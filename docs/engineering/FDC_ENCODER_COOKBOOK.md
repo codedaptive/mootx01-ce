@@ -7,7 +7,7 @@ author: MOOTx01 maintainers
 date: 2026-07-09
 relates_to:
   - docs/reference/FDC_ENCODER_CANONICAL.md (canonical spec; the contract)
-  - docs/decisions/DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md (kit ownership)
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md (kit ownership and dependency direction)
   - CONTRIBUTING.md (language extension and pool contribution guide)
 ---
 
@@ -681,8 +681,9 @@ and a full conformance vector regeneration.
 | HMM/Viterbi tagger | LatticeLib | Stub (`.other`); real artifact pending (non-Apple) |
 | EW integration seam | LatticeLib (toggle off) | No (pending license) |
 
-Full rationale for each assignment is in
-`DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md`.
+These assignments follow the ownership and dependency rules in
+`SYSTEM_ENGINEERING_REFERENCE.md` §2.1. The table itself is the current
+FDC-specific ownership authority.
 
 ## Changelog
 

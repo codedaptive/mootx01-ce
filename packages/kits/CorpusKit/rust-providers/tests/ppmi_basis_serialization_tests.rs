@@ -24,7 +24,10 @@ fn load() -> PpmiBasisFixture {
 }
 
 fn trained_from_fixture(f: &PpmiBasisFixture) -> PpmiProvider {
-    let mut p = PpmiProvider::new();
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = PpmiProvider::with_parameters(
+        "ppmi-v1", "1.0.0", corpus_kit_providers::PPMI_PROJECTION_SEED);
     for doc in &f.corpus {
         let terms: Vec<&str> = doc.iter().map(String::as_str).collect();
         p.train(&terms, PPMI_WINDOW);

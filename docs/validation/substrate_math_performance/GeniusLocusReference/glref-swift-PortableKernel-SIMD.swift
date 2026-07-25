@@ -1,8 +1,8 @@
 // PortableKernel-SIMD.swift
 //
 // SIMD-backed kernel implementation per
-// DECISION_OR_REDUCE_BACKENDS_2026-05-17.md (Axis 1, the "1" path)
-// and DECISION_HAMMING_BACKENDS_2026-05-17.md (Phase 2.β-1).
+// measured SIMD OR-reduce selection (Axis 1, the "1" path)
+// and measured SIMD Hamming selection (Phase 2.β-1).
 //
 // Uses Swift's `import simd` library for SIMD lanes. On Apple
 // Silicon and other aarch64 targets, the compiler emits NEON

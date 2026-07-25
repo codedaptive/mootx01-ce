@@ -33,7 +33,7 @@ Write durable decisions, facts, relationships, corrections, and session
 continuity using `moot_file_memory`, `moot_file_fact`, `moot_link_memories`,
 trust/correction tools, and `moot_write_journal`.
 
-Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 If MOOTx01 is unavailable, say so and answer only from current context.
 

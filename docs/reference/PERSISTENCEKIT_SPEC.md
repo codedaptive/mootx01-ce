@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.8.0
+version: 1.10.0
 status: active
-date: 2026-07-16
+date: 2026-07-20
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -10,15 +10,15 @@ relates_to:
   - docs/reference/PERSISTENCEKIT_INTERFACE.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
-  - docs/decisions/DECISION_STORAGEKIT_DESIGN_2026-05-19.md
-  - docs/decisions/ADR-008-persistencekit-vector-contract-correction.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#41-persistencekit-contract
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#42-vector-ownership-correction
 purpose: |
   PersistenceKit is the storage-abstraction layer of the substrate.
   It defines one `Storage` protocol — surfacing a RowStore, BlobStore,
   AuditLog, and StorageObserver — and ships three conforming backends
   behind it: SQLite, PostgreSQL, and InMemory (tests). PersistenceKit
   owns no vector-search engine: dense-embedding k-NN lives solely in
-  VectorKit (ADR-008). What every backend guarantees instead is the
+  VectorKit (the vector-ownership contract). What every backend guarantees instead is the
   vector-storage ACCOMMODATION contract — it accommodates vector
   workloads' storage needs (vector-payload round-trip, bulk hydration at
   scale, count, delete) through the general RowStore / BlobStore surfaces.
@@ -46,7 +46,7 @@ PostgreSQL is deferred to MX-TAB-2.
 
 PersistenceKit owns no vector-search engine. An earlier wording, "Storage
 surfaces a VectorIndex", was a wording defect; the intent was a
-storage-CAPABILITY guarantee, not a per-backend k-NN engine (ADR-008).
+storage-CAPABILITY guarantee, not a per-backend k-NN engine (the vector-ownership contract).
 Dense-embedding k-NN lives solely in VectorKit. What every backend
 guarantees instead is the **vector-storage accommodation contract**:
 it MUST support vector workloads' storage needs — vector-payload
@@ -68,9 +68,9 @@ transactions, and migration state — durable, lifecycle-bearing state, in
 contrast to a stateless Lib. The eight design questions behind this kit
 (schema declaration, predicate tree, transaction model, migration
 runner, connection pool, audit coordination, conformance fixtures, and —
-as corrected by ADR-008 — the vector-storage accommodation contract in
+as corrected by the vector-ownership contract — the vector-storage accommodation contract in
 place of the originally-misworded vector engine) are settled in
-`DECISION_STORAGEKIT_DESIGN_2026-05-19.md` and `ADR-008`; this spec is the
+`the PersistenceKit contract` and `the vector-ownership contract`; this spec is the
 durable contract those decisions produced.
 
 ## § 2 — Scope
@@ -86,7 +86,7 @@ This specification defines:
 - The transaction model: isolation levels, atomicity, no nesting.
 - The vector-storage accommodation contract: every backend round-trips,
   bulk-hydrates, counts, and deletes vector-payload rows through the
-  general RowStore/BlobStore surfaces (ADR-008). PersistenceKit owns no
+  general RowStore/BlobStore surfaces (the vector-ownership contract). PersistenceKit owns no
   k-NN engine.
 - Append-only audit persistence and HLC-ordered iteration.
 - Change-notification (observer) delivery semantics.
@@ -105,7 +105,7 @@ This specification defines:
 
 This specification does NOT define:
 
-- Vector (dense-embedding k-NN) search — VectorKit owns it (ADR-008).
+- Vector (dense-embedding k-NN) search — VectorKit owns it (the vector-ownership contract).
   PersistenceKit backends accommodate vector storage but run no search.
 - API signatures — those live in `PERSISTENCEKIT_INTERFACE.md`.
 - The audit-event value model, HLC, or fingerprints — those are
@@ -114,7 +114,9 @@ This specification does NOT define:
   projection) — GeniusLocusKit owns those.
 - Sync / replication — ConvergenceKit owns those.
 - Each consumer's schema content — every consumer kit declares its own
-  tables.
+  tables. A standalone and a composed operating profile may declare different
+  table sets; GLK's attached CorpusKit profile intentionally omits standalone
+  document/passage tables.
 
 ## § 3 — Position in the kit family
 
@@ -128,7 +130,7 @@ PersistenceKit               ← the Storage protocol + value model
    ▲
    ├── LocusKit          (one estate's rows, blobs, audit)
    ├── VectorKit         (embeddings + in-house k-NN → rows/blobs)
-   ├── CorpusKit         (RAG bundles → rows + vectors)
+   ├── CorpusKit         (standalone content or attached derived RAG indexes)
    ├── QueueKit          (durable work queue → rows + observer)
    ├── ConvergenceKit    (outbound replication → observer, TableChange)
    └── GeniusLocusKit    (estate composition, opens backends)
@@ -138,7 +140,7 @@ PersistenceKit               ← the Storage protocol + value model
 which the value model and audit log carry). No external Swift package
 dependency beyond the PostgreSQL backend's `postgres-nio`. (The SQLite
 backend's former `CSQLiteVec` vendored target was removed with the
-vector engine per ADR-008.)
+vector engine per the vector-ownership contract.)
 
 **Consumed by:** LocusKit, VectorKit, CorpusKit, QueueKit,
 ConvergenceKit, GeniusLocusKit (which opens the concrete backends), and
@@ -159,7 +161,7 @@ search. Every backend MUST accommodate vector workloads' storage needs —
 vector-payload round-trip (binary 32-byte and float32 384-d payloads),
 bulk hydration of vector rows at scale, count, and delete — through the
 general RowStore/BlobStore surfaces. Dense-embedding k-NN lives solely
-in VectorKit (ADR-008). The conformance harness's vector fixtures
+in VectorKit (the vector-ownership contract). The conformance harness's vector fixtures
 machine-enforce this guarantee on all three backends (§ 7).
 
 **I-2 (raw SQLite, never Core Data):** the SQLite backend is built on
@@ -269,13 +271,13 @@ The topology boundary (PersistenceKit upstream of LatticeLib) requires separate
 declarations; consumers bridge them with a trivial switch at the GLK/NeuronKit
 boundary when calling LatticeLib tagging APIs with the estate's choice.
 
-**I-22 (residency hint, ADR-026):** `EstateConfiguration` carries a
+**I-22 (residency hint, the storage-residency rule):** `EstateConfiguration` carries a
 `residencyHint: ResidencyHint` field (`.diskBacked` default) that kits
 read to choose their index caching strategy. `.diskBacked`: computed
 indexes (BM25, float vector) are loaded from the durable store on
 demand and discarded after use; the OS page cache manages RAM residency
 via `PRAGMA mmap_size`. `.ramResident`: all indexes are cached in the
-process heap between queries for minimum query latency (pre-ADR-026
+process heap between queries for minimum query latency (pre-the storage-residency rule
 behavior). The hint is advisory — kits interpret it independently for
 their own index structures. PersistenceKit defines the enum and the
 field; it does not enforce or interpret the hint itself.
@@ -395,7 +397,7 @@ trigger; InMemory rejects in `RowStore.update`/`delete` with
 
 **B-9 (vector-storage accommodation):** PersistenceKit exposes no `knn`
 or any vector-search method — dense-embedding k-NN lives solely in
-VectorKit (ADR-008). Instead, every backend MUST accommodate a vector
+VectorKit (the vector-ownership contract). Instead, every backend MUST accommodate a vector
 workload's storage needs through the general `RowStore`/`BlobStore`
 surfaces: (1) a vector-payload row (a 32-byte binary payload column and a
 384-d float32 payload column, stored as `.blob`) round-trips
@@ -476,7 +478,7 @@ also apply the per-row content seam (the seam is a no-op for FullDatabase). An
 external process opening a Mode 3 file with a plain SQLite library cannot read
 or alter the schema.
 
-> **Implemented (ADR-014).** Apple uses SQLCipher on CommonCrypto (Apple
+> **Implemented (the whole-file encryption contract).** Apple uses SQLCipher on CommonCrypto (Apple
 > CoreCrypto, FIPS-validated), vendored from the Community Edition source, with
 > the key from `KeychainKeyStore` (Secure-Enclave-wrapped). One whole-file
 > mechanism across all platforms. Apple Data Protection (iOS), the macOS
@@ -501,7 +503,7 @@ The key-storage **mechanism** differs by port — a `0600` `db.key` file on Rust
 Rust, CommonCrypto on Apple) and RAM-swap protection (the Rust resident daemon
 calls `mlockall`; the Apple port relies on macOS's encrypted virtual memory, so
 no `mlock` is needed). These are approved port divergences; the result — a
-per-estate-keyed, whole-file-encrypted estate — is identical. See ADR-014.
+per-estate-keyed, whole-file-encrypted estate — is identical. See the whole-file encryption contract.
 
 **B-12b (per-backend at-rest coverage):** the at-rest mechanism is NOT uniform
 across backends — whole-file encryption is intrinsically a SQLite (embedded-file)
@@ -523,7 +525,7 @@ concept. The Mode 2 content seam is wired in the SQLite and PostgreSQL backends
 
 Mode 2 (per-row AEAD) is the cross-backend content-encryption mechanism that
 works on SQLite AND PostgreSQL. Mode 3 (whole-file SQLCipher) is SQLite-only
-(both Swift and Rust ports). See ADR-014 (Backend coverage).
+(both Swift and Rust ports). See the whole-file encryption contract (Backend coverage).
 
 **B-12a (cross-port at-rest format parity — Mode 2 only):** for Mode 2
 (RowEncryption), the Rust SQLite backend encrypts the `content` column at
@@ -842,9 +844,25 @@ Tag contract: every metric carries `"kit": "PersistenceKit"` and
 intra-repo dependencies. `PersistenceKit → IntellectusLib` is
 downstream→upstream; the dep direction does not invert the kit topology.
 Authority for the Package.swift / Cargo.toml addition:
-`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
+`the package-dependency rule`.
 
 ## Changelog
+
+### 1.10.0 -- 2026-07-20
+Cross-port parity fix (GLK shared-content 1.1 P4): the Rust SQLite
+backend now EXECUTES declared `SchemaDeclaration.migrations` operations
+(createTable/dropTable/addColumn/dropColumn/renameColumn/addIndex/
+dropIndex/custom) with the same forward-only, per-step version-recording
+semantics as the Swift backend — previously it silently ignored them, so
+declared retirements (e.g. the shared-content dropTable migration) never
+ran on Rust SQLite estates. Version recording is now upgrade-only
+(matching Swift); dropped tables leave the accumulated schema view.
+
+### 1.9.0 -- 2026-07-20
+
+Clarified that consumer kits may declare standalone and composed schema
+profiles; GLK's attached CorpusKit profile omits standalone content/passage
+tables. PersistenceKit behavior is unchanged.
 
 ### 1.8.0 -- 2026-07-16
 CVK-ICLOUD P1-M1: Added behavioral contract B-19 (change origin tag). Every
@@ -885,7 +903,7 @@ to absent, and `TemporalCacheKey` is internal.
 ### 1.4.0 -- 2026-06-20
 NT-P1: Added `corruptStoredValue`, `invalidConfiguration`, and `featureGated`
 to the § 6 error table. The `featureGated` case gates the as-of temporal query
-surface (ADR-017 §17) until NT-L4 (lineage-wide expunge) and NT-P3 (erasure
+surface (the node-integrity contract §17) until NT-L4 (lineage-wide expunge) and NT-P3 (erasure
 overlay) merge. `ColumnRole` metadata enables temporal validity column
 identification at schema declaration time; the as-of filter uses it to push
 `created_hlc <= T AND (tombstoned_hlc IS NULL OR tombstoned_hlc > T)` into the
@@ -930,7 +948,7 @@ PostgreSQL has no whole-file analogue and relies on Mode 2 client-side AEAD
 is the cross-backend content mechanism; Mode 3 is SQLite-only.
 
 ### 1.1.1 -- 2026-06-17
-Added a forward-pointer in B-12 to ADR-014: the Apple port moves to SQLCipher on
+Added a forward-pointer in B-12 to the whole-file encryption contract: the Apple port moves to SQLCipher on
 the CommonCrypto backend (FIPS-validated, Secure-Enclave-wrapped Keychain key),
 with Data Protection / app-group container / FileVault as additive layers
 (implementation queued).

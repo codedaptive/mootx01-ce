@@ -1,6 +1,6 @@
 // AuditLog.swift
 //
-// Append-only audit log protocol per DECISION_STORAGEKIT_DESIGN
+// Append-only audit log protocol per the PersistenceKit storage surface
 // §9 (Q7). PersistenceKit provides append-only persistence and
 // HLC-ordered iteration. GeniusLocusKit owns CRDT enforcement.
 // Append is idempotent on (eventID, hlc) compound key.

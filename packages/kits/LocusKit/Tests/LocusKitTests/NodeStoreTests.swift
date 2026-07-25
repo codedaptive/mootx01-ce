@@ -6,7 +6,7 @@ import SubstrateTypes
 @testable import LocusKit
 
 /// Tests for NodeStore: create-on-demand resolution, invariants,
-/// tombstone lifecycle, and the no-resurrection guard (ADR-017).
+/// tombstone lifecycle, and the no-resurrection guard.
 struct NodeStoreTests {
 
     // MARK: - Helpers

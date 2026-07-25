@@ -4,7 +4,7 @@ import LocusKit
 import PersistenceKit
 
 /// Persistent store for issued grants — the `grants` table per
-/// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §6.
+/// federation disclosure controls.
 ///
 /// One `GrantStore` is built per open estate, backed by that estate's
 /// injected `Storage`. The store declares the `grants` table alongside
@@ -97,7 +97,7 @@ public actor GrantStore {
             .int("decay_half_life", nullable: true),
             .timestamp("decay_started_at", nullable: true),
             .int("decay_floor", nullable: true),
-            // ADR-012 forward-compat slot — the #11 custody-payload slot.
+            // nullable entity ext slots forward-compat slot — the #11 custody-payload slot.
             // Nullable `.json`; reserves space for future custody metadata
             // (the federation/encryption track — e.g. mode-3 share-policy
             // descriptors) without a migration. 1.0 omits it on insert and
@@ -315,7 +315,7 @@ public actor GrantStore {
     /// lives with the caller, not the store. This is the intended posture, NOT a
     /// schema defect. Any future custody metadata the federation/encryption track
     /// needs to retain (e.g. a share-policy descriptor) has a migration-free home
-    /// in the `ext` forward-compat slot (ADR-012) rather than new typed columns.
+    /// in the `ext` forward-compat slot rather than new typed columns.
     ///
     /// `experimentalIPClearanceConfirmed` decodes as `true` because a
     /// persisted mode-3 grant was, by construction, issued with clearance.

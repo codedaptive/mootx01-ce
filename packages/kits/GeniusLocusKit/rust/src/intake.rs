@@ -29,7 +29,93 @@
 
 use std::sync::Arc;
 
-use corpus_kit::corpus::Corpus;
+use corpus_kit::content::{
+    CorpusContentChangeBatch, CorpusContentId, CorpusContentRecord, CorpusContentSource,
+};
+use corpus_kit::{content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine};
+use corpus_kit::error::CorpusKitError;
+use locus_kit::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID;
+use locus_kit::drawer_operational::ContentKind;
+use locus_kit::estate::Estate;
+
+/// The GLK-owned LocusKit-backed content source (shared-content 1.1, P3).
+/// Rust twin of Swift `LocusDrawerCorpusContentSource`.
+///
+/// COMPOSITION RULE: `CorpusContentSource` is declared by corpus-kit; GLK
+/// owns this adapter; locus-kit never depends on corpus-kit. A Drawer's
+/// content is immutable per ID (revisions are new drawers via lineage), so
+/// every live drawer reports revision 1 with digest = sha256(content).
+/// The estate verbs ARE the change stream — the polling feed is empty.
+pub struct LocusDrawerContentSource {
+    estate: Estate,
+}
+
+impl LocusDrawerContentSource {
+    pub fn new(estate: Estate) -> Self {
+        LocusDrawerContentSource { estate }
+    }
+}
+
+impl CorpusContentSource for LocusDrawerContentSource {
+    fn record(&self, id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+        let Some(drawer) = self
+            .estate
+            .drawer_by_id(id)
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?
+        else {
+            return Ok(None);
+        };
+        if drawer.content.is_empty()
+            || drawer.content_kind() == ContentKind::Dataset
+            || drawer.embedding_model_id == DATASET_HANDLE_EMBEDDING_MODEL_ID
+        {
+            return Ok(None);
+        }
+        Ok(Some(CorpusContentRecord {
+            id: drawer.id.clone(),
+            revision: 1,
+            digest: content_digest(&drawer.content),
+            text: drawer.content,
+        }))
+    }
+
+    fn changes(
+        &self,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<CorpusContentChangeBatch, CorpusKitError> {
+        Ok(CorpusContentChangeBatch::empty())
+    }
+
+    fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let page_size = 2_000usize;
+        loop {
+            let page = self
+                .estate
+                .active_drawers_after(cursor.as_deref(), page_size)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|d| d.id.clone());
+            for drawer in &page {
+                if !drawer.content.is_empty()
+                    && drawer.content_kind() != ContentKind::Dataset
+                    && drawer.embedding_model_id != DATASET_HANDLE_EMBEDDING_MODEL_ID
+                {
+                    ids.push(drawer.id.clone());
+                }
+            }
+            if page.len() < page_size {
+                break;
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+}
 use locus_kit::drawer::Drawer;
 
 use crate::coordinator::{EstateCoordinator, VerbDispatchError};
@@ -185,12 +271,20 @@ impl EstateCoordinator {
                 // through the normal encode path. Swift parity: capture(_:_:mode:) .regular.
                 if !drawer.content.is_empty() {
                     if let Some(corpus) = self.corpus_for(handle) {
-                        // Corpus::ingest/enqueue_ingest expect now_millis
-                        // (MILLISECONDS); drawer.filed_at is epoch MILLISECONDS
-                        // (ADR-023), so it is passed directly.
+                        // Shared-content 1.1: enqueue a Drawer CHANGE REFERENCE
+                        // — id/revision/digest — never the text. The drain
+                        // worker resolves the CURRENT content by ID through
+                        // the LocusKit-backed adapter at work time.
+                        let job = ContentIndexJob {
+                            kind: ContentIndexJobKind::Upsert,
+                            content_id: drawer.id.clone(),
+                            revision: 1,
+                            digest: Some(content_digest(&drawer.content)),
+                            cursor: None,
+                        };
                         corpus
-                            .enqueue_ingest(&drawer.content, &drawer.id, drawer.filed_at)
-                            .map_err(|e| verb_fail(format!("corpus enqueue_ingest failed: {e:?}")))?;
+                            .enqueue_change(&job, drawer.filed_at)
+                            .map_err(|e| verb_fail(format!("corpus enqueue_change failed: {e:?}")))?;
                     }
                 }
             }
@@ -312,7 +406,7 @@ impl EstateCoordinator {
     pub fn collect_reindex_jobs(
         &mut self,
         handle: &EstateHandle,
-    ) -> Result<Option<(Arc<Corpus>, Vec<(String, String, i64)>)>, VerbDispatchError> {
+    ) -> Result<Option<(Arc<CorpusContentEngine>, Vec<(ContentIndexJob, i64)>)>, VerbDispatchError> {
         // Guard: only estates with a registered Corpus have a BM25/vector lane.
         let corpus = match self.corpus_for(handle) {
             Some(c) => c,
@@ -329,7 +423,7 @@ impl EstateCoordinator {
         // Read all drawers (including tombstoned) so we can filter active ones.
         let all_drawers = self.all_drawers(handle)?;
 
-        let mut jobs: Vec<(String, String, i64)> = Vec::new();
+        let mut jobs: Vec<(ContentIndexJob, i64)> = Vec::new();
         for drawer in all_drawers {
             // Skip tombstoned (intentionally removed) and empty-content drawers.
             if drawer.tombstoned_at.is_some() || drawer.content.is_empty() {
@@ -341,17 +435,29 @@ impl EstateCoordinator {
             if indexed_ids.contains(&drawer.id) {
                 continue;
             }
-            // G4: source_id = drawer.id so BM25/vector hits hydrate back to the
-            // Drawer row. drawer.filed_at is epoch MILLISECONDS (ADR-023) —
-            // exactly the now_millis enqueue_ingest expects — so pass it directly.
-            jobs.push((drawer.content, drawer.id, drawer.filed_at));
+            // Shared-content 1.1: the job is a Drawer CHANGE REFERENCE —
+            // id/revision/digest — never the text. The drain worker resolves
+            // CURRENT content by ID through the LocusKit-backed adapter at
+            // work time. G4: content_id = drawer.id so BM25/vector hits
+            // hydrate back to the Drawer row; drawer.filed_at is epoch
+            // MILLISECONDS — exactly what enqueue_change_batch expects.
+            jobs.push((
+                ContentIndexJob {
+                    kind: ContentIndexJobKind::Upsert,
+                    content_id: drawer.id,
+                    revision: 1,
+                    digest: Some(content_digest(&drawer.content)),
+                    cursor: None,
+                },
+                drawer.filed_at,
+            ));
         }
 
         // Cap the collected jobs to REINDEX_MAX_JOBS to prevent a single large
         // estate from flooding the encode queue and starving live captures
         // (Part 6 DoS hardening). Log a warning when truncation occurs so the
         // HTTP handler knows to surface a "call again" advisory to the caller.
-        // NOTE: REINDEX_MAX_JOBS is the total ceiling; enqueue_ingest_batch's
+        // NOTE: REINDEX_MAX_JOBS is the total ceiling; enqueue_change_batch's
         // internal chunk size is a separate per-fsync unit, NOT this cap.
         let total_missing = jobs.len();
         if total_missing > Self::REINDEX_MAX_JOBS {
@@ -392,7 +498,7 @@ impl EstateCoordinator {
     pub fn sweep_reindex_missing(
         &mut self,
         handle: &EstateHandle,
-    ) -> Result<Option<(Arc<Corpus>, Vec<(String, String, i64)>, usize)>, VerbDispatchError> {
+    ) -> Result<Option<(Arc<CorpusContentEngine>, Vec<(ContentIndexJob, i64)>, usize)>, VerbDispatchError> {
         let corpus = match self.corpus_for(handle) {
             Some(c) => c,
             None => return Ok(None),
@@ -415,7 +521,7 @@ impl EstateCoordinator {
         // sweep scans per page. Matches the Swift twin's
         // `reindexScanPageSize`.
         const SCAN_PAGE_SIZE: usize = 2_000;
-        let mut jobs: Vec<(String, String, i64)> = Vec::new();
+        let mut jobs: Vec<(ContentIndexJob, i64)> = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
             let page = self.active_drawers_after(handle, cursor.as_deref(), SCAN_PAGE_SIZE)?;
@@ -434,10 +540,20 @@ impl EstateCoordinator {
                 if indexed_ids.contains(&drawer.id) {
                     continue;
                 }
-                // G4: source_id = drawer.id so BM25/vector hits hydrate back
-                // to the Drawer row. drawer.filed_at is epoch MILLISECONDS
-                // (ADR-023) — exactly what enqueue_ingest expects.
-                jobs.push((drawer.content, drawer.id, drawer.filed_at));
+                // Shared-content 1.1: change reference only (id/revision/
+                // digest) — the drain resolves current content by ID. G4:
+                // content_id = drawer.id so BM25/vector hits hydrate back to
+                // the Drawer row; filed_at is epoch MILLISECONDS.
+                jobs.push((
+                    ContentIndexJob {
+                        kind: ContentIndexJobKind::Upsert,
+                        content_id: drawer.id,
+                        revision: 1,
+                        digest: Some(content_digest(&drawer.content)),
+                        cursor: None,
+                    },
+                    drawer.filed_at,
+                ));
             }
             if page_len < SCAN_PAGE_SIZE {
                 break; // partial page: table exhausted
@@ -453,7 +569,7 @@ impl EstateCoordinator {
     /// `Corpus::reindex` on the shared `Arc` OUTSIDE the coordinator lock so the
     /// long full re-embed does not block other verbs while it runs. A thin public
     /// wrapper over the crate-internal `corpus_for`.
-    pub fn corpus_handle(&self, handle: &EstateHandle) -> Option<Arc<Corpus>> {
+    pub fn corpus_handle(&self, handle: &EstateHandle) -> Option<Arc<CorpusContentEngine>> {
         self.corpus_for(handle)
     }
 
@@ -496,12 +612,12 @@ impl EstateCoordinator {
         if drawer.content.is_empty() {
             return Ok(());
         }
+        // Shared-content 1.1: the drawer row is already durably stored; the
+        // engine resolves it through the LocusKit-backed adapter and indexes
+        // it under its own Drawer ID (identity is direct — no chunk lane).
         corpus
-            // `Corpus::ingest` expects `now_millis` (MILLISECONDS — it divides by
-            // 1000 internally); `drawer.filed_at` is epoch MILLISECONDS (ADR-023),
-            // so it is passed directly.
-            .ingest(&drawer.content, &drawer.id, drawer.filed_at)
-            .map_err(|e| verb_fail(format!("corpus ingest failed: {e:?}")))?;
+            .index_content(&drawer.id, drawer.filed_at)
+            .map_err(|e| verb_fail(format!("corpus index_content failed: {e:?}")))?;
         Ok(())
     }
 }

@@ -124,13 +124,13 @@ pub(crate) mod recall_stage {
 
 impl Estate {
     // -----------------------------------------------------------------------
-    // node-name resolution (ADR-017)
+    // node-name resolution
     // -----------------------------------------------------------------------
 
     /// Build a `parent_node_id → (wing_name, room_name)` map for the given
     /// drawers by querying the estate's node tree. Used to supply the
     /// `BitmapEvaluator::evaluate` node_names parameter after drawers lost
-    /// their denormalized wing/room fields (ADR-017 §3).
+    /// their denormalized wing/room fields.
     ///
     /// Returns an empty map when `node_store` is `None` (e.g. legacy estates
     /// opened without a node tree). The bitmap evaluator tolerates missing
@@ -308,7 +308,7 @@ impl Estate {
             6,
         );
 
-        // ADR-017 §7: resolve wing/room display names to node IDs via
+        // resolve wing/room display names to node IDs via
         // NodeStore's create-on-demand resolution. The root must exist
         // (seeded at provision time); wing and room nodes are created
         // if absent, returned if already present.
@@ -541,7 +541,7 @@ impl Estate {
 
     /// Seed a named wing by writing a hint memory into the `AI_Charter_Hint` room.
     ///
-    /// ADR-016 §2 / ADR-017: wings are node rows in the `nodes` table.
+    /// wing organization / node-tree integrity: wings are node rows in the `nodes` table.
     /// `seed_wing` resolves `wing_name` to a wing node (create-on-demand
     /// via NodeStore) and files the hint drawer under it. Other capture
     /// paths resolve wing via `CaptureFrame.wing`, falling back to
@@ -577,7 +577,7 @@ impl Estate {
                 "seed_wing: wing_name must not be empty".to_string(),
             ));
         }
-        // ADR-017 §7: resolve wing/room to node IDs via NodeStore's
+        // resolve wing/room to node IDs via NodeStore's
         // create-on-demand resolution, same as the capture verb.
         let node_store = self.node_store.as_ref().ok_or_else(|| {
             LocusKitError::DatabaseUnavailable(
@@ -1217,7 +1217,7 @@ impl Estate {
     /// `including_restricted` is the ONE sanctioned widening of the tunnel
     /// sensitivity gate: the vault export's `believed-including-private`
     /// scope — the owner's explicit opt-in for Private-tier bulk export
-    /// (ADR-007 Decision 2) — must carry provenance tunnels to restricted
+    /// — must carry provenance tunnels to restricted
     /// drawers, mirroring the drawer-side tier rule
     /// (`VaultExportScope::includes_private_tier`). Secret-tier edges are
     /// excluded UNCONDITIONALLY — no parameter widens past restricted,
@@ -1367,7 +1367,7 @@ impl Estate {
     }
 
     /// Fingerprints of every non-tombstoned drawer captured in the closed
-    /// epoch-milliseconds window `[start_epoch, end_epoch]` (ADR-023), in
+    /// epoch-milliseconds window `[start_epoch, end_epoch]`, in
     /// HLC-ascending order within the window. Estate-level pass-through over
     /// `DrawerStore::fingerprints_captured_in`. Used by GLK to expose the
     /// per-window fingerprint read the Moment lens needs without NeuronKit
@@ -1396,7 +1396,7 @@ impl Estate {
     /// Time-bucketed fingerprint bit-activity series for `bit` over the most
     /// recent `bucket_count` buckets of width `bucket_seconds` (a SECONDS width;
     /// the store scales it to ms internally), ending at `ending_at` (epoch
-    /// milliseconds, ADR-023 — deterministic clock, never read system time).
+    /// milliseconds, epoch-millisecond instants — deterministic clock, never read system time).
     ///
     /// Estate-level pass-through over `DrawerStore::fingerprint_bit_series`.
     /// Used by GLK to expose the bit-series surface the Rhythm lens needs without
@@ -1422,7 +1422,7 @@ impl Estate {
         self.store.all_tunnels()
     }
 
-    /// All non-tombstoned, non-retired tunnels estate-wide (T13 / ADR-021 Phase 7).
+    /// All non-tombstoned, non-retired tunnels estate-wide.
     ///
     /// Active-edge view: retired tunnels (bit 13 of `operational_bitmap` set) are
     /// excluded so that OMEGA retirement removes a tunnel from the dreaming
@@ -1432,7 +1432,7 @@ impl Estate {
         self.store.all_active_tunnels()
     }
 
-    /// Flip bit 13 of `operational_bitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Flip bit 13 of `operational_bitmap` to retire a tunnel.
     ///
     /// Throws `TunnelNotFound` if no non-tombstoned tunnel with `tunnel_id` exists.
     /// The caller (NeuronKit via the GLK seam) is responsible for writing a diary
@@ -1447,7 +1447,7 @@ impl Estate {
         self.store.retire_tunnel(tunnel_id, changed_by, now)
     }
 
-    /// Clear bit 13 of `operational_bitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Clear bit 13 of `operational_bitmap` to un-retire a tunnel.
     ///
     /// Reverses a prior `retire_tunnel`. The tunnel re-enters active reads
     /// (`all_active_tunnels`) and the dreaming suppression set once persisted.
@@ -2468,7 +2468,7 @@ impl Estate {
     /// Reanchor a drawer to a different room and/or lattice position.
     ///
     /// Moves the row's placement: `to_room`/`to_wing` resolve to a new
-    /// room node and update `parent_node_id` via NodeStore (ADR-017);
+    /// room node and update `parent_node_id` via NodeStore;
     /// `to_lattice` updates the lattice anchor columns. At least one must
     /// be supplied (belt-and-suspenders; the primary empty check is GLK's
     /// boundary). An absent row returns `LocusKitError::DrawerNotFound`.
@@ -2870,7 +2870,7 @@ impl Estate {
 /// `recalledAt` value written here is parsed back to epoch and re-rendered via
 /// `format_iso8601` on durable-backend reads (the `.timestamp` column decodes
 /// to `TypedValue::Timestamp`); a format drift would make the read-back string
-/// differ from the written string. Input is epoch MILLISECONDS (ADR-023); the
+/// differ from the written string. Input is epoch MILLISECONDS; the
 /// millisecond component is emitted as the 3-digit `.SSS` field.
 fn epoch_to_iso8601(epoch_ms: i64) -> String {
     // Simple Gregorian calendar conversion without external crates.
@@ -2966,7 +2966,7 @@ mod tests {
             "alice",
             "test-v1",
         );
-        // Epoch MILLISECONDS (ADR-023).
+        // Epoch MILLISECONDS.
         estate.capture(frame, 1_700_000_001_000).unwrap()
     }
 
@@ -3079,7 +3079,7 @@ mod tests {
         let estate = make_estate();
         let drawer = basic_capture(&estate, "my content", "study");
         assert_eq!(drawer.content, "my content");
-        // ADR-017: room is resolved from the node tree via parent_node_id,
+        // room is resolved from the node tree via parent_node_id,
         // not stored on the Drawer struct. Verify via resolve_node_names.
         let names = estate.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
         let (_, room) = names.get(&drawer.parent_node_id).expect("room node must resolve");
@@ -3088,11 +3088,11 @@ mod tests {
 
     #[test]
     fn capture_uses_default_wing_name() {
-        // ADR-016: all captures use the fixed DEFAULT_WING_NAME constant
+        // all captures use the fixed DEFAULT_WING_NAME constant
         // ("Agentic Memory") regardless of the estate's owner identifier.
         // The prior dynamic derivation ("wing_<owner>" / "wing_default")
         // is retired.
-        // ADR-017: wing resolved from node tree via parent_node_id.
+        // wing resolved from node tree via parent_node_id.
         let estate = make_estate();
         let drawer = basic_capture(&estate, "x", "r");
         let names = estate.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
@@ -3114,7 +3114,7 @@ mod tests {
         let entries = estate.store.room_level_fingerprints().unwrap();
         assert_eq!(entries.len(), 1, "the captured drawer's room is enumerated");
         let entry = &entries[0];
-        // ADR-017: wing is resolved from the node tree, not stored on Drawer.
+        // wing is resolved from the node tree, not stored on Drawer.
         let names = estate.store.resolve_node_names(&[d.parent_node_id.clone()]).unwrap();
         let (d_wing, _) = names.get(&d.parent_node_id).expect("room node must resolve");
         assert_eq!(&entry.wing, d_wing);
@@ -3308,7 +3308,7 @@ mod tests {
         // other axis is preserved (room/state unchanged).
         let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
         assert_eq!(after.confirmation(), Confirmation::UserConfirmed);
-        // ADR-017: room resolved from node tree via parent_node_id.
+        // room resolved from node tree via parent_node_id.
         let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
         let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
         assert_eq!(room, "study");
@@ -4047,7 +4047,7 @@ mod tests {
         let d = basic_capture(&estate, "content", "original-room");
         estate.reanchor(&d.id, Some("new-room"), None, None).unwrap();
         let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        // ADR-017: room resolved from node tree via parent_node_id.
+        // room resolved from node tree via parent_node_id.
         let names = estate.store.resolve_node_names(&[updated.parent_node_id.clone()]).unwrap();
         let (_, room) = names.get(&updated.parent_node_id).expect("room node must resolve");
         assert_eq!(room, "new-room");
@@ -4599,7 +4599,7 @@ mod tests {
         let estate = make_sqlite_estate(&db);
         capture_n(&estate, 10);
 
-        // Two recalls at distinct epochs (epoch MILLISECONDS, ADR-023), each
+        // Two recalls at distinct epochs (epoch MILLISECONDS, epoch-millisecond instants), each
         // writing trace rows.
         let old_epoch = 1_700_001_000_000;
         let new_epoch = 1_700_005_000_000;

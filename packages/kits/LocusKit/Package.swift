@@ -18,7 +18,7 @@
 // ship in subsequent LOCI-* missions.
 //
 // cp-locuskit-report: added IntellectusLib self-report telemetry.
-// Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4
+// Repository-owned dependencies use local package paths.
 // (P2 self-report coverage). Layering: IntellectusLib has zero repo deps;
 // adding it here is strictly downstream→upstream, no cycle.
 
@@ -35,6 +35,16 @@ let package = Package(
             name: "LocusKit",
             targets: ["LocusKit"]
         ),
+        // Test-support product, not shipped in any binary. Consumers are test
+        // targets in packages ABOVE LocusKit (AriaMcpKit, apps/mootx01) that
+        // need a real on-disk estate to exercise. It lives here, at the layer
+        // that owns Drawer/KGFact/Tunnel, so the generator exists once rather
+        // than being copied per package. Follows the PersistenceKitConformance
+        // precedent: a plain library target that test targets depend on.
+        .library(
+            name: "LocusKitEstateFixture",
+            targets: ["LocusKitEstateFixture"]
+        ),
     ],
     dependencies: [
         .package(name: "SubstrateLib", path: "../../libs/SubstrateLib"),
@@ -46,14 +56,14 @@ let package = Package(
         // path, recall, and KG-fact operation metrics via Intellectus.report(_:),
         // which is a no-op when monitoring is disabled (the default).
         // Off-path cost: one Atomic<Bool> load + branch (~1 ns). No lock on the
-        // off-path. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+        // off-path. Repository-owned dependencies use local package paths.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
         // LatticeLib supplies QIDClosure: the pinned Q-ID taxonomic-closure
         // surface DrawerFingerprint hashes into the lattice-block
         // `qidClosureHash` slot (mission #7b). LatticeLib is a libs/ library
         // that imports no substrate kit — the edge is strictly downstream→
         // upstream (kit → lib), no cycle. Authority:
-        // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (the #7 feature requires it).
+        // in-repository dependency direction (the #7 feature requires it).
         .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
     ],
     targets: [
@@ -70,6 +80,18 @@ let package = Package(
             ],
             path: "Sources/LocusKit"
         ),
+        // Shared test-support generator (see the product comment above). Depends
+        // on PersistenceKitSQLite because the fixture's whole point is a real
+        // SQLite file on disk, not an in-memory store.
+        .target(
+            name: "LocusKitEstateFixture",
+            dependencies: [
+                "LocusKit",
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Sources/LocusKitEstateFixture"
+        ),
         .testTarget(
             name: "LocusKitTests",
             dependencies: [
@@ -79,6 +101,24 @@ let package = Package(
                 "IntellectusLib",
             ],
             path: "Tests/LocusKitTests"
+        ),
+        // Regenerates the checked-in Rust fixture artifact. Deliberately NOT a
+        // product: it ships in nothing and exists so the binary artifact under
+        // rust/tests/fixtures can always be rebuilt instead of rotting.
+        //   swift run EstateFixtureEmit <output-directory>
+        .executableTarget(
+            name: "EstateFixtureEmit",
+            dependencies: ["LocusKitEstateFixture"],
+            path: "Sources/EstateFixtureEmit"
+        ),
+        .testTarget(
+            name: "LocusKitEstateFixtureTests",
+            dependencies: [
+                "LocusKitEstateFixture",
+                "LocusKit",
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/LocusKitEstateFixtureTests"
         ),
     ]
 )

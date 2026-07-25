@@ -41,12 +41,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::corpus::Corpus;
+use corpus_kit::content_engine::CorpusContentEngine;
+use corpus_kit::schema_profile::{
+    CorpusContentConfiguration, CorpusIndexUnitPolicy, CorpusOperatingMode,
+};
+use genius_locus_kit::intake::LocusDrawerContentSource;
 // The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
+use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::EstateCoordinator;
+use genius_locus_kit_migrations::SharedContentMigrationExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_postgres::PostgresDrawerStore;
@@ -152,7 +158,7 @@ impl EstateRegistry {
         // fail in a correct build; the InMemory backend never returns I/O errors.
         wire_inmemory_semantic_recall(&handle, &coord)
             .expect("in-memory semantic recall wiring must succeed");
-        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // Idempotently seed the seven default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "in-memory");
@@ -297,7 +303,7 @@ impl EstateRegistry {
         })?;
         wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
-        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // Idempotently seed the seven default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, path);
@@ -445,7 +451,7 @@ impl EstateRegistry {
         // Uses a separate PostgresStorage handle on the same connection string.
         wire_postgres_semantic_recall(conn_str, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for postgres: {e}"))?;
-        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // Idempotently seed the seven default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "postgres");
@@ -621,7 +627,7 @@ impl EstateRegistry {
 // Default wing seeding helper
 // ---------------------------------------------------------------------------
 
-/// Idempotently seed the seven ADR-016 default wings for `handle`.
+/// Idempotently seed the seven default wings for `handle`.
 ///
 /// Reads existing `AI_Charter_Hint` drawers and skips wings that are already
 /// present — safe to call on re-opens of an existing estate. Failure is
@@ -685,19 +691,37 @@ fn wire_inmemory_semantic_recall(
     // fresh UUID — this storage holds no LocusKit rows and is never read via
     // the DrawerStore path, so the estate_id is a logging hint only.
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    EstateFormatStore::new(Arc::clone(&storage))
+        .stamp(EstateFormatVersion::CURRENT, INIT_NOW)
+        .map_err(|error| format!("estate-format stamp: {error:?}"))?;
 
-    // Corpus: applies BundleStore + VectorStore schema migrations (idempotent
-    // on InMemory, which always builds from empty). Five-signal honest ensemble
-    // (RI/PPMI/LSA/NMF/FDC via default_ensemble()): the trainable distributional
-    // signals train on-corpus and persist; FDC is stateless. Lane D (dense float
-    // recall) fuses all five and is live from the first capture.
-    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for in-memory semantic recall: {e}"))?;
-
-    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
-    // instead of constructing a second VectorStore over the same `vectors` table.
-    // Corpus already migrated the VectorStore schema; one shared store means one
-    // resident array and one on-disk sidecar kept in sync by every write.
+    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
+    // CorpusContentEngine over the LocusKit-backed adapter — canonical
+    // content lives once in Drawers; the engine keys every derived row by
+    // Drawer ID and resolves content by ID at work time (mirrors the GLK
+    // coordinator's provision wiring arms).
+    let estate = {
+        let guard = coord.lock().unwrap();
+        guard
+            .estate_for(handle)
+            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
+            .clone()
+    };
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    let corpus = CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new(estate)),
+            default_ensemble(),
+        )
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
+    corpus
+        .reconcile_configured_providers(INIT_NOW)
+        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
     let corpus = Arc::new(corpus);
     let vector_store = corpus.shared_vector_store();
 
@@ -751,16 +775,42 @@ fn wire_postgres_semantic_recall(
             .map_err(|e| format!("PostgresStorage for semantic recall at {conn_str:?}: {e}"))?,
     );
 
-    // Corpus: idempotent schema migration via migrate() — safe on an existing PG schema.
-    // Five-signal honest ensemble (default_ensemble()): trainable signals train
-    // on-corpus and persist; FDC stateless. Lane D fused and live from first capture.
-    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for postgres semantic recall at {conn_str:?}: {e}"))?;
-
-    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
-    // instead of constructing a second VectorStore over the same `vectors` table.
-    // Corpus already migrated the VectorStore schema; one shared store means one
-    // resident array and one on-disk sidecar kept in sync by every write.
+    // This binary declares a 1.0 floor, so prepare the estate through the
+    // separately compiled migration capsule before current-runtime wiring.
+    // A crash leaves the persisted phase/cursor resumable on the next start.
+    {
+        let mut guard = coord.lock().unwrap();
+        guard
+            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
+            .map_err(|error| format!("shared-content migration: {error:?}"))?;
+    }
+    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
+    // CorpusContentEngine over the LocusKit-backed adapter — canonical
+    // content lives once in Drawers; the engine keys every derived row by
+    // Drawer ID and resolves content by ID at work time (mirrors the GLK
+    // coordinator's provision wiring arms).
+    let estate = {
+        let guard = coord.lock().unwrap();
+        guard
+            .estate_for(handle)
+            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
+            .clone()
+    };
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    let corpus = CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new(estate)),
+            default_ensemble(),
+        )
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
+    corpus
+        .reconcile_configured_providers(wall_now_millis())
+        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
     let corpus = Arc::new(corpus);
     let vector_store = corpus.shared_vector_store();
 
@@ -807,17 +857,41 @@ fn wire_sqlite_semantic_recall(
     // migrations (BundleStore + VectorStore tables) on the same connection.
     let storage = shared_storage;
 
-    // Corpus: applies its own schema migration (BundleStore + VectorStore tables)
-    // idempotently on construction — safe to call on an existing database.
-    // Five-signal honest ensemble (default_ensemble()): Lane D fused, live from
-    // first capture; trainable signals train on-corpus and persist their bases.
-    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for {path:?}: {e}"))?;
-
-    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
-    // instead of constructing a second VectorStore over the same `vectors` table.
-    // Corpus already migrated the VectorStore schema; one shared store means one
-    // resident array and one on-disk sidecar kept in sync by every write.
+    // This binary declares a 1.0 floor, so prepare the estate through the
+    // separately compiled migration capsule before current-runtime wiring.
+    {
+        let mut guard = coord.lock().unwrap();
+        guard
+            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
+            .map_err(|error| format!("shared-content migration for {path:?}: {error:?}"))?;
+    }
+    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
+    // CorpusContentEngine over the LocusKit-backed adapter — canonical
+    // content lives once in Drawers; the engine keys every derived row by
+    // Drawer ID and resolves content by ID at work time (mirrors the GLK
+    // coordinator's provision wiring arms).
+    let estate = {
+        let guard = coord.lock().unwrap();
+        guard
+            .estate_for(handle)
+            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
+            .clone()
+    };
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    let corpus = CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new(estate)),
+            default_ensemble(),
+        )
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
+    corpus
+        .reconcile_configured_providers(wall_now_millis())
+        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
     let corpus = Arc::new(corpus);
     let vector_store = corpus.shared_vector_store();
 
@@ -841,4 +915,13 @@ fn wire_sqlite_semantic_recall(
     }
 
     Ok(())
+}
+
+fn wall_now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }

@@ -156,15 +156,20 @@ public extension GeniusLocusKit {
             let estate = try estate(for: handle)
             try await estate.rollupRoomsForDrawers([drawer.id])
         case .regular:
-            // P3: enqueue the drawer onto the Corpus's own ingest queue; the
-            // Corpus drain worker (P4) ingests it and fires onEncoded → room
-            // rollup. Hint drawers (AI_Charter_Hint room) are normal drawers
-            // and flow through the normal encode path. Empty content is
-            // skipped inside enqueueIngest.
-            try await corpus.enqueueIngest(
-                drawer.content,
-                sourceID: drawer.id,
-                now: drawer.filedAt
+            // Shared-content 1.1: enqueue a Drawer CHANGE REFERENCE — id,
+            // revision, digest — never the text. The engine's drain worker
+            // resolves the CURRENT content by ID through the LocusKit-backed
+            // adapter at work time, then fires onEncoded → room rollup. Hint
+            // drawers (AI_Charter_Hint room) are normal drawers and flow
+            // through the same path.
+            guard !drawer.content.isEmpty else { return drawer }
+            try await corpus.enqueueChange(
+                .upsert(
+                    id: drawer.id,
+                    revision: 1,
+                    digest: CorpusContentDigest.digest(drawer.content)),
+                cursor: nil,
+                capturedAt: drawer.filedAt
             )
         }
         return drawer
@@ -415,8 +420,7 @@ public extension GeniusLocusKit {
         guard let corpus = corpusKits[handle] else { return 0 }
         let estate = try estate(for: handle)
 
-        // Fetch the set of source IDs already indexed in the BundleStore — the
-        // drawer IDs that already have chunks and can be skipped. A single
+        // Fetch the canonical Drawer IDs already indexed by CorpusKit. A single
         // snapshot, not re-fetched per pass: the missing set below is
         // determined once, up front, and the per-pass loop only enqueues
         // slices of that already-known list — see the sweep comment below
@@ -437,7 +441,9 @@ public extension GeniusLocusKit {
         // table's declared TEXT primary key, present on every backend), so
         // no single query call ever materializes more than
         // `reindexScanPageSize` full `Drawer` rows.
-        var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
+        // Shared-content 1.1: collect CHANGE REFERENCES (id/revision/digest),
+        // never text — the drain resolves the current content at work time.
+        var uncappedBatch: [(change: CorpusContentChange, cursor: String?, capturedAt: Date)] = []
         var scannedCount = 0
         var cursor: String?
         while true {
@@ -448,7 +454,13 @@ public extension GeniusLocusKit {
             for drawer in page {
                 guard !drawer.content.isEmpty else { continue }          // nothing to encode
                 guard !indexedIDs.contains(drawer.id) else { continue }  // already indexed (idempotent)
-                uncappedBatch.append((text: drawer.content, sourceID: drawer.id, now: drawer.filedAt))
+                uncappedBatch.append((
+                    change: .upsert(
+                        id: drawer.id,
+                        revision: 1,
+                        digest: CorpusContentDigest.digest(drawer.content)),
+                    cursor: nil,
+                    capturedAt: drawer.filedAt))
             }
             if page.count < Self.reindexScanPageSize { break }  // partial page: table exhausted
         }
@@ -489,17 +501,18 @@ public extension GeniusLocusKit {
             let batch = Array(uncappedBatch[missingOffset..<passEnd])
             missingOffset = passEnd
 
-            // Batch-enqueue in chunks so the backend commits new/ ONCE per chunk
-            // instead of per job.
+            // Batch-enqueue in bounded groups so the backend commits once per
+            // group instead of once per job.
             //
             // Stream choice is the delta decision made above:
             //   • LARGE import → IMPORT stream: the discrete import drain worker
-            //     ingests chunk + BM25 only — no bootstrap train, no embed. The
+            //     ingests structural Drawer state + BM25 only — no bootstrap
+            //     train, no embed. The
             //     encode drain's embed-now work would be pure repeated waste for
             //     a bulk import whose basis is retrained on the WHOLE corpus and
-            //     whose chunks are embedded ONCE at the tail below.
+            //     whose Drawers are embedded once at the tail below.
             //   • SMALL delta → ENCODE stream: the encode drain embeds each
-            //     chunk through the LIVE basis as it ingests (identical to a
+            //     Drawer through the live basis as it ingests (identical to a
             //     live capture), so no tail retrain/re-embed is needed at all.
             // Same durable queue.sqlite either way, so a crash mid-import
             // cold-starts: the drain worker reclaims orphaned rows and resumes.
@@ -507,11 +520,11 @@ public extension GeniusLocusKit {
             var offset = 0
             while offset < batch.count {
                 let end = min(offset + enqueueChunk, batch.count)
-                if smallDelta {
-                    try await corpus.enqueueIngestBatch(Array(batch[offset..<end]))
-                } else {
-                    try await corpus.enqueueIngestBatchImport(Array(batch[offset..<end]))
-                }
+                // One encode stream for both cases: jobs are references, so
+                // the legacy copied-text import stream no longer exists. The
+                // small-delta decision below only controls whether the
+                // full-corpus retrain tail runs.
+                try await corpus.enqueueChangeBatch(Array(batch[offset..<end]))
                 offset = end
             }
             total += batch.count
@@ -527,26 +540,24 @@ public extension GeniusLocusKit {
             // only observes the read-only depth probe FOR THE STREAM the batch
             // was enqueued on.
             while true {
-                let depth = smallDelta
-                    ? ((try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0))
-                    : ((try? await corpus.importQueueDepth()) ?? (pending: 0, inFlight: 0))
+                let depth = (try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0)
                 if depth.pending == 0 && depth.inFlight == 0 { break }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
 
         // total == 0 is unreachable here: the empty-sweep case (nothing was
-        // missing — no new chunks would enter the corpus, so the basis,
+        // missing — no new Drawers would enter the corpus, so the basis,
         // every embedding, and the Merkle tree are exactly as current as
         // before this call, and the O(corpus) tail below would be pure
         // waste, observed: an UNCHANGED vault reimport into a 50k estate
         // burned ~70 min of full retrain + re-embed for a no-op) already
         // returned early, right after the sweep, before `smallDelta` was
-        // even classified. A previously interrupted import (chunks present
+        // even classified. A previously interrupted import (structural rows present
         // but basis stale) is repaired by the explicit `moot_reindex` tool,
         // which exists for exactly that.
         if smallDelta {
-            // Small delta: every enqueued chunk was already embedded through the
+            // Small delta: every enqueued Drawer was already embedded through the
             // LIVE basis by the encode drain. Await the barrier once — it
             // publishes the resident vector index, the searchability contract —
             // and skip the full retrain. New vocabulary enters the basis at the
@@ -559,14 +570,14 @@ public extension GeniusLocusKit {
             // vector / RAG) recall lane is query-ready the moment the import
             // cycle completes.
             //
-            // The loop above reaches full CHUNK coverage: every drawer is
-            // chunked and BM25 (lexical) indexed — but import-stream ingest
+            // The loop above reaches full Drawer coverage: every Drawer is
+            // BM25 (lexical) indexed — but bulk ingest
             // deliberately does NOT embed. A query term that appears only in an
-            // unembedded chunk reads dense_lane:dark:vocabMiss until the basis
-            // is trained on the WHOLE corpus and every chunk embedded into that
-            // space. Corpus.reindex does exactly that (train the basis over all
-            // active chunks, then re-embed → one index rebuild). Lexical (BM25)
-            // and structured (Locus) recall are already live from chunk
+            // unembedded Drawer reads dense_lane:dark:vocabMiss until the basis
+            // is trained on the whole corpus and every Drawer embedded into that
+            // space. CorpusKit reindex does exactly that (train over all active
+            // Drawers, then re-embed → one index rebuild). Lexical (BM25)
+            // and structured (Locus) recall are already live from Drawer
             // coverage; THIS is the step that lights up semantic recall, so it
             // belongs at the tail of the import cycle, not on a later cadence.
             try await corpus.reindex(now: now)
@@ -581,7 +592,7 @@ public extension GeniusLocusKit {
 
     // MARK: - Internals
 
-    /// Wire the estate's Corpus `onEncoded` callback to roll up the touched
+    /// Wire the engine's `onEncoded` callback to roll up the touched
     /// LocusKit rooms for each drained batch.
     ///
     /// CorpusKit owns the encode pipeline and fires this callback with the
@@ -594,7 +605,7 @@ public extension GeniusLocusKit {
     /// Called from `wireSubstores` at provision (for `.glk`/`.corpusOnly`
     /// estates). The closure captures the GLK actor weakly so a torn-down estate
     /// leaves no retain cycle through the Corpus.
-    internal func wireCorpusRoomRollup(_ corpus: Corpus, for handle: EstateHandle) async {
+    internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
         await corpus.setOnEncoded { [weak self] drawerIDs in
             guard let self else { return }
             guard let estate = try? await self.estate(for: handle) else { return }
@@ -612,11 +623,10 @@ public extension GeniusLocusKit {
     ) async throws {
         guard let corpus = corpusKits[handle] else { return }
         guard !drawer.content.isEmpty else { return }
-        try await corpus.ingest(
-            drawer.content,
-            sourceID: drawer.id,
-            now: drawer.filedAt
-        )
+        // The drawer row is already durably stored; the engine resolves it
+        // through the LocusKit-backed adapter and indexes it under its own
+        // Drawer ID (identity is direct — no chunk lane).
+        try await corpus.indexContent(id: drawer.id, now: drawer.filedAt)
     }
 
     /// The canonical unclassified-content sentinel UDC code. A drawer that

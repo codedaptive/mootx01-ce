@@ -5,7 +5,7 @@
 //! object), NOT top-level `allowedTools`. Entries take the MCP-prefixed
 //! form `mcp__mootx01__<tool_name>` for the direct connection, and
 //! `mcp__plugin_mootx01_mootx01__<tool_name>` for calls routed through the
-//! installed plugin (ADR-024 §2, v1.0.15) — empirically confirmed against a
+//! installed plugin (plugin-owned MCP connections, v1.0.15) — empirically confirmed against a
 //! live `~/.claude/settings.json` carrying both prefixes side by side (this
 //! installer's marketplace and plugin are both named `mootx01`, giving the
 //! concrete plugin prefix `mcp__plugin_mootx01_mootx01__`). A rule written
@@ -104,7 +104,7 @@ const MUTATION_TOOLS: &[&str] = &[
     // Dataset import (MX-TAB-7): creates a backend table and can read a
     // csv_path from the filesystem — same Ask posture as palace/vault import.
     "moot_file_dataset",
-    // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
+    // Monitoring flag mutation: sets daemon telemetry state
     // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
     // Mirrors Swift PermissionsWriter.mutationTools (parity required).
     "moot_monitoring_status",
@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(classify("moot_reindex"), Tier::Ask);
         assert_eq!(classify("moot_palace_import"), Tier::Ask);
         assert_eq!(classify("moot_vault_import"), Tier::Ask);
-        // ADR-025 wave 8.2: monitoring_status mutates daemon behaviour — ask tier.
+        // monitoring_status mutates daemon behaviour — ask tier.
         assert_eq!(classify("moot_monitoring_status"), Tier::Ask, "monitoring_status is mutating — ask tier");
 
         assert_eq!(classify("moot_erase_memory"), Tier::Deny);

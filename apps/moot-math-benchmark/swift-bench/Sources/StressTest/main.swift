@@ -172,24 +172,47 @@ func nowNS() -> UInt64 {
     return UInt64(ts.tv_sec) * 1_000_000_000 + UInt64(ts.tv_nsec)
 }
 
-func timeLoop(warmupNS: UInt64, measureNS: UInt64, body: () -> Void)
+nonisolated(unsafe) var stressSink: UInt64 = 0
+
+@inline(never) @_optimize(none)
+func consumeStressResult(_ value: UInt64) {
+    stressSink ^= value
+}
+
+func timeLoop(warmupNS: UInt64, measureNS: UInt64, body: () -> UInt64)
     -> (UInt64, UInt64, UInt64, UInt64)
 {
     let warmupEnd = nowNS() + warmupNS
-    while nowNS() < warmupEnd { body() }
+    while nowNS() < warmupEnd { consumeStressResult(body()) }
+
+    // Batch very fast operations so every clock sample spans at least 10 us.
+    // This avoids publishing zero-nanosecond rows caused by timer resolution.
+    var callsPerSample: UInt64 = 1
+    while callsPerSample < 1 << 20 {
+        let t0 = nowNS()
+        var checksum: UInt64 = 0
+        for _ in 0..<callsPerSample { checksum ^= body() }
+        let elapsed = nowNS() &- t0
+        consumeStressResult(checksum)
+        if elapsed >= 10_000 { break }
+        callsPerSample &*= 2
+    }
 
     var samples: [UInt64] = []
     samples.reserveCapacity(1 << 16)
     let measureEnd = nowNS() + measureNS
     while nowNS() < measureEnd {
         let t0 = nowNS()
-        body()
+        var checksum: UInt64 = 0
+        for _ in 0..<callsPerSample { checksum ^= body() }
         let dt = nowNS() &- t0
-        samples.append(dt)
+        consumeStressResult(checksum)
+        samples.append((dt &+ callsPerSample &- 1) / callsPerSample)
     }
 
-    let iters = UInt64(samples.count)
-    if iters == 0 { return (0, 0, 0, 0) }
+    let sampleCount = UInt64(samples.count)
+    if sampleCount == 0 { return (0, 0, 0, 0) }
+    let iters = sampleCount &* callsPerSample
     let minNS = samples.min() ?? 0
 
     // Use Double for mean/stddev to keep this simple; sample counts
@@ -197,13 +220,13 @@ func timeLoop(warmupNS: UInt64, measureNS: UInt64, body: () -> Void)
     // our use.
     var sum: Double = 0
     for s in samples { sum += Double(s) }
-    let mean = sum / Double(iters)
+    let mean = sum / Double(sampleCount)
     var varSum: Double = 0
     for s in samples {
         let d = Double(s) - mean
         varSum += d * d
     }
-    let variance = varSum / Double(iters)
+    let variance = varSum / Double(sampleCount)
     let stddev = variance.squareRoot()
     return (iters, minNS, UInt64(mean), UInt64(stddev))
 }
@@ -235,18 +258,15 @@ func measureHamming(_ kernel: SubstrateKernel, _ rng: inout Harness.SplitMix64,
 {
     let probe = fingerprintFromRNG(&rng)
     let candidates: [Fingerprint256] = (0..<batchSize).map { _ in fingerprintFromRNG(&rng) }
-    var sink: Int = 0
-
     let (itB, mnB, muB, sdB) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
         let result = kernel.hammingDistanceBatch(probe: probe, candidates: candidates)
-        if !result.isEmpty { sink &+= result[0] }
+        return UInt64(result.first ?? 0)
     }
     let (itS, mnS, muS, sdS) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
         var total = 0
         for cand in candidates { total &+= kernel.hammingDistance256(probe, cand) }
-        sink &+= total
+        return UInt64(total)
     }
-    if sink == 0xDEADBEEF { print("# sink: \(sink)") }
 
     return (
         Measurement(kernel: kernel.kind, op: .hammingDistanceBatch,
@@ -279,18 +299,15 @@ func measureSimhash(_ kernel: SubstrateKernel, _ rng: inout Harness.SplitMix64,
         for _ in 0..<inputWordCount { w.append(rng.next()) }
         inputs.append(w)
     }
-    var sink: UInt64 = 0
-
     let (itB, mnB, muB, sdB) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
         let result = kernel.simhashBlockBatch(inputs: inputs, family: family)
-        if !result.isEmpty { sink &+= result[0] }
+        return result.first ?? 0
     }
     let (itS, mnS, muS, sdS) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
         var total: UInt64 = 0
         for inp in inputs { total &+= SimHash.block(over: inp, family: family) }
-        sink &+= total
+        return total
     }
-    if sink == 0xDEAD_BEEF_CAFE_BABE { print("# sink: \(sink)") }
 
     return (
         Measurement(kernel: kernel.kind, op: .simhashBlockBatch,
@@ -315,18 +332,15 @@ func measureOrReduce(_ kernel: SubstrateKernel, _ rng: inout Harness.SplitMix64,
         for _ in 0..<innerCount { cohort.append(fingerprintFromRNG(&rng)) }
         batches.append(cohort)
     }
-    var sink: UInt64 = 0
-
     let (itB, mnB, muB, sdB) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
         let result = kernel.orReduceBatch(batches: batches)
-        if !result.isEmpty { sink &+= result[0].block0 }
+        return result.first?.block0 ?? 0
     }
     let (itS, mnS, muS, sdS) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
         var totalB0: UInt64 = 0
         for cohort in batches { totalB0 &+= kernel.orReduce256(cohort).block0 }
-        sink &+= totalB0
+        return totalB0
     }
-    if sink == 0xCAFE_BABE_DEAD_BEEF { print("# sink: \(sink)") }
 
     return (
         Measurement(kernel: kernel.kind, op: .orReduceBatch,

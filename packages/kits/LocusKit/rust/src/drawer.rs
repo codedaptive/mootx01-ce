@@ -6,7 +6,7 @@
 //! requires that retrieval surface exactly what was filed.
 //!
 //! Every drawer belongs to a room node in the estate's containment tree
-//! (ADR-017). The `parent_node_id` field is the UUID of the room node.
+//!. The `parent_node_id` field is the UUID of the room node.
 //! Display names (wing, room) are resolved via `DrawerStore::resolve_node_names`
 //! when needed — they are not stored on the Drawer struct.
 //!
@@ -23,7 +23,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Matches the
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, epoch-millisecond instants). Matches the
 //!   leaf-type convention documented in `audit_types.rs` / `manifest.rs`:
 //!   the Rust port stores timestamps as i64 epoch milliseconds and the
 //!   persistence-kit `TypedValue::Timestamp(i64)` carries them on the wire.
@@ -76,7 +76,7 @@ pub struct Drawer {
     /// The content as filed. Verbatim, no transformation.
     pub content: String,
 
-    /// UUID of the room node that contains this drawer (ADR-017 §3).
+    /// UUID of the room node that contains this drawer.
     /// Foreign key to nodes.id; the referenced node has depth=2
     /// (room level) in the estate containment tree.
     pub parent_node_id: String,
@@ -122,7 +122,7 @@ pub struct Drawer {
 
     /// Provenance bitmap encoding source type, channel, provenance capture
     /// channel, confirmation, confidence, sensitivity, and enrichment
-    /// status per Q1_DECISION_PROVENANCE_BITMAP.md. See `provenance.rs`
+    /// status per the packed provenance layout. See `provenance.rs`
     /// for the axis enums and the accessor methods below for type-safe
     /// decoding.
     pub provenance: i64,

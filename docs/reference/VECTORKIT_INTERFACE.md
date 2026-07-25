@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
-status: active
-version: 1.6.0
-date: 2026-07-16
+status: accepted-1.1-target
+version: 1.7.0
+date: 2026-07-20
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -18,13 +18,22 @@ purpose: |
   kind/payload; single-row write-behind path addPayload/add_payload;
   batch amortised path addPayloads/add_payloads; flush quiesce),
   the VectorMatch result type, and the VectorKitError enum. The companion
-  SPEC carries the behavioral contracts (invariants I-1…I-7, conformance
-  C-1…C-12).
+  SPEC carries the behavioral contracts (invariants I-1…I-9, conformance
+  C-1…C-13).
 ---
 
 # VectorKit Interface
 
 ## § 1 — Package layout
+
+### GLK identity and ownership rule (1.1 target)
+
+`itemID` remains an opaque VectorKit string. The composition layer assigns its
+meaning: GLK Corpus rows always use canonical `Drawer.id`, while standalone
+CorpusKit may use document or optional passage index-unit IDs. GLK never stores
+a passage/chunk ID in a Corpus vector row. Composed callers delete vectors by
+declared item/lane/model ownership; whole-table destruction is not a GLK
+cleanup or migration operation.
 
 **Swift:** `packages/kits/VectorKit/`
 
@@ -170,7 +179,7 @@ was added in schema v2.
 ```swift
 public struct StoredVector: Sendable, Equatable {
     public let id: String            // UUID string, stable across upserts
-    public let itemID: String        // drawer or chunk UUID (was drawerID)
+    public let itemID: String        // GLK: Drawer UUID; standalone: opaque item id
     public let vectorIndex: UInt32   // 0 for single-vector; token slot for ColBERT
     public let modelID: String
     public let modelVersion: String
@@ -217,7 +226,7 @@ ascending, ties by `itemID`/`item_id` ascending. Lane F rename:
 
 ```swift
 public struct VectorMatch: Sendable, Comparable, Equatable {
-    public let itemID: String    // drawer or chunk UUID (was drawerID)
+    public let itemID: String    // GLK: Drawer UUID; standalone: opaque item id
     public let distance: Int     // Hamming 0…256 (binary lane) or cosine×10_000 (float lane)
     public let modelID: String
 
@@ -253,7 +262,7 @@ both indexes are updated once for the whole batch rather than once per row.
 
 ```swift
 public struct VectorPayloadInput: Sendable, Equatable {
-    public let itemID: String          // owning drawer/chunk UUID; joins vectors.item_id
+    public let itemID: String          // GLK: Drawer UUID; standalone: opaque item id
     public let vectorIndex: UInt32     // 0 for single-vector; token position for ColBERT
     public let payload: VectorPayload  // binary, float32, or int8 typed payload
     public let modelID: String
@@ -325,13 +334,13 @@ impl VectorStore {
 }
 ```
 
-**`vectors` table schema — schema version 4 (Lane F multi-vector + ADR-012 ext slot + `filed_at` index):**
+**`vectors` table schema — schema version 4 (Lane F multi-vector + forward-compatible ext slot + `filed_at` index):**
 declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()`.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `id` | UUID / TEXT | NOT NULL | Primary key. Stable across upserts. |
-| `item_id` | TEXT | NOT NULL | Owning drawer or chunk UUID. (Renamed from `drawer_id`.) |
+| `item_id` | TEXT | NOT NULL | Opaque item identity; canonical Drawer UUID for every GLK Corpus row. (Renamed from `drawer_id`.) |
 | `vector_index` | INTEGER | NOT NULL DEFAULT 0 | 0 for single-vector; 0..N-1 for ColBERT token vectors. |
 | `model_id` | TEXT | NOT NULL | Embedding model identifier. |
 | `model_version` | TEXT | NOT NULL | Model weights version. |
@@ -340,7 +349,7 @@ declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()
 | `payload` | BLOB | NOT NULL | Vector bytes: 32 bytes (binary); dim×4 (float32); dim (int8). (Renamed from `engram`.) |
 | `scale` | REAL | NULL | Int8 dequantization scale. NULL for binary and float32. |
 | `filed_at` | TIMESTAMP TEXT | NOT NULL | ISO8601 text (TEXT, not REAL). |
-| `ext` | JSON | NULL | ADR-012 forward-compat slot (schema v3). Inert in 1.0 — written NULL / omitted on insert, never read. |
+| `ext` | JSON | NULL | the forward-compatible ext-slot contract forward-compat slot (schema v3). Inert in 1.0 — written NULL / omitted on insert, never read. |
 
 UNIQUE constraint: `(item_id, vector_index, model_id)`.
 Indices: `idx_vectors_item` on `(item_id)`; `idx_vectors_model_item` on `(model_id, item_id)`;
@@ -860,11 +869,11 @@ pub fn delete_payload(
 
 ### `VectorStore.destroyAllVectors` / `destroy_all_vectors`
 
-Deletes all rows from the `vectors` table. Called by
-`GeniusLocusKit.destroy(storage:corpusStorage:handle:)` as part of
-coordinated estate teardown. After this call the backing storage is intact
-(schema preserved) but contains no vector data. The caller is responsible for
-closing the estate before calling this method.
+Deletes all rows from the `vectors` table. This is a standalone administrative
+operation available only when the caller owns every row in the store. GLK must
+not call it for cleanup, expunge, rebuild, or migration because unrelated lanes
+may share the table; GLK uses item/lane/model-scoped deletion. After this call
+the backing schema remains intact but contains no vector data.
 
 **Swift:**
 
@@ -1048,6 +1057,13 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 
 ## Changelog
 
+### 1.7.0 -- 2026-07-20
+
+- Defined `itemID` as canonical Drawer identity for GLK Corpus rows while
+  retaining opaque document/passage identities for standalone uses.
+- Restricted whole-table `destroyAllVectors` to exclusively owned standalone
+  stores; GLK deletion is ownership-scoped.
+
 ### 1.6.0 -- 2026-07-16
 Seven public-surface gaps closed (verifier pass 2):
 - Added `defaultSidecarURL(for:)` / `default_sidecar_path` static factory helper
@@ -1123,7 +1139,7 @@ rows of differing dimension without shared-stride corruption. Public surface
 unchanged (`findNearestFloat`/`find_nearest_float` signatures preserved).
 
 ### 1.2.0 -- 2026-06-17
-Schema v2 → v3 (ADR-012): added the nullable `.json` `ext` forward-compat slot to the `vectors` table. Both ports; inert in 1.0 (NULL / omitted on insert, never read). Updated the `vectors`-table schema section.
+Schema v2 → v3 (the forward-compatible ext-slot contract): added the nullable `.json` `ext` forward-compat slot to the `vectors` table. Both ports; inert in 1.0 (NULL / omitted on insert, never read). Updated the `vectors`-table schema section.
 
 ### 1.0.1 -- 2026-06-15
 Added `VectorPayload` row to the Swift/Rust Concordance — engine types table. Type exists in both ports; the audit regex missed it because the Swift declaration does not use a keyword the regex tracks (VectorPayload is a plain `public struct`; the gap was solely a missing concordance row).

@@ -13,6 +13,7 @@
 [![Homebrew](https://img.shields.io/badge/Homebrew-codedaptive%2Fmootx01--ce-FBB040?logo=homebrew&logoColor=white)](https://github.com/codedaptive/homebrew-mootx01-ce)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20·%20aarch64-FCC624?logo=linux&logoColor=black)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![SDKs](https://img.shields.io/badge/SDKs-4%20Apache--2.0%20library%20repos-8A2BE2)](#developer-sdks)
+![channel](https://img.shields.io/badge/channel-1.1.0--beta--03-orange)
 ![signed](https://img.shields.io/badge/releases-minisign%20signed-success)
 ![platforms](https://img.shields.io/badge/platforms-Apple%20Silicon%20·%20PC%2FLinux-blue)
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
@@ -21,6 +22,61 @@
 
 > Every release asset ships with a minisign-signed `checksums.txt` so you can
 > verify what you install.
+
+> **Branch channel:** `develop/1.1.x` is currently versioned
+> `1.1.0-beta-04`. It is the fast-moving beta for 1.1 feature work, not the
+> supported production release. The installers and `releases/latest` links
+> below install the current stable 1.0 line; use a source build from this
+> checkout to exercise 1.1 work in progress.
+
+## Personal MOOTs are always free
+
+A personal MOOT belongs to one person. That person may use it at home or at
+work, and across their personal devices, without a license fee. A company may
+install a separate, isolated personal MOOT for every employee. Individuals and
+companies may also compile, sign, and deploy their own single-user MOOTx01-App
+builds for free.
+
+Commercial licensing begins when the MOOTx01 product core becomes shared
+multiuser infrastructure, part of a client-facing application, or a service
+that hosts MOOTs for clients for a fee. The official Apple App Store build is a
+separate, optional convenience purchase, currently expected to be about $3 per
+major `x.0.0` release. That purchase pays for the maintained App Store
+distribution, not for the right to run a personal MOOT.
+
+**People are free. Systems are licensed. Assurance is Enterprise.** See the
+[plain-language licensing guide](LICENSING.md) and the binding
+[`LICENSE`](LICENSE).
+
+## 1.1 development beta
+
+This branch is where compatible 1.1 capabilities land and are qualified before
+promotion. It moves continuously: APIs, migrations, documentation, and feature
+flags can change between commits. `beta-03` records the three pushes made to
+`candidate/1.1.x` since that branch was created. Pin the commit you test, use a
+disposable or backed-up estate, and report the version and commit with every
+beta issue.
+
+Current 1.1 work includes the native MOOTx01-App, CorpusKit shared-content
+architecture, Apple surfaces and on-demand federation, and the foundation for
+continuous Obsidian synchronization. The roadmap distinguishes implemented
+behavior from planned work.
+
+Build the beta directly:
+
+```bash
+# Swift — macOS 26+
+swift build -c release --package-path apps/mootx01 --product mootx01
+SWIFT_BIN="$(swift build -c release --package-path apps/mootx01 --show-bin-path)"
+"$SWIFT_BIN/mootx01" --version
+
+# Rust — Linux or Windows
+cargo build --locked --release --manifest-path apps/mootx01/rust/Cargo.toml
+apps/mootx01/rust/target/release/mootx01 --version
+```
+
+The plugin packages committed on this branch are development artifacts. The
+public marketplace plugin remains on the stable 1.0 channel.
 
 ## Install in 60 seconds
 
@@ -124,7 +180,13 @@ Show me the current status of my MOOT estate.
 - **Understand it fast.** Read [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md).
 - **Have an AI install it.** Give the AI [`AI_START_HERE.md`](AI_START_HERE.md).
 - **Read the story.** [`ABOUT.md`](ABOUT.md) explains why MOOTx01 exists and why memory belongs to you.
-- **Build on it.** [`docs/start-here/SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) shows the open → capture → recall loop, and [`SDK.MD`](SDK.MD) maps the standalone Apache-2.0 SDK repos.
+- **Build on it.** Start with [`moot-memory`](https://github.com/codedaptive/moot-memory), [`moot-semantics`](https://github.com/codedaptive/moot-semantics), [`moot-system`](https://github.com/codedaptive/moot-system), or [`moot-core`](https://github.com/codedaptive/moot-core). [`SDK.MD`](SDK.MD) maps all 17 Apache-2.0 packages; [`SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) covers the product-tree composition path.
+- **Build the native Apple app.** [`apps/Mootx01-App/README.md`](apps/Mootx01-App/README.md) covers the macOS/iOS app, Apple intelligence and automation, sync, LAN serving, federation, build steps, and current development boundaries.
+- **Understand CorpusKit 1.1.** [`packages/kits/CorpusKit/README.md`](packages/kits/CorpusKit/README.md) explains standalone and attached modes, canonical content identity, providers, migration, and the Swift/Rust test lanes.
+- **Operate it.** [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) covers the dashboard, read API, control plane, configuration, and troubleshooting.
+- **Maintain an Obsidian vault.** [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) documents today's explicit workflow and the planned 1.1 continuous mode.
+- **Use two memory backends.** [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) explains the optional primary/secondary MCP bridge and its failure model.
+- **Inspect benchmark evidence.** [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) separates reproducible performance data from conformance and memory-quality evaluation.
 - **See the architecture.** [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) is the readable map of the repository.
 - **Visit the live site.** [mootx01.ai](https://mootx01.ai)
 
@@ -209,6 +271,37 @@ By default:
 | `moot-mgr` dashboard | `http://127.0.0.1:4200` |
 
 Both are loopback addresses. They are meant for your own machine, not the public internet. For security they will reject connection from other devices.
+
+#### If you want a more secure local setup
+
+Use direct stdio when one AI client should launch its own MOOTx01 subprocess
+instead of connecting to the resident HTTP listener:
+
+```bash
+mootx01 install --target codex --mode server --no-daemon --vault-off
+```
+
+For Codex, this writes a command entry to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.mootx01]
+command = "/absolute/path/to/mootx01"
+args = ["serve"]
+env = { MOOTX01_HTTP_PORT = "", MOOTX01_VAULT = "0" }
+```
+
+Direct stdio normally limits the MCP transport to the parent client's process
+pipes. Clearing `MOOTX01_HTTP_PORT` prevents an inherited shell setting from
+turning that child back into an HTTP server. `mootx01 serve` will, however, forward to a resident daemon over
+localhost when that daemon already owns the same estate. Stop or disable the
+existing resident service first if you require socket-free MCP operation, then
+restart the AI client and confirm its MOOTx01 entry contains `command` and
+`args`, not `url`.
+
+This mode gives up the shared resident's background governor, central
+telemetry, and `moot-mgr` visibility. See
+[`INSTALLING_MOOTX01.md`](docs/start-here/INSTALLING_MOOTX01.md#direct-stdio-for-a-tighter-local-transport)
+for service-stop and verification steps.
 
 ### 3 · Verify it
 
@@ -367,22 +460,29 @@ Neither port leads. Both must agree bit for bit.
 ## Security
 
 Security-relevant changes go through an independent adversarial review before merge, verified against the live code and gated on that pass.
+Users who prefer process-pipe MCP transport can install in
+[direct stdio mode](#if-you-want-a-more-secure-local-setup) instead of keeping
+the resident HTTP listener.
+The [continuous security review record](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md)
+documents **537 remediated security finding records** from June 25 through
+July 22, 2026. The linked [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+names every issue and its fix or closing commit.
 
 ## Roadmap
 
-Version 1.1.x
-- **Docs and Specs** — Clean up agentic baggage in the documentation. Remove the noise and organize for humans
-- **Improved Sidecar and embedded examples** — reference app patterns.    
-- **Apple iOS Native App**  — Full App with Shortcut Support and App Intents for Mootx01 sharing to External Apps
-- **Apple Intelligence integration** — native capture and recall across Apple surfaces.  
-- **Apple iCloud Sync** Seemless default estate sharing between iOS and MacOs
-  
-Version 1.2.x
-- **Federation** — bounded cross-estate sharing.
-- **MiniLLM Support** — moot side local language model for schedule driven llm house keeping and data mining of the estates
+MOOTx01 is moving from durable local memory to personal agentic memory,
+controlled collaboration, and optional Postgres scale.
 
-Version 1.3.x
-- **mootgres**  — full postgres extension to offload moot computations to a postgres server.
+- **1.1:** MOOTx01-App across iOS, iPadOS, and macOS; the cross-platform
+  `moot-mgr` web app; Apple Intelligence; Review Center; Work Packets; and
+  optional iCloud and continuous eligible Obsidian synchronization.
+- **1.2:** bounded Federation and cross-platform local agents.
+- **1.3:** PGlite for portable browser/WASM Postgres and pgMOOT for optional
+  PostgreSQL server computation.
+
+Read the full [`ROADMAP.md`](ROADMAP.md) for the product story, release
+boundaries, and ways to follow the build. Roadmap items are direction, not
+shipped promises; tagged releases and their guides remain authoritative.
 
 
 ## Repository structure
@@ -408,23 +508,29 @@ mootx01/
 | Document | Purpose |
 |----------|---------|
 | [`ABOUT.md`](ABOUT.md) | What MOOTx01 is and why — the full story |
+| [`ROADMAP.md`](ROADMAP.md) | The public path from personal agentic memory to Federation and Postgres scale |
 | [`AI_START_HERE.md`](AI_START_HERE.md) | For an AI assistant: explain MOOTx01 and install it for the user |
 | [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md) | Plain-language explainer for a non-technical user |
 | [`docs/start-here/INSTALL_SURFACE.md`](docs/start-here/INSTALL_SURFACE.md) | Install fact sheet: addresses, flow, platform matrix, verification |
 | [`docs/start-here/SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) | Build on the substrate: open an estate, capture → recall (Swift + Rust) |
+| [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) | Current on-demand vault workflow and planned 1.1 continuous mode |
 | [`docs/start-here/AI_INSTALL_MANIFEST.json`](docs/start-here/AI_INSTALL_MANIFEST.json) | Machine-readable install facts for AI agents (commands, ports, verification, adapters) |
+| [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) | Operator console, dashboard/read API, control plane, and troubleshooting |
+| [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) | Optional two-backend MCP bridge: routing, configuration, security, and failure behavior |
+| [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) | Reproducible benchmark program, evidence requirements, and result submission |
+| [`llms.txt`](llms.txt) | Compact repository and standalone-SDK discovery map for AI agents |
 | [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) | Readable front door: products, stack, surfaces, sidecar |
 | [`docs/concepts/MOOTX01_AND_ARIA_CANON.md`](docs/concepts/MOOTX01_AND_ARIA_CANON.md) | Durable definitions of MOOTx01 and ARIA |
 | [`docs/concepts/ARIA_LEXICON.md`](docs/concepts/ARIA_LEXICON.md) | The ARIA grammar: one noun, nine verbs, four adjectives |
 | [`SDK.MD`](SDK.MD) | The framework SDKs: four Apache-2.0 venues, what they give you, what the product adds |
 | [`apps/moot-agent-skills/PLUGIN.MD`](apps/moot-agent-skills/PLUGIN.MD) | Why the plugin install depth matters — server vs. skills vs. plugin |
 | [`docs/reference/PLUGIN_SPEC.md`](docs/reference/PLUGIN_SPEC.md) | Plugin distribution specification |
-| [`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md`](docs/reference/) | Authoritative substrate specification |
+| [`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md`](docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md) | Authoritative substrate specification |
 | [`EDITIONS.md`](EDITIONS.md) · [`LICENSING.md`](LICENSING.md) | Open core + commercial editions, in plain language |
 
 ## Standards
 
-Swift 6 strict concurrency · zero external Swift dependencies in kits (except sqlite-vec in PersistenceKit-SQLite) · raw SQLite via PersistenceKit, no Core Data · dates as TEXT/ISO8601 · no Bool stored properties on entities (bitmap fields) · Metal for GPU compute on Apple Silicon · every computation deterministic.
+Swift 6 strict concurrency · external dependencies declared per package (including swift-crypto, postgres-nio, swift-nio-ssl, and sqlite-vec where used) · raw SQLite via PersistenceKit, no Core Data · dates as TEXT/ISO8601 · no Bool stored properties on entities (bitmap fields) · Metal for GPU compute on Apple Silicon · every computation deterministic.
 
 ---
 

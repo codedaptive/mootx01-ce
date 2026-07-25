@@ -3,6 +3,7 @@ import AriaMCP
 import CorpusKit
 import CorpusKitProviders
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -161,7 +162,7 @@ struct AriaMCPMain {
             // Construct the SQLite storage. busyTimeout of 5.0 seconds is
             // the PersistenceKit BackendConfiguration.sqlite default; sufficient
             // for a single-process server with no concurrent writers.
-            // Whole-file encryption (ADR-014): open the estate as FullDatabase
+            // Whole-file encryption: open the estate as FullDatabase
             // with this estate's per-estate key from the Keychain (keyed by the
             // estate file path), so the file — schema and content — is
             // SQLCipher-encrypted at rest. The app and this server point at the
@@ -285,6 +286,8 @@ struct AriaMCPMain {
             do {
                 // Shared seam: Corpus + VectorStore + encode queue, the same wiring
                 // `provision` and `mootx01 serve` perform. Idempotent on reopen.
+                _ = try await GLKMigrationCatalog.prepare(
+                    kit: kit, handle: handle, now: Date())
                 try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
                 // Rebuild + register the matrix tier from the persisted audit log
                 // so matrix-driven recall (co-occurrence/temporal scoring — the
@@ -335,7 +338,9 @@ struct AriaMCPMain {
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(),
                 brainTickMs: AriaResident.brainTickMs(),
                 monitoringPollMs: AriaResident.monitoringPollMs(),
-                statsStorePath: statsStorePath
+                statsStorePath: statsStorePath,
+                vaultPath: AriaResident.vaultPath(),
+                vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds()
             )
             let gateSuffix = (statsStorePath != nil) ? " + monitoring gate" : ""
             Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, HTTP transport + autonomic governor\(gateSuffix))")

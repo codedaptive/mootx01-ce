@@ -14,7 +14,7 @@ import PersistenceKitInMemory
 /// locally-open estate on behalf of another, refusing unless the source
 /// estate holds an active, unexpired grant naming the requester as
 /// grantee. These tests make the A-versus-C refusal
-/// (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13, cookbook I-23)
+/// (federation disclosure controls, cookbook I-23)
 /// executable: B answers A only from B-authored or B-to-A-granted
 /// content; a read of C's content by A with no C-to-A grant is refused,
 /// not silently empty.
@@ -315,7 +315,7 @@ struct CrossEstateFederationTests {
 
     /// Capture a drawer into a specific wing/room via the Estate.capture
     /// verb, which resolves wing/room names to node IDs through
-    /// NodeStore's create-on-demand resolution (ADR-017 §7).
+    /// NodeStore's create-on-demand resolution.
     private func captureWithAttributes(
         into handle: EstateHandle,
         wing: String,
@@ -445,7 +445,7 @@ struct CrossEstateFederationTests {
     /// filter is both inclusive (matching drawers pass) and exclusive
     /// (non-matching drawers are dropped).
     ///
-    /// ADR-016: `defaultWing()` now returns the constant `defaultWingName`
+    /// `defaultWing` now returns the constant `defaultWingName`
     /// ("Agentic Memory") for all estates regardless of owner — the grant
     /// scope must use the same constant.
     @Test
@@ -463,7 +463,7 @@ struct CrossEstateFederationTests {
             into: hB, wing: "other-wing", room: "r", udcCode: "004",
             tag: "scope-wing-out", kit: kit)
 
-        // Grant scoped to the default wing — all normal captures land here (ADR-016).
+        // Grant scoped to the default wing — all normal captures land here.
         _ = try await kit.issueGrant(hB, scopedGrantOptions(to: hA, scope: .wing(LocusKit.defaultWingName)))
 
         let result = try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)

@@ -18,15 +18,21 @@ cannot ship with drifted versions.
 
 ## Release runbook
 
-1. `python3 scripts/release/bump_version.py <version>` on
-   `develop/1.0.x`.
+For the 1.1 beta train, `YY` is the number of pushes made to
+`candidate/1.1.x`, with the branch-creation push counted as `01`. The current
+development version is `1.1.0-beta-04` (four-push count; stamped 2026-07-24).
+Before the next candidate push, bump both CE and EE to `1.1.0-beta-05`; that
+candidate push then becomes number 5.
+
+1. `python3 scripts/release/bump_version.py <version>` on the active
+   `develop/X.Y.x`.
 2. Add the root `CHANGELOG.md` release-notes entry.
 3. Build both legs; `mootx01 --version` should print
    `<version> (<date>)`.
 4. Commit; flow `develop → candidate → stable`.
 5. `python3 scripts/release/verify_version.py <version>` against the
    stable HEAD.
-6. Tag last, on the stable HEAD:
+6. For a stable release, tag last on the stable HEAD:
    `git tag -a v<version> <stable-HEAD>`.
 
 Tagging last is a rule, not a preference. The version bump and the

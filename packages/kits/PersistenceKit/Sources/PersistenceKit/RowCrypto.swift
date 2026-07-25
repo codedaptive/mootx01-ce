@@ -13,7 +13,7 @@
 // Application-level per-record encryption, deliberately NOT whole-file
 // SQLCipher: encrypting per row lets a machine read exactly the records whose
 // key it holds and makes per-record keying fall out of the schema
-// (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1). Mode 3
+// (federation disclosure controls Appendix A.1). Mode 3
 // (FullDatabase / SQLCipher) is the orthogonal whole-file layer; it has no
 // per-row analogue on PostgreSQL because the server owns the schema, so on
 // Postgres the content seam is the only at-rest content protection.

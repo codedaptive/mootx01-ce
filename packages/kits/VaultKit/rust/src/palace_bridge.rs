@@ -24,7 +24,7 @@
 //!
 //! ## Time convention
 //!
-//! `now` is epoch-MILLISECONDS (from `wall_now`, ADR-023), which is exactly what
+//! `now` is epoch-MILLISECONDS (from `wall_now`, epoch-millisecond instants), which is exactly what
 //! every sink here — capture / capture_batch, add_kg_fact, and the diary receipt
 //! — expects, so it is passed DIRECTLY. The palace's `filed_at` metadata is also
 //! milliseconds (`iso8601_to_ms`), so an imported drawer's `event_time` flows
@@ -258,7 +258,7 @@ impl<'a> PalaceBridge<'a> {
                     for window in batch_frames.chunks(crate::import_policy::BULK_WINDOW) {
                         let frames: Vec<CaptureFrame> =
                             window.iter().map(|(f, _)| f.clone()).collect();
-                        // `now` (wall_now, ADR-023) is epoch-MILLISECONDS — the same
+                        // `now` (wall_now, epoch-millisecond instants) is epoch-MILLISECONDS — the same
                         // unit capture, the stream path, and the KG paths all expect —
                         // so it is passed directly with no conversion.
                         self.coordinator
@@ -496,7 +496,7 @@ impl<'a> PalaceBridge<'a> {
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
-        // CaptureFrame.event_time is now epoch-MILLISECONDS too (ADR-023), as is
+        // CaptureFrame.event_time is now epoch-MILLISECONDS too, as is
         // `now` (wall_now), so it flows straight through with no unit conversion
         // — the source's sub-second precision is preserved end to end.
         frame.event_time = Some(event_time_ms.unwrap_or(now));
@@ -610,7 +610,7 @@ impl<'a> PalaceBridge<'a> {
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
-        // CaptureFrame.event_time is now epoch-MILLISECONDS too (ADR-023), as is
+        // CaptureFrame.event_time is now epoch-MILLISECONDS too, as is
         // `now` (wall_now), so it flows straight through with no unit conversion
         // — the source's sub-second precision is preserved end to end.
         frame.event_time = Some(event_time_ms.unwrap_or(now));
@@ -737,7 +737,7 @@ impl<'a> PalaceBridge<'a> {
         frame.kind = ContentKind::Prose;
         frame.lineage_id = Some(lineage_id);
         // event_time_ms is epoch-MILLISECONDS (iso8601_to_ms) and
-        // CaptureFrame.event_time is now epoch-MILLISECONDS too (ADR-023), as is
+        // CaptureFrame.event_time is now epoch-MILLISECONDS too, as is
         // `now` (wall_now), so it flows straight through with no unit conversion
         // — the source's sub-second precision is preserved end to end.
         frame.event_time = Some(event_time_ms.unwrap_or(now));

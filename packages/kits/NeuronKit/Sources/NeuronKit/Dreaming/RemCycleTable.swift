@@ -1,6 +1,6 @@
 // RemCycleTable.swift
 //
-// The shared REM-cycle dispatch table (ADR-021 Phase 6, T11).
+// The shared REM-cycle dispatch table.
 //
 // Dreaming is ONE engine parameterized by four cadences (NEURONKIT_SPEC § 12.6).
 // This file defines the table that both drivers — the resident Autonomic Governor
@@ -42,7 +42,7 @@ public enum RemCycleKind: Sendable, Equatable, CaseIterable {
     /// Implemented in T12; run-fn is `DreamingDaemon.runBetaCycle`.
     case beta
     /// Biweekly retire of dreamed tunnels no longer reinforced by recall.
-    /// T13 / ADR-021 Phase 7 — implemented; run-fn is `DreamingDaemon.runOmegaCycle`.
+    ///  / recall-driven dreaming — implemented; run-fn is `DreamingDaemon.runOmegaCycle`.
     case omega
 }
 
@@ -86,12 +86,12 @@ public let remCycleTable: [RemCycleEntry] = [
     ),
     RemCycleEntry(
         name: "REM-BETA",
-        cadenceSecs: 604_800, // 7 days (T12 / ADR-021 Phase 7)
+        cadenceSecs: 604_800, // 7 days
         kind: .beta
     ),
     RemCycleEntry(
         name: "REM-OMEGA",
-        cadenceSecs: 1_209_600, // 14 days (T13 / ADR-021 Phase 7)
+        cadenceSecs: 1_209_600, // 14 days
         kind: .omega
     ),
 ]

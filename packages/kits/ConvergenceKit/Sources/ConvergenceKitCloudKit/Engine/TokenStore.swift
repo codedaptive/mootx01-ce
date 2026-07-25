@@ -2,7 +2,7 @@
 //
 // Persists CKServerChangeToken per CloudKit zone in the _ck_change_token
 // side table. Implements R5 from
-// DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md.
+// Tokens persist across process restarts and reset on server expiry.
 //
 // Problem being fixed: `serverChangeToken` was an actor variable; every
 // process launch re-pulled the full zone even if nothing had changed.

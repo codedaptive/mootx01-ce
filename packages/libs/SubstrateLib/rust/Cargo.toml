@@ -22,7 +22,7 @@ path = "src/lib.rs"
 # own Cargo.toml so the conformance gate can run
 # `--kernel=simd` against the reference.
 #
-# See `DECISION_OR_REDUCE_BACKENDS_2026-05-17.md` (Axis 1) for
+# See `measured SIMD OR-reduce selection` (Axis 1) for
 # the SIMD implementation rationale and Axis 2 for why no AMX/
 # BNNS path applies to bitwise OR-reduce.
 simd-nightly = ["substrate-kernel/simd-nightly"]
@@ -56,7 +56,7 @@ substrate-ml = { path = "../../SubstrateML/rust" }
 # StatsSink trait + Intellectus global holder + report! short-circuit macro.
 # It sits BELOW substrate-lib in the topology (no repo deps of its own),
 # so this dependency does not invert layering. Wired per PACKAGES.md
-# "Mission 2" note and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# "" note and in-repository dependency direction.
 intellectus-lib = { path = "../../IntellectusLib/rust" }
 serde_repr = { version = "0.1", optional = true }
 # Serde's built-in array impls only cover N ≤ 32. CountVector256's

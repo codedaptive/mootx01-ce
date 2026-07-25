@@ -22,7 +22,7 @@
 //     Additional per-operation tags (`result_count`, `kind`) are included
 //     where useful for funnel analysis (MANAGER_1.0_PLAN §4, GUI §4.4).
 //
-// Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+// Repository-owned dependencies use local package paths.
 
 import Foundation
 import IntellectusLib

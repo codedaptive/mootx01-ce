@@ -37,22 +37,45 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(name: "AriaLexiconLib", path: "../../packages/libs/AriaLexiconLib"),
-        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        .package(
+            name: "GeniusLocusKit",
+            path: "../../packages/kits/GeniusLocusKit",
+            traits: ["MigrationFloor1_0"]
+        ),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
         // NeuronKit: DreamCommand constructs DreamingDaemon + seam adapters
         // (EstateDreamingReader, EstateDreamingSink, EstateManifestDreamingPolicyStore)
-        // to run one REM-ALPHA dreaming cycle. Required by T10 (ADR-021 Phase 5).
+        // to run one REM-ALPHA dreaming cycle. Required for the dreaming path.
         .package(name: "NeuronKit", path: "../../packages/kits/NeuronKit"),
         // QueueKit: DreamCommand acquires the "dreaming" DrainLease to prevent
-        // concurrent dreamers for the same estate. Required by T10 (ADR-021 Phase 5).
+        // concurrent dreamers for the same estate. Required for the dreaming path.
         .package(name: "QueueKit", path: "../../packages/kits/QueueKit"),
     ],
     targets: [
         .target(
             name: "MootInstallerCore",
-            dependencies: [],
+            // Two dependencies, each for exactly one reason — do not grow
+            // this list with domain logic.
+            //
+            // PersistenceKitSQLite: EstateKeyProvider must go through
+            // KeychainKeyStore rather than reimplement key custody. A second
+            // implementation could derive a different Keychain account and
+            // mint a second key for the same estate, which is an
+            // unopenable-estate bug, so the real store is the only
+            // acceptable path.
+            //
+            // SQLCipher: EstateEncryptionMigrator (CE-1.0.35-08) performs a
+            // PHYSICAL plaintext→encrypted clone via ATTACH +
+            // sqlcipher_export(), which needs the raw sqlite3 C API —
+            // PersistenceKitSQLite's connection type is internal, and a
+            // logical re-import through the capture seam would mint new row
+            // ids and lose trace rows, fingerprints, and the Merkle rollup.
+            dependencies: [
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SQLCipher", package: "PersistenceKit"),
+            ],
             path: "Sources/MootInstallerCore"
         ),
         .executableTarget(
@@ -67,10 +90,11 @@ let package = Package(
                 // AriaResident: the shared resident-daemon runner (HTTP transport +
                 // autonomic governor + telemetry/monitoring gate). `mootx01 serve` calls it
                 // when resident (MOOTX01_HTTP_PORT/--http) so the product binary and
-                // aria-mcp run identical resident wiring (ADR-LOOPBACKHTTP-001).
+                // aria-mcp run identical resident wiring.
                 .product(name: "AriaResident", package: "AriaMcpKit"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
@@ -83,7 +107,13 @@ let package = Package(
         ),
         .testTarget(
             name: "MootInstallerCoreTests",
-            dependencies: ["MootInstallerCore"],
+            dependencies: [
+                "MootInstallerCore",
+                // The twenty-row plaintext estate fixture (CE-1.0.35-04). Test
+                // support only: detection has to be proven against a REAL estate
+                // file, and the production estate is never an acceptable target.
+                .product(name: "LocusKitEstateFixture", package: "LocusKit"),
+            ],
             path: "Tests/MootInstallerCoreTests"
         ),
     ]

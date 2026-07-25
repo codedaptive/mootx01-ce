@@ -1,4 +1,4 @@
-// sensitivity_audit_verbs.rs — ADR-025 §4 (Audit) parity coverage.
+// sensitivity_audit_verbs.rs — out-of-band sensitivity grants (Audit) parity coverage.
 //
 // Mirrors Swift `SensitivityAuditVerbsTests.swift`. Same harness shape as
 // grants_parity.rs's GRT-03 coordinator integration tests.
@@ -16,7 +16,7 @@ const NOW_MS: i64 = 1_700_000_000_000;
 fn open_coord() -> (EstateCoordinator, genius_locus_kit::EstateHandle) {
     let mut coord = EstateCoordinator::new();
     let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW_MS / 1000, None).unwrap());
-    let handle = coord.open(store, OwnerCredentials::new("owner-adr025"), 0, 100).expect("open");
+    let handle = coord.open(store, OwnerCredentials::new("sensitivity-audit-owner"), 0, 100).expect("open");
     (coord, handle)
 }
 

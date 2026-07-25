@@ -1,6 +1,6 @@
 // SnapshotId.swift
 //
-// Typed UUID wrapper for snapshot identifiers per ADR-017 §15.
+// Typed UUID wrapper for snapshot identifiers under the node-tree model.
 // Each snapshot in the snapshot registry carries a unique
 // SnapshotId that distinguishes it from drawer IDs, node IDs,
 // and estate IDs at the type level.

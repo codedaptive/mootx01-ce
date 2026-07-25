@@ -44,6 +44,7 @@
 
 use std::env;
 use std::fs;
+use std::hint::black_box;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -52,9 +53,9 @@ use std::time::{Duration, Instant};
 use harness::SplitMix64;
 use harness::{hardware, kernel_registry};
 
+use substrate_kernel::kernel::{KernelKind, PortableKernel, SubstrateKernel};
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::hyperplane::HyperplaneFamily;
-use substrate_kernel::kernel::{KernelKind, PortableKernel, SubstrateKernel};
 
 const DEFAULT_SEED: u64 = 0xCAFEBABEDEADBEEFu64;
 const BATCH_SIZES: [usize; 9] = [1, 2, 4, 8, 16, 32, 64, 128, 256];
@@ -70,36 +71,46 @@ const WARMUP_QUICK: Duration = Duration::from_millis(10);
 const MEASURE_QUICK: Duration = Duration::from_millis(40);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode { Batched, Sequential }
+enum Mode {
+    Batched,
+    Sequential,
+}
 
 impl Mode {
     fn as_str(&self) -> &'static str {
-        match self { Mode::Batched => "batched", Mode::Sequential => "sequential" }
+        match self {
+            Mode::Batched => "batched",
+            Mode::Sequential => "sequential",
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op { HammingDistanceBatch, SimhashBlockBatch, OrReduceBatch }
+enum Op {
+    HammingDistanceBatch,
+    SimhashBlockBatch,
+    OrReduceBatch,
+}
 
 impl Op {
     fn as_str(&self) -> &'static str {
         match self {
             Op::HammingDistanceBatch => "hamming_distance_batch",
-            Op::SimhashBlockBatch    => "simhash_block_batch",
-            Op::OrReduceBatch        => "or_reduce_batch",
+            Op::SimhashBlockBatch => "simhash_block_batch",
+            Op::OrReduceBatch => "or_reduce_batch",
         }
     }
     fn cli_name(&self) -> &'static str {
         match self {
             Op::HammingDistanceBatch => "hamming",
-            Op::SimhashBlockBatch    => "simhash",
-            Op::OrReduceBatch        => "or_reduce",
+            Op::SimhashBlockBatch => "simhash",
+            Op::OrReduceBatch => "or_reduce",
         }
     }
     fn parse_cli(s: &str) -> Option<Self> {
         match s {
-            "hamming"               => Some(Op::HammingDistanceBatch),
-            "simhash"               => Some(Op::SimhashBlockBatch),
+            "hamming" => Some(Op::HammingDistanceBatch),
+            "simhash" => Some(Op::SimhashBlockBatch),
             "or_reduce" | "or-reduce" => Some(Op::OrReduceBatch),
             _ => None,
         }
@@ -120,8 +131,10 @@ struct Measurement {
 
 fn fingerprint_from_rng(rng: &mut SplitMix64) -> Fingerprint256 {
     Fingerprint256 {
-        block0: rng.next(), block1: rng.next(),
-        block2: rng.next(), block3: rng.next(),
+        block0: rng.next(),
+        block1: rng.next(),
+        block2: rng.next(),
+        block3: rng.next(),
     }
 }
 
@@ -139,143 +152,241 @@ fn expand_seed_to_32(seed: u64) -> [u8; 32] {
     out
 }
 
-fn time_loop<F: FnMut()>(warmup: Duration, measure: Duration, mut body: F)
-    -> (u64, u64, u64, u64)
-{
+fn time_loop<F: FnMut() -> u64>(
+    warmup: Duration,
+    measure: Duration,
+    mut body: F,
+) -> (u64, u64, u64, u64) {
     let warmup_end = Instant::now() + warmup;
-    while Instant::now() < warmup_end { body(); }
+    while Instant::now() < warmup_end {
+        black_box(body());
+    }
+
+    // Batch very fast operations so each clock sample spans at least 10 us.
+    let mut calls_per_sample = 1u64;
+    while calls_per_sample < (1 << 20) {
+        let t0 = Instant::now();
+        let mut checksum = 0u64;
+        for _ in 0..calls_per_sample {
+            checksum ^= body();
+        }
+        let elapsed = t0.elapsed().as_nanos();
+        black_box(checksum);
+        if elapsed >= 10_000 {
+            break;
+        }
+        calls_per_sample *= 2;
+    }
 
     let mut samples: Vec<u64> = Vec::with_capacity(1 << 16);
     let measure_end = Instant::now() + measure;
     while Instant::now() < measure_end {
         let t0 = Instant::now();
-        body();
+        let mut checksum = 0u64;
+        for _ in 0..calls_per_sample {
+            checksum ^= body();
+        }
         let dt = t0.elapsed().as_nanos() as u64;
-        samples.push(dt);
+        black_box(checksum);
+        samples.push((dt + calls_per_sample - 1) / calls_per_sample);
     }
 
-    let iters = samples.len() as u64;
-    if iters == 0 { return (0, 0, 0, 0); }
+    let sample_count = samples.len() as u64;
+    if sample_count == 0 {
+        return (0, 0, 0, 0);
+    }
+    let iters = sample_count * calls_per_sample;
     let min = *samples.iter().min().unwrap_or(&0);
     let sum: u128 = samples.iter().map(|n| *n as u128).sum();
-    let mean = (sum / (iters as u128)) as u64;
-    let var: u128 = samples.iter()
-        .map(|n| { let d = (*n as i128) - (mean as i128); (d * d) as u128 })
-        .sum::<u128>() / (iters as u128);
+    let mean = (sum / (sample_count as u128)) as u64;
+    let var: u128 = samples
+        .iter()
+        .map(|n| {
+            let d = (*n as i128) - (mean as i128);
+            (d * d) as u128
+        })
+        .sum::<u128>()
+        / (sample_count as u128);
     let stddev = (var as f64).sqrt() as u64;
     (iters, min, mean, stddev)
 }
 
-fn measure_hamming(kernel: &dyn SubstrateKernel, rng: &mut SplitMix64,
-                   batch_size: usize, warmup: Duration, measure: Duration)
-    -> (Measurement, Measurement)
-{
+fn measure_hamming(
+    kernel: &dyn SubstrateKernel,
+    rng: &mut SplitMix64,
+    batch_size: usize,
+    warmup: Duration,
+    measure: Duration,
+) -> (Measurement, Measurement) {
     let probe = fingerprint_from_rng(rng);
-    let candidates: Vec<Fingerprint256> = (0..batch_size)
-        .map(|_| fingerprint_from_rng(rng)).collect();
+    let candidates: Vec<Fingerprint256> =
+        (0..batch_size).map(|_| fingerprint_from_rng(rng)).collect();
     let mut out = vec![0u32; batch_size];
 
     let (it_b, mn_b, mu_b, sd_b) = time_loop(warmup, measure, || {
         kernel.hamming_distance_batch(&probe, &candidates, &mut out);
+        out.first().copied().unwrap_or(0) as u64
     });
     let (it_s, mn_s, mu_s, sd_s) = time_loop(warmup, measure, || {
         for i in 0..batch_size {
             out[i] = kernel.hamming_distance_256(&probe, &candidates[i]);
         }
+        out.first().copied().unwrap_or(0) as u64
     });
 
     let kind = kernel.kind();
     (
-        Measurement { kernel: kind, op: Op::HammingDistanceBatch, batch_size,
-                      mode: Mode::Batched, iterations: it_b,
-                      ns_min: mn_b, ns_mean: mu_b, ns_stddev: sd_b },
-        Measurement { kernel: kind, op: Op::HammingDistanceBatch, batch_size,
-                      mode: Mode::Sequential, iterations: it_s,
-                      ns_min: mn_s, ns_mean: mu_s, ns_stddev: sd_s },
+        Measurement {
+            kernel: kind,
+            op: Op::HammingDistanceBatch,
+            batch_size,
+            mode: Mode::Batched,
+            iterations: it_b,
+            ns_min: mn_b,
+            ns_mean: mu_b,
+            ns_stddev: sd_b,
+        },
+        Measurement {
+            kernel: kind,
+            op: Op::HammingDistanceBatch,
+            batch_size,
+            mode: Mode::Sequential,
+            iterations: it_s,
+            ns_min: mn_s,
+            ns_mean: mu_s,
+            ns_stddev: sd_s,
+        },
     )
 }
 
-fn measure_simhash(kernel: &dyn SubstrateKernel, rng: &mut SplitMix64,
-                   batch_size: usize, warmup: Duration, measure: Duration)
-    -> (Measurement, Measurement)
-{
+fn measure_simhash(
+    kernel: &dyn SubstrateKernel,
+    rng: &mut SplitMix64,
+    batch_size: usize,
+    warmup: Duration,
+    measure: Duration,
+) -> (Measurement, Measurement) {
     let block_index = 0usize;
     let input_bit_length = 192usize;
     let input_word_count = (input_bit_length + 63) / 64;
     let hyperplane_seed = rng.next();
     let seed_bytes = expand_seed_to_32(hyperplane_seed);
-    let family = HyperplaneFamily::generate(
-        &seed_bytes, block_index, input_bit_length, 1.0);
+    let family = HyperplaneFamily::generate(&seed_bytes, block_index, input_bit_length, 1.0);
 
     let inputs_owned: Vec<Vec<u64>> = (0..batch_size)
-        .map(|_| (0..input_word_count).map(|_| rng.next()).collect()).collect();
+        .map(|_| (0..input_word_count).map(|_| rng.next()).collect())
+        .collect();
     let inputs: Vec<&[u64]> = inputs_owned.iter().map(|v| v.as_slice()).collect();
     let mut out = vec![0u64; batch_size];
 
     let (it_b, mn_b, mu_b, sd_b) = time_loop(warmup, measure, || {
         kernel.simhash_block_batch(&inputs, &family, &mut out);
+        out.first().copied().unwrap_or(0)
     });
     let (it_s, mn_s, mu_s, sd_s) = time_loop(warmup, measure, || {
         for i in 0..batch_size {
             out[i] = kernel.simhash_block(inputs[i], &family);
         }
+        out.first().copied().unwrap_or(0)
     });
 
     let kind = kernel.kind();
     (
-        Measurement { kernel: kind, op: Op::SimhashBlockBatch, batch_size,
-                      mode: Mode::Batched, iterations: it_b,
-                      ns_min: mn_b, ns_mean: mu_b, ns_stddev: sd_b },
-        Measurement { kernel: kind, op: Op::SimhashBlockBatch, batch_size,
-                      mode: Mode::Sequential, iterations: it_s,
-                      ns_min: mn_s, ns_mean: mu_s, ns_stddev: sd_s },
+        Measurement {
+            kernel: kind,
+            op: Op::SimhashBlockBatch,
+            batch_size,
+            mode: Mode::Batched,
+            iterations: it_b,
+            ns_min: mn_b,
+            ns_mean: mu_b,
+            ns_stddev: sd_b,
+        },
+        Measurement {
+            kernel: kind,
+            op: Op::SimhashBlockBatch,
+            batch_size,
+            mode: Mode::Sequential,
+            iterations: it_s,
+            ns_min: mn_s,
+            ns_mean: mu_s,
+            ns_stddev: sd_s,
+        },
     )
 }
 
-fn measure_or_reduce(kernel: &dyn SubstrateKernel, rng: &mut SplitMix64,
-                     batch_size: usize, warmup: Duration, measure: Duration)
-    -> (Measurement, Measurement)
-{
+fn measure_or_reduce(
+    kernel: &dyn SubstrateKernel,
+    rng: &mut SplitMix64,
+    batch_size: usize,
+    warmup: Duration,
+    measure: Duration,
+) -> (Measurement, Measurement) {
     let inner_count = 8usize;
     let batches_owned: Vec<Vec<Fingerprint256>> = (0..batch_size)
-        .map(|_| (0..inner_count).map(|_| fingerprint_from_rng(rng)).collect()).collect();
+        .map(|_| {
+            (0..inner_count)
+                .map(|_| fingerprint_from_rng(rng))
+                .collect()
+        })
+        .collect();
     let batches: Vec<&[Fingerprint256]> = batches_owned.iter().map(|v| v.as_slice()).collect();
     let mut out = vec![Fingerprint256::ZERO; batch_size];
 
     let (it_b, mn_b, mu_b, sd_b) = time_loop(warmup, measure, || {
         kernel.or_reduce_batch(&batches, &mut out);
+        out.first().map(|v| v.block0).unwrap_or(0)
     });
     let (it_s, mn_s, mu_s, sd_s) = time_loop(warmup, measure, || {
         for i in 0..batch_size {
             out[i] = kernel.or_reduce_256(batches[i]);
         }
+        out.first().map(|v| v.block0).unwrap_or(0)
     });
 
     let kind = kernel.kind();
     (
-        Measurement { kernel: kind, op: Op::OrReduceBatch, batch_size,
-                      mode: Mode::Batched, iterations: it_b,
-                      ns_min: mn_b, ns_mean: mu_b, ns_stddev: sd_b },
-        Measurement { kernel: kind, op: Op::OrReduceBatch, batch_size,
-                      mode: Mode::Sequential, iterations: it_s,
-                      ns_min: mn_s, ns_mean: mu_s, ns_stddev: sd_s },
+        Measurement {
+            kernel: kind,
+            op: Op::OrReduceBatch,
+            batch_size,
+            mode: Mode::Batched,
+            iterations: it_b,
+            ns_min: mn_b,
+            ns_mean: mu_b,
+            ns_stddev: sd_b,
+        },
+        Measurement {
+            kernel: kind,
+            op: Op::OrReduceBatch,
+            batch_size,
+            mode: Mode::Sequential,
+            iterations: it_s,
+            ns_min: mn_s,
+            ns_mean: mu_s,
+            ns_stddev: sd_s,
+        },
     )
 }
 
-fn measure_one_op(op: Op, kernel: &dyn SubstrateKernel,
-                  rng: &mut SplitMix64,
-                  warmup: Duration, measure: Duration)
-    -> Vec<Measurement>
-{
+fn measure_one_op(
+    op: Op,
+    kernel: &dyn SubstrateKernel,
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out: Vec<Measurement> = Vec::with_capacity(BATCH_SIZES.len() * 2);
     for &bs in BATCH_SIZES.iter() {
         let (b, s) = match op {
             Op::HammingDistanceBatch => measure_hamming(kernel, rng, bs, warmup, measure),
-            Op::SimhashBlockBatch    => measure_simhash(kernel, rng, bs, warmup, measure),
-            Op::OrReduceBatch        => measure_or_reduce(kernel, rng, bs, warmup, measure),
+            Op::SimhashBlockBatch => measure_simhash(kernel, rng, bs, warmup, measure),
+            Op::OrReduceBatch => measure_or_reduce(kernel, rng, bs, warmup, measure),
         };
-        eprintln!("    bs={:>5}  batched: {:>7}ns  sequential: {:>7}ns",
-                  bs, b.ns_min, s.ns_min);
+        eprintln!(
+            "    bs={:>5}  batched: {:>7}ns  sequential: {:>7}ns",
+            bs, b.ns_min, s.ns_min
+        );
         out.push(b);
         out.push(s);
     }
@@ -285,17 +396,29 @@ fn measure_one_op(op: Op, kernel: &dyn SubstrateKernel,
 fn git_short_sha() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     let s = String::from_utf8(out.stdout).ok()?;
     let trimmed = s.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
-fn write_json(measurements: &[Measurement], path: &Path, op: Op,
-              seed: u64, warmup: Duration, measure: Duration,
-              quick: bool) -> std::io::Result<()>
-{
+fn write_json(
+    measurements: &[Measurement],
+    path: &Path,
+    op: Op,
+    seed: u64,
+    warmup: Duration,
+    measure: Duration,
+    quick: bool,
+) -> std::io::Result<()> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let hw = hardware::tag();
@@ -327,15 +450,25 @@ fn write_json(measurements: &[Measurement], path: &Path, op: Op,
         // Per-element timing (best-case: ns_min / batch_size).
         let ns_per_element = if m.batch_size > 0 {
             m.ns_min as f64 / m.batch_size as f64
-        } else { 0.0 };
-        writeln!(w,
+        } else {
+            0.0
+        };
+        writeln!(
+            w,
             "    {{ \"kernel\": \"{}\", \"batch_size\": {}, \"mode\": \"{}\", \
               \"iterations\": {}, \"ns_per_call_min\": {}, \
               \"ns_per_call_mean\": {}, \"ns_per_call_stddev\": {}, \
               \"ns_per_element_min\": {:.3} }}{}",
-            m.kernel.as_str(), m.batch_size, m.mode.as_str(),
-            m.iterations, m.ns_min, m.ns_mean, m.ns_stddev,
-            ns_per_element, comma)?;
+            m.kernel.as_str(),
+            m.batch_size,
+            m.mode.as_str(),
+            m.iterations,
+            m.ns_min,
+            m.ns_mean,
+            m.ns_stddev,
+            ns_per_element,
+            comma
+        )?;
     }
     writeln!(w, "  ]")?;
     writeln!(w, "}}")?;
@@ -377,7 +510,8 @@ fn usage() -> ! {
 fn parse_seed(s: &str) -> u64 {
     let s = s.strip_prefix("0x").unwrap_or(s);
     u64::from_str_radix(s, 16).unwrap_or_else(|e| {
-        eprintln!("invalid seed: {e}"); process::exit(2);
+        eprintln!("invalid seed: {e}");
+        process::exit(2);
     })
 }
 
@@ -392,12 +526,40 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--seed"   => { i += 1; if i >= args.len() { usage(); } seed = parse_seed(&args[i]); }
-            "--op"     => { i += 1; if i >= args.len() { usage(); } op_arg = args[i].clone(); }
-            "--kernel" => { i += 1; if i >= args.len() { usage(); } kernel_arg = Some(args[i].clone()); }
-            "--all"    => { all_kernels = true; }
-            "--out"    => { i += 1; if i >= args.len() { usage(); } out_arg = Some(args[i].clone()); }
-            "--quick"  => { quick = true; }
+            "--seed" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                seed = parse_seed(&args[i]);
+            }
+            "--op" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                op_arg = args[i].clone();
+            }
+            "--kernel" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                kernel_arg = Some(args[i].clone());
+            }
+            "--all" => {
+                all_kernels = true;
+            }
+            "--out" => {
+                i += 1;
+                if i >= args.len() {
+                    usage();
+                }
+                out_arg = Some(args[i].clone());
+            }
+            "--quick" => {
+                quick = true;
+            }
             "--help" | "-h" => usage(),
             _ => usage(),
         }
@@ -406,20 +568,31 @@ fn main() {
 
     // Resolve op list
     let ops: Vec<Op> = if op_arg == "all" {
-        vec![Op::HammingDistanceBatch, Op::SimhashBlockBatch, Op::OrReduceBatch]
+        vec![
+            Op::HammingDistanceBatch,
+            Op::SimhashBlockBatch,
+            Op::OrReduceBatch,
+        ]
     } else {
         match Op::parse_cli(&op_arg) {
             Some(o) => vec![o],
-            None => { eprintln!("unknown op: {op_arg}"); process::exit(2); }
+            None => {
+                eprintln!("unknown op: {op_arg}");
+                process::exit(2);
+            }
         }
     };
 
     // Resolve kernel list
     let kernels: Vec<KernelKind> = match (kernel_arg, all_kernels) {
-        (Some(_), true) => { eprintln!("--kernel and --all are mutually exclusive"); process::exit(2); }
+        (Some(_), true) => {
+            eprintln!("--kernel and --all are mutually exclusive");
+            process::exit(2);
+        }
         (Some(name), false) => {
             let k = KernelKind::parse(&name).unwrap_or_else(|| {
-                eprintln!("unknown kernel: {name}"); process::exit(2);
+                eprintln!("unknown kernel: {name}");
+                process::exit(2);
             });
             vec![k]
         }
@@ -454,12 +627,28 @@ fn main() {
     eprintln!("# stress-test (rust)");
     eprintln!("# seed:          0x{:016x}", seed);
     eprintln!("# hardware:      {}", hardware::tag());
-    eprintln!("# kernels:       {}", kernels.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
-    eprintln!("# ops:           {}", ops.iter().map(|o| o.as_str()).collect::<Vec<_>>().join(", "));
+    eprintln!(
+        "# kernels:       {}",
+        kernels
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!(
+        "# ops:           {}",
+        ops.iter()
+            .map(|o| o.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     eprintln!("# batch sizes:   {:?}", BATCH_SIZES);
-    eprintln!("# timing:        warmup {}ms, measure {}ms{}",
-              warmup.as_millis(), measure.as_millis(),
-              if quick { " (quick)" } else { "" });
+    eprintln!(
+        "# timing:        warmup {}ms, measure {}ms{}",
+        warmup.as_millis(),
+        measure.as_millis(),
+        if quick { " (quick)" } else { "" }
+    );
     eprintln!();
 
     for op in &ops {
@@ -472,8 +661,12 @@ fn main() {
             // disabled), skip this kernel rather than reporting
             // misleading numbers.
             if kernel.kind() != k {
-                eprintln!("  skipping {} ({} requested but dispatcher returned {})",
-                          k.as_str(), k.as_str(), kernel.kind().as_str());
+                eprintln!(
+                    "  skipping {} ({} requested but dispatcher returned {})",
+                    k.as_str(),
+                    k.as_str(),
+                    kernel.kind().as_str()
+                );
                 continue;
             }
             eprintln!("  kernel={}  op={}", k.as_str(), op.as_str());
@@ -493,8 +686,15 @@ fn main() {
             out_dir.join(format!("{}-rust.json", op.cli_name()))
         };
 
-        if let Err(e) = write_json(&all_measurements, &file_path, *op,
-                                   seed, warmup, measure, quick) {
+        if let Err(e) = write_json(
+            &all_measurements,
+            &file_path,
+            *op,
+            seed,
+            warmup,
+            measure,
+            quick,
+        ) {
             eprintln!("write failed: {}", e);
             process::exit(1);
         }

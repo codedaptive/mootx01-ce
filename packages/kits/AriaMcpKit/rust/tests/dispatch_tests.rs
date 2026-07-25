@@ -251,10 +251,10 @@ fn tools_list_count_is_68() {
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
     // moot_recall_shaped (named RecallShape preset surface) +
     // moot_lens_contradiction (genuine contradiction detector, Part 5) +
-    // moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001) +
+    // moot_lens_node_motion (diffusion node-layer lens, node motion modeling) +
     // moot_palace_import (direct palace import, PAR-PB-1) +
     // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling) +
-    // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control) +
+    // moot_monitoring_status (out-of-band sensitivity grants, daemon telemetry monitoring control) +
     // the contradiction hunter (moot_review_tunnel interface tool +
     // moot_hunt_contradictions recipe tool):
     //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
@@ -320,7 +320,7 @@ fn tools_list_name_set_matches_expected_71_names() {
         "moot_estate_status",
         "moot_estate_map",
         "moot_estate_ping",
-        // Monitoring control (1) — ADR-025 wave 8.2
+        // Monitoring control (1) — out-of-band sensitivity grants
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
@@ -2821,7 +2821,7 @@ fn estate_ping_includes_injected_build_serial() {
     );
 }
 
-/// ADR-024 §5: a non-empty version_skew string is surfaced verbatim under a
+/// a non-empty version_skew string is surfaced verbatim under a
 /// `version_skew:` line in both moot_estate_ping and moot_estate_status; an
 /// empty string (the common case, no skew detected) omits the field.
 #[test]
@@ -3584,7 +3584,7 @@ fn federated_search_exhausted_budget_is_refused_as_error_result_no_content_leak(
 }
 
 // ---------------------------------------------------------------------------
-// 10. Vault tools — now backed by vault-kit (ADR-VAULTKIT-002)
+// 10. Vault tools — now backed by vault-kit
 // ---------------------------------------------------------------------------
 //
 // All four vault tools are real dispatchers. Missing `vaultPath` is an
@@ -5561,7 +5561,7 @@ fn dream_dispatch_rejects_malformed_now_as_invalid_params() {
 }
 
 // ---------------------------------------------------------------------------
-// Vault gating (ADR-015)
+// Vault gating
 // ---------------------------------------------------------------------------
 
 /// `vault_enabled()` returns true when MOOTX01_VAULT is absent from the
@@ -5662,7 +5662,7 @@ fn dispatch_vault_tool_when_vault_on_does_not_return_disabled_error() {
     // Use a non-existent vault path — vault_status handles this gracefully.
     let result = dispatch_tool_with_vault_flag(
         "moot_vault_status",
-        &args!["vaultPath" => "/tmp/no-such-vault-for-test-adr015"],
+        &args!["vaultPath" => "/tmp/no-such-vault-for-security-test"],
         &registry,
         &SurfacedRecallLedger::new(),
         true, // vault_on=true
@@ -5709,7 +5709,7 @@ fn file_memory_with_event_time_is_accepted() {
         "file_memory with event_time must return success; got: {result:?}"
     );
     // Confirm the drawer was stored with the provided event_time (epoch ms
-    // for 2020-01-01T00:00:00Z = 1577836800000, ADR-023).
+    // for 2020-01-01T00:00:00Z = 1577836800000, epoch-millisecond instants).
     let estate = registry.resolve(&BTreeMap::new(), "estateID").unwrap();
     let coord = estate.coord.lock().unwrap();
     let drawers = coord
@@ -6005,7 +6005,7 @@ fn non_gate_error_does_not_produce_gate_rejection_phrase() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-016 Wings SURFACE lane — estate_map hint drawers as normal room entries
+// wing organization Wings SURFACE lane — estate_map hint drawers as normal room entries
 // + recall wing scoping
 //
 // Hint drawers (AI_Charter_Hint room) are normal drawers — they appear in the
@@ -7008,13 +7008,13 @@ fn lens_contradiction_hides_secret_tunnel_endpoint() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-025 sensitivity unlock — ceiling seam + read-under-grant audit wiring
+// sensitivity unlock — ceiling seam + read-under-grant audit wiring
 // ---------------------------------------------------------------------------
 //
 // Mirrors Swift `SensitivityUnlockIntegrationTests.swift`. Drives the real
 // `interface_tools::dispatch` path with an explicit `SensitivityGrantLedger`
 // the test controls directly (the CLI/UnlockAuthority approval surface is a
-// separate, out-of-band channel per ADR §3 — these tests exercise the POLICY
+// separate, out-of-band channel; these tests exercise the policy
 // the ceiling seam enforces once a grant exists).
 
 #[test]
@@ -7034,7 +7034,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
         &SurfacedRecallLedger::new(),
     ).expect("file_memory must succeed");
 
-    // NOTE: this estate is `new_inmemory()`, which seeds the seven ADR-016
+    // NOTE: this estate is `new_inmemory`, which seeds the seven wing organization
     // default wing-hint drawers — a single-novel-token query like
     // "unlock-marker-restricted" can still return those (degraded/fallback
     // ranking over the non-excluded pool) even though the restricted row

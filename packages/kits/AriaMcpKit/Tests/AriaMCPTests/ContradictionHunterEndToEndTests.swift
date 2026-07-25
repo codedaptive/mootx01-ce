@@ -78,10 +78,12 @@ struct ContradictionHunterEndToEndTests {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "hunt-token-bag-v1", modelVersion: "1.0",
             projectionSeed: 0xC0FF_EE00, inference: tokenBag)
-        let corpus = try await Corpus(
-            storage: storage, model: .randomIndexing(provider: provider))
-        await kit.registerCorpus(corpus, for: handle)
-        await kit.registerVectorStore(corpus.sharedVectorStore, for: handle)
+        // Shared-content 1.1: canonical wiring seam with the test's custom
+        // token-bag provider — constructs the attached engine over the
+        // LocusKit adapter and registers engine + shared VectorStore.
+        try await kit.wireGLKSubstores(
+            for: handle, backingStorage: storage,
+            embeddingModels: [.randomIndexing(provider: provider)])
 
         return (ToolDispatcher(kit: kit, handle: handle), kit, handle)
     }

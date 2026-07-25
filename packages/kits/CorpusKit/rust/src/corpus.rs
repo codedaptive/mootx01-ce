@@ -165,7 +165,7 @@ pub enum EmbeddingModelConfig {
     /// (the trained vocabulary) is built externally by the caller before
     /// opening the Corpus.
     ///
-    /// See ADR-010 Decision B for the rationale and `RandomIndexingProvider`
+    /// See honest semantic fusion for the rationale and `RandomIndexingProvider`
     /// in `corpus-kit-providers` for the full training API.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α) rather
@@ -186,7 +186,7 @@ pub enum EmbeddingModelConfig {
     /// `max(0, log(P(t,c)/(P(t)·P(c))))`.  Stopword-like co-occurrences are
     /// down-weighted toward zero; genuinely informative associations dominate.
     ///
-    /// See ADR-010 Decision B and `PpmiProvider` in `corpus-kit-providers`.
+    /// See honest semantic fusion and `PpmiProvider` in `corpus-kit-providers`.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
     Ppmi { provider: Box<dyn TrainableEmbeddingBasis> },
@@ -196,7 +196,7 @@ pub enum EmbeddingModelConfig {
     /// The caller constructs and trains an `LsaProvider` (term-document matrix +
     /// deterministic Jacobi SVD truncated to k dimensions) and passes it here.
     ///
-    /// See ADR-010 Decision B and `LsaProvider` in `corpus-kit-providers`.
+    /// See honest semantic fusion and `LsaProvider` in `corpus-kit-providers`.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
     Lsa { provider: Box<dyn TrainableEmbeddingBasis> },
@@ -208,7 +208,7 @@ pub enum EmbeddingModelConfig {
     /// with tolerance=0 for fixed iteration count / bit-identical output) and
     /// passes it here.
     ///
-    /// See ADR-010 Decision B and `NmfProvider` in `corpus-kit-providers`.
+    /// See honest semantic fusion and `NmfProvider` in `corpus-kit-providers`.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
     Nmf { provider: Box<dyn TrainableEmbeddingBasis> },
@@ -227,7 +227,7 @@ pub enum EmbeddingModelConfig {
     /// lane is dark (returns `vec![]`) for texts the FDC engine cannot classify
     /// (UNRESOLVED). This is the expected opt-out, not an error.
     ///
-    /// See ADR-010 Decision B (FDC lattice co-classification) and `FDCProvider`
+    /// See honest semantic fusion (FDC lattice co-classification) and `FDCProvider`
     /// in `corpus-kit-providers` for the encoding details.
     Fdc { provider: Box<dyn EmbeddingProvider> },
 
@@ -333,7 +333,7 @@ const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const COMMIT_CHUNK_ITEMS: usize = 512;
 const COMMIT_CHUNK_ROWS: usize = 4096;
 
-fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
+pub(crate) fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
     // FNV-1a 64-bit hash of the input text, then LCG for 32 floats in
     // [-1, 1]. Mirrors the Swift EmbeddingModel.deterministic closure
     // exactly (same constants, same LCG, same float mapping).
@@ -376,7 +376,7 @@ fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
 /// `Plain` holds a non-trainable provider. `provider()` upcasts a reference to
 /// `&dyn EmbeddingProvider` for the embed surface (stable trait upcasting),
 /// `trainable_mut()` hands back the trainable box for an in-place retrain.
-enum ProviderHandle {
+pub(crate) enum ProviderHandle {
     /// A trainable distributional provider (RI/PPMI/LSA/NMF). Retains the
     /// `TrainableEmbeddingBasis` capability so the corpus can retrain it.
     Trainable(Box<dyn TrainableEmbeddingBasis>),
@@ -390,7 +390,7 @@ impl ProviderHandle {
     /// `&dyn EmbeddingProvider` (the Rust mirror of Swift's type-erased carried
     /// provider) since `EmbeddingProvider` is a supertrait of
     /// `TrainableEmbeddingBasis`.
-    fn provider(&self) -> &dyn EmbeddingProvider {
+    pub(crate) fn provider(&self) -> &dyn EmbeddingProvider {
         match self {
             ProviderHandle::Trainable(b) => b.as_ref() as &dyn EmbeddingProvider,
             ProviderHandle::Plain(b) => b.as_ref(),
@@ -401,7 +401,7 @@ impl ProviderHandle {
     /// `reconstruct_trainable_basis`), or `None` when the provider is not
     /// trainable. Mirrors Swift's `provider as? any TrainableEmbeddingBasis`
     /// capability probe.
-    fn as_trainable(&self) -> Option<&dyn TrainableEmbeddingBasis> {
+    pub(crate) fn as_trainable(&self) -> Option<&dyn TrainableEmbeddingBasis> {
         match self {
             ProviderHandle::Trainable(b) => Some(b.as_ref()),
             ProviderHandle::Plain(_) => None,
@@ -424,11 +424,11 @@ impl ProviderHandle {
 /// can return `&str` for the DEFAULT slot without locking. For N=1 the corpus
 /// holds exactly one slot and every fan-out loop runs once — byte-identical to
 /// the pre-6a-iii single-provider path.
-struct ProviderSlot {
+pub(crate) struct ProviderSlot {
     /// The serving provider, behind a `Mutex` so a per-slot retrain can swap in
     /// a freshly-trained provider through `&self`. A `ProviderHandle`, not a
     /// bare box, so the trainable capability survives (see `ProviderHandle`).
-    handle: Mutex<ProviderHandle>,
+    pub(crate) handle: Mutex<ProviderHandle>,
     /// The serialized EMPTY (untrained) basis of a trainable provider — the
     /// from-scratch factory. `Some` for EVERY trainable slot, whether built fresh
     /// OR reopened from a persisted basis; `None` only for non-trainable slots.
@@ -437,27 +437,40 @@ struct ProviderSlot {
     /// from-basis slot (rather than dropping it) is the frozen-after-restart fix:
     /// a restarted corpus can retrain on `reindex`. Mirrors Swift's
     /// `ProviderSlot.freshBasisBlob`.
-    fresh_basis_blob: Option<Vec<u8>>,
+    pub(crate) fresh_basis_blob: Option<Vec<u8>>,
     /// The dedicated maintained-counts accumulator for a trainable slot (P3),
     /// held SEPARATELY from `handle` behind its own `Mutex` so it can be folded
     /// through `&self`. `None` for non-trainable slots. It must NOT be the serving
     /// provider: for LSA/NMF, growing the maintained vocabulary would desync the
     /// serving provider's basis-aligned vocab from its frozen factors. Mirrors
     /// Swift's `ProviderSlot.countsAccumulator` + `countsDocumentCount`.
-    counts: Mutex<Option<CountsState>>,
+    pub(crate) counts: Mutex<Option<CountsState>>,
     /// Cached provider modelID. Stable for the corpus's lifetime (training
     /// mutates the basis, not the identity). Lets the corpus key the float lane
     /// and basis rows without locking the handle Mutex.
-    model_id: String,
+    pub(crate) model_id: String,
+    /// Basis-generation anchor for coverage rows (corrective pass):
+    /// stateless slots derive it from the model version; trainable slots
+    /// carry the SHA-256 of the persisted basis blob (empty while
+    /// untrained). Swapped alongside the handle on retrain.
+    pub(crate) basis_digest: Mutex<String>,
 }
 
 /// A trainable slot's maintained-counts state: the accumulator plus its
 /// document-count growth anchor. The doc count is tracked here (not read off the
 /// provider) so it is uniform across RI/PPMI/LSA/NMF, whose providers track
 /// document count inconsistently. Mirrors the two Swift slot fields.
-struct CountsState {
-    accumulator: Box<dyn TrainableEmbeddingBasis>,
-    document_count: usize,
+pub(crate) struct CountsState {
+    pub(crate) accumulator: Box<dyn TrainableEmbeddingBasis>,
+    pub(crate) document_count: usize,
+    /// The governor-facing vocabulary-growth anchor. Persisted on the counts
+    /// row in the same transaction as every reference mutation, so the
+    /// threshold decision is identical before and after a process restart.
+    pub(crate) vocab_anchor: usize,
+    /// Hashes of terms first observed after the published counts generation.
+    /// ContentEngine persists these in identity-scoped references; standalone
+    /// Corpus leaves the set empty and keeps its historical accumulator path.
+    pub(crate) growth_term_digests: std::collections::BTreeSet<String>,
 }
 
 // MARK: - Corpus
@@ -739,7 +752,7 @@ impl Corpus {
     /// Build one `ProviderSlot` from a model config, resolving load-on-open and
     /// capturing the fresh-basis blob. Shared by `open_many` per element; the
     /// per-slot logic is exactly the pre-6a-iii single-provider construction.
-    fn build_slot(
+    pub(crate) fn build_slot(
         model: EmbeddingModelConfig,
         basis_store: &BasisStore,
         counts_store: &CorpusProviderCountsStore,
@@ -820,16 +833,20 @@ impl Corpus {
             let factory = trainable.serialize_basis();
             let mut accumulator = trainable.reconstruct_trainable_basis(&factory)?;
             let mut document_count = 0usize;
+            let mut vocab_anchor = 0usize;
             if let Some(persisted) =
                 counts_store.load(trainable.model_id(), trainable.model_version())?
             {
                 accumulator.restore_counts(&persisted.counts)?;
                 document_count = persisted.document_count;
+                vocab_anchor = persisted.vocab_size;
             }
             fresh_basis_blob = Some(factory);
             counts = Some(CountsState {
                 accumulator,
                 document_count,
+                vocab_anchor,
+                growth_term_digests: std::collections::BTreeSet::new(),
             });
         }
 
@@ -845,11 +862,24 @@ impl Corpus {
         // Cache the (stable) provider modelID for `model_id()` without locking.
         let model_id = handle.provider().model_id().to_string();
 
+        // Basis-generation digest (corrective pass): stateless slots use a
+        // version-derived constant; trainable slots the digest of the
+        // PERSISTED basis blob (empty string until trained).
+        let basis_digest = if fresh_basis_blob.is_some() {
+            match basis_store.load(&model_id, handle.provider().model_version())? {
+                Some(persisted) => crate::content::content_digest_bytes(&persisted.basis),
+                None => String::new(),
+            }
+        } else {
+            format!("stateless@{}", handle.provider().model_version())
+        };
+
         Ok(ProviderSlot {
             handle: Mutex::new(handle),
             fresh_basis_blob,
             counts: Mutex::new(counts),
             model_id,
+            basis_digest: Mutex::new(basis_digest),
         })
     }
 
@@ -966,6 +996,7 @@ impl Corpus {
                 fresh_basis_blob: None,
                 counts: Mutex::new(None),
                 model_id,
+                basis_digest: Mutex::new("stateless@test".to_string()),
             }],
             ingest_queue: Mutex::new(None),
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
@@ -1287,7 +1318,7 @@ impl Corpus {
     /// same content-addressed idempotency. This is the cross-document parallelism
     /// the per-corpus ingest drain drives (the 1.0 separate-pump fix; the global
     /// cross-estate cap is the 1.1 central drain master,
-    /// DECISION_CENTRAL_DRAIN_MASTER_2026-06-23). Rust mirror of Swift
+    /// the deferred process-global drain master). Rust mirror of Swift
     /// `Corpus.ingestBatch`.
     ///
     /// First-ingest training cannot run concurrently (it mutates a slot's basis),
@@ -2032,8 +2063,8 @@ impl Corpus {
         // by the storage mutex. Running them serially made a large reindex wait
         // ΣT(train) on one core with LSA's SVD + NMF's ALS dominating; concurrent
         // slots wait max(T) instead. Per-slot output is byte-identical to the
-        // serial loop — the fixed-sweep kernels are untouched (ADR-022) and no
-        // slot reads another's state. LSA and NMF each derive the ADR-022 reduced
+        // serial loop — the fixed-sweep kernels are untouched and no
+        // slot reads another's state. LSA and NMF each derive the shared reduced embedding vocabulary reduced
         // vocabulary with the same pure deterministic selection, so concurrent
         // duplicate computation of it is benign (identical artifact). For N=1
         // this spawns one thread — same work, same result as the plain call.
@@ -2086,7 +2117,7 @@ impl Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         self.persist_maintained_counts(filed_at_secs)?;
 
-        // ADR-026 NOTE: release_basis() was here but is REMOVED because the
+        // disk-default storage residency NOTE: release_basis was here but is REMOVED because the
         // serving providers have no on-demand reconstruction path. Calling it
         // clears the live vocab, making subsequent embeds return zero vectors.
         // The ~2GB vocab RAM stays resident until a lazy-load-from-BasisStore
@@ -2980,8 +3011,9 @@ impl Corpus {
 
     // MARK: - Lifecycle (GLK_PROVISION_001)
 
-    /// Destroy the entire recall index — clear BM25, chunk_source_map, and all
-    /// vectors.
+    /// Destroy the recall index — clear BM25, chunk_source_map, and this
+    /// corpus's own vector rows (ownership-scoped: its chunk IDs under its
+    /// held models — never rows other lanes wrote to shared storage).
     ///
     /// Called by `EstateCoordinator::destroy` as part of the coordinated estate
     /// teardown path. After this call the corpus has no recall capability: BM25
@@ -3001,10 +3033,31 @@ impl Corpus {
             csm.clear();
         }
 
-        // Step 3: Delete all vector rows.
-        self.vector_store
-            .destroy_all_vectors()
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("destroy_recall_index vector teardown failed: {:?}", e)))?;
+        // Step 3: Delete THIS CORPUS'S vector rows — OWNERSHIP-SCOPED
+        // (shared-content 1.1 P5). The corpus owns exactly the rows keyed by
+        // its own chunk IDs under its held models' model_ids; on shared
+        // storage the vectors table can also hold rows written by other
+        // lanes, and destroying the corpus's recall index must never delete
+        // those. The chunk inventory comes from the append-only chunks
+        // table, so it covers every chunk this corpus ever wrote vectors for
+        // (already-removed sources' deletes are no-ops). Whole-table
+        // teardown (`destroy_all_vectors`) is reserved for the whole-estate
+        // destruction path in EstateCoordinator::destroy. Mirrors the Swift
+        // `Corpus.destroyRecallIndex` scoping.
+        let held_model_ids: Vec<String> =
+            self.slots.iter().map(|s| s.model_id.clone()).collect();
+        let source_ids = self.bundle_store.all_source_ids(None)?;
+        for source_id in &source_ids {
+            let chunks = self.bundle_store.chunks_for_source(source_id, None)?;
+            for chunk in &chunks {
+                for model_id in &held_model_ids {
+                    self.vector_store
+                        .delete_all_vectors(&chunk.id.to_string(), model_id)
+                        .map_err(|e| CorpusKitError::StoreUnavailable(format!(
+                            "destroy_recall_index vector teardown failed: {:?}", e)))?;
+                }
+            }
+        }
 
         // Step 4: Wipe the persisted trained basis (mission 6a-ii-β). A
         // destroyed corpus must leave no orphaned basis row: the next open would

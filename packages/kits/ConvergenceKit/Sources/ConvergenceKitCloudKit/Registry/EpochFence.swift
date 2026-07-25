@@ -26,7 +26,7 @@
 //
 // Adjudications: A4 (heartbeat updates lastActiveHLC), A5 (reenrollRequired
 // is loud, not silent).
-// Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
+// Epoch fencing prevents a stale claimant from minting new outbound records.
 
 import Foundation
 import CloudKit

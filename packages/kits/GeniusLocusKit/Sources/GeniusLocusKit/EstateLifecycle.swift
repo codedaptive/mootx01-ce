@@ -79,7 +79,7 @@ public extension GeniusLocusKit {
     ///   - owner: Credentials for the new estate's owner.
     ///   - params: Provisioning parameters (name, kind, zoom window, profile, sync mode).
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
-    ///     canonical 1.0 five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`:
+    ///     canonical five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`:
     ///     RI / PPMI / LSA / NMF / FDC), so every provisioned estate gets the
     ///     honest multi-signal default. The Corpus lifecycle trains and persists
     ///     the trainable signals on first ingest / reindex. Pass an explicit
@@ -179,9 +179,13 @@ public extension GeniusLocusKit {
         // hints seeded in step 2c are stamped with the corpus's real model id, not
         // a sentinel. This matches the serve open path, which also wires before it
         // seeds. (Seeding does not depend on the wiring; the order is purely so the
-        // hint drawers carry the normal model id — ADR-016 §2.)
+        // hint drawers carry the normal model id — wing organization.)
         let backingStorage = corpusStorage ?? storage
+        let formatStorage = params.kind == .locusOnly ? storage : backingStorage
         do {
+            // A fresh GLK provision is born at the current estate format. This
+            // is the only non-migration path allowed to create the format stamp.
+            try await EstateFormatStore(storage: formatStorage).stamp(.current, now: Date())
             // Wire via the shared seam (also called by the serve entry points so a
             // bare-opened served estate gets the same Corpus + VectorStore + encode
             // queue — the semantic recall + distillation lanes — without re-stamping
@@ -198,7 +202,7 @@ public extension GeniusLocusKit {
             )
         }
 
-        // Step 2c: Seed the seven default wings (ADR-016 §1 and §2).
+        // Step 2c: Seed the seven default wings.
         // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
         // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
         // the serve open path calls the same method unconditionally so bare estates
@@ -211,7 +215,7 @@ public extension GeniusLocusKit {
         // are filed row-only (LocusKit `seedWing` does not enqueue): their semantic
         // vectors are produced by the next full-corpus reindex, alongside user
         // content, rather than training a basis on the 7 hints alone. This is the
-        // intended ADR-016 §2 behaviour — normal drawers, embedded under the normal
+        // intended wing organization behaviour — normal drawers, embedded under the normal
         // model at reindex.
         //
         // Failure policy: wing seeding is part of provision — if seeding fails
@@ -244,7 +248,7 @@ public extension GeniusLocusKit {
 
     // MARK: - seedDefaultWings(for:now:)
 
-    /// Idempotently seed the seven ADR-016 default wings on an open estate.
+    /// Idempotently seed the seven default wings on an open estate.
     ///
     /// This is the single seam that owns the default-wing seeding loop. Both the
     /// `provision` path (fresh estate) and the `mootx01 serve` open path (bare
@@ -301,7 +305,7 @@ public extension GeniusLocusKit {
 
         // Seed each wing that is not yet present. Missing wings emerge when an
         // estate was created via the bare `Estate.create` + `open` path that
-        // predates ADR-016 (e.g. the `mootx01 serve` first-run path before this
+        // predates wing organization (e.g. the `mootx01 serve` first-run path before this
         // fix). For estates already seeded via `provision`, this loop is a no-op.
         var seededCount = 0
         for wing in LocusKit.defaultWings where !seededWings.contains(wing.name) {
@@ -350,7 +354,7 @@ public extension GeniusLocusKit {
     ///   - backingStorage: The storage the Corpus and VectorStore are built on —
     ///     the estate's own storage for a served estate.
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
-    ///     canonical 1.0 five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`).
+    ///     canonical five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`).
     /// - Throws: A storage/schema error if a sub-store cannot be opened.
     func wireSubstores(
         for handle: EstateHandle,
@@ -360,6 +364,10 @@ public extension GeniusLocusKit {
     ) async throws {
         switch kind {
         case .glk:
+            // Current-only GLK never detects or executes historical layouts.
+            // Upgrade-capable hosts run their optional migration catalog before
+            // calling this seam; an unstamped/older estate fails explicitly.
+            try await EstateFormatStore(storage: backingStorage).requireCurrent()
             // Apply the GLK composite schema so all component kit tables (LocusKit,
             // VectorKit, CorpusKit) are registered on backingStorage under the
             // GeniusLocusKit composite kit ID. The plain `open(storage:owner:)` path
@@ -371,10 +379,19 @@ public extension GeniusLocusKit {
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
             try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
-            // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
-            // Both are created on backingStorage. The Corpus.init call applies both
-            // BundleStore and VectorStore schema declarations to backingStorage.
-            let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
+            // Full composition: the attached-mode CorpusContentEngine (BM25 +
+            // internal vectors, Drawer-ID keyed) + standalone VectorStore.
+            // EVERY GLK Corpus is constructed attached + .wholeContent — the
+            // configuration initializer rejects standalone or passage-enabled
+            // registration structurally (shared-content 1.1 decision lock).
+            let estateObj = try estate(for: handle)
+            let corpus = try await CorpusContentEngine(
+                storage: backingStorage,
+                configuration: CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                models: embeddingModels)
+            try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
             // vector lane rather than constructing a second VectorStore over the
@@ -383,8 +400,8 @@ public extension GeniusLocusKit {
             // model), so a second store doubled the resident array + cold-start
             // table scan AND made the on-disk sidecar churn (each store's writes
             // invalidated the other's whole-table live-count). One shared store =
-            // one resident array, one sidecar kept in sync by every write (chunk
-            // vectors from encode + distilled vectors from the distillation cycle).
+            // one resident array, one sidecar kept in sync by every write
+            // (Drawer corpus vectors + distilled vectors).
             // CorpusKit owns the dense vector lane; GLK reaches it through Corpus's
             // public accessor (no reaching around the kit).
             let vectorStore = await corpus.sharedVectorStore
@@ -402,8 +419,17 @@ public extension GeniusLocusKit {
             )
 
         case .corpusOnly:
-            // LocusKit core + Corpus. No standalone VectorStore registration.
-            let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
+            try await EstateFormatStore(storage: backingStorage).requireCurrent()
+            // LocusKit core + the attached engine. No standalone VectorStore
+            // registration. Same attached + .wholeContent construction rule.
+            let estateObj = try estate(for: handle)
+            let corpus = try await CorpusContentEngine(
+                storage: backingStorage,
+                configuration: CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                models: embeddingModels)
+            try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // A CorpusOnly estate also feeds its Corpus from capture: mount the
             // Corpus-owned ingest queue + drain worker and wire the room rollup.
@@ -430,7 +456,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - handle: The open estate handle to wire.
     ///   - backingStorage: The estate's storage (Corpus + VectorStore are built on it).
-    ///   - embeddingModels: The recall ensemble. Defaults to the canonical 1.0
+    ///   - embeddingModels: The recall ensemble. Defaults to the canonical
     ///     five-signal ensemble.
     /// - Throws: A storage/schema error if a sub-store cannot be opened.
     func wireGLKSubstores(
@@ -581,18 +607,21 @@ public extension GeniusLocusKit {
     ///      connection open to execute its SQL DELETE operations.
     ///   2. Calls `VectorStore.destroyAllVectors()` on the registered vector store
     ///      (if any), for the same reason — before the storage connection is closed.
+    ///      WHOLE-ESTATE PRECONDITION (shared-content 1.1 P5): this is the ONLY
+    ///      shared-lifecycle path allowed to use the broad whole-table vector
+    ///      teardown, and only because the estate itself is being destroyed —
+    ///      every row in this estate's vectors table belongs to the estate, the
+    ///      estate is closed and deregistered immediately after (step 3), and the
+    ///      admin plane deletes the backing file. Recall-index lifecycle paths
+    ///      (engine destroyRecallIndex, legacy Corpus destroyRecallIndex,
+    ///      migration teardown) are all ownership-scoped and never call it.
     ///   3. Calls `close(_:)` to flush LocusKit, drop all registry entries, and
     ///      release the SQLite connection. If the handle is already closed
     ///      (`.estateNotOpen`), this step is skipped.
     ///
-    /// Note: the BundleStore's `chunks` table is append-only (PersistenceKit schema
-    /// invariant). Chunk rows are NOT deleted by this call — they remain in the
-    /// backing storage for audit purposes. The recall capability is destroyed (BM25
-    /// index cleared, vectors deleted), but the verbatim chunk content survives.
-    /// This is by design: destroying a MOOT invalidates its active recall surface,
-    /// not its stored verbatim content (which may be subject to retention requirements).
-    /// A future storage-erasure primitive (redaction / compaction layer) handles
-    /// verbatim content erasure.
+    /// Attached CorpusKit has no content or passage table. This call destroys
+    /// only its derived recall state; canonical Drawer content remains under
+    /// LocusKit ownership until the estate backing store itself is erased.
     ///
     /// - Parameters:
     ///   - storage: The backing storage that will have its vector data cleared.

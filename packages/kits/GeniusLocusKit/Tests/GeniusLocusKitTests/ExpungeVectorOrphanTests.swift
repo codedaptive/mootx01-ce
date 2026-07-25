@@ -164,7 +164,7 @@ struct ExpungeVectorOrphanTests {
         // Confirm corpus RECALLS chunks for this content BEFORE expunge.
         let chunksBefore = try await corpus.recall(
             "platinum dense transition metal", limit: 10, now: now)
-        let hitBefore = chunksBefore.contains { $0.chunk.sourceID == drawer.id }
+        let hitBefore = chunksBefore.contains { $0.id == drawer.id }
         #expect(hitBefore,
                 "corpus must recall chunks for drawer '\(drawer.id)' before expunge; got \(chunksBefore.count) chunk(s)")
 
@@ -176,7 +176,7 @@ struct ExpungeVectorOrphanTests {
         // Confirm corpus NO LONGER recalls chunks for this drawer after expunge.
         let chunksAfter = try await corpus.recall(
             "platinum dense transition metal", limit: 10, now: now)
-        let hitAfter = chunksAfter.contains { $0.chunk.sourceID == drawer.id }
+        let hitAfter = chunksAfter.contains { $0.id == drawer.id }
         #expect(!hitAfter,
                 "corpus must NOT recall chunks for expunged drawer '\(drawer.id)'; vector and BM25 index entries must be purged")
     }
@@ -324,7 +324,7 @@ struct ExpungeVectorOrphanTests {
         let now = Date()
         let chunksAfter = try await corpus.recall(
             "noble gas argon", limit: 10, now: now)
-        let vectorSurvived = chunksAfter.contains { $0.chunk.sourceID == drawer.id }
+        let vectorSurvived = chunksAfter.contains { $0.id == drawer.id }
         #expect(!vectorSurvived,
                 "no corpus vector must survive after a successful expunge — cross-kit delete ran before seal")
     }
@@ -455,7 +455,7 @@ struct ExpungeVectorOrphanTests {
         let now = Date()
         let chunksAfter = try await corpus.recall(
             "actinide radioactive", limit: 10, now: now)
-        let vectorPresent = chunksAfter.contains { $0.chunk.sourceID == drawer.id }
+        let vectorPresent = chunksAfter.contains { $0.id == drawer.id }
         #expect(vectorPresent,
                 "corpus vector must survive when expunge is rejected by validation — validation-first preserved")
     }

@@ -1,9 +1,8 @@
 //! CorpusDocument — the versioned canonical interchange envelope.
 //!
-//! THE versioned canonical JSON document mandated by ADR-007 Decision 1:
-//! "NoteIR is the single interchange representation … Its serialized form
-//! is a versioned canonical JSON document — the JSON is the payload,
-//! never a per-tool mapping DSL." `Vec<NoteIR>` passed in memory has no
+//! `CorpusDocument` is the versioned canonical JSON representation of a
+//! corpus. The JSON is the payload, never a per-tool mapping DSL.
+//! `Vec<NoteIR>` passed in memory has no
 //! version or identity; this envelope gives a corpus both. Mirrors Swift
 //! `CorpusDocument` (`Sources/VaultKit/CorpusDocument.swift`).
 //!
@@ -67,15 +66,15 @@ pub(crate) fn sort_keys(v: serde_json::Value) -> serde_json::Value {
 }
 
 /// The format version this build reads and writes. Bumping it is a
-/// deliberate act recorded in `docs/decisions/` — shapes froze at v0.9
-/// beta (ADR-007 Decision 4, deliverable 2). Mirrors Swift
-/// `CorpusDocument.currentFormatVersion`.
+/// deliberate compatibility change that requires the versioned interface
+/// specification, fixtures, and both language implementations to advance
+/// together. Mirrors Swift `CorpusDocument.currentFormatVersion`.
 pub const CURRENT_FORMAT_VERSION: i64 = 1;
 
 /// The versioned canonical envelope around a corpus of `NoteIR` entries.
 ///
 /// `{ formatVersion, name, notes }` — nothing else. The envelope is the
-/// unit of mass data movement (ADR-007 Decision 1): exporters produce
+/// unit of mass data movement: exporters produce
 /// one, importers consume one, and `formatVersion` is the explicit
 /// compatibility gate between producers and consumers built years apart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

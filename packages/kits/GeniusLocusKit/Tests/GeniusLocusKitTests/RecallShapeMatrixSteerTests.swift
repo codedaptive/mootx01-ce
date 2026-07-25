@@ -73,7 +73,7 @@ struct RecallShapeMatrixSteerTests {
     private func seedMatrixTier(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, d1: String, d2: String
     ) async throws -> Bool {
-        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
+        // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
         let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []
@@ -262,7 +262,7 @@ struct RecallShapeMatrixSteerTests {
                 "graph column must be byte-identical at all-ones; \(a.id)")
             #expect(a.score.preference == b.score.preference,
                 "preference column must be byte-identical at all-ones; \(a.id)")
-            // CROSS-PORT CONFORMANCE (ADR-011 D-4): the constant graph(0.8) /
+            // CROSS-PORT CONFORMANCE (cross-port RecallShape steering): the constant graph(0.8) /
             // preference(0.9) caches give every candidate the same column value, so
             // each is measured-uniform and normalizes to exactly 0.5 — the SAME value
             // the Rust port pins in recall_shape_matrix_steer_parity. This is the

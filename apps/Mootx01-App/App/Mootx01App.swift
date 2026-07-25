@@ -1,4 +1,3 @@
-import SwiftUI
 import AppIntents
 import GatewayUI
 import MootGateway  // MinerRunLoop + GatewayRuntime (M-ING-2 executor)
@@ -10,7 +9,7 @@ import BackgroundTasks
 
 // MARK: - Mootx01App
 //
-// The MOOTx01 ecosystem app — the Apple presentation layer of ADR-005. One
+// The MOOTx01 ecosystem app — the Apple presentation layer of the app/engine boundary. One
 // codebase, two app targets (macOS + iOS/iPadOS), sharing the GatewayUI
 // surface. Every platform runs the engine "server-in-app" (embedded); macOS
 // adds the app-managed-daemon panel (Engine tab). The clean server binary is
@@ -68,10 +67,10 @@ struct Mootx01App: App {
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
                 .task {
-                    // CVK-WB2: apply the user's persisted sync preference at launch.
-                    // configure() is a no-op when called with the same value as the
-                    // current config; safe to call on every launch including cold starts
-                    // where the driver is already in the .disabled default.
+                    // FAB5-SM: migrate WB2 key → master gate once, then configure.
+                    // migrateIfNeeded() is a no-op on subsequent launches when the
+                    // master key is already present. configure() is idempotent.
+                    SyncPolicy.migrateIfNeeded()
                     await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: SyncPolicy.isEnabled()))
                     await MootSyncDriver.shared.syncNow()
                 }
@@ -82,7 +81,8 @@ struct Mootx01App: App {
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
                 .task {
-                    // CVK-WB2: apply the user's persisted sync preference at launch.
+                    // FAB5-SM: migrate WB2 key → master gate once, then configure.
+                    SyncPolicy.migrateIfNeeded()
                     await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: SyncPolicy.isEnabled()))
                     await MootSyncDriver.shared.syncNow()
                 }
@@ -101,6 +101,12 @@ struct Mootx01App: App {
         }
 
         #if os(macOS)
+        // FAB5-SM: system Settings window (Cmd+,). SettingsView owns the master
+        // iCloud sync switch; the Engine tab's SyncTileView mirrors the same value.
+        Settings {
+            SettingsView()
+        }
+
         // Headless surface (M-MXA-7): estate status + reopen + quit; the
         // embedded engine stays alive while only this item remains.
         MenuBarExtra(

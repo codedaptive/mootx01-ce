@@ -7,6 +7,14 @@ date: "2026-06-15"
 
 # SDK Quickstart
 
+> **Looking for the standalone Apache-2.0 SDKs?** Start with
+> [`moot-memory`](https://github.com/codedaptive/moot-memory),
+> [`moot-semantics`](https://github.com/codedaptive/moot-semantics),
+> [`moot-system`](https://github.com/codedaptive/moot-system), or
+> [`moot-core`](https://github.com/codedaptive/moot-core). The complete public
+> package map is [`SDK.MD`](../../SDK.MD). This guide uses the MOOTx01 product
+> source tree and its `GeniusLocusKit` composition layer.
+
 This is the developer "build on top of MOOTx01" path. If you just want to *use* MOOTx01 with
 your AI client, see [`INSTALL_SURFACE.md`](INSTALL_SURFACE.md) instead. Here you'll add the
 substrate to a project, open a memory estate, **capture** a memory, and **recall** it — the
@@ -14,9 +22,10 @@ core write→read loop.
 
 ## It's modular
 
-MOOTx01 is not one monolith. Everything under `packages/` is an **independently consumable SDK
-module** — the libs (`SubstrateLib`, `LatticeLib`, …) and the kits (`LocusKit`, `VectorKit`,
-`CorpusKit`, `PersistenceKit`, `GeniusLocusKit`, …). You depend only on the modules you need.
+MOOTx01 is not one monolith. The product tree is modular. Seventeen libs and
+kits are also published through the four standalone Apache-2.0 SDK repos.
+Product-only composition packages such as `GeniusLocusKit` remain in the
+MOOTx01 source tree. You depend only on the modules your integration needs.
 
 **GeniusLocusKit (GLK) is the composition layer**, not a mandatory gate. It unifies the kits
 into one estate and exposes the ARIA verbs (capture, recall, …) with audit, grants, recall

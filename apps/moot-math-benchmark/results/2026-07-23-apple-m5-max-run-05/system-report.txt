@@ -1,0 +1,39 @@
+moot-math-benchmark submission — system report
+Generated: 2026-07-23T08:52:51Z
+Bundle:    results/2026-07-23-apple-m5-max-run-05
+
+=== uname -a ===
+Darwin bob-mbpm.local 27.0.0 Darwin Kernel Version 27.0.0: Mon Jun 29 21:25:23 PDT 2026; root:xnu-13432.0.50.501.3~1/RELEASE_ARM64_T6050 arm64
+
+=== git HEAD ===
+b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99
+ M apps/moot-math-benchmark/METHODOLOGY.md
+ M apps/moot-math-benchmark/README.md
+ M apps/moot-math-benchmark/SCHEMA.md
+ M apps/moot-math-benchmark/rust-bench/Cargo.lock
+ M apps/moot-math-benchmark/rust-bench/Cargo.toml
+ M apps/moot-math-benchmark/rust-bench/src/bin/ml_bench.rs
+ M apps/moot-math-benchmark/rust-bench/src/bin/stress_test.rs
+ M apps/moot-math-benchmark/rust-bench/src/bin/topk_bench.rs
+ M apps/moot-math-benchmark/submit-results.sh
+ M apps/moot-math-benchmark/swift-bench/Package.swift
+
+=== Swift toolchain ===
+swift-driver version: 1.168.4 Apple Swift version 6.4 (swiftlang-6.4.0.25.4 clang-2100.3.25.1)
+Target: arm64-apple-macosx27.0.0
+
+=== Rust toolchain ===
+rustc 1.95.0 (59807616e 2026-04-14)
+
+=== sysctl machdep.cpu ===
+machdep.cpu.cores_per_package: 18
+machdep.cpu.core_count: 18
+machdep.cpu.logical_per_package: 18
+machdep.cpu.thread_count: 18
+machdep.cpu.brand_string: Apple M5 Max
+
+=== sysctl hw.memsize / hw.ncpu ===
+hw.memsize: 137438953472
+hw.ncpu: 18
+hw.physicalcpu: 18
+hw.logicalcpu: 18

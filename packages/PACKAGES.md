@@ -32,7 +32,7 @@ TELEMETRY   IntellectusLib  (zero-dependency floor: stat model + sink + report g
             ObserverSink    (PersistenceKit-backed StatsSink + SQLite stats store + retention)
 ```
 
-The substrate ships as **four packages** (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR
+The substrate ships as **four packages** (the four-package substrate contract
 addendum 2026-05-29): `SubstrateTypes` (pure data), `SubstrateKernel`
 (hot-path kernels), `SubstrateML` (cold-path / ML algorithms), and
 `SubstrateLib` — the orchestration layer over the other three.
@@ -410,11 +410,13 @@ knowledge. CorpusKit is the vector recall tier; LocusKit is the semantic
 recall tier (structured knowledge, KG facts, diary, associations).
 
 **Provides:**
-- `BundleStore` (actor) — content bundle management
+- `CorpusContentEngine` — canonical-ID whole-content BM25/vector indexing
+- `CorpusDocumentStore` — canonical standalone document ownership
 - `BM25Index` — inverted text index for keyword retrieval
-- `Chunker` — content splitting into chunks
-- `Chunk` — the stored content unit
-- `HybridRecall` — combined BM25 + vector retrieval
+- Optional `StandalonePassages` / `standalone-passages` range-only token
+  windows with database-bound window and overlap; not compiled for GLK/MOOTx01
+- `BundleStore`, `Chunker`, `Chunk`, and `HybridRecall` — legacy standalone
+  1.0 compatibility only; never GLK content identity
 - `EmbeddingProvider` protocol + `CorpusKitProviders` (MiniLM, MPNet, Gemma)
 - `SyncManifest` — replication metadata
 - `TokenizerProtocol`
@@ -480,7 +482,7 @@ reflects the live dispatch behavior asserted by
 *Grants and scope:*
 - `GrantStore`, `ScopeKeyVault`, `LagrangeDecayKey`
 
-*Migration (orchestration only — mass ingestion lives in VaultKit per ADR-007):*
+*Migration (orchestration only — mass ingestion lives in VaultKit per the data-movement contract):*
 - `runParallel`, `verifyMigration` (`MigrationAPI`), `ExternalCorpus`
 
 **Critical invariants:**

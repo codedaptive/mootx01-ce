@@ -26,7 +26,7 @@ import Darwin
 import Glibc
 #endif
 
-/// Abstraction over invoking the `claude` CLI (ADR-024 Wave 3, Defect 1:
+/// Abstraction over invoking the `claude` CLI (plugin-owned MCP connections:
 /// "stranded cache"). Real callers use `ProcessClaudeCLIRunner`, which shells
 /// out to `claude` resolved from PATH; tests inject a fake so the refresh
 /// path is unit-testable without touching a real Claude Code installation.
@@ -254,9 +254,9 @@ public enum DepthInstaller {
     ///     registration time, independent of this function), and client-side
     ///     env on an HTTP entry is inert — nothing reads it. Defaults to
     ///     `false` (vault-on); absent `MOOTX01_VAULT` means vault-on per
-    ///     ADR-015 §1.
+    ///     the open 1.0 Vault posture.
     ///   - claudeCLIRunner: injectable seam for the `claude plugin update`
-    ///     stranded-cache refresh (ADR-024 Wave 3, Defect 1). Defaults to the
+    ///     stranded-cache refresh. Defaults to the
     ///     real process-based runner; tests inject a fake.
     /// - Returns: the achieved `DepthOutcome`.
     /// - Throws: filesystem errors writing the skill file or package tree.
@@ -304,9 +304,9 @@ public enum DepthInstaller {
     /// `skills/` dir, `+ "mootx01-plugin"`), without checking existence.
     /// Exposed so callers outside this file (e.g. `mootx01 upgrade`) can
     /// check whether a plugin was previously materialized for this host, to
-    /// decide whether to rematerialize it after a binary swap (ADR-024 Wave
-    /// 3, Defect 1 — an upgrade alone does not touch this directory or
-    /// Claude Code's plugin cache unless something asks it to).
+    /// decide whether to rematerialize it after a binary swap. An upgrade alone
+    /// does not touch this directory or Claude Code's plugin cache unless
+    /// something explicitly requests convergence.
     public static func pluginInstallDirectory(host: InstallMapHost, homeDirectory: URL) -> URL {
         let skillDest = expandTilde(host.skillUserPath, homeDirectory: homeDirectory)
         return skillDest
@@ -318,7 +318,7 @@ public enum DepthInstaller {
 
     /// Every plugin-capable host that ALREADY has a plugin directory on disk
     /// for `homeDirectory` — the gating logic behind `mootx01 upgrade`'s
-    /// rematerialization pass (ADR-024 Wave 3, Defect 1: an upgrade alone
+    /// rematerialization pass (plugin-owned MCP connections: an upgrade alone
     /// never touches `~/.claude/mootx01-plugin`, stranding the package and,
     /// for Claude Code, its plugin cache).
     ///
@@ -368,8 +368,8 @@ public enum DepthInstaller {
     /// files, and plugin-metadata files (plugin.json without an mcpServers
     /// block) are written verbatim.
     ///
-    /// ADR-024 Wave 3, Defect 1 ("stranded cache"): for Claude Code
-    /// specifically, after materializing the package this also refreshes
+    /// Claude Code loads plugins from a cache snapshot. After materializing
+    /// the package, this also refreshes
     /// Claude Code's own plugin cache if it was already installed — see
     /// `refreshStrandedPluginCache`.
     private static func installPlugin(
@@ -389,7 +389,7 @@ public enum DepthInstaller {
             return outcome
         }
         let dest = pluginInstallDirectory(host: host, homeDirectory: homeDirectory)
-        // §4.2: back up an existing plugin dir, then replace it.
+        // Back up an existing plugin directory, then replace it.
         if FileManager.default.fileExists(atPath: dest.path) {
             try Installer.backupExisting(at: dest)
             try FileManager.default.removeItem(at: dest)
@@ -403,7 +403,7 @@ public enum DepthInstaller {
             //    installed path — live only for hosts whose package still
             //    carries a `command` entry (the proxy-bridge fallback;
             //    currently none of the manifestBundle hosts reachable here,
-            //    since ADR-024 §2 moved them all to HTTP — see
+            //    because all plugin-capable hosts now use HTTP entries — see
             //    rewriteBareMootCommand's own doc comment).
             // 2. When vault-off, inject MOOTX01_VAULT=0 into any
             //    command/stdio-shaped entry — HTTP entries are skipped (see
@@ -441,8 +441,7 @@ public enum DepthInstaller {
     /// specific plugin-identity lookup.
     static let claudeCodePluginID = "mootx01@mootx01"
 
-    /// ADR-024 Wave 3, Defect 1 ("stranded cache"): Claude Code loads
-    /// plugins from a CACHE SNAPSHOT
+    /// Claude Code loads plugins from a cache snapshot
     /// (`~/.claude/plugins/installed_plugins.json`) that pins `installPath`
     /// + `version` at install time — it does NOT re-read the marketplace
     /// directory on every launch. Rewriting `~/.claude/mootx01-plugin` above
@@ -546,7 +545,7 @@ public enum DepthInstaller {
         try out.write(to: settingsURL, options: .atomic)
     }
 
-    /// ADR-024 Wave 3, Defect 2 ("dead vault env on HTTP entry"): inject
+    /// Inject
     /// `env.MOOTX01_VAULT=0` into the `mcpServers.mootx01` entry of an MCP
     /// config JSON file — but ONLY when that entry is command/stdio-shaped
     /// (carries a `command` key: the proxy-bridge fallback for a host whose
@@ -596,12 +595,12 @@ public enum DepthInstaller {
         return str.hasSuffix("\n") ? str : str + "\n"
     }
 
-    /// ADR-024 Wave 3, Defect 3 audit: as of the current platform matrix,
+    /// As of the current platform matrix,
     /// this rewrite is DEAD for every host `installPlugin` can reach today.
     /// `installPlugin` only runs for `family == "manifestBundle"` hosts
     /// (`host.supportsPlugin`) — antigravity, claude-code, codex, cursor,
     /// gemini-cli, github-copilot — and every one of those now packages an
-    /// HTTP-shaped entry (`httpTyped`/`http`/`httpServerUrl`; ADR-024 §2),
+    /// HTTP-shaped entry (`httpTyped`/`http`/`httpServerUrl`; plugin-owned MCP connections),
     /// which carries no `command` field at all. Xcode is the one host whose
     /// package still uses the proxy-bridge `command`/`args` shape, but Xcode
     /// is `family == "ideConfig"` — `supportsPlugin` is false for it, so it

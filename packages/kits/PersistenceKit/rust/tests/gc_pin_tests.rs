@@ -1,4 +1,4 @@
-// GC pin tests (ADR-017 §15).
+// GC pin tests.
 // Rust port of Swift GCPinTests — minimum retainable HLC queries,
 // pin boundary semantics, delete-moves-pin.
 

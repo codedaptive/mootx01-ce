@@ -2,7 +2,7 @@
 //
 // Mission GLK-07 — The training-daemon admission gate.
 //
-// Per DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21 the training daemon
+// Per the training transition threshold the training daemon
 // is gated on transition count. Below the threshold the daemon is
 // dormant — no enrichment, no matrix updates, no calibration work —
 // so a tiny estate pays zero training cost. At or above the threshold
@@ -81,7 +81,7 @@ public enum TrainingThresholdDecision: Sendable, Equatable {
 /// the count derived from the caller-supplied audit log.
 public struct TrainingThresholdGate: Sendable, Equatable, Codable {
 
-    /// Provisional default per DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21.
+    /// Provisional default per the training transition threshold.
     /// Callers may override at estate instantiation; this value is the
     /// floor below which the decision record warns the bootstrap
     /// heuristics carry the cognitive load on their own.
@@ -143,7 +143,7 @@ public struct TrainingThresholdGate: Sendable, Equatable, Codable {
                  // grant and key events, not drawer state-transitions,
                  // so they do not count toward the training threshold.
                  .grantIssued, .grantRevoked, .keyDecayed, .physicalKeyDecayed,
-                 // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                 // sensitivity unlock verbs: record grant/deny/
                  // revoke/read-under-grant events, not drawer state
                  // transitions, so they do not count either.
                  .sensitivityGrantIssued, .sensitivityGrantDenied,

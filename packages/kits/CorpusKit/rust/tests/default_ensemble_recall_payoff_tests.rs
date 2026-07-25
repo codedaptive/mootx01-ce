@@ -1,6 +1,6 @@
 //! Mission 6a-iii-wire — end-to-end PAYOFF proof (Rust parity leg).
 //!
-//! The 1.0 default recall ensemble (`corpus_kit_providers::default_ensemble()`:
+//! The default recall ensemble (`corpus_kit_providers::default_ensemble()`:
 //! RI/PPMI/LSA/NMF/FDC) un-pins recall. This is the Rust mirror of the Swift
 //! `DefaultEnsembleRecallPayoffTests`: the Corpus built here is exactly the one
 //! the Rust GLK provision path (via the moot-mgr / ARIA_MCP app callers) and
@@ -22,7 +22,7 @@
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as the other corpus integration tests.
 
-use corpus_kit::{Corpus, FloatLaneOutcome};
+use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
 use corpus_kit_providers::default_ensemble;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use std::collections::HashSet;
@@ -59,6 +59,23 @@ const DOCS: [(&str, &str); 12] = [
 
 const NOW_MILLIS: i64 = 1_700_000_000_000;
 
+#[test]
+fn default_ensemble_invalidates_trainable_1_0_bases() {
+    let models = default_ensemble();
+    let versions: Vec<&str> = models
+        .iter()
+        .map(|model| match model {
+            EmbeddingModelConfig::RandomIndexing { provider }
+            | EmbeddingModelConfig::Ppmi { provider }
+            | EmbeddingModelConfig::Lsa { provider }
+            | EmbeddingModelConfig::Nmf { provider } => provider.model_version(),
+            EmbeddingModelConfig::Fdc { provider } => provider.model_version(),
+            _ => panic!("unexpected model in the default ensemble"),
+        })
+        .collect();
+    assert_eq!(versions, ["1.1.0", "1.1.0", "1.1.0", "1.1.0", "1.0.0"]);
+}
+
 fn scratch_path() -> String {
     std::env::temp_dir()
         .join(format!("corpuskit-payoff-rust-{}.sqlite3", Uuid::new_v4()))
@@ -77,7 +94,7 @@ fn storage_at(path: &str) -> Arc<dyn Storage> {
     Arc::new(SqliteStorage::new(config).expect("open sqlite"))
 }
 
-/// Build a Corpus on the canonical 1.0 default ensemble, ingest the diverse
+/// Build a Corpus on the canonical default ensemble, ingest the diverse
 /// corpus, and reindex (trains the four trainable signals). The call under test:
 /// `default_ensemble()` — the exact set the Rust production provision sites thread.
 fn make_trained_ensemble_corpus() -> Corpus {

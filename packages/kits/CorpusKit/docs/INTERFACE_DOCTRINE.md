@@ -73,4 +73,6 @@ If you find yourself wanting to:
 - Reach into the chunks table directly
 - Skip schema versioning on a migration
 
-Stop. Write a decision record in `docs/decisions/` proposing the change. The kit boundaries are deliberate.
+Stop. Update the owning reference specification and engineering master before
+changing code. The kit boundaries are deliberate, and the change must state its
+new behavior, compatibility effect, and cross-port conformance requirement.

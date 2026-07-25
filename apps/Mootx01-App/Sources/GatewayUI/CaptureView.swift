@@ -20,7 +20,7 @@ struct CaptureView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text(String(localized: "Submit-in — bring content into the MOOT as a verbatim drawer."))
+                Text(String(localized: "Save a thought, note, or idea to your memory."))
                     .font(.title3.weight(.semibold))
 
                 GroupBox(String(localized: "Content")) {
@@ -36,7 +36,7 @@ struct CaptureView: View {
                 VStack(spacing: 12) {
                     HStack(alignment: .bottom, spacing: 16) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(String(localized: "Location (room)")).font(.caption).foregroundStyle(.secondary)
+                            Text(String(localized: "Location")).font(.caption).foregroundStyle(.secondary)
                             TextField(String(localized: "location"), text: $model.captureLocation)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(maxWidth: .infinity)
@@ -54,18 +54,15 @@ struct CaptureView: View {
                             .accessibilityLabel(String(localized: "Sensitivity"))
                         }
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(String(localized: "Exportability")).font(.caption).foregroundStyle(.secondary)
+                            Text(String(localized: "Visibility")).font(.caption).foregroundStyle(.secondary)
                             Picker("", selection: $model.captureExportability) {
                                 // Adjective raw values — "private" or "public" map directly to the
                                 // moot_file_memory exportability argument and the §6.2 serve-out gate.
                                 ForEach(model.exportabilityOptions, id: \.self) { Text($0).tag($0) }
                             }
                             .labelsHidden()
-                            // accessibilityLabel so VoiceOver identifies this Picker as
-                            // "Exportability" rather than reading only "private" or "public".
-                            // Fixes WCAG 1.3.1: the programmatic relationship between the visual
-                            // caption and the control must be machine-determinable.
-                            .accessibilityLabel(String(localized: "Exportability"))
+                            // accessibilityLabel matches the visual caption "Visibility" (WCAG 1.3.1).
+                            .accessibilityLabel(String(localized: "Visibility"))
                         }
                     }
                     HStack {
@@ -81,14 +78,14 @@ struct CaptureView: View {
                 }
 
                 Label {
-                    Text(String(localized: "Set Exportability to \"public\" to include this drawer in serve-out (filter:exportable recall). Private drawers are never surfaced by the serve-out gate. Use moot_update_memory correctExportability(public) to promote an existing private drawer."))
+                    Text(String(localized: "Set Visibility to \"public\" to make this entry findable when searching with the \"Public only\" filter. Private entries stay private. You can change an entry's visibility later."))
                 } icon: {
                     Image(systemName: "info.circle.fill").foregroundStyle(.blue)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-                CallRecordView(title: String(localized: "moot_file_memory result"), call: model.lastCaptureCall)
+                CallRecordView(title: String(localized: "Result"), call: model.lastCaptureCall)
             }
             .padding(20)
         }

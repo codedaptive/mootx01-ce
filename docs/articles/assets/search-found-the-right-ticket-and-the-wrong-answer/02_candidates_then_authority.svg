@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="700" viewBox="0 0 1120 700" role="img" aria-labelledby="svg-title svg-desc">
+  <title id="svg-title">Finding a candidate is only the first decision</title>
+  <desc id="svg-desc">Ranking answers where to look. History and state answer what may guide the work.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect id="canvas" width="1120" height="700" fill="#fbfaf7"/>
+  <g font-family="Inter, Arial, sans-serif">
+    <rect id="title-bound" x="45" y="22" width="1030" height="46" fill="none"/>
+<text x="560.0" y="58" text-anchor="middle" font-size="34" font-weight="700" fill="#111827" data-container="title-bound"><tspan x="560.0" dy="0">Finding a candidate is only the first decision</tspan></text>
+<rect id="subtitle-bound" x="65" y="73" width="990" height="30" fill="none"/>
+<text x="560.0" y="96" text-anchor="middle" font-size="18" font-weight="400" fill="#475569" data-container="subtitle-bound"><tspan x="560.0" dy="0">Ranking answers where to look. History and state answer what may guide the work.</tspan></text>
+    <rect id="box-0" x="85" y="178" width="410" height="208" rx="8" fill="#eaf2ff" stroke="#4f83cc" stroke-width="2"/>
+<rect x="86" y="179" width="408" height="7" rx="6" fill="#4f83cc"/>
+<text x="290.0" y="264" text-anchor="middle" font-size="22" font-weight="700" fill="#12356b" data-container="box-0"><tspan x="290.0" dy="0">Retrieval</tspan></text>
+<text x="290.0" y="299" text-anchor="middle" font-size="17" font-weight="400" fill="#475569" data-container="box-0"><tspan x="290.0" dy="0">Keywords, meaning, time, and structure</tspan><tspan x="290.0" dy="24">rank possible records</tspan></text>
+<rect id="box-1" x="625" y="178" width="410" height="208" rx="8" fill="#e8f6ee" stroke="#39a368" stroke-width="2"/>
+<rect x="626" y="179" width="408" height="7" rx="6" fill="#39a368"/>
+<text x="830.0" y="264" text-anchor="middle" font-size="22" font-weight="700" fill="#116033" data-container="box-1"><tspan x="830.0" dy="0">Authority</tspan></text>
+<text x="830.0" y="299" text-anchor="middle" font-size="17" font-weight="400" fill="#475569" data-container="box-1"><tspan x="830.0" dy="0">Source, confirmation, dispute, and</tspan><tspan x="830.0" dy="24">replacement shape current use</tspan></text>
+<circle cx="290" cy="178" r="22" fill="#4f83cc"/>
+<rect id="badge-bound-0" x="272" y="161" width="36" height="34" fill="none"/>
+<text x="290" y="185" text-anchor="middle" font-size="18" font-weight="700" fill="#ffffff" data-container="badge-bound-0">A</text>
+<circle cx="830" cy="178" r="22" fill="#39a368"/>
+<rect id="badge-bound-1" x="812" y="161" width="36" height="34" fill="none"/>
+<text x="830" y="185" text-anchor="middle" font-size="18" font-weight="700" fill="#ffffff" data-container="badge-bound-1">B</text>
+<path d="M290 386 C290 441, 469.0 412, 469.0 467" stroke="#334155" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+<path d="M830 386 C830 441, 651.0 412, 651.0 467" stroke="#334155" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+<rect id="box-2" x="235" y="476" width="650" height="132" rx="8" fill="#fff7e6" stroke="#d97706" stroke-width="3"/>
+<rect x="236" y="477" width="648" height="7" rx="6" fill="#d97706"/>
+<text x="560.0" y="536" text-anchor="middle" font-size="22" font-weight="700" fill="#8a4b00" data-container="box-2"><tspan x="560.0" dy="0">Usable answer</tspan></text>
+<text x="560.0" y="571" text-anchor="middle" font-size="17" font-weight="400" fill="#475569" data-container="box-2"><tspan x="560.0" dy="0">The task determines which evidence may act</tspan></text>
+  </g>
+</svg>

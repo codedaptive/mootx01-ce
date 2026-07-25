@@ -1,9 +1,94 @@
 # Changelog
 
 All notable code changes to MOOTx01 are recorded here. Versions follow
-`VERSIONING.md`: semantic `MAJOR.MINOR.PATCH`, pre-release builds tagged with a
-qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
-the tag carries the pre-release qualifier.
+`VERSIONING.md`: stable releases use `MAJOR.MINOR.PATCH`; the active 1.1
+development line uses the explicit SemVer pre-release
+`1.1.0-beta-YY`.
+
+## 1.1.0-beta-04 — 2026-07-24
+
+First internal beta cut for 1.1. Stamps the Wave-1 / FAB5 feature set
+for TestFlight evaluation. Nine streams merged since beta-03.
+
+- **Sensitive-tier sync opt-ins (FAB5-ST).** Per-tier CloudKit sync
+  authorization (Restricted, Secret) gated by LocalAuthentication and
+  Keychain. Dynamic sensitivity ceiling with WB1-style retraction
+  tombstones purge affected rows on tier revocation. Settings UI surface
+  added. Fixed a silent security bug: `SensitivityFilteredStorage` was
+  checking the wrong column key and never matched — all rows were passing
+  through regardless of tier.
+- **iCloud Sync master preference (FAB5-SM).** `SyncPolicy.masterEnabled`
+  is now the single authoritative iCloud sync gate. Settings surface
+  present on iOS (gear toolbar) and macOS (Cmd+,). Off by default on
+  clean install. Legacy WB2 key migration path included.
+- **CKRecord.encryptedValues wiring (FAB5-EV2).** `PushCycle` now passes
+  `encryptedContentColumns` to `CKRecordMapping.record(...)` so declared
+  columns route through `CKRecord.encryptedValues` on every push.
+  `CloudKitStateActor.enable()` validates column declarations before zone
+  setup. Tables without declarations are byte-identical to pre-EV behavior.
+- **CKRecord.encryptedValues opt-in (FAB5-EV).** `SyncManifest` gains an
+  `encryptedContentColumns` field for opt-in per-table encryption. Empty
+  by default — no wire format change for existing callers. Metadata columns
+  provably stay plaintext. Dual-read decode path included.
+- **First-run experience (FAB5-FR).** App Store Guideline 4.2 defense: a
+  reviewer with an empty estate can reach capture → recall in under 60
+  seconds. Engineering tabs (The Top, Edges, Engine) moved behind an
+  Advanced toggle for the App Store build.
+- **Federation durable outbox (FAB5-FO).** Durable outbox layer for the
+  federation sync surface. Fixed a TOCTOU race in the Rust echo
+  suppression mechanism in InMemoryRowStore.
+- **App Store compliance pack (FAB5-CP).** All NSUsageDescription keys
+  present and reviewer-grade. `ITSAppUsesNonExemptEncryption = false` in
+  both iOS and macOS plists. `TARGETED_DEVICE_FAMILY 1` (iPhone-only for
+  1.1). Privacy label worksheet and App Store reviewer notes ready.
+- **TestFlight & two-device validation harness (FAB5-VH).** Release
+  checklist, two-device sync matrix, and conformance scenario fixtures
+  (concurrent kill/restore, offline/rejoin) for the 1.1 TestFlight and
+  App Store submission pipeline.
+- **Docs truth-up (FAB5-DT).** TOPOLOGY.md sync/federation status section
+  added. Public docs de-agentified (zero internal codename hits in
+  `docs/start-here/`, `docs/guide/`, `README.md`). Roadmap dates
+  grounded.
+
+## 1.1.0-beta-03 — develop/1.1.x
+
+This branch is the source beta for 1.1 feature updates. It changes continuously
+and the exact code under test is identified by version plus commit. `03` is the
+three-push history of `candidate/1.1.x`: its creation push on 2026-07-15 and
+two subsequent pushes on 2026-07-20. Stable installers and the public
+marketplace plugin continue to track the supported 1.0 line until 1.1 work is
+promoted through candidate and stable.
+
+Current development themes include the native MOOTx01-App, CorpusKit
+shared-content architecture, Apple surfaces and on-demand federation, and the
+foundation for continuous Obsidian synchronization. Individual entries and
+feature guides distinguish implemented behavior from planned work.
+
+The Swift and Rust upgrade comparators now honor SemVer pre-release precedence,
+so `1.1.0` is correctly offered as newer than `1.1.0-beta-03`, and later beta
+sequence values sort after earlier ones.
+
+## v1.0.34 — 2026-07-23
+
+Direct-stdio transport, documentation-authority, and packaging-integrity
+release.
+
+- **`--no-daemon` now changes client wiring.** Both Swift and Rust installers
+  write explicit `mootx01 serve` stdio entries instead of resident HTTP URLs
+  when the flag is selected. Direct entries clear inherited HTTP-port state,
+  `--vault-off` is carried into the child-process environment, and
+  connection-owning plugin depth falls back to skills.
+- **The tighter local setup is discoverable.** The root and CLI READMEs,
+  install guide, install-surface contract, CLI help, and security policy
+  document the Codex command/args configuration, the resident-forwarding
+  wrinkle, and the checks required for genuinely socket-free operation.
+- **Engineering documentation consolidated.** The durable rules from all 59
+  legacy 1.0 decision records now live in the topic-based engineering masters.
+  The live 1.0 decision directory is retired, and source comments state their
+  behavior and invariants directly instead of depending on historical records.
+- **Embedded plugin bundle synchronized.** The Swift and Rust installer copies
+  now carry the current 10-host plugin package, its per-user update-check cache
+  behavior, and consistent 1.0.34 product/plugin version stamps.
 
 ## v1.0.33 — 2026-07-16
 
@@ -223,7 +308,7 @@ Sensitivity unlock and monitoring release. Private and secret memories
 become reachable — by human approval only, never by a model — and the
 monitoring dashboard is live out of the box.
 
-- **Sensitivity unlock (ADR-025)** — restricted ("private") rows unlock
+- **Sensitivity unlock** — restricted ("private") rows unlock
   until local start-of-day; secret rows for a fixed 30 minutes. Approval
   is strictly out-of-band: `mootx01 unlock private|secret` and
   `mootx01 lock` in a terminal — macOS verifies with Touch ID / password
@@ -276,7 +361,7 @@ the destructive few, and real fast-path word-class coverage out of the box.
 ## v1.0.15 — 2026-07-04
 
 Installation integrity release. One daemon, one connection per client, no
-accidental duplicates — however you install, in whatever order (ADR-024).
+accidental duplicates — however you install, in whatever order.
 
 - **Plugin now connects over HTTP** — the Claude Code plugin's MCP manifest
   wires the resident daemon (`http://127.0.0.1:4242`) instead of spawning a
@@ -604,8 +689,8 @@ substrate temporal-correctness and performance fixes.
   documented in `VERSIONING.md`; installers validated on `candidate` before
   promotion.
 - **Substrate correctness / performance** — instants migrated to epoch
-  milliseconds (ADR-023); temporal matrix folds keyed on event time with
-  full-precision HLC; shared IDF-reduced vocabulary for LSA/NMF (ADR-022);
+  milliseconds; temporal matrix folds keyed on event time with full-precision
+  HLC; shared IDF-reduced vocabulary for LSA/NMF;
   FDC term interning and SVD/NMF hot-loop tightening.
 
 ## v1.0.5-beta — 2026-06-29
@@ -713,7 +798,7 @@ ports move together.
 
 ### Vault security posture
 
-- **ADR-015 — vault security posture** — vault is open in 1.0.x-beta (trust at
+- **Vault security posture** — vault is open in 1.0.x-beta (trust at
   rest via encryption) with a gated vault-password feature deferred to 1.1.
 - **`mootx01 install --vault-on/--vault-off`** — coarse install switch (default
   on); `--vault-off` hides and refuses the five vault MCP tools. Mandatory
@@ -748,9 +833,8 @@ together.
   implementation in PersistenceKit core.
 - **RAM protection** — the Rust resident daemon `mlock`s its memory out of swap;
   the Apple port relies on macOS's encrypted virtual memory.
-- **Federation signature** — ADR-013 selects ECDSA P-256 (FIPS-validated module
-  boundary). ADR-014 records the Apple SQLCipher at-rest decision and the
-  approved port divergences.
+- **Federation signature** — ECDSA P-256 is used at the FIPS-validated module
+  boundary. Apple uses SQLCipher at rest with the approved port divergences.
 
 ## v1.0.1-beta — 2026-06-17
 
@@ -762,12 +846,11 @@ move together, conformance-gated.
 
 ### Recall — classical-fusion semantic recall
 
-- **Decision recorded** — ADR-010: classical-fusion semantic recall +
-  ARIA recall steering (Decision D); addendum for Decision B (full fusion incl.
-  LSA/SVD) and CoreML-encoder flip-the-switch readiness for 1.1.
+- **Recall architecture** — classical-fusion semantic recall with ARIA recall
+  steering, full fusion including LSA/SVD, and CoreML-encoder readiness for 1.1.
 - **Substrate primitive** — float-vector ops (l2Norm / l2Normalize / dot /
   cosine), Swift+Rust conformance-gated.
-- **Distributional embedding providers** (ADR-010 signals, Swift+Rust):
+- **Distributional embedding providers** (Swift+Rust):
   Random Indexing, PPMI (+ consolidated keyword tokenizer), LSA, NMF-retrieval
   (+ shared term-document builder).
 - **Deterministic one-sided Jacobi SVD**, Swift+Rust bit-identical (backs LSA).
@@ -786,8 +869,8 @@ move together, conformance-gated.
 - **Production default flipped** to the five-signal ensemble.
 - **Capture/import → encode pipeline** wired across all paths + reindex
   backfill.
-- **GLK parity** — GraphCache/PreferenceStore recall surface ported to Rust GLK
-  (closes ADR-011 D-4); matrix/graph/preference recall lanes wired into
+- **GLK parity** — GraphCache/PreferenceStore recall surface ported to Rust GLK;
+  matrix/graph/preference recall lanes wired into
   RecallDirector.
 - **CognitionKit** — `recall_exploratory` recipe consuming
   `RandomWalks.walkWithRestart`.
@@ -817,8 +900,7 @@ move together, conformance-gated.
 - `CaptureFrame` exposes confirmation + confidence provenance to production
   callers (A-13); propose verb wires its three provenance bitmap axes (A-3).
 - `#4` — compile-enforce required trait reads; `#7` Q-ID closure rescoped.
-- Schema `ext` forward-compat slot extended to the 5 remaining entity tables
-  (ADR-012).
+- Schema `ext` forward-compat slot extended to the 5 remaining entity tables.
 - `ext`/forward-compat groundwork; LocusKit interface bumped to 1.6.0.
 
 ### Performance

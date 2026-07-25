@@ -1,10 +1,9 @@
-//! T11 REM-THETA consolidation cycle + REM-cycle dispatch table tests
-//! (ADR-021 Phase 6, NEURONKIT_SPEC § 12.6).
+//! REM-THETA consolidation-cycle and dispatch-table tests.
 //!
 //! Rust parity of `NeuronKitTests/DreamingThetaTests.swift`.
 //!
 //! Covers:
-//!   D5a — THETA fires on a 24 h cadence.
+//!   THETA fires on a 24-hour cadence.
 //!   D5c — last-run timestamp persists across restarts; stdio estates
 //!          do not re-consolidate within the same 24 h window.
 //!   §12.5 — decide() math is unchanged for THETA (same EWC++ path as
@@ -240,7 +239,7 @@ fn theta_justification_identifies_theta_cycle() {
 #[test]
 fn theta_persists_last_run_via_daemon_state() {
     // run_theta → daemon_state → new daemon → restore_state → check timestamp.
-    // Simulates F6/ADR-020 round-trip through the policy store.
+    // Simulates /manifest-backed daemon state round-trip through the policy store.
     let reader = ThetaFakeReader::new(vec![trace("a", true), trace("b", true)]);
     let mut sink = ThetaRecordingSink::default();
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());

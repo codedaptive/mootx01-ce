@@ -101,7 +101,7 @@ struct VaultBridgeTests {
     }
 
     /// Resolve display names (wing, room) for drawers from the node tree.
-    /// ADR-017 removed wing/room from Drawer; this helper resolves them
+    /// node-tree integrity removed wing/room from Drawer; this helper resolves them
     /// for test assertions that need the display names.
     private func resolveNames(
         _ drawers: [Drawer], kit: GeniusLocusKit, handle: EstateHandle
@@ -161,7 +161,7 @@ struct VaultBridgeTests {
 
         let tunnels = try await kit.recallTunnels(handle, wing: drawerNames.wing)
         // Filter by originClass == .imported to exclude synthetic containment
-        // tunnels injected by NodeTopologyProvider (ADR-017 tree edges surfaced
+        // tunnels injected by NodeTopologyProvider (node-tree integrity tree edges surfaced
         // as .references tunnels with label "containment").
         let refs = tunnels.filter { $0.kind == .references && $0.originClass == .imported }
         #expect(refs.count == 1)
@@ -200,7 +200,7 @@ struct VaultBridgeTests {
         let drawer = try #require(drawers.first)
         let drawerNames = try await resolveNames(drawer, kit: kit, handle: handle)
         // Filter by originClass == .imported to exclude synthetic containment
-        // tunnels from NodeTopologyProvider (ADR-017 tree edges).
+        // tunnels from NodeTopologyProvider (node-tree integrity tree edges).
         let refs = try await kit.recallTunnels(handle, wing: drawerNames.wing)
             .filter { $0.kind == .references && $0.originClass == .imported }
         #expect(refs.count == 1)
@@ -1326,9 +1326,9 @@ struct VaultBridgeTests {
                 "estate must remain empty after re-import of erased (expunged) lineage")
     }
 
-    // MARK: - ADR-016 Wing vault layout round-trip
+    // MARK: - wing organization Wing vault layout round-trip
 
-    /// ADR-016 Consequences: wing = top folder; all drawers export under their wing path.
+    /// wing organization Consequences: wing = top folder; all drawers export under their wing path.
     ///
     /// This test verifies the full round-trip export → vault layout → import:
     ///   1. Export: vault top-level folders == distinct wing names in the estate.
@@ -1342,7 +1342,7 @@ struct VaultBridgeTests {
     /// wired end-to-end: a drawer captured in "User Canon" must re-import into
     /// "User Canon", and a drawer captured in "Personal" must re-import into
     /// "Personal", not both into the default wing.
-    @Test("ADR-016: export uses wing as top-level vault folder; import restores non-default wings")
+    @Test("export uses wing as top-level vault folder; import restores non-default wings")
     func wingVaultLayoutRoundTrip() async throws {
         let (kit, handle) = try await openEstate()
         let vault = makeTempVault()
@@ -1352,7 +1352,7 @@ struct VaultBridgeTests {
 
         // Capture two drawers in DIFFERENT wings via the GLK capture seam.
         // CaptureFrame.wing routes each drawer into its named wing at capture time
-        // (ADR-016). Content is distinct so slug derivation produces stable slugs.
+        //. Content is distinct so slug derivation produces stable slugs.
         let userCanonFrame = CaptureFrame(
             content: "# Research Note\nOrganic chemistry primer.",
             channel: .typed,
@@ -1386,12 +1386,12 @@ struct VaultBridgeTests {
         // Export the estate. Two distinct wings → two top-level vault folders.
         let mapping = DrawerMapping(classifyOnImport: false)
         let bridge = VaultBridge(kit: kit, mapping: mapping)
-        // CAND-032: default scope is now `.exportable`; this ADR-016 wing-folder
+        // The default scope is `.exportable`; this wing-folder
         // round-trip validates believed-tier export, so it passes `.believed`.
         let exportReport = try await bridge.export(estate: handle, to: vault, scope: .believed, now: now)
         #expect(exportReport.notesExported == 2, "both drawers must be exported")
 
-        // --- Vault layout assertions (ADR-016) ---
+        // --- Vault layout assertions ---
         //
         // Each wing must appear as a top-level folder in the vault.
         let fm = FileManager.default
@@ -1403,9 +1403,9 @@ struct VaultBridgeTests {
         }.map { $0.lastPathComponent }
 
         #expect(topDirs.contains("User Canon"),
-                "ADR-016: vault must have a top-level 'User Canon' folder (wing = top-level folder)")
+                "vault must have a top-level 'User Canon' folder (wing = top-level folder)")
         #expect(topDirs.contains("Personal"),
-                "ADR-016: vault must have a top-level 'Personal' folder (wing = top-level folder)")
+                "vault must have a top-level 'Personal' folder (wing = top-level folder)")
 
         // Root-level MD files must only be OKF nav files (index.md, log.md) — no notes.
         let allMD = try fm.contentsOfDirectory(
@@ -1413,7 +1413,7 @@ struct VaultBridgeTests {
             .filter { $0.pathExtension == "md" }
         let rootNotes = allMD.map { $0.deletingPathExtension().lastPathComponent }
             .filter { $0 != "index" && $0 != "log" }
-        #expect(rootNotes.isEmpty, "ADR-016: no note files at vault root — all notes must live under a wing folder")
+        #expect(rootNotes.isEmpty, "no note files at vault root — all notes must live under a wing folder")
 
         // Notes under each wing folder sit in <wing>/<room>/ subfolders.
         let userCanonURL = vault.appendingPathComponent("User Canon", isDirectory: true)
@@ -1620,7 +1620,7 @@ struct VaultBridgeTests {
         // Create the _distilled_from provenance tunnel (factoid → source),
         // exactly as DistillationCycle does.
         let estate = try await kit.estate(for: handle)
-        // Resolve display names for the captured drawers (ADR-017).
+        // Resolve display names for the captured drawers.
         let sourceNames = try await resolveNames(sourceDrawer, kit: kit, handle: handle)
         let factoidNames = try await resolveNames(factoidDrawer, kit: kit, handle: handle)
         let provenanceFrame = TunnelCaptureFrame(

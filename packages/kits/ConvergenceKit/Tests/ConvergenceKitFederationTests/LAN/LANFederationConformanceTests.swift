@@ -2,7 +2,7 @@
 //
 // FED-OD-7: F1 On-Demand Federation Conformance Suite — aggregator.
 //
-// Decision doc §6 (DECISION_FEDERATION_ONDEMAND_LAN_PROXIMITY_2026-07-18) names
+// The LAN federation contract names
 // six negative conformance rows. This file:
 //
 //   1. Documents all six rows with the EXACT test function that satisfies each.

@@ -7,9 +7,9 @@ authors: MOOTx01 maintainers
 date: 2026-06-28
 description: Public interface contract for VaultKit — bidirectional bridge between a MOOTx01 estate and human-readable Markdown vaults, programmatic exchange formats, and MemPalace.
 relates_to:
-  - docs/decisions/ADR-VAULTKIT-001.md
-  - docs/decisions/ADR-007-data-movement-trust-and-version-ladder.md
-  - docs/decisions/DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#62-note-identity-and-import-semantics
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#61-ownership-and-trust-posture
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#63-export-scope-and-drift
   - docs/reference/GENIUSLOCUSKIT_INTERFACE.md
   - docs/reference/LOCUSKIT_INTERFACE.md
 ---
@@ -51,7 +51,7 @@ public struct NoteIR: Codable, Sendable, Equatable {
     /// parsed on import by ObsidianAdapter. Carries drawer.lineageID (the STABLE UUID,
     /// not drawer.id which supersession re-mints).
     public var mootID: UUID?
-    /// Full-fidelity fields (ADR-007 Decision 1). All defaulted;
+    /// Full-fidelity fields (the data-movement contract Decision 1). All defaulted;
     /// JSON serialized before the extension decodes with these defaults.
     public var facts: [FactIR]            // default []
     public var pathComponents: [String]   // default [] — full hierarchy, ancestor → leaf; authoritative over originalPath (the joined back-compat view)
@@ -81,7 +81,7 @@ public struct FactIR: Codable, Sendable, Equatable {
 
 ### `CorpusDocument` + `VaultKitError` (Swift)
 
-THE versioned canonical interchange JSON per ADR-007 Decision 1 — the
+THE versioned canonical interchange JSON per the data-movement contract Decision 1 — the
 serialized form of a corpus; the JSON is the payload, never a per-tool
 mapping DSL.
 
@@ -105,8 +105,8 @@ public struct CorpusDocument: Codable, Sendable, Equatable {
 and any value other than `currentFormatVersion` throws
 `VaultKitError.unsupportedFormatVersion(n)` before any note is parsed —
 never silent best-effort decoding of an unknown shape. Bumping the
-version is a deliberate act recorded in `docs/decisions/`; the shapes
-are frozen (ADR-007 Decision 4, deliverable 2). Decoding a
+version requires a deliberate, versioned interface and conformance update; the
+shapes are frozen within a format version. Decoding a
 pre-extension `NoteIR` JSON (no `facts`/`pathComponents`/`scope`/`kind`
 keys) succeeds with the documented defaults.
 
@@ -126,7 +126,7 @@ Default is `.exportable` (CAND-032) — only drawers explicitly marked exportabl
 disk export never writes non-exportable or private rows. `.believed` is an explicit opt-in
 that fixes the old confirmed-drop bug present when the filter was hard-coded to `.unconfirmed`.
 
-**Privacy-tier semantics (ADR-007 Decision 2).** Sensitivity is NOT part
+**Privacy-tier semantics (the data-movement contract Decision 2).** Sensitivity is NOT part
 of any scope's `filterChain` — the bulk channel enforces the tier rules by
 partition so exclusions are counted, never silent. Secret tier never rides
 bulk export under any scope. Private tier (`.restricted`) is excluded by
@@ -251,7 +251,7 @@ and must not round-trip as notes.
 
 ### `ExchangeAdapter: VaultAdapter` + `ExchangeExport` (read + write)
 
-The first programmatic-tool adapter (ADR-007 Decision 1), both
+The first programmatic-tool adapter (the data-movement contract Decision 1), both
 directions. Decodes the external memory-tool JSON export
 `{ name, entries: [{ id, content, tags?, facts?, pathComponents?, scope?, kind? }] }`
 into `[NoteIR]` on the full-fidelity IR: `id` → `stableSourceKey`,
@@ -276,7 +276,7 @@ public struct ExchangeAdapter: VaultAdapter {
 }
 ```
 
-**Write side (the exit promise).** Per ADR-007 Decision 4
+**Write side (the exit promise).** Per the data-movement contract Decision 4
 gold item 7 ("programmatic export-my-data — exit promise real in both
 forms"), the human-form exit is the Obsidian projection and the
 programmatic form is this adapter's `fromIR`: a user can produce a
@@ -379,7 +379,7 @@ when present.
 ### Palace exchange — outbound pump (`PalacePump` + the four-noun surface)
 
 VaultKit is the canonical home for MemPalace exchange **with fidelity**, in
-both directions (DECISION_PALACE_PUMP_CANONICAL_2026-06-12). The reverse
+both directions (the Palace pump contract). The reverse
 direction is `MemPalaceChromaAdapter` (above); the outbound direction is
 `PalacePump` and its supporting types. The pump moves the WHOLE mootx01 data
 model — drawers, tunnels, KG facts, diary entries — into a live MemPalace MCP
@@ -571,7 +571,7 @@ Exposed as the `moot_palace_import` MCP tool (PAR-PB-1). Tool requires `estateID
 
 public struct ExportReport: Sendable, Equatable {
     public var notesExported: Int
-    /// ADR-007 Decision 2 tier-exclusion counts — reported, never silent.
+    /// the data-movement contract Decision 2 tier-exclusion counts — reported, never silent.
     public var excludedSecretTier: Int   // secret never rides bulk export
     public var excludedPrivateTier: Int  // restricted, absent the explicit opt-in scope
     public var scope: VaultExportScope
@@ -605,7 +605,7 @@ public struct ImportReport: Sendable, Equatable {
 }
 ```
 
-### Audit receipts (ADR-007 Decision 2)
+### Audit receipts (the data-movement contract Decision 2)
 
 Every successful `export` and `importVault` run writes exactly ONE receipt
 into the estate diary — "what left, where, when, how many." The bitmap-audit
@@ -636,7 +636,7 @@ Receipts are read back via the existing diary query surface:
 `EstateCoordinator::diary_entries(handle, agent_name, last_n)` (Rust)
 with `agentName == VaultBridge.receiptAgentName`.
 
-### Sensitivity frontmatter passthrough (ADR-007 Decision 2)
+### Sensitivity frontmatter passthrough (the data-movement contract Decision 2)
 
 Export writes a `sensitivity:` frontmatter key (`elevated` / `restricted` /
 `secret` labels; `normal` omitted as the default) so the tier survives a
@@ -662,7 +662,7 @@ one drawer. The owner re-lowers via the in-app sensitivity control
 lowering via an untrusted file is the exact attack the floor blocks, so the
 asymmetry is by design.
 
-## aria-mcp tool family — `moot_vault_*` (ADR-VAULTKIT-002)
+## aria-mcp tool family — `moot_vault_*` (the Vault MCP contract)
 
 The aria-mcp server exposes `VaultBridge` (plus drift detection and a
 candidate seam) as four tools. Both the Swift and Rust ports are live. All
@@ -695,7 +695,7 @@ current `.md` file's SHA-256 and classifies: **added** (not in manifest),
 `reconcile` surfaces each added/modified file as a candidate
 (`stableSourceKey`, vault path, new content hash) for the downstream
 dreaming/Proposal loop. It is **return-only** — no QueueKit instance is
-mounted in the MCP dispatch context (ADR-VAULTKIT-002 decision d). The
+mounted in the MCP dispatch context (the Vault MCP contract decision d). The
 tool layer produces candidates only: it writes no Proposal noun, and deletions are
 reported, never actioned (no drawer is expunged).
 
@@ -732,7 +732,7 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `MCPStdioClient` | `McpStdioClient` | `vault_kit::mcp_stdio_client` | Local stdio MCP client (JSON-RPC 2.0, one object per line). Swift is an `actor` with `async` methods (`connect`/`listTools`/`callTool(_:arguments:)`/`disconnect`); Rust is a blocking struct (`connect(command)`/`list_tools`/`call_tool(name, Value)`). Both launch via `/usr/bin/env` with leading `KEY=value` env-prefix tokens. `MCPCallResult.textBlocks`/`rawResultJSON` -> `McpCallResult.text_blocks`/`raw_result_json`. |
 | `PalaceJSONValue` | `serde_json::Value` | `vault_kit` (Swift `PalaceJSONValue.swift`) | The loosely-typed JSON carrier for the four-noun envelope-field maps. Swift defines a `PalaceJSONValue` Codable enum (null/bool/number/string/array/object) with canonical encoding + a `.foundationValue` bridge for `callTool`; Rust uses `serde_json::Value` natively. Both serialize maps key-sorted (Swift `.sortedKeys`; Rust `BTreeMap`) so envelopes are byte-identical. |
 | `PalaceNoun` | `PalaceNoun` | `vault_kit::palace_item` | The four-noun discriminator (`drawer`/`tunnel`/`kgFact`/`diaryEntry`). Swift `enum: String` (lowerCamelCase raw values); Rust enum with `#[serde(rename)]` to the same raw values. Drives tool choice, the assigned-id key, the verify strategy. |
-| `PalaceItem` | `PalaceItem` | `vault_kit::palace_item` | The language-neutral four-noun pump carrier: `noun`, `sourceID`/`source_id`, `body`, `nativeFields`/`native_fields`, `envelopeFields`/`envelope_fields`. The read seam — the caller projects each GLK noun to a `PalaceItem` and injects the stream (DECISION_PALACE_PUMP_CANONICAL_2026-06-12). Swift maps use `[String: PalaceJSONValue]`; Rust uses `BTreeMap<String, serde_json::Value>`. |
+| `PalaceItem` | `PalaceItem` | `vault_kit::palace_item` | The language-neutral four-noun pump carrier: `noun`, `sourceID`/`source_id`, `body`, `nativeFields`/`native_fields`, `envelopeFields`/`envelope_fields`. The read seam — the caller projects each GLK noun to a `PalaceItem` and injects the stream (the Palace pump contract). Swift maps use `[String: PalaceJSONValue]`; Rust uses `BTreeMap<String, serde_json::Value>`. |
 | `PalaceEnvelopePayload` | `PalaceEnvelopePayload` | `vault_kit::palace_payload_envelope` | The typed `NoteIR`-drawer envelope payload (frontmatter, links, tags, facts, …). Field names match the Swift Codable keys verbatim via serde renames. Used by the drawers-only `NoteIR` pump path. |
 | `PalacePayloadEnvelope` (codec) | `palace_payload_envelope` (fns) | `vault_kit::palace_payload_envelope` | The ONE versioned envelope codec for all four nouns. Typed-payload path: `encode(body:payload:)`/`decode(content:)`/`reconstructNote(content:fallbackKey:)`. Generic four-noun path: `encodeFields(body:fields:)`/`decodeFields(content:)` -> `encode_fields`/`decode_fields`. Marker `<!-- MOOT-ENVELOPE v1 … MOOT-ENVELOPE -->`; canonical JSON (sorted keys, no slash escaping). Empty field map -> body unchanged (no empty envelope). `DecodeError`/`EnvelopeDecodeError`: `unsupportedVersion`/`unterminated`/`malformedJSON`. Byte-identical envelopes both ports — shared conformance vectors (bitmaps as integers to match Swift `JSONEncoder`). |
 | `PalaceDrawerArgs` | `PalaceDrawerArgs` | `vault_kit::palace_pump_mapping` | The drawer-only `NoteIR` mapping result (wing/room/content/sourceFile/addedBy). `PalacePumpMapping.makeArgs(for:)` -> `make_args(note)`. |
@@ -767,14 +767,16 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 
 - EideticLib FDC classification (structural support present, `classify_on_import` flag honoured, lookup always returns `None` — equivalent to the feature-flag-off path in Swift).
 - Async `VaultBridge` methods (synchronous in Rust V1; the GLK Rust coordinator is synchronous).
-Note: the aria-mcp `moot_vault_*` Rust mirror is delivered (see DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md). ADR-VAULTKIT-002 decision a is superseded by that document.
+Note: the aria-mcp `moot_vault_*` Rust mirror is delivered (see the Vault identity-and-scope contract). the Vault MCP contract decision a is superseded by that document.
 
 ## Out of scope (later missions)
 
 CorpusKit RAG bundling; substrate-level origin-date and `SourceRef` primitive;
-attachment blob custody; the watched-source scheduler and the real
-QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a later,
-separately-gated mission).
+attachment blob custody; the watched-source scheduler and the real QueueKit
+enqueue (leg a) + dream → Proposal → Debrief consumption. The watched-source
+scheduler is a planned 1.1 resident control-layer mission; it does not move
+into `VaultBridge`. See `VAULTKIT_SPEC.md` §6.4 for lifecycle and sensitivity
+requirements.
 
 ---
 
@@ -782,6 +784,7 @@ separately-gated mission).
 
 | Version | Date | Change |
 |---|---|---|
+| 1.14.0 | 2026-07-23 | Clarified that the watched-source scheduler is a planned 1.1 resident control-layer mission, not a `VaultBridge` responsibility; linked the lifecycle and automated sensitivity requirements in `VAULTKIT_SPEC.md`. |
 | 1.13.0 | 2026-07-16 | Concordance table: added two missing public Rust types re-exported at the `vault_kit` crate root. (1) `PalaceItemJobPayload` — the four-noun checkpoint-job payload struct (fields: `noun`, `source_id`, `body`, `call`); Swift-internal counterpart also documented. (2) `CheckpointQueue` — Rust-only dependency-free maildir-style filesystem queue that stands in for QueueKit on the Rust leg; public methods `mount`/`send`/`send_item`/`pending_jobs`/`read_job`/`read_item_job`/`complete` documented. Both types live in `vault_kit::palace_pump` and were re-exported via `lib.rs` but had no concordance rows. |
 | 1.12.0 | 2026-07-16 | Audit corrections: (1) `VaultExportScope` default corrected from `.believed` to `.exportable` (CAND-032 shipped before the doc was updated) — fixed in prose, enum annotation, MCP tool table, and both concordance rows (`VaultExportScope` Rust Default, `moot_vault_export` scope). (2) `VaultProgress` typealias added (Swift + Rust). (3) `VaultAdapter` protocol extended with `fromIR(_:to:progress:)` / `from_ir_with_progress` overload. (4) `VaultBridge.export` scope default and all bridge method signatures updated to include `progress: VaultProgress?` parameter (present in source since T7; missing from doc). (5) `VaultBridge.importVault(includingPaths:)` and `importMemPalace` updated with `mode` and `progress` params. (6) `PalaceBridge.importPalace` updated with `progress` param. (7) `ImportReport` four missing fields added: `drawersSkippedUnchanged`, `drawersSkippedTombstoned`, `drawersSkippedPartialWrite`, `enqueuedForEncode` (FINDING-1a, FINDING-1b). (8) Import receipt JSON updated to include `drawersSkippedPartialWrite`. (9) Concordance table rows corrected for `VaultAdapter`, `ImportReport`, `VaultBridge`, and `PalaceBridge`. |
 | 1.11.0 | 2026-06-28 | Path-traversal hardening (planned lockdown). `ObsidianAdapter.fromIR(_:to:)` and `ExchangeAdapter.decode(_:)` now enforce vault containment as a security boundary. A shared `containedVaultURL(forRelativePath:under:)` helper (Swift) / `contained_vault_path` free function (Rust) validates every vault-relative path before any filesystem access: rejects `..`, absolute prefixes, backslash separators, empty and `.` components (lexical phase). A second pass via `ensureContainedInVault(_:under:)` (Swift) / `write_contained_file` (Rust) re-checks the fully-resolved path with symlink expansion (`resolvingSymlinksInPath` / `canonicalize`) and rejects pre-existing symlinks at the destination. `ExchangeAdapter.decode` validates `pathComponents` entries with the same lexical rules before projecting them to `NoteIR`. Both phases share identical rejection vocabulary across Swift and Rust. Errors surface as `VaultKitError.adapterError` (Swift) / `VaultKitError::AdapterError` (Rust) — fail-closed, never silent. Both ports. |

@@ -1,4 +1,4 @@
-// Snapshot registry tests (ADR-017 §15).
+// Snapshot registry tests.
 // Rust port of Swift SnapshotRegistryTests — CRUD round-trips,
 // attestation write/read, delete cascade, HLC ordering.
 

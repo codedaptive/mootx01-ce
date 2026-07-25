@@ -4,7 +4,7 @@
 // against (NEURONKIT_SPEC § 4.7). A corpus is any enumerable reference
 // set flattened to a list of id/content/tags entries.
 //
-// Corpus construction paths (VK-ADAPT-01, ADR-007):
+// Corpus construction paths (VK-ADAPT-01, data-movement privacy tiers):
 //   - VaultKit's CorpusProjection converts [NoteIR] → ExternalCorpus for
 //     the adapter → bridge import pipeline.
 //   - ARIA_MCP can construct a corpus inline from wire args.
@@ -12,7 +12,7 @@
 //     from captured drawer content.
 //
 // Decode knowledge for the external memory-tool JSON export format lives
-// in VaultKit's ExchangeAdapter per ADR-007 Decision 1; it is not
+// in VaultKit's ExchangeAdapter per data-movement privacy tiers; it is not
 // reproduced here.
 //
 // Ownership rationale: "external" means external to a GeniusLocus
@@ -116,34 +116,32 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     }
 
     /// Execute hybrid BM25+vector recall for each corpus entry via the
-    /// supplied `Corpus` actor. Returns one `[ScoredChunk]` list per
+    /// canonical-content engine. Returns one `[CorpusContentHit]` list per
     /// entry, in entry order. Entries with empty content return an empty
     /// list without querying the store.
     ///
-    /// This is the production recall path (CORPUSKIT_INTERFACE_v0.8 § 6).
+    /// This is the shared-content 1.1 recall path.
     /// Recall fuses vector kNN and BM25 keyword scores via Reciprocal Rank
     /// Fusion, surfacing both `vectorScore` and `keywordScore` on each
     /// result. For the LocusKit-only content-match path used in
     /// `verifyMigration`, use `asRecallFrames()`.
     ///
     /// - Parameters:
-    ///   - corpus: The estate's `Corpus` actor. Caller constructs it from
-    ///     the same `Storage` backing the estate so chunk embeddings index
-    ///     the estate's content.
-    ///   - limit: Maximum scored chunks per entry. Default 10.
-    ///   - now: Deterministic clock — forwarded to `Corpus.recall` per the
+    ///   - corpus: The estate's canonical-content engine.
+    ///   - limit: Maximum canonical content hits per entry. Default 10.
+    ///   - now: Deterministic clock — forwarded to `CorpusContentEngine.recall` per the
     ///     fleet determinism rule (CLAUDE.md).
     ///
-    /// - Returns: One `[ScoredChunk]` list per entry, index-aligned with
+    /// - Returns: One `[CorpusContentHit]` list per entry, index-aligned with
     ///   `entries`. Entries with empty content produce an empty list.
     ///
     /// - Throws: `CorpusKitError` if any recall call fails.
     public func hybridRecall(
-        via corpus: CorpusKit.Corpus,
+        via corpus: CorpusKit.CorpusContentEngine,
         limit: Int = 10,
         now: Date
-    ) async throws -> [[CorpusKit.ScoredChunk]] {
-        var results: [[CorpusKit.ScoredChunk]] = []
+    ) async throws -> [[CorpusKit.CorpusContentHit]] {
+        var results: [[CorpusKit.CorpusContentHit]] = []
         results.reserveCapacity(entries.count)
         for entry in entries {
             guard !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

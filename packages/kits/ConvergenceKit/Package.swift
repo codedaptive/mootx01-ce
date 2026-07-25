@@ -7,8 +7,8 @@
 // ecosystem), Federation (substrate-native CRDT exchange),
 // None (single-device passthrough).
 //
-// Design per DECISION_SYNCKIT_DESIGN_2026-05-19.md.
-// Eleven-kit graph per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
+// Design per the ConvergenceKit replication surface.
+// Eleven-kit graph per current kit ownership.
 
 import PackageDescription
 

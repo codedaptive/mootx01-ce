@@ -1,6 +1,6 @@
 //! Default wing constants and definitions. Rust port of `DefaultWings.swift`.
 //!
-//! ADR-016 §1–§2: the estate's default wing name is the fixed constant
+//! the estate's default wing name is the fixed constant
 //! `DEFAULT_WING_NAME` ("Agentic Memory"). At provision time, GeniusLocusKit
 //! seeds seven named wings, each with a hint memory in the normal room
 //! `HINT_ROOM` ("AI_Charter_Hint"). These constants drive both the per-capture
@@ -19,13 +19,13 @@
 //! Swift parity: `DefaultWings.swift` in LocusKit. Kept in lockstep.
 //! Hint text must match verbatim — the cross-port canonical text.
 
-/// Fixed name for the default wing. ADR-016 §1.
+/// Fixed name for the default wing. wing organization.
 /// Every `capture` call that does not supply an explicit wing writes here.
 pub const DEFAULT_WING_NAME: &str = "Agentic Memory";
 
-/// Room name for per-wing hint memories seeded at provision. ADR-016 §2.
+/// Room name for per-wing hint memories seeded at provision. wing organization.
 /// A drawer filed in this room IS the hint memory for the wing.
-/// Per ADR-017, wings are node rows in the `nodes` table and drawers
+/// Under the node-tree model, wings are node rows in the `nodes` table and drawers
 /// reference their parent room via `parent_node_id`.
 /// The hint memory is a NORMAL drawer: embedded, recallable, user-deletable.
 pub const HINT_ROOM: &str = "AI_Charter_Hint";
@@ -45,13 +45,13 @@ pub const HINT_ADDED_BY: &str = "estate-provision";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WingDefinition {
     /// The wing name (used as the node `display_name` for the wing node in the
-    /// ADR-017 `nodes` table).
+    /// node-tree integrity `nodes` table).
     pub name: &'static str,
     /// The hint text (becomes `drawer.content` in the `AI_Charter_Hint` room).
     pub hint: &'static str,
 }
 
-/// The seven default wings seeded at provision time. ADR-016 §2.
+/// The seven default wings seeded at provision time. wing organization.
 ///
 /// Order matches `DefaultWings.swift` exactly — the first entry is the
 /// default wing (`DEFAULT_WING_NAME`). Hint text is identical verbatim

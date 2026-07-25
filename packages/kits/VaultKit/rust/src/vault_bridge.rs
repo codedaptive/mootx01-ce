@@ -8,13 +8,13 @@
 //! internally — so the bridge is deterministic. The caller supplies a
 //! milliseconds-since-epoch integer.
 //!
-//! ## Audit receipts (ADR-007 Decision 2)
+//! ## Audit receipts
 //!
 //! Every successful export and import run writes one receipt into the
 //! estate's diary — "what left, where, when, how many." The bitmap-audit
 //! trail is per-row and cannot carry an estate-level payload, so receipts
 //! use the diary: the estate-level event log whose `Migration` event class
-//! (spec § 5.6) exists for exactly this. See `DECISION_NEEDED_VK-TIER-01`.
+//! exists for exactly this.
 
 use crate::drawer_mapping::{ms_to_iso8601, DrawerMapping, ImportOutcome};
 use crate::error::VaultKitError;
@@ -93,7 +93,7 @@ pub struct ImportReport {
     /// The bulk `capture_batch` path intentionally skips the per-item encode
     /// enqueue to avoid flooding the queue for large imports. After the batch
     /// write completes, `import_notes` calls `collect_reindex_jobs` and enqueues
-    /// the resulting jobs via `Corpus::enqueue_ingest_batch` (capped at
+    /// the resulting change references via `enqueue_change_batch` (capped at
     /// `REINDEX_MAX_JOBS` = 10,000 per call).
     ///
     /// The per-item path (`capture_with_mode(WriteMode::Regular)`) enqueues each
@@ -106,7 +106,7 @@ pub struct ImportReport {
 }
 
 /// Counts returned by an export run, including the per-tier exclusion counts
-/// the ADR-007 Decision 2 bulk-channel rules produced. Exclusions are
+/// the data-movement privacy tiers bulk-channel rules produced. Exclusions are
 /// reported, never silent (zero-loss reporting symmetry with C-13). Mirrors
 /// Swift `ExportReport`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +170,7 @@ impl<'a> VaultBridge<'a> {
     /// Project an estate to a Markdown vault. Mirrors Swift
     /// `VaultBridge.export(estate:to:scope:now:)`.
     ///
-    /// Enforces the ADR-007 Decision 2 privacy-tier rules on this bulk
+    /// Enforces the data-movement privacy tiers privacy-tier rules on this bulk
     /// channel: secret-tier drawers never export, private-tier drawers
     /// export only under `VaultExportScope::BelievedIncludingPrivate`, and
     /// every tier exclusion is counted in the returned `ExportReport` —
@@ -218,7 +218,7 @@ impl<'a> VaultBridge<'a> {
     /// on each note's `stable_source_key`. Every captured drawer satisfies I-5.
     /// Mirrors Swift `VaultBridge.importVault(at:into:now:)`.
     ///
-    /// Import is ungated (ADR-007: arrival is free), but each note's
+    /// Import is ungated (data-movement privacy tiers: arrival is free), but each note's
     /// sensitivity tier is preserved from the IR when the adapter supplies it
     /// (`sensitivity` frontmatter → `CaptureFrame.sensitivity`). A successful
     /// run writes one audit receipt to the estate's diary.
@@ -488,8 +488,8 @@ impl<'a> VaultBridge<'a> {
                     jobs.len()
                 );
                 corpus
-                    .enqueue_ingest_batch(&jobs)
-                    .map_err(|e| VaultKitError::VerbError(format!("enqueue_ingest_batch failed: {e:?}")))?;
+                    .enqueue_change_batch(&jobs)
+                    .map_err(|e| VaultKitError::VerbError(format!("enqueue_change_batch failed: {e:?}")))?;
                 self.coordinator
                     .rollup_after_reindex(handle, now / 1000)
                     .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;
@@ -509,7 +509,7 @@ impl<'a> VaultBridge<'a> {
         Ok(report)
     }
 
-    // MARK: - Audit receipts (ADR-007 Decision 2)
+    // MARK: - Audit receipts
 
     /// File one receipt into the estate diary through the coordinator's
     /// sanctioned `estate_for` access point (the same seam `DrawerMapping`
@@ -639,7 +639,7 @@ impl<'a> VaultBridge<'a> {
             .recall(handle, frame, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
 
-        // Resolve wing display names from the node tree (ADR-017: Drawer no
+        // Resolve wing display names from the node tree (node-tree integrity: Drawer no
         // longer stores wing/room strings directly).
         let node_names = crate::drawer_mapping::resolve_drawer_node_names(
             self.coordinator, handle, &drawers,

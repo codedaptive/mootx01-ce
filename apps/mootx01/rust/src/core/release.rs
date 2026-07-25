@@ -83,29 +83,104 @@ pub fn latest_version_within(timeout_secs: Option<u64>) -> Result<String, Releas
     Ok(tag.trim_start_matches('v').to_string())
 }
 
-/// Numeric semver comparison: Some(true) when `candidate` is newer than
-/// `current`. None when either fails to parse.
+/// SemVer comparison: Some(true) when `candidate` is newer than `current`.
+/// Stable versions sort after pre-releases with the same numeric core.
+/// None when either value fails to parse.
 pub fn is_newer(candidate: &str, current: &str) -> Option<bool> {
-    Some(parse_semver(candidate)? > parse_semver(current)?)
+    Some(compare_semver(&parse_semver(candidate)?, &parse_semver(current)?).is_gt())
 }
 
-fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
-    // Tolerant: "1", "0.8", "1.0.0", "v2.0.0", "1.0.0-rc1" all parse; missing
-    // components default to 0 (real release tags have used two segments).
-    let mut it = s.trim().trim_start_matches('v').splitn(3, '.');
-    let num = |part: Option<&str>| -> Option<u64> {
-        match part {
-            None => Some(0),
-            Some(p) => {
-                let digits: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if digits.is_empty() { None } else { digits.parse().ok() }
-            }
-        }
+#[derive(Debug, Eq, PartialEq)]
+struct ParsedSemver {
+    core: [u64; 3],
+    prerelease: Option<Vec<PrereleaseIdentifier>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PrereleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+fn parse_semver(s: &str) -> Option<ParsedSemver> {
+    // Tolerant of historical one- and two-component tags; missing numeric
+    // components default to zero. Pre-release precedence follows SemVer 2.0.
+    let raw = s.trim().strip_prefix('v').unwrap_or(s.trim());
+    let (core_text, prerelease_text) = match raw.split_once('-') {
+        Some((core, pre)) if !pre.is_empty() => (core, Some(pre)),
+        Some(_) => return None,
+        None => (raw, None),
     };
-    let maj = num(it.next())?;
-    let min = num(it.next())?;
-    let patch = num(it.next())?;
-    Some((maj, min, patch))
+    let core_parts: Vec<&str> = core_text.split('.').collect();
+    if core_parts.is_empty() || core_parts.len() > 3 {
+        return None;
+    }
+    let mut core = [0_u64; 3];
+    for (index, part) in core_parts.iter().enumerate() {
+        if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        core[index] = part.parse().ok()?;
+    }
+    let prerelease = match prerelease_text {
+        Some(pre) => Some(
+            pre.split('.')
+                .map(|part| {
+                    if part.is_empty()
+                        || !part
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    {
+                        return None;
+                    }
+                    match part.parse::<u64>() {
+                        Ok(value) => Some(PrereleaseIdentifier::Numeric(value)),
+                        Err(_) => Some(PrereleaseIdentifier::Text(part.to_owned())),
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+    Some(ParsedSemver { core, prerelease })
+}
+
+fn compare_semver(a: &ParsedSemver, b: &ParsedSemver) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let core = a.core.cmp(&b.core);
+    if core != Ordering::Equal {
+        return core;
+    }
+    match (&a.prerelease, &b.prerelease) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a_ids), Some(b_ids)) => {
+            for (a_id, b_id) in a_ids.iter().zip(b_ids.iter()) {
+                let order = match (a_id, b_id) {
+                    (
+                        PrereleaseIdentifier::Numeric(a_value),
+                        PrereleaseIdentifier::Numeric(b_value),
+                    ) => a_value.cmp(b_value),
+                    (PrereleaseIdentifier::Numeric(_), PrereleaseIdentifier::Text(_)) => {
+                        Ordering::Less
+                    }
+                    (PrereleaseIdentifier::Text(_), PrereleaseIdentifier::Numeric(_)) => {
+                        Ordering::Greater
+                    }
+                    (
+                        PrereleaseIdentifier::Text(a_value),
+                        PrereleaseIdentifier::Text(b_value),
+                    ) => a_value.cmp(b_value),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            a_ids.len().cmp(&b_ids.len())
+        }
+    }
 }
 
 /// `(os, arch)` for the asset name, matching the release matrix.
@@ -489,6 +564,10 @@ mod tests {
         assert_eq!(is_newer("0.9.9", "1.0.0"), Some(false));
         assert_eq!(is_newer("v2.0.0", "1.9.9"), Some(true));
         assert_eq!(is_newer("2.0.0-rc1", "1.9.9"), Some(true));
+        assert_eq!(is_newer("1.1.0", "1.1.0-beta-03"), Some(true));
+        assert_eq!(is_newer("1.1.0-beta-04", "1.1.0-beta-03"), Some(true));
+        assert_eq!(is_newer("1.1.0-beta-02", "1.1.0-beta-03"), Some(false));
+        assert_eq!(is_newer("1.1.0-beta-03", "1.1.0"), Some(false));
         assert_eq!(is_newer("0.8", "1.0.0"), Some(false)); // real two-segment tag
         assert_eq!(is_newer("1.1", "1.0.0"), Some(true));
         assert_eq!(is_newer("junk", "1.0.0"), None);

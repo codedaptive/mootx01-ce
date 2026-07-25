@@ -105,10 +105,10 @@ public extension GeniusLocusKit {
     /// every token but the number, so BM25 co-locates them at the very top.
     ///
     /// The prior vector lanes were unusable here — the binary SimHash space is
-    /// degenerate on real estates (109k estate: 748 chunks within Hamming ≤ 2,
+    /// degenerate on real estates (109k estate: 748 items within Hamming ≤ 2,
     /// true twin buried at rank #399), and a whole-partition float scan is
     /// ~3 s per probe (the on-demand default of 500 probes was ~25 min). BM25
-    /// returns SOURCE (drawer) IDs directly, so no chunk→drawer remap either.
+    /// returns Drawer IDs directly, so no identity remap is required.
     ///
     /// A small K suffices because BM25 ranks the shared-term twin near the top;
     /// the ConflictCue screen downstream is the precision gate, so this only
@@ -135,7 +135,7 @@ public extension GeniusLocusKit {
     ///   - modelID: Embedding-model partition for the DRAWER-keyed lane;
     ///     must match the model used when those vectors were filed.
     ///     Defaults to the standing-signal registration default. When a
-    ///     Corpus is registered for the estate, its chunk-keyed lane is
+    ///     Corpus is registered for the estate, its Drawer-keyed lane is
     ///     ALSO mined under the corpus's own modelID — that is the lane
     ///     the production encode pipeline populates.
     ///   - probeLimit: Maximum vector-indexed item IDs probed this
@@ -216,25 +216,23 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Lane 2 — the corpus lane, the ONLY lane a production estate
-        // populates: the encode drain writes chunk-keyed rows under the corpus
-        // provider's modelID, so lane 1's drawer-keyed `getVector` finds
-        // nothing there. Candidate generation here is LEXICAL, via the corpus's
+        // Lane 2 — the CorpusKit model population used by production. The
+        // encode drain writes Drawer-keyed rows under the corpus provider's
+        // modelID. Candidate generation here is LEXICAL, via the corpus's
         // persistent BM25 inverted index — NOT vectors. A contradiction is two
         // statements about the same thing that disagree; "about the same thing"
         // is exactly what BM25 answers cheaply (sub-linear WAND/BMW over
         // posting lists), and it is the same shared-term similarity ConflictCue
         // screens on, so generator and screen agree on what a candidate is. The
         // vector lanes were unusable at estate scale — the binary SimHash space
-        // is degenerate (109k estate: 748 chunks within Hamming ≤ 2, true twin
+        // is degenerate (109k estate: 748 items within Hamming ≤ 2, true twin
         // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
-        // returns SOURCE (drawer) IDs directly, so no chunk→drawer remap.
+        // returns Drawer IDs directly, so no identity remap is required.
         // `seenPairs` keys on drawer IDs, so both lanes dedupe together.
         if let corpus = corpusKits[handle] {
-            // Probe drawers = the owning drawers of the recent probe chunks.
-            let probeChunkUUIDs = probeIDs.compactMap { UUID(uuidString: $0) }
-            let probeOwners = await corpus.sourceIDs(forChunkIDs: probeChunkUUIDs)
-            let probeDrawerIDs = Array(Set(probeOwners.values))
+            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
+            // IDs are the probe Drawers directly.
+            let probeDrawerIDs = Array(Set(probeIDs))
             // Hydrate probe drawers for their content — the BM25 query text.
             var probeDrawers: [Drawer] = []
             if !probeDrawerIDs.isEmpty {

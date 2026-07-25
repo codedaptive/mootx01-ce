@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.15.0
-status: active
-date: 2026-07-16
+version: 1.16.0
+status: accepted-1.1-target
+date: 2026-07-20
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -11,7 +11,7 @@ relates_to:
   - GENIUSLOCUS_ARCHITECTURE_SPEC.md  (§ 7.8 verb surface, § 11 standing signals, § 12 matrix tier, § 15 kit composition; invariants I-13, I-15)
   - LOCUSKIT_SPEC.md  (the single-estate tier GLK composes)
   - VECTORKIT_SPEC.md  (the vector tier composed per estate)
-  - CORPUSKIT_SPEC.md  (the RAG-bundle tier composed per estate)
+  - CORPUSKIT_SPEC.md  (the standalone-capable RAG/index tier composed per estate)
   - QUEUEKIT_SPEC.md  (the serial-lane dispatch substrate the scheduler owns)
   - ARIALEXICONLIB_SPEC.md  (the verb/noun/adjective vocabulary the surface conforms to)
   - ARIA_MCP_SPEC.md  (the access surface that mediates cross-device federation, I-13)
@@ -88,7 +88,9 @@ This specification defines:
   parent-never-modified invariant (I-15).
 - The MemPalace migration API: import, parallel-run, and zero-loss
   verification.
-- The Swift ⇄ Rust conformance obligation and the documented port gap.
+  - The Swift ⇄ Rust conformance obligation and the documented port gap.
+- The shared-content composition contract: LocusKit owns each canonical Drawer,
+  while CorpusKit indexes that same content through a GLK-owned adapter.
 
 This specification does NOT define:
 
@@ -96,7 +98,8 @@ This specification does NOT define:
 - Single-estate nouns, bitmaps, the recall pipeline, container pruning,
   or the per-kit bitmap-audit trail — see `LOCUSKIT_SPEC.md`.
 - Embeddings and ANN search — see `VECTORKIT_SPEC.md`.
-- RAG bundle composition — see `CORPUSKIT_SPEC.md`.
+- CorpusKit's standalone document/passage storage policy — see
+  `CORPUSKIT_SPEC.md`. GLK uses CorpusKit's attached-content mode.
 - The job-queue mechanics the scheduler dispatches over — see
   `QUEUEKIT_SPEC.md`.
 - Cross-device federation, the MCP wire protocol, and answer-assembly
@@ -176,7 +179,7 @@ lane.
 
 **I-5 (single serial lane per estate):** each estate's scheduler drains
 its queue through a single drainer at `.serializable` isolation
-(DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21). Exactly one job is
+(the standing-signal scheduling contract). Exactly one job is
 claimed at a time, FIFO; two signals' emissions against one estate never
 interleave at job grain. There is no per-signal queue and no
 cross-estate lane.
@@ -258,23 +261,52 @@ emission ordering, the matrix tier, the training daemon, and the grant,
 federation, branch, and migration surfaces. Value-level results must
 agree; neither version leads.
 
-**I-16 (composite schema version = sum of component versions):** the GLK
-composite schema version is the SUM of its three GLK-composed component
-versions (LocusKit + VectorKit + CorpusKit/BundleStore). It is derived from
-the live component declarations in both ports, so it can never drift from the
-components, and any component bump forces the composite to advance — which the
-replication schema gate relies on (a source/destination version mismatch is
-rejected). After the ADR-012 `ext` pre-provisioning that sum is 7. The `grants`
-table and every persistent entity table across the composed kits carry the
-ADR-012 nullable `.json` `ext` forward-compat slot, inert in 1.0.
+**I-16 (composite schema version derives from attached profiles):** the GLK
+composite schema version derives from the live GLK-attached schema declarations
+for LocusKit, VectorKit, and CorpusKit. CorpusKit's standalone content,
+passage/chunk, and removed-source schemas are not component declarations in a
+GLK composite. Any attached-profile component bump advances the composite and
+therefore the replication schema gate. Historical version 7 described the 1.0
+layout; the 1.1 migration advances it rather than pretending that the old
+`BundleStore` remains part of GLK.
+
+**I-17 (one canonical content row):** LocusKit owns the canonical Drawer row and
+`Drawer.id` in every GLK estate. GLK injects a LocusKit-backed
+`CorpusContentSource` into CorpusKit. CorpusKit persists only derived retrieval
+state keyed by that Drawer id and never stores Drawer text in a document,
+passage, chunk, queue payload, or metadata copy.
+
+**I-18 (passage chunking is dark in GLK):** GLK always selects
+`CorpusIndexUnitPolicy.wholeContent`. Passage production and standalone chunk
+compatibility types are unreachable from GLK and MOOTx01. Corpus BM25, vector,
+provider-basis, counts, and checkpoints operate at Drawer identity; recall
+returns that identity without a chunk-to-Drawer translation join.
+
+**I-19 (migration preserves canonical state):** upgrading a legacy estate may
+delete only redundant Corpus content/chunk rows and Corpus-derived indexes.
+Canonical Drawers, their audit/history relationships, and unrelated
+Drawer-keyed vector lanes are preserved. CorpusKit's derived BM25/vector and
+provider basis/count state is rebuilt from Drawers before the Corpus lane is
+made available.
+
+**I-20 (historical migration is optional build baggage):** current-format GLK
+runtime and attached CorpusKit composition contain no concrete historical
+migration implementation. Each historical step is a separate capsule selected
+at build time by a declared minimum estate-format floor. A consumer that starts
+with fresh/current estates compiles no capsules; a consumer that supports floor
+1.0 compiles the contiguous 1.0-to-1.1 capsule and refuses estates below that
+floor before any destructive transition.
 
 ## § 5 — Behavioral contracts
 
 **B-1 (open composes then registers):** `open(storage:owner:)` opens a
 `LocusKit.Estate` over the supplied storage, reads its manifest, derives
 the `EstateHandle` (validating the UUID and the zoom window), refuses a
-duplicate UUID, then registers the estate, retains its storage for the
-grant surface, and mints an empty `UnifiedAuditLog`. `close(_:)` flushes
+duplicate UUID, constructs a GLK-owned LocusKit-to-`CorpusContentSource`
+adapter, and opens CorpusKit in attached whole-content mode over that adapter.
+It then registers the estate, retains its storage for the grant surface, and
+mints an empty `UnifiedAuditLog`. Opening attached CorpusKit must not register
+standalone content/passage schemas. `close(_:)` flushes
 the estate, drops the registry entry, the audit log, and the grant
 surface; a refusing flush still drops the entry so a dead handle never
 lingers.
@@ -303,15 +335,14 @@ confirmation flag and S-3 state gate, tombstones the drawer row, and zeroes
 the content blob — atomically. The gate produces an `AuditEvent` (substrate
 truth) but does NOT append it to the audit log yet.
 
-Step 2 (GLK orchestration, cross-kit vector delete): when a `Corpus` is
-registered for the estate, calls `Corpus.remove(sourceID: rowID)` to purge
-the drawer's BM25 index entries and all vector embeddings from the Corpus's
-internal VectorStore; when a standalone `VectorStore` is also registered
-(`.glk` kind), additionally calls
-`VectorStore.deleteAllVectors(itemID: rowID, modelID: corpus.modelID)` to
-invalidate the standalone store's resident array (the two stores share the
-same backing SQLite table but maintain separate in-memory bitmaps). When no
-Corpus or VectorStore is registered (`.locusOnly` kind), Step 2 is a no-op.
+Step 2 (GLK orchestration, derived-state delete): when a `Corpus` is registered
+for the estate, call `Corpus.remove(sourceID: rowID)` to purge Drawer-keyed BM25,
+Corpus vector, provider, and checkpoint state. When an independent GLK
+`VectorStore` lane is registered, delete only rows for the exact Drawer id and
+lane/model ownership. A broad `destroyAllVectors` call is forbidden here.
+Canonical content was already zeroed by LocusKit in step 1; CorpusKit has no
+verbatim copy to scrub. With no Corpus or vector lane (`.locusOnly`), step 2 is
+a no-op.
 
 Step 3 (audit seal):
 - **On success (steps 1+2 both complete):** GLK calls
@@ -544,10 +575,10 @@ record, drops any mode-1 vault key (cryptographic clawback), and appends
 a `grantRevoked` entry. Both append HLC-stamped entries that sort cleanly
 and cannot break the chain.
 
-**B-8a (ADR-025 sensitivity-unlock audit seam):** Four public methods on
+**B-8a (sensitivity-unlock audit seam):** Four public methods on
 `GeniusLocusKit` (`SensitivityAuditVerbs.swift`) provide the audit write
 surface that `AriaMcpKit`'s `SensitivityGrantLedger` / `ToolDispatcher`
-calls into for ADR-025 §4 compliance ("every grant, every denial, every
+calls into to satisfy the "every grant, every denial, every
 manual revocation, and every read served under an active grant is written
 to the UnifiedAuditLog with tier, grant id, and timestamps"):
 - `recordSensitivityGrantIssued(_:tier:grantID:expiresAt:now:)` — a
@@ -581,7 +612,7 @@ against `_storagekit_audit`, bridges the rows to `UnifiedAuditEntry`
 values, and folds them into a freshly-built `UnifiedAuditLog` via
 `add(contentsOf:)` (idempotent by content hash, I-11) — replacing the
 former N+1-per-drawer `feedAuditLog(for:)` walk into a persistent
-registry (ADR025-AUDITLOG-GOVERNOR Bug 1 fix / ADR-026); the returned
+registry under the storage-residency rule; the returned
 log is a value-type snapshot, not accumulated state. `AuditProjectionFold.project`
 folds the HLC-ordered log into per-row state; the asOf variant folds only
 entries at or before a cutoff HLC. `AuditRecovery.rebuild` replays the
@@ -633,7 +664,7 @@ recall per corpus entry and returns `.identical` only when every entry
 is recallable, else `.diverged` with the missing entries. `runParallel`
 returns a `ParallelRunHandle` that routes captures per
 `ParallelCaptureMode` until `stop()`. Mass data ingestion is NOT a GLK
-verb: per ADR-007 Decision 1 the flat import verb is
+verb: per the data-movement contract Decision 1 the flat import verb is
 retired, superseded by VaultKit's adapter → bridge path
 (`ExchangeAdapter` → `VaultBridge.importVault`), which provides
 idempotent re-import, link reconstruction, and per-entry provenance
@@ -704,6 +735,45 @@ by-id load threw or returned a partial set) is degraded gracefully — kept — 
 a valid ACTIVE drawer that is merely not-yet-joined is never dropped. The
 forced-`getDrawers`-failure degradation contract (query survives on lane
 signals, stage recorded in `degradedStages`) is preserved.
+
+**B-17 (legacy Corpus-to-Drawer migration):** opening a pre-1.1 GLK layout
+enters a migration gate before the Corpus lane becomes queryable:
+
+1. Validate that every active legacy Corpus source maps to an existing
+   canonical Drawer and record any mismatch as a migration failure; do not
+   synthesize Drawers from chunks.
+2. Drop legacy GLK-only copied content/chunk tables, chunk-source maps,
+   removed-source rows, and stale Corpus-derived BM25/vector/provider state.
+   Preserve Drawers, Drawer audit/history, tunnels, facts, diary rows, and
+   vector rows outside CorpusKit's declared ownership scope.
+3. Open CorpusKit in attached `.wholeContent` mode, rebuild BM25, Corpus-scoped
+   vectors, provider basis/counts, and checkpoints from the Drawer source.
+4. Verify canonical-id coverage and sample recall/hydration. Only then advance
+   the schema/checkpoint and make the Corpus lane non-dark. Failure leaves
+   LocusKit recall available and Corpus recall explicitly degraded/dark.
+
+The migration capsule is not called by the current GLK core. MOOTx01 and Aria
+build the floor-1.0 catalog and invoke it before current-runtime CorpusKit wiring;
+fresh SDK consumers omit that dependency/feature. Each subsequent migration
+must declare its source/target versions and join the same contiguous catalog so
+raising the compiled floor removes all lower capsules.
+
+The migration streams in stable Drawer-ID order. Pure tokenization and
+stateless embedding compute run in bounded parallel batches; all durable writes
+remain ordered/serial and the cursor advances only after the batch commit.
+Trainable bases commit atomically before per-model backfill. A crash either
+restarts basis training from zero or resumes deterministic upserts from the last
+durable cursor. Before the first destructive state, the five-signal rebuild
+checks a conservative working-set requirement (`2 GiB + 320 KiB × active
+content`) against 80% of physical RAM, or the lower operator-supplied
+`MOOT_MIGRATION_MEMORY_BUDGET_BYTES`, and refuses when it cannot complete
+safely. It must not retain copied passage text as a compatibility cache.
+Selective deletion is mandatory; an unqualified `destroyAllVectors` is a
+migration defect.
+
+Migration verification also covers MX-TAB: dataset-handle Drawers and their
+backing typed tables are excluded from CorpusKit and must retain canonical rows,
+schema/index declarations, statistics, signatures, and handle identity.
 
 ## § 6 — Error model (conceptual)
 
@@ -796,6 +866,12 @@ identical value-level results across the whole gated surface — C-2 (verb
 vocabulary), C-4 (scheduler ordering), C-5 (audit/projection/recovery),
 C-6 (matrix), C-7 (training), and the grant, federation, branch, and
 migration surfaces — against the shared `glref` vectors.
+
+**C-13 (shared content and migration):** a black-box suite runs the same
+capture/change/remove/rebuild/recall cases against standalone CorpusKit and the
+GLK attached adapter. For GLK it additionally asserts one verbatim Drawer row,
+zero Corpus document/passage/chunk rows, Drawer-id results, passage policy dark,
+and survival of unrelated vectors across legacy migration (I-17…I-19, B-17).
 
 
 
@@ -899,7 +975,7 @@ standing-signal set.
 
 The six v1 standing signals documented in §11.2 of the architecture spec have
 been extended to ten — `TemporalCausalitySignal` (7), `DistillationSignal`
-(8, DG5), `TrainingSignal` (9, ADR-018 F1), and `ContradictionScoutSignal`
+(8, DG5), `TrainingSignal` (9, the brain-layer ownership contract F1), and `ContradictionScoutSignal`
 (10, the contradiction hunter's background half):
 
 | # | Signal name | Cadence | Purpose |
@@ -932,7 +1008,7 @@ tunnel including withdrawn ones).
 
 Cookbook §6.4 specified a weekly T-matrix update on the dreaming daemon pass.
 This was superseded with hourly cadence.
-See `docs/decisions/DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md`.
+See `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#54-matrix-t`.
 
 ### MatrixTier additions
 
@@ -954,7 +1030,7 @@ function lives in SubstrateML (single source of truth for conformance vectors).
 GeniusLocusKit/Package.swift gained a dependency on SubstrateML to access
 `TemporalCausalityFold`. Layering is correct: GeniusLocusKit (composition) →
 SubstrateML (algorithms). Justified by
-DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+the temporal-matrix cadence.
 
 ## § RAG_WIRING — RAG and vector seams
 
@@ -963,19 +1039,21 @@ Both seams are wired in Swift and Rust.
 ### ExternalCorpus hybrid recall
 
 `ExternalCorpus.hybridRecall(via:limit:now:)` routes recall through
-CorpusKit's `Corpus` actor. Each corpus entry's content is used as
-the query to `Corpus.recall(query:limit:now:)`, which fuses vector
-kNN and BM25 keyword scores via Reciprocal Rank Fusion. The result
-per entry is a `[ScoredChunk]` list with both `vectorScore` and
-`keywordScore` sub-scores.
+CorpusKit's `Corpus` actor. Each external entry's content is used as the query
+to `Corpus.recall(query:limit:now:)`, which fuses vector kNN and BM25 keyword
+scores via Reciprocal Rank Fusion. The result per entry is `[CorpusHit]`, keyed
+directly by canonical GLK `Drawer.id`, with optional vector and keyword
+evidence. `ScoredChunk` is not part of this GLK path.
 
 The existing `asRecallFrames()` method is preserved for the
 LocusKit-only content-match path used by `verifyMigration` (estate
 existence checking, not hybrid retrieval).
 
-**Corpus construction:** the caller constructs the `Corpus` actor
-from the same `Storage` backing the estate so chunk embeddings index
-the estate's content. The default recall ensemble is the canonical
+**Corpus construction:** GLK constructs one `LocusDrawerCorpusContentSource`
+adapter over the open LocusKit Estate and injects it into CorpusKit's attached
+constructor with `.wholeContent`. The storage supplied to CorpusKit contains
+only derived retrieval state; it does not contain another copy of Drawer
+content. The default recall ensemble is the canonical
 five honest signals (RI/PPMI/LSA/NMF/FDC) — `CorpusEnsemble.defaultEnsemble()`
 in Swift / `corpus_kit_providers::default_ensemble()` in Rust — wired at
 every production provision site (`provision`, the ARIA_MCP estate
@@ -999,18 +1077,15 @@ each five-minute fire:
    what need association screening; the earlier ascending-item_id
    enumeration was a static UUID-ordered window new content rarely
    entered on a large estate).
-2. Lane 1 — drawer-keyed rows: for each candidate, retrieves its engram
+2. Lane 1 — Drawer-keyed rows: for each candidate, retrieves its engram
    via `VectorStore.getVector(itemID:modelID:)` under the caller's
    `modelID` and calls `VectorStore.findNearest(probe:modelID:limit:5)`
    to find nearby rows.
-3. Lane 2 — chunk-keyed corpus rows (when `corpus` is supplied): the same
-   probe sample is mined under the corpus's own modelID, and chunk hits
-   map back to their owning drawers via `Corpus.sourceIDs(forChunkIDs:)`;
-   same-drawer chunk pairs collapse. This is the ONLY vector-row
-   population a production estate holds (the estate lifecycle registers
-   `corpus.sharedVectorStore`; the encode drain keys every row by chunk
-   UUID) — without this lane the signal finds nothing on a real install.
-4. Deduplicates pairs across both lanes on DRAWER-pair keys and emits one
+3. Lane 2 — Corpus-derived rows (when `corpus` is supplied): the same probe is
+   mined under CorpusKit's model IDs. Those rows are already keyed by
+   `Drawer.id`; no `sourceIDs(forChunkIDs:)` map, chunk-owner join, or
+   same-Drawer passage collapse exists in GLK 1.1.
+4. Deduplicates pairs across both lanes on Drawer-pair keys and emits one
    `AssociateFrame` per pair whose Hamming distance ≤
    `proximityThreshold` (default 64 = 25% of 256 bits).
    Weight = 1 − distance / 256. Every emitted frame carries drawer ids —
@@ -1022,12 +1097,21 @@ The sentinel-only `defaultSpec()` factory is removed. The production
 factory requires an injected `VectorStore` and `modelID`.
 
 `DefaultStandingSignals.registerDefaultStandingSignals(in:vectorStore:
-modelID:now:)` forwards the VectorStore AND the estate's registered
+modelID:now:)` forwards the VectorStore and the estate's registered
 Corpus (`corpusKits[handle]`) to `VectorSimilaritySignal.spec`. The Rust
 governor does the same via `EstateCoordinator::corpus_for` →
 `default_standing_signal_specs(vector_store, model_id, corpus)`.
 
 **Import domain:** `VectorSimilaritySignal.swift` imports `VectorKit`.
+
+### GLK content and indexing lifecycle
+
+Capture writes one Drawer through LocusKit. After that write commits, GLK
+enqueues a `CorpusContentChange` containing Drawer id, revision/digest, and
+cursor—never content text. CorpusKit resolves the Drawer through the injected
+source, updates Drawer-keyed BM25/vectors/provider state, and advances its
+checkpoint. Supersession, withdrawal, and expunge follow the same identity.
+This change-driven index is rebuildable in full from LocusKit Drawers.
 GLK may orchestrate VectorKit directly for non-RAG vector work per the
 kit-roles doctrine; row-similarity is Brain math, not RAG.
 
@@ -1261,7 +1345,8 @@ It replaces the three-step caller pattern (`Estate.create` + `GLK.open` +
 1. Seeds the LocusKit manifest with the kind-prefixed framework profile and
    zoom window.
 2. Opens the estate through the standard coordinator path (issues an `EstateHandle`).
-3. Wires sub-stores (Corpus, VectorStore) according to `EstateKind`.
+3. Wires sub-stores according to `EstateKind`; every Corpus is attached to the
+   LocusKit-backed content source with whole-content indexing.
 
 ### EstateKind
 
@@ -1298,10 +1383,14 @@ The expected admin-plane teardown sequence is:
 provision → (operate) → quiesce → drain → destroy
 ```
 
-`destroy` internally calls `close` if the estate is still open, then tears
-down sub-stores: `Corpus.destroyRecallIndex()` (BM25 cleared, vectors deleted)
-and `VectorStore.destroyAllVectors()`. BundleStore chunks are NOT deleted
-(append-only invariant — verbatim content survives for audit purposes).
+`destroy` internally calls `close` if the estate is still open, then tears down
+derived sub-store state. `Corpus.destroyRecallIndex()` clears BM25,
+Corpus-scoped vectors, provider basis/counts, and checkpoints. Independent GLK
+vector rows are deleted only under their declared lane/model ownership. The
+canonical LocusKit Drawer store is handled by the explicit estate-destruction
+policy; it is never preserved or deleted accidentally as a side effect of
+Corpus cleanup. An unqualified `VectorStore.destroyAllVectors()` is not an
+acceptable composed cleanup primitive.
 
 ### Invariants
 
@@ -1311,7 +1400,8 @@ and `VectorStore.destroyAllVectors()`. BundleStore chunks are NOT deleted
   re-throwing, so no half-wired zombie estates are left in the registry.
 - `quiesce` is idempotent: calling on an already-quiesced estate is a no-op.
 - The existing `open` + `registerCorpus` + `registerVectorStore` caller path is
-  unchanged. All existing callers continue to work. `provision` is purely additive.
+  migrated to require an attached whole-content Corpus. Registration rejects a
+  standalone Corpus or any passage-enabled policy for a GLK estate.
 
 ---
 
@@ -1629,7 +1719,7 @@ per-signal dense float signals fuse:
   `PreferenceStore`; with a cache registered, steering those keys moves the live
   columns identically cross-port. Absent a cache the columns read 0.0 on both
   ports — the correct fresh-estate behaviour. The cache PRODUCERS remain absent
-  in both ports.) See ADR-011 D-4 for the full cross-port boundary.
+  in both ports.) See the recall-shape contract D-4 for the full cross-port boundary.
 
 A `nil` shape — or an all-1.0 shape — is BYTE-IDENTICAL to the prior uniform
 fusion in EVERY lane including `unionBest` (the back-compat contract, proven by
@@ -1805,6 +1895,17 @@ surface.
 
 ## Changelog
 
+### 1.16.0 -- 2026-07-20
+
+- Established one canonical GLK content row: LocusKit owns Drawers and GLK
+  injects a LocusKit-backed content source into CorpusKit.
+- Made CorpusKit passage/chunk production dark in GLK and changed Corpus
+  retrieval/vector identity to `Drawer.id` directly.
+- Replaced the legacy chunk-owner translation lane and broad vector teardown
+  language with Drawer-keyed indexing and ownership-scoped deletion.
+- Added the pre-1.1 migration gate: remove redundant Corpus copies, rebuild
+  derived state, verify, then enable the Corpus lane.
+
 ### 1.14.0 -- 2026-07-16
 MX-TAB dataset surface documented (shipped 2026-07-11/12, not previously
 in the spec): added `§ DATASET_STORE_ACCESS` covering the
@@ -1844,8 +1945,8 @@ had made NeuronKit's audit-chain integrity monitor's alerting
 structurally unreachable (a rejected entry never reaches
 `AuditChainVerifier`, so the chain walk always reported vacuously
 valid). I-11 and B-9/B-10 updated to describe the current ingress path
-(`auditLog(for:)` / `currentAuditLog(in:)`, ADR025-AUDITLOG-GOVERNOR /
-ADR-026 — the doc previously named the removed `feedAuditLog(for:)`
+(`auditLog(for:)` / `currentAuditLog(in:)`, under the storage-residency rule —
+the doc previously named the removed `feedAuditLog(for:)`
 per-drawer walk) and the new counter. See NEURONKIT_SPEC.md § 9 C-4/C-12.
 
 ### 1.11.0 -- 2026-06-28
@@ -1923,7 +2024,7 @@ site. Parity: `GeniusLocusKit/Intake/EncodeIntake.swift` (Swift) and
 Additive (FINDING-1b cluster C): `tombstonedLineageIDs(_ handle:)` added to the GLK verb surface (B-1-compliant passthrough for VaultKit). Delegates to `Estate.tombstonedLineageIDs()` → `DrawerStore.tombstonedLineageIDs()`, which issues a storage-tier `.isNotNull(tombstonedAt)` predicate and reads `lineageID` from raw rows without a full decode — deliberately avoiding timestamp-format parsing, which is sensitive to the format difference between `ISO8601DateFormatter()` (no fractional seconds, used by `expungeGated`) and `LKISO8601` (fractional seconds). Returns `Set<UUID>` of cluster C lineage IDs. Parity: `EstateCoordinator::tombstoned_lineage_ids` in the Rust port.
 
 ### 1.7.0 -- 2026-06-17
-Added invariant I-16 (composite schema version = sum of component versions, derived in both ports): after the ADR-012 `ext` pre-provisioning the composite is 7 (LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2). The `grants` table gained the ADR-012 `ext` forward-compat slot. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
+Added invariant I-16 (composite schema version = sum of component versions, derived in both ports): after the the forward-compatible ext-slot contract `ext` pre-provisioning the composite is 7 (LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2). The `grants` table gained the the forward-compatible ext-slot contract `ext` forward-compat slot. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.6.1 -- 2026-06-17
 Clarification (parity-sweep-batch #12): noted that the Rust port now mirrors the
@@ -1948,7 +2049,7 @@ engine already honours. Conformance: `RecallShapePresetTests.swift` /
 
 ### 1.5.0 -- 2026-06-17
 Brought the Rust port to parity on the `GraphCache` / `PreferenceStore` recall-
-consumption surface (mission glk-recall-graphpref-rust, closing ADR-011 D-4). The
+consumption surface (mission glk-recall-graphpref-rust, closing the recall-shape contract D-4). The
 `graph` / `preference` columns are no longer hardcoded `0.0` in Rust: the port now
 defines the two traits (`Send + Sync`, per-drawer score lookup),
 `register_graph_cache` / `register_preference_store`, and per-candidate
@@ -1967,7 +2068,7 @@ adaptive `RecallWeights` budget. The combined matrix term is split so
 `coOccurrence`/`temporal` steer independently; the neutral path preserves the
 exact pre-steer expression so a nil/all-ones shape is byte-identical (proven both
 ports). The matrix keys are a no-op under `.raw`/`.rrf`. The stale "Matrix/graph/
-preference columns are NOT shape-steerable" statement is removed. See ADR-011.
+preference columns are NOT shape-steerable" statement is removed. See the recall-shape contract.
 ADDITIVE (MINOR).
 
 ### 1.3.0 -- 2026-06-17

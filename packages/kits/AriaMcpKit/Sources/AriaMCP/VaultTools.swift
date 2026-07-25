@@ -11,10 +11,8 @@
 //
 // The shipped MCP binary is the Swift port (`mootx01`, built from
 // `apps/mootx01` via `swift build`). The Rust `aria-mcp` bin (`apps/aria-mcp-server/rust/`)
-// is a parity sibling; both ports are live and in sync (see ADR-VAULTKIT-002,
-// and the new ADR recorded in cp-vault-bidir which documents that the Rust
-// mirror has landed). The `moot_vault_*` tools are wired in both dispatch
-// surfaces.
+// is a parity sibling; both ports are live and in sync. The `moot_vault_*`
+// tools are wired in both dispatch surfaces.
 //
 // ## Drift detection owns its own hash stamp
 //
@@ -173,7 +171,7 @@ enum VaultTools {
         // Return a clear refusal rather than an opaque failure. The tool
         // should never be called when disabled (it is absent from tools/list),
         // but the guard ensures a clean error if a client hard-codes the name.
-        // MOOTX01_VAULT env var: absent/≠"0" = enabled; "0" = disabled (ADR-015).
+        // MOOTX01_VAULT env var: absent/≠"0" = enabled; "0" = disabled.
         guard ToolProjection.vaultEnabled(environment: environment) else {
             return ToolDispatcher.errorResult(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
@@ -1080,7 +1078,7 @@ enum VaultTools {
             //   - normal / elevated:   note exported AND csv exported (no change)
             //   - restricted / secret: note exported, CSV is SKIPPED with a logged notice
             //
-            // "restricted" and "secret" map to ADR-007 tiers that are excluded from
+            // "restricted" and "secret" map to sensitivity tiers excluded from
             // bulk data export. Their CSV content must not leave the estate unprotected.
             let noteSensitivity = vaultSensitivityToAdjectiveSensitivity(
                 from: note.frontmatter["sensitivity"])

@@ -4,7 +4,7 @@
 //
 // Coverage note (VK-ADAPT-01 Part 3): decode + zero-loss + provenance
 // + idempotency coverage for the adapter → bridge import path lives in
-// VaultKit's ExchangeAdapterTests per ADR-007 Decision 1.
+// VaultKit's ExchangeAdapterTests per data-movement privacy tiers
 //
 // The remaining five tests cover:
 //   1. runParallel writes to target in .writeToTarget mode
@@ -59,7 +59,7 @@ struct GLK_MIG_02_MigrationTests {
     /// corpus entry, using the consolidated import-path provenance
     /// (channel: .importedFile, sourceType: .imported, provenanceChannel:
     /// .fileImport). This is the sanctioned corpus-construction helper
-    /// for verifyMigration tests (VK-ADAPT-01 Part 3, ADR-007 Decision 1).
+    /// for verifyMigration tests (VK-ADAPT-01 Part 3, data-movement privacy tiers).
     private func populateEstate(
         kit: GeniusLocusKit,
         corpus: ExternalCorpus,

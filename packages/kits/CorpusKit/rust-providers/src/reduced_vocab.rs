@@ -1,5 +1,5 @@
 //! reduced_vocab.rs — shared IDF-reduced vocabulary selection for the dense
-//! distributional-factorization providers (LSA, NMF). ADR-022.
+//! distributional-factorization providers (LSA, NMF). shared reduced embedding vocabulary.
 //!
 //! Rust port of Swift's `CorpusKitProviders/ReducedVocab.swift`.
 //!
@@ -61,7 +61,7 @@ pub fn select_reduced_vocabulary(
 
     // No-op below the cap: keep the FULL vocabulary in its existing column
     // order, so estates whose vocab already fits K (incl. all conformance
-    // fixtures) train a byte-identical basis to the pre-ADR-022 behavior.
+    // fixtures) train a byte-identical basis to the pre-shared reduced embedding vocabulary behavior.
     if full_size <= cap.max(1) {
         let mut kept_terms: Vec<String> = vec![String::new(); full_size];
         for (term, &idx) in vocab {

@@ -57,7 +57,7 @@ pub struct TableDeclaration {
     /// every insert, update, and upsert on this table's rows. The
     /// hash is supplied by a `ContentHashProvider` callback injected
     /// into `HashingRowStore`; PersistenceKit does not depend on
-    /// substrate-lib or substrate-kernel (ADR-017 §16 / NT-P2).
+    /// substrate-lib or substrate-kernel (node-tree integrity / NT-P2).
     pub hashable: bool,
 }
 
@@ -95,7 +95,7 @@ impl TableDeclaration {
 
     /// Marks this table for hash-on-write: every insert, update, and
     /// upsert computes a ContentHash via a caller-supplied callback
-    /// (ADR-017 §16 / NT-P2).
+    /// (node-tree integrity / NT-P2).
     pub fn hashable(mut self) -> Self {
         self.hashable = true;
         self
@@ -125,7 +125,7 @@ impl TableDeclaration {
 }
 
 /// Semantic role of a column within the as-of temporal filter
-/// (ADR-017 §15). Columns tagged with a role participate in the
+///. Columns tagged with a role participate in the
 /// temporal validity window: `created_hlc <= T AND
 /// (tombstoned_hlc IS NULL OR tombstoned_hlc > T)`.
 /// Kits declare roles at schema time; PersistenceKit uses them to
@@ -176,8 +176,14 @@ impl ColumnDeclaration {
     pub fn uuid(name: impl Into<String>) -> Self {
         Self::new(name, ColumnType::Uuid)
     }
+    /// Bitmap column with a `DEFAULT 0` — matching the Swift
+    /// `ColumnDeclaration.bitmap(_:nullable:default:)` factory, which mints a
+    /// `.bitmap(0)` default unless overridden. The ports must emit identical
+    /// DDL for equivalent declarations (composite layout-signature parity,
+    /// GLK shared-content 1.1 P0); before this default the Rust port created
+    /// bitmap columns WITHOUT the default Swift estates carry.
     pub fn bitmap(name: impl Into<String>) -> Self {
-        Self::new(name, ColumnType::Bitmap)
+        Self::new(name, ColumnType::Bitmap).with_default(TypedValue::Bitmap(0))
     }
     pub fn text(name: impl Into<String>) -> Self {
         Self::new(name, ColumnType::Text)
@@ -204,14 +210,14 @@ impl ColumnDeclaration {
         Self::new(name, ColumnType::Hlc)
     }
     /// HLC column tagged as the row-creation timestamp for
-    /// as-of temporal filtering (ADR-017 §15).
+    /// as-of temporal filtering.
     pub fn created_hlc(name: impl Into<String>) -> Self {
         let mut col = Self::new(name, ColumnType::Hlc);
         col.role = Some(ColumnRole::CreatedHlc);
         col
     }
     /// HLC column tagged as the row-tombstone timestamp for
-    /// as-of temporal filtering (ADR-017 §15). Nullable by
+    /// as-of temporal filtering. Nullable by
     /// convention — a nil tombstone means "still live."
     pub fn tombstoned_hlc(name: impl Into<String>) -> Self {
         let mut col = Self::new(name, ColumnType::Hlc);

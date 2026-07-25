@@ -1,4 +1,4 @@
-// DreamingItem.swift — the dreaming-queue job payload (ADR-021 Phase 2b).
+// DreamingItem.swift — the dreaming-queue job payload.
 //
 // Each recall that surfaces ≥ 2 distinct drawers enqueues one DreamingItem
 // onto the estate's shared queue.sqlite under stream_id = "dreaming". The item

@@ -77,8 +77,8 @@ struct RecallShapeUnionBestTests {
 
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
-        let corpus = try await CorpusKit.Corpus(
-            storage: corpusStorage,
+        let corpus = try await CorpusKit.CorpusContentEngine(
+            standaloneOn: corpusStorage,
             models: [
                 .miniLM(inference: { tokens in
                     let lead = tokens.first ?? 0
@@ -116,7 +116,7 @@ struct RecallShapeUnionBestTests {
             )
             let drawer = try await kit.capture(handle, frame)
             ids.append(drawer.id)
-            try await corpus.ingest(content, sourceID: drawer.id, now: Self.t0)
+            try await corpus.ingest(content, contentID: drawer.id, now: Self.t0)
             let engram = try await corpus.embed(content)
             try await vectorStore.addVector(
                 itemID: drawer.id, engram: engram, modelID: hammingModelID,

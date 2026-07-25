@@ -13,7 +13,7 @@
 // bind, UDS at 0600) is enforced identically — arguably more directly, since the
 // bind address and file mode are set explicitly here.
 //
-// Extracted to LoopbackHTTP per ADR-LOOPBACKHTTP-001 so moot-mgr and the
+// Extracted to LoopbackHTTP per bounded loopback HTTP so moot-mgr and the
 // resident mootx01 daemon share one audited loopback-bind implementation.
 
 import Foundation

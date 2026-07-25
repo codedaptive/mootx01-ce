@@ -77,7 +77,7 @@ pub trait QueueBackend: Send + Sync {
     /// COMPILE rather than at runtime. Every conforming backend implements it.
     fn pending_count(&self) -> Result<usize, QueueError>;
 
-    // ── Stream-scoped drain (ADR-021 Decision 7 / T1) ──────────────────────
+    // ── Stream-scoped drain ──────────────────────
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///
@@ -192,7 +192,7 @@ pub trait QueueBackend: Send + Sync {
 
     /// Block until `stream` has no pending and no in-flight work.
     ///
-    /// Stream-scoped twin of `await_drain` (ADR-021 Decision 7 / T1). On the
+    /// Stream-scoped twin of `await_drain`. On the
     /// shared per-estate `queue.sqlite` a single drainer (e.g. the encode pump)
     /// only processes its own stream; the global `await_drain` would block
     /// forever on OTHER streams' jobs (e.g. `dreaming` enqueued on recall) that

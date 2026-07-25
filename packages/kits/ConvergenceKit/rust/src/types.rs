@@ -108,10 +108,10 @@ impl SyncedTable {
 ///
 /// The hook receives this value after every pull in which at least one record
 /// was applied. The `storage` handle is the same `Arc<dyn Storage>` the pull
-/// used; writes made through it do NOT carry the pull guard (`pulling` flag),
-/// so they are treated as local mutations and flow into the observer workers'
-/// outbox — satisfying the hook-writes-must-ship invariant (Kong Q2
-/// adjudication).
+/// used; writes made through it use `upsert`/`insert`/`delete` (not the
+/// `_sync` variants), so they emit `ChangeOrigin::Local` and flow into the
+/// observer workers' outbox — satisfying the hook-writes-must-ship invariant
+/// (Kong Q2 adjudication).
 ///
 /// ## Atomicity caveat
 ///
@@ -303,7 +303,7 @@ pub enum SyncError {
     // exist in the Rust error enum so error-handling code and tests can
     // reference the vocabulary without depending on CloudKit.
     //
-    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+    // Slot and fence epoch identify the writer across concurrent devices.
 
     /// This device's (slot, epoch) pair has been superseded: the slot was
     /// evicted and its epoch bumped while the device was inactive. Raised

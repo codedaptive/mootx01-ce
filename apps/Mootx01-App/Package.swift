@@ -4,7 +4,7 @@
 //
 // This SwiftPM package vends the two Swift-only, Apple-side libraries the
 // Mootx01 app (and the developer example apps) build on. It is the "Apple
-// layer" of ADR-005: it ENVELOPES the clean, Rust-mirrored engine through a
+// layer" of the app/engine boundary: it ENVELOPES the clean, Rust-mirrored engine through a
 // transport seam — it never absorbs it. The headless `mootx01`/`aria-mcp`
 // server is a separate, untouched binary.
 //
@@ -53,6 +53,7 @@ let package = Package(
         // Sync lives in ConvergenceKit (CloudKitSyncEngine / NoSyncEngine behind
         // the SyncEngine protocol) — the app wires it, it does not reimplement it.
         .package(name: "ConvergenceKit", path: "../../packages/kits/ConvergenceKit"),
+        .package(name: "WorkPacketKit", path: "../../packages/kits/WorkPacketKit"),
     ],
     targets: [
         .target(
@@ -82,6 +83,9 @@ let package = Package(
                 // FED-OD-3: QR pairing views reference ConvergenceKitFederation types
                 // (LocalIdentity, HyperplaneFamilySpec) passed in from the app layer.
                 .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
+                // FAB5-I3: PacketListView, PacketDetailView, LineageView consume
+                // WorkPacket, WorkPacketStore, LineageGraph.
+                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
             ],
             path: "Sources/GatewayUI"
         ),
@@ -118,6 +122,8 @@ let package = Package(
                 "GatewayUI",
                 "MootGateway",
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
+                // FAB5-I3: PacketViewsTests constructs WorkPacket fixtures directly.
+                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
             ],
             path: "Tests/GatewayUITests"
         ),

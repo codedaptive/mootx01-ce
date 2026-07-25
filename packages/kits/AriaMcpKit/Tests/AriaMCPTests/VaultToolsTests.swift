@@ -92,7 +92,7 @@ struct VaultToolsTests {
         #expect(federation.count == 1)
     }
 
-    // MARK: - Vault gating (ADR-015)
+    // MARK: - Vault gating
 
     /// When MOOTX01_VAULT=0 (installed with --vault-off), all five vault tools
     /// and the filesystem-importing palace import tool are absent from the
@@ -110,9 +110,9 @@ struct VaultToolsTests {
         // arbitrary local SQLite files (same security posture as vault tools).
         #expect(!names.contains("moot_palace_import"))
         // Vault-off removes the five moot_vault_* tools plus palace import.
-        // 71 vault-on − 6 = 65 (dataset + contradiction-hunter tools are not
+        // 75 vault-on − 6 = 69 (dataset + packet + contradiction-hunter tools are not
         // vault-gated).
-        #expect(toolsOff.count == 65)
+        #expect(toolsOff.count == 69)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -120,8 +120,8 @@ struct VaultToolsTests {
         let toolsNoEnv = ToolProjection.tools(environment: [:])
         let names = Set(toolsNoEnv.map(\.name))
         #expect(names.contains("moot_vault_export"))
-        // 66 baseline + 2 contradiction-hunter + 3 dataset tools = 71.
-        #expect(toolsNoEnv.count == 71)
+        // 66 baseline + 2 contradiction-hunter + 3 dataset tools + 4 packet tools = 75.
+        #expect(toolsNoEnv.count == 75)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.

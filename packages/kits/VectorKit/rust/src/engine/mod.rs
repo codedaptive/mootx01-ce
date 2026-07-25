@@ -13,7 +13,7 @@
 //!
 //! Lane C: float lane — `FloatBruteForceIndex` (exact brute-force for Float32),
 //! the float lane's production path and oracle. Dense-embedding k-NN is a
-//! VectorKit concern (ADR-008); persistence-kit owns no vector engine.
+//! VectorKit concern; persistence-kit owns no vector engine.
 
 // Lane F — foundation types
 pub mod hit;

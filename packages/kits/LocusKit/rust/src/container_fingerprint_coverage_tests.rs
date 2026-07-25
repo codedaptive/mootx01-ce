@@ -63,7 +63,7 @@ fn add_coverage_guarantee_all_three_bitmaps() {
 
     let drawer = estate.capture(frame, NOW).unwrap();
 
-    // ADR-017: wing/room resolved from node tree via parent_node_id.
+    // wing/room resolved from node tree via parent_node_id.
     let names = store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
     let (wing, room) = names.get(&drawer.parent_node_id).expect("node must resolve");
     let wing = wing.clone();
@@ -143,7 +143,7 @@ fn add_coverage_two_drawers_same_room() {
     let d1 = estate.capture(frame1, NOW).unwrap();
     let d2 = estate.capture(frame2, NOW + 1).unwrap();
 
-    // ADR-017: wing resolved from node tree via parent_node_id.
+    // wing resolved from node tree via parent_node_id.
     let names = store.resolve_node_names(&[d1.parent_node_id.clone()]).unwrap();
     let (wing, _) = names.get(&d1.parent_node_id).expect("node must resolve");
 

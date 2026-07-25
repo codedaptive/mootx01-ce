@@ -27,7 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
@@ -102,7 +102,8 @@ fn large_estate() -> (
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
     let corpus = Arc::new(
-        Corpus::open(storage, minilm_monotonic_config()).expect("Corpus::open"),
+        CorpusContentEngine::standalone_on(storage, vec![minilm_monotonic_config()])
+            .expect("engine open"),
     );
     let vector_store = make_vector_store();
 
@@ -116,7 +117,7 @@ fn large_estate() -> (
         corpus.ingest(&content, &drawer.id, NOW).expect("ingest");
         let engram = corpus.embed(&content).expect("embed");
         vector_store
-            .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+            .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
             .expect("add_vector");
         ids.push(drawer.id);
     }

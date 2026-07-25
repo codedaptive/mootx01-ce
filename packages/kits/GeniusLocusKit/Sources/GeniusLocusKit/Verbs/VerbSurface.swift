@@ -653,8 +653,9 @@ public extension GeniusLocusKit {
     /// step 2 confirms the storage half completed.
     ///
     /// **Step 2 — Cross-kit vector delete (GLK orchestration, fail-closed):**
-    /// when a `Corpus` is registered, calls `corpus.expunge(sourceID:)` to scrub
-    /// verbatim chunk text and purge BM25 index entries and all vector embeddings. When a standalone
+    /// when an engine is registered, calls `corpus.removeContent(id:)` to purge
+    /// BM25 index entries and Drawer-keyed vector embeddings by exact key
+    /// (shared-content 1.1: no second text copy exists to scrub). When a standalone
     /// `VectorStore` is also registered (`.glk` estate), additionally calls
     /// `vectorStore.deleteAllVectors` to invalidate the standalone store's
     /// resident array (the corpus and the standalone store share backing storage
@@ -744,13 +745,12 @@ public extension GeniusLocusKit {
             do {
                 for deleteId in idsToDelete {
                     if let corpus {
-                        // Expunge: zero verbatim chunk text AND remove from recall
-                        // (BM25 + internal vector index). sourceID == drawer.id
-                        // (EncodeIntake G4). expunge() is the hard-delete variant of
-                        // remove() — it calls scrubText first so verbatim content is
-                        // erased even if the subsequent recall-removal steps fail.
-                        // (secfix/ws2-coredelete: destruction contract)
-                        try await corpus.expunge(sourceID: deleteId)
+                        // Shared-content 1.1: the canonical text lives ONLY in the
+                        // Drawer row LocusKit just tombstoned/zeroed — there is no
+                        // second copy to scrub. Clearing the engine's derived state
+                        // (BM25 postings + Drawer-keyed vectors, by exact key)
+                        // completes the destruction contract.
+                        try await corpus.removeContent(id: deleteId)
                     }
                     if let vectorStore, let corpus {
                         // Invalidate the standalone VectorStore's resident slot
@@ -979,8 +979,9 @@ public extension GeniusLocusKit {
             if corpus != nil || vectorStore != nil {
                 do {
                     if let corpus {
-                        // Hard-delete: scrub chunk text AND remove from recall.
-                        try await corpus.expunge(sourceID: rowID)
+                        // Shared-content 1.1: clear derived state (no second copy
+                        // exists to scrub — the Drawer row is the only text home).
+                        try await corpus.removeContent(id: rowID)
                     }
                     if let vectorStore {
                         if let corpus {
@@ -1196,8 +1197,8 @@ public extension GeniusLocusKit {
         // Resolve the handle up front so a stale handle raises
         // estateNotOpen before any storage work, matching the other verbs.
         _ = try estate(for: handle)
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): auditLog(for:) now reads directly
-        // from the _storagekit_audit table via a single bounded SQL query —
+        // auditLog(for:) reads directly from the _storagekit_audit table via
+        // a single bounded SQL query —
         // the former feedAuditLog N+1 call is gone; the log is populated here.
         let log = try await auditLog(for: handle)
         return AuditChainVerifier.verify(log)
@@ -1352,7 +1353,7 @@ public extension GeniusLocusKit {
         // estate's node tree (branch rows have parentNodeIds pointing to
         // branch-local nodes, not parent estate nodes).
         //
-        // Wing integrity (ADR-016): all security/placement/lifecycle fields
+        // Wing integrity: all security/placement/lifecycle fields
         // are preserved on promotion so non-default-wing rows re-file into
         // the correct wing rather than silently falling back to defaultWing().
         // lineageID is intentionally NOT preserved — see derivation comment.
@@ -1460,7 +1461,7 @@ public extension GeniusLocusKit {
         // estate's node tree (branch rows have parentNodeIds pointing to
         // branch-local nodes, not parent estate nodes).
         //
-        // Wing integrity (ADR-016): all security/placement/lifecycle fields
+        // Wing integrity: all security/placement/lifecycle fields
         // are preserved on merge so non-default-wing rows re-file into the
         // correct wing rather than silently falling back to defaultWing().
         // lineageID is intentionally NOT preserved — see derivation comment.
@@ -1742,7 +1743,7 @@ public extension GeniusLocusKit {
 
     /// Issue a federation grant from the estate addressed by `handle`.
     ///
-    /// Per DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §6 and Appendix
+    /// Per federation disclosure controls and Appendix
     /// B. The grant is signed by the estate's Ed25519 identity key, then
     /// persisted to the estate's `grants` table. The scope key is
     /// handled per custody mode: mode 1 retains it in the vault and
@@ -1979,7 +1980,7 @@ extension GeniusLocusKit {
     /// The private key is loaded from the identity key store (Keychain in
     /// production) by `Estate.open` and held in memory for the lifetime of the
     /// Estate instance. This method reads that cached value — no Keychain
-    /// round-trip occurs at signing time (ADR-007, secfix/ed25519-keychain).
+    /// round-trip occurs at signing time (data-movement privacy tiers, secfix/ed25519-keychain).
     ///
     /// Throws `GeniusLocusKitError.invalidManifest` when the key is absent,
     /// which happens when the estate was opened after a Keychain wipe or was

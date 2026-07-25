@@ -72,6 +72,8 @@ try {
     <button class="navitem" data-view="lexicon">Lexicon</button>
     <button class="navitem" data-view="lattice">Lattice</button>
     <button class="navitem" data-view="configuration">Configuration</button>
+    <button class="navitem" data-view="review">Review</button>
+    <button class="navitem" data-view="packets">Packets</button>
     <!-- activity-temp: hidden from nav, preserved as a parts drawer for reuse.
          Contains the original Overview elements (metric cards, feeds, health,
          capabilities, busiest estates) while the new Overview is being built
@@ -350,6 +352,48 @@ try {
       <div class="panel" id="configCaps">
         <h2 class="phead">Capabilities</h2>
         <div class="caps-grid" id="configCapsGrid"></div>
+      </div>
+    </section>
+
+    <!-- REVIEW — recent estate activity summary (FAB5-K1 Part 1) -->
+    <section class="view" data-view="review">
+      <h1 class="title">Review</h1>
+      <p class="sub">Recent estate activity: capture count, active estates, and event feed.</p>
+
+      <!-- Summary cards row -->
+      <div class="cards" id="reviewCards"></div>
+
+      <!-- Recent event feed -->
+      <div class="panel" id="reviewFeed">
+        <div class="phead-row">
+          <h2 class="phead">Recent Events</h2>
+          <span class="phint" id="reviewFeedHint"></span>
+        </div>
+        <div class="feed" id="reviewEventList"></div>
+      </div>
+    </section>
+
+    <!-- PACKETS — exportable work-packet list/detail/lineage (FAB5-K1 Part 2) -->
+    <section class="view" data-view="packets">
+      <h1 class="title">Packets</h1>
+      <p class="sub">Exportable agentic work packets — objective, provenance, and lineage.</p>
+
+      <!-- Packet list panel -->
+      <div class="panel" id="packetsPanel">
+        <div class="phead-row">
+          <h2 class="phead">Work Packets</h2>
+          <span class="phint" id="packetsPendingHint"></span>
+        </div>
+        <table class="dtable" id="packetsTable">
+          <thead><tr>
+            <th>Objective</th>
+            <th>Agent</th>
+            <th>Created</th>
+            <th>Claims</th>
+            <th>Links</th>
+          </tr></thead>
+          <tbody id="packetsBody"></tbody>
+        </table>
       </div>
     </section>
 

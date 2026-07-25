@@ -48,7 +48,7 @@
 // ## Projection seed
 //
 //   PPMI_PROJECTION_SEED = 0x5050_4D49_5F56_314D  ("PPMI_V1M")
-//   Model ID = "ppmi-v1",  version = "1.0.0"
+//   Model ID = "ppmi-v1",  version = "1.1.0"
 //
 // The seed MUST differ from RI's riProjectionSeed (0x5249_5F56_315F_4D58)
 // so PPMI and RI engrams key to different storage buckets when both
@@ -73,7 +73,7 @@
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/ppmi.rs
 //
-// ADR-010 reference: Decision B, signal #3 of the honest fusion.
+// honest semantic fusion reference: Decision B, signal #3 of the honest fusion.
 
 import Foundation
 import CorpusKit
@@ -145,10 +145,10 @@ public let ppmiProjectionSeed: UInt64 = 0x5050_4D49_5F56_314D
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`.
-/// modelID = "ppmi-v1", modelVersion = "1.0.0".
+/// modelID = "ppmi-v1", modelVersion = "1.1.0".
 /// Projection seed = `ppmiProjectionSeed`.
 ///
-/// ADR-010 Decision B, signal #3 — PPMI co-occurrence provider in the
+/// honest semantic fusion, signal #3 — PPMI co-occurrence provider in the
 /// dense recall lane.
 public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
@@ -193,7 +193,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
     public init(
         modelID: String = "ppmi-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         projectionSeed: UInt64 = ppmiProjectionSeed
     ) {
         self.modelID = modelID
@@ -287,7 +287,12 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
         ppmiVectors = [:]
 
-        for (target, contextCounts) in coCount {
+        // Hash-map iteration order is not a numeric contract. Sort both levels
+        // by UTF-8 bytes so floating accumulation order is byte-identical in
+        // Swift and Rust at representative vocabulary sizes.
+        let targets = coCount.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        for target in targets {
+            guard let contextCounts = coCount[target] else { continue }
             // Marginal probability for the target term.
             // If termCount has no entry (should not happen since train
             // increments both tables, but guard defensively), skip.
@@ -296,7 +301,11 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
             var vec = [Float](repeating: 0, count: ppmiDimension)
 
-            for (context, pairCount) in contextCounts {
+            let contexts = contextCounts.keys.sorted {
+                $0.utf8.lexicographicallyPrecedes($1.utf8)
+            }
+            for context in contexts {
+                guard let pairCount = contextCounts[context] else { continue }
                 guard pairCount > 0 else { continue }
                 // Marginal probability for the context term.
                 guard let cc = termCount[context], cc > 0 else { continue }
@@ -593,13 +602,25 @@ extension PpmiProvider: TrainableEmbeddingBasis {
         finalize()
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `trainOnCorpus` runs, finalization deferred to `finalizeTraining`.
+    public func accumulateTraining(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: ppmiWindow)
+        }
+    }
+
+    public func finalizeTraining() {
+        finalize()
+    }
+
     /// Reconstruct a fresh `PpmiProvider` from a serialized basis, type-erased.
     /// Delegates to `init(deserializing:)` (6a-i).
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try PpmiProvider(deserializing: basis)
     }
 
-    /// ADR-026: release the in-memory ppmiVectors dictionary (~1GB on a 50K estate).
+    /// release the in-memory ppmiVectors dictionary (~1GB on a 50K estate).
     /// The next embed call must go through reconstructBasis from BasisStore.
     public func releaseBasis() {
         ppmiVectors.removeAll(keepingCapacity: false)
@@ -648,4 +669,8 @@ extension PpmiProvider: TrainableEmbeddingBasis {
     /// target terms seen during accumulation (before PPMI filtering), which is
     /// the vocabulary the next finalize will derive from.
     public var countsVocabularySize: Int { coCount.count }
+
+    public func countsContainsTerm(_ term: String) -> Bool {
+        coCount[term] != nil
+    }
 }

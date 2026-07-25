@@ -1,5 +1,4 @@
-// stream_scoped.rs — Integration tests for ADR-021 Decision 7 / T1:
-// stream-scoped drain and pending_count_for_stream.
+// Integration tests for stream-scoped drain and pending_count_for_stream.
 //
 // Covers:
 //   1. Stream isolation: drain_available_for_stream("a") returns ONLY "a" jobs

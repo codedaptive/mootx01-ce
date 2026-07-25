@@ -1,0 +1,31 @@
+moot-math-benchmark evidence — system report
+Generated during local 2026-07-22 run (UTC date 2026-07-23)
+Bundle: apps/moot-math-benchmark/results/2026-07-22-apple-m4-b3fcd1dc-evidence
+
+Repository
+  branch: develop/1.0.x
+  commit: b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99
+
+Hardware
+  model: Mac mini (Mac16,10)
+  CPU: Apple M4
+  architecture: arm64
+  physical CPUs: 10
+  logical CPUs: 10
+  memory: 25769803776 bytes (24 GiB)
+
+Operating system
+  macOS 27.0
+  build 26A5388g
+
+Swift toolchain
+  Swift 6.4 development toolchain
+  swift-driver 1.167
+
+Rust toolchain
+  rustc 1.97.0 stable (Homebrew)
+  portable-SIMD nightly unavailable; Rust results are scalar-only
+
+Product
+  mootx01 1.0.34 (2026-07-20)
+  SHA-256: bc940718884951b1f4ec98779e8e3094b6d4993ca73ba97eb962c36d6817bb38

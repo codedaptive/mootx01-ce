@@ -32,7 +32,7 @@ And whatever fills the gap has to be yours. Not parked in someone else's cloud, 
 
 ## Imagine your AI had that layer.
 
-It captures every conversation exactly as it happened, in the words it happened in. Verbatim. What you said stays said, in the words you said it, without paraphrase or summary or silent rewriting.
+What your AI files into memory is kept exactly as it happened, in the words it happened in. Verbatim. What you said stays said, in the words you said it, without paraphrase or summary or silent rewriting.
 
 While you sleep, it consolidates. The matrix of what-connects-to-what reweighs itself against how your memory actually got used — connections strengthen between things you recalled together, themes surface from the co-occurrence of your week, the unimportant fades. By morning, recall is ranked by what mattered.
 
@@ -80,7 +80,7 @@ The interface is called ARIA. It is consistent across implementations, across co
 
 You open your AI. It already knows who you are. Last night, while you slept, MOOTx01 consolidated the week's use of your memory. Themes surfaced from what you and your AI actually touched; the connections you leaned on grew stronger. The recall is prepared the moment you sit down.
 
-You ask a question. The AI doesn't ask you to re-explain. It doesn't search the basement. It reads from your MOOT through ARIA, the shared language every AI tool and application uses to talk to your memory. What comes back is ordered thought, not chaotic data. Your AI reasons on signal instead of noise. Faster. More accurate. Cheaper per call. And tomorrow's recall is better than today's, because the subconscious kept working overnight.
+You ask a question. The AI doesn't ask you to re-explain. It doesn't search the basement. It reads from your MOOT through ARIA, the shared language every AI tool and application uses to talk to your memory. What comes back is ordered thought, not chaotic data. Your AI reasons on signal instead of noise. Faster. Sharper. Cheaper per call. And tomorrow's recall is better than today's, because the subconscious kept working overnight.
 
 You switch AI tools next month. Your memory comes with you. Your MOOT is yours, and any AI that speaks ARIA can read from it. The intelligence is rented. The memory is owned.
 

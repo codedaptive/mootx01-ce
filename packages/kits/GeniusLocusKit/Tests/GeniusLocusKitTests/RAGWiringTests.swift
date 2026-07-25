@@ -3,7 +3,7 @@
 // Tests for the GLK_RAG_WIRING_001 seam wiring:
 //
 // Suite 1 — ExternalCorpus.hybridRecall: verifies that hybrid recall
-// routes through CorpusKit's Corpus actor and returns ScoredChunk
+// routes through CorpusKit's canonical-content engine and returns canonical
 // results with a non-zero fused score (sub-scores may be nil when only
 // one dimension matched).
 //
@@ -33,29 +33,26 @@ struct ExternalCorpusHybridRecallTests {
 
     private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
 
-    /// Build a fresh in-memory Corpus with the deterministic embedding
-    /// provider. The DeterministicTokenizer produces FNV-1a tokens;
-    /// the corpus ingests content so subsequent recall returns chunks
-    /// with both keyword and (deterministic-hash-based) vector scores.
-    private func makeCorpus() async throws -> CorpusKit.Corpus {
+    /// Build a fresh whole-content standalone engine with the deterministic
+    /// embedding provider. This test intentionally exercises no chunk API.
+    private func makeCorpus() async throws -> CorpusContentEngine {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
-        return try await CorpusKit.Corpus(storage: storage, model: .deterministic)
+        return try await CorpusContentEngine(
+            standaloneOn: storage, models: [.deterministic])
     }
 
     // MARK: - T1: hybridRecall returns scored results for ingested content
 
     @Test
-    func hybridRecallReturnsScoredChunksForIngestedContent() async throws {
+    func hybridRecallReturnsCanonicalHitsForIngestedContent() async throws {
         let corpus = try await makeCorpus()
 
         // Ingest documents whose content matches the corpus entries.
         try await corpus.ingest(
-            "The quick brown fox jumps over the lazy dog",
-            sourceID: "entry-0", now: t0)
+            "The quick brown fox jumps over the lazy dog", contentID: "entry-0", now: t0)
         try await corpus.ingest(
-            "Pack my box with five dozen liquor jugs",
-            sourceID: "entry-1", now: t0)
+            "Pack my box with five dozen liquor jugs", contentID: "entry-1", now: t0)
 
         let externalCorpus = ExternalCorpus(
             name: "test-corpus",
@@ -74,14 +71,14 @@ struct ExternalCorpusHybridRecallTests {
         #expect(results.count == 2,
             "hybridRecall returns one result list per entry")
         #expect(!results[0].isEmpty,
-            "entry-0 should match at least one chunk (content ingested)")
+            "entry-0 should match at least one canonical result")
         #expect(!results[1].isEmpty,
-            "entry-1 should match at least one chunk (content ingested)")
+            "entry-1 should match at least one canonical result")
 
-        // ScoredChunk.score is the fused RRF score — verify it is positive.
-        for chunk in results[0] {
-            #expect(chunk.score > 0,
-                "fused RRF score must be positive for a matching chunk")
+        // CorpusContentHit.score is the fused RRF score.
+        for hit in results[0] {
+            #expect(hit.score > 0,
+                "fused RRF score must be positive for a matching result")
         }
     }
 
@@ -126,9 +123,9 @@ struct ExternalCorpusHybridRecallTests {
             via: corpus, limit: 5, now: t0)
 
         #expect(results.count == 1)
-        // Empty corpus → no chunks → empty result.
+        // Empty corpus → no indexed content → empty result.
         #expect(results[0].isEmpty,
-            "no matching chunks in an empty corpus returns an empty list")
+            "no matching content in an empty corpus returns an empty list")
     }
 
     // MARK: - T4: results include both vector and keyword sub-scores
@@ -141,8 +138,7 @@ struct ExternalCorpusHybridRecallTests {
         // and the vector pass contribute. The DeterministicTokenizer
         // always produces an embedding, so vectorScore is always present.
         try await corpus.ingest(
-            "substrate mathematics bitmap fingerprint",
-            sourceID: "math-doc", now: t0)
+            "substrate mathematics bitmap fingerprint", contentID: "math-doc", now: t0)
 
         let externalCorpus = ExternalCorpus(
             name: "score-corpus",
@@ -318,16 +314,11 @@ struct VectorSimilaritySignalProximityTests {
             "no AssociateFrames expected for vectors beyond the threshold")
     }
 
-    // MARK: - T7: corpus lane — chunk-keyed production rows associate DRAWERS
+    // MARK: - T7: corpus lane — Drawer-keyed production rows associate Drawers
 
-    /// Production estates never hold drawer-keyed vectors: the estate
-    /// lifecycle registers the corpus's shared VectorStore and the encode
-    /// pipeline keys every row by CHUNK UUID under the corpus's own modelID.
-    /// This test reproduces that wiring shape and proves the signal's
-    /// corpus-lane mining emits AssociateFrames carrying DRAWER ids —
-    /// verified structurally via `estate.allAssociations()`, because the
-    /// `associate` verb throws `drawerNotFound` for anything that is not a
-    /// real drawer id (a chunk UUID could never persist).
+    /// The estate lifecycle registers CorpusKit's shared VectorStore and the
+    /// encode pipeline keys every row directly by Drawer ID. This test proves
+    /// corpus-lane mining emits associations with those canonical identities.
     @Test
     func corpusLaneEmitsDrawerLevelAssociations() async throws {
         let kit = GeniusLocusKit()
@@ -360,11 +351,11 @@ struct VectorSimilaritySignalProximityTests {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "assoc-token-bag-v1", modelVersion: "1.0",
             projectionSeed: 0xC0FF_EE01, inference: tokenBag)
-        let corpus = try await Corpus(
-            storage: storage, model: .randomIndexing(provider: provider))
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: storage, models: [.randomIndexing(provider: provider)])
 
         // Two near-identical drawers + one far filler, ingested the way the
-        // encode pipeline does: chunk rows under the corpus's modelID.
+        // encode pipeline does: one row per Drawer under the corpus model.
         let frameA = CaptureFrame(
             content: "the api timeout is 30 seconds", channel: .typed,
             room: "study", latticeAnchor: LatticeAnchor(udcCode: "004"),
@@ -377,7 +368,7 @@ struct VectorSimilaritySignalProximityTests {
         let b = try await kit.capture(handle, frameB)
         let c = try await kit.capture(handle, frameC)
         for drawer in [a, b, c] {
-            try await corpus.ingest(drawer.content, sourceID: drawer.id, now: t0)
+            try await corpus.ingest(drawer.content, contentID: drawer.id, now: t0)
         }
 
         // "test-v1" matches no corpus row — the drawer-keyed lane is empty
@@ -402,8 +393,7 @@ struct VectorSimilaritySignalProximityTests {
         #expect(associateCount >= 1,
             "corpus lane must emit at least one AssociateFrame for the near pair")
 
-        // The persisted association's endpoints are the OWNING DRAWERS —
-        // the chunk → source mapping happened before emission.
+        // The persisted association endpoints are the canonical Drawers.
         let estate = try await kit.estate(for: handle)
         let associations = try await estate.allAssociations()
         let pairEndpointSets = associations.map {

@@ -1,7 +1,7 @@
 // IntegrityHook.swift
 //
 // AppliedBatch type and invocation helper for the post-apply integrity hook
-// (R3 — DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09).
+// after an inbound batch so consumers can restore domain invariants.
 //
 // The hook is an optional closure on SyncManifest, called once per pull batch
 // AFTER all records have been applied. Its purpose is to restore cross-row or

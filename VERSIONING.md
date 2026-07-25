@@ -1,7 +1,7 @@
 ---
-version: 1.2.0
+version: 1.4.1
 status: active
-date: 2026-07-03
+date: 2026-07-24
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
 ---
 
@@ -63,11 +63,24 @@ The governing question: does the consumer have to do anything? If yes, it is a M
 
 ### 1.5 Pre-Release Designation
 
-Releases in active development append a qualifier before tagging stable.
+The development channel carries an explicit SemVer pre-release version.
 
-- `1.1.0-dev` during development
-- `1.1.0-rc1`, `1.1.0-rc2` during release candidate review
-- `1.1.0` upon promotion to stable
+- `develop/1.1.x` uses `1.1.0-beta-YY`.
+- `YY` is the zero-padded count of pushes to `candidate/1.1.x`, starting with
+  the branch-creation push as `01`. The field expands beyond two digits when
+  necessary.
+- The current value is `1.1.0-beta-04`: stamped 2026-07-24 in preparation
+  for the fourth push to `candidate/1.1.x`.
+- CE and EE source, binary, plugin, and embedded-installer stamps use the same
+  beta version.
+- Candidate artifacts use the source version verbatim, without a leading `v`.
+- Release-candidate tags may use `v1.1.Z-rcN`.
+- Stable releases use `v1.1.Z`.
+
+The exact commit still identifies the code under test between candidate
+promotions. Before the next push to `candidate/1.1.x`, increment `YY` once
+across both repositories and all generated artifacts so the pushed candidate,
+its tag, and both binaries report the same version.
 
 Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guarantee. mootx01 does not ship production releases under `0.x.y`. The first public release is `1.0.0`.
 
@@ -79,7 +92,7 @@ Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guara
 
 | Branch Pattern | Purpose |
 |---|---|
-| `develop/X.Y.x` | **Default branch.** Active development; pull requests land here; the daily regression suite (`make test`) runs here; security scanning targets it. |
+| `develop/X.Y.x` | **Default branch and fast-moving source beta.** Feature work and pull requests land here; the daily regression suite (`make test`) runs here; security scanning targets it. |
 | `candidate/X.Y.x` | Test-build line. Every push produces an automatic **unsigned pre-release** whose installers are verified in CI (see 2.3). |
 | `stable/X.Y.x` | Release staging / last-known-good. Merges sit inert here; a `vX.Y.Z` tag on this branch is what cuts the **signed** production release. |
 
@@ -89,13 +102,20 @@ repository default branch (not `stable`): contributions and PRs target the
 active line, and released binaries are obtained from tagged releases, not by
 cloning.
 
+For the active minor line, the development branch is a source beta rather than
+a supported binary channel. Testers pin the commit they evaluate and use
+disposable or backed-up data. The public plugin and normal installer continue
+to track the stable line until a candidate or stable artifact is deliberately
+published.
+
 Per-branch automation:
 
 - **develop** — daily `make test` (regression backstop; runs only when develop
   moved that day). Not a build.
 - **candidate** — on every push, build all platforms UNSIGNED, publish a
-  GitHub pre-release tagged `X.Y.Z-prerelease.<run>`, then verify the installers
-  by installing that pre-release. No signing here.
+  GitHub pre-release tagged with the source beta version
+  (`X.Y.Z-beta-YY`), then verify the installers by installing that exact
+  pre-release. No signing here.
 - **stable** — no automation on push. Only a pushed `vX.Y.Z` tag triggers the
   signed, notarized release build.
 
@@ -127,7 +147,7 @@ develop/X.Y.x  --merge-->  candidate/X.Y.x  --merge-->  stable/X.Y.x
 1. Development lands on `develop/X.Y.x`.
 2. When preparing a release, `develop` is merged into `candidate`. That push
    automatically builds every platform and publishes an unsigned pre-release
-   (`X.Y.Z-prerelease.<run>`); CI then installs it via the product installers
+   (`X.Y.Z-beta-YY`); CI then installs it via the product installers
    to prove they work. Deeper hardware testing (e.g. the Windows VM harness)
    runs against that same pre-release before promotion.
 3. On a passing candidate, `candidate` is merged into `stable`. This does NOT
@@ -167,12 +187,12 @@ pre-release qualifier is allowed on a signed release when applicable
 a repository tag ruleset), since a `v*` tag creates a Codedaptive-signed
 release.
 
-Candidate pre-release tags are a **separate namespace**: `X.Y.Z-prerelease.<run>`
+Candidate pre-release tags are a **separate namespace**: `X.Y.Z-beta-YY`
 with **no leading `v`**. This is deliberate — a `v*` tag would trigger the
 signed release pipeline, so candidate builds must stay clear of it. The
 installers normalize a bare `X.Y.Z` to its `vX.Y.Z` tag but leave
-`-prerelease` tags untouched, so a candidate installs with
-`MOOTX01_VERSION=X.Y.Z-prerelease.<run>`.
+pre-release tags untouched, so a candidate installs with
+`MOOTX01_VERSION=X.Y.Z-beta-YY`.
 
 Tags are immutable. A tagged release is never altered. If a critical fix is
 required, a new PATCH tag is created.
@@ -276,6 +296,21 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 1.4.1 -- 2026-07-24
+Updated §1.5 current-value statement to `1.1.0-beta-04` after the FAB5-B1
+release-engineering bump (four-push count to `candidate/1.1.x`).
+
+### 1.4.0 -- 2026-07-23
+Made the 1.1 development version explicit as `1.1.0-beta-YY`, defined `YY` as
+the `candidate/1.1.x` push count, synchronized the value across CE and EE
+product/plugin stamps, and made candidate artifact tags equal the source beta
+version.
+
+### 1.3.0 -- 2026-07-23
+Defined `develop/X.Y.x` as the fast-moving source beta for its minor feature
+line. Distinguished the branch channel from candidate and stable artifact
+versions, and documented the stable installer/plugin boundary.
 
 ### 1.2.0 -- 2026-07-03
 Documented the branch model as actually operated: `develop` is the repository

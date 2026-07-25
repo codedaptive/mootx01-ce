@@ -20,7 +20,7 @@
 use corpus_kit::{CorpusKitError, EmbeddingModelConfig, TrainableEmbeddingBasis};
 use corpus_kit_providers::{
     LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider, LSA_PROJECTION_SEED,
-    NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED,
+    NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED, PPMI_PROJECTION_SEED, RI_PROJECTION_SEED,
 };
 use serde::Deserialize;
 use vectorkit::EmbeddingProvider;
@@ -60,7 +60,10 @@ fn ri_seam_matches_swift_blob_byte_for_byte() {
     let texts: Vec<String> = f.corpus.iter().map(|d| d.join(" ")).collect();
     let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
 
-    let mut p = RandomIndexingProvider::new();
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = RandomIndexingProvider::with_parameters(
+        "random-indexing-v1", "1.0.0", RI_PROJECTION_SEED);
     TrainableEmbeddingBasis::train_on_corpus(&mut p, &text_refs);
     let blob = TrainableEmbeddingBasis::serialize_basis(&p);
     assert_eq!(
@@ -77,7 +80,9 @@ fn ppmi_seam_matches_swift_blob_byte_for_byte() {
     let texts: Vec<String> = f.corpus.iter().map(|d| d.join(" ")).collect();
     let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
 
-    let mut p = PpmiProvider::new();
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = PpmiProvider::with_parameters("ppmi-v1", "1.0.0", PPMI_PROJECTION_SEED);
     TrainableEmbeddingBasis::train_on_corpus(&mut p, &text_refs);
     let blob = TrainableEmbeddingBasis::serialize_basis(&p);
     assert_eq!(
@@ -95,7 +100,9 @@ fn lsa_seam_matches_swift_blob_byte_for_byte() {
 
     // rank=3, sweeps=30 — construction config matching the 6a-i fixture builder.
     // train_on_corpus governs only the train+finalize SEQUENCE.
-    let mut p = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = LsaProvider::with_parameters("lsa-v1", "1.0.0", 3, 30, LSA_PROJECTION_SEED);
     TrainableEmbeddingBasis::train_on_corpus(&mut p, &text_refs);
     let blob = TrainableEmbeddingBasis::serialize_basis(&p);
     assert_eq!(
@@ -112,7 +119,10 @@ fn nmf_seam_matches_swift_blob_byte_for_byte() {
     let text_refs: Vec<&str> = f.corpus.iter().map(String::as_str).collect();
 
     // rank=3, iterations=100 — construction config matching the 6a-i fixture builder.
-    let mut p = NmfProvider::new(3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED);
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = NmfProvider::with_parameters(
+        "nmf-v1", "1.0.0", 3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED);
     TrainableEmbeddingBasis::train_on_corpus(&mut p, &text_refs);
     let blob = TrainableEmbeddingBasis::serialize_basis(&p);
     assert_eq!(

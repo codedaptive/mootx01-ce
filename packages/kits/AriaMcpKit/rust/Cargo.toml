@@ -18,7 +18,7 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = { version = "1" }
 uuid        = { version = "1", features = ["v4"] }
 # SHA-256 for the ARIA-layer drift-detection sidecar manifest
-# (ADR-VAULTKIT-002 decision b). Already in the lock file as a transitive
+# (Vault drift and candidate handling decision b). Already in the lock file as a transitive
 # dep; adding as direct dep so the version is explicit and stable.
 sha2        = { version = "0.10", features = [] }
 digest      = { version = "0.10" }
@@ -26,19 +26,20 @@ digest      = { version = "0.10" }
 # Kit path deps. From packages/kits/AriaMcpKit/rust/, kits are ../../<Kit>/rust.
 cognition-kit    = { path = "../../CognitionKit/rust" }
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+genius-locus-kit-migrations = { path = "../../GeniusLocusKit/rust-migrations", features = ["migration-floor-1-0"] }
 locus-kit        = { path = "../../LocusKit/rust" }
 neuron-kit       = { path = "../../NeuronKit/rust" }
 substrate-ml     = { path = "../../../libs/SubstrateML/rust" }
 # substrate-types: direct dep for Fingerprint256 (used in moot_lens_moment
 # and moot_lens_rhythm dispatch arms that call DrawerStore::fingerprints_captured_in
 # and DrawerStore::fingerprint_bit_series). Permitted per
-# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dependency recorded in
+# in-repository dependency direction; dependency recorded in
 # the aria-tools mission blast-radius report.
 substrate-types  = { path = "../../../libs/SubstrateTypes/rust" }
 # vault-kit: VaultBridge + ObsidianAdapter + DrawerMapping — backing the
 # moot_vault_* tool family. In-repo path dep permitted per
-# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dep recorded in
-# ADR-VAULTKIT-002 decision (e) Rust analog.
+# in-repository dependency direction; dep recorded in
+# Vault drift and candidate handling decision (e) Rust analog.
 vault-kit        = { path = "../../VaultKit/rust" }
 # The estate registry opens in-memory estates using InMemoryStorage and
 # InMemoryDrawerStore — both production-path for v1. persistence-kit is
@@ -47,12 +48,12 @@ persistence-kit  = { path = "../../PersistenceKit/rust" }
 # corpus-kit and vectorkit: wired by the SQLite estate constructor to light up
 # the BM25 + vector semantic-recall lanes. Mirrors AriaMCPMain.swift's
 # wireSemanticRecall branch (SQLite only). Permitted per
-# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dependency recorded in the
+# in-repository dependency direction; dependency recorded in the
 # mcp-semantic-lanes mission blast-radius report.
 corpus-kit       = { path = "../../CorpusKit/rust" }
 # corpus-kit-providers: the concrete five-signal ensemble (default_ensemble())
 # the estate constructor wires into Lane D. Permitted per
-# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; recorded in the 6a-iii-wire
+# in-repository dependency direction; recorded in the 6a-iii-wire
 # blast-radius report. Downstream of the providers crate — no layering inversion.
 corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
 vectorkit        = { path = "../../VectorKit/rust" }
@@ -65,7 +66,7 @@ observer-sink    = { path = "../../../libs/ObserverSink/rust" }
 # lattice-lib: the resident Autonomic Governor drives `lattice::pool_reduce`
 # (novel-token merge-back — the second dormant learning loop) on a low cadence
 # from autonomic_governor.rs. App→lib path dep (downstream→upstream), no
-# inversion. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# inversion. Permitted per in-repository dependency direction.
 lattice-lib      = { path = "../../../libs/LatticeLib/rust" }
 # eidetic-lib: maintenance FDC reclassification uses the same deterministic
 # text->anchor seam as GeniusLocusKit capture, through lookup_no_record so
@@ -73,9 +74,9 @@ lattice-lib      = { path = "../../../libs/LatticeLib/rust" }
 # avoids relying on genius-locus-kit's transitive dependency.
 eidetic-lib      = { path = "../../../libs/EideticLib/rust" }
 # queuekit: dream_runner.rs acquires the "dreaming" DrainLease (per-(estate,stream)
-# stampede prevention, ADR-021 Decision 7). QueueKit is already a transitive dep
+# stampede prevention, recall-driven dreaming). QueueKit is already a transitive dep
 # via neuron-kit; added as a direct dep so dream_runner can name DrainLease explicitly.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; recorded in T10 blast-radius.
+# Per in-repository dependency direction; recorded in  blast-radius.
 queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 
 [dev-dependencies]
@@ -84,5 +85,5 @@ queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 # genius-locus-kit carries convergence-kit as a transitive dep; naming it here
 # makes it an explicit dev-only entry so test code can import it without
 # depending on internal transitive crate names. App→kit layering, no inversion.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 convergence-kit  = { path = "../../ConvergenceKit/rust" }

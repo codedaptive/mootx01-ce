@@ -2,7 +2,6 @@
 //
 // FED-SIG-01 — Grant signature verification at the federated_recall boundary.
 //
-// D9 hardening (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6):
 // federated_recall verifies each candidate grant's Ed25519 signature against
 // the GRANTER's registered identity public key before any recall is performed.
 // Trust derives from the estate registry (the manifest-persisted public key),

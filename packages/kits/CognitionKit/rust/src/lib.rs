@@ -25,9 +25,8 @@
 //!    AssociationRules, AprioriRules, FormalConcepts, Moment, Rhythm,
 //!    Precedence, Complexity, ExploratoryRecall). Every lens recipe is
 //!    paired with a Swift version in `Sources/CognitionKit/` (SPEC C-7
-//!    satisfied) and registered in BOTH versions' catalogs with byte-
-//!    identical descriptors, per
-//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`.
+//!    satisfied) and registered in both versions' catalogs with byte-identical
+//!    descriptors.
 //!    All 30 catalog entries are present in both versions; the 3 distillation-
 //!    family entries carry descriptor metadata in Rust but no full Rust recipe
 //!    body in this directory.

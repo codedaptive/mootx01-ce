@@ -4,23 +4,23 @@ import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
-// @testable (not plain `import`) so ADR-025 §4 audit-emission tests below
+// @testable (not plain `import`) so out-of-band sensitivity grants audit-emission tests below
 // can read `kit.auditLog(for:)` — internal API, exposed to this test
 // target the same way SensitivityAuditVerbsTests.swift (GeniusLocusKit's
 // own test target) reads it.
 @testable import GeniusLocusKit
 
-/// ADR-025 sensitivity unlock — end-to-end integration through the real
+/// sensitivity unlock — end-to-end integration through the real
 /// dispatch path (`moot_memory_search` / `moot_memory_get`), driving the
 /// grant ledger directly (the CLI/UnlockAuthority approval surface is a
-/// separate, out-of-band channel per ADR §3 — these tests exercise the
+/// separate, out-of-band channel; these tests exercise the
 /// POLICY the ceiling seam enforces once a grant exists, independent of
 /// how that grant was approved).
 ///
-/// Covers the ADR's own Verification section: grant → visible; expiry
+/// Covers grant → visible; expiry
 /// (midnight / 30 min) → redacted again; restart → locked; tier
 /// independence.
-@Suite("ADR-025 sensitivity unlock — ceiling seam integration", .serialized)
+@Suite("sensitivity unlock — ceiling seam integration", .serialized)
 struct SensitivityUnlockIntegrationTests {
 
     private func openEstate(
@@ -213,7 +213,7 @@ struct SensitivityUnlockIntegrationTests {
         #expect(text(of: hiddenAgain).contains("found 0 memory(s)"))
     }
 
-    // MARK: - ADR-025 §4: read-under-grant audit emission
+    // MARK: - out-of-band sensitivity grants: read-under-grant audit emission
 
     @Test("reading a restricted drawer under a live grant emits a sensitivityReadUnderGrant audit entry, via search")
     func restrictedReadUnderGrantEmitsAuditEntryViaSearch() async throws {

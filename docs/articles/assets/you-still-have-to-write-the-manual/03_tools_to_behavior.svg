@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Tools are handles. Manuals teach behavior.</title>
+  <desc id="desc">A diagram showing how product install exposes tools, while adapters and manuals teach an AI agent when and how to use them.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#111827" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="720" fill="#fbfaf7"/>
+  <text x="600" y="72" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="700" fill="#111827">Tools are handles. Manuals teach behavior.</text>
+  <text x="600" y="114" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="22" fill="#4b5563">The install gives the agent tools. The manual teaches the agent when to use them.</text>
+
+  <rect x="72" y="190" width="280" height="350" rx="22" fill="#ffffff" stroke="#cbd5e1" stroke-width="2" filter="url(#shadow)"/>
+  <text x="212" y="242" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Product install</text>
+  <rect x="118" y="286" width="188" height="42" rx="10" fill="#e0f2fe" stroke="#7dd3fc"/>
+  <text x="212" y="313" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#0c4a6e">memory tools</text>
+  <rect x="118" y="350" width="188" height="42" rx="10" fill="#e0f2fe" stroke="#7dd3fc"/>
+  <text x="212" y="377" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#0c4a6e">local service</text>
+  <rect x="118" y="414" width="188" height="42" rx="10" fill="#e0f2fe" stroke="#7dd3fc"/>
+  <text x="212" y="441" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#0c4a6e">client wiring</text>
+  <text x="212" y="505" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">What exists?</text>
+
+  <path d="M352 365 L443 365" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="460" y="170" width="280" height="390" rx="22" fill="#ffffff" stroke="#cbd5e1" stroke-width="2" filter="url(#shadow)"/>
+  <text x="600" y="222" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Adapter + manual</text>
+  <rect x="508" y="267" width="184" height="42" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text x="600" y="294" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#4c1d95">when to recall</text>
+  <rect x="508" y="331" width="184" height="42" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text x="600" y="358" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#4c1d95">when to write back</text>
+  <rect x="508" y="395" width="184" height="42" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text x="600" y="422" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#4c1d95">how to verify</text>
+  <rect x="508" y="459" width="184" height="42" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+  <text x="600" y="486" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#4c1d95">when to ask a person</text>
+  <text x="600" y="533" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">What should happen?</text>
+
+  <path d="M740 365 L831 365" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="848" y="190" width="280" height="350" rx="22" fill="#ffffff" stroke="#cbd5e1" stroke-width="2" filter="url(#shadow)"/>
+  <text x="988" y="242" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Agent behavior</text>
+  <rect x="895" y="286" width="186" height="42" rx="10" fill="#dcfce7" stroke="#86efac"/>
+  <text x="988" y="313" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#14532d">search before guessing</text>
+  <rect x="895" y="350" width="186" height="42" rx="10" fill="#dcfce7" stroke="#86efac"/>
+  <text x="988" y="377" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#14532d">choose the right path</text>
+  <rect x="895" y="414" width="186" height="42" rx="10" fill="#dcfce7" stroke="#86efac"/>
+  <text x="988" y="441" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#14532d">leave useful memory</text>
+  <text x="988" y="505" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">What does the agent do?</text>
+
+  <rect x="370" y="616" width="460" height="46" rx="23" fill="#fffbeb" stroke="#fbbf24"/>
+  <text x="600" y="646" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" font-weight="700" fill="#78350f">Documentation is part of the operating surface.</text>
+</svg>

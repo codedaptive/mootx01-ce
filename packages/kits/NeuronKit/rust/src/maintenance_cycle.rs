@@ -32,7 +32,7 @@ use intellectus_lib::{report, StatSample};
 use crate::lattice_anchor::EnrichmentStatus;
 use crate::maintenance_decision::{self, AgedRow, AuditVerdict, Category, DriftRow};
 
-/// One drawer's node-tree data for ADR-017 invariant verification. The
+/// One drawer's node-tree data for node-tree integrity invariant verification. The
 /// adapter populates these from the same active-drawer scan it uses for
 /// decay/forbidden checks; the daemon verifies I-NT-3 (non-empty
 /// parent_node_id) and sibling display-name consistency.
@@ -96,8 +96,8 @@ pub struct MaintenanceCycleReport {
     /// deterministic re-inference miss, which now terminates as `qid_proposed`.
     /// Emitted as `neuronkit.enrichment.qid_still_pending`.
     pub qid_still_pending: usize,
-    // ── ADR-017 node invariant verification telemetry ────────────────
-    /// Number of ADR-017 node-tree invariant violations detected this
+    // ── node-tree invariant verification telemetry ────────────────
+    /// Number of node-tree invariant violations detected this
     /// cycle. Covers I-NT-3 (empty parent_node_id) and sibling display-name
     /// consistency. Emitted as `neuronkit.node_invariant.violations`.
     pub node_invariant_violations: usize,
@@ -158,7 +158,7 @@ pub trait MaintenancePolicyStore {
 
     /// Load the persisted daemon cycle state, or `None` if none has been saved.
     /// Loaded once at governor construction so a restart continues from the prior
-    /// run's idempotency/cycle memory (F6 / ADR-020). Default: no state persisted.
+    /// run's idempotency/cycle memory. Default: no state persisted.
     /// Mirrors Swift `MaintenancePolicyStore.loadDaemonState`.
     fn load_daemon_state(&self) -> Option<MaintenanceDaemonState> {
         None
@@ -172,7 +172,7 @@ pub trait MaintenancePolicyStore {
 
 /// The maintenance daemon's across-cycle state, captured for persistence so a
 /// restart continues instead of repeating suppressed proposals or resetting its
-/// counters (F6 / ADR-020). `proposed_keys` is a SORTED Vec so the serialized
+/// counters. `proposed_keys` is a SORTED Vec so the serialized
 /// manifest value is byte-stable. Mirrors Swift `MaintenanceDaemonState`:
 /// `last_fire_epoch_secs` ≡ `lastTickAt` (scan-tick baseline) and
 /// `last_audit_check_epoch_secs` ≡ `lastAuditCheckAt` (audit-check cadence,
@@ -252,7 +252,7 @@ pub struct MaintenanceScan {
     /// The daemon retries each row via `infer_lattice_anchor`; on success the
     /// status is flipped to `qid_completed` via the sink.
     pub qid_pending_drawers: Vec<QidPendingRow>,
-    /// Active drawers' node-tree data for ADR-017 invariant verification
+    /// Active drawers' node-tree data for node-tree integrity invariant verification
     /// (I-NT-3 empty parent_node_id, sibling display-name consistency).
     pub node_invariant_rows: Vec<NodeInvariantRow>,
 }
@@ -340,7 +340,7 @@ impl MaintenanceDaemon {
         }
     }
 
-    /// Export the daemon's across-cycle state for persistence (F6 / ADR-020).
+    /// Export the daemon's across-cycle state for persistence.
     /// `proposed_keys` is emitted sorted (BTreeSet iterates in order) so the
     /// serialized value is byte-stable. Mirrors Swift `currentDaemonState()`.
     pub fn daemon_state(&self) -> MaintenanceDaemonState {
@@ -352,7 +352,7 @@ impl MaintenanceDaemon {
         }
     }
 
-    /// Restore the daemon's across-cycle state from persistence (F6 / ADR-020).
+    /// Restore the daemon's across-cycle state from persistence.
     /// Called once at governor construction so a restart resumes the prior run's
     /// idempotency/cycle memory.
     pub fn restore_state(&mut self, state: MaintenanceDaemonState) {
@@ -616,8 +616,8 @@ drawer {} (mdcc: {}); enrichment proposal filed for human/agent Q-ID assignment"
             ));
         }
 
-        // ── Step 5.9: ADR-017 node invariant verification ────────────
-        // Verify a subset of ADR-017 node-tree containment invariants from
+        // ── Step 5.9: node-tree invariant verification ────────────
+        // Verify a subset of node-tree containment invariants from
         // the drawer corpus already gathered by the adapter. Full invariant
         // verification (I-NT-1 through I-NT-6) requires node-table access
         // not yet exposed through the GLK public surface.
@@ -1279,7 +1279,7 @@ node-invariant-violations 0"
         assert_eq!(enrichment_proposals, report.qid_proposed);
     }
 
-    // ─── ADR-017 node invariant verification ────────────────────────────
+    // ─── node-tree invariant verification ────────────────────────────
 
     // NI-1: no invariant rows → zero violations.
     #[test]

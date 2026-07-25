@@ -31,7 +31,7 @@
 //   Future kits that just need to speak substrate-shape.
 //
 // per the six-phase plan in
-// docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md.
+// the four-package substrate layout.
 // As of 2026-05-29 the four-package split is complete: SubstrateLib is
 // the orchestration layer over Types/Kernel/ML and no longer re-exports
 // them. Consumers depend on this package directly.

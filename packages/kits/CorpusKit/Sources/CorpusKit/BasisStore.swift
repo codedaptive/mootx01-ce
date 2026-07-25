@@ -107,7 +107,7 @@ public actor BasisStore {
     /// false: a retrain UPSERTs the existing (modelID, modelVersion) row, so
     /// the table holds at most one basis per provider key.
     ///
-    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012):
+    /// v2 adds the nullable `.json` `ext` forward-compat slot:
     /// reserves the slot for future per-basis typed metadata (training
     /// hyperparameters, provenance) without a migration. 1.0 writes NULL /
     /// omits it on upsert and never reads it.
@@ -126,7 +126,7 @@ public actor BasisStore {
                     .timestamp("trained_at", nullable: false),
                     // INTEGER staleness anchor — NOT a Bool flag.
                     .int("trained_chunk_count", nullable: false),
-                    // ADR-012 forward-compat slot. Nullable `.json`, present
+                    // nullable entity ext slots forward-compat slot. Nullable `.json`, present
                     // from schema v2. Reserves the slot, not a shape. 1.0 omits
                     // it on upsert and never reads it.
                     .json("ext", nullable: true)
@@ -151,6 +151,13 @@ public actor BasisStore {
     ///
     /// - Parameter row: the basis row to persist.
     public func upsert(_ row: PersistedBasis) async throws {
+        try await upsert(row, into: storage.rowStore)
+    }
+
+    /// Transaction-scoped variant: write through the CALLER's row store so
+    /// the basis row commits atomically with sibling writes (the corrective
+    /// pass's basis+counts atomic commit).
+    public func upsert(_ row: PersistedBasis, into rowStore: any RowStore) async throws {
         let values: [String: TypedValue] = [
             "model_id": .text(row.modelID),
             "model_version": .text(row.modelVersion),
@@ -162,7 +169,7 @@ public actor BasisStore {
         // non-conflict columns (basis, trained_at, trained_chunk_count) of the
         // existing row for the same provider key, so a retrain overwrites the
         // prior basis in place rather than accumulating rows.
-        _ = try await storage.rowStore.upsert(
+        _ = try await rowStore.upsert(
             table: "corpus_provider_basis",
             values: values,
             conflictColumns: ["model_id", "model_version"]

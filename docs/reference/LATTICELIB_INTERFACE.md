@@ -1031,7 +1031,7 @@ the existing "Semantic micro-ranker" row.
 
 `FDC.ancestors(of:)` / `Fdc::ancestors` (ancestor chain façade delegating to
 `FDCFrame.ancestors` / `FdcFrame::ancestors`) is present in both ports and
-confirmed. Added as part of the ADR-010 Decision B FDC provider migration:
+confirmed. Added as part of the the semantic-fusion contract Decision B FDC provider migration:
 consumers use the `FDC`/`Fdc` runtime façade rather than reaching into
 `FDCFrame`/`FdcFrame` directly, and the decimal hierarchy math lives only in
 LatticeLib (Gate 2).
@@ -1141,7 +1141,7 @@ Additive; no existing surface changed.
 Added `FDC.ancestors(of:)` (Swift) and `Fdc::ancestors` (Rust) to the public
 FDC/Fdc runtime façade. Both delegate to the already-public
 `FDCFrame.ancestors(of:)` / `FdcFrame::ancestors`; the decimal hierarchy math
-lives in LatticeLib only. Added to support ADR-010 Decision B: the FDC provider
+lives in LatticeLib only. Added to support the semantic-fusion contract Decision B: the FDC provider
 in CorpusKitProviders now calls `FDC.ancestors(of:)` / `Fdc::ancestors` rather
 than reimplementing the ancestor walk inline (Gate 2 compliance). Added the new
 façade row to the concordance table. Drift summary updated.

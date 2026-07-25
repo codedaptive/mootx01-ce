@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.13.0
+version: 1.14.0
 status: active
-date: 2026-07-16
+date: 2026-07-20
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -22,7 +22,7 @@ SURFACE — the internal stores, validators, fingerprint machinery, and bitmap
 helpers that are public for testing and intra-kit use, consumed by the kit's
 own pipeline and tests rather than another package; a table of contents
 (name + role + source file). The companion SPEC carries the behavioral
-contracts (invariants I-1…I-11, conformance C-1…C-7).
+contracts (invariants I-1…I-13, conformance C-1…C-8).
 
 ## § 1 — Package layout
 
@@ -44,6 +44,25 @@ Rust `add_drawer` / `bitmap_audit_trail`). The two ports also differ in
 *shape* — Swift is `actor`/`async`, the Rust version is synchronous and takes
 `now: i64` explicitly; the Rust `DrawerStore` is a trait with an in-memory
 implementation only. The value-level results agree (SPEC § 8, I-11).
+
+### GLK shared-content composition (1.1 target)
+
+LocusKit's public API remains independent of CorpusKit. When composed by GLK,
+the existing `Drawer` surface is the canonical content-source surface:
+
+- `Drawer.id` is the identity used by CorpusKit indexes and returned by Corpus
+  recall; GLK does not mint a chunk or passage identity for it.
+- `Drawer.content` is read through a GLK-owned `CorpusContentSource` adapter.
+  CorpusKit receives content for indexing but does not own or copy the Drawer.
+- capture, supersession, withdrawal, and expunge are converted by GLK into
+  revision/digest/cursor-bearing source changes. Attached Corpus queue payloads
+  carry those references, not verbatim Drawer text.
+- LocusKit exposes no CorpusKit type and writes no CorpusKit table. CorpusKit
+  likewise imports no LocusKit type; GLK owns the adapter and lifecycle.
+
+`Drawer.chunkIndex` is source/provenance metadata already present on a canonical
+Drawer. It is not a CorpusKit RAG passage, does not authorize a second content
+row, and is not used as GLK recall identity.
 
 > **Two-tier surface.** LocusKit declares 74 public types in the Swift version,
 > of which 33 are referenced by another package (GeniusLocusKit, NeuronKit,
@@ -231,7 +250,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public let lineageID: UUID
     public let content: String                 // verbatim, never mutated (I-3)
     // Wing and room are NOT stored on Drawer. The drawer belongs to a room node in
-    // the estate containment tree (ADR-017). Display names are resolved via
+    // the estate containment tree. Display names are resolved via
     // DrawerStore.resolveNodeNames(parentNodeIds:) when needed.
     public let parentNodeId: String            // UUID of the room node (depth=2 in node tree)
     public let sourceFile: String?
@@ -313,7 +332,7 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
     public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
     public let addedBy: String; public let filedAt: Date
     public let tombstonedAt: Date?; public let removedByBatch: String?
-    public let orderKey: Double?  // fractional-index sibling ordering under parent edges (ADR-017 §11)
+    public let orderKey: Double?  // fractional-index sibling ordering under parent edges (the node-integrity contract §11)
     public init(id: String, sourceWing: String, sourceRoom: String, sourceDrawerId: String? = nil,
                 targetWing: String, targetRoom: String, targetDrawerId: String? = nil,
                 label: String, kind: TunnelKind = .references, adjectiveBitmap: Int64 = 0,
@@ -486,7 +505,7 @@ value or a domain argument — no raw masks or thresholds.
 
 **Recall defaults.** When no sensitivity filter is present in the chain, the
 evaluator prepends `.sensitivityAtMost(.elevated)` — the Normal-tier ceiling
-per ADR-007 Decision 2 (Normal tier = `.normal` + `.elevated`;
+per the data-movement contract Decision 2 (Normal tier = `.normal` + `.elevated`;
 `.restricted` = Private; `.secret` = Secret). `restricted` and `secret`
 drawers are excluded from default (no-claims) recall. They are reachable only
 by an explicit sensitivity constraint in the caller's chain, e.g.
@@ -579,14 +598,14 @@ plain `String`/`Uuid`.
 #### Bitmap value enums (the named axes the accessors decode)
 
 All `Int64`-backed; decode with safe fallback to the neutral case (SPEC C-1).
-Bit layouts per architecture spec § 5.5 / § 5.6 and `Q1_DECISION_PROVENANCE_BITMAP`.
+Bit layouts per architecture spec § 5.5 / § 5.6 and `Q1_the provenance-bitmap contract`.
 
 ```swift
 // adjective bitmap (Adjectives.swift) — scale-gapped raws per cookbook §2.3 (F13/v0.6)
 public enum State: Int { case active=0, pending=1, contested=2, accepted=3, superseded=16, decayed=17, withdrawn=18, expired=19, rejected=32, tombstoned=33 }
 public enum Trust: Int, Comparable { case verbatim=0, observed, imported, canonical, derived, proposed, ambient }   // ambient=6 NEW in v0.6
 public enum AdjectiveSensitivity: Int { case normal=0, elevated=16, restricted=32, secret=48 }   // scale-gapped
-// ADR-007 Decision 2 privacy-tier predicates on AdjectiveSensitivity (no new bits):
+// the data-movement contract Decision 2 privacy-tier predicates on AdjectiveSensitivity (no new bits):
 var isBulkExportable: Bool           // true for .normal, .elevated  (Normal tier)
 var requiresOwnerKeyForBulk: Bool    // true for .restricted          (Private tier)
 var isExcludedFromBulk: Bool         // true for .secret              (Secret tier)
@@ -714,7 +733,7 @@ public actor DrawerStore {
     /// Returns the total number of recall_trace rows in the estate. Used by moot_estate_status.
     public func countRecallTraces() async throws -> Int
     public func allTunnels() async throws -> [Tunnel]
-    // Outline helpers (ADR-017 §11) — typed parent edges with fractional ordering
+    // Outline helpers (the node-integrity contract §11) — typed parent edges with fractional ordering
     public func outlineChildren(of parentDrawerId: String) async throws -> [Tunnel]
     public func outlineAncestors(of drawerId: String) async throws -> [String]
     public func reparentDrawer(_ childId: String, newParentId: String?, orderKey: Double,
@@ -791,7 +810,7 @@ cited file.
   `"|"`-joined transitive ancestor list (`LatticeLib.QIDClosure.ancestors(of:)`);
   no QID or no ancestors → the deterministic null 0. This adds a
   LocusKit → LatticeLib dependency (downstream → upstream, no cycle; authority
-  DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
+  the package-dependency rule).
 - **Bundle materialisation:** `BundleMaterializer`, `NodeBundleStore`,
   `NodeBundleStore.BundleKind` (count-vector roll-ups over rooms/wings) —
   `BundleMaterializer.swift`, `NodeBundleStore.swift`.
@@ -851,7 +870,7 @@ cited file.
   value sets; the gate uses `union_slots()` / `frozen()` identically at estate open and per-write
   validation time.
 - **Default wings (estate provisioning):** `DefaultWings.swift` — module-level public constants
-  and a struct used at estate provision time (ADR-016):
+  and a struct used at estate provision time:
   `public let defaultWingName: String = "Agentic Memory"` — the default wing for `capture`
   when no explicit wing is supplied; all new captures without an explicit wing land here.
   `public let hintRoom: String = "AI_Charter_Hint"` — room name for per-wing hint drawers.
@@ -1015,7 +1034,7 @@ bit-identical DDL. Gaps are tracked until resolved.
 | `node_bundles` table | `LocusKitSchema.nodeBundlesTable` (LocusKitSchema.swift:308) | `node_bundles_table()` (schema.rs:470) | Present | Three-part composite PK matches |
 | `container_fingerprints` table | `LocusKitSchema.containerFingerprintsTable` (LocusKitSchema.swift:283) | `container_fingerprints_table()` (schema.rs:506) | Present | |
 | `recall_trace` table | `LocusKitSchema.recallTraceTable` (LocusKitSchema.swift:499) | `recall_trace_table()` (schema.rs:542) | Present | `score` REAL nullable matches |
-| `keys` table (ENC-01) | `LocusKitSchema.keysTable` | `keys_table()` | Present | key_id TEXT PK, algorithm TEXT, wrapped BLOB, created_at TIMESTAMP (ISO8601), ext JSON nullable (ADR-012 forward-compat slot, schema v2); no bitmap columns; no generated columns |
+| `keys` table (ENC-01) | `LocusKitSchema.keysTable` | `keys_table()` | Present | key_id TEXT PK, algorithm TEXT, wrapped BLOB, created_at TIMESTAMP (ISO8601), ext JSON nullable (the forward-compatible ext-slot contract forward-compat slot, schema v2); no bitmap columns; no generated columns |
 
 **Date storage invariant:** all `timestamp` / `created_at` / `filedAt` columns use
 `ColumnType::Timestamp` in Rust (emitted as TEXT ISO8601 by PersistenceKit backends),
@@ -1025,7 +1044,7 @@ matching Swift's `.timestamp(...)` — never REAL (Unix timestamp).
 (`migrations` list is empty in Rust; no `ALTER TABLE` history in Swift — each
 version re-declares the full column set fresh, as no estate data has shipped).
 v2 added the nullable `.json` `ext` forward-compat slot to the `keys` table
-(ADR-012), completing the one-`ext`-column-per-persistent-entity convention;
+(the forward-compatible ext-slot contract), completing the one-`ext`-column-per-persistent-entity convention;
 1.0 writes NULL and never reads it. The ENC-01 `keys` table was present from v1;
 this concordance row records that both ports carry the v2 `ext` column.
 
@@ -1063,7 +1082,7 @@ Recurring sanctioned shapes:
 | Association | `Association` (Association.swift:67) | `Association` (association.rs:51) | public / pub | identical | `AssociationTests.swift` ↔ `association_tests.rs` | Confirmed |
 | Learned reference | `LearnedReference` (LearnedReference.swift:86) | `LearnedReference` (learned_reference.rs:132) | public / pub | identical | `LearnedReferenceTests.swift` ↔ `learned_reference_tests.rs` | Confirmed |
 | Container fingerprint | `ContainerFingerprint` (ContainerFingerprintStore.swift:40) | `ContainerFingerprint` (container_fingerprint_store.rs:62) | public / pub | identical | `ContainerFingerprintStoreTests.swift` | Confirmed |
-| Tree node | `Node` (Node.swift:25, `public struct`) | `Node` (node.rs:30, `pub struct`) | public / pub | identical; thirteen fields: `id`, `parentId`/`parent_id`, `displayName`/`display_name`, `lookupName`/`lookup_name`, `depth`, `lifecycle` (lifecycle-state bitmap, no-resurrection guard ADR-017), `createdHlc`/`created_hlc`, `tombstonedHlc`/`tombstoned_hlc`, `tombstonedAt`/`tombstoned_at`, `merkleRoot`/`merkle_root`, `createdAt`/`created_at`, `updatedAt`/`updated_at`, `ext` (JSON forward-compat). `Date?` / `Option<i64>` for date fields — ISO8601-TEXT seam (sanctioned). NT-L1. | `NodeStoreTests.swift` ↔ `node_store_tests.rs` | Confirmed |
+| Tree node | `Node` (Node.swift:25, `public struct`) | `Node` (node.rs:30, `pub struct`) | public / pub | identical; thirteen fields: `id`, `parentId`/`parent_id`, `displayName`/`display_name`, `lookupName`/`lookup_name`, `depth`, `lifecycle` (lifecycle-state bitmap, no-resurrection guard the node-integrity contract), `createdHlc`/`created_hlc`, `tombstonedHlc`/`tombstoned_hlc`, `tombstonedAt`/`tombstoned_at`, `merkleRoot`/`merkle_root`, `createdAt`/`created_at`, `updatedAt`/`updated_at`, `ext` (JSON forward-compat). `Date?` / `Option<i64>` for date fields — ISO8601-TEXT seam (sanctioned). NT-L1. | `NodeStoreTests.swift` ↔ `node_store_tests.rs` | Confirmed |
 
 #### Adjective enums (proved by `adjective_bitmap_conformance.rs`)
 
@@ -1215,7 +1234,7 @@ future pass can decide whether Rust should narrow it to `pub(crate)`.
 | Source catalog entry | `SourceCatalogEntry` (`SourceCatalogEntry.swift:50`) | `SourceCatalogEntry` (`source_catalog_entry.rs:75`) | both public/pub | identical 6-field struct: `id`, `kind: SourceKind`/`SourceKind`, `handle`, `latticeAnchor`/`lattice_anchor: LatticeAnchor` (the genuine anchor `learn` inherits), `firstSeen`/`first_seen` (Date/i64 ISO8601-TEXT seam — sanctioned), `addedBy`/`added_by: String` | `EstateTests.swift` (source-catalog paths) ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
 | Source kind | `SourceKind` (`SourceCatalogEntry.swift:103`) | `SourceKind` (`source_catalog_entry.rs:42`) | both public/pub | identical 6-case enum stored as Int raw value: `.user`/`User`=0, `.federation`/`Federation`=1, `.householdPairing`/`HouseholdPairing`=2, `.fleetPairing`/`FleetPairing`=3, `.tierInheritance`/`TierInheritance`=4, `.pairedEstate`/`PairedEstate`=5; Swift lowerCamel / Rust UpperCamel — idiom | `EstateTests.swift` ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
 | Recall internal-read fault seam | `Estate.RecallInternalRead` (`Estate.swift:66`, nested public enum; `_testForceInternalReadError` stored property) | `RecallInternalRead` (`estate.rs:100`, `#[cfg(any(test, feature = "test-seams"))]` pub enum; `_test_force_internal_read_error: AtomicU8` field) | Swift public nested in `Estate` actor / Rust pub (test-seams only) | 5-case test fault-injection seam (`liveRows`/`LiveRows`, `roomFingerprints`/`RoomFingerprints`, `roomDrawerRead`/`RoomDrawerRead`, `bitmapEval`/`BitmapEval`, `traceWrite`/`TraceWrite`); Swift lowerCamel / Rust UpperCamel — idiom. Present in both ports; Rust gates behind `#[cfg(any(test, feature="test-seams"))]` (not in the production binary). The seam declaration lives on `Estate` in both ports (Swift stored property, Rust `AtomicU8` field) — not on `EstateVerbs`, which is an extension/impl that cannot own stored properties. | `EstateRecallFaultTests.swift` ↔ `estate_recall_fault_tests.rs` (recall degraded-stage suite) | Confirmed (test-seam; production binary excludes the Rust enum) |
-| Wing provisioning definition | `WingDefinition` (DefaultWings.swift:48, `public struct`) | `WingDefinition` (default_wings.rs:48, `pub struct`) | public / pub | identical concept; two fields: `name` (String / `&'static str`), `hint` (String / `&'static str`) — the wing's role-description text, seeded as a NORMAL drawer in the wing's `AI_Charter_Hint` room (no special room/provenance/embedding; see ADR-016 §2 amendment 2026-06-23). Swift uses owned `String`; Rust uses static string literals — same semantic values at runtime. Seeded at estate provision as the seven ADR-016 default wings. NT-L1. | `EstateTests.swift` (provision path) ↔ `node_store_tests.rs` (estate provision exercises WingDefinition) | Confirmed |
+| Wing provisioning definition | `WingDefinition` (DefaultWings.swift:48, `public struct`) | `WingDefinition` (default_wings.rs:48, `pub struct`) | public / pub | identical concept; two fields: `name` (String / `&'static str`), `hint` (String / `&'static str`) — the wing's role-description text, seeded as a NORMAL drawer in the wing's `AI_Charter_Hint` room (no special room/provenance/embedding; see the wing-organization contract §2 amendment 2026-06-23). Swift uses owned `String`; Rust uses static string literals — same semantic values at runtime. Seeded at estate provision as the seven the wing-organization contract default wings. NT-L1. | `EstateTests.swift` (provision path) ↔ `node_store_tests.rs` (estate provision exercises WingDefinition) | Confirmed |
 | Snapshot attestation (LocusKit-homed) | — | `SnapshotAttestation` (merkle_rollup.rs:269, `pub struct`) | — / pub | **Layering note:** Rust port places `SnapshotAttestation` in `LocusKit/merkle_rollup.rs`. The Swift equivalent is `PersistenceKit.SnapshotAttestation` (SnapshotRegistry.swift:47). Relocate to PersistenceKit Rust in a future parity mission (NT-P1/L4). Until relocated, this row documents the Rust declaration site so the concordance audit does not flag it as an undocumented gap. | `MerkleRollupTests.swift` ↔ `merkle_rollup_tests.rs` | Documented (layering mismatch — see PersistenceKit concordance for Swift counterpart) |
 | Snapshot record (LocusKit-homed) | — | `SnapshotRecord` (merkle_rollup.rs:260, `pub struct`) | — / pub | **Layering note:** same as `SnapshotAttestation` above. Rust port places this in `LocusKit/merkle_rollup.rs`; Swift equivalent is `PersistenceKit.SnapshotRecord` (SnapshotRegistry.swift:32). NT-P1/L4. | `MerkleRollupTests.swift` ↔ `merkle_rollup_tests.rs` | Documented (layering mismatch — see PersistenceKit concordance for Swift counterpart) |
 
@@ -1231,7 +1250,7 @@ enabled. Off by default.
 
 - `Package.swift`: `IntellectusLib` in-repo dependency added to the
   `LocusKit` target and `LocusKitTests` test target. Authority:
-  `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
+  `the package-dependency rule`.
 - `Cargo.toml`: `intellectus-lib = { path = "…/IntellectusLib/rust" }`
   added under `[dependencies]`.
 
@@ -1359,6 +1378,13 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 
 ## Changelog
 
+### 1.14.0 -- 2026-07-20
+
+- Documented the 1.1 GLK shared-content seam: LocusKit owns canonical Drawer
+  content and identity while a GLK-owned adapter supplies it to CorpusKit.
+- Clarified that `Drawer.chunkIndex` is provenance metadata, not CorpusKit RAG
+  chunk storage or result identity.
+
 ### 1.13.0 -- 2026-07-16
 Closed CRITICAL documentation gaps identified by the post-pass verifier:
 
@@ -1381,10 +1407,10 @@ Closed CRITICAL documentation gaps identified by the post-pass verifier:
   Rust: `DEFAULT_WING_NAME`, `WingDefinition`, `DEFAULT_WINGS` in `default_wings.rs`.
 
 ### 1.12.0 -- 2026-07-16
-MX-TAB-4 and HLC/ADR-017 audit-model corrections:
+MX-TAB-4 and HLC audit-model corrections:
 
 - **Drawer struct**: `wing: String` and `room: String` fields replaced by
-  `parentNodeId: String` (ADR-017 node-tree containment). Display names are
+  `parentNodeId: String` (node-tree containment). Display names are
   resolved via `DrawerStore.resolveNodeNames(parentNodeIds:)` when needed; they
   are no longer stored on the struct. Init signature updated accordingly.
 - **RecallFrame.asOf**: type changed from `Date?` to `HLC?` (§11 clock decision
@@ -1412,10 +1438,10 @@ Added the `Estate` consumer metadata surface (`meta(key:)` / `setMeta(key:value:
 Swift; `meta` / `set_meta` Rust) — the public, durable, lowest-level key-value
 primitive over the manifest table that upper layers persist their own state
 through (resolves the "future verb surface" the manifest accessor anticipated;
-see ADR-020). Additive, both ports.
+see the daemon-state persistence contract). Additive, both ports.
 
 ### 1.10.0 -- 2026-06-23
-Charter special-casing removed (ADR-016 §2 amendment). `WingDefinition`'s second
+Charter special-casing removed (the wing-organization contract §2 amendment). `WingDefinition`'s second
 field renamed `charter` → `hint` on both ports; the seeded wing hint is now a
 NORMAL drawer (filed into the `AI_Charter_Hint` room, normal embedding,
 recallable, counted, user-deletable) — no reserved room, no `added_by` sentinel,
@@ -1464,7 +1490,7 @@ sorted-numeric, `"|"`-joined transitive ancestor list
 (`LatticeLib.QIDClosure.ancestors(of:)`); no QID or no ancestors → the
 deterministic null 0 (preserving the prior behaviour for those rows). Adds a
 `LocusKit → LatticeLib` package dependency (downstream → upstream, no cycle;
-authority DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28, required by the #7
+authority the package-dependency rule, required by the #7
 feature). Removed the stale "Q-ID closure cache deferred (I-17)" comments. The
 fingerprint output changes only for drawers whose `wikidataQID` has ancestors;
 cross-port conformance preserved.
@@ -1481,7 +1507,7 @@ order. Callers must invoke `moot_reindex` / `moot_dream` to rebuild BM25/vector
 lanes after batch import.
 
 ### 1.8.0 -- 2026-06-21
-NT-DOC-1: Added 5 ADR-017 concordance rows to § 7. Entities section gains `Node`
+NT-DOC-1: Added 5 the node-integrity contract concordance rows to § 7. Entities section gains `Node`
 (tree node entity, 13 fields, ISO8601-TEXT date seam). Estate/store types gains
 `NodeStore` (Swift actor / Rust struct, 7 verbs). Additional public types gains
 `WingDefinition` (2-field provisioning struct, static string seam), plus
@@ -1489,7 +1515,7 @@ NT-DOC-1: Added 5 ADR-017 concordance rows to § 7. Entities section gains `Node
 with layering-mismatch notes pointing to the PersistenceKit Swift counterparts.
 
 ### 1.7.0 -- 2026-06-21
-Schema v5 → v6 (ADR-017 §11): `TunnelKind.parent` (raw 9) adds typed parent edges to the tunnel graph for outline containment, orthogonal to the node-tree containment hierarchy. `Tunnel` gains `orderKey: Double?` (`order_key: Option<f64>` in Rust) for fractional-index sibling ordering. Schema adds `order_key REAL` nullable column and two new indices (`idx_tunnels_kind_source_drawer`, `idx_tunnels_kind_target_drawer`). Three new `DrawerStore` methods: `outlineChildren(of:)` (children sorted by order_key), `outlineAncestors(of:)` (root-first ancestor walk, 256-depth ceiling), `reparentDrawer(_:newParentId:orderKey:wing:room:addedBy:now:)` (tombstone + recreate). One-parent-per-child enforced in `addTunnel`. All three backends (InMemory, SQLite, Postgres). Rust `Tunnel` uses manual `PartialEq`/`Eq`/`Hash` via `f64::to_bits()` for the `order_key` field.
+Schema v5 → v6 (the node-integrity contract §11): `TunnelKind.parent` (raw 9) adds typed parent edges to the tunnel graph for outline containment, orthogonal to the node-tree containment hierarchy. `Tunnel` gains `orderKey: Double?` (`order_key: Option<f64>` in Rust) for fractional-index sibling ordering. Schema adds `order_key REAL` nullable column and two new indices (`idx_tunnels_kind_source_drawer`, `idx_tunnels_kind_target_drawer`). Three new `DrawerStore` methods: `outlineChildren(of:)` (children sorted by order_key), `outlineAncestors(of:)` (root-first ancestor walk, 256-depth ceiling), `reparentDrawer(_:newParentId:orderKey:wing:room:addedBy:now:)` (tombstone + recreate). One-parent-per-child enforced in `addTunnel`. All three backends (InMemory, SQLite, Postgres). Rust `Tunnel` uses manual `PartialEq`/`Eq`/`Hash` via `f64::to_bits()` for the `order_key` field.
 
 ### 1.3.0 -- 2026-06-17
 `ProposeFrame` now carries the three proposal provenance axes in both ports: `confirmation` (`ProposalConfirmationSource`, default `.human`), `generatedBy` (`ProposalGeneratedByClass`, default `.dreamingDaemon`), and `confidence` (`ProposalConfidenceBucket`, default `.null`). The `propose` verb wires all three into the proposal operational bitmap at bits 12–17 / 18–23 / 24–29 — the exact windows the `confirmationSource` / `generatedByClass` / `confidenceBucket` read accessors (cookbook §2.4) decode — replacing the previous behaviour where those windows were hard-zeroed regardless of producer. Additive and behaviour-preserving: the three defaults reproduce the pre-wire bitmap byte-for-byte, so existing callers (NeuronKit daemon sinks, GLK boundary, scheduler) are unaffected. Daemon-emitted proposals may now set their true producer class so provenance reflects reality rather than the zero fallback. Cross-port round-trip + default-byte-identity conformance added (`ProposeProvenanceTests.swift` ↔ `estate_verbs.rs` propose-provenance tests). Removed the stale "a later sub-mission wires them through the Brain layer ProposalFrame" deferral comment in both ports.
@@ -1504,7 +1530,7 @@ Schema v5 → v6 (ADR-017 §11): `TunnelKind.parent` (raw 9) adds typed parent e
 Rust `DrawerStore` brought to Swift parity on compile-enforcement: `all_drawers` and `room_level_fingerprints` are now required trait methods with NO default (a backend that forgets either fails to COMPILE, not at runtime). Documented the compile-required-reads exception alongside the existing fail-loud-default newtype-forwarding contract. No behaviour change for any production backend (all three already implement both); no signature change.
 
 ### 1.1.0 -- 2026-06-17
-Schema v1 → v2 (ADR-012): added the nullable `.json` `ext` forward-compat slot to the `keys` table, completing the one-`ext`-column-per-persistent-entity convention. Both ports; 1.0 writes NULL and never reads it. Updated the `LocusKitSchema.version` surface and the `keys`-table concordance row.
+Schema v1 → v2 (the forward-compatible ext-slot contract): added the nullable `.json` `ext` forward-compat slot to the `keys` table, completing the one-`ext`-column-per-persistent-entity convention. Both ports; 1.0 writes NULL and never reads it. Updated the `LocusKitSchema.version` surface and the `keys`-table concordance row.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

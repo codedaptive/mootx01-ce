@@ -1,5 +1,5 @@
 //! Manifest-backed implementations of the dreaming and maintenance policy
-//! stores (F6 / ADR-020). These satisfy the daemon persistence seams by reading
+//! stores. These satisfy the daemon persistence seams by reading
 //! and writing the estate manifest THROUGH the substrate's public key-value
 //! surface (`DrawerStore::get_meta` / `set_meta`, backed by the durable manifest
 //! table), so policy and daemon cycle state survive a process restart.
@@ -24,7 +24,7 @@ use crate::maintenance_cycle::{
 };
 use crate::solver_bandit::SolverBandit;
 
-/// Namespaced manifest keys for NeuronKit daemon state (ADR-020). Namespaced to
+/// Namespaced manifest keys for NeuronKit daemon state. Namespaced to
 /// avoid collision with the typed v1 manifest keys. Keys match the Swift port.
 mod keys {
     pub const DREAMING_POLICY: &str = "neuronkit.dreaming.policy";

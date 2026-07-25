@@ -119,6 +119,30 @@ impl InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
+    /// The in-memory backend has no page model and no on-disk footprint:
+    /// nothing is ever reclaimable (explicit per-backend contract, mirrors
+    /// the Swift `InMemoryStorage: StorageMaintenance` conformance).
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        Ok(0)
+    }
+
+    /// Explicit no-op (per the maintenance backend table). The report says
+    /// `performed: false` so callers can distinguish "ran and freed
+    /// nothing" from "nothing to run".
+    fn perform_maintenance(
+        &self,
+        _progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        _should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        Ok(crate::maintenance::MaintenanceReport::no_op(
+            "inmemory",
+            "in-memory backend holds no pages; nothing to reclaim",
+        ))
+    }
+
     fn configuration(&self) -> &EstateConfiguration {
         &self.configuration
     }
@@ -446,11 +470,21 @@ impl InMemoryRowStore {
     }
 }
 
-impl RowStore for InMemoryRowStore {
-    fn insert(
+impl InMemoryRowStore {
+    // ----------------------------------------------------------------
+    // Private helpers — write with explicit ChangeOrigin
+    //
+    // `insert`, `upsert`, and `delete` delegate here with Local;
+    // the `_sync` trait overrides delegate here with SyncApply so that
+    // ConvergenceKit's outbox observer can suppress inbound-apply writes
+    // via `change.origin == ChangeOrigin::SyncApply` (I-10, WC2).
+    // ----------------------------------------------------------------
+
+    fn insert_impl(
         &self,
         table: &str,
         values: BTreeMap<String, TypedValue>,
+        origin: ChangeOrigin,
     ) -> StorageResult<RowHandle> {
         let (key, stored, changed, in_txn) = {
             let mut state = self.state.lock().unwrap();
@@ -482,7 +516,7 @@ impl RowStore for InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(stored.clone()),
                     hlc: None,
-                    origin: ChangeOrigin::Local,
+                    origin,
                     changed_columns: Some(changed.clone()),
                 });
             }
@@ -495,18 +529,19 @@ impl RowStore for InMemoryRowStore {
                 row_key: Some(key),
                 values: Some(stored),
                 hlc: None,
-                origin: ChangeOrigin::Local,
+                origin,
                 changed_columns: Some(changed),
             });
         }
         Ok(RowHandle::new(table, key))
     }
 
-    fn upsert(
+    fn upsert_impl(
         &self,
         table: &str,
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
+        origin: ChangeOrigin,
     ) -> StorageResult<RowHandle> {
         let (key, event, emitted_values, changed_cols, in_txn) = {
             let mut state = self.state.lock().unwrap();
@@ -564,7 +599,7 @@ impl RowStore for InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(vals.clone()),
                     hlc: None,
-                    origin: ChangeOrigin::Local,
+                    origin,
                     changed_columns: Some(changed.clone()),
                 });
             }
@@ -577,11 +612,112 @@ impl RowStore for InMemoryRowStore {
                 row_key: Some(key),
                 values: Some(emitted_values),
                 hlc: None,
-                origin: ChangeOrigin::Local,
+                origin,
                 changed_columns: Some(changed_cols),
             });
         }
         Ok(RowHandle::new(table, key))
+    }
+
+    fn delete_impl(
+        &self,
+        table: &str,
+        predicate: &StoragePredicate,
+        origin: ChangeOrigin,
+    ) -> StorageResult<usize> {
+        let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
+        let (count, in_txn) = {
+            let mut state = self.state.lock().unwrap();
+            let t = state
+                .tables
+                .get_mut(table)
+                .ok_or_else(|| StorageError::InvalidQuery {
+                    detail: format!("delete: table {} not found", table),
+                })?;
+            if t.declaration.append_only {
+                return Err(StorageError::AppendOnlyViolation {
+                    table: table.to_string(),
+                });
+            }
+            let matching: Vec<(RowKey, BTreeMap<String, TypedValue>)> = t
+                .rows
+                .iter()
+                .filter(|(_, row)| evaluate_predicate(predicate, row))
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            for (k, row) in &matching {
+                t.rows.remove(k);
+                notifications.push((*k, row.clone()));
+            }
+            // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                for (key, row) in &notifications {
+                    state.pending_row_events.push(TableChange {
+                        table: table.to_string(),
+                        event: StorageEvent::Delete,
+                        row_key: Some(*key),
+                        values: Some(row.clone()),
+                        hlc: None,
+                        origin,
+                        // changedColumns for delete = None (CVK-WB4).
+                        changed_columns: None,
+                    });
+                }
+            }
+            (matching.len(), in_txn)
+        };
+        if !in_txn {
+            for (key, row) in notifications {
+                self.hub.emit(TableChange {
+                    table: table.to_string(),
+                    event: StorageEvent::Delete,
+                    row_key: Some(key),
+                    values: Some(row),
+                    hlc: None,
+                    origin,
+                    // changedColumns for delete = None (CVK-WB4).
+                    changed_columns: None,
+                });
+            }
+        }
+        Ok(count)
+    }
+}
+
+impl RowStore for InMemoryRowStore {
+    fn insert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
+        self.insert_impl(table, values, ChangeOrigin::Local)
+    }
+
+    fn insert_sync(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
+        self.insert_impl(table, values, ChangeOrigin::SyncApply)
+    }
+
+    fn upsert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
+        self.upsert_impl(table, values, conflict_columns, ChangeOrigin::Local)
+    }
+
+    fn upsert_sync(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
+        self.upsert_impl(table, values, conflict_columns, ChangeOrigin::SyncApply)
     }
 
     fn update(
@@ -665,63 +801,11 @@ impl RowStore for InMemoryRowStore {
     }
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
-        let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
-        let (count, in_txn) = {
-            let mut state = self.state.lock().unwrap();
-            let t = state
-                .tables
-                .get_mut(table)
-                .ok_or_else(|| StorageError::InvalidQuery {
-                    detail: format!("delete: table {} not found", table),
-                })?;
-            if t.declaration.append_only {
-                return Err(StorageError::AppendOnlyViolation {
-                    table: table.to_string(),
-                });
-            }
-            let matching: Vec<(RowKey, BTreeMap<String, TypedValue>)> = t
-                .rows
-                .iter()
-                .filter(|(_, row)| evaluate_predicate(predicate, row))
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-            for (k, row) in &matching {
-                t.rows.remove(k);
-                notifications.push((*k, row.clone()));
-            }
-            // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
-            let in_txn = state.in_transaction;
-            if in_txn {
-                for (key, row) in &notifications {
-                    state.pending_row_events.push(TableChange {
-                        table: table.to_string(),
-                        event: StorageEvent::Delete,
-                        row_key: Some(*key),
-                        values: Some(row.clone()),
-                        hlc: None,
-                        origin: ChangeOrigin::Local,
-                        // changedColumns for delete = None (CVK-WB4).
-                        changed_columns: None,
-                    });
-                }
-            }
-            (matching.len(), in_txn)
-        };
-        if !in_txn {
-            for (key, row) in notifications {
-                self.hub.emit(TableChange {
-                    table: table.to_string(),
-                    event: StorageEvent::Delete,
-                    row_key: Some(key),
-                    values: Some(row),
-                    hlc: None,
-                    origin: ChangeOrigin::Local,
-                    // changedColumns for delete = None (CVK-WB4).
-                    changed_columns: None,
-                });
-            }
-        }
-        Ok(count)
+        self.delete_impl(table, predicate, ChangeOrigin::Local)
+    }
+
+    fn delete_sync(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
+        self.delete_impl(table, predicate, ChangeOrigin::SyncApply)
     }
 
     fn query(

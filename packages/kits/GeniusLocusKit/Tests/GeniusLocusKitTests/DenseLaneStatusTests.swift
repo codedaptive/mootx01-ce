@@ -61,7 +61,7 @@ private func openEstateWithDeterministicCorpusNoIngest() async throws
 
     let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
         estateID: UUID(), backend: .inMemory))
-    let corpus = try await CorpusKit.Corpus(storage: corpusStorage, model: .deterministic)
+    let corpus = try await CorpusKit.CorpusContentEngine(standaloneOn: corpusStorage)
     await kit.registerCorpus(corpus, for: handle)
 
     return (kit: kit, handle: handle)
@@ -90,14 +90,14 @@ private func openEstateWithFloatCorpusAndIngest() async throws
 
     let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
         estateID: UUID(), backend: .inMemory))
-    let corpus = try await CorpusKit.Corpus(
-        storage: corpusStorage,
-        model: .miniLM(inference: { tokens in
+    let corpus = try await CorpusContentEngine(
+        standaloneOn: corpusStorage,
+        models: [.miniLM(inference: { tokens in
             let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
             return Array(repeating: v, count: 384)
-        })
+        })]
     )
-    try await corpus.ingest(frame.content, sourceID: drawer.id, now: t0)
+    try await corpus.ingest(frame.content, contentID: drawer.id, now: t0)
     await kit.registerCorpus(corpus, for: handle)
 
     return (kit: kit, handle: handle, drawer: drawer)
@@ -418,14 +418,14 @@ struct DenseLaneStoreErrorTests {
             // Build a corpus using the miniLM path (supports embedFloat).
             let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
                 estateID: UUID(), backend: .inMemory))
-            let corpus = try await CorpusKit.Corpus(
-                storage: corpusStorage,
-                model: .miniLM(inference: { tokens in
+            let corpus = try await CorpusContentEngine(
+                standaloneOn: corpusStorage,
+                models: [.miniLM(inference: { tokens in
                     let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
                     return Array(repeating: v, count: 384)
-                })
+                })]
             )
-            try await corpus.ingest(frame.content, sourceID: drawer.id, now: t0)
+            try await corpus.ingest(frame.content, contentID: drawer.id, now: t0)
             await kit.registerCorpus(corpus, for: handle)
 
             // Force the store error on the NEXT floatNearest call (single-use seam).

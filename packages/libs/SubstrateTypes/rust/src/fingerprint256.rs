@@ -143,7 +143,7 @@ impl std::error::Error for Fingerprint256Error {}
 // ─────────────────────────────────────────────────────────────────
 // Phase 1 combinator layer
 //
-// Per DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6 Phase 1
+// Per the four-package substrate layout
 // (Clojure convergent A; APL convergent A; Cursor convergent D; ML
 // convergent D). The four-block unroll that appears in 7+ files is
 // one expression in APL. These combinators express it once and let
@@ -297,7 +297,7 @@ mod tests {
 
     // ──────────────────────────────────────────────────────────
     // Phase 1 combinator tests
-    // (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.1)
+    //
     // ──────────────────────────────────────────────────────────
 
     fn sample_a() -> Fingerprint256 {

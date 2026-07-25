@@ -38,7 +38,7 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
     var noManager: Bool = false
 
-    @Flag(name: .long, help: "Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background launchd service (macOS).")
+    @Flag(name: .long, help: "Use direct stdio client wiring (`mootx01 serve`) and skip registering the resident HTTP daemon as a background service. Stop an already-running resident for socket-free MCP operation.")
     var noDaemon: Bool = false
 
     @Flag(name: .long, help: "Enable Vault MCP tools (moot_vault_*): expose export/import/status/reconcile/job on the MCP surface. Default behavior when neither --vault-on nor --vault-off is specified.")
@@ -46,6 +46,9 @@ struct InstallCommand: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Hide Vault MCP tools (moot_vault_*) from the MCP surface. For a more secure install position that disables import/export. Use --vault-on to re-enable.")
     var vaultOff: Bool = false
+
+    @Flag(name: .long, help: "Create the default estate WITHOUT at-rest encryption. The estate database is stored unencrypted. Default is encrypted (SQLCipher whole-database, key held in the Keychain). Run `mootx01 upgrade` at any time to encrypt an unencrypted estate.")
+    var noEncrypt: Bool = false
 
     @Flag(name: .long, help: "When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).")
     var reuseDb: Bool = false
@@ -65,6 +68,47 @@ struct InstallCommand: AsyncParsableCommand {
         // any wiring so a 'replace' that cannot proceed (daemon running,
         // trash failure) aborts the install with nothing half-done.
         try handleExistingDatabase(homeDirectory: home)
+
+        // At-rest encryption posture for the DEFAULT estate.
+        //
+        // install does not create the estate file — it says so itself ("a fresh
+        // estate will be created on first serve"), and the substrate writes the
+        // SQLite file lazily on first open. So --no-encrypt cannot act now; it
+        // records the choice next to the estate, and the shared open posture
+        // (EstateKeyProvider.resolveOpenPosture) honors it when the file is
+        // finally created. Encrypted is the default: absent the marker, first
+        // serve provisions a key and creates a SQLCipher estate.
+        //
+        // Recorded as a marker file rather than only in the daemon environment
+        // because `mootx01 serve` run by hand carries no launchd environment, and
+        // the two must not disagree about the same estate.
+        if noEncrypt {
+            let dataDir = MootPaths.resolveDataDirectory(
+                environment: ProcessInfo.processInfo.environment,
+                homeDirectory: home
+            )
+            let estateURL = MootPaths.estateURL(in: dataDir)
+            switch EstateKeyProvider.detectEstateFileState(at: estateURL) {
+            case .absent:
+                do {
+                    try EstateKeyProvider.writeEncryptionOptOut(forEstateAt: estateURL)
+                    print("Estate encryption: DISABLED (--no-encrypt). The estate will be stored unencrypted.")
+                    print("  Run `mootx01 upgrade` at any time to encrypt it.")
+                } catch {
+                    // Failing to record the choice must not silently produce the
+                    // opposite posture — the user would get an encrypted estate
+                    // after asking for a plaintext one.
+                    throw ValidationError(
+                        "could not record the --no-encrypt choice at \(estateURL.deletingLastPathComponent().path): \(error)")
+                }
+            case .plaintext:
+                print("Estate encryption: already unencrypted; --no-encrypt has nothing to change.")
+            case .ciphertext:
+                // Refuse to imply that --no-encrypt decrypts an existing estate.
+                // It does not, and there is deliberately no path that does.
+                print("Estate encryption: the existing estate is already ENCRYPTED; --no-encrypt does not decrypt it and was ignored.")
+            }
+        }
 
         // Resolve the SOURCE binary (the running executable). We never
         // write this path into a client config — instead we copy it to a
@@ -86,16 +130,23 @@ struct InstallCommand: AsyncParsableCommand {
         //   → --yes default (plugin, no prompt)
         //   → guided depth prompt (after the client picker, before apply)
         //   → default (plugin) when the prompt is non-interactive.
-        let depth: InstallDepth
+        let requestedDepth: InstallDepth
         if let mode {
             guard let parsed = InstallDepth(modeFlag: mode) else {
                 throw ValidationError("--mode must be 'server', 'skills', or 'plugin' (got '\(mode)').")
             }
-            depth = parsed
+            requestedDepth = parsed
         } else if yes {
-            depth = .default
+            requestedDepth = .default
         } else {
-            depth = AgentPicker.pickDepth()
+            requestedDepth = AgentPicker.pickDepth()
+        }
+        // A plugin can own its own MCP connection and route through the resident
+        // daemon. Direct stdio installs therefore stop at the skills ceiling;
+        // the client config written below remains the connection owner.
+        let depth: InstallDepth = noDaemon && requestedDepth == .plugin ? .skills : requestedDepth
+        if noDaemon && requestedDepth == .plugin {
+            print("Direct stdio requested: using skills depth instead of a connection-owning plugin.")
         }
 
         // Place the binary and use its installed absolute path as the config
@@ -137,7 +188,7 @@ struct InstallCommand: AsyncParsableCommand {
         var installed: [String] = []
         var skipped: [String] = []
 
-        // ADR-024 §1/§3: plugins the CLI installer knows how to detect and
+        // plugins the CLI installer knows how to detect and
         // defer to. Keyed by client id → the plugin registry id
         // (`installed_plugins.json`'s top-level key). Only Claude Code has a
         // live plugin today; the table is intentionally small rather than
@@ -150,7 +201,8 @@ struct InstallCommand: AsyncParsableCommand {
             // enabledPlugins map), and an installed-but-disabled plugin
             // does not own the connection. Skipping/removing the direct
             // entry in that state would leave the client with nothing.
-            if let pluginID = pluginOwnedClients[client.id],
+            if !noDaemon,
+               let pluginID = pluginOwnedClients[client.id],
                PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
                 // The plugin is the preferred connection owner (§1): still
                 // place the binary/daemon (done above, unconditionally) but
@@ -174,7 +226,7 @@ struct InstallCommand: AsyncParsableCommand {
                 }
                 print("  ⓘ MOOTx01 plugin already installed — \(client.displayName) connects through it; skipping direct wiring.")
                 // Wave 6, Defect A (live 1.0.16 machine finding): the
-                // ADR-024 ownership skip above applies ONLY to the direct
+                // plugin-owned MCP connections ownership skip above applies ONLY to the direct
                 // mcpServers entry. Before this fix, `continue` here left
                 // `client.displayName` out of `installed` entirely, and the
                 // depth loop below filters on `installed.contains(...)` —
@@ -198,7 +250,9 @@ struct InstallCommand: AsyncParsableCommand {
                     daemonURL: MootPaths.residentEndpointURL,
                     homeDirectory: home,
                     workingDirectory: cwd,
-                    local: local
+                    local: local,
+                    directStdio: noDaemon,
+                    vaultOff: vaultOff
                 )
                 installed.append(client.displayName)
             } catch {
@@ -299,7 +353,7 @@ struct InstallCommand: AsyncParsableCommand {
                     // 6b08d56b). HTTP-shaped entries are untouched — the
                     // resident daemon carries the vault posture in its own
                     // launchd environment (`daemonEnv` above), independent
-                    // of this call (ADR-024 Wave 3, Defect 2).
+                    // of this call.
                     let outcome = try DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
@@ -419,13 +473,20 @@ struct InstallCommand: AsyncParsableCommand {
             // MOOTX01_VAULT: "0" = vault-off (--vault-off); "1" = vault-on (default).
             // The flag pair is mutually exclusive by convention: if both are set
             // (CLI parse does not block this) --vault-off wins (safer default).
-            // When neither is set, vault is on (ADR-015 §1: default = vault-on).
+            // When neither is set, vault is on (the open 1.0 Vault posture: default = vault-on).
             let vaultValue = vaultOff ? "0" : "1"
+            // MOOTX01_ENCRYPT: "0" = --no-encrypt, "1" = encrypted (default).
+            // Recorded for observability and parity with MOOTX01_VAULT. The
+            // AUTHORITATIVE signal is the marker file written above, because a
+            // hand-run `mootx01 serve` carries no launchd environment at all and
+            // the two must never disagree about the same estate.
+            let encryptValue = noEncrypt ? "0" : "1"
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
                 "MOOTX01_DATA_DIR": dataDir.path,
                 "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 "MOOTX01_VAULT": vaultValue,
+                "MOOTX01_ENCRYPT": encryptValue,
             ]
             switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
             case let .installed(plistPath, endpointURL):
@@ -469,11 +530,21 @@ struct InstallCommand: AsyncParsableCommand {
                 do {
                     // §4.2: same backup discipline as native configs.
                     try Installer.backupExisting(at: configURL)
+                    // directStdio/vaultOff must be forwarded here exactly as the
+                    // native path forwards them to Installer.install() above.
+                    // Both parameters default to false, so omitting them meant a
+                    // `--no-daemon --vault-off` install still wrote an
+                    // http://127.0.0.1:4242 entry into every Parall clone: the
+                    // clone bypassed both postures, and with no daemon running
+                    // any same-user process could bind that fixed port and
+                    // impersonate the MCP server.
                     try Installer.mergeIntoJSONConfig(
                         at: configURL,
                         client: client,
                         binaryPath: binaryPath,
-                        daemonURL: MootPaths.residentEndpointURL
+                        daemonURL: MootPaths.residentEndpointURL,
+                        directStdio: noDaemon,
+                        vaultOff: vaultOff
                     )
                     parallInstalled.append((client.displayName, configURL.path))
                 } catch {
@@ -513,7 +584,7 @@ struct InstallCommand: AsyncParsableCommand {
         print("")
         print("Run `mootx01 status` to confirm your setup.")
 
-        // ADR-015 §1 mandatory disclosure: tell the user about the Vault
+        // the open 1.0 Vault posture mandatory disclosure: tell the user about the Vault
         // surface so they can make an informed security choice. Disclosure
         // is always printed regardless of which Vault flag was passed, so
         // the user knows the current state and how to change it.

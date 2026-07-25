@@ -8,7 +8,7 @@
 //!
 //! Cache key: (table, UUID key, AsOfCoordinate). A present read and an
 //! as-of snapshot read of the same row are distinct cache entries per
-//! ADR-017 §18. Snapshot reads (AsOf(hlc)) against pinned immutable
+//! node-tree integrity. Snapshot reads (AsOf(hlc)) against pinned immutable
 //! views are safely cacheable because the GC pin (NT-P3) prevents
 //! vacuum of pinned rows. Present reads remain invalidation-driven.
 //!

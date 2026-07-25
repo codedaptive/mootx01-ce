@@ -36,7 +36,7 @@ substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 uuid = { version = "1", features = ["v4", "serde"] }  # serde feature required for DatasetHandleContent.dataset_id (MX-TAB-4)
 # Ed25519 keypair generation for the federation signing identity minted at
 # first open. Mirrors Swift's CryptoKit Curve25519.Signing.PrivateKey().
-# Authority: DECISION_SYNCKIT_DESIGN_2026-05-19 §8.
+# Authority: the ConvergenceKit replication surface.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["std"] }
 # Base64 encoding for the Ed25519 key material persisted to the manifest.
@@ -44,16 +44,16 @@ base64 = "0.22"
 # IntellectusLib is the zero-dep telemetry floor. LocusKit emits
 # path, recall, and KG-fact operation metrics via the report! macro,
 # which is a no-op when monitoring is disabled (the default).
-# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+# Repository-owned dependencies use local package paths.
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # LatticeLib supplies qid_closure::ancestors — the pinned Q-ID taxonomic-closure
 # surface drawer_fingerprint hashes into the lattice-block qid_closure_hash slot
 # (mission #7b). LatticeLib is a libs/ library that imports no substrate kit, so
 # the edge is strictly downstream→upstream (kit → lib), no cycle. Authority:
-# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (the #7 feature requires it).
+# in-repository dependency direction (the #7 feature requires it).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 # unicode-normalization provides NFC normalization for lookup_name derivation
-# (ADR-017 §8). Already a transitive dependency via the idna crate.
+#. Already a transitive dependency via the idna crate.
 unicode-normalization = "0.1"
 # serde + serde_json for DatasetHandleContent JSON encode/decode (MX-TAB-4).
 # DatasetHandleContent is stored as JSON in Drawer.content and must be decoded

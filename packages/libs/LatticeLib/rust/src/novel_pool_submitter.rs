@@ -49,7 +49,21 @@ pub fn default_pool_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
+    // Apple platforms use the same Application Support container as the
+    // Swift implementation. Keeping both ports on one writable table artifact
+    // is part of the FDC classification contract: otherwise learned word-class
+    // rows can diverge even when the bundled artifacts and input bytes match.
+    #[cfg(target_os = "macos")]
+    {
+        return dirs_home()
+            .map(|home| {
+                home.join("Library/Application Support")
+                    .join("com.mootx01.lattice/pool")
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+    }
     // Priority 2: XDG_DATA_HOME (POSIX only; never set on Windows).
+    #[cfg(not(target_os = "macos"))]
     let base = if let Ok(xdg) = env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
             PathBuf::from(xdg)
@@ -59,6 +73,7 @@ pub fn default_pool_dir() -> PathBuf {
     } else {
         platform_data_base()
     };
+    #[cfg(not(target_os = "macos"))]
     base.join("mootx01/lattice/pool")
 }
 
@@ -86,6 +101,7 @@ pub fn default_table_artifact() -> PathBuf {
 /// unset). Windows: `%LOCALAPPDATA%` (e.g. `C:\Users\X\AppData\Local`), matching
 /// the app's `core::paths::data_dir()`. If the relevant base var is unavailable,
 /// falls back to the current directory (a last resort that avoids panicking).
+#[cfg(not(target_os = "macos"))]
 fn platform_data_base() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -158,10 +174,7 @@ const MAX_POOL_FILES: usize = 500;
 fn write_submission(submission: &PoolSubmission, dir: &Path) {
     // Create the directory if it does not exist yet.
     if let Err(e) = fs::create_dir_all(dir) {
-        eprintln!(
-            "novel pool: cannot create pool dir {:?}: {}",
-            dir, e
-        );
+        eprintln!("novel pool: cannot create pool dir {:?}: {}", dir, e);
         return;
     }
     // Cap check: count existing pool files and skip if at capacity.
@@ -249,9 +262,27 @@ mod tests {
             "default pool dir must be absolute, got {dir:?}"
         );
         assert!(
-            dir.ends_with("mootx01/lattice/pool"),
-            "default pool dir must end with mootx01/lattice/pool, got {dir:?}"
+            dir.ends_with(if cfg!(target_os = "macos") {
+                "com.mootx01.lattice/pool"
+            } else {
+                "mootx01/lattice/pool"
+            }),
+            "default pool dir must end with the platform lattice pool path, got {dir:?}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_pool_dir_matches_swift_application_support_path_on_macos() {
+        if std::env::var("LATTICE_POOL_DIR")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .is_some()
+        {
+            return;
+        }
+        let dir = default_pool_dir();
+        assert!(dir.ends_with("Library/Application Support/com.mootx01.lattice/pool"));
     }
 
     #[cfg(target_os = "windows")]
@@ -389,8 +420,10 @@ mod tests {
         assert_eq!(sub.table_version, "1.0.0");
         // Every token must be present in submission order.
         assert_eq!(sub.entries[0].token, "novelword0");
-        assert_eq!(sub.entries[POOL_SUBMIT_THRESHOLD - 1].token,
-                   format!("novelword{}", POOL_SUBMIT_THRESHOLD - 1));
+        assert_eq!(
+            sub.entries[POOL_SUBMIT_THRESHOLD - 1].token,
+            format!("novelword{}", POOL_SUBMIT_THRESHOLD - 1)
+        );
 
         // Cleanup.
         let _ = fs::remove_dir_all(&tmp);

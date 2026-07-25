@@ -7,7 +7,7 @@
 //! Implements RowStore, BlobStore, AuditLog, and StorageObserver plus
 //! schema/migrations/generated-columns/append-only. The backend owns no
 //! vector-search engine; it accommodates vector workloads' storage needs
-//! through RowStore/BlobStore (ADR-008).
+//! through RowStore/BlobStore.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;
@@ -364,9 +364,10 @@ const BLOB_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_blobs" (
   "bytes" BLOB NOT NULL
 )"#;
 
-// Rust-shaped audit table: holds the Rust AuditEvent fields. `hlc` is the
-// packed integer (PK + ordering, order-preserving by HLC); the three
-// component columns let events reconstruct without an unpack dependency.
+// Canonical audit table shared with the Swift estate format. Rust keeps the
+// descriptive AuditEvent field names in memory, but persists the established
+// short on-disk names. `hlc` is the packed integer (PK); the three component
+// columns preserve full-precision chronological ordering.
 // `reason` is nullable TEXT — None persists as NULL; old rows without a
 // reason read back as None (schema not frozen, no migration needed).
 const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
@@ -378,16 +379,16 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "estate_uuid" TEXT NOT NULL,
   "row_id" TEXT NOT NULL,
   "verb" TEXT NOT NULL,
-  "before_adjective" INTEGER,
-  "before_operational" INTEGER,
-  "before_provenance" INTEGER,
-  "after_adjective" INTEGER NOT NULL,
-  "after_operational" INTEGER NOT NULL,
-  "after_provenance" INTEGER NOT NULL,
-  "before_lattice_anchor" INTEGER,
-  "after_lattice_anchor" INTEGER NOT NULL,
-  "before_lattice_qid" INTEGER,
-  "after_lattice_qid" INTEGER NOT NULL DEFAULT 0,
+  "before_adj" INTEGER,
+  "before_op" INTEGER,
+  "before_pv" INTEGER,
+  "after_adj" INTEGER NOT NULL,
+  "after_op" INTEGER NOT NULL,
+  "after_pv" INTEGER NOT NULL,
+  "before_udc" INTEGER,
+  "after_udc" INTEGER NOT NULL,
+  "before_qid" INTEGER,
+  "after_qid" INTEGER NOT NULL DEFAULT 0,
   "actor" TEXT NOT NULL,
   "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
@@ -401,12 +402,41 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
 const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_chrono" ON "_storagekit_audit" ("row_id", "physical_time", "logical_count", "node_id")"#;
 const AUDIT_DROP_PACKED_INDEX: &str = r#"DROP INDEX IF EXISTS "_storagekit_audit_row_hlc""#;
 
+/// Render a TypedValue as a SQLite literal for DEFAULT clauses. Mirrors
+/// Swift `SQLiteSchemaEmitter.literalSQL` — only trivial cases; complex
+/// defaults render NULL. (Layout parity, GLK shared-content 1.1 P0: the
+/// Rust emitter previously DROPPED declared defaults, so Rust-created
+/// estates lacked the `DEFAULT 0` Swift-created estates carry on bitmap
+/// columns.)
+fn default_literal_sql(v: &TypedValue) -> String {
+    match v {
+        TypedValue::Null => "NULL".to_string(),
+        TypedValue::Bool(b) => {
+            if *b {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        TypedValue::Int(i) => i.to_string(),
+        TypedValue::Bitmap(i) => i.to_string(),
+        TypedValue::Float(d) => d.to_string(),
+        TypedValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        TypedValue::Uuid(u) => format!("'{}'", u.to_string().to_uppercase()),
+        TypedValue::Hlc(h) => (h.packed() as i64).to_string(),
+        _ => "NULL".to_string(),
+    }
+}
+
 fn create_table_sql(decl: &TableDeclaration) -> String {
     let mut parts: Vec<String> = Vec::new();
     for col in &decl.columns {
         let mut line = format!("\"{}\" {}", col.name, native_type(col.column_type));
         if !col.nullable {
             line.push_str(" NOT NULL");
+        }
+        if let Some(ref dv) = col.default_value {
+            line.push_str(&format!(" DEFAULT {}", default_literal_sql(dv)));
         }
         parts.push(line);
     }
@@ -876,17 +906,143 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     for index in &schema.indices {
         exec(&create_index_sql(index))?;
     }
-    // Record the schema version (kit-scoped).
-    conn.execute(
-        r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at") VALUES (?, ?, ?)
-           ON CONFLICT("kit_id") DO UPDATE SET "version" = excluded.version, "applied_at" = excluded.applied_at"#,
-        params_from_iter(vec![
-            SqlValue::Text(schema.kit_id.clone()),
-            SqlValue::Integer(schema.version as i64),
-            SqlValue::Text(iso8601(0)),
-        ]),
-    )
-    .map_err(|e| StorageError::BackendError { underlying: format!("record version: {e}") })?;
+
+    // Execute pending DECLARED migration steps (Swift `applyMigrations`
+    // parity — GLK shared-content 1.1 P4 closed the gap where this backend
+    // silently ignored `SchemaDeclaration.migrations`, so declared
+    // dropTable/addColumn retirements never ran on Rust SQLite estates).
+    let record_version = |conn: &rusqlite::Connection, version: i32| -> StorageResult<()> {
+        conn.execute(
+            r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at") VALUES (?, ?, ?)
+               ON CONFLICT("kit_id") DO UPDATE SET "version" = excluded.version, "applied_at" = excluded.applied_at"#,
+            params_from_iter(vec![
+                SqlValue::Text(schema.kit_id.clone()),
+                SqlValue::Integer(version as i64),
+                SqlValue::Text(iso8601(0)),
+            ]),
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("record version: {e}"),
+        })
+        .map(|_| ())
+    };
+    let current_version = |conn: &rusqlite::Connection| -> i32 {
+        conn.query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = ?"#,
+            [schema.kit_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v as i32)
+        .unwrap_or(0)
+    };
+
+    let current = current_version(conn);
+    if current < schema.version {
+        let mut pending: Vec<&crate::schema::Migration> = schema
+            .migrations
+            .iter()
+            .filter(|m| m.from_version >= current && m.to_version <= schema.version)
+            .collect();
+        pending.sort_by_key(|m| m.from_version);
+        for migration in pending {
+            for op in &migration.operations {
+                apply_migration_operation(conn, op)?;
+            }
+            record_version(conn, migration.to_version)?;
+        }
+        let final_version = current_version(conn);
+        if final_version < schema.version {
+            record_version(conn, schema.version)?;
+        }
+    }
+
+    // Keep the accumulated schema view coherent with dropped tables.
+    if let Some(existing) = &mut inner.schema {
+        let dropped: Vec<String> = schema
+            .migrations
+            .iter()
+            .flat_map(|m| m.operations.iter())
+            .filter_map(|op| match op {
+                crate::schema::SchemaOperation::DropTable { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        if !dropped.is_empty() {
+            existing.tables.retain(|t| !dropped.contains(&t.name));
+        }
+    }
+    Ok(())
+}
+
+/// Execute one declared migration operation (Swift `applyOperation` parity).
+fn apply_migration_operation(
+    conn: &rusqlite::Connection,
+    op: &crate::schema::SchemaOperation,
+) -> StorageResult<()> {
+    use crate::schema::SchemaOperation as Op;
+    let exec = |sql: &str| {
+        conn.execute_batch(sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("migration ddl: {e}"),
+            })
+    };
+    match op {
+        Op::CreateTable(decl) => {
+            exec(&create_table_sql(decl))?;
+            for trigger in append_only_triggers(decl) {
+                exec(&trigger)?;
+            }
+        }
+        Op::DropTable { name } => exec(&format!("DROP TABLE IF EXISTS \"{name}\""))?,
+        Op::AddColumn { table, column } => {
+            // Idempotent: skip when present (fresh DBs create the latest
+            // layout before replaying migrations).
+            let exists: bool = conn
+                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        let name: String = row.get(1)?;
+                        if name == column.name {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(false);
+            if !exists {
+                let mut sql = format!(
+                    "ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}",
+                    column.name,
+                    native_type(column.column_type)
+                );
+                if !column.nullable {
+                    sql.push_str(" NOT NULL DEFAULT ");
+                    sql.push_str(&default_literal_sql(
+                        column.default_value.as_ref().unwrap_or(&TypedValue::Null),
+                    ));
+                }
+                exec(&sql)?;
+            }
+        }
+        Op::DropColumn { table, column_name } => {
+            exec(&format!(
+                "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
+            ))?
+        }
+        Op::RenameColumn { table, from, to } => {
+            exec(&format!(
+                "ALTER TABLE \"{table}\" RENAME COLUMN \"{from}\" TO \"{to}\""
+            ))?
+        }
+        Op::AddIndex(decl) => exec(&create_index_sql(decl))?,
+        Op::DropIndex { name } => exec(&format!("DROP INDEX IF EXISTS \"{name}\""))?,
+        Op::Custom { sqlite, .. } => {
+            if let Some(sql) = sqlite {
+                exec(sql)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1030,6 +1186,203 @@ impl Storage for SqliteStorage {
             inner: self.inner.clone(),
         }))
     }
+
+    /// Freelist pages × page size, plus the WAL file's current size — the
+    /// filesystem bytes a checkpoint + VACUUM pass would release. Read-only
+    /// (two PRAGMAs + one file stat); safe for status polling. Mirrors the
+    /// Swift `SQLiteBackend.maintenanceEstimatedReclaimableBytes`.
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        use crate::maintenance::MaintenanceError as ME;
+        let guard = self.inner.lock().unwrap();
+        let pragma = |name: &str| -> Result<i64, ME> {
+            guard
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| ME::BackendFailure {
+                    reason: format!("pragma {name}: {e}"),
+                })
+        };
+        let page_size = pragma("page_size")?;
+        let freelist = pragma("freelist_count")?;
+        let path = match &self.config.backend {
+            BackendConfiguration::Sqlite { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        Ok(freelist * page_size + maintenance_file_bytes(&format!("{path}-wal")))
+    }
+
+    /// WAL checkpoint (TRUNCATE) + VACUUM with the four-phase contract
+    /// declared in `crate::maintenance`: quiescence check, disk-capacity
+    /// preflight, per-phase progress, phase-boundary cancellation, and
+    /// post-operation introspection.
+    ///
+    /// Runs while holding the inner connection Mutex: no row/blob operation
+    /// can interleave, so the quiescence check (`is_autocommit`) is
+    /// authoritative for this process. Mirrors the Swift
+    /// `SQLiteBackend.performMaintenance`.
+    fn perform_maintenance(
+        &self,
+        progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        use crate::maintenance::{
+            MaintenanceError as ME, MaintenancePhase as MP, MaintenanceProgress,
+            MaintenanceReport,
+        };
+        let started = std::time::Instant::now();
+        let total_phases = 4usize;
+        let enter = |phase: MP, completed: usize| -> Result<(), ME> {
+            if let Some(cancel) = should_cancel {
+                if cancel() {
+                    return Err(ME::Cancelled { at_phase: phase });
+                }
+            }
+            if let Some(report) = progress {
+                report(MaintenanceProgress {
+                    phase,
+                    completed_phases: completed,
+                    total_phases,
+                });
+            }
+            Ok(())
+        };
+        let path = match &self.config.backend {
+            BackendConfiguration::Sqlite { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        let wal_path = format!("{path}-wal");
+
+        let guard = self.inner.lock().unwrap();
+        let pragma = |name: &str| -> Result<i64, ME> {
+            guard
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| ME::BackendFailure {
+                    reason: format!("pragma {name}: {e}"),
+                })
+        };
+
+        // Phase 1 — preflight: quiescence, baselines, disk capacity.
+        enter(MP::Preflight, 0)?;
+        if !guard.conn.is_autocommit() {
+            return Err(ME::NotQuiescent {
+                reason: "a transaction is open on the estate connection".to_string(),
+            });
+        }
+        let page_size = pragma("page_size")?;
+        let page_count_before = pragma("page_count")?;
+        let freelist_before = pragma("freelist_count")?;
+        let file_before = maintenance_file_bytes(&path);
+        let wal_before = maintenance_file_bytes(&wal_path);
+        // VACUUM rewrites the live pages into a temporary database before
+        // swapping it in, so the volume needs at least the live-content size
+        // free. Best-effort: when the volume capacity cannot be read (None),
+        // VACUUM proceeds and its own failure is still surfaced.
+        let required_bytes = (page_count_before - freelist_before) * page_size;
+        if let Some(available) = maintenance_volume_available_bytes(&path) {
+            if available < required_bytes {
+                return Err(ME::InsufficientDiskCapacity {
+                    required_bytes,
+                    available_bytes: available,
+                });
+            }
+        }
+
+        // Phase 2 — WAL checkpoint. TRUNCATE flushes every frame into the
+        // main database file and truncates the WAL to zero bytes, so the
+        // subsequent VACUUM operates on the complete committed state and the
+        // WAL's disk footprint is released along with the freelist pages.
+        enter(MP::WalCheckpoint, 1)?;
+        guard
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("wal_checkpoint failed: {e}"),
+            })?;
+
+        // Phase 3 — VACUUM. Atomic at the SQLite level; never interrupted
+        // mid-flight (cancellation was honoured at the phase boundary).
+        enter(MP::Vacuum, 2)?;
+        guard
+            .conn
+            .execute_batch("VACUUM")
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("VACUUM failed: {e}"),
+            })?;
+
+        // Phase 4 — post-operation introspection. VACUUM itself commits
+        // through the WAL in WAL mode, so a second TRUNCATE checkpoint runs
+        // first — without it the rewritten pages would sit in a fresh WAL
+        // file and the filesystem would not see the reclaim.
+        enter(MP::Introspection, 3)?;
+        guard
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("post-VACUUM wal_checkpoint failed: {e}"),
+            })?;
+        let page_count_after = pragma("page_count")?;
+        let freelist_after = pragma("freelist_count")?;
+        let file_after = maintenance_file_bytes(&path);
+        let wal_after = maintenance_file_bytes(&wal_path);
+        let reclaimed = ((file_before + wal_before) - (file_after + wal_after)).max(0);
+        Ok(MaintenanceReport {
+            backend: "sqlite".to_string(),
+            performed: true,
+            note: None,
+            page_size_bytes: page_size,
+            page_count_before,
+            page_count_after,
+            freelist_pages_before: freelist_before,
+            freelist_pages_after: freelist_after,
+            file_size_bytes_before: file_before,
+            file_size_bytes_after: file_after,
+            wal_bytes_before: wal_before,
+            wal_bytes_after: wal_after,
+            reclaimed_bytes: reclaimed,
+            duration_seconds: started.elapsed().as_secs_f64(),
+        })
+    }
+}
+
+/// Size on disk of `path`, or 0 when absent / in-memory.
+fn maintenance_file_bytes(path: &str) -> i64 {
+    if path.is_empty() || path.starts_with(":memory:") {
+        return 0;
+    }
+    std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
+}
+
+/// Available bytes on the volume holding `path` (statvfs on the parent
+/// directory). None when the capacity cannot be determined — the caller
+/// treats that as "skip the preflight", matching the Swift best-effort
+/// contract.
+#[cfg(unix)]
+fn maintenance_volume_available_bytes(path: &str) -> Option<i64> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.is_empty() || path.starts_with(":memory:") {
+        return None;
+    }
+    let parent = std::path::Path::new(path).parent()?;
+    let dir = if parent.as_os_str().is_empty() {
+        std::ffi::CString::new(".").ok()?
+    } else {
+        std::ffi::CString::new(parent.as_os_str().as_bytes()).ok()?
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(dir.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    Some((stat.f_bavail as i64).saturating_mul(stat.f_frsize as i64))
+}
+
+#[cfg(not(unix))]
+fn maintenance_volume_available_bytes(_path: &str) -> Option<i64> {
+    None
 }
 
 impl StorageTransaction for SqliteStorage {
@@ -2384,7 +2737,7 @@ fn audit_binds(e: &AuditEvent) -> Vec<SqlValue> {
     ]
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","before_lattice_qid","after_lattice_qid","actor","reason""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adj","before_op","before_pv","after_adj","after_op","after_pv","before_udc","after_udc","before_qid","after_qid","actor","reason""#;
 
 /// Decode one audit row from rusqlite into an AuditEvent.
 ///

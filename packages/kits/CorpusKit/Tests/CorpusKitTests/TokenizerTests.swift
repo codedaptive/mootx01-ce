@@ -35,6 +35,19 @@ struct TokenizerTests {
         #expect(tokenizer.keywordTokens("!!! ... ???").isEmpty)
     }
 
+    @Test func lowercasesGreekSigmaWithoutContext() {
+        #expect(tokenizer.keywordTokens("embeddings from U·Σ") ==
+            ["embeddings", "from", "u", "σ"])
+    }
+
+    @Test func finalSigmaFoldsToMedialSigmaCrossPort() {
+        let tokens = defaultKeywordTokens("ΟΔΥΣΣΕΥΣ and ς alone")
+        #expect(tokens == ["οδυσσευσ", "and", "σ", "alone"])
+        #expect(tokens[0].utf8.map { $0 } ==
+            [0xCE, 0xBF, 0xCE, 0xB4, 0xCF, 0x85, 0xCF, 0x83,
+             0xCF, 0x83, 0xCE, 0xB5, 0xCF, 0x85, 0xCF, 0x83])
+    }
+
     @Test func exposesProtocolVocabularySurface() {
         // The protocol requirements DeterministicTokenizer satisfies.
         #expect(tokenizer.vocabID == "deterministic-v1")

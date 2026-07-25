@@ -1,11 +1,13 @@
 ---
 title: MOOTx01-App — Specification
-version: v0.1
+version: v0.2
 status: draft
+date: 2026-07-23
 relates_to:
-  - docs/decisions/ADR-005-mootx01-app-envelope-and-parity-boundary.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#11-edition-and-application-boundary
   - apps/Mootx01-App/LEXICON_TO_APPLE_MAPPING.md
   - docs/decisions/DECISION_MOOTX01_APP_PORTABLE_LAN_SERVER_2026-07-11.md
+  - docs/decisions/DECISION_FEDERATION_ONDEMAND_LAN_PROXIMITY_2026-07-18.md
 ---
 
 # MOOTx01-App — Specification
@@ -20,11 +22,13 @@ Status legend used throughout: **live** (works today), **pending registration**
 (implemented + tested; activates when the Xcode app bundle is built and
 installed), **seam** (a typed boundary; the far side lands later), **inert**
 (wired and correct; activates when an external prerequisite — signing, an
-iCloud container — is provided).
+iCloud container — is provided), and **guarded** (the type and local path
+exist, but the unavailable operation rejects instead of returning fabricated
+data).
 
 ---
 
-## 1. What the app is (architecture of record: ADR-005)
+## 1. What the app is
 
 The clean, Rust-mirrored `mootx01` / `aria-mcp` server is a separate program.
 This app **envelopes** it — it never absorbs it, because absorbing it would
@@ -100,7 +104,7 @@ Edges tab).
 |---|---|---|
 | A1 | Embedded server-in-app | **live** |
 | A2 | ARIA server on this device (loopback HTTP + LAN) | **seam** (see §6) |
-| A3 | Consume other estates (MCP client) | deferred to v1.1 |
+| A3 | Consume arbitrary remote MCP estates | **guarded** — local fold-in exists; `MootEstateClient.fetch` throws |
 | A4 | App Intents (Siri / Spotlight / Shortcuts) | **pending registration** |
 | A5 | Callback URL (`mootx01://x-callback-url/<verb>`) | **pending registration** |
 | A6 | Shortcuts catalog donation | **pending registration** |
@@ -222,6 +226,8 @@ Sync is **ConvergenceKit**'s `CloudKitSyncEngine` — operational, row-level,
 HLC-conflict-resolved replication through the user's **private** CloudKit
 database. The app orchestrates; the engine reconciles. This stays above the
 parity boundary (the engine merges; no CloudKit in parity-bound storage).
+The user-facing toggle is disabled by default. The persisted opt-in is applied
+at launch before the first sync beat.
 
 - `MootEstateSyncManifest` declares which tables sync, verified against
   `LocusKitSchema`: **drawers** and **tunnels** (last-writer-wins by HLC),
@@ -229,20 +235,27 @@ parity boundary (the engine merges; no CloudKit in parity-bound storage).
   `LocusKitSchema.version` so the cross-device contract cannot silently drift.
 - Derived/projection tables (node bundles, matrix snapshot, container
   fingerprints) are **not** synced — they rebuild locally.
-- `MootSyncDriver` enables the engine once against the estate's live Storage
-  and push/pulls on the app's ambient beats (launch, foreground, iOS background
-  refresh, macOS hourly tick).
+- `MootSyncDriver` applies the user's persisted setting against the estate's
+  live Storage and push/pulls on the app's ambient beats (launch, foreground,
+  iOS background refresh, macOS hourly tick).
+- `SensitivityFilteredStorage` is the only Storage handle passed into the
+  engine. Normal and elevated rows may cross; restricted and secret rows are
+  suppressed on outbound writes and rejected on inbound application.
+- If a row rises above the ceiling, the wrapper retracts its previously
+  synchronized representation instead of leaving stale lower-tier content in
+  the transport.
 
-**Inert until provisioned.** Without an available iCloud account the driver
-logs, stays disabled, and retries — it never fabricates a sync. It activates
-when the iCloud container `iCloud.com.codedaptive.mootx01` is provisioned.
+**Inert until provisioned and enabled.** Without an available iCloud account
+the driver logs, stays disabled, and retries — it never fabricates a sync. It
+activates only when the user enables it and the iCloud container
+`iCloud.com.codedaptive.mootx01` is provisioned.
 
 ---
 
 ## 8. Capture from anywhere (Share Sheet)
 
 UI-less Share extensions (iOS + macOS) capture shared text and URLs. The
-extension process never opens the estate (ADR-005): it spools the item into an
+extension process never opens the estate: it spools the item into an
 app-group inbox backed by QueueKit's durable maildir (atomic write, crash
 recovery), and the **host app** drains the spool through `CaptureSink` on its
 ambient beats. A capture that fails is retried on the next drain; an undecodable
@@ -251,6 +264,32 @@ item is retired, not lost.
 The **recall widget** (WidgetKit, iOS + macOS) renders a derived projection the
 app refreshes from a public-only recall — the widget process reads the
 app-group snapshot, never the estate.
+
+---
+
+## 8.1 On-demand federation
+
+On-demand federation is separate from A3's generic outbound MCP client. It
+uses ConvergenceKit's federation transport and the app's explicit session UI.
+The F1 development surface includes:
+
+- Bonjour discovery on `_mootx01-fed._tcp`, with visibility Off by default.
+  Discovery publishes a short identity fingerprint, display name, protocol
+  version, and relay port. It publishes no estate content.
+- QR pairing with a signed proposal/acceptance exchange and a
+  short-authentication-string confirmation on both devices.
+- A hardware-gated UWB proximity enhancement on supported iPhones. QR remains
+  the portable ceremony.
+- One time-boxed federation session. The available F1 posture is Balanced;
+  later postures remain visibly locked.
+- A sensitivity ceiling that keeps restricted and secret content off the
+  session transport.
+- Explicit End Session behavior that closes the channel before expiring the
+  peer grant and keys.
+
+The UI never treats discovery as trust. A peer must complete the pairing
+ceremony before a session can start. Generic `MootEstateClient.fetch` remains
+guarded on this branch; its local fold-in path is not the federation transport.
 
 ---
 
@@ -265,6 +304,8 @@ app-group snapshot, never the estate.
   with sentinel defanging against prompt-injection break-out.
 - **Owner presence:** serving the estate on the LAN requires the device unlock
   system.
+- **Federation default:** peer visibility is off by default, pairing requires
+  transcript confirmation, and session end expires the peer's access.
 - **Privacy manifest:** declares the required-reason APIs the app uses
   (FileTimestamp, DiskSpace, UserDefaults); no developer data collection, no
   tracking. Calendar and Contacts reads are on-device and disclosed.
@@ -290,9 +331,27 @@ app-group snapshot, never the estate.
 - **Live:** embedded host; the six verb intents and heavy verbs (exercised via
   AppIntentsTesting); typed recall; batch curation; miners (ship disabled);
   Foundation Models tools + evals; the portable LAN server logic; the Share
-  spool and widget projection; the sync wiring.
+  spool and widget projection; the opt-in sync wiring; the F1 federation
+  discovery, pairing, and Balanced-session lifecycle.
 - **Pending registration (needs the Xcode app bundle built/installed):** system
   activation of Siri phrases, Spotlight, Shortcuts, and the URL scheme (A4–A6).
-- **Inert (needs an external prerequisite):** CloudKit sync (iCloud container);
-  code signing for device/TestFlight; the standalone-daemon Bonjour leg (A2,
+- **Inert (needs an external prerequisite):** the CloudKit transport after
+  user opt-in (available iCloud account and provisioned container); code
+  signing for device/TestFlight; the standalone-daemon Bonjour leg (A2,
   engine-lane).
+- **Guarded:** arbitrary remote MCP fetch through `MootEstateClient`. The
+  method throws and returns no fabricated remote data.
+
+---
+
+## 12. Development changelog
+
+### v0.2 — 2026-07-23
+
+- Documented the user-facing CloudKit toggle, its default-off posture, the
+  sensitivity-filtered Storage boundary, and tier-rise retraction.
+- Added the F1 on-demand federation surface: default-off discovery, QR/SAS and
+  UWB-assisted pairing, Balanced sessions, and deterministic teardown.
+- Distinguished ConvergenceKit federation from the still-guarded generic A3
+  MCP client.
+- Aligned the live/pending/inert summary with the current development source.

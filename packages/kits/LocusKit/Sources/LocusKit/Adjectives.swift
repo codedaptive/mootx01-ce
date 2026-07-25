@@ -178,19 +178,19 @@ public enum AdjectiveSensitivity: Int, Sendable, Codable {
     case secret = 48
 }
 
-// MARK: - Privacy-tier predicates (ADR-007 Decision 2)
+// MARK: - Privacy-tier predicates
 
 public extension AdjectiveSensitivity {
 
     /// `true` for sensitivity values that belong to the **Normal tier**
-    /// per ADR-007 Decision 2: `.normal` (raw 0) and `.elevated` (raw 16).
+    /// per data-movement privacy tiers: `.normal` (raw 0) and `.elevated` (raw 16).
     ///
     /// Normal-tier drawers are eligible for free bulk export. This predicate
     /// is the enforcement hook that VaultKit's export path consults to
     /// determine whether a drawer may ride a bulk channel without additional
     /// friction.
     ///
-    /// ADR-007 Decision 2 tier mapping (four sensitivity values → three tiers):
+    /// data-movement privacy tiers tier mapping (four sensitivity values → three tiers):
     ///   `.normal`     → Normal tier  → `isBulkExportable = true`
     ///   `.elevated`   → Normal tier  → `isBulkExportable = true`
     ///   `.restricted` → Private tier → `isBulkExportable = false`
@@ -203,14 +203,14 @@ public extension AdjectiveSensitivity {
     }
 
     /// `true` for sensitivity values that belong to the **Private tier**
-    /// per ADR-007 Decision 2: `.restricted` (raw 32).
+    /// per data-movement privacy tiers: `.restricted` (raw 32).
     ///
     /// Private-tier drawers require an owner-held key at execution time before
     /// participating in bulk operations (v1.0 gold deliverable). By default
     /// they are excluded from bulk export; an explicit scope option in VaultKit
     /// may include them when the key ceremony is satisfied.
     ///
-    /// ADR-007 Decision 2 tier mapping:
+    /// data-movement privacy tiers tier mapping:
     ///   `.normal`     → Normal tier  → `requiresOwnerKeyForBulk = false`
     ///   `.elevated`   → Normal tier  → `requiresOwnerKeyForBulk = false`
     ///   `.restricted` → Private tier → `requiresOwnerKeyForBulk = true`
@@ -223,14 +223,14 @@ public extension AdjectiveSensitivity {
     }
 
     /// `true` for sensitivity values that belong to the **Secret tier**
-    /// per ADR-007 Decision 2: `.secret` (raw 48).
+    /// per data-movement privacy tiers: `.secret` (raw 48).
     ///
     /// Secret-tier drawers never ride bulk channels under any scope option.
     /// This predicate is the hard exclusion gate: VaultKit's export path
     /// must reject secret-tier drawers regardless of any other scope
     /// configuration.
     ///
-    /// ADR-007 Decision 2 tier mapping:
+    /// data-movement privacy tiers tier mapping:
     ///   `.normal`     → Normal tier  → `isExcludedFromBulk = false`
     ///   `.elevated`   → Normal tier  → `isExcludedFromBulk = false`
     ///   `.restricted` → Private tier → `isExcludedFromBulk = false`

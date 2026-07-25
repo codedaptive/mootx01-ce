@@ -1,6 +1,6 @@
 // StreamScopedDrainTests.swift
 //
-// Tests for the ADR-021 Decision 7 / T1 stream-scoped drain capability.
+// Tests for the recall-driven dreaming /  stream-scoped drain capability.
 // Covers drainAvailable(stream:) and pendingCount(stream:) on both
 // PersistenceKitBackend and FilesystemBackend, plus facade passthroughs,
 // and back-compat of the all-streams paths.
@@ -34,7 +34,7 @@ import PersistenceKitInMemory
 
 // MARK: - PersistenceKitBackend stream-scoped drain
 
-@Suite("Stream-scoped drain — PersistenceKitBackend (ADR-021 D7 / T1)")
+@Suite("Stream-scoped drain — PersistenceKitBackend")
 struct StreamScopedDrainPKTests {
 
     func makeBackend() async throws -> PersistenceKitBackend {
@@ -167,7 +167,7 @@ struct StreamScopedDrainPKTests {
 
 // MARK: - FilesystemBackend stream-scoped drain
 
-@Suite("Stream-scoped drain — FilesystemBackend (ADR-021 D7 / T1)", .serialized)
+@Suite("Stream-scoped drain — FilesystemBackend", .serialized)
 final class StreamScopedDrainFSTests {
 
     let root: URL
@@ -264,7 +264,7 @@ final class StreamScopedDrainFSTests {
 
 // MARK: - QueueKit facade stream-scoped passthroughs
 
-@Suite("Stream-scoped drain — QueueKit facade (ADR-021 D7 / T1)")
+@Suite("Stream-scoped drain — QueueKit facade")
 struct StreamScopedDrainFacadeTests {
 
     func makeKit() async throws -> QueueKit {

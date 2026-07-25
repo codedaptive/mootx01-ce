@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # intellectus-lib: zero-dep telemetry floor. VectorStore emits search and
 # insert metrics via the report! macro, which is a no-op when monitoring is
 # disabled (the default). Off-path cost: one AtomicBool load + branch.
-# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+# Repository-owned dependencies use local package paths.
 [dependencies]
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }

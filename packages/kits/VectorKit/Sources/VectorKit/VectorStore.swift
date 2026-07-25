@@ -15,7 +15,7 @@
 //   payload        BLOB NOT NULL,               -- 32 bytes for binary; dim*4 for float32
 //   scale          REAL,                        -- int8 dequant scale; NULL otherwise
 //   filed_at       TIMESTAMP NOT NULL,
-//   ext            TEXT                         -- ADR-012 JSON extension slot
+//   ext            TEXT                         -- nullable entity ext slots JSON extension slot
 // )
 // UNIQUE(item_id, vector_index, model_id)
 // INDEX(model_id, item_id)
@@ -23,9 +23,9 @@
 // ```
 //
 // Refactored 2026-05-19 (mission 6) per
-// DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md section 4.6: replaced
+// current kit ownership section 4.6: replaced
 // direct SQLite I/O with PersistenceKit's RowStore + BlobStore
-// protocols. Dense-embedding k-NN is VectorKit's own concern (ADR-008
+// protocols. Dense-embedding k-NN is VectorKit's own concern (VectorKit-owned vector search
 // persistencekit-vector-contract-correction); PersistenceKit backends
 // (SQLite, PostgreSQL, InMemory) only accommodate vector storage.
 // Backends are selected at the application layer via EstateConfiguration.
@@ -114,7 +114,7 @@ struct VKLogicalPos: Hashable {
 /// Schema version 3: current production schema. Version 2 added
 /// multi-vector support, `item_id`, `vector_index`, `kind`, `dim`,
 /// `scale`, and `payload`; version 3 added the `ext` JSON slot per
-/// ADR-012.
+/// nullable entity ext slots.
 ///
 /// Hot-path: findNearest dispatches through a DenseIndex seam. Below
 /// `mihThreshold` binary vectors the active index is BruteForceIndex
@@ -220,11 +220,16 @@ public actor VectorStore {
     /// nothing was deferred (the drain barrier may fire on an idle corpus).
     private var deferredIndexDirty: Bool = false
 
-    /// Live keys tracked incrementally across the deferred window so replacement
-    /// detection stays O(batch) per call instead of re-scanning the (stale) index
-    /// snapshot every write. Seeded from the published snapshot by
-    /// `beginDeferredIndex()`; nil when not in deferred mode.
-    private var deferredLiveKeys: Set<VectorRecordKey>? = nil
+    /// Live full keys grouped by the schema's logical UNIQUE position. Grouping
+    /// by `(itemID, vectorIndex, modelID)` is essential: a model-version change
+    /// replaces the durable row and must also remove the old-version resident
+    /// slot. Seeded from the published snapshot by `beginDeferredIndex()`.
+    private var deferredLiveKeys: [VKLogicalPos: Set<VectorRecordKey>]? = nil
+
+    /// Full keys superseded during the current window. Needed when a model
+    /// version changes at the same logical position and the small-delta
+    /// publisher updates the resident indexes incrementally.
+    private var deferredReplacedKeys: Set<VectorRecordKey> = []
 
     /// Memory-only deferral buffer. With NO sidecar `arrayStore`, deferred
     /// `addPayloads` calls accumulate their binary records here (an O(batch)
@@ -243,6 +248,13 @@ public actor VectorStore {
     /// callers hold the deferred window open indefinitely.
     /// (secfix/punt-vector: unbounded deferred buffer fix)
     private var deferredPendingRecords: [(key: VectorRecordKey, bytes: [UInt8])] = []
+
+    /// Small bursts update both resident indexes incrementally. A periodic
+    /// full materialization compacts BruteForce tombstones and bounds overlay
+    /// history without making every single-Drawer capture O(estate).
+    private static let incrementalPublishLimit = 256
+    private static let incrementalCompactionInterval = 1_024
+    private var incrementalPublicationCount = 0
 
     /// Maximum number of records that `deferredPendingRecords` may hold before
     /// an intermediate flush is triggered (memory-only deferred path only).
@@ -326,7 +338,7 @@ public actor VectorStore {
     ///   (drawer_id, model_id).
     ///
     /// Column changes from v2 → v3:
-    ///   - Added: `ext` JSON nullable — the ADR-012 forward-compat slot.
+    ///   - Added: `ext` JSON nullable — the nullable entity ext slots forward-compat slot.
     ///     Reserves the slot, not a shape; 1.0 writes NULL and never reads it.
     ///
     /// Index changes v3 → v4:
@@ -354,7 +366,7 @@ public actor VectorStore {
                     .blob("payload", nullable: false),
                     .float("scale", nullable: true),
                     .timestamp("filed_at", nullable: false),
-                    // Reserve-space forward-compat slot (ADR-012). Nullable
+                    // Reserve-space forward-compat slot. Nullable
                     // `.json`, present from schema v3. Future per-vector typed
                     // metadata (quantisation provenance, embedding-run tags)
                     // serializes here migration-free. 1.0 writes NULL and never
@@ -770,30 +782,37 @@ public actor VectorStore {
                 // publishResidentIndex(). Replacement detection uses the
                 // incrementally-maintained live-key set, so the whole window stays
                 // O(batch) per call rather than O(N) (no per-call snapshot scan).
-                var live = deferredLiveKeys ?? []
-                var seenInBatch = Set<VectorRecordKey>()
+                var live = deferredLiveKeys ?? [:]
+                var seenInBatch = Set<VKLogicalPos>()
                 var newKeyCount: UInt32 = 0
                 var replacedKeys = Set<VectorRecordKey>()
                 for k in batchKeys {
-                    if live.contains(k) {
-                        // Already live (earlier window write or pre-existing) →
-                        // this is a replacement, not a new key.
-                        replacedKeys.insert(k)
-                    } else if !seenInBatch.contains(k) {
+                    let pos = VKLogicalPos(
+                        itemID: k.itemID,
+                        vectorIndex: k.vectorIndex,
+                        modelID: k.modelID
+                    )
+                    if let existing = live[pos] {
+                        // The durable UNIQUE key excludes modelVersion, so every
+                        // full key already resident at this logical position is
+                        // superseded — including an old model version.
+                        replacedKeys.formUnion(existing)
+                    } else if !seenInBatch.contains(pos) {
                         newKeyCount += 1
                     }
-                    seenInBatch.insert(k)
-                    live.insert(k)
+                    seenInBatch.insert(pos)
+                    live[pos] = [k]
                 }
                 if let store = arrayStore {
                     // Sidecar present: stage into the resident array store now.
                     await store.tombstoneDeferred(keys: replacedKeys)
                     try await store.appendBatch(records: binaryRecords)
-                } else {
-                    // Memory-only: accumulate; publishResidentIndex() merges all
-                    // pending records into the resident index in one pass.
-                    deferredPendingRecords.append(contentsOf: binaryRecords)
                 }
+                // Retain the compact delta in both sidecar and memory-only
+                // modes. Small publications apply it directly to the resident
+                // indexes; large publications materialize the final snapshot.
+                deferredPendingRecords.append(contentsOf: binaryRecords)
+                deferredReplacedKeys.formUnion(replacedKeys)
                 deferredLiveKeys = live
                 liveBinaryCount += newKeyCount
                 deferredIndexDirty = true
@@ -887,7 +906,7 @@ public actor VectorStore {
         //    policy. Dropping the map entry is the invalidation (its presence is
         //    the built flag); other models' indices are untouched.
         for input in batch where input.payload.kind == .float32 {
-            // ADR-026: diskBacked scans SQLite directly (no cache). ramResident
+            // diskBacked scans SQLite directly (no cache). ramResident
             // still uses floatIndices — invalidate so stale entries don't survive.
             if storage.configuration.residencyHint == .ramResident {
                 floatIndices.removeAll()
@@ -924,13 +943,20 @@ public actor VectorStore {
         // Seed live keys from the currently-published snapshot so replacement
         // detection across the window is O(batch), not O(N), per call.
         let snap = await bruteForceIndex.currentSnapshot()
-        var keys = Set<VectorRecordKey>()
+        var keys: [VKLogicalPos: Set<VectorRecordKey>] = [:]
         keys.reserveCapacity(Int(snap.count))
         for i in 0..<Int(snap.count) where !snap.isTombstoned(i) {
-            keys.insert(snap.keys[i])
+            let key = snap.keys[i]
+            let pos = VKLogicalPos(
+                itemID: key.itemID,
+                vectorIndex: key.vectorIndex,
+                modelID: key.modelID
+            )
+            keys[pos, default: []].insert(key)
         }
         deferredLiveKeys = keys
         deferredPendingRecords = []
+        deferredReplacedKeys = []
         deferredIndexDirty = false
         deferredIndexActive = true
     }
@@ -949,7 +975,28 @@ public actor VectorStore {
         deferredLiveKeys = nil
         let pending = deferredPendingRecords
         deferredPendingRecords = []
+        let replaced = deferredReplacedKeys
+        deferredReplacedKeys = []
         guard wasDirty else { return }
+
+        let delta = Self.dedupLastWins(pending)
+        if delta.count <= Self.incrementalPublishLimit,
+           incrementalPublicationCount < Self.incrementalCompactionInterval
+        {
+            for key in replaced {
+                try await bruteForceIndex.remove(key: key)
+                try await mihIndex.remove(key: key)
+            }
+            for record in delta {
+                let payload = VectorPayload(
+                    kind: .binary, dim: 256, bytes: record.bytes)
+                try await bruteForceIndex.add(key: record.key, vector: payload)
+                try await mihIndex.add(key: record.key, vector: payload)
+            }
+            incrementalPublicationCount += 1
+            _selectIndex()
+            return
+        }
 
         let merged: ResidentVectorArray
         if let store = arrayStore {
@@ -963,7 +1010,7 @@ public actor VectorStore {
             let cur = await bruteForceIndex.currentSnapshot()
             merged = Self.mergeBatchIntoSnapshot(
                 snapshot: cur,
-                records: Self.dedupLastWins(pending)
+                records: delta
             )
         }
         await bruteForceIndex.build(from: merged)
@@ -973,6 +1020,7 @@ public actor VectorStore {
         var liveCount: UInt32 = 0
         for i in 0..<Int(merged.count) where !merged.isTombstoned(i) { liveCount += 1 }
         liveBinaryCount = liveCount
+        incrementalPublicationCount = 0
         _selectIndex()
     }
 
@@ -991,6 +1039,7 @@ public actor VectorStore {
         guard !deferredPendingRecords.isEmpty else { return }
         let pending = Self.dedupLastWins(deferredPendingRecords)
         deferredPendingRecords = []
+        deferredReplacedKeys = []
         let cur = await bruteForceIndex.currentSnapshot()
         let merged = Self.mergeBatchIntoSnapshot(snapshot: cur, records: pending)
         await bruteForceIndex.build(from: merged)
@@ -998,31 +1047,49 @@ public actor VectorStore {
         // Recompute live count and reseed the live-key set authoritatively from
         // the flushed snapshot so subsequent replacement detection remains correct.
         var liveCount: UInt32 = 0
-        var liveKeys = Set<VectorRecordKey>()
+        var liveKeys: [VKLogicalPos: Set<VectorRecordKey>] = [:]
         for i in 0..<Int(merged.count) where !merged.isTombstoned(i) {
             liveCount += 1
-            liveKeys.insert(merged.keys[i])
+            let key = merged.keys[i]
+            let pos = VKLogicalPos(
+                itemID: key.itemID,
+                vectorIndex: key.vectorIndex,
+                modelID: key.modelID
+            )
+            liveKeys[pos, default: []].insert(key)
         }
         liveBinaryCount = liveCount
         deferredLiveKeys = liveKeys
+        incrementalPublicationCount = 0
         // deferredIndexActive stays true, deferredIndexDirty stays true.
     }
 
-    /// Keep only the last occurrence of each key, preserving first-seen order of
-    /// the survivors. Used to collapse a memory-only deferral buffer before the
-    /// single merge, since `mergeBatchIntoSnapshot` appends every record (two
-    /// records with one key would otherwise both go live).
+    /// Keep only the last occurrence at each durable logical position.
+    /// `modelVersion` is deliberately excluded: several revisions in one
+    /// deferred burst must publish only the final version at the table's
+    /// `(itemID, vectorIndex, modelID)` UNIQUE key.
     private static func dedupLastWins(
         _ records: [(key: VectorRecordKey, bytes: [UInt8])]
     ) -> [(key: VectorRecordKey, bytes: [UInt8])] {
         guard !records.isEmpty else { return records }
-        var lastIndex: [VectorRecordKey: Int] = [:]
+        var lastIndex: [VKLogicalPos: Int] = [:]
         lastIndex.reserveCapacity(records.count)
-        for (i, r) in records.enumerated() { lastIndex[r.key] = i }
+        for (i, r) in records.enumerated() {
+            lastIndex[VKLogicalPos(
+                itemID: r.key.itemID,
+                vectorIndex: r.key.vectorIndex,
+                modelID: r.key.modelID
+            )] = i
+        }
         var out: [(key: VectorRecordKey, bytes: [UInt8])] = []
         out.reserveCapacity(lastIndex.count)
-        for (i, r) in records.enumerated() where lastIndex[r.key] == i {
-            out.append(r)
+        for (i, r) in records.enumerated() {
+            let pos = VKLogicalPos(
+                itemID: r.key.itemID,
+                vectorIndex: r.key.vectorIndex,
+                modelID: r.key.modelID
+            )
+            if lastIndex[pos] == i { out.append(r) }
         }
         return out
     }
@@ -1267,7 +1334,7 @@ public actor VectorStore {
     ///   - limit: maximum number of matches to return.
     /// - Returns: up to `limit` matches, nearest first. Empty if `limit`
     ///   is non-positive, the probe is empty, or no float rows exist.
-    /// ADR-026: float NN search. `.diskBacked` scans SQLite directly
+    /// float NN search. `.diskBacked` scans SQLite directly
     /// (no heap copy). `.ramResident` caches a FloatBruteForceIndex.
     public func findNearestFloat(
         probe: [Float],
@@ -1289,7 +1356,7 @@ public actor VectorStore {
         }
     }
 
-    /// Pre-ADR-026 cached float search path. Used when residencyHint == .ramResident.
+    /// Pre-disk-default storage residency cached float search path. Used when residencyHint ==.ramResident.
     private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
@@ -1336,7 +1403,7 @@ public actor VectorStore {
     /// - Returns: up to `limit` matches, FARTHEST (most dissimilar) first.
     ///   Empty if `limit` is non-positive, the probe is empty, or no float
     ///   rows exist for the model.
-    /// ADR-026: farthest float search. Same residencyHint dispatch as nearest.
+    /// farthest float search. Same residencyHint dispatch as nearest.
     public func findFarthestFloat(
         probe: [Float],
         modelID: String,
@@ -1357,7 +1424,7 @@ public actor VectorStore {
         }
     }
 
-    /// Pre-ADR-026 cached farthest float path. Used when residencyHint == .ramResident.
+    /// Pre-disk-default storage residency cached farthest float path. Used when residencyHint ==.ramResident.
     private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
@@ -1659,6 +1726,176 @@ public actor VectorStore {
         await _selectIndex()
     }
 
+    // MARK: - Exact-key batch mutation (GLK shared-content 1.1, P0)
+
+    /// Delete exactly the rows named by `keys` — the scoped batch-delete the
+    /// shared-content migration uses instead of model-wide teardowns.
+    ///
+    /// Each key addresses one logical row position (itemID, vectorIndex,
+    /// modelID); every modelVersion stored at that position is removed (a
+    /// version bump must not orphan the stale row). Rows NOT named are never
+    /// touched: one model partition may contain retained/shared keys and
+    /// removed keys side by side without collateral mutation.
+    ///
+    /// Durable writes run in one transaction; the resident binary index is
+    /// updated in one pass and Lane D float indices are invalidated only for
+    /// the modelIDs the keys touch.
+    public func deleteVectors(keys: [VectorExactKey]) async throws {
+        guard !keys.isEmpty else { return }
+        // Publish any in-flight deferred burst first so the resident index
+        // reflects every appended vector before we tombstone against it.
+        if deferredIndexDirty { try await publishResidentIndex() }
+
+        let keySet = Set(keys)
+        try await storage.rowStore.beginTransaction()
+        do {
+            for key in keySet {
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "item_id"), .text(key.itemID)),
+                        .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(key.vectorIndex))),
+                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID))
+                    ])
+                )
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+
+        // Lane D coherence: a deleted key may have addressed a float row. Drop
+        // ONLY the touched models' cached float indices so the next
+        // findNearestFloat rebuilds them from the table; other models' float
+        // indices are untouched (scoped invalidation).
+        for modelID in Set(keySet.map(\.modelID)) {
+            floatIndices.removeValue(forKey: modelID)
+        }
+
+        // Binary-lane coherence: tombstone every resident slot whose logical
+        // position matches a deleted key, in ONE snapshot pass. Slots at other
+        // positions — including other keys of the same model — are untouched.
+        if indexBuilt {
+            let snap = await bruteForceIndex.currentSnapshot()
+            var removed: UInt32 = 0
+            for slotIdx in 0..<Int(snap.count) {
+                guard !snap.isTombstoned(slotIdx) else { continue }
+                let k = snap.keys[slotIdx]
+                let pos = VectorExactKey(
+                    itemID: k.itemID, vectorIndex: Int(k.vectorIndex), modelID: k.modelID)
+                guard keySet.contains(pos) else { continue }
+                if let store = arrayStore {
+                    try await store.tombstone(key: k)
+                }
+                try await bruteForceIndex.remove(key: k)
+                try await mihIndex.remove(key: k)
+                removed += 1
+            }
+            if removed > 0 {
+                liveBinaryCount = liveBinaryCount > removed ? liveBinaryCount - removed : 0
+                _selectIndex()
+            }
+        }
+    }
+
+    /// Reconcile ONE model's partition against an explicit expected key set —
+    /// the scoped rebuild the shared-content migration uses instead of
+    /// `replaceModelVectors` (which clears the whole partition) against
+    /// shared storage.
+    ///
+    /// Every row in `expected` is upserted (exact-key idempotent). Every
+    /// existing row of `modelID` whose (itemID, vectorIndex) is NOT named in
+    /// `expected` is deleted. Rows of other models are never read or touched.
+    /// This lets a rebuild retain shared representations in place while
+    /// removing only the keys no lane claims.
+    ///
+    /// - Returns: the count of rows deleted (stale keys) and upserted.
+    /// - Throws: `VectorKitError.int8QuantizationPolicyUndefined` for any int8
+    ///   payload; `VectorKitError.storeError` when an input's modelID differs
+    ///   from `modelID` (a cross-partition write is a caller bug).
+    @discardableResult
+    public func reconcileModelVectors(
+        modelID: String,
+        expected: [VectorPayloadInput]
+    ) async throws -> (removed: Int, upserted: Int) {
+        if let bad = expected.first(where: { $0.payload.kind == .int8 }) {
+            throw VectorKitError.int8QuantizationPolicyUndefined(
+                "int8 writes are rejected: quantization policy is unspecified. " +
+                "reconcileModelVectors received an int8 payload for item \(bad.itemID)")
+        }
+        if let stray = expected.first(where: { $0.modelID != modelID }) {
+            throw VectorKitError.invalidPayload(
+                "reconcileModelVectors(modelID: \(modelID)) received an input for "
+                + "model \(stray.modelID) — cross-partition writes are not permitted")
+        }
+        if deferredIndexDirty { try await publishResidentIndex() }
+
+        // Enumerate the model's existing logical keys from the durable table
+        // (the authoritative source), then compute the stale set.
+        let existingRows = try await storage.rowStore.query(
+            table: "vectors",
+            where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+            orderBy: [], limit: nil, offset: nil)
+        var existingKeys = Set<VectorExactKey>()
+        for row in existingRows {
+            guard case let .text(itemID)? = row["item_id"],
+                  case let .int(vectorIndex)? = row["vector_index"] else { continue }
+            existingKeys.insert(VectorExactKey(
+                itemID: itemID, vectorIndex: Int(vectorIndex), modelID: modelID))
+        }
+        let expectedKeys = Set(expected.map {
+            VectorExactKey(itemID: $0.itemID, vectorIndex: Int($0.vectorIndex), modelID: modelID)
+        })
+        let staleKeys = existingKeys.subtracting(expectedKeys)
+
+        // One transaction: delete exactly the stale keys, upsert the expected
+        // rows. Other models' rows are never addressed.
+        try await storage.rowStore.beginTransaction()
+        do {
+            for key in staleKeys {
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "item_id"), .text(key.itemID)),
+                        .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(key.vectorIndex))),
+                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID))
+                    ])
+                )
+            }
+            for input in expected {
+                let values: [String: TypedValue] = [
+                    "id":           .uuid(UUID()),
+                    "item_id":      .text(input.itemID),
+                    "vector_index": .int(Int64(input.vectorIndex)),
+                    "model_id":     .text(input.modelID),
+                    "model_version":.text(input.modelVersion),
+                    "kind":         .int(Int64(input.payload.kind.rawValue)),
+                    "dim":          .int(Int64(input.payload.dim)),
+                    "payload":      .blob(Data(input.payload.bytes)),
+                    "scale":        input.payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
+                    "filed_at":     .timestamp(input.filedAt)
+                ]
+                _ = try await storage.rowStore.upsert(
+                    table: "vectors",
+                    values: values,
+                    conflictColumns: ["item_id", "vector_index", "model_id"]
+                )
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+
+        // Coherence: this model's float index lazily rebuilds from the table;
+        // the resident binary index is rebuilt once from the table (the
+        // reconcile may have touched an arbitrary mix of keys).
+        floatIndices.removeValue(forKey: modelID)
+        try await _rebuildBinaryIndexFromTable()
+        return (removed: staleKeys.count, upserted: expected.count)
+    }
+
     // MARK: - Lifecycle (GLK_PROVISION_001)
 
     /// Destroy all vector rows in this store.
@@ -1789,7 +2026,7 @@ public actor VectorStore {
     /// index requires a single stride, so all float rows for the queried
     /// model share one dimension (spec I-4 keeps models on disjoint
     /// partitions, and one model emits one dimension).
-    /// ADR-026: float NN search scans the SQLite `vectors` table directly
+    /// float NN search scans the SQLite `vectors` table directly
     /// via a cursor, computing distance per row and maintaining a top-k
     /// heap. No ResidentVectorArray, no FloatBruteForceIndex, no 2GB heap
     /// allocation. With PRAGMA mmap_size, each row read is an OS page-cache
@@ -1813,7 +2050,7 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // String interning for model fields (ADR-026).
+        // String interning for model fields.
         var internCache: [String: String] = [:]
         func intern(_ s: String) -> String {
             if let existing = internCache[s] { return existing }
@@ -1912,7 +2149,7 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // ADR-026 string interning: modelID is the same for every row
+        // disk-default storage residency string interning: modelID is the same for every row
         // (we're fetching a single modelID partition). Intern to avoid
         // N identical String heap allocations.
         var internCache: [String: String] = [:]
@@ -2035,7 +2272,7 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // ADR-026 string interning: modelID and modelVersion repeat for
+        // disk-default storage residency string interning: modelID and modelVersion repeat for
         // every row in a partition. Interning collapses 200K+ identical
         // String heap allocations to one shared instance per unique value.
         var internCache: [String: String] = [:]

@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-07-17
-version: 1.7
+version: 1.8
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -146,14 +146,23 @@ public struct SyncManifest: Sendable {
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
+    /// Columns to route through `CKRecord.encryptedValues` (CloudKit backend only).
+    /// Key: table name. Value: set of column names to encrypt. Default `[:]` →
+    /// byte-identical to pre-encryption behavior. Not wire-carried (local CloudKit
+    /// encoding directive only). `_sync*` columns and `_ck_*` tables are rejected
+    /// by `validateEncryptedColumns()`. Registry records always stay plaintext.
+    public let encryptedContentColumns: [String: Set<String>]
     /// Optional hook run after each inbound pull batch applies;
     /// use to restore cross-row or cross-table structural invariants that
     /// sync cannot maintain (Playground Rule 3). Not `Codable` — closures
     /// cannot be serialized; set at construction only.
-    public var postApplyIntegrityHook: ((any Storage) async -> Void)?
+    public var postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)?
     public init(kitID: String, schemaVersion: Int, zoneIdentifier: String, tables: [SyncedTable],
-                postApplyIntegrityHook: ((any Storage) async -> Void)? = nil)
+                encryptedContentColumns: [String: Set<String>] = [:],
+                postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil)
     public func table(named name: String) -> SyncedTable?
+    /// Validate `encryptedContentColumns`: rejects `_sync*` columns and `_ck_*` tables.
+    public func validateEncryptedColumns() throws
 }
 ```
 

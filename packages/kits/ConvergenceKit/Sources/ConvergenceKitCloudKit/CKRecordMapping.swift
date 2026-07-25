@@ -87,7 +87,8 @@ public enum CKRecordMapping {
         schemaVersion: Int,
         kitID: String,
         zone: CKRecordZone.ID,
-        columnHLCs: ColumnHLCMap? = nil
+        columnHLCs: ColumnHLCMap? = nil,
+        encryptedColumns: Set<String> = []
     ) throws -> CKRecord {
         let recordID = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: recordID)
@@ -116,7 +117,10 @@ public enum CKRecordMapping {
         }
 
         for (key, value) in values {
-            try assign(value: value, to: record, forKey: key)
+            // Declared columns go through the encrypted channel; all others stay plaintext.
+            // encryptedValues is itself a CKRecord, so assign() works unchanged.
+            let target = encryptedColumns.contains(key) ? record.encryptedValues : record
+            try assign(value: value, to: target, forKey: key)
         }
         // Sync metadata fields (reserved names start with _sync).
         record["_syncHLC"] = packed(hlc) as NSNumber
@@ -183,9 +187,15 @@ public enum CKRecordMapping {
         }
 
         var values: [String: TypedValue] = [:]
-        for key in record.allKeys() {
+        // Union both channels: encrypted (post-migration) and plaintext (pre-migration).
+        // Dual-read: encrypted channel wins when a key appears in both, enabling
+        // the server-side transition where plaintext rows coexist with encrypted ones.
+        let allDataKeys = Set(record.allKeys()).union(record.encryptedValues.allKeys())
+        for key in allDataKeys {
             if key.hasPrefix("_sync") { continue }
-            if let any = record[key] {
+            if let any = record.encryptedValues[key] {
+                values[key] = try typedValue(from: any)
+            } else if let any = record[key] {
                 values[key] = try typedValue(from: any)
             } else {
                 values[key] = .null
@@ -270,7 +280,7 @@ public enum CKRecordMapping {
         )
     }
 
-    private static func assign(value: TypedValue, to record: CKRecord, forKey key: String) throws {
+    private static func assign(value: TypedValue, to record: any CKRecordKeyValueSetting, forKey key: String) throws {
         switch value {
         case .null:
             record[key] = nil

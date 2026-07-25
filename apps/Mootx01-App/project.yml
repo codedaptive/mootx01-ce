@@ -1,4 +1,4 @@
-# xcodegen spec for the MOOTx01 ecosystem app (ADR-005, the Apple layer).
+# xcodegen spec for the MOOTx01 ecosystem app (the app/engine boundary, the Apple layer).
 # Regenerate: xcodegen generate   (run in apps/Mootx01-App)
 #
 # Two app targets — macOS and iOS/iPadOS — sharing the App/ sources and the
@@ -60,11 +60,11 @@ targets:
         # M-ING-2: purpose strings for the live miner consent prompts
         # (EventKit + Contacts). Shown in the system dialog on first live
         # read; the readers themselves only run from attended sessions.
-        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
-        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads your Calendar events to file them into your private, on-device memory estate. Your data never leaves your device."
+        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact names and birthdays to file them into your private, on-device memory estate. Your data never leaves your device."
         # Spawning the managed daemon needs no sandbox for this dev prototype.
         ENABLE_APP_SANDBOX: NO
-    # App-group container (ADR-014, macOS 15+): when the estate lives in the
+    # App-group container (whole-file estate encryption, macOS 15+): when the estate lives in the
     # group container, the OS gives it System Integrity Protection even WITHOUT
     # App Sandbox — a process outside the group is prompted before it can touch
     # the estate. Defense-in-depth on top of SQLCipher whole-file encryption. The
@@ -104,8 +104,13 @@ targets:
         # Both NSLocalNetworkUsageDescription and NSBonjourServices are required —
         # the OS denies NWBrowser/NWListener for undeclared service types, and
         # App Store review rejects builds with missing local-network usage strings.
-        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons, to serve this estate to MCP clients on your LAN, and to discover other Mootx01 estates for on-demand federation."
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to connect to local memory services, to share your private estate with AI tools on your home or office network, and to pair with other Mootx01 devices."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
+        # App Intents (Siri Shortcuts): capture and recall voice phrases land in
+        # Mootx01Shortcuts (AppShortcutsProvider). Included for parity with iOS;
+        # macOS ships via Developer ID so App Store review does not require this key,
+        # but the AppShortcutsProvider registers these phrases on macOS too.
+        NSSiriUsageDescription: "MOOTx01 uses Siri and Shortcuts to let you capture memories and recall them using voice commands. All memory data stays on your device."
         NSBonjourServices:
           - _mootx01._tcp
           - _mootx01-fed._tcp
@@ -139,16 +144,18 @@ targets:
         MARKETING_VERSION: "1.0.18"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
+        # FAB5-L1: restored iPad support (reverses FAB5-CP iPhone-only ruling).
+        # "1,2" = iPhone + iPad; matched by Widget-iOS and Share-iOS below.
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
         # M-ING-2: purpose strings for the live miner consent prompts
         # (EventKit + Contacts). Shown in the system dialog on first live
         # read; the readers themselves only run from attended sessions.
-        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
-        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads your Calendar events to file them into your private, on-device memory estate. Your data never leaves your device."
+        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact names and birthdays to file them into your private, on-device memory estate. Your data never leaves your device."
     # A4b: the iOS app joins the same app group as the Share Extension so
     # ShareInboxDrain can read the spool the extension writes. (The macOS
-    # target already carries the group for ADR-014 estate SIP defense.)
+    # target already carries the group for estate SIP defense.)
     entitlements:
       path: App/Mootx01-iOS.entitlements
       properties:
@@ -187,8 +194,11 @@ targets:
         # Both NSLocalNetworkUsageDescription and NSBonjourServices are required —
         # iOS denies NWBrowser/NWListener for undeclared service types, and
         # App Store review rejects builds with missing local-network usage strings.
-        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons, to serve this estate to MCP clients on your LAN, and to discover other Mootx01 estates for on-demand federation."
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to connect to local memory services, to share your private estate with AI tools on your home or office network, and to pair with other Mootx01 devices."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
+        # App Intents (Siri Shortcuts): capture and recall voice phrases —
+        # see Mootx01Shortcuts (AppShortcutsProvider). Required for iOS App Store review.
+        NSSiriUsageDescription: "MOOTx01 uses Siri and Shortcuts to let you capture memories and recall them using voice commands. All memory data stays on your device."
         NSBonjourServices:
           - _mootx01._tcp
           - _mootx01-fed._tcp
@@ -219,6 +229,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.widget
         PRODUCT_NAME: Mootx01Widget
         SWIFT_VERSION: "6.0"
+        # FAB5-L1: must match the app target — widget runs on iPad too.
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
     info:
       path: derived-Info-Widget-iOS.plist
@@ -275,6 +287,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.share
         PRODUCT_NAME: Mootx01Share
         SWIFT_VERSION: "6.0"
+        # FAB5-L1: must match the app target — share extension runs on iPad too.
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
     info:
       path: derived-Info-Share-iOS.plist

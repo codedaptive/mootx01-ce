@@ -1329,7 +1329,7 @@ actor FederationStateActor {
     /// Side table name for the persistent estate Ed25519 identity (I-8, WC1).
     /// One row per estate: key_id TEXT PK (fixed "local"), secret_key BLOB (32 bytes,
     /// Ed25519 private key), public_key BLOB (32 bytes), created_at TEXT (ISO8601).
-    /// At-rest posture: covered by SQLCipher per ADR-014. Keychain storage is a
+    /// At-rest posture: covered by SQLCipher. Keychain storage is a
     /// follow-up for Swift only; Rust leg stores in-estate for parity.
     static let fedIdentityTable = "_fed_identity"
 
@@ -1467,7 +1467,7 @@ actor FederationStateActor {
         // _fed_identity: one-row side table for the persistent estate Ed25519 identity
         // (I-8, WC1). key_id is fixed "local"; secret_key and public_key are the 32-byte
         // raw Ed25519 key material. created_at is ISO8601 TEXT per schema invariants.
-        // At-rest: covered by SQLCipher (ADR-014). Keychain is a follow-up (Swift only).
+        // At rest, SQLCipher covers the estate file. Keychain is a follow-up (Swift only).
         let fedIdentityDecl = TableDeclaration(
             name: fedIdentityTable,
             columns: [
@@ -1747,7 +1747,7 @@ actor FederationStateActor {
     /// before any push/pull/pair operation that reads `localIdentity`.
     ///
     /// At-rest posture: the 32-byte private key lives in the estate SQLite file.
-    /// SQLCipher covers the file at rest (ADR-014). Per-key Keychain storage is a
+    /// SQLCipher covers the file at rest. Per-key Keychain storage is a
     /// follow-up for the Swift leg only; both legs store in-estate for parity now.
     ///
     /// I-8: identity is per-estate. Keypair derivation is unchanged — only

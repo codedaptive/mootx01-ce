@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">File operations mapped to record events</title>
+  <desc id="desc">Four rows map create, edit, delete, and rename operations to unconfirmed capture, superseding history, withdrawal, and new virtual paths.</desc>
+  <rect width="1200" height="760" fill="#fbfaf7"/>
+  <text x="600" y="70" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="700" fill="#111827">File operations can preserve record history</text>
+  <text x="600" y="112" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="22" fill="#4b5563">The agent sees a familiar mutation; the owner keeps evidence of what changed.</text>
+
+  <g font-family="Inter,Arial,sans-serif">
+    <rect x="90" y="165" width="1020" height="105" rx="18" fill="#eef2ff" stroke="#a5b4fc" stroke-width="2"/>
+    <rect x="120" y="190" width="180" height="56" rx="12" fill="#c7d2fe" stroke="#818cf8"/>
+    <text x="210" y="226" text-anchor="middle" font-size="22" font-weight="700" fill="#312e81">create</text>
+    <text x="370" y="226" font-size="20" fill="#475569">→</text>
+    <text x="430" y="210" font-size="20" font-weight="700" fill="#312e81">capture new record</text>
+    <text x="430" y="240" font-size="17" fill="#4338ca">origin recorded • confirmation begins unconfirmed</text>
+
+    <rect x="90" y="290" width="1020" height="105" rx="18" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+    <rect x="120" y="315" width="180" height="56" rx="12" fill="#dbeafe" stroke="#60a5fa"/>
+    <text x="210" y="351" text-anchor="middle" font-size="22" font-weight="700" fill="#1e3a8a">edit / insert</text>
+    <text x="370" y="351" font-size="20" fill="#475569">→</text>
+    <text x="430" y="335" font-size="20" font-weight="700" fill="#1e3a8a">supersede content</text>
+    <text x="430" y="365" font-size="17" fill="#1d4ed8">new active version • older version remains in lineage</text>
+
+    <rect x="90" y="415" width="1020" height="105" rx="18" fill="#fff7ed" stroke="#fdba74" stroke-width="2"/>
+    <rect x="120" y="440" width="180" height="56" rx="12" fill="#ffedd5" stroke="#fb923c"/>
+    <text x="210" y="476" text-anchor="middle" font-size="22" font-weight="700" fill="#7c2d12">delete</text>
+    <text x="370" y="476" font-size="20" fill="#475569">→</text>
+    <text x="430" y="460" font-size="20" font-weight="700" fill="#7c2d12">withdraw from active use</text>
+    <text x="430" y="490" font-size="17" fill="#9a3412">path disappears to the agent • audit trail remains</text>
+
+    <rect x="90" y="540" width="1020" height="105" rx="18" fill="#ecfdf5" stroke="#86efac" stroke-width="2"/>
+    <rect x="120" y="565" width="180" height="56" rx="12" fill="#d1fae5" stroke="#34d399"/>
+    <text x="210" y="601" text-anchor="middle" font-size="22" font-weight="700" fill="#065f46">rename</text>
+    <text x="370" y="601" font-size="20" fill="#475569">→</text>
+    <text x="430" y="585" font-size="20" font-weight="700" fill="#065f46">capture new virtual path</text>
+    <text x="430" y="615" font-size="17" fill="#047857">new record becomes active • old path is withdrawn</text>
+  </g>
+
+  <text x="600" y="708" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="700" fill="#334155">The interface mutates files; the backend preserves the change story.</text>
+</svg>

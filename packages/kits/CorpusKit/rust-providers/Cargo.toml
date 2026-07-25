@@ -21,7 +21,7 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # RandomIndexingProvider calls substrate_kernel::float_vec_ops::l2_normalize
 # instead of the former inline implementation. Layering: corpus-kit-providers
 # is downstream of substrate-kernel — no inversion.
-# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + arch mandate §4.
+# Repository-owned dependencies use local package paths.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 # B2-5: the named text providers conform to vectorkit::EmbeddingProvider
 # and project pooled vectors through substrate_ml::float_simhash::project
@@ -36,7 +36,7 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # of LatticeLib's FDC runtime). eidetic-lib is not needed directly (FDCProvider
 # calls the lattice-lib surface only) but is declared here for structural
 # parity with Swift's CorpusKitProviders depending on EideticLib.
-# Authority: ADR-010 Decision B (FDC co-classification signal).
+# Authority: honest semantic fusion (FDC co-classification signal).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 

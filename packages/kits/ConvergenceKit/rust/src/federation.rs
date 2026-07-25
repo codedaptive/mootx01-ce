@@ -29,8 +29,8 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use persistence_kit::{
-    Column, IsolationLevel, OrderClause, RowStore, Storage, StorageError, StorageEvent,
-    StoragePredicate, TableChange, TypedValue,
+    ChangeOrigin, Column, IsolationLevel, OrderClause, RowStore, Storage, StorageError,
+    StorageEvent, StoragePredicate, TableChange, TypedValue,
 };
 
 // ----- identity -----
@@ -328,13 +328,6 @@ struct EngineState {
     /// still holds an `Arc<dyn Storage>` clone keeps the observer hub — and its
     /// senders — alive, so the receiver would never disconnect on its own.
     observer_stop: Arc<AtomicBool>,
-    /// Guard flag set to `true` for the duration of `pull()`'s apply loop.
-    /// When the flag is set the observer workers skip appending inbound-write
-    /// events to the outbox, preventing a sync echo: without this guard, each
-    /// `apply_record` write triggers the storage observer, causing received
-    /// records to be re-enqueued for the next `push` and bounced back to the
-    /// peer that sent them.
-    pulling: Arc<AtomicBool>,
 }
 
 pub struct FederationSyncEngine {
@@ -373,7 +366,6 @@ impl FederationSyncEngine {
                 hlc_counter: 0,
                 observer_workers: Vec::new(),
                 observer_stop: Arc::new(AtomicBool::new(false)),
-                pulling: Arc::new(AtomicBool::new(false)),
             },
             subscribers: Vec::new(),
         }
@@ -594,7 +586,6 @@ impl FederationSyncEngine {
             let worker_storage = Arc::clone(storage);
             let hlc_generator = Arc::clone(&self.state.hlc_generator);
             let stop = Arc::clone(&self.state.observer_stop);
-            let pulling = Arc::clone(&self.state.pulling);
             let schema_version = manifest.schema_version;
             let kit_id = manifest.kit_id.clone();
             // Column projection (R2, CVK-ICLOUD P2-M2): capture excluded columns and
@@ -614,17 +605,17 @@ impl FederationSyncEngine {
                     }
                     match rx.recv_timeout(tick) {
                         Ok(change) => {
-                            // Skip while a pull is in progress: the write was
-                            // caused by apply_record, not by a local user
-                            // mutation. Suppressing here prevents a sync echo
-                            // where inbound records are re-enqueued and pushed
-                            // back to the peer that originally sent them.
-                            // Echo suppression (I-10): the `pulling` flag mirrors
-                            // Swift's `change.origin != .syncApply` guard —
-                            // inbound-write-triggered changes are suppressed at
-                            // observe time, so entries in the durable outbox are
-                            // by construction local writes only.
-                            if pulling.load(Ordering::Acquire) {
+                            // Echo suppression (I-10): apply_record uses
+                            // upsert_sync/insert_sync/delete_sync, so every
+                            // inbound-apply write emits ChangeOrigin::SyncApply.
+                            // Discarding those events here prevents re-enqueueing
+                            // received records back to the sending peer.
+                            // Mirrors Swift's `change.origin != .syncApply` guard.
+                            // This check is race-free: the origin is stamped at
+                            // emit time (inside the storage write), not at consume
+                            // time — so there is no TOCTOU window between the write
+                            // and the worker processing the event.
+                            if change.origin == ChangeOrigin::SyncApply {
                                 continue;
                             }
                             // Column projection (R2): apply outbound strip and
@@ -954,13 +945,6 @@ impl SyncEngine for FederationSyncEngine {
             out
         };
 
-        // Block the observer workers from appending to the outbox for the
-        // duration of the apply loop: writes made by apply_record are inbound
-        // sync writes, not local user mutations, and must not be re-pushed back
-        // to the sending peer. The flag is cleared in the finally-equivalent
-        // block below (after all applies, before returning).
-        self.state.pulling.store(true, Ordering::Release);
-
         let mut pulled = 0;
         let mut conflicts = 0;
         // Count of records held in _fed_pending_skew this pull cycle (CVK-WC3, R9).
@@ -1118,13 +1102,6 @@ impl SyncEngine for FederationSyncEngine {
                 }
             }
         }
-        // Clear the pull guard: local writes from this point forward are user
-        // mutations and must be captured by the observer workers as normal.
-        // The hook invocation below intentionally runs AFTER the guard is
-        // cleared so that hook-originated repair writes flow into the outbox
-        // (hook-writes-must-ship, Kong Q2 adjudication).
-        self.state.pulling.store(false, Ordering::Release);
-
         // Emit RecordsHeldForMigration when at least one future-schema record
         // was enqueued this cycle (CVK-WC3, R9). Mirrors Swift pull() behavior.
         if skew_held_count > 0 {
@@ -1223,7 +1200,7 @@ fn apply_record(
             }
             ConflictPolicy::RemoteWins => {
                 // Remote delete wins unconditionally.
-                let _ = row_store.delete(&record.table, &predicate);
+                let _ = row_store.delete_sync(&record.table, &predicate);
                 // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
                 // remoteWins applies without an HLC gate; purge all older-HLC skew entries
                 // since they would be overridden by this delete on replay. Mirrors
@@ -1255,7 +1232,7 @@ fn apply_record(
                 storage
                     .transaction(IsolationLevel::Serializable, &mut |txn| {
                         let txn_row_store = txn.row_store();
-                        let _ = txn_row_store.delete(&record.table, &predicate);
+                        let _ = txn_row_store.delete_sync(&record.table, &predicate);
                         // A6: persist tombstone HLC in side table after hard-delete.
                         // WHY: without this a stale insert arriving later would find
                         // local_hlc = None and be accepted, resurrecting the deleted row.
@@ -1302,7 +1279,7 @@ fn apply_record(
                     storage
                         .transaction(IsolationLevel::Serializable, &mut |txn| {
                             let txn_row_store = txn.row_store();
-                            let _ = txn_row_store.delete(&record.table, &predicate);
+                            let _ = txn_row_store.delete_sync(&record.table, &predicate);
                             // Clear column HLC side-table entries: the row is gone, and stale
                             // column entries would confuse a future re-insert under fieldLevelLWW.
                             clear_fed_column_hlcs(&txn_row_store, &record.table, &record.row_key);
@@ -1378,7 +1355,7 @@ fn apply_record(
             match synced_table.conflict_policy {
                 ConflictPolicy::AppendOnly => {
                     row_store
-                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                        .upsert_sync(&record.table, values, &[synced_table.primary_key_column.clone()])
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::LastWriterWinsByHLC => {
@@ -1405,7 +1382,7 @@ fn apply_record(
                     storage
                         .transaction(IsolationLevel::Serializable, &mut |txn| {
                             let txn_row_store = txn.row_store();
-                            txn_row_store.upsert(
+                            txn_row_store.upsert_sync(
                                 &record.table,
                                 values_for_write.clone(),
                                 &[synced_table.primary_key_column.clone()],
@@ -1424,7 +1401,7 @@ fn apply_record(
                 }
                 ConflictPolicy::RemoteWins => {
                     row_store
-                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                        .upsert_sync(&record.table, values, &[synced_table.primary_key_column.clone()])
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::LocalWins => {
@@ -1433,7 +1410,7 @@ fn apply_record(
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     if count == 0 {
                         row_store
-                            .insert(&record.table, values)
+                            .insert_sync(&record.table, values)
                             .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     }
                 }
@@ -1482,7 +1459,7 @@ fn apply_record(
                         .transaction(IsolationLevel::Serializable, &mut |txn| {
                             let txn_row_store = txn.row_store();
                             if !columns_to_apply_is_empty {
-                                txn_row_store.upsert(
+                                txn_row_store.upsert_sync(
                                     &record.table,
                                     columns_to_apply_for_write.clone(),
                                     &[synced_table.primary_key_column.clone()],
@@ -1739,7 +1716,7 @@ const FED_SKEW_QUEUE_CAP: usize = 512;
 /// One row per estate: key_id TEXT PK (fixed "local"), secret_key BLOB
 /// (32 bytes, Ed25519 private key), public_key BLOB (32 bytes),
 /// created_at TEXT (ISO8601 per schema invariants — never REAL).
-/// At-rest posture: covered by SQLCipher per ADR-014 on the estate file.
+/// At-rest posture: SQLCipher covers the estate file.
 const FED_IDENTITY_TABLE: &str = "_fed_identity";
 
 /// Side table name for the Federation durable outbox (WC2).
@@ -2017,7 +1994,7 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
     );
     // v4 (WC1): persistent Ed25519 estate identity (I-8).
     // One row per estate (key_id = "local"). At-rest posture: SQLCipher
-    // per ADR-014 covers the estate file. No custom crypto invented.
+    // SQLCipher covers the estate file. No custom crypto is added here.
     let identity_table = TableDeclaration::new(
         FED_IDENTITY_TABLE,
         vec![
@@ -2155,7 +2132,7 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
 /// Called by the host at startup — mirrors Swift `FederationStateActor.loadOrMintIdentity`.
 /// Runs `ensure_fed_sync_meta_table` first so callers need not pre-warm the schema.
 ///
-/// At-rest posture: the estate file is covered by SQLCipher (ADR-014); no custom
+/// At-rest posture: the estate file is covered by SQLCipher; no custom
 /// crypto is applied to the key bytes at this layer.
 ///
 /// Returns `Err(String)` on storage failure; callers should surface the error.
@@ -2734,9 +2711,9 @@ fn clear_fed_column_hlcs(
 /// time (ISO8601) in `received_at`, then calls `fed_skew_evict_if_needed` to
 /// keep the table at or below `FED_SKEW_QUEUE_CAP`.
 ///
-/// All side-table writes flow through the default `upsert` path (not
-/// `upsert_sync`) because the Rust engine suppresses echo via the
-/// `pulling: AtomicBool` flag, not the sync-tagged write variants.
+/// All side-table writes use the default `upsert` path (not `upsert_sync`)
+/// because `_fed_pending_skew` is a federation metadata table, not an
+/// application table observed by the outbox worker — no echo suppression needed.
 ///
 /// Mirrors Swift `PendingSkewQueue.enqueue(_:to:sideTable:)`.
 fn fed_skew_enqueue(
@@ -2842,8 +2819,8 @@ fn fed_skew_drain_ready(
 /// Delete entries with the given IDs from `_fed_pending_skew`.
 ///
 /// Called after successful `apply_record` for each replayed entry. Uses
-/// `delete` (not `delete_sync`) because Rust echo suppression is handled
-/// by the `pulling` flag, not the sync-tagged write paths.
+/// `delete` (not `delete_sync`) because `_fed_pending_skew` is a federation
+/// metadata table, not an application table observed by the outbox worker.
 ///
 /// Mirrors Swift `SkewReplay.deleteApplied(ids:from:sideTable:)`.
 fn fed_skew_delete_applied(

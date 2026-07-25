@@ -7,8 +7,8 @@
 //!     ("Agentic Memory"), preserving byte-identical behaviour for all
 //!     existing callers.
 //!
-//! ADR-016: wing targeting at capture time.
-//! ADR-017: wing/room resolved from node tree via parent_node_id.
+//! wing targeting at capture time.
+//! wing/room resolved from node tree via parent_node_id.
 
 #![cfg(test)]
 
@@ -47,7 +47,7 @@ fn frame_with_wing(content: &str, wing: Option<&str>) -> CaptureFrame {
 }
 
 /// Resolve the wing name for a drawer via its parent_node_id in the
-/// estate's node tree (ADR-017).
+/// estate's node tree.
 fn resolve_wing(estate: &Estate, drawer: &Drawer) -> String {
     let names = estate.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
     let (wing, _) = names.get(&drawer.parent_node_id).expect("wing node must resolve");

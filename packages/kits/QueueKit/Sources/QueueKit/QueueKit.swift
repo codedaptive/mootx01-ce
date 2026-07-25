@@ -99,7 +99,7 @@ public final class QueueKit: Sendable {
         return result
     }
 
-    /// Drain only the jobs belonging to `stream` (ADR-021 Decision 7 / T1).
+    /// Drain only the jobs belonging to `stream`.
     ///
     /// Routes to the backend's `drainAvailable(stream:)`, which on
     /// PersistenceKitBackend uses the `(stream_id, status)` index (one
@@ -218,7 +218,7 @@ public final class QueueKit: Sendable {
         try await backend.pendingCount()
     }
 
-    /// Count pending jobs belonging to `stream` only (ADR-021 Decision 7 / T1).
+    /// Count pending jobs belonging to `stream` only.
     ///
     /// Routes to the backend's `pendingCount(stream:)`. PersistenceKitBackend
     /// uses the `(stream_id, status)` index; FilesystemBackend scans `new/` and
@@ -305,7 +305,7 @@ public final class QueueKit: Sendable {
 
     /// Block until `stream` has no pending and no in-flight work, then return.
     ///
-    /// Stream-scoped twin of `awaitDrain` (ADR-021 Decision 7 / T1). On the
+    /// Stream-scoped twin of `awaitDrain`. On the
     /// shared per-estate `queue.sqlite` a single drainer (e.g. the encode pump)
     /// processes only its own stream; the global `awaitDrain` would block forever
     /// on OTHER streams' jobs (e.g. `dreaming` enqueued on recall) that this

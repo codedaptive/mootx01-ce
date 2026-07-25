@@ -4,7 +4,7 @@
 //! Mirrors the Swift `TemporalReadsTests.swift` fixture so both legs
 //! verify identical semantics against the same instants. Swift anchors the
 //! fixture in `Date`-space (`EPOCH_NOW` seconds + `t(offset)` seconds); this
-//! Rust leg holds the SAME instants as epoch MILLISECONDS (ADR-023), so every
+//! Rust leg holds the SAME instants as epoch MILLISECONDS, so every
 //! offset is the Swift second-offset × 1000. `bucket_seconds` stays a seconds
 //! WIDTH (the store multiplies it to ms internally), matching Swift's
 //! `bucketSeconds: Int`.
@@ -26,7 +26,7 @@ use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::error::LocusKitError;
 use substrate_types::fingerprint256::Fingerprint256;
 
-// Epoch anchor in MILLISECONDS (ADR-023) — the ms-equivalent of the Swift
+// Epoch anchor in MILLISECONDS — the ms-equivalent of the Swift
 // leg's `EPOCH_NOW: TimeInterval = 1_700_100_000` (seconds). Same instant.
 const EPOCH_NOW: i64 = 1_700_100_000_000;
 const CONTENT_A: &str = "temporal-fixture-alpha";

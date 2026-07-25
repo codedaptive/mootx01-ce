@@ -16,7 +16,7 @@ import PackageDescription
 // IntellectusLib into ObserverSink's PersistenceStatsSink (the `--stats-store`
 // option), so moot-mgr can dashboard a live bridge session. These are in-repo libs
 // only; layering is correct (this tool is downstream of both libs). No external
-// deps added. (Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; the
+// deps added. (Permitted per in-repository dependency direction; the
 // dependency is recorded as MUST_UPDATE in the lane blast-radius notes.)
 //
 // Platform floor: macOS 26 (Tahoe) / swift-tools 6.2 — matches the

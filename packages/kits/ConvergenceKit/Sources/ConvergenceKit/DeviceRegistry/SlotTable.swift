@@ -10,7 +10,7 @@
 // All time comparisons use an injected clock (`now: @Sendable () -> Date`)
 // so the table is fully testable with deterministic, reproducible inputs.
 //
-// Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
+// The slot table persists device claims and their fencing epochs.
 
 import Foundation
 import SubstrateTypes
@@ -41,7 +41,7 @@ import SubstrateTypes
 ///    does not accumulate phantom registry entries that block new devices
 ///    from enrolling.
 ///
-/// Adjudication A4 (DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16).
+/// A slot record is identified by the claimed slot and device identity.
 public let SlotLongInactivityWindow: TimeInterval = 30 * 24 * 60 * 60   // 30 days
 
 /// 1 hour in seconds.
@@ -60,7 +60,7 @@ public let SlotLongInactivityWindow: TimeInterval = 30 * 24 * 60 * 60   // 30 da
 /// Fast-path is checked before the long-inactivity path so ghost slots are
 /// freed quickly rather than waiting 30 days.
 ///
-/// Adjudication A4 (DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16).
+/// The claim table is the authority for active slot ownership.
 public let SlotGhostWindow: TimeInterval = 60 * 60   // 1 hour
 
 // ─────────────────────────────────────────────────────────────────────────────

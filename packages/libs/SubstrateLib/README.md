@@ -8,7 +8,7 @@ algorithms).
 
 Promoted from `docs/validation/substrate_math_performance/GeniusLocusReference/`
 on 2026-05-19. The four-package split landed 2026-05-29
-(`docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md` §20
+(`docs/engineering/HARNESS_REFERENCE.md#6-the-four-package-substrate-split` §20
 + the 2026-05-29 addendum), which moved the value types, kernels, and ML
 primitives into the three sub-packages and **retained SubstrateLib** as
 the orchestration package. The transitional `@_exported` re-export shim

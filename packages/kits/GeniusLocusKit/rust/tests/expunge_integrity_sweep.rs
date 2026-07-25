@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::{EstateCoordinator, ExpungeIntegritySweepResult};
 use locus_kit::{
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
@@ -62,9 +62,9 @@ fn cap_frame(content: &str) -> CaptureFrame {
     )
 }
 
-fn make_corpus() -> Arc<Corpus> {
+fn make_corpus() -> Arc<CorpusContentEngine> {
     let storage = make_storage();
-    Arc::new(Corpus::open(storage, EmbeddingModelConfig::Deterministic).expect("Corpus::open"))
+    Arc::new(CorpusContentEngine::standalone_on(storage, vec![EmbeddingModelConfig::Deterministic]).expect("Corpus::open"))
 }
 
 // ---------------------------------------------------------------------------
@@ -169,11 +169,11 @@ fn s1_sweep_remediates_crash_window_row_with_corpus() {
 
     // Verify: corpus no longer recalls the drawer after the sweep re-deleted it.
     let chunks_after = corpus
-        .recall("sweep test content", 10, sweep_now)
+        .recall("sweep test content", 10)
         .expect("corpus recall after sweep");
     let vector_survived = chunks_after
         .iter()
-        .any(|sc| sc.chunk.source_id == drawer.id);
+        .any(|sc| sc.id == drawer.id);
     assert!(
         !vector_survived,
         "corpus must not recall the drawer after the sweep re-attempted the delete"

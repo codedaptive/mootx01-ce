@@ -159,7 +159,7 @@ pub struct GraphTopology {
 
 // MARK: epoch → ISO-8601
 
-/// Format epoch MILLISECONDS (ADR-023) as "YYYY-MM-DDTHH:MM:SSZ" (UTC, second
+/// Format epoch MILLISECONDS as "YYYY-MM-DDTHH:MM:SSZ" (UTC, second
 /// precision — topology timestamps are display values). Hand-rolled
 /// civil-from-days (Howard Hinnant's algorithm) — no chrono, per the
 /// no-external-deps constraint. 400-year leap cycles are exact; negative
@@ -537,7 +537,7 @@ mod tests {
     // Euclidean splits, century non-leap (1900) and 400-year leap (2000).
     #[test]
     fn epoch_to_iso8601_known_vectors() {
-        // Inputs are epoch MILLISECONDS (ADR-023); ×1000 the seconds vectors.
+        // Inputs are epoch MILLISECONDS; ×1000 the seconds vectors.
         assert_eq!(epoch_to_iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(epoch_to_iso8601(86_399_000), "1970-01-01T23:59:59Z");
         assert_eq!(epoch_to_iso8601(951_782_400_000), "2000-02-29T00:00:00Z");

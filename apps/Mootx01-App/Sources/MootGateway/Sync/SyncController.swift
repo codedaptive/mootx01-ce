@@ -6,10 +6,10 @@ import OSLog
 
 // MARK: - SyncController  (app-side orchestration of ConvergenceKit sync)
 //
-// Sync itself lives in ConvergenceKit (CloudKitSyncEngine / NoSyncEngine
-// behind the SyncEngine protocol) — this controller does NOT reimplement it.
-// It only wires the engine to the estate's live Storage and drives the
-// enable → push/pull → disable lifecycle from the app.
+// Drives ConvergenceKit's CloudKitSyncEngine from the app's ambient beats
+// (launch, foregrounding, on-power tick) — the same moments ShareInboxDrain
+// and WidgetSnapshotRefresher use. Enables once against the estate's live
+// Storage (via SyncController), then push/pulls each beat.
 //
 // GeniusLocusKit.registerSyncEngine is status-reporting only (it feeds the
 // moot_estate_status `sync:` token); it does NOT drive the lifecycle — the
@@ -32,6 +32,13 @@ public actor SyncController {
     private let bridge: MootBridge
     private var engine: (any SyncEngine)?
     private let log = Logger(subsystem: "com.codedaptive.mootx01", category: "sync")
+
+    /// Retained reference to the active SensitivityFilteredStorage.
+    ///
+    /// Used by updateCeiling(to:) to lower the ceiling and emit retraction tombstones
+    /// when tier authorization is revoked (FAB5-ST). Cleared when disable() tears down
+    /// the engine.
+    private var filteredStorage: SensitivityFilteredStorage?
 
     /// Optional federation session manager. When set, `disable()` cascades to
     /// `federationSessionManager?.endSession()` (try?) after disabling the
@@ -85,13 +92,14 @@ public actor SyncController {
     ) async throws {
         let rawStorage = await bridge.estateStorage()
         // Wrap storage before enable() — Perkins Amendment 1 invariant (see above).
-        let filteredStorage = SensitivityFilteredStorage(wrapping: rawStorage, ceiling: ceiling)
-        try await engine.enable(manifest: manifest, storage: filteredStorage)
+        let wrapped = SensitivityFilteredStorage(wrapping: rawStorage, ceiling: ceiling)
+        try await engine.enable(manifest: manifest, storage: wrapped)
         self.engine = engine
+        self.filteredStorage = wrapped  // retain for ceiling updates (FAB5-ST)
         // Register with GeniusLocusKit so moot_estate_status sync: reports real state.
         // This is status-reporting only — it does NOT drive the engine lifecycle.
         try await bridge.registerSyncEngine(engine, backendName: backendName)
-        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public), ceiling \(ceiling.rawValue, privacy: .public)")
+        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public), ceiling \(ceiling.rawValue, privacy: .private)")
     }
 
     /// Pull remote changes (engine applies + reconciles), then push local.
@@ -118,6 +126,7 @@ public actor SyncController {
     public func disable() async throws {
         try await engine?.disable()
         engine = nil
+        filteredStorage = nil  // release FAB5-ST reference
         // Cascade to federation session if one is active.
         // Uses try? — a failing endSession during controller teardown is logged
         // by the session manager itself; we do not re-throw here.
@@ -126,5 +135,27 @@ public actor SyncController {
 
     public func state() async -> SyncState? {
         await engine?.state
+    }
+
+    // MARK: - FAB5-ST: Dynamic ceiling
+
+    /// Lower the sensitivity ceiling to `newCeiling`, retracting above-ceiling rows.
+    ///
+    /// Calls `SensitivityFilteredStorage.retractAndLowerCeiling(to:tables:)` which:
+    /// 1. Scans base storage for drawers whose `adjectiveBitmap` exceeds `newCeiling`.
+    /// 2. Yields WB1-style tombstones into the retraction stream (merged into the
+    ///    drawers observer), so the sync engine ships them on the next push cycle.
+    /// 3. Updates the ceiling atomically.
+    ///
+    /// Raising the ceiling (newCeiling > current) is also valid — no tombstones are
+    /// emitted (no rows exceed the higher ceiling), and the ceiling is updated so new
+    /// syncs use the higher bound.
+    ///
+    /// No-op when sync is not currently enabled.
+    public func updateCeiling(to newCeiling: AdjectiveSensitivity) async {
+        guard let fs = filteredStorage else { return }
+        // Only drawers carry adjectiveBitmap in the standard estate schema.
+        await fs.retractAndLowerCeiling(to: newCeiling, tables: ["drawers"])
+        log.info("sync ceiling updated: \(newCeiling.rawValue, privacy: .private)")
     }
 }

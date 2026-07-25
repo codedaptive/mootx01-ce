@@ -74,6 +74,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             currentVersion: Mootx01.currentVersion)
 
         // --check: query GitHub and print the latest tag without downloading.
+        // Query-only by contract, so the encryption offer does not run here.
         if checkOnly {
             if let tag = try await downloader.latestTag() {
                 print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -107,6 +108,10 @@ struct UpgradeCommand: AsyncParsableCommand {
             }
             guard let tag else {
                 print("Already up to date (\(Mootx01.currentVersion)).")
+                // Bob's ruling: `mootx01 upgrade` is the ONLY migration
+                // vehicle, and it offers whether or not a new version is
+                // available — so the up-to-date early return still offers.
+                offerEstateEncryptionIfNeeded(home: home)
                 return
             }
             print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -161,7 +166,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
         #endif
 
-        // ADR-024 Wave 3, Defect 1: an upgrade alone never touches
+        // an upgrade alone never touches
         // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
         // this, a machine upgraded via `mootx01 upgrade` keeps a stranded
         // plugin package (and Claude Code keeps a stranded cached snapshot)
@@ -184,7 +189,112 @@ struct UpgradeCommand: AsyncParsableCommand {
 
         restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
+
+        // The encryption offer runs AFTER the services are back up so a
+        // decline leaves a fully converged install, and an accept owns the
+        // whole stop → migrate → restart sequence itself.
+        offerEstateEncryptionIfNeeded(home: home)
     }
+
+    /// CE-1.0.35-08: offer to encrypt an unencrypted default estate.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling): no
+    /// detection or prompting lives anywhere else — not serve, not install,
+    /// not the App, not an MCP tool. The offer is macOS-only (Linux/Windows
+    /// ship the Rust binary and are already encrypted) and TTY-gated: a
+    /// non-interactive invocation (launchd, scripts, piped stdin) never
+    /// prompts and never migrates. Declining is a clean no-op; users who
+    /// stay unencrypted are assumed to have chosen that.
+    private func offerEstateEncryptionIfNeeded(home: URL) {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+
+        // Only a readable plaintext estate qualifies. Absent means first run
+        // (serve creates new estates encrypted); ciphertext means done.
+        guard EstateKeyProvider.detectEstateFileState(at: estateURL) == .plaintext else { return }
+
+        // Non-TTY invocations skip the offer silently and never migrate.
+        guard isatty(fileno(stdin)) == 1 else { return }
+
+        print("""
+
+            Your memory estate at \(estateURL.path)
+            is not encrypted at rest. mootx01 can encrypt it now: the estate is
+            cloned into an encrypted copy, verified row-for-row, and swapped in
+            at the same path. Your original is moved to the Trash afterwards.
+            """)
+        print("Encrypt the estate now? Type 'yes' to proceed: ", terminator: "")
+        guard readLine()?.trimmingCharacters(in: .whitespaces) == "yes" else {
+            print("Leaving the estate as it is. Run `mootx01 upgrade` again any time to encrypt it.")
+            return
+        }
+
+        runEstateEncryptionMigration(estateURL: estateURL, home: home)
+        #endif
+    }
+
+    #if os(macOS)
+    /// Drive the accepted migration: provision the key, then clone → verify
+    /// → swap → trash through EstateEncryptionMigrator. Every failure path
+    /// leaves the plaintext original working at the canonical path; the
+    /// messages below say which side of the swap the user is on.
+    private func runEstateEncryptionMigration(estateURL: URL, home: URL) {
+        let key: Data
+        do {
+            // EstateKeyProvider owns key custody: returns the existing key
+            // for this estate or mints one in the Keychain. On failure
+            // nothing has been touched.
+            key = try EstateKeyProvider.provideKey(for: estateURL)
+        } catch {
+            print("""
+                Could not provision an encryption key (\(error)).
+                Nothing was changed; the estate is untouched.
+                """)
+            return
+        }
+
+        print("Encrypting the estate\u{2026}")
+        do {
+            let result = try EstateEncryptionMigrator.migrate(
+                estateURL: estateURL,
+                key: key,
+                daemon: .launchd(homeDirectory: home))
+            print("  \u{2713} Estate encrypted in place at \(estateURL.path)")
+            print("  \u{2713} Verified: \(result.counts)")
+            if result.swap.daemonWasRunning {
+                if result.swap.daemonRestarted {
+                    print("  \u{2713} Daemon restarted over the encrypted estate.")
+                } else {
+                    print("""
+                          \u{2717} The daemon did not restart cleanly. Restart it manually:
+                            launchctl kickstart -k gui/$(id -u)/com.mootx01.daemon
+                        """)
+                }
+            }
+            if let untrashed = result.swap.untrashedOriginalPath {
+                print("""
+                      \u{2717} The plaintext original could not be moved to the Trash.
+                        It is STILL UNENCRYPTED at: \(untrashed)
+                        Delete it yourself to finish the migration.
+                    """)
+            } else {
+                print("""
+                      \u{2713} Your original estate was moved to the Trash. That copy is
+                        STILL UNENCRYPTED \u{2014} emptying the Trash is the final step
+                        of this migration, not optional cleanup.
+                    """)
+            }
+        } catch {
+            print("""
+                Migration failed: \(error)
+                Your estate is still the plaintext original at \(estateURL.path) and
+                remains fully usable. Run `mootx01 upgrade` to try again.
+                """)
+        }
+    }
+    #endif
 
     /// See the call site's doc comment. The gating (which hosts qualify —
     /// plugin-capable AND already has a plugin directory on disk) lives in
@@ -195,7 +305,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// cache) converge on whatever the CURRENT embedded bundle carries, and
     /// prints the per-host CLI result. `vaultOff` is not tracked across
     /// upgrades — passing `false` here is safe regardless: every
-    /// plugin-capable host's package is HTTP-shaped today (ADR-024 §2), so
+    /// plugin-capable host's package is HTTP-shaped today, so
     /// `vaultOff` has no effect on rematerialization (Defect 2); the vault
     /// posture that matters lives in the resident daemon's own launchd
     /// environment, which `mootx01 upgrade` does not touch (it restarts the

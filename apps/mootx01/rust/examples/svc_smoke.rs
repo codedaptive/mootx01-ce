@@ -24,7 +24,7 @@ fn main() {
     let scratch_str = scratch.display().to_string();
 
     const TASK: &str = "mootx01-svc-smoke"; // never the real task name
-    // vault_on=true: smoke uses the default vault-on posture (ADR-015).
+    // vault_on=true: smoke uses the default vault-on posture.
     // Fails CLOSED if scratch_str contains cmd.exe-unsafe characters (it won't
     // — temp_dir() paths are ASCII-clean on all supported Windows builds).
     let (exec, arg) = service::daemon_task_command(&exe.display().to_string(), Some(&scratch_str), true)

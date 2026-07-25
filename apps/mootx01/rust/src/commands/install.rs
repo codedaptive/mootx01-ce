@@ -60,12 +60,21 @@ pub fn run(
     //   → --yes default (plugin, no prompt)
     //   → guided depth prompt (after the picker, before apply)
     //   → default (plugin) when non-interactive.
-    let depth = match depth_arg {
+    let requested_depth = match depth_arg {
         Some(InstallDepthArg::Server) => InstallDepth::Server,
         Some(InstallDepthArg::Skills) => InstallDepth::Skills,
         Some(InstallDepthArg::Plugin) => InstallDepth::Plugin,
         None if yes => InstallDepth::DEFAULT,
         None => prompt_depth(),
+    };
+    // A plugin can own its own MCP connection and route through the resident
+    // daemon. Direct stdio installs therefore stop at the skills ceiling; the
+    // client config written below remains the connection owner.
+    let depth = if no_daemon && requested_depth == InstallDepth::Plugin {
+        println!("Direct stdio requested: using skills depth instead of a connection-owning plugin.");
+        InstallDepth::Skills
+    } else {
+        requested_depth
     };
 
     let binary_path = std::env::current_exe()
@@ -82,7 +91,7 @@ pub fn run(
     let mut wired_ids: Vec<&'static str> = Vec::new();
 
     for client in &selected {
-        // ADR-024 §1/§3: the plugin is the preferred connection owner. Still
+        // the plugin is the preferred connection owner. Still
         // place the binary/daemon (done above, unconditionally) but skip
         // writing a competing direct entry, and clean up any direct entry a
         // PRIOR install wrote — only when confirmed ours-default (§4).
@@ -91,30 +100,53 @@ pub fn run(
         // map), and an installed-but-disabled plugin does not own the
         // connection. Skipping/removing the direct entry in that state
         // would leave the client with nothing.
-        if let Some(plugin_id) = plugin_owner(client.id) {
-            if mcp_ownership::owns_connection(plugin_id, &home) {
-                match dedupe_one(client, &home, location) {
-                    Ok(merge::JsonOwnershipOutcome::NotPresent) => {}
-                    Ok(merge::JsonOwnershipOutcome::Removed) => println!(
-                        "  ⓘ {}: removed a stale direct mootx01 entry — the plugin now owns the connection",
+        if !no_daemon {
+            if let Some(plugin_id) = plugin_owner(client.id) {
+                if mcp_ownership::owns_connection(plugin_id, &home) {
+                    match dedupe_one(client, &home, location) {
+                        Ok(merge::JsonOwnershipOutcome::NotPresent) => {}
+                        Ok(merge::JsonOwnershipOutcome::Removed) => println!(
+                            "  ⓘ {}: removed a stale direct mootx01 entry — the plugin now owns the connection",
+                            client.display_name
+                        ),
+                        Ok(merge::JsonOwnershipOutcome::RetainedForeign { reason, path }) => println!(
+                            "  ⚠ {}: a non-default mootx01 entry at {} ({reason}) was left untouched — inspect it by hand",
+                            client.display_name,
+                            path.display()
+                        ),
+                        Err(e) => eprintln!(
+                            "  ✗ {}: could not check for a competing direct entry: {e}",
+                            client.display_name
+                        ),
+                    }
+                    println!(
+                        "  ⓘ MOOTx01 plugin already installed — {} connects through it; skipping direct wiring.",
                         client.display_name
-                    ),
-                    Ok(merge::JsonOwnershipOutcome::RetainedForeign { reason, path }) => println!(
-                        "  ⚠ {}: a non-default mootx01 entry at {} ({reason}) was left untouched — inspect it by hand",
-                        client.display_name,
-                        path.display()
-                    ),
-                    Err(e) => eprintln!(
-                        "  ✗ {}: could not check for a competing direct entry: {e}",
-                        client.display_name
-                    ),
+                    );
+                    // Wave 6, Defect A (live 1.0.16 machine finding): the
+                    // plugin-owned MCP connections ownership skip above applies ONLY to the direct
+                    // mcpServers entry. Before this fix, `continue` here left
+                    // `client.id` out of `wired_ids` entirely, and the depth
+                    // loop below filters on `wired_ids.contains(...)` — so a
+                    // plugin-owned client got NO depth pass at all: no package
+                    // rematerialization, no stranded-cache refresh. The stale
+                    // stdio-era package in ~/.claude/mootx01-plugin (and Claude
+                    // Code's stale cached snapshot) then survived every
+                    // subsequent `mootx01 install` run forever. A plugin-owned
+                    // connection is exactly the case where the package must
+                    // stay freshest, so this client counts as wired (its MCP
+                    // connection succeeded — via the plugin, not a direct
+                    // entry) and proceeds to the depth pass below.
+                    wired.push(client.display_name);
+                    wired_ids.push(client.id);
+                    continue;
                 }
                 println!(
                     "  ⓘ MOOTx01 plugin already installed — {} connects through it; skipping direct wiring.",
                     client.display_name
                 );
                 // Wave 6, Defect A (live 1.0.16 machine finding): the
-                // ADR-024 ownership skip above applies ONLY to the direct
+                // plugin-owned MCP connections ownership skip above applies ONLY to the direct
                 // mcpServers entry. Before this fix, `continue` here left
                 // `client.id` out of `wired_ids` entirely, and the depth
                 // loop below filters on `wired_ids.contains(...)` — so a
@@ -132,7 +164,20 @@ pub fn run(
                 continue;
             }
         }
-        match install_one(client, &home, &binary_path, &daemon_url, location) {
+        let install_result = if no_daemon {
+            install_one_with_transport(
+                client,
+                &home,
+                &binary_path,
+                &daemon_url,
+                location,
+                true,
+                !vault_on,
+            )
+        } else {
+            install_one(client, &home, &binary_path, &daemon_url, location)
+        };
+        match install_result {
             Ok(Some(p)) => {
                 println!("  ✓ wired {} ({})", client.display_name, p.display());
                 wired.push(client.display_name);
@@ -166,7 +211,7 @@ pub fn run(
             // HTTP) inherits the correct env. HTTP-shaped entries are
             // untouched — the resident daemon carries the vault posture in
             // its own service-manager environment (`core::service`),
-            // independent of this call (ADR-024 Wave 3, Defect 2).
+            // independent of this call.
             match depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner) {
                 Ok(DepthOutcome::Server) => {
                     // Claude Desktop's "plugin" is a Desktop extension, not a
@@ -295,7 +340,7 @@ pub fn run(
         let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
             // vault_on baked into the unit's Environment= block so the resident
-            // daemon reads MOOTX01_VAULT without it being set in the shell (ADR-015).
+            // daemon reads MOOTX01_VAULT without it being set in the shell.
             // Fails CLOSED if MOOTX01_DATA_DIR contains characters that would allow
             // systemd directive injection.
             match service::daemon_unit(&binary_path, data_override.as_deref(), vault_on) {
@@ -334,7 +379,7 @@ pub fn run(
         let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
             // vault_on baked into the cmd wrapper as `set MOOTX01_VAULT=...&&`
-            // so the resident daemon reads MOOTX01_VAULT at launch (ADR-015).
+            // so the resident daemon reads MOOTX01_VAULT at launch.
             // Fails CLOSED if MOOTX01_DATA_DIR contains cmd.exe-unsafe characters.
             match service::daemon_task_command(&binary_path, data_override.as_deref(), vault_on) {
                 Ok((exe, arg)) => report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg)),
@@ -384,7 +429,7 @@ pub fn run(
         println!("Done. Restart your clients to pick up the new server.");
     }
 
-    // ADR-015 §1 mandatory disclosure: inform the user of the vault surface
+    // the open 1.0 Vault posture mandatory disclosure: inform the user of the vault surface
     // state so they can make an informed security choice. Always printed.
     println!();
     if vault_on {
@@ -407,6 +452,26 @@ fn install_one(
     daemon_url: &str,
     location: Location,
 ) -> Result<Option<PathBuf>, merge::MergeError> {
+    install_one_with_transport(
+        client,
+        home,
+        binary_path,
+        daemon_url,
+        location,
+        false,
+        false,
+    )
+}
+
+fn install_one_with_transport(
+    client: &McpClient,
+    home: &Path,
+    binary_path: &str,
+    daemon_url: &str,
+    location: Location,
+    direct_stdio: bool,
+    vault_off: bool,
+) -> Result<Option<PathBuf>, merge::MergeError> {
     let Some(mut config) = client.config_path(home) else {
         println!(
             "  skipping {} (not available on this platform)",
@@ -422,33 +487,65 @@ fn install_one(
     match client.format {
         ConfigFormat::Json => {
             merge::backup_existing(&config)?;
-            let entry = merge::entry_for(client, binary_path, daemon_url);
+            let entry = if direct_stdio {
+                merge::direct_stdio_entry_for(client, binary_path, vault_off)
+            } else {
+                merge::entry_for(client, binary_path, daemon_url)
+            };
             merge::merge_into_json_config(&config, client.json_servers_key(), SERVER_NAME, entry)?;
             Ok(Some(config))
         }
         ConfigFormat::Toml => {
             merge::backup_existing(&config)?;
-            merge::merge_into_toml_config(&config, client, SERVER_NAME, binary_path, daemon_url)?;
+            if direct_stdio {
+                merge::merge_into_toml_stdio_config(
+                    &config,
+                    SERVER_NAME,
+                    binary_path,
+                    vault_off,
+                )?;
+            } else {
+                merge::merge_into_toml_config(
+                    &config,
+                    client,
+                    SERVER_NAME,
+                    binary_path,
+                    daemon_url,
+                )?;
+            }
             Ok(Some(config))
         }
         ConfigFormat::Yaml => {
             if client.id == "continue" {
                 merge::backup_existing(&config)?;
-                merge::write_continue_yaml(&config, binary_path, Some(daemon_url))?;
+                if direct_stdio {
+                    merge::write_continue_stdio_yaml(&config, binary_path, vault_off)?;
+                } else {
+                    merge::write_continue_yaml(&config, binary_path, Some(daemon_url))?;
+                }
                 Ok(Some(config))
             } else {
                 // Hermes' shared config.yaml: line-based block merge under
                 // `mcp_servers:` (schema verified against the real
                 // hermes-agent example).
                 merge::backup_existing(&config)?;
-                merge::merge_into_hermes_yaml(&config, SERVER_NAME, daemon_url)?;
+                if direct_stdio {
+                    merge::merge_into_hermes_stdio_yaml(
+                        &config,
+                        SERVER_NAME,
+                        binary_path,
+                        vault_off,
+                    )?;
+                } else {
+                    merge::merge_into_hermes_yaml(&config, SERVER_NAME, daemon_url)?;
+                }
                 Ok(Some(config))
             }
         }
     }
 }
 
-/// ADR-024 §3: clients the CLI installer knows how to detect a live plugin
+/// clients the CLI installer knows how to detect a live plugin
 /// for, mapped to the plugin registry id (`installed_plugins.json`'s
 /// top-level key). Only Claude Code has a live plugin today; kept as an
 /// explicit small table rather than guessed for hosts with no shipped
@@ -460,7 +557,7 @@ fn plugin_owner(client_id: &str) -> Option<&'static str> {
     }
 }
 
-/// ADR-024 §3/§4: resolve the same config path `install_one` would target
+/// resolve the same config path `install_one` would target
 /// (respecting `--location local` for Claude Code) and run the
 /// ownership-aware dedupe pass against it. Scoped to JSON-format clients —
 /// the only format any currently plugin-owned client uses.
@@ -711,9 +808,64 @@ pub(crate) fn default_estate_exists(data: &Path) -> bool {
 /// moot-mgr history store is trashed so the dashboard's estate registry
 /// rebuilds from what the daemon actually serves.
 pub(crate) fn apply_reuse(data: &Path) -> Result<(), String> {
+    repair_reused_audit_dialect(data)?;
     paths::set_active_estate(data, "default")
         .map_err(|e| format!("cannot set active estate: {e}"))?;
     trash_mgr_store(data)
+}
+
+/// One-release compatibility repair for Rust estates created with the verbose
+/// `_storagekit_audit` column dialect. It runs only after the installer chose
+/// `reuse`; fresh installs and ordinary database opens never carry this work.
+///
+/// `before_adjective` is the dialect sentinel. If present, all ten verbose
+/// columns are renamed to the established short estate format in one SQLite
+/// transaction. Failure aborts reuse before the active-estate pointer or
+/// manager history changes.
+fn repair_reused_audit_dialect(data: &Path) -> Result<(), String> {
+    let candidates = [
+        paths::estate_sqlite_path(data, "default"),
+        data.join("estate.sqlite"),
+    ];
+    for path in candidates.iter().filter(|path| path.exists()) {
+        let conn = rusqlite::Connection::open(path)
+            .map_err(|e| format!("cannot inspect reused estate {}: {e}", path.display()))?;
+        persistence_kit::apply_install_encryption_to_conn(&conn, &path.to_string_lossy())
+            .map_err(|e| format!("cannot unlock reused estate {}: {e}", path.display()))?;
+
+        let has_verbose_dialect = conn
+            .query_row(
+                r#"SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('_storagekit_audit')
+                    WHERE name = 'before_adjective'
+                )"#,
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| format!("cannot inspect reused estate {}: {e}", path.display()))?;
+        if !has_verbose_dialect {
+            continue;
+        }
+
+        conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_adjective" TO "before_adj";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_operational" TO "before_op";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_provenance" TO "before_pv";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_adjective" TO "after_adj";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_operational" TO "after_op";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_provenance" TO "after_pv";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_lattice_anchor" TO "before_udc";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_lattice_anchor" TO "after_udc";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_lattice_qid" TO "before_qid";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_lattice_qid" TO "after_qid";
+            COMMIT;
+            "#,
+        )
+        .map_err(|e| format!("cannot upgrade reused estate {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Fresh start: move the default estate files (both layouts) and the
@@ -911,7 +1063,7 @@ mod tests {
         assert!(err.contains("Unknown client id 'frobnicator'"));
     }
 
-    // ADR-024 §3/§4: four-state matrix (plugin present/absent × prior direct
+    // four-state matrix (plugin present/absent × prior direct
     // entry present/absent) + the non-default-entry-survives guarantee.
     // Mirrors Swift's PluginDedupeTests.swift. SAFETY: every test uses a
     // temp-dir sandbox home; never the real ~/.claude.
@@ -999,7 +1151,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    // ADR-024 §1/§3 gated on installed AND enabled (Adams #5). Mirrors the
+    // plugin-owned MCP connections gated on installed AND enabled (Adams #5). Mirrors the
     // exact conditional install::run() uses: "disabled falls back to direct
     // wiring; enabled skips as shipped."
 
@@ -1044,7 +1196,7 @@ mod tests {
     /// Wave 6, Defect A regression fixture — the exact state Bob's machine
     /// was found in: plugin installed+enabled (own_connection true) AND a
     /// stale stdio-era package already on disk (`.mcp.json` with
-    /// `command: mootx01, args: [serve]`, pre-ADR-024-§2). Before the fix,
+    /// `command: mootx01, args: [serve]`, from the legacy direct-entry design). Before the fix,
     /// `run()`'s loop `continue`d without pushing `client.id` into
     /// `wired_ids`, so the depth pass's `wired_ids.contains(...)` filter
     /// (line ~134) silently excluded claude-code — the plugin package,
@@ -1084,7 +1236,7 @@ mod tests {
         );
 
         // Seed the stale stdio-era package Bob's machine actually had on
-        // disk — pre-ADR-024-§2, before the package moved to an
+        // disk — from the legacy direct-entry design, before the package moved to an
         // HTTP-shaped .mcp.json.
         let bundle = depth::InstallBundle::embedded();
         let host = bundle.host("claude-code").expect("claude-code must be in the embedded install map");
@@ -1119,7 +1271,7 @@ mod tests {
             "the stale bare `command: mootx01` placeholder must be gone; got: {rewritten}"
         );
 
-        // The stranded-cache refresh (ADR-024 Wave 3, Defect 1) must have
+        // The stranded-cache refresh must have
         // invoked the CLI-update seam, since the plugin is already installed.
         assert_eq!(
             fake.invoked.borrow().as_slice(),
@@ -1253,6 +1405,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn codex_no_daemon_install_writes_direct_stdio_without_url() {
+        let home = std::env::temp_dir()
+            .join(format!("mootx01-codex-stdio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let codex = reg.iter().find(|c| c.id == "codex").unwrap().clone();
+        install_one_with_transport(
+            &codex,
+            &home,
+            "/usr/local/bin/mootx01",
+            "http://127.0.0.1:4242",
+            Location::Global,
+            true,
+            true,
+        )
+        .expect("direct stdio install must succeed");
+
+        let config_path = codex.config_path(&home).unwrap();
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("command = \"/usr/local/bin/mootx01\""));
+        assert!(text.contains("args = [\"serve\"]"));
+        assert!(text.contains(
+            "env = { MOOTX01_HTTP_PORT = \"\", MOOTX01_VAULT = \"0\" }"
+        ));
+        assert!(!text.contains("url = "));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     // ── existing-database decision matrix ───────────────────────────────
     // Every destructive branch must require an explicit human 'yes' or the
     // --replace-db --yes automation pair; the implicit non-interactive
@@ -1351,6 +1535,158 @@ mod tests {
         )
         .unwrap();
         assert!(default_estate_exists(&data));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn reuse_repairs_verbose_audit_columns_before_continuing() {
+        let data = std::env::temp_dir()
+            .join(format!("mootx01-reuse-audit-dialect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let estate = paths::estate_sqlite_path(&data, "default");
+        std::fs::create_dir_all(estate.parent().unwrap()).unwrap();
+
+        let conn = rusqlite::Connection::open(&estate).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_storagekit_audit" (
+              "before_adjective" INTEGER,
+              "before_operational" INTEGER,
+              "before_provenance" INTEGER,
+              "after_adjective" INTEGER,
+              "after_operational" INTEGER,
+              "after_provenance" INTEGER,
+              "before_lattice_anchor" INTEGER,
+              "after_lattice_anchor" INTEGER,
+              "before_lattice_qid" INTEGER,
+              "after_lattice_qid" INTEGER
+            );
+            INSERT INTO "_storagekit_audit" VALUES (1,2,3,4,5,6,7,8,9,10);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        apply_reuse(&data).expect("reuse must repair the legacy Rust dialect");
+
+        let conn = rusqlite::Connection::open(&estate).unwrap();
+        let columns: Vec<String> = conn
+            .prepare(r#"SELECT name FROM pragma_table_info('_storagekit_audit') ORDER BY cid"#)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            columns,
+            [
+                "before_adj", "before_op", "before_pv", "after_adj", "after_op",
+                "after_pv", "before_udc", "after_udc", "before_qid", "after_qid",
+            ]
+        );
+        let preserved: (i64, i64) = conn
+            .query_row(
+                r#"SELECT "before_adj", "after_qid" FROM "_storagekit_audit""#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, (1, 10));
+
+        // Restart-safe: a second reuse sees the short dialect and proceeds
+        // without touching the table again.
+        drop(conn);
+        apply_reuse(&data).expect("canonical reuse must be a no-op");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn repaired_reuse_accepts_a_locus_capture() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+        use locus_kit::estate::Estate;
+        use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+        use locus_kit::frames::CaptureFrame;
+        use std::sync::Arc;
+
+        let data = std::env::temp_dir().join(format!(
+            "mootx01-reuse-capture-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let estate_path = paths::estate_sqlite_path(&data, "default");
+        std::fs::create_dir_all(estate_path.parent().unwrap()).unwrap();
+        let path = estate_path.to_string_lossy().into_owned();
+
+        // Build a complete current estate, then transpose only the audit
+        // columns to the historical verbose Rust dialect that `reuse` repairs.
+        let store = Arc::new(SqliteDrawerStore::from_path(&path, 1_700_000_000, None, 5.0).unwrap());
+        let locus = Estate::create(
+            store,
+            OwnerCredentials::new("reuse-capture-owner"),
+            None,
+        )
+        .unwrap();
+        let seed = CaptureFrame::new(
+            "before repair",
+            CaptureChannel::Typed,
+            "reuse-room",
+            LatticeAnchor::udc("001"),
+            "reuse-test",
+            "test-model",
+        );
+        locus.capture(seed, 1_700_000_001).unwrap();
+        drop(locus);
+
+        let conn = rusqlite::Connection::open(&estate_path).unwrap();
+        conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_adj" TO "before_adjective";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_op" TO "before_operational";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_pv" TO "before_provenance";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_adj" TO "after_adjective";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_op" TO "after_operational";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_pv" TO "after_provenance";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_udc" TO "before_lattice_anchor";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_udc" TO "after_lattice_anchor";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_qid" TO "before_lattice_qid";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_qid" TO "after_lattice_qid";
+            COMMIT;
+            "#,
+        )
+        .unwrap();
+        let before_count: i64 = conn
+            .query_row(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, [], |row| row.get(0))
+            .unwrap();
+        drop(conn);
+
+        apply_reuse(&data).expect("reuse must repair before publishing the estate");
+        let reopened_store = Arc::new(
+            SqliteDrawerStore::from_path(&path, 1_700_000_002, None, 5.0).unwrap(),
+        );
+        let reopened = Estate::open(
+            reopened_store,
+            OwnerCredentials::new("reuse-capture-owner"),
+        )
+        .unwrap();
+        let frame = CaptureFrame::new(
+            "after repair",
+            CaptureChannel::Typed,
+            "reuse-room",
+            LatticeAnchor::udc("001"),
+            "reuse-test",
+            "test-model",
+        );
+        let drawer = reopened.capture(frame, 1_700_000_003).unwrap();
+        assert_eq!(drawer.content, "after repair");
+        drop(reopened);
+
+        let conn = rusqlite::Connection::open(&estate_path).unwrap();
+        let after_count: i64 = conn
+            .query_row(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, [], |row| row.get(0))
+            .unwrap();
+        assert!(after_count > before_count, "post-repair capture must append audit state");
+        drop(conn);
         let _ = std::fs::remove_dir_all(&data);
     }
 }

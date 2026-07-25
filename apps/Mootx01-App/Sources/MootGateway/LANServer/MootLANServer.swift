@@ -36,7 +36,7 @@ import OSLog
 // dispatch seam) and `JSONRPCRequest.decode` / `JSONRPCResponse` (the wire
 // types, via LANRequestGate). The LAN-bind + auth posture extends the CE
 // transport off loopback — see the decision record annotating
-// ADR-LOOPBACKHTTP-001.
+// Loopback HTTP owns wire framing only; the gateway owns acceptance policy.
 
 public actor MootLANServer {
 

@@ -78,7 +78,7 @@ mod tests {
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        // ADR-017: room resolved from node tree via parent_node_id.
+        // room resolved from node tree via parent_node_id.
         let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
         let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
         assert_eq!(room, "room-new");
@@ -231,7 +231,7 @@ mod tests {
         estate.reanchor(&d.id, Some("moved-room"), None, None).unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        // ADR-017: room resolved from node tree via parent_node_id.
+        // room resolved from node tree via parent_node_id.
         let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
         let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
         assert_eq!(room, "moved-room");
@@ -291,7 +291,7 @@ mod tests {
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
-        // ADR-017: room resolved from node tree via parent_node_id.
+        // room resolved from node tree via parent_node_id.
         let names = estate.store.resolve_node_names(&[after.parent_node_id.clone()]).unwrap();
         let (_, room) = names.get(&after.parent_node_id).expect("room node must resolve");
         assert_eq!(room, "room-b");
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn estate_reanchor_to_wing_updates_wing() {
         // Bug J regression: reanchor must update the wing when to_wing is supplied.
-        // ADR-017: wing/room resolved from node tree via parent_node_id.
+        // wing/room resolved from node tree via parent_node_id.
         let estate = make_estate();
         let d = basic_capture(&estate, "wing move via estate", "origin-room", "000");
         let original_names = estate.store.resolve_node_names(&[d.parent_node_id.clone()]).unwrap();

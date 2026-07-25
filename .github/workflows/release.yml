@@ -731,7 +731,12 @@ jobs:
   # Rust build code can never reach the signing credential or mint an OIDC token.
   sign-windows-x86_64:
     name: Sign Windows x86_64
-    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
+    # Tag push ONLY. A job carrying `environment: release` plus `id-token: write`
+    # can mint an Azure-trusted OIDC token from ANY step, so step-level gating on
+    # azure/login does not remove the capability — the job must not be reachable
+    # from workflow_dispatch or a branch run at all. The build jobs that feed this
+    # one keep their manual-dispatch conditions; they hold no signing capability.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
     needs: build-windows-x86_64
     runs-on: windows-latest
     # Binds the OIDC token subject to repo:<owner/repo>:environment:release so an
@@ -955,7 +960,8 @@ jobs:
   # them (when provisioned), builds and signs the Inno setup.exe, uploads finals.
   sign-windows-arm64:
     name: Sign Windows arm64
-    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
+    # Tag push ONLY — same OIDC capability reasoning as sign-windows-x86_64.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
     needs: build-windows-arm64
     runs-on: windows-11-arm
     # Binds the OIDC token subject to repo:<owner/repo>:environment:release so an
@@ -1398,7 +1404,13 @@ jobs:
   # package build/install — only the upload of the artifact from build-pypi.
   publish-pypi:
     name: Publish moot-memory to PyPI
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    # Tag push ONLY, same reasoning as the Windows signing jobs above. This job
+    # holds `environment: pypi` plus `id-token: write`, so any step in it can
+    # mint a PyPI-trusted publish token. workflow_dispatch accepts a TAG as its
+    # ref, so gating on the ref string alone let a manual run against a release
+    # tag enter the pypi environment and publish under the project's name. The
+    # event type is the trust boundary, not the ref.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
     needs: [build-pypi]
     runs-on: ubuntu-latest
     environment:

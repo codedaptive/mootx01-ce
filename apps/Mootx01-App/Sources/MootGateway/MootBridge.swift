@@ -189,7 +189,7 @@ public actor MootBridge {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
         let owner = OwnerCredentials(ownerIdentifier: "gateway-owner")
-        // Whole-file encryption (ADR-014): load this estate's per-estate key from
+        // Whole-file encryption: load this estate's per-estate key from
         // the Keychain (keyed by the estate file path) and open the estate as
         // FullDatabase, so the file — schema and content — is SQLCipher-encrypted
         // at rest. A separately-spawned managed server pointed at the same file

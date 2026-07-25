@@ -37,7 +37,7 @@ public extension GeniusLocusKit {
     /// 3. Dispatches to the lane named in `request.mode`.
     /// 4. Returns a `GLKRecallResult` carrying the plan, hits, and provenance.
     /// 5. If `request.origin == .external` and the result has ≥ 2 distinct drawer ids,
-    ///    enqueues a dreaming item onto the estate's "dreaming" stream (ADR-021 Phase 2b,
+    ///    enqueues a dreaming item onto the estate's "dreaming" stream (recall-driven dreaming,
     ///    spec §12.2). The enqueue is a non-fatal side effect — any failure is logged and
     ///    the recall result is returned unchanged. Only external-origin scored recall
     ///    enqueues dreaming items (B-10a): internal reads (dreaming, signals, recipes,
@@ -113,7 +113,7 @@ public extension GeniusLocusKit {
             result = try await recallLocusOnly(estate: estate, request: request, plan: plan)
         }
 
-        // ADR-021 Phase 2b: enqueue a dreaming item for external-origin scored recalls.
+        // Enqueue a dreaming item for external-origin scored recalls.
         //
         // Guard (spec §12.2 + B-10a):
         //   - origin must be .external — only ARIA boundary recalls are dreaming
@@ -780,7 +780,7 @@ public extension GeniusLocusKit {
     /// embed failure without a real corpus error.
     private func compileSketch(
         from request: GLKRecallRequest,
-        corpus: Corpus,
+        corpus: CorpusContentEngine,
         handle: EstateHandle,
         degradedStages: inout [String]
     ) async -> RecallQuerySketch {

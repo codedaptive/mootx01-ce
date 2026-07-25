@@ -1,1 +1,3 @@
 packages/kits/PersistenceKit/Sources/SQLCipher/** linguist-vendored
+*.m4a filter=lfs diff=lfs merge=lfs -text
+*.mp4 filter=lfs diff=lfs merge=lfs -text

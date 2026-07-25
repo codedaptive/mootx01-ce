@@ -10,11 +10,17 @@ shape which kernel backend ships as the default per platform.
 apps/moot-math-benchmark/submit-results.sh
 ```
 
-That runs all six bench binaries (Rust + Swift × stress + topk + ml) on
-your machine, gathers a system report, and bundles everything in
+That runs the ten math binaries (Rust + Swift × stress + top-K + ML +
+catalog + FDC) on your machine, gathers a system report, and bundles everything in
 `apps/moot-math-benchmark/results/<date>-<hardware-tag>/` ready to `git add`
-and PR. Add `--quick` for a smoke test. See the generated
+and PR. If a release `mootx01` binary is already built, the script also runs
+the isolated product-boundary benchmark. Add `--quick` for a smoke test. See the generated
 `SUBMISSION.md` inside the bundle for the next steps.
+
+The current published evidence and its claim-by-claim interpretation are in
+[`PERFORMANCE.md`](PERFORMANCE.md). Coverage of the cookbook math is recorded
+in [`COVERAGE.md`](COVERAGE.md). The 1.0.34 retest of the historical EE
+MemPalace/MOOT retrieval workload is documented in [`GAUNTLET.md`](GAUNTLET.md).
 
 ## Add a new language port
 
@@ -58,6 +64,10 @@ win.
 | `stress-test` | Every (op, batch_size, mode) cell across all kernels |
 | `topk-bench`  | `hamming_top_k` across K ∈ {1, 4, 10, 32, 100} × N ∈ {256 … 1M} |
 | `ml-bench`    | The 15 SubstrateML cold-path algorithms (NMF, FFT, eigenvalue centrality, anomaly detection, …) — the dreaming-daemon math (schema `ml-1`) |
+| `catalog-bench` | All 29 canonical cookbook/conformance primitives, after a mandatory conformance pass (schema `catalog-1`) |
+| `fdc-bench` | Deterministic classifier v4 encode and semantic stages across resolved, unresolved, long, and code inputs (schema `fdc-1`) |
+| `product-bench.py` | Resident `mootx01` loopback MCP calls against a disposable estate (schema `product-1`) |
+| EE `tools/mcp-benchmarker` | Seeded adversarial retrieval quality and latency through the shipped MCP product; current CE artifact is MOOT-only |
 
 Each run produces a structured JSON file with:
 
@@ -70,19 +80,25 @@ Each run produces a structured JSON file with:
 ### Swift
 
 ```sh
-cd swift
+cd apps/moot-math-benchmark/swift-bench
 swift run -c release stress-test --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-stress.json
 swift run -c release topk-bench   --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-topk.json
 swift run -c release ml-bench     --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-ml.json
+swift run -c release catalog-bench --vectors ../../../docs/validation/substrate_math_performance/test-harness/vectors --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-catalog.json
+swift run -c release fdc-bench --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-fdc.json
 ```
 
 ### Rust
 
 ```sh
-cd rust
-cargo run --release --bin stress-test -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-stress.json
-cargo run --release --bin topk-bench  -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-topk.json
-cargo run --release --bin ml-bench    -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-ml.json
+cd apps/moot-math-benchmark/rust-bench
+# Stable/scalar run. Use the pinned nightly toolchain and omit
+# --no-default-features when collecting Rust portable-SIMD data.
+cargo run --release --no-default-features --bin stress-test -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-stress.json
+cargo run --release --no-default-features --bin topk-bench  -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-topk.json
+cargo run --release --no-default-features --bin ml-bench    -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-ml.json
+cargo run --release --no-default-features --bin catalog-bench -- --vectors ../../../docs/validation/substrate_math_performance/test-harness/vectors --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-catalog.json
+cargo run --release --no-default-features --bin fdc-bench -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-fdc.json
 ```
 
 ### `--quick` mode
@@ -92,9 +108,9 @@ binaries build + run; full sweeps take a few minutes).
 
 ## Submitting results
 
-1. Run all six (Swift stress + topk + ml, Rust stress + topk + ml) on
+1. Run all ten math binaries on
    a single piece of hardware in one session.
-2. Add the six JSON files to `results/<hostname>-<date>/`.
+2. Add the JSON files and run conditions to `results/<hostname>-<date>/`.
 3. Open a PR with title `bench: <hardware-tag> <date>` (e.g.
    `bench: apple-m3-max 2026-05-29`).
 4. Maintainers aggregate periodically. The aggregated table lives in
@@ -103,8 +119,10 @@ binaries build + run; full sweeps take a few minutes).
 
 ## Conformance is separate
 
-This tool measures speed only. Bit-identity of every backend against the
-scalar reference is verified by the conformance harness at
+The operation-specific suites measure speed only. `catalog-bench` first
+requires every canonical vector to pass, then times the real validator path.
+Bit-identity of every backend against the scalar reference is verified by the
+conformance harness at
 `docs/validation/substrate_math_performance/test-harness/`, with four
 release-blocking scripts:
 
@@ -112,18 +130,20 @@ release-blocking scripts:
 - `check-lockstep.py`              — Swift/Rust 1:1 type parity
 - `check-test-locations.py`        — tests live with their source
 - `check-harness-builds-clean.sh`  — harness rebuilds clean +
-                                     23/23 primitives conformance
+                                     29/29 primitives conformance
 
 A backend that wins the benchmark but fails conformance is rejected.
 
 ## Decision-doc protocol
 
 When a new kernel backend is proposed, the protocol per
-`docs/decisions/METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md`:
+`docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`:
 
 1. Implement the candidate as a new `SubstrateKernel` conformer.
 2. Register it in `kernel_registry` on both ports.
-3. Run all four bins above on the dev hardware.
+3. Run the catalog prerequisite and all operation-specific suites above on the
+   development hardware; include the product boundary when the claim concerns
+   user-visible latency.
 4. Attach the resulting JSON files to the decision-doc PR.
 5. The decision doc cites the JSON file path + commit hash + hardware
    tag in its "measured at" line.

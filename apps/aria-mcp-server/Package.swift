@@ -25,7 +25,11 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
-        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        .package(
+            name: "GeniusLocusKit",
+            path: "../../packages/kits/GeniusLocusKit",
+            traits: ["MigrationFloor1_0"]
+        ),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "CorpusKit", path: "../../packages/kits/CorpusKit"),
@@ -39,6 +43,7 @@ let package = Package(
                 .product(name: "AriaMCP", package: "AriaMcpKit"),
                 .product(name: "AriaResident", package: "AriaMcpKit"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
@@ -50,7 +55,7 @@ let package = Package(
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 // CorpusKitProviders: the concrete five-signal ensemble
                 // (CorpusEnsemble.defaultEnsemble()) the server wires into Lane D.
-                // Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; the
+                // Dependency per in-repository dependency direction; the
                 // server is downstream of the providers, no layering inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 .product(name: "VectorKit", package: "VectorKit"),

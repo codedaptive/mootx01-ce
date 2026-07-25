@@ -2,7 +2,7 @@
 
 Rust port of the Swift `VectorKit` Swift Package. On-device embedding generation, model-tagged vector storage, and Hamming-distance nearest-neighbour retrieval.
 
-**Status:** v0.2.0 — refactored 2026-05-19 (Rust mission 6) per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md` section 4.6.
+**Status:** v0.2.0 — refactored 2026-05-19 (Rust mission 6) per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership` section 4.6.
 
 ## What changed in v0.2.0
 
@@ -49,4 +49,4 @@ Requires Rust 1.75+ and sibling `substrate-kit`, `engram-kit`, `storage-kit` cra
 ## See also
 
 - Swift counterpart: `VectorKit/Sources/`
-- Kit graph ADR: `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`
+- Kit graph rule: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`

@@ -1,6 +1,6 @@
 // CaptureIntoWingTests.swift
 //
-// GLK-level capture-into-wing conformance tests (ADR-016).
+// GLK-level capture-into-wing conformance tests.
 //
 // Verifies that the wing slot on CaptureFrame threads all the way through
 // the GeniusLocusKit capture surface (kit.capture → EncodeIntake → EstateVerbs)
@@ -18,7 +18,7 @@ import PersistenceKitInMemory
 import SubstrateTypes
 @testable import GeniusLocusKit
 
-@Suite("GLK Capture-into-wing — CaptureFrame.wing threads through GLK (ADR-016)")
+@Suite("GLK Capture-into-wing — CaptureFrame.wing threads through GLK")
 struct CaptureIntoWingTests {
 
     // MARK: - Infrastructure

@@ -34,7 +34,7 @@
 // ===========================================================================
 //
 // Implementation: a hand-rolled std::net loopback listener + minimal HTTP
-// parser, mirroring the ARIA_MCP Rust server (per ADR-LOOPBACKHTTP-001 the
+// parser, mirroring the ARIA_MCP Rust server (per bounded loopback HTTP the
 // shared LoopbackHTTP library is Swift-only; the Rust vertical hand-rolls its
 // own transport — parity is enforced at the wire, not the transport). Each
 // accepted connection is served on a dedicated thread.

@@ -6,7 +6,7 @@ date: 2026-07-16
 relates_to:
   - docs/reference/CONVERGENCEKIT_SPEC.md
   - docs/reference/CONVERGENCEKIT_INTERFACE.md
-  - docs/decisions/DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
 supersedes: none
 context:
   - ConvergenceKit v1.0 was designed for single-device use; the CloudKit backend assumed at most one active machine writing to a zone at a time.
@@ -30,8 +30,8 @@ A 2026-07-16 audit of `CloudKitSyncEngine.swift` confirmed six shipped
 defects. Each is listed in the Shipped-defect audit section below with
 its source location.
 
-The R1–R10 requirements in
-`DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md` address
+The operational-store requirements R1–R10 consolidated in the system
+engineering reference address
 transport hardening and vocabulary gaps. They were proposed on
 2026-06-09 and are promoted to accepted and blocking scope by this
 decision.
@@ -51,8 +51,8 @@ Apple devices:
   last-writer-wins, backed by ConvergenceKit's existing conflict
   policies.
 
-R1–R10 of `DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md`
-are promoted from proposed to accepted and constitute blocking scope
+Operational-store requirements R1–R10 are promoted from proposed to
+accepted and constitute blocking scope
 for the ConvergenceKit v1.1 implementation program.
 
 ### Playground Rules (consumer contract)
@@ -204,8 +204,7 @@ only — the same precedent as Metal compute kernels, which have no
 Rust path and none is planned. Vocabulary and wire-format changes
 (SyncRecord encoding, TypedValue discriminators) still carry
 byte-identical Rust twins per C-8 and B-4. The Rust vertical's
-multi-machine story is Federation
-(`DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md`).
+multi-machine story is Federation under the engineering disclosure model.
 
 ---
 
@@ -291,9 +290,7 @@ add a distinct `SyncEvent` case if a start event is needed).
 
 ## Status
 
-Accepted (2026-07-16). R1–R10 from
-`DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md` are blocking
+Accepted (2026-07-16). Operational-store requirements R1–R10 are blocking
 scope for ConvergenceKit v1.1. N1–N4 above extend that scope for
-multi-device correctness. See also
-`DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md`, which is
-updated to accepted status by this decision.
+multi-device correctness. Their durable contract lives in
+`docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md` § 4.3.

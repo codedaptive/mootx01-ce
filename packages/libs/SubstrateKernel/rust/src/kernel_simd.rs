@@ -1,8 +1,8 @@
 // kernel_simd.rs
 //
 // Portable-SIMD-backed kernel implementation per
-// DECISION_OR_REDUCE_BACKENDS_2026-05-17.md (Axis 1, the "1" path)
-// and DECISION_HAMMING_BACKENDS_2026-05-17.md (Phase 2.β-1).
+// measured SIMD OR-reduce selection (Axis 1, the "1" path)
+// and measured SIMD Hamming selection (Phase 2.β-1).
 //
 // Uses Rust's nightly `std::simd::u64x4` for SIMD lanes. On
 // aarch64 (Apple Silicon and other ARM64 targets), the compiler
@@ -212,7 +212,7 @@ impl SubstrateKernel for SimdKernel {
     /// under 100 microseconds. The bandwidth floor at section
     /// 17.5 is roughly 533 microseconds on apple-m5-max; the
     /// Swift counterpart sits 13% above floor at 604 microseconds
-    /// per DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md row 5.
+    /// per the measured production kernel table.
     /// This Rust port targets parity within measurement noise on
     /// the same hardware.
     fn hamming_top_k(&self, probe: &Fingerprint256,

@@ -3,14 +3,14 @@
 //! Provides `run_one_dreaming_cycle`: opens a SQLite estate, mounts the
 //! dreaming queue, and iterates the shared REM dispatch table to run every
 //! due cycle (ALPHA, THETA, BETA, OMEGA). Called by the `dream`
-//! subcommand (T10/T11/T12/T13, ADR-021 Phase 5/Phase 6/Phase 7).
+//! subcommand.
 //!
 //! Layering: `mootx01` → `aria-mcp::dream_runner` → `neuron-kit` / `genius-locus-kit`.
 //! The dream command does not import neuron-kit or genius-locus-kit directly —
 //! they route through this module so `mootx01`'s Cargo.toml stays thin
 //! (single `aria-mcp` dep, same as the drain command).
 //!
-//! # REM dispatch table (ADR-021 Phase 6, T11)
+//! # REM dispatch table
 //!
 //! All four cadences (ALPHA, THETA, BETA, OMEGA) are dispatched from the shared
 //! `rem_cycle_table()`. ALPHA runs when the queue is non-empty. THETA runs when the
@@ -49,7 +49,7 @@ pub struct DreamRunResult {
 
 /// Open the addressed SQLite estate and iterate the shared REM dispatch table,
 /// running every due cycle: ALPHA (queue non-empty), THETA (24h cadence),
-/// BETA (7d cadence), OMEGA (14d cadence). ADR-021 Phase 5/6/7.
+/// BETA (7d cadence), OMEGA (14d cadence). recall-driven dreaming
 ///
 /// # Lease
 ///
@@ -169,7 +169,7 @@ pub fn run_one_dreaming_cycle(
     let loaded_policy = policy_store.load_policy().unwrap_or_default();
     let mut dreaming = DreamingDaemon::new(loaded_policy);
 
-    // Restore persisted cycle state (F6 / ADR-020): idempotency memory,
+    // Restore persisted cycle state: idempotency memory,
     // co-recall counts, proposed-key set, EWC++ consolidation, cycle counter.
     // Non-fatal: if the estate has no persisted state, the daemon starts fresh.
     if let Some(state) = policy_store.load_daemon_state() {
@@ -179,7 +179,7 @@ pub fn run_one_dreaming_cycle(
         dreaming.set_bandit(bandit);
     }
 
-    // ── REM dispatch table (ADR-021 Phase 6, T11) ─────────────────────────────
+    // ── REM dispatch table ─────────────────────────────
     // Iterate the shared table. Each entry's due-check is performed here; the
     // daemon runs only the cycles that are currently due. ALPHA is gated on the
     // queue pending count (already checked above); THETA/BETA/OMEGA are cadence-gated.
@@ -281,7 +281,7 @@ pub fn run_one_dreaming_cycle(
         }
     }
 
-    // Persist the updated daemon state (F6 / ADR-020) — last-run timestamps for
+    // Persist the updated daemon state — last-run timestamps for
     // THETA/BETA/OMEGA and any cycle-state mutations from ALPHA, THETA, BETA
     // (consolidated/co_recall_counts pruned), or OMEGA (cycle state advanced).
     policy_store.save_daemon_state(dreaming.daemon_state());

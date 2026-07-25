@@ -19,7 +19,7 @@
 // application data records to avoid creating a second zone and adding a second
 // quota bucket per user.
 //
-// Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
+// Maps durable device-slot claims to their CloudKit representation.
 // Adjudications: A4 (ghost fast-path), A5 (CAS retry)
 
 import Foundation

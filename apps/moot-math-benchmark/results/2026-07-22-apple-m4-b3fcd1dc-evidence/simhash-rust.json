@@ -1,0 +1,39 @@
+{
+  "schema_version": "2",
+  "language": "rust",
+  "op": "simhash_block_batch",
+  "date": "2026-07-23",
+  "generated_at": "2026-07-23T01:54:00Z",
+  "hardware_tag": "apple-m4",
+  "commit_sha": "b3fcd1dc",
+  "seed": "0xcafebabedeadbeef",
+  "timing": {
+    "warmup_ms": 50,
+    "measure_ms": 200,
+    "quick_mode": false
+  },
+  "platform": {
+    "arch": "aarch64",
+    "os":   "macos"
+  },
+  "measurements": [
+    { "kernel": "scalar", "batch_size": 1, "mode": "batched", "iterations": 1248000, "ns_per_call_min": 150, "ns_per_call_mean": 160, "ns_per_call_stddev": 35, "ns_per_element_min": 150.000 },
+    { "kernel": "scalar", "batch_size": 1, "mode": "sequential", "iterations": 1250304, "ns_per_call_min": 149, "ns_per_call_mean": 160, "ns_per_call_stddev": 35, "ns_per_element_min": 149.000 },
+    { "kernel": "scalar", "batch_size": 2, "mode": "batched", "iterations": 612800, "ns_per_call_min": 303, "ns_per_call_mean": 326, "ns_per_call_stddev": 71, "ns_per_element_min": 151.500 },
+    { "kernel": "scalar", "batch_size": 2, "mode": "sequential", "iterations": 619136, "ns_per_call_min": 301, "ns_per_call_mean": 322, "ns_per_call_stddev": 63, "ns_per_element_min": 150.500 },
+    { "kernel": "scalar", "batch_size": 4, "mode": "batched", "iterations": 298496, "ns_per_call_min": 601, "ns_per_call_mean": 669, "ns_per_call_stddev": 270, "ns_per_element_min": 150.250 },
+    { "kernel": "scalar", "batch_size": 4, "mode": "sequential", "iterations": 286912, "ns_per_call_min": 605, "ns_per_call_mean": 695, "ns_per_call_stddev": 319, "ns_per_element_min": 151.250 },
+    { "kernel": "scalar", "batch_size": 8, "mode": "batched", "iterations": 155424, "ns_per_call_min": 1193, "ns_per_call_mean": 1282, "ns_per_call_stddev": 391, "ns_per_element_min": 149.125 },
+    { "kernel": "scalar", "batch_size": 8, "mode": "sequential", "iterations": 156448, "ns_per_call_min": 1193, "ns_per_call_mean": 1276, "ns_per_call_stddev": 289, "ns_per_element_min": 149.125 },
+    { "kernel": "scalar", "batch_size": 16, "mode": "batched", "iterations": 77836, "ns_per_call_min": 2375, "ns_per_call_mean": 2561, "ns_per_call_stddev": 856, "ns_per_element_min": 148.438 },
+    { "kernel": "scalar", "batch_size": 16, "mode": "sequential", "iterations": 77960, "ns_per_call_min": 2386, "ns_per_call_mean": 2561, "ns_per_call_stddev": 593, "ns_per_element_min": 149.125 },
+    { "kernel": "scalar", "batch_size": 32, "mode": "batched", "iterations": 32920, "ns_per_call_min": 4771, "ns_per_call_mean": 6066, "ns_per_call_stddev": 7507, "ns_per_element_min": 149.094 },
+    { "kernel": "scalar", "batch_size": 32, "mode": "sequential", "iterations": 38790, "ns_per_call_min": 4750, "ns_per_call_mean": 5138, "ns_per_call_stddev": 1726, "ns_per_element_min": 148.438 },
+    { "kernel": "scalar", "batch_size": 64, "mode": "batched", "iterations": 19298, "ns_per_call_min": 9521, "ns_per_call_mean": 10346, "ns_per_call_stddev": 2799, "ns_per_element_min": 148.766 },
+    { "kernel": "scalar", "batch_size": 64, "mode": "sequential", "iterations": 19496, "ns_per_call_min": 9521, "ns_per_call_mean": 10241, "ns_per_call_stddev": 2292, "ns_per_element_min": 148.766 },
+    { "kernel": "scalar", "batch_size": 128, "mode": "batched", "iterations": 9760, "ns_per_call_min": 19041, "ns_per_call_mean": 20457, "ns_per_call_stddev": 4531, "ns_per_element_min": 148.758 },
+    { "kernel": "scalar", "batch_size": 128, "mode": "sequential", "iterations": 9755, "ns_per_call_min": 19041, "ns_per_call_mean": 20467, "ns_per_call_stddev": 4525, "ns_per_element_min": 148.758 },
+    { "kernel": "scalar", "batch_size": 256, "mode": "batched", "iterations": 4880, "ns_per_call_min": 38125, "ns_per_call_mean": 40950, "ns_per_call_stddev": 7437, "ns_per_element_min": 148.926 },
+    { "kernel": "scalar", "batch_size": 256, "mode": "sequential", "iterations": 4887, "ns_per_call_min": 38125, "ns_per_call_mean": 40893, "ns_per_call_stddev": 7287, "ns_per_element_min": 148.926 }
+  ]
+}

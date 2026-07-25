@@ -7,8 +7,8 @@ import PersistenceKitInMemory
 import SubstrateTypes
 @testable import GeniusLocusKit
 
-/// Firing tests for the default standing signals — architecture
-/// spec §11.2 / mission GLK-05 + ADR-018 F1 (TrainingSignal).
+/// Firing tests for the default standing signals, including the training
+/// signal owned by the brain-layer governor.
 ///
 /// Every test follows the same template:
 ///
@@ -355,7 +355,7 @@ struct StandingSignalsTests {
 
     // MARK: - Training signal
 
-    /// Assert that the training signal is in the default name set (ADR-018 F1)
+    /// Assert that the training signal is in the default name set
     /// and that a tick invokes TrainingDaemon.runOnce. The daemon is configured
     /// with a zero threshold so the gate is always open; the test verifies the
     /// pipeline ran (liveRowCount > 0 after a capture log) even though the
@@ -367,7 +367,7 @@ struct StandingSignalsTests {
         // Assert the signal name is in the canonical default set so the test
         // would fail if the signal were ever removed from the registry.
         #expect(GeniusLocusKit.defaultStandingSignalNames.contains(TrainingSignal.signalName),
-            "TrainingSignal must be in the default standing signal names (ADR-018 F1)")
+            "TrainingSignal must be in the default standing signal names")
 
         // Set up mutable boxes — the spec closure must be @Sendable so it
         // captures reference-typed boxes, not inout bindings.
@@ -443,7 +443,7 @@ struct StandingSignalsTests {
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        // ADR-018 F1 added TrainingSignal as signal 9; the contradiction
+        // brain-layer governor ownership  added TrainingSignal as signal 9; the contradiction
         // scout (hunter background half) is signal 10. Any future addition
         // must update this count and extend defaultStandingSignalNames.
         #expect(registered.count == 10, "all ten standing signals register")
@@ -484,15 +484,15 @@ struct StandingSignalsTests {
         // Added 2026-06-04: T-population pass runs hourly per design-council
         // decision superseding cookbook §6.4's weekly cadence.
         #expect(TemporalCausalitySignal.defaultCadenceSeconds == 3_600,
-            "hourly T fold per DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04")
+            "hourly T fold")
         // Added 2026-06-19 (Dg4): distillation sweep runs hourly per
         // architecture spec §11.2, signal 8.
         #expect(DistillationSignal.defaultCadenceSeconds == 3_600,
             "distillation sweep runs hourly per architecture spec §11.2")
-        // Added 2026-06-20 (ADR-018 F1): training-daemon signal runs hourly
+        // Added 2026-06-20: training-daemon signal runs hourly
         // matching the distillation-sweep and temporal-causality-fold rhythm.
         #expect(TrainingSignal.defaultCadenceSeconds == 3_600,
-            "training-daemon signal runs hourly per ADR-018 F1")
+            "training-daemon signal runs hourly")
     }
 
     // MARK: - T-population end-to-end
@@ -521,7 +521,7 @@ struct StandingSignalsTests {
         _ = try await kit.capture(handle, frame2)
 
         // Pull the unified audit log and rebuild the T tier.
-        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
+        // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
 
         let tier1 = MatrixTier.rebuildTemporal(from: auditLog)

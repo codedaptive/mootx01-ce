@@ -38,7 +38,7 @@ Charter document: `docs/analysis/CVK_WAVEC_FEDERATION_CHARTER.md`
 4. **Hosted relay seam is clean.** Relay protocol already abstracts transport. Client
    conformer is additive; SyncServer wire protocol spec must precede WC7.
 
-5. **DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md correctly out of scope.**
+5. **The cross-estate disclosure model was correctly out of scope.**
    SPEC I-9 is unambiguous. Wave C ships row-sync transport only.
 
 ## Missions opened

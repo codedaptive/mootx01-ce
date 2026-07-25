@@ -3,7 +3,7 @@ name = "vault-kit"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "VaultKit — bidirectional bridge between a MOOT estate and a human-readable Markdown vault. Rust port of the Swift VaultKit package, per ADR-VAULTKIT-001 (f)."
+description = "VaultKit — bidirectional bridge between a MOOT estate and a human-readable Markdown vault. Rust port of the Swift VaultKit package."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -21,13 +21,13 @@ path = "src/lib.rs"
 #     The "serde" feature decodes the `mootID` key of the canonical corpus
 #     JSON; encoding is custom (uppercase, matching Foundation's UUID).
 #   serde / serde_json: the versioned canonical JSON corpus document per
-#     ADR-007 Decision 1 ("the JSON is the payload"). Both crates were
+#     data-movement privacy tiers ("the JSON is the payload"). Both crates were
 #     already in vault-kit's transitive graph (via genius-locus-kit →
 #     corpus-kit); declared explicitly here per the mission's Blast Radius
-#     Report (VK_IR_01) and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+#     Report (VK_IR_01) and in-repository dependency direction.
 #
 # Layering: vault-kit (above GLK) → genius-locus-kit → locus-kit.
-# No inversion. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# No inversion. Per in-repository dependency direction.
 #   rusqlite: read-only access to MemPalace's foreign SQLite stores
 #     (ChromaDB `chroma.sqlite3` + `knowledge_graph.sqlite3`) in
 #     MemPalaceChromaAdapter. Version and `bundled` feature match

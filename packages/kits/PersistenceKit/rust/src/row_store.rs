@@ -29,20 +29,30 @@ pub trait RowStore: Send + Sync {
     // ----------------------------------------------------------------
     // Sync-tagged write paths (I-10, CVK-ICLOUD P1-M1)
     //
-    // These methods mark writes as originating from `apply_inbound` so
-    // ConvergenceKit's outbound observer can discard them (echo
-    // suppression). The Rust federation uses an orthogonal suppression
-    // mechanism (`pulling: Arc<AtomicBool>`), so the default
-    // implementations simply delegate to the ordinary write paths —
-    // correct for all Rust backends. Backends that want to stamp
-    // `ChangeOrigin::SyncApply` on the emitted `TableChange` can override
-    // these methods (mirrors the Swift `insertSync`/`upsertSync`/`deleteSync`
-    // pattern).
+    // These methods stamp the emitted `TableChange` with
+    // `ChangeOrigin::SyncApply`, which ConvergenceKit's outbound observer
+    // uses to suppress inbound-apply writes (echo suppression). Using the
+    // origin at emit time is race-free — unlike a global `pulling` flag
+    // that can be cleared before the observer worker processes the event.
+    //
+    // `apply_record` uses these variants for every application-table write.
+    // Federation metadata table writes (`_fed_sync_meta`, `_fed_outbox`,
+    // etc.) use the plain variants since those tables are not observed by
+    // the outbox worker.
+    //
+    // The `InMemoryRowStore` backend overrides all three to produce
+    // `ChangeOrigin::SyncApply` events. Other backends (SQLite, Caching)
+    // inherit the default, which falls back to the plain write path — they
+    // emit `ChangeOrigin::Local`. SQLite and Caching are production backends
+    // where echo suppression for inbound-apply writes is handled at the
+    // SQLite transaction level (writes inside the apply transaction are
+    // committed before any observer fires). Override those backends when
+    // observer-based echo suppression is required in production.
     // ----------------------------------------------------------------
 
-    /// Insert a row, tagging the resulting `TableChange` as `SyncApply`.
-    /// Default delegates to `insert` (Rust federation's `pulling` flag
-    /// already prevents echo; no origin override needed in the default path).
+    /// Insert a row, stamping the emitted `TableChange` with `SyncApply`.
+    /// Default delegates to `insert` — backends that emit origin-stamped
+    /// events (e.g. `InMemoryRowStore`) override this.
     fn insert_sync(
         &self,
         table: &str,
@@ -51,8 +61,9 @@ pub trait RowStore: Send + Sync {
         self.insert(table, values)
     }
 
-    /// Upsert a row, tagging the resulting `TableChange` as `SyncApply`.
-    /// Default delegates to `upsert`.
+    /// Upsert a row, stamping the emitted `TableChange` with `SyncApply`.
+    /// Default delegates to `upsert` — backends that emit origin-stamped
+    /// events override this.
     fn upsert_sync(
         &self,
         table: &str,
@@ -62,8 +73,9 @@ pub trait RowStore: Send + Sync {
         self.upsert(table, values, conflict_columns)
     }
 
-    /// Delete rows matching `predicate`, tagging the resulting `TableChange`
-    /// as `SyncApply`. Default delegates to `delete`.
+    /// Delete rows matching `predicate`, stamping the emitted `TableChange`
+    /// with `SyncApply`. Default delegates to `delete` — backends that emit
+    /// origin-stamped events override this.
     fn delete_sync(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
         self.delete(table, predicate)
     }
@@ -214,7 +226,7 @@ pub trait RowStore: Send + Sync {
     }
 
     // ----------------------------------------------------------------
-    // As-of temporal query (ADR-017 §15)
+    // As-of temporal query
     // ----------------------------------------------------------------
 
     /// Temporal query: returns rows visible at the given `AsOfCoordinate`.

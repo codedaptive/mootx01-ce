@@ -1,6 +1,6 @@
 // ErasureOverlay.swift
 //
-// Two-phase fail-closed global erasure overlay (ADR-017 §17).
+// Two-phase fail-closed global erasure overlay.
 //
 // Every read (present and as-of) passes through this overlay.
 // Phase 1: select rows by temporal filter (standard query).

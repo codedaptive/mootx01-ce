@@ -46,6 +46,6 @@ ARIA_iOS is the iOS application shell. It:
 
 The MOOTx01 ecosystem app — universal macOS + iOS + iPadOS, the Apple
 presentation layer (App Intents, Shortcuts, Siri) over the clean engine —
-lives at `apps/Mootx01-App/` (architecture: `docs/decisions/ADR-005`), with its
+lives at `apps/Mootx01-App/` (architecture: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#22-apple-application-envelope-and-host-ownership`), with its
 lexicon→Apple mapping. Developer examples that build on the same `MootGateway`
 SDK live in `examples/Moot{Notepad,Todo,CalendarIngest}/`.

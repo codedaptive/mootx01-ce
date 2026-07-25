@@ -1,6 +1,6 @@
 // DreamCommand.swift
 //
-// On-demand REM-ALPHA dreaming cycle (ADR-021 Phase 5).
+// On-demand REM-ALPHA dreaming cycle.
 //
 // `mootx01 dream` is the sibling of `mootx01 drain`. It is the detached
 // dreaming finisher an stdio `serve` spawns in three situations:
@@ -26,7 +26,7 @@
 //   - Runs ONE REM-ALPHA dreaming cycle via `DreamingDaemon.triggerDreamingCycle`.
 //   - Releases the lease and exits.
 //
-// THETA/BETA/OMEGA cycles (ADR-021 Phase 5, T11/T12/T13) are NOT built here.
+// THETA/BETA/OMEGA cycles (recall-driven dreaming, /) are NOT built here.
 // The seam comments below mark where they would plug in. Do not implement them
 // here — those missions have their own scope and PRs.
 //
@@ -37,6 +37,7 @@ import Foundation
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import NeuronKit
 import LocusKit
 import PersistenceKit
@@ -86,7 +87,7 @@ struct DreamCommand: AsyncParsableCommand {
         // The dreaming lease file lives beside queue.sqlite (parent of the estate
         // SQLite file), keyed by stream name "dreaming". This is independent of
         // the encode ("encode.drain.lease") lease — both can be held simultaneously
-        // (ADR-021 Decision 7: per-(estate, stream) leases).
+        // (recall-driven dreaming: per-(estate, stream) leases).
         let leaseDir = estateURL.deletingLastPathComponent()
         let instanceToken = UUID().uuidString
         let lease = DrainLease(
@@ -110,9 +111,21 @@ struct DreamCommand: AsyncParsableCommand {
         // Open the estate and wire the GLK semantic layer (corpus + vector store
         // + encode queue), exactly as DrainCommand does. wireGLKSubstores is
         // idempotent on reopen.
+        // At-rest posture — the SAME shared decision serve and drain use, so the
+        // three commands cannot drift.
+        let encryption: EstateEncryptionConfig
+        do {
+            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            encryption = resolved.encryption
+        } catch {
+            Logging.stderr.log("mootx01 dream fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0)
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
         )
         let storage: SQLiteStorage
         do {
@@ -127,6 +140,8 @@ struct DreamCommand: AsyncParsableCommand {
         let handle: EstateHandle
         do {
             handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(
+                kit: kit, handle: handle, now: Date())
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate open/wiring failed: \(error)")
@@ -174,7 +189,7 @@ struct DreamCommand: AsyncParsableCommand {
             growthProbe: nil
         )
 
-        // Restore persisted policy, bandit state, and cycle memory (F6 / ADR-020).
+        // Restore persisted policy, bandit state, and cycle memory.
         // This ensures the one-shot dreamer picks up any prior cycle's learning
         // (minAttempts gate, proposed-key idempotency, EWC++ consolidation).
         do {
@@ -185,7 +200,7 @@ struct DreamCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 dream warning: policy restore failed: \(error) — using spec defaults")
         }
 
-        // Run ONE REM-ALPHA dreaming cycle (ADR-021 Phase 5, §12.2 trigger mode).
+        // Run one REM-ALPHA cycle against the pending dreaming queue.
         // No heartbeat task: one dreaming cycle is fast (subsecond for normal
         // estates) and well within the 15-second lease TTL. The resident
         // AutonomicGovernor heartbeats its lease because it holds it for minutes;

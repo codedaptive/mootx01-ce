@@ -77,6 +77,23 @@ fn fresh_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
     .expect("Corpus::open must succeed")
 }
 
+/// The shared alpha fixture pins the historical 1.0 provider envelope. Keep
+/// that fixture useful while production defaults advance to 1.1 to invalidate
+/// bases trained with the pre-correction tokenizer contract.
+fn legacy_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
+    Corpus::open(
+        storage,
+        EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::with_parameters(
+                "random-indexing-v1",
+                "1.0.0",
+                corpus_kit_providers::RI_PROJECTION_SEED,
+            )),
+        },
+    )
+    .expect("Corpus::open legacy fixture provider must succeed")
+}
+
 // ── §2 reindex persists a basis ──
 
 #[test]
@@ -93,7 +110,7 @@ fn reindex_persists_basis() {
 
     let store = BasisStore::new(storage_at(&path));
     let loaded = store
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load")
         .expect("basis row must exist after reindex");
     assert_eq!(loaded.trained_chunk_count, RI_DOCS.len());
@@ -109,21 +126,28 @@ fn first_ingest_auto_trains_and_persists() {
     let store = BasisStore::new(storage_at(&path));
 
     assert!(
-        store.load("random-indexing-v1", "1.0.0").expect("load").is_none(),
+        store
+            .load("random-indexing-v1", "1.1.0")
+            .expect("load")
+            .is_none(),
         "no basis before first ingest"
     );
 
-    corpus.ingest(RI_DOCS[0], "doc-0", NOW_MILLIS).expect("ingest 0");
+    corpus
+        .ingest(RI_DOCS[0], "doc-0", NOW_MILLIS)
+        .expect("ingest 0");
     let after_first = store
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load")
         .expect("basis after first ingest");
     let count_after_first = after_first.trained_chunk_count;
 
     // A SECOND ingest must NOT retrain — the basis row (chunk count) is unchanged.
-    corpus.ingest(RI_DOCS[1], "doc-1", NOW_MILLIS).expect("ingest 1");
+    corpus
+        .ingest(RI_DOCS[1], "doc-1", NOW_MILLIS)
+        .expect("ingest 1");
     let after_second = store
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load")
         .expect("basis after second ingest");
     assert_eq!(after_second.trained_chunk_count, count_after_first);
@@ -137,16 +161,24 @@ fn destroy_recall_index_wipes_basis() {
     let path = scratch_path();
     let corpus = fresh_ri_corpus(storage_at(&path));
     for (i, doc) in RI_DOCS.iter().enumerate() {
-        corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+        corpus
+            .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+            .expect("ingest");
     }
     corpus.reindex(NOW_MILLIS).expect("reindex");
 
     let store = BasisStore::new(storage_at(&path));
-    assert!(store.load("random-indexing-v1", "1.0.0").expect("load").is_some());
+    assert!(store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load")
+        .is_some());
 
     corpus.destroy_recall_index().expect("destroy");
     assert!(
-        store.load("random-indexing-v1", "1.0.0").expect("load").is_none(),
+        store
+            .load("random-indexing-v1", "1.1.0")
+            .expect("load")
+            .is_none(),
         "destroy must wipe the basis row (no orphans)"
     );
 }
@@ -155,14 +187,19 @@ fn destroy_recall_index_wipes_basis() {
 fn non_trainable_persists_no_basis() {
     let _g = global_lock();
     let path = scratch_path();
-    let corpus = Corpus::open(storage_at(&path), EmbeddingModelConfig::Deterministic)
-        .expect("Corpus::open");
-    corpus.ingest("car engine drive", "doc-0", NOW_MILLIS).expect("ingest");
+    let corpus =
+        Corpus::open(storage_at(&path), EmbeddingModelConfig::Deterministic).expect("Corpus::open");
+    corpus
+        .ingest("car engine drive", "doc-0", NOW_MILLIS)
+        .expect("ingest");
     corpus.reindex(NOW_MILLIS).expect("reindex");
 
     let store = BasisStore::new(storage_at(&path));
     assert!(
-        store.load("corpus-deterministic-v1", "1.0.0").expect("load").is_none(),
+        store
+            .load("corpus-deterministic-v1", "1.0.0")
+            .expect("load")
+            .is_none(),
         "non-trainable provider persists no basis"
     );
 }
@@ -243,9 +280,11 @@ fn cross_port_persist_reopen_embed() {
     // byte-for-byte. Training fresh (reconstruct from the empty blob) makes the
     // basis the canonical from-scratch one, matching the Swift port.
     {
-        let corpus = fresh_ri_corpus(storage_at(&path));
+        let corpus = legacy_ri_corpus(storage_at(&path));
         for (i, doc) in RI_DOCS.iter().enumerate() {
-            corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+            corpus
+                .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+                .expect("ingest");
         }
         corpus.reindex(NOW_MILLIS).expect("reindex");
 
@@ -264,7 +303,7 @@ fn cross_port_persist_reopen_embed() {
     // provider from the persisted basis. The reopened corpus's embedding of the
     // fixed probe must equal the α canonical bit patterns. This proves
     // persist → reopen → embed is cross-port deterministic.
-    let reopened = fresh_ri_corpus(storage_at(&path));
+    let reopened = legacy_ri_corpus(storage_at(&path));
     let after = reopened.embed_float(probe).expect("embed_float");
     let after_bits: Vec<u32> = after.iter().map(|f| f.to_bits()).collect();
     assert_eq!(
@@ -278,7 +317,7 @@ fn cross_port_persist_reopen_embed() {
 use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
 
 const RI_MODEL_ID: &str = "random-indexing-v1";
-const RI_MODEL_VERSION: &str = "1.0.0";
+const RI_MODEL_VERSION: &str = "1.1.0";
 
 #[test]
 fn ingest_persists_counts_with_growing_anchor() {
@@ -293,7 +332,9 @@ fn ingest_persists_counts_with_growing_anchor() {
         .expect("growth_anchor")
         .is_none());
 
-    corpus.ingest(RI_DOCS[0], "doc-0", NOW_MILLIS).expect("ingest 0");
+    corpus
+        .ingest(RI_DOCS[0], "doc-0", NOW_MILLIS)
+        .expect("ingest 0");
     let a0 = counts
         .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
         .expect("growth_anchor")
@@ -302,7 +343,9 @@ fn ingest_persists_counts_with_growing_anchor() {
     assert!(a0.vocab_size > 0);
 
     // A second ingest with new vocabulary grows both anchors.
-    corpus.ingest(RI_DOCS[3], "doc-3", NOW_MILLIS).expect("ingest 3");
+    corpus
+        .ingest(RI_DOCS[3], "doc-3", NOW_MILLIS)
+        .expect("ingest 3");
     let a1 = counts
         .growth_anchor(RI_MODEL_ID, RI_MODEL_VERSION)
         .expect("growth_anchor")
@@ -321,7 +364,9 @@ fn reopen_restores_counts_anchor() {
     {
         let corpus = fresh_ri_corpus(storage_at(&path));
         for (i, doc) in RI_DOCS.iter().enumerate() {
-            corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+            corpus
+                .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+                .expect("ingest");
         }
     }
     let counts = CorpusProviderCountsStore::new(storage_at(&path));
@@ -355,7 +400,9 @@ fn reopened_corpus_retrains_on_reindex() {
     {
         let corpus = fresh_ri_corpus(storage_at(&path));
         for (i, doc) in RI_DOCS.iter().enumerate() {
-            corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+            corpus
+                .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+                .expect("ingest");
         }
         corpus.reindex(NOW_MILLIS).expect("reindex");
     }
@@ -398,7 +445,9 @@ fn reingest_does_not_inflate_counts() {
     let counts = CorpusProviderCountsStore::new(storage_at(&path));
 
     for (i, doc) in RI_DOCS.iter().enumerate() {
-        corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
+        corpus
+            .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+            .expect("ingest");
     }
     let chunk_count0 = corpus.count().expect("count");
     let a0 = counts
@@ -412,7 +461,9 @@ fn reingest_does_not_inflate_counts() {
     // maintained counts must NOT advance — the fold runs only over newly-inserted
     // chunks, of which there are none on the second pass.
     for (i, doc) in RI_DOCS.iter().enumerate() {
-        corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("re-ingest");
+        corpus
+            .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+            .expect("re-ingest");
     }
     let chunk_count1 = corpus.count().expect("count");
     let a1 = counts
@@ -420,7 +471,10 @@ fn reingest_does_not_inflate_counts() {
         .expect("growth_anchor")
         .expect("counts row");
 
-    assert_eq!(chunk_count1, chunk_count0, "re-ingest must not add chunks (idempotent)");
+    assert_eq!(
+        chunk_count1, chunk_count0,
+        "re-ingest must not add chunks (idempotent)"
+    );
     assert_eq!(
         a1.document_count, a0.document_count,
         "re-ingest must not inflate the maintained document count"
@@ -459,7 +513,11 @@ fn reingest_batch_does_not_inflate_counts() {
         .expect("growth_anchor")
         .expect("counts row");
 
-    assert_eq!(corpus.count().expect("count"), chunk0, "batch re-import must not add chunks");
+    assert_eq!(
+        corpus.count().expect("count"),
+        chunk0,
+        "batch re-import must not add chunks"
+    );
     assert_eq!(
         a1.document_count, a0.document_count,
         "batch re-import must not inflate the maintained document count"
@@ -470,7 +528,7 @@ fn reingest_batch_does_not_inflate_counts() {
     );
 }
 
-// T4 (ADR-021 Decision 7): a file-backed (SQLite) estate persists the Corpus
+// a file-backed (SQLite) estate persists the Corpus
 // ingest queue to a per-estate SQLite file BESIDE the estate — not a plaintext
 // maildir. The sibling filename is `<estate-stem>.queue.sqlite` so two estates
 // in the same directory never share a queue (cross-estate isolation). Proven by:
@@ -486,7 +544,11 @@ fn ingest_queue_is_durable_for_sqlite_estate() {
             .expect("Corpus::open must succeed"),
     );
     corpus
-        .enqueue_ingest("durable queue content survives restart", "doc-queue", NOW_MILLIS)
+        .enqueue_ingest(
+            "durable queue content survives restart",
+            "doc-queue",
+            NOW_MILLIS,
+        )
         .expect("enqueue_ingest");
     corpus.await_ingest_drain().expect("await_ingest_drain");
 
@@ -519,7 +581,9 @@ fn ingest_queue_is_durable_for_sqlite_estate() {
     );
 
     // The enqueued document is searchable via the per-estate queue path.
-    let results = corpus.recall("durable queue", 5, NOW_MILLIS).expect("recall");
+    let results = corpus
+        .recall("durable queue", 5, NOW_MILLIS)
+        .expect("recall");
     assert!(!results.is_empty());
 
     let _ = std::fs::remove_file(&queue_sibling);

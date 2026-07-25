@@ -40,7 +40,7 @@ use crate::dreaming_cycle::{
 pub struct EstateDreamingReader<'a> {
     traces: Vec<CycleRecallTraceItem>,
     tunnels: Vec<TunnelLink>,
-    /// Dreamed-active tunnels for OMEGA retire evaluation (T13 / ADR-021 Phase 7).
+    /// Dreamed-active tunnels for OMEGA retire evaluation.
     /// Snapshotted at construction via `coordinator.all_active_tunnels`, then
     /// filtered to `is_dreamed() == true`. Pre-fetching keeps `dreamed_active_tunnels()`
     /// a cheap `Vec::clone()` inside the cycle — consistent with how `traces` and
@@ -90,7 +90,7 @@ impl<'a> EstateDreamingReader<'a> {
             })
             .collect();
 
-        // Snapshot dreamed-active tunnels for OMEGA retire evaluation (T13 / ADR-021 Phase 7).
+        // Snapshot dreamed-active tunnels for OMEGA retire evaluation.
         // `all_active_tunnels` excludes retired tunnels (bit 13 clear); filtering to
         // `is_dreamed() == true` enforces the §12.8 guard (declared tunnels never retired).
         // `source_drawer_id` and `target_drawer_id` are Options on the substrate type
@@ -150,7 +150,7 @@ impl<'a> DreamingSubstrateReader for EstateDreamingReader<'a> {
         self.tunnels.clone()
     }
 
-    /// All non-retired dreamed tunnels for OMEGA retire evaluation (T13 / ADR-021 Phase 7).
+    /// All non-retired dreamed tunnels for OMEGA retire evaluation.
     ///
     /// Returns the snapshot taken at reader construction via
     /// `coordinator.all_active_tunnels` filtered to `is_dreamed() == true`.

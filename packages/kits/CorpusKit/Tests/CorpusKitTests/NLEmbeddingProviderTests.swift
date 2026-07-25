@@ -7,7 +7,7 @@
 // available. On Linux/Windows they compile to an empty test file, which
 // is the correct outcome: neither provider exists on those platforms, and
 // their absence is the sanctioned Swift/Rust parity divergence recorded in
-// ADR-019.
+// opt-in Apple embedding providers.
 //
 // ## Test strategy
 //
@@ -31,7 +31,7 @@
 //    (the test machine may not have the asset downloaded), embedFloat returns []
 //    gracefully — never crashes. This is the primary safety test for that provider.
 //
-// ADR-019 reference: Apple NL Embedding Providers.
+// opt-in Apple embedding providers reference: Apple NL Embedding Providers.
 
 #if canImport(NaturalLanguage)
 import NaturalLanguage

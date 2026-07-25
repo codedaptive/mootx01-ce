@@ -13,14 +13,19 @@
 //     than "tries to sync to a container that doesn't exist."
 //
 // Sensitivity ceiling (syncCeiling):
-//   Rows with an `adjective_bitmap` sensitivity tier ABOVE syncCeiling
+//   Rows with an `adjectiveBitmap` sensitivity tier ABOVE syncCeiling
 //   are suppressed from outbound sync and rejected on inbound applies.
 //   The default ceiling (`.elevated`) means normal and elevated rows sync
 //   freely; restricted and secret rows are gated by SensitivityFilteredStorage.
 //
-//   This satisfies the ADR-025 privacy guarantee at the sync boundary:
+//   NOTE (FAB5-ST): The operational ceiling is now determined dynamically by
+//   TierAuthorizationStore.shared.effectiveCeiling at enable time, not by this
+//   field. SyncConfig.syncCeiling is retained for configuration construction
+//   but is not read by MootSyncDriver in the production enable path.
+//
+//   This enforces the privacy guarantee at the sync boundary:
 //   restricted and secret content does not cross device boundaries via
-//   iCloud without the operator explicitly raising the ceiling.
+//   iCloud without the user granting per-tier authorization.
 //
 // Playground Rules note:
 //   Rule 2 requires one SyncManifest per estate. The manifest is compiled
@@ -71,17 +76,17 @@ public struct SyncConfig: Sendable {
 
     /// The sensitivity ceiling applied to both outbound and inbound sync.
     ///
-    /// Rows whose `adjective_bitmap` sensitivity tier is ABOVE this value are:
+    /// Rows whose `adjectiveBitmap` sensitivity tier is ABOVE this value are:
     ///   - Outbound: suppressed from the sync outbox (never pushed to CloudKit)
     ///   - Inbound: rejected via `SensitivityCeilingError` (counted as conflict)
     ///
     /// Default: `.elevated` — normal and elevated rows sync; restricted and
     /// secret rows do not.
     ///
-    /// Operators targeting a high-trust device scope (e.g. end-to-end-encrypted
-    /// enterprise deployment) may raise the ceiling to `.restricted` or even
-    /// `.secret`, but this requires corresponding CloudKit encrypted-values
-    /// support (tracked follow-up, CVK-ICLOUD P5-M1 Discoveries).
+    /// NOTE (FAB5-ST): In production, MootSyncDriver reads the ceiling dynamically
+    /// from TierAuthorizationStore.shared.effectiveCeiling at enable time. This
+    /// field is used during configuration construction (e.g. `.cloudKitDefault`)
+    /// but is superseded by the dynamic store for the actual engine enable call.
     public let syncCeiling: AdjectiveSensitivity
 
     /// Whether sync is administratively enabled. False causes MootSyncDriver

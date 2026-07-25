@@ -4,16 +4,26 @@
 //
 // A GeniusLocus estate is a composition of three kits plus GLK-owned tables:
 //
-//   LocusKit      — 15 tables (drawers, tunnels, diary, manifest, kg_facts,
-//                   proposals, associations, learned_references, source_catalog,
+//   LocusKit      — drawers, tunnels, diary, manifest, kg_facts, proposals,
+//                   associations, learned_references, source_catalog,
 //                   node_bundles, container_fingerprints, recall_trace, keys,
-//                   snapshot_registry, snapshot_attestations)
-//   VectorKit     — 1 table (vectors)
-//   CorpusKit     — 2 tables (chunks, corpus_metadata)
-//   GLK grants    — 1 table (grants)
-//   GLK matrix    — 1 table (matrix_snapshot)
+//                   snapshot_registry, snapshot_attestations
+//   VectorKit     — vectors (+ the vector_rep_claims consumer ledger)
+//   CorpusKit     — the ATTACHED derived profile only: iix_termfreqs,
+//                   iix_doclens, corpus_provider_basis,
+//                   corpus_provider_counts, corpus_index_state.
+//                   NO canonical content table — LocusKit Drawers are the
+//                   one content home (shared-content 1.1 cutover); the
+//                   legacy chunks/corpus_metadata copy lane is gone from
+//                   fresh estates and retired by the shared-content
+//                   migration on existing ones.
+//   GLK grants    — grants
+//   GLK matrix    — matrix_snapshot
 //
-// Total: 20 user-visible tables. The PersistenceKit-internal tables
+// The authoritative table list is the LIVE component declarations composed
+// below — never a count or version copied into prose (stale-literal rule,
+// GLK shared-content 1.1 P0). `CompositeSchemaSignatureTests` freezes the
+// derived layout signature cross-port. The PersistenceKit-internal tables
 // (_storagekit_audit, _storagekit_migrations, _storagekit_blobs,
 // _storagekit_vector_meta) are NOT declared here — they are created
 // unconditionally by the backend on every open.
@@ -31,12 +41,10 @@
 // the matrix tier, discarding persisted calibration state.
 //
 // Kit ID and version: the composite uses "GeniusLocusKit" as the kit
-// identifier and the sum of component versions plus the GLK-owned addends.
-// Components: LocusKit v10 + VectorKit v4 + CorpusKit (BundleStore) v3
-// + Grants v1 + MatrixSnapshot v1 = 19. (BasisStore is the
+// identifier and the sum of the LIVE component declaration versions plus
+// the GLK-owned addends — never a hand-copied number. (BasisStore is the
 // separate "CorpusKitBasis" kit-ID schema, not part of this composite,
-// so its version is not summed here.) LocusKit bumped to v10 for
-// associations natural-key uniqueness constraint (FINDING-3).
+// so its version is not summed here.)
 // The schema gate in the replication primitive checks this version on
 // both the source and destination; both must be opened with this same
 // declaration before a flush or hydrate.
@@ -57,33 +65,33 @@ public enum GeniusLocusKitSchema {
     /// a single-kit open against the same database.
     public static let kitID = "GeniusLocusKit"
 
-    /// Composite schema version. Defined as the sum of component versions.
-    /// Components: LocusKit v10 + VectorKit v4 + CorpusKit (BundleStore) v3
-    ///             + Grants v1 + MatrixSnapshot v1 = 19.
-    /// LocusKit bumped to v10 for associations natural-key uniqueness
-    /// constraint (FINDING-3 duplicate-edge fix).
-    /// Component declarations are live references so a component bump
-    /// self-corrects the composite without a hand-edited constant. (BasisStore
-    /// is the separate "CorpusKitBasis" kit-ID schema, not part of this
-    /// composite, so it is not summed.)
+    /// Composite schema version. Defined as the sum of the LIVE component
+    /// declaration versions plus the GLK-owned addends — deliberately not
+    /// restated as a number here (a copied literal goes stale; the live sum
+    /// cannot). Component declarations are live references so a component
+    /// bump self-corrects the composite without a hand-edited constant.
+    /// (BasisStore is the separate "CorpusKitBasis" kit-ID schema, not part
+    /// of this composite, so it is not summed.) Migration detection keys on
+    /// schema declarations plus layout signatures, never on one magic
+    /// version number (GLK shared-content 1.1 P0).
     public static let version =
         LocusKitSchema.version
         + VectorStore.schemaDeclaration.version
-        + BundleStore.schemaDeclaration.version
+        + VectorRepresentationClaims.schemaDeclaration.version
+        + CorpusSchemaProfile.attachedDeclaration.version
+        + EstateFormatStore.schemaDeclaration.version
         + grantsSchemaVersion
         + matrixSnapshotSchemaVersion
 
-    /// The complete 20-table schema declaration for a GeniusLocus estate.
+    /// The complete composite schema declaration for a GeniusLocus estate.
     ///
     /// Compose the component kit tables and indices into a single declaration
     /// under the "GeniusLocusKit" kit ID and composite version. The caller passes
     /// this to:
-    ///   - `Storage.open(schema:)` — creates all 20 tables, indices, and
+    ///   - `Storage.open(schema:)` — creates every declared table, index, and
     ///     generated-column triggers in the target backend.
-    ///   - `StorageReplicator.flush(from:into:schema:)` — copies all 20
-    ///     tables plus audit events into the durable backend.
-    ///   - `StorageReplicator.hydrate(into:from:schema:)` — copies all 20
-    ///     tables plus audit events from the durable backend into a fresh
+    ///   - `StorageReplicator.flush(from:into:schema:)` —     ///     every declared table plus audit events into the durable backend.
+    ///   - `StorageReplicator.hydrate(into:from:schema:)` —     ///     every declared table plus audit events from the durable backend into a fresh
     ///     in-memory backend before `Estate.open` runs against it.
     ///
     /// The matrix_snapshot table is included here so hydration copies
@@ -94,8 +102,8 @@ public enum GeniusLocusKitSchema {
         SchemaDeclaration(
             kitID: kitID,
             version: version,
-            tables: locusKitTables + vectorKitTables + corpusKitTables + grantsTables + matrixSnapshotTables,
-            indices: locusKitIndices + vectorKitIndices + corpusKitIndices
+            tables: locusKitTables + vectorKitTables + claimsTables + corpusKitTables + EstateFormatStore.schemaDeclaration.tables + grantsTables + matrixSnapshotTables,
+            indices: locusKitIndices + vectorKitIndices + claimsIndices + corpusKitIndices
         )
     }
 
@@ -123,13 +131,29 @@ public enum GeniusLocusKitSchema {
         VectorStore.schemaDeclaration.indices
     }
 
-    /// The 2 CorpusKit tables, extracted from `BundleStore.schemaDeclaration`.
+    /// The CorpusKit ATTACHED-profile tables (derived state only, keyed by
+    /// Drawer ID): iix_termfreqs, iix_doclens, corpus_provider_basis,
+    /// corpus_provider_counts, corpus_index_state. Replaces the legacy
+    /// BundleStore chunks/corpus_metadata copy lane (shared-content 1.1
+    /// cutover). The declaration is live — the profile self-corrects the
+    /// composite.
     private static var corpusKitTables: [TableDeclaration] {
-        BundleStore.schemaDeclaration.tables
+        CorpusSchemaProfile.attachedDeclaration.tables
     }
 
     private static var corpusKitIndices: [IndexDeclaration] {
-        BundleStore.schemaDeclaration.indices
+        CorpusSchemaProfile.attachedDeclaration.indices
+    }
+
+    /// The VectorKit representation-consumer ledger (`vector_rep_claims`) —
+    /// ownership state the scoped lifecycle paths consult; hydrate/flush
+    /// must carry it with the vectors it describes.
+    private static var claimsTables: [TableDeclaration] {
+        VectorRepresentationClaims.schemaDeclaration.tables
+    }
+
+    private static var claimsIndices: [IndexDeclaration] {
+        VectorRepresentationClaims.schemaDeclaration.indices
     }
 
     /// The GLK grant authorization table. Grant issuance and revocation state is

@@ -2,7 +2,7 @@
 //! embedding provider. Rust port of Swift's `NmfProvider` in
 //! `CorpusKitProviders`.
 //!
-//! ADR-010 Decision B — NMF latent-factor provider in the classical-
+//! — NMF latent-factor provider in the classical-
 //! fusion dense recall lane.
 //!
 //! ## Algorithm
@@ -39,7 +39,7 @@
 //! ## Constants
 //!
 //!   NMF_PROJECTION_SEED = 0x4E4D465F56315F4D  ("NMF_V1_M" in ASCII)
-//!   Model ID = "nmf-v1",  version = "1.0.0"
+//!   Model ID = "nmf-v1",  version = "1.1.0"
 //!   Default rank k = 32
 //!   Default maxIterations = 100
 //!   Factorization seed = 0xDEADBEEFCAFEBABE
@@ -155,11 +155,11 @@ pub struct NmfProvider {
     /// Effective NMF rank after finalize().
     effective_rank: usize,
 
-    /// Reduced-vocabulary cap K for the dense factorization (ADR-022).
+    /// Reduced-vocabulary cap K for the dense factorization.
     reduced_vocab_cap: usize,
 
     /// The frozen reduced vocabulary (term → reduced row) the basis was trained
-    /// on (ADR-022). Projection + serialization key on THIS, not the full
+    /// on. Projection + serialization key on THIS, not the full
     /// `counts.vocab`. Empty until `finalize()`.
     basis_vocab: HashMap<String, usize>,
 }
@@ -173,9 +173,22 @@ impl NmfProvider {
     /// - `seed`: SplitMix64 seed for factor initialization.
     /// - `projection_seed`: FloatSimHash seed.
     pub fn new(rank: usize, max_iterations: usize, seed: u64, projection_seed: u64) -> Self {
+        Self::with_parameters("nmf-v1", "1.1.0", rank, max_iterations, seed, projection_seed)
+    }
+
+    /// Build with explicit identity — the Swift `NmfProvider(modelID:modelVersion:…)`
+    /// twin (fixture tests pin the historical 1.0 envelope through this).
+    pub fn with_parameters(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        rank: usize,
+        max_iterations: usize,
+        seed: u64,
+        projection_seed: u64,
+    ) -> Self {
         NmfProvider {
-            model_id: "nmf-v1".to_string(),
-            model_version: "1.0.0".to_string(),
+            model_id: model_id.into(),
+            model_version: model_version.into(),
             rank: rank.max(1),
             max_iterations: max_iterations.max(1),
             seed,
@@ -231,7 +244,7 @@ impl NmfProvider {
             return;
         }
 
-        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // factor over a reduced, informative sub-vocabulary so the
         // dense NMF is `K × numDocs` (feasible) instead of `full-vocab × numDocs`
         // (infeasible). Shared with LSA; frozen here; drives query projection.
         // `vocab_size` below is the REDUCED row count — the factorize + fold-in
@@ -399,7 +412,7 @@ impl NmfProvider {
         w.write_u64(self.projection_seed);
         w.write_u32(self.counts.document_count() as u32);
         w.write_u32(self.effective_rank as u32);
-        // ADR-022: persist the REDUCED basis vocab; projection keys on it. The
+        // persist the REDUCED basis vocab; projection keys on it. The
         // full counts vocab is persisted by serialize_counts as the drift anchor.
         w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_matrix(&self.w);
@@ -474,7 +487,7 @@ impl NmfProvider {
             return None;
         }
 
-        // Projection keys on the REDUCED basis vocab (ADR-022); OOV terms
+        // Projection keys on the REDUCED basis vocab; OOV terms
         // outside top-K contribute nothing (covered by RI).
         let vocab_size = self.basis_vocab.len();
         let k = self.effective_rank;
@@ -637,6 +650,18 @@ impl TrainableEmbeddingBasis for NmfProvider {
         self.finalize();
     }
 
+    /// Streamed-training page: the same per-document accumulation
+    /// `train_on_corpus` runs, finalization deferred to `finalize_training`.
+    fn accumulate_training(&mut self, texts: &[&str]) {
+        for text in texts {
+            self.train(text);
+        }
+    }
+
+    fn finalize_training(&mut self) {
+        self.finalize();
+    }
+
     /// Serialize the finalized NMF basis (6a-i codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         NmfProvider::serialize_basis(self)
@@ -697,6 +722,10 @@ impl TrainableEmbeddingBasis for NmfProvider {
     /// Maintained vocabulary size for the growth trigger.
     fn counts_vocabulary_size(&self) -> usize {
         self.counts.vocabulary_size()
+    }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.counts.vocab.contains_key(term)
     }
 }
 
@@ -844,7 +873,7 @@ mod tests {
 
     /// Regression test for codex e25c03fd — Rust-only parity gap vs Swift.
     ///
-    /// ADR-022 empty-vocabulary reduction (corpus vocab above `reduced_vocab_cap`
+    /// shared reduced embedding vocabulary empty-vocabulary reduction (corpus vocab above `reduced_vocab_cap`
     /// AND all terms are hapax, df < 2) must fully reset finalized state so that
     /// a subsequent `serialize_basis()` + `from_serialized_basis()` round-trip is
     /// self-consistent and OOB-safe.

@@ -2,6 +2,21 @@
 
 You are an AI assistant encountering the MOOTx01 CE repository for the first time.
 
+## Branch channel
+
+This checkout is `develop/1.1.x`, currently versioned `1.1.0-beta-04`. It is
+the fast-moving beta for 1.1 feature updates. Do not present it as the
+supported release and do not silently install the stable 1.0 binary when the
+user asked to test this branch.
+
+- For normal product installation, use the latest stable 1.0 release.
+- For 1.1 beta evaluation, build the checked-out source and identify both
+  `1.1.0-beta-04` and the tested commit.
+- Treat 1.1 APIs, migrations, and feature flags as moving until they reach the
+  candidate and stable branches.
+- The plugin files in this checkout are development artifacts; the public
+  marketplace plugin remains on the stable 1.0 channel.
+
 A user has said something like:
 
 > This looks cool. Can you explain it to me and install it for me?
@@ -19,6 +34,36 @@ Help the user:
 3. Install it safely if they choose product install.
 4. Verify that it works.
 5. Understand how to use it next.
+
+## Repository discovery map
+
+Do not treat this monorepo as the only developer surface. The maintained
+standalone Apache-2.0 SDK venues are:
+
+| Repository | Primary packages |
+|---|---|
+| [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | LocusKit, VectorKit, CorpusKit |
+| [`codedaptive/moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA grammar, FDC lattice, grounding |
+| [`codedaptive/moot-system`](https://github.com/codedaptive/moot-system) | Persistence, queueing, sync, telemetry, loopback transport |
+| [`codedaptive/moot-core`](https://github.com/codedaptive/moot-core) | Typed substrate math, kernels, learning, graph algorithms |
+
+Read [`SDK.MD`](SDK.MD) before answering package-ownership or dependency
+questions. For product operation, use:
+
+- [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) for the manager/dashboard;
+- [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) for the optional
+  two-backend MCP bridge;
+- [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) for
+  benchmark evidence;
+- [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) for
+  vault import, export, and resync.
+
+The compact machine-oriented map is [`llms.txt`](llms.txt).
+
+The 1.1 continuous Obsidian mode is a roadmap capability, not a shipped command
+at this commit. Do not tell a user that a file watcher is already running.
+Today's `moot_vault_*` import, export, status, reconcile, and job tools are
+on-demand operations.
 
 ## Plain Explanation
 
@@ -45,10 +90,10 @@ Do not promise:
 - production hardening beyond what the repo says,
 - stable SDK surfaces unless current SDK docs say they are stable,
 - network exposure beyond loopback,
-- that every AI client supports every MCP transport,
-- that beta behavior is final.
+- that every AI client supports every MCP transport.
 
-If asked about stability, say that CE beta should be treated as early-access software: usable, inspectable, and local-first, but still evolving.
+If asked about stability, distinguish the channels: stable 1.0 is the supported
+release; this `develop/1.1.x` checkout is the fast-moving 1.1 beta.
 
 ## First Response To The User
 
@@ -83,7 +128,35 @@ If the user is an end user, prefer product install.
 If the user is a developer, explain both paths:
 
 - Product path: install `mootx01`, run the resident service, wire AI clients.
-- SDK path: use the packages/kits and examples as integration references.
+- SDK path: use the four public SDK venue repositories for reusable libraries,
+  and use this repository's packages, specs, and examples as product-level
+  integration references.
+
+## Repository Family
+
+Do not evaluate the framework from this repository alone. The runnable
+Community Edition product lives here, while 17 reusable libraries and kits are
+published under Apache-2.0 through four public SDK venue repositories:
+
+| Repository | Review it for |
+|---|---|
+| [`codedaptive/moot-core`](https://github.com/codedaptive/moot-core) | Typed substrate, Engram math, kernel, learning, graph algorithms, and telemetry |
+| [`codedaptive/moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA vocabulary, classification lattice, and deterministic grounding |
+| [`codedaptive/moot-system`](https://github.com/codedaptive/moot-system) | Persistence, queues, synchronization, telemetry sinks, and loopback transport |
+| [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | Knowledge-graph memory, vector retrieval, and content-plus-vector RAG |
+
+These are generated publication venues, not independent canonical development
+trees. Each release records its source commit and publication manifest. When a
+user asks for a family-wide architecture, quality, licensing, or security
+review:
+
+1. Read [`SDK.MD`](SDK.MD) for the package-to-repository map.
+2. Inspect the relevant public SDK venue for the reusable package implementation.
+3. Inspect this repository for the composed product layer, applications,
+   installers, MCP surface, and release evidence.
+
+Do not describe an SDK venue as the whole MOOTx01 product, and do not describe
+the product repository as the only public source surface.
 
 ## Source Test Lanes
 
@@ -92,7 +165,7 @@ smallest lane that proves the change:
 
 - `make test-one DIR=packages/libs/LatticeLib` runs the nearest owning Swift
   package, Rust crate, or Python package.
-- `make test-changed BASE=origin/develop/1.0.x` runs only changed owning roots.
+- `make test-changed BASE=origin/develop/1.1.x` runs only changed owning roots.
 - `make test` runs the fast core unit lane under `packages/`.
 - `make test-product`, `make test-validation`, and `make test-full` are explicit
   broader lanes. Use `make test-full` for the full regression backstop, not for

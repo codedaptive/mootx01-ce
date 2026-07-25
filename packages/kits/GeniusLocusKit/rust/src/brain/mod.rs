@@ -10,7 +10,7 @@
 //
 // What this scaffold does NOT do: open a real Rust QueueKit. The
 // Rust port of QueueKit does not exist (the decision
-// `DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21` defines QueueKit
+// `serialized standing-signal scheduling` defines QueueKit
 // as a Swift kit consumed by GeniusLocusKit Swift only). The Rust
 // mirror's serial lane is an in-process FIFO with the same drain
 // guarantee — exactly one drainer per estate, jobs applied in

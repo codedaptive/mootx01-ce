@@ -54,7 +54,9 @@ PLUGIN_MANIFESTS = [
 # incoming plugin version (the value the generator stamped for every host).
 BUNDLE_PROBE_KEY = "claude-code/.claude-plugin/plugin.json"
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+VERSION_RE = re.compile(
+    r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 # Matches `"version" : "X"` in the manifests (spaces around the colon are the
 # packager's exact byte format — preserved by capturing only the value).
 MANIFEST_VER_RE = re.compile(r'("version"\s*:\s*")([^"]+)(")')
@@ -129,7 +131,7 @@ def run_verify(version: str) -> int:
 def main() -> None:
     target = ce_version()
     if not VERSION_RE.match(target):
-        raise SystemExit(f"sync: CE version {target!r} is not MAJOR.MINOR.PATCH")
+        raise SystemExit(f"sync: CE version {target!r} is not supported SemVer")
 
     print(f"sync: CE product version is {target} — forcing plugin to match.")
     changed = False
@@ -141,12 +143,22 @@ def main() -> None:
             print(f"  stamped {rel}")
 
     readme = rd(README)
-    readme2 = re.sub(r"Version \d+\.\d+\.\d+", f"Version {target}", readme, count=1)
+    readme2 = re.sub(
+        r"Version \d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+        f"Version {target}",
+        readme,
+        count=1,
+    )
     if readme2 != readme:
         wr(README, readme2); changed = True; print(f"  stamped {README}")
 
     chlog = rd(PLUGIN_CHANGELOG)
-    chlog2 = re.sub(r"## \[\d+\.\d+\.\d+\]", f"## [{target}]", chlog, count=1)
+    chlog2 = re.sub(
+        r"## \[\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\]",
+        f"## [{target}]",
+        chlog,
+        count=1,
+    )
     if chlog2 != chlog:
         wr(PLUGIN_CHANGELOG, chlog2); changed = True; print(f"  stamped {PLUGIN_CHANGELOG}")
 

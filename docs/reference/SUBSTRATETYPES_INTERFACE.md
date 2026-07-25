@@ -861,7 +861,7 @@ projection under that seed. Generation lives in `SubstrateML.FloatSimHash`.
 
 ### `ContentHash`
 
-Typed 32-byte SHA-256 leaf digest. SPEC § 5.8. ADR-017 §16.
+Typed 32-byte SHA-256 leaf digest. SPEC § 5.8. the node-integrity contract §16.
 
 **Swift:**
 
@@ -897,7 +897,7 @@ pub enum ContentHashError { InvalidHexLength(usize), InvalidHexCharacter }
 
 ### `MerkleRoot`
 
-Typed 32-byte subtree root hash. SPEC § 5.9. ADR-017 §16.
+Typed 32-byte subtree root hash. SPEC § 5.9. the node-integrity contract §16.
 
 **Swift:**
 
@@ -933,7 +933,7 @@ pub enum MerkleRootError { InvalidHexLength(usize), InvalidHexCharacter }
 
 ### `SnapshotId`
 
-Typed UUID wrapper for snapshot identifiers. SPEC § 5.10. ADR-017 §15.
+Typed UUID wrapper for snapshot identifiers. SPEC § 5.10. the node-integrity contract §15.
 
 **Swift:**
 
@@ -968,7 +968,7 @@ pub enum SnapshotIdError { InvalidUUID(String) }
 
 ### `AsOfCoordinate`
 
-Temporal query coordinate. SPEC § 5.11. ADR-017 §15–§17.
+Temporal query coordinate. SPEC § 5.11. the node-integrity contract §15–§17.
 
 **Swift:**
 
@@ -993,7 +993,7 @@ both ports.
 
 ### `MerkleDomain`
 
-Frozen domain-separation tag constants. SPEC § 5.12. ADR-017 §16.
+Frozen domain-separation tag constants. SPEC § 5.12. the node-integrity contract §16.
 
 **Swift:**
 
@@ -1334,7 +1334,7 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 Added missing public surface found during full audit. (1) `FloatSimHashPlanes` — a public type in both ports absent from the doc (Swift 30th file, Rust `float_simhash_planes.rs`; §1 file count corrected, §2 new section, §7 concordance row added). (2) `HLC.advanced()` / `HLC.physicalSecondsSinceEpoch()` — present in both ports since initial commit, not documented; added to §2 HLC block and concordance. (3) `HLC.init(physicalTime:logicalCount:nodeId:)` — Swift-only back-compat alias; documented with note. (4) `RowState` cluster helpers — `cluster`, `isActiveCluster`, `activeClusterUpperBoundRaw`, `cluster(ofRawState:)` and `description` conformance (Swift); Rust `ACTIVE_CLUSTER_UPPER_BOUND_RAW`, `from_raw`, `cluster`, `is_active_cluster`, `cluster_of_raw_state` equivalents added with parity notes. (5) `RowVerb::token()` — Rust-only method returning the lowercase verb string; documented with parity note. (6) `LatticeAnchor.udcQid(_:qid:)` / `udc_qid()` — both ports, omitted since initial doc; added to §2 and concordance. (7) `LatticeAnchor::fnv1a64()` — Rust-only helper; documented with parity note. (8) `RowStateError.description` — `CustomStringConvertible` conformance; added to §2.
 
 ### 1.2.0 -- 2026-06-20
-Added five new types for ADR-017 content-integrity and snapshots: ContentHash, MerkleRoot, SnapshotId, AsOfCoordinate, MerkleDomain (§2). Updated §1 file count from 24 to 29. Added ContentHashError, MerkleRootError, SnapshotIdError to §4. Added nine concordance rows to §7. Updated Rust module list.
+Added five new types for the node-integrity contract content-integrity and snapshots: ContentHash, MerkleRoot, SnapshotId, AsOfCoordinate, MerkleDomain (§2). Updated §1 file count from 24 to 29. Added ContentHashError, MerkleRootError, SnapshotIdError to §4. Added nine concordance rows to §7. Updated Rust module list.
 
 ### 1.1.0 -- 2026-06-17
 Added `reason: String?` / `reason: Option<String>` field to `AuditEvent` in both ports (A-8: audit reason persistence). The field is nil/None when no caller reason is supplied and is persisted as nullable TEXT in the `_storagekit_audit` table's `reason` column. Added `withReason(_:) -> AuditEvent` copy helper (Swift). Updated concordance table row and init signature accordingly.

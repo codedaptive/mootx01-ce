@@ -313,7 +313,7 @@ struct GLK_COW_01_BranchTests {
             "compareToParent must detect rows added to branch after derivation")
     }
 
-    // MARK: - Test 11: derive preserves wing (ADR-016 wing-integrity, Finding A)
+    // MARK: - Test 11: derive preserves wing (wing-integrity, Finding A)
 
     /// A drawer captured into the parent in a non-default wing must land in the
     /// SAME wing in the branch estate after derivation.
@@ -364,7 +364,7 @@ struct GLK_COW_01_BranchTests {
             "Derived branch row must be in 'User Canon' wing — wing was dropped before this fix")
     }
 
-    // MARK: - Test 12: promote preserves wing (ADR-016 wing-integrity, Finding A)
+    // MARK: - Test 12: promote preserves wing (wing-integrity, Finding A)
 
     /// A drawer captured into the parent in a non-default wing must land in the
     /// SAME wing after derive → capture-in-branch → promote.
@@ -406,7 +406,7 @@ struct GLK_COW_01_BranchTests {
             "Promoted branch row must land in 'User Canon' wing — wing was dropped before this fix")
     }
 
-    // MARK: - Test 13: merge preserves wing (ADR-016 wing-integrity, Finding A)
+    // MARK: - Test 13: merge preserves wing (wing-integrity, Finding A)
 
     /// A drawer cherry-picked via glkMergeDrawers must land in its original wing
     /// in the parent estate, not the default wing.

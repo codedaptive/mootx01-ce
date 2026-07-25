@@ -51,7 +51,7 @@ public actor Estate {
     /// alongside the store over the same storage; backfilled on open.
     internal let containerFP: ContainerFingerprintStore
 
-    /// The estate's containment tree store (ADR-017). Wings and rooms
+    /// The estate's containment tree store. Wings and rooms
     /// are nodes; the capture verb resolves wing/room display names to
     /// node IDs through this store's create-on-demand resolution (§7).
     /// Public so GeniusLocusKit's SubstrateNodeTopologyProvider can
@@ -238,13 +238,13 @@ public actor Estate {
         }
         // Establish the estate's Ed25519 federation identity on first open.
         // The keypair is the signing credential for federation grants
-        // (DECISION_SYNCKIT_DESIGN_2026-05-19 §8); minting it once and
+        //; minting it once and
         // persisting the public half to the manifest makes the public key
         // stable across every subsequent open of the same storage. Key
         // generation is intrinsically random — like the estate UUID minted
         // at create — so it is exempt from the deterministic-engine rule.
         //
-        // Security posture (ADR-007, mirrors Rust Estate::open post PR #8):
+        // Security posture (data-movement privacy tiers, mirrors Rust Estate::open post PR #8):
         //   - The private key lives in the identity key store (Keychain in prod).
         //   - The private key is NEVER written to manifest.value: that table is
         //     ordinary metadata, unencrypted, visible to database and backup readers.
@@ -284,7 +284,7 @@ public actor Estate {
         }
         // NodeStore shares the same storage — schema already opened.
         let nodeStore = NodeStore(storage: storage)
-        // ADR-017: ensure root node exists. createRoot is idempotent —
+        // ensure root node exists. createRoot is idempotent —
         // returns existing root if already seeded.
         _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
         // Backfill so the aggregate covers every active row and is
@@ -387,7 +387,7 @@ public actor Estate {
             throw EstateError.substrateUnavailable("\(error)")
         }
         let nodeStore = NodeStore(storage: storage)
-        // ADR-017: seed root node on create. createRoot is idempotent.
+        // seed root node on create. createRoot is idempotent.
         _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
         let manifest = try await store.readManifest()
         // Estate.create does not mint the Ed25519 keypair — that happens in
@@ -642,7 +642,7 @@ public actor Estate {
     ///
     /// `includingRestricted` is the ONE sanctioned widening: the vault
     /// export's `.believedIncludingPrivate` scope — the owner's explicit
-    /// opt-in for Private-tier bulk export (ADR-007 Decision 2) — must carry
+    /// opt-in for Private-tier bulk export — must carry
     /// provenance tunnels to restricted drawers, mirroring the drawer-side
     /// tier rule (`VaultExportScope.includesPrivateTier`). Secret-tier edges
     /// are excluded UNCONDITIONALLY — no parameter widens past restricted,
@@ -677,7 +677,7 @@ public actor Estate {
         try await store.allTunnels()
     }
 
-    /// All confirmed-active, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    /// All confirmed-active, non-retired tunnels across all wings.
     ///
     /// Active-edge view: only tunnels with `lifecycle == .active` (bits 3–5 = 0)
     /// and `isRetired == false` (bit 13 clear) are returned. Proposed, withdrawn,
@@ -698,7 +698,7 @@ public actor Estate {
         try await store.addTunnel(t)
     }
 
-    /// Flip bit 13 of `operationalBitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Flip bit 13 of `operationalBitmap` to retire a tunnel.
     ///
     /// Throws `LocusKitError.tunnelNotFound` if no non-tombstoned tunnel exists for
     /// `tunnelId`. Delegates to `DrawerStore.retireTunnel(id:changedBy:now:)`.
@@ -706,7 +706,7 @@ public actor Estate {
         try await store.retireTunnel(id: tunnelId, changedBy: changedBy, now: now)
     }
 
-    /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel.
     ///
     /// Reverses a prior `retireTunnel`. Throws `LocusKitError.tunnelNotFound` if no
     /// non-tombstoned tunnel exists for `tunnelId`. Delegates to
@@ -825,7 +825,7 @@ public actor Estate {
     // MARK: - Node-tree name resolution
 
     /// Resolve parentNodeId UUIDs to display-name pairs (wing, room).
-    /// Higher kits call this to obtain display names after ADR-017
+    /// Higher kits call this to obtain display names after node-tree integrity
     /// removed them from the Drawer struct.
     public func resolveNodeNames(
         parentNodeIds: [String]

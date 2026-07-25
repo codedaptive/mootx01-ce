@@ -1,24 +1,24 @@
 ---
 title: CorpusKit Interface
-status: active
+status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-12
+date: 2026-07-22
 spec_type: kit
-version: 1.16.0
+version: 1.18.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
   - CORPUSKIT_SPEC.md  (the contract this interface implements)
-  - DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md  (authorizes the IntellectusLib dependency)
+  - the package-dependency rule  (authorizes the IntellectusLib dependency)
 purpose: |
-  Public API surface of CorpusKit in both ports: the Chunk content
-  model and its content-addressed identity, the Chunker, the BM25Index
-  actor, the BundleStore actor, HybridRecall, the Tokenizer protocol,
-  the three CorpusKitProviders providers (Swift and Rust, both ports),
-  the DeterministicTokenizer stand-in, the host-inference seam type,
-  and the CorpusKitSync manifest. The companion SPEC carries the
-  behavioral contracts (invariants I-1…I-8, conformance C-1…C-8b).
+  Accepted 1.1 public API target for CorpusKit in both ports: the
+  content-source contract, standalone content store, operating modes,
+  canonical CorpusHit result, whole-content and optional standalone
+  passage policies, BM25/vector retrieval, provider surfaces, and
+  synchronization/migration seams. Chunk, Chunker, ScoredChunk, and
+  BundleStore remain a standalone 1.0 compatibility surface and are not
+  used by GeniusLocusKit.
 ---
 
 # CorpusKit Interface
@@ -36,7 +36,7 @@ Two library targets plus tests:
   - `BundleStore.swift` — `BundleStore` (actor)
   - `BasisStore.swift` — `BasisStore` (actor), `PersistedBasis`
   - `CorpusProviderCountsStore.swift` — `CorpusProviderCountsStore` (actor),
-    `PersistedCounts`, `CountsGrowthAnchor`
+    `PersistedCounts`, `PersistedCountsReference`, `CountsGrowthAnchor`
   - `RemovedSourceStore.swift` — `RemovedSourceStore` (actor)
   - `HybridRecall.swift` — `HybridRecall`, `HybridRecallConfiguration`
   - `Tokenizer.swift` — `Tokenizer` protocol + default `keywordTokens`
@@ -60,7 +60,7 @@ Two library targets plus tests:
   - `BasisCodec.swift` — `BasisWriter`, `BasisReader`, `basisFormatVersion`
   - `DefaultEnsemble.swift` — `CorpusEnsemble`
   - `NLEmbeddingProvider.swift`, `NLContextualEmbeddingProvider.swift`
-    (Swift-only, `#if canImport(NaturalLanguage)` — see ADR-019)
+    (Swift-only, `#if canImport(NaturalLanguage)` — see the Apple embedding-provider contract)
 - `Tests/CorpusKitTests/`, `Package.swift`
 
 **Rust:** `packages/kits/CorpusKit/rust/` (crate `corpus-kit`,
@@ -76,13 +76,189 @@ lib `corpus_kit`) + `packages/kits/CorpusKit/rust-providers/`
 - depends on `substrate-lib`, `engram-lib`, `eidetic-lib`,
   `persistence-kit`, `convergence-kit`, `vectorkit`
 
+## § 1.1 — Shared-content operating surface (accepted 1.1 target)
+
+The types in this section are the common engine boundary for standalone
+CorpusKit and GeniusLocusKit composition. Swift and Rust ship the same value
+semantics and conformance traces.
+
+### Canonical content values
+
+```swift
+public typealias CorpusContentID = String
+
+public struct CorpusContentRecord: Sendable, Equatable {
+    public let id: CorpusContentID
+    public let revision: String
+    public let digest: ContentHash
+    public let text: String
+}
+
+public struct CorpusChangeCursor: Sendable, Equatable, Codable {
+    public let rawValue: String
+}
+
+public enum CorpusContentChange: Sendable, Equatable {
+    case upsert(id: CorpusContentID, revision: String, digest: ContentHash)
+    case remove(id: CorpusContentID, revision: String)
+}
+
+public struct CorpusContentChangeBatch: Sendable, Equatable {
+    public let changes: [CorpusContentChange]
+    public let nextCursor: CorpusChangeCursor
+}
+```
+
+```rust
+pub type CorpusContentId = String;
+
+pub struct CorpusContentRecord {
+    pub id: CorpusContentId,
+    pub revision: String,
+    pub digest: ContentHash,
+    pub text: String,
+}
+
+pub struct CorpusChangeCursor(pub String);
+
+pub enum CorpusContentChange {
+    Upsert { id: CorpusContentId, revision: String, digest: ContentHash },
+    Remove { id: CorpusContentId, revision: String },
+}
+
+pub struct CorpusContentChangeBatch {
+    pub changes: Vec<CorpusContentChange>,
+    pub next_cursor: CorpusChangeCursor,
+}
+```
+
+### Content-source and standalone-store contracts
+
+```swift
+public protocol CorpusContentSource: Sendable {
+    func content(id: CorpusContentID) async throws -> CorpusContentRecord?
+    func changes(since cursor: CorpusChangeCursor?) async throws
+        -> CorpusContentChangeBatch
+}
+
+public protocol CorpusContentStore: CorpusContentSource {
+    @discardableResult
+    func put(_ text: String, id: CorpusContentID?, now: Date) async throws
+        -> CorpusContentID
+    func removeContent(id: CorpusContentID, now: Date) async throws
+}
+```
+
+```rust
+pub trait CorpusContentSource: Send + Sync {
+    fn content(&self, id: &CorpusContentId) -> CorpusKitResult<Option<CorpusContentRecord>>;
+    fn changes(&self, cursor: Option<&CorpusChangeCursor>)
+        -> CorpusKitResult<CorpusContentChangeBatch>;
+}
+
+pub trait CorpusContentStore: CorpusContentSource {
+    fn put(&self, text: &str, id: Option<CorpusContentId>, now_millis: i64)
+        -> CorpusKitResult<CorpusContentId>;
+    fn remove_content(&self, id: &CorpusContentId, now_millis: i64)
+        -> CorpusKitResult<()>;
+}
+```
+
+`CorpusContentSource` is declared in CorpusKit core. LocusKit does not conform
+directly and does not import CorpusKit; GeniusLocusKit owns the adapter that
+projects active Drawers into these values.
+
+### Index-unit policy and results
+
+```swift
+public enum CorpusIndexUnitPolicy: Sendable, Equatable {
+    case wholeContent
+#if CORPUSKIT_STANDALONE_PASSAGES
+    case tokenWindows(windowTokens: Int, overlapTokens: Int)
+#endif
+}
+
+public struct CorpusEvidence: Sendable, Equatable {
+    public let passageID: String
+    public let utf8Start: Int
+    public let utf8Length: Int
+}
+
+public struct CorpusContentHit: Sendable, Equatable {
+    public let id: CorpusContentID
+    public let score: Float
+    public let vectorScore: Float?
+    public let keywordScore: Float?
+    public let evidence: CorpusEvidence?
+}
+```
+
+Rust exposes the equivalent `CorpusIndexUnitPolicy::TokenWindows`,
+`CorpusEvidence`, and `CorpusContentHit` values with snake-case fields when the
+`standalone-passages` feature is enabled.
+
+`.wholeContent` is the standalone default and the only policy accepted by the
+GeniusLocusKit adapter. `.tokenWindows` is compiled only with the Swift
+`StandalonePassages` trait and is standalone-only. Its persisted rows carry
+`content_id`, `revision`, `digest`, `policy_fingerprint`, and UTF-8 range
+coordinates; they carry no text. The database also stores one
+`corpus_index_configuration` authority row containing tokenizer identity,
+window, overlap, and version. Every recall result is aggregated to its canonical
+content ID.
+
+### Operating modes and construction
+
+```swift
+public enum CorpusOperatingMode: Sendable {
+    case standalone
+    case attached
+}
+
+public actor CorpusContentEngine {
+    public init(
+        storage: any Storage,
+        vectorStorage: any Storage,
+        mode: CorpusOperatingMode,
+        indexUnitPolicy: CorpusIndexUnitPolicy = .wholeContent,
+        embeddingModels: [EmbeddingModel]
+    ) async throws
+
+    public func applySourceChanges(now: Date) async throws
+    public func rebuildFromSource(now: Date) async throws
+    public func recall(_ query: String, limit: Int = 10, now: Date) async throws
+        -> [CorpusHit]
+}
+```
+
+Rust exposes the equivalent `CorpusOperatingMode` and `CorpusContentEngine::open`,
+`apply_source_changes`, `rebuild_from_source`, and `recall` surface.
+
+Standalone convenience methods delegate content mutation to the configured
+`CorpusContentStore` and then apply the resulting source change. Attached mode
+has no content mutation surface. GLK capture, mutation, withdrawal, and expunge
+remain LocusKit/GLK operations.
+
+### Storage profiles
+
+- **Standalone:** canonical `corpus_documents`; optional
+  `corpus_index_configuration` plus range-only `corpus_passages` when the
+  standalone passage build option is selected; derived BM25, vector,
+  provider-basis/counts, and `corpus_index_state` tables.
+- **GLK attached:** canonical `drawers` supplied by LocusKit; derived BM25,
+  vector, provider-basis/counts, and `corpus_index_state` tables only. No
+  `corpus_documents`, `corpus_passages`, `chunks`, or `corpus_metadata` table is
+  part of the GLK composite schema.
+- `corpus_index_state` is keyed by canonical content ID and records only source
+  revision/digest, applied cursor, and index version. It contains no verbatim
+  content.
+
 ## § 2 — Public types
 
 ### `Chunk`
 
-A unit of retrievable text with a content-addressed identity
-(SPEC § 4, I-1). The id is a deterministic RFC 4122 v5 UUID over
-`(sourceID, startOffset, text)`.
+A standalone 1.0 compatibility type for an optional passage index unit. It is
+never a GLK content object or public GLK result identity. The id is a
+deterministic RFC 4122 v5 UUID over `(sourceID, startOffset, text)`.
 
 **Swift:**
 
@@ -136,8 +312,9 @@ impl Chunk {
 
 ### `ScoredChunk`
 
-A chunk plus its retrieval score, returned by hybrid recall
-(SPEC § 5, B-4). Absent sub-scores are `nil` / `None`.
+A standalone 1.0 compatibility result: a chunk plus its retrieval score,
+returned only by the legacy passage-hydration hybrid recall (SPEC § 5, B-4).
+Absent sub-scores are `nil` / `None`.
 
 **Swift:**
 
@@ -171,8 +348,11 @@ impl ScoredChunk {
 
 ### `ChunkerConfiguration`
 
-Chunking parameters; defaults match the substrate reference
-(target 800 chars, overlap 100). Overlap is clamped to
+Standalone-only passage parameters. New 1.1 callers use
+`CorpusIndexUnitPolicy.tokenWindows(windowTokens:overlapTokens:)`, whose limits
+are expressed in tokens under the versioned CorpusKit passage tokenizer. These
+character-based defaults remain
+only for 1.0 compatibility (target 800 chars, overlap 100). Overlap is clamped to
 `[0, targetChars-1]` (SPEC § 5, B-1).
 
 **Swift:**
@@ -263,8 +443,9 @@ impl BM25Index {
 
 ### `BundleStore`
 
-Append-only, idempotent storage for the content half of a bundle
-(SPEC § 4, I-2, I-3). The chunks table joins to VectorKit by
+Standalone 1.0 compatibility storage for copied chunk content. It is excluded
+from the GeniusLocusKit composite schema under the 1.1 shared-content contract.
+The chunks table joins to VectorKit by
 `chunk.id.uuidString == storedVector.drawerID` (I-5). An `actor` in
 Swift over a PersistenceKit `Storage`.
 
@@ -272,7 +453,7 @@ Swift over a PersistenceKit `Storage`.
 
 ```swift
 public actor BundleStore {
-    public static let schemaDeclaration: SchemaDeclaration   // chunks + corpus_metadata tables (kit-ID "CorpusKit", v3), appendOnly; chunks carries content_hash BLOB nullable (hash-on-write, ADR-017 §19) and ext JSON nullable (ADR-012, inert in 1.0)
+    public static let schemaDeclaration: SchemaDeclaration   // chunks + corpus_metadata tables (kit-ID "CorpusKit", v3), appendOnly; chunks carries content_hash BLOB nullable (hash-on-write, the node-integrity contract §19) and ext JSON nullable (the forward-compatible ext-slot contract, inert in 1.0)
     public init(storage: any Storage)
     public func insert(_ chunks: [Chunk]) async throws        // idempotent (B-5); hash-on-write + Merkle rollup (I-11, I-13)
     public func get(id: UUID, asOf: AsOfCoordinate? = nil) async throws -> Chunk?
@@ -352,10 +533,16 @@ public protocol Tokenizer: Sendable {
     func keywordTokens(_ text: String) -> [String]
 }
 public extension Tokenizer {
-    // default: lowercase, split on Unicode word boundaries
+    // default: lowercase, fold final sigma U+03C2 to U+03C3,
+    // then split on Unicode-alphabetic / ASCII-digit boundaries
     func keywordTokens(_ text: String) -> [String]
 }
 ```
+
+The final-sigma fold is part of the cross-port canonical-token contract.
+Because it changes training input for RI, PPMI, LSA, and NMF, their production
+defaults use model version `1.1.0`; persisted `1.0.0` bases are not reused.
+FDC is stateless and remains `1.0.0`.
 
 **Rust:**
 
@@ -497,6 +684,11 @@ The fifth default-ensemble signal. A deterministic, non-trainable provider that
 encodes each chunk as a 256-dimensional float vector by hashing its vocabulary
 terms through a fixed codebook (`fdcNodeVector`). No inference closure; no
 training. Projection seed `fdcProjectionSeed` ("FDCV1P", `0x4644_435F_5631_5F50`).
+Cross-port classification also requires the Lattice tokenizer contract: Rust
+splits ASCII `:` to match Foundation word enumeration, and macOS Rust resolves
+the writable `WordClassTable.json` from the same
+`~/Library/Application Support/com.mootx01.lattice` root as Swift. An explicit
+environment override still takes precedence.
 
 **Swift:**
 
@@ -537,8 +729,8 @@ public func riIndexVector(term: String) -> [Float]
 
 public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendable {
     public let modelID: String              // default "random-indexing-v1"
-    public let modelVersion: String         // default "1.0.0"
-    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.0.0",
+    public let modelVersion: String         // default "1.1.0"
+    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.1.0",
                 dimension: Int = riDimension, nonzeros: Int = riNonzeros,
                 window: Int = riWindow, projectionSeed: UInt64 = riProjectionSeed)
     public func train(terms: [String], window: Int = riWindow)
@@ -565,7 +757,7 @@ public let ppmiProjectionSeed: UInt64       // 0x5050_4D49_5F56_314D ("PPMI_V1M"
 public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     public let modelID: String              // default "ppmi-v1"
     public let modelVersion: String
-    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.1.0",
                 dimension: Int = ppmiDimension, nonzeros: Int = ppmiNonzeros,
                 window: Int = ppmiWindow, projectionSeed: UInt64 = ppmiProjectionSeed)
     public func train(terms: [String], window: Int = ppmiWindow)
@@ -590,7 +782,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     public let rank: Int                    // SVD rank (default lsaDefaultRank)
     public let reducedVocabCap: Int         // vocabulary cap before SVD
     public let svdSweeps: Int               // Jacobi sweep count
-    public init(modelID: String = "lsa-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "lsa-v1", modelVersion: String = "1.1.0",
                 rank: Int = lsaDefaultRank, reducedVocabCap: Int = 8192,
                 svdSweeps: Int = 30, projectionSeed: UInt64 = lsaProjectionSeed)
     public func train(document: String)     // accumulate one document's TF
@@ -620,7 +812,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     public let reducedVocabCap: Int
     public let maxIterations: Int           // default nmfDefaultIterations
     public let seed: UInt64                 // NMF random init seed (default nmfFactorizationSeed)
-    public init(modelID: String = "nmf-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "nmf-v1", modelVersion: String = "1.1.0",
                 rank: Int = nmfDefaultRank, reducedVocabCap: Int = 8192,
                 maxIterations: Int = nmfDefaultIterations,
                 seed: UInt64 = nmfFactorizationSeed,
@@ -720,7 +912,7 @@ impl Default for TermDocumentCounts { /* new() */ }
 ```
 
 **`ReducedVocabulary`** — frozen IDF-reduced vocabulary selection for
-the dense LSA/NMF factorizations (ADR-022). The selection algorithm is
+the dense LSA/NMF factorizations. The selection algorithm is
 bit-identical across ports: drop hapax (df < 2), rank remaining terms
 by document frequency descending then UTF-8 byte order ascending, keep
 the top K. Below the cap the full vocabulary is returned unchanged.
@@ -781,12 +973,12 @@ pub fn select_reduced_vocabulary(
 > matches Swift's `Array(term.utf8)` compare). Covered by
 > `reduced_vocab.rs` tests.
 
-#### Apple NL providers — Swift-only (ADR-019)
+#### Apple NL providers — Swift-only (the Apple embedding-provider contract)
 
 Two additional providers exist in `CorpusKitProviders` behind
 `#if canImport(NaturalLanguage)`. They are **not** available in the
 Rust port (sanctioned divergence — same class as the `.nlTagger`
-word-class path; see ADR-019). They are item-local (stateless,
+word-class path; see the Apple embedding-provider contract). They are item-local (stateless,
 compute-once-on-write) and **opt-in** (not part of the default ensemble).
 
 **`NLEmbeddingProvider`** — OS-bundled sentence embedding (macOS 12+/iOS 15+):
@@ -851,7 +1043,7 @@ extension EmbeddingModel {
 ```
 
 Neither case joins `CorpusEnsemble.defaultEnsemble()`. Neither conforms to
-`TrainableEmbeddingBasis`. Rust has no counterpart. Recorded in SPEC I-14 and ADR-019.
+`TrainableEmbeddingBasis`. Rust has no counterpart. Recorded in SPEC I-14 and the Apple embedding-provider contract.
 
 ### Distributional-provider basis serialization (both ports)
 
@@ -947,12 +1139,13 @@ It surfaces three operations:
 
 The seam also carries the **maintained-counts** operations (the incremental
 counts table — see the `CorpusProviderCountsStore` section below). These let the
-host keep each trainable provider's raw additive statistics current as chunks are
-written, through the type-erased provider, instead of rebuilding from scratch on
-every reindex:
-- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one chunk into
-  the maintained accumulated counts (RI/PPMI fold a term sequence; LSA/NMF fold a
-  document into a lightweight vocab+doc-count anchor, O(vocab) not O(corpus)).
+host maintain each trainable provider's raw additive statistics through the
+type-erased provider instead of rebuilding them merely to measure growth:
+- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one canonical
+  index unit into the accumulated counts (RI/PPMI fold a term sequence; LSA/NMF
+  fold a document into a lightweight vocab+doc-count anchor, O(vocab) not
+  O(corpus)). In attached GLK mode that unit is a whole GLK Drawer; standalone
+  behavior follows the standalone database's explicit index-unit policy.
 - `serializeCounts()` / `serialize_counts()` — snapshot the raw additive state
   (distinct from `serializeBasis`; the counts codec, persisted in
   `corpus_provider_counts`). Byte-identical across ports.
@@ -1040,26 +1233,40 @@ public enum CorpusEnsemble {
 pub fn default_ensemble() -> Vec<EmbeddingModelConfig>;
 ```
 
-### `CorpusProviderCountsStore` — incremental maintained counts (both ports)
+### `CorpusProviderCountsStore` — base counts plus attached reference deltas (both ports)
 
-The persisted **counts table**: each trainable provider's raw additive statistics
-(RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary + document-count
-anchor), kept current as chunks are written so a retrain reads the maintained
-table instead of re-reading and re-tokenizing the whole corpus. Sibling of
+The persisted **counts table**: each trainable provider's published additive
+statistics base (RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary +
+document-count anchor). Sibling of
 `BasisStore`; CorpusKit-core, depends only on PersistenceKit + SubstrateTypes,
 never interprets the bytes (the provider owns the codec via the
 `TrainableEmbeddingBasis` counts seam). One row per `(model_id, model_version)`,
-keyed identically to the basis and vector rows; the two cheap integer columns
-`doc_count` / `vocab_size` are the growth-trigger anchors, readable without
-deserializing the blob.
+keyed identically to the basis and vector rows. The two cheap integer columns
+`doc_count` / `vocab_size` are independently maintained, durable growth-trigger
+anchors. Between provider publications they intentionally describe the live
+maintained state while `counts` remains the frozen published base blob.
 
-Lifecycle (driven by `Corpus`): the accumulator is restored on open, folded
-once per written chunk (`addToCounts`), and persisted at **batch boundaries**
-(end of `ingest` / `ingestBatch` / `reindex`) — never per chunk (that would be
-O(N·vocab) over an import). `Corpus.maintainedVocabAnchor()` /
-`maintained_vocab_anchor()` exposes the maximum maintained vocabulary size across
-trainable slots — the in-process read the autonomic governor's vocab-growth
-retrain trigger consumes (NeuronKit `CorpusGrowthProbe`).
+Standalone `Corpus` retains the established lifecycle: restore the accumulator,
+fold each newly written standalone index unit, and publish the blob at bounded
+ingest/reindex boundaries. Attached `CorpusContentEngine` does not rewrite an
+estate-scale counts blob for each queue burst. It atomically publishes small rows in
+`corpus_provider_count_references`, keyed by provider generation and canonical
+content identity, alongside the content checkpoint and the updated anchor
+columns. A new identity advances the document anchor once. A changed digest
+refreshes the same reference and may advance the nondecreasing vocabulary anchor
+without incrementing documents; an identical digest is a no-op. Those rows
+contain no text or token payload. Open restores the published base blob, resolves
+each pending identity through the canonical content source, rebuilds the working
+accumulator, and then restores the transactional anchor columns as the governor's
+authority. A provider publication/retrain atomically replaces its base counts
+and removes the reference rows that generation subsumed.
+
+`CorpusContentEngine.maintainedVocabAnchor()` /
+`CorpusContentEngine::maintained_vocab_anchor()` exposes the maximum durable,
+nondecreasing vocabulary anchor across trainable slots — the in-process read the
+autonomic governor's vocab-growth retrain trigger consumes (NeuronKit
+`CorpusGrowthProbe`). Store-level `growthAnchor` reads the same transactional
+anchor columns; it does not infer them from the frozen blob.
 
 **Swift:**
 
@@ -1076,12 +1283,24 @@ public struct CountsGrowthAnchor: Sendable, Equatable {
     public let documentCount: Int
     public let vocabSize: Int
 }
+public struct PersistedCountsReference: Sendable, Equatable {
+    public let modelID: String
+    public let modelVersion: String
+    public let contentID: String
+    public let revision: Int64
+    public let digest: String
+    public let updatedAt: Date
+}
 public actor CorpusProviderCountsStore {
     public static let schemaDeclaration: SchemaDeclaration
     public init(storage: any Storage)
     public func upsert(_ row: PersistedCounts) async throws
     public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts?
     public func growthAnchor(modelID: String, modelVersion: String) async throws -> CountsGrowthAnchor?
+    public func upsertReference(_ row: PersistedCountsReference, into rowStore: any RowStore) async throws
+    public func updateAnchors(modelID: String, modelVersion: String, documentCount: Int, vocabSize: Int, into rowStore: any RowStore) async throws -> Bool
+    public func references(modelID: String, modelVersion: String) async throws -> [PersistedCountsReference]
+    public func deleteReferences(modelID: String, modelVersion: String, into rowStore: any RowStore) async throws
     public func deleteAll() async throws
 }
 
@@ -1101,12 +1320,24 @@ pub struct PersistedCounts {
     pub updated_at_secs: i64,
 }
 pub struct CountsGrowthAnchor { pub document_count: usize, pub vocab_size: usize }
+pub struct PersistedCountsReference {
+    pub model_id: String,
+    pub model_version: String,
+    pub content_id: String,
+    pub revision: i64,
+    pub digest: String,
+    pub updated_at_secs: i64,
+}
 impl CorpusProviderCountsStore {
     pub fn schema_declaration() -> SchemaDeclaration;
     pub fn new(storage: Arc<dyn Storage>) -> Self;
     pub fn upsert(&self, row: &PersistedCounts) -> CorpusKitResult<()>;
     pub fn load(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<PersistedCounts>>;
     pub fn growth_anchor(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<CountsGrowthAnchor>>;
+    pub fn upsert_reference_into(&self, row: &PersistedCountsReference, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
+    pub fn update_anchors_into(&self, model_id: &str, model_version: &str, document_count: usize, vocab_size: usize, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<bool>;
+    pub fn references(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Vec<PersistedCountsReference>>;
+    pub fn delete_references_into(&self, model_id: &str, model_version: &str, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
     pub fn delete_all(&self) -> CorpusKitResult<()>;
 }
 
@@ -1135,7 +1366,8 @@ struct). Their members are documented in § 3.
 
 ### `Chunker.chunk`
 
-Sentence-aware chunking with overlap (SPEC § 5, B-1). Sentence
+Standalone compatibility surface only. Sentence-aware chunking with overlap
+(SPEC § 5, B-1). It is not constructed or called by GLK. Sentence
 segmentation is delegated to `EideticLib.sentences` (Swift) /
 `eidetic_lib::segmenter::sentences` (Rust), which centralizes the FDC
 encoder mandate's segmentation stage. Time enters
@@ -1162,9 +1394,10 @@ pub fn chunk_with_default_hlc(text: &str, source_id: &str,
 
 ### `HybridRecall.recall`
 
-RRF fusion of vector kNN and BM25 keyword hits, hydrated from the
-bundle store (SPEC § 5, B-4; I-4). The kNN pass is filtered to
-`modelID`.
+Standalone 1.0 compatibility surface. RRF fusion of vector kNN and BM25
+keyword hits is hydrated from the bundle store (SPEC § 5, B-4; I-4). The kNN
+pass is filtered to `modelID`. GLK uses `Corpus.recall` from § 1.1 and receives
+canonical Drawer-keyed `CorpusHit` values; it does not hydrate `ScoredChunk`.
 
 **Swift:**
 
@@ -1189,9 +1422,12 @@ pub fn recall(probe: &Engram, query: &str, model_id: &str, limit: usize,
 
 ### `CorpusKitSync.manifest`
 
-Builds the per-estate `SyncManifest` declaring the chunks table
+In standalone mode this builds the per-corpus `SyncManifest` declaring the chunks table
 bidirectional with the `.appendOnly` conflict policy (SPEC § 4, I-2;
-C-7). The `SyncManifest` type is ConvergenceKit's, not CorpusKit's.
+C-7). In GLK mode the composition manifest includes only CorpusKit's derived,
+rebuildable index state; no `chunks`, `corpus_documents`, or `corpus_passages`
+content table is declared. The `SyncManifest` type is ConvergenceKit's, not
+CorpusKit's.
 
 **Swift:**
 
@@ -1227,6 +1463,9 @@ public enum CorpusKitError: Error, Sendable, Equatable {
     case embeddingFailed(String)
     case storeUnavailable(String)
     case notTrainable(String)  // EmbeddingModel.reconstruct on a non-trainable model
+    case contentUnavailable(String)
+    case modeViolation(String)
+    case migrationIncomplete(String)
 }
 ```
 
@@ -1242,6 +1481,9 @@ pub enum CorpusKitError {
     EmbeddingFailed(String),
     StoreUnavailable(String),
     NotTrainable(String),  // EmbeddingModelConfig::reconstruct on a non-trainable model
+    ContentUnavailable(String),
+    ModeViolation(String),
+    MigrationIncomplete(String),
 }
 pub type CorpusKitResult<T> = Result<T, CorpusKitError>;
 // implements std::fmt::Display + std::error::Error
@@ -1257,7 +1499,7 @@ monitoring is enabled. Off by default; off-path cost is one
 
 Both ports add IntellectusLib as a dependency (non-breaking addition to
 `Package.swift` and `Cargo.toml`, authorized by
-`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+`the package-dependency rule`).
 
 **Swift:** `Package.swift` in `packages/kits/CorpusKit/` adds
 `.product(name: "IntellectusLib", package: "IntellectusLib")` to both
@@ -1328,6 +1570,12 @@ canonical vectors, covering SPEC C-8b.)
 
 ## § 7 — Corpus actor (public entry point)
 
+> **1.1 authority:** the shared-content constructors and operations in § 1.1
+> are the normative target surface. Signatures below that accept verbatim text,
+> return `ScoredChunk`, or expose `BundleStore` are retained only as the
+> standalone CorpusKit 1.0 compatibility surface. They are not available from a
+> GLK-composed `Corpus`.
+
 ### `EmbeddingModel` (Swift) / `EmbeddingModelConfig` (Rust)
 
 A CorpusKit-owned type for selecting the embedding model. No VectorKit
@@ -1387,8 +1635,10 @@ pub enum EmbeddingModelConfig {
 
 ### `Corpus`
 
-The public RAG entry point. No VectorKit type appears in any public
-signature (SPEC § 8, B-8).
+The public RAG entry point. No VectorKit type appears in any public signature
+(SPEC § 8, B-8). In standalone mode CorpusKit owns its content store. In GLK
+mode it reads canonical Drawers through the injected `CorpusContentSource` and
+persists only Drawer-keyed derived index state.
 
 **Swift:**
 
@@ -1452,11 +1702,17 @@ public actor Corpus {
     /// leases. Idempotent. Rust: `drop_ingest_queue(&self)`.
     public func dropIngestQueue() async
 
-    /// Enqueue text for asynchronous ingest (lazily mounts the queue). Empty
-    /// text is skipped. `sourceID` is the stable source handle (drawer id in the
-    /// GLK context); `now` is the capture instant. Rust:
+    /// STANDALONE ONLY: enqueue text for asynchronous ingest (lazily mounts the
+    /// queue). Empty text is skipped. `sourceID` is the canonical standalone
+    /// document id; `now` is the capture instant. Rust:
     /// `enqueue_ingest(self: &Arc<Self>, text, source_id, now_millis)`.
     public func enqueueIngest(_ text: String, sourceID: String, now: Date) async throws
+
+    /// GLK/attached mode: enqueue a source change without copying Drawer text
+    /// into QueueKit. The job contains canonical id, revision/digest, and source
+    /// cursor; the worker resolves current content through CorpusContentSource.
+    /// Rust: `enqueue_source_change(self: &Arc<Self>, change)`.
+    public func enqueueSourceChange(_ change: CorpusContentChange) async throws
 
     /// Block until the ingest queue has fully drained (every enqueued item
     /// ingested + replied). Returns promptly when empty; no-op when no queue is
@@ -1497,8 +1753,9 @@ public actor Corpus {
     /// (a method, not a var, because Rust has no stored-closure-as-property idiom).
     public var onEncoded: (@Sendable ([String]) async -> Void)?
 
-    /// Embed the query and return fused kNN + BM25 results (SPEC B-10).
-    /// Runs on the DEFAULT signal (models[0]).
+    /// STANDALONE 1.0 COMPATIBILITY: embed the query and return fused kNN + BM25
+    /// ScoredChunk results. The § 1.1 recall overload returns [CorpusHit] in both
+    /// modes and is the only overload GLK calls. Runs on models[0].
     public func recall(_ query: String, limit: Int = 10, now: Date) async throws -> [ScoredChunk]
 
     /// Dense float nearest-neighbour recall (Lane D) on the DEFAULT signal.
@@ -1524,15 +1781,17 @@ public actor Corpus {
     /// surfaces the most DISSIMILAR sources ("find things UNLIKE this"), ranked
     /// least-similar first. Same outcome shape, dark-lane observability,
     /// telemetry, and slot ordering as floatNearestPerSignal; only the objective
-    /// differs (the store returns farthest chunks via VectorStore.findFarthestFloat,
-    /// and a source's score is its WORST chunk cosine — the min-cosine inversion
+    /// differs (the store returns farthest index units via VectorStore.findFarthestFloat,
+    /// and a source's score is its WORST unit cosine — the min-cosine inversion
     /// of nearest's best-chunk rule). This is the seam GLK's RecallShape
     /// antiSimilarLanes consumes. Empty query / zero limit → one .emptyQuery per
     /// signal. Rust mirror: `Corpus::float_farthest_per_signal`.
     public func floatFarthestPerSignal(query: String, limit: Int) async
         -> [(modelID: String, outcome: FloatLaneOutcome)]
 
-    /// Retrain the embedding basis on the full corpus and re-embed every chunk
+    /// Retrain the embedding basis on the full corpus and re-embed every active
+    /// index unit. In GLK an index unit is exactly one canonical Drawer; in
+    /// standalone mode it may be a document or configured passage
     /// (mission 6a-ii-β). For a trainable provider: gathers all chunk texts,
     /// trains a FRESH basis from scratch through the TrainableEmbeddingBasis seam,
     /// UPSERTs it into corpus_provider_basis (one row per (modelID, modelVersion)),
@@ -1541,48 +1800,50 @@ public actor Corpus {
     /// vector refresh with no basis row written. Deterministic (pass `now`).
     public func reindex(now: Date) async throws
 
-    /// Remove a source from BM25 + VectorStore. BundleStore is
-    /// append-only; count() does not decrease (SPEC B-11).
+    /// Remove a canonical content id from BM25 + the Corpus-owned vector scope.
+    /// In GLK this removes derived rows only; LocusKit Drawer content is untouched.
     public func remove(sourceID: String) async throws
 
-    /// Total chunks in BundleStore (does not decrease after remove).
+    /// STANDALONE 1.0 COMPATIBILITY: total chunks in BundleStore.
     public func count() async throws -> Int
 
-    /// Resolve chunk IDs to the source (drawer) IDs that own them, from the
+    /// STANDALONE 1.0 COMPATIBILITY: resolve chunk IDs to document IDs, from the
     /// warm in-memory chunkSourceMap (no table scan; unmapped IDs absent
-    /// from the result). Consumer: GeniusLocusKit.huntContradictions maps
-    /// chunk-keyed vector rows back to drawer pairs (the contradiction
-    /// hunter's corpus lane). Rust: `source_ids_for_chunks(&[Uuid])`.
+    /// from the result). Retired from GLK in 1.1 because every Corpus result is
+    /// already keyed by Drawer id; retained only for standalone 1.0 callers.
+    /// Rust: `source_ids_for_chunks(&[Uuid])`.
     public func sourceIDs(forChunkIDs ids: [UUID]) -> [UUID: String]
 
     // Estate lifecycle primitive:
-    /// Destroy the entire recall index. Clears BM25, chunk_source_map, all
-    /// vectors, AND all persisted basis rows (no orphans). BundleStore rows
-    /// (chunks) are NOT deleted (append-only invariant). Called by
+    /// Destroy CorpusKit's derived recall index. Clears BM25, CorpusKit-owned
+    /// id maps, CorpusKit-scoped vectors, provider basis/count rows, and
+    /// checkpoints. It MUST NOT delete canonical documents/Drawers or vectors
+    /// owned by other GLK lanes, and MUST NOT call an unqualified
+    /// `destroyAllVectors`. Standalone BundleStore rows are preserved. Called by
     /// GeniusLocusKit.destroy(storage:corpusStorage:handle:).
     public func destroyRecallIndex() async throws
 
-    /// Scrub verbatim chunk text for a source (SPEC B-15), then remove it from
-    /// recall (delegates to `remove`). Step 1 (scrub) is committed before step
-    /// 2 (recall removal) so content erasure is durable even if remove fails.
-    /// BundleStore rows survive with emptied `text` fields; the append-only
-    /// invariant holds. Rust: `expunge(&self, source_id)`.
+    /// STANDALONE ONLY: scrub verbatim content owned by CorpusKit, then remove
+    /// its derived recall state. In GLK, erasure begins in LocusKit and GLK calls
+    /// `remove` for the Drawer id; CorpusKit never scrubs or owns Drawer text.
+    /// Rust: `expunge(&self, source_id)`.
     public func expunge(sourceID: String) async throws
 
-    /// Source-aggregated BM25 recall: returns up to `limit` `(sourceID, score)`
-    /// pairs, one per source, scored by the maximum chunk BM25 score for that
-    /// source. Used by the Hunter BM25 prefilter path (corpus lane).
+    /// Canonical-content-aggregated BM25 recall. GLK rows are Drawer-keyed
+    /// directly; standalone passage scores fold to their document id. Used by
+    /// the Hunter BM25 prefilter path (corpus lane).
     /// Empty query or limit ≤ 0 returns []. Rust: `bm25_top_k_by_source`.
     public func bm25TopKBySource(query: String, limit: Int) async throws -> [(sourceID: String, score: Float)]
 
-    /// All source IDs currently in the BundleStore (the full stored-chunk
-    /// universe, including removed sources whose rows are preserved by the
-    /// append-only invariant). Used by GLK provision for membership checks.
+    /// All canonical content IDs represented in the derived Corpus index. In
+    /// GLK this is read from index/checkpoint state, not BundleStore, and is used
+    /// only for reconciliation with the injected content source.
     /// Rust: `indexed_source_ids() -> HashSet<String>`.
     public func indexedSourceIDs() async throws -> Set<String>
 
-    /// Per-corpus and global Merkle roots, delegating to the internal BundleStore.
-    /// See BundleStore.corpusMerkleRoot / globalCorpusMerkleRoot in § 2.
+    /// STANDALONE compatibility roots over CorpusKit-owned content. GLK uses the
+    /// LocusKit/GLK content and composition roots; it does not create a second
+    /// Corpus content Merkle identity.
     public func corpusMerkleRoot(for sourceID: String) async throws -> MerkleRoot
     public func globalCorpusMerkleRoot() async throws -> MerkleRoot
 
@@ -1620,7 +1881,7 @@ public actor Corpus {
 public actor BasisStore {
     /// Additive schema (kit-ID "CorpusKitBasis", version 2): corpus_provider_basis(
     /// model_id TEXT, model_version TEXT, basis BLOB, trained_at TIMESTAMP/ISO8601,
-    /// trained_chunk_count INTEGER, ext JSON nullable — ADR-012 forward-compat slot,
+    /// trained_chunk_count INTEGER, ext JSON nullable — the forward-compatible ext-slot contract forward-compat slot,
     /// inert in 1.0), PK (model_id, model_version). NO Bool columns; dates TEXT ISO8601.
     public static let schemaDeclaration: SchemaDeclaration
     public init(storage: any Storage)
@@ -1640,8 +1901,10 @@ pub struct Corpus { /* bundle_store, bm25: Mutex<BM25Index>, vector_store,
                        basis_store, model_id, provider: Mutex<ProviderHandle>,
                        fresh_basis_blob: Option<Vec<u8>> */ }
 impl Corpus {
-    /// Construct via migrate() to apply all schemas (BundleStore + VectorStore +
-    /// BasisStore) regardless of version gating. LOAD-ON-OPEN: when the model is
+    /// STANDALONE 1.0 compatibility constructor. Construct via migrate() to apply
+    /// CorpusKit-owned content plus derived schemas. The § 1.1 attached constructor
+    /// accepts Arc<dyn CorpusContentSource> and omits content/chunk schemas.
+    /// LOAD-ON-OPEN: when the model is
     /// trainable AND a basis was persisted for its (model_id, model_version), the
     /// trained provider is reconstructed from that blob (trained-ready on open).
     pub fn open(storage: Arc<dyn Storage>, model: EmbeddingModelConfig) -> CorpusKitResult<Self>;
@@ -1649,10 +1912,16 @@ impl Corpus {
     /// now_millis: Unix epoch in milliseconds (caller-supplied for determinism).
     /// FIRST-INGEST AUTO-TRAIN: a trainable provider with no persisted basis
     /// trains a fresh basis on the first ingest; later ingests fold in (no retrain).
+    /// STANDALONE 1.0 compatibility; unavailable in attached GLK mode.
     pub fn ingest(&self, text: &str, source_id: &str, now_millis: i64) -> CorpusKitResult<()>;
+    /// STANDALONE 1.0 compatibility. The § 1.1 recall returns Vec<CorpusHit>.
     pub fn recall(&self, query: &str, limit: usize, now_millis: i64) -> CorpusKitResult<Vec<ScoredChunk>>;
 
-    /// Retrain the embedding basis on the full corpus and re-embed every chunk
+    /// Attached/GLK queue payload contains identity and revision metadata only.
+    pub fn enqueue_source_change(&self, change: CorpusContentChange) -> CorpusKitResult<()>;
+
+    /// Retrain the embedding basis on the full corpus and re-embed every index
+    /// unit (one Drawer per unit in GLK; document or passage in standalone mode)
     /// (mission 6a-ii-β). Trainable provider: trains a FRESH basis (reconstructed
     /// from the empty-basis blob — train_on_corpus is additive), UPSERTs it into
     /// corpus_provider_basis, re-embeds every chunk replacing stale vectors.
@@ -1663,17 +1932,18 @@ impl Corpus {
     pub fn remove(&self, source_id: &str) -> CorpusKitResult<()>;
     pub fn count(&self) -> CorpusKitResult<usize>;
 
-    /// Scrub verbatim chunk text then remove from recall (SPEC B-15).
-    /// Swift: `expunge(sourceID:)`.
+    /// STANDALONE ONLY: scrub CorpusKit-owned text then remove from recall.
+    /// GLK erasure is owned by LocusKit/GLK. Swift: `expunge(sourceID:)`.
     pub fn expunge(&self, source_id: &str) -> CorpusKitResult<()>;
 
     /// Source-aggregated BM25 recall. Swift: `bm25TopKBySource(query:limit:)`.
     pub fn bm25_top_k_by_source(&self, query: &str, limit: usize) -> Vec<(String, f32)>;
 
-    /// All source IDs in BundleStore. Swift: `indexedSourceIDs()`.
+    /// Canonical IDs represented by the derived index; GLK does not read a
+    /// BundleStore. Swift: `indexedSourceIDs()`.
     pub fn indexed_source_ids(&self) -> CorpusKitResult<std::collections::HashSet<String>>;
 
-    /// Per-corpus and global Merkle roots (delegate to internal BundleStore).
+    /// STANDALONE content roots. GLK uses LocusKit/GLK content roots.
     pub fn corpus_merkle_root(&self, source_id: &str) -> CorpusKitResult<MerkleRoot>;
     pub fn global_corpus_merkle_root(&self) -> CorpusKitResult<MerkleRoot>;
 
@@ -1685,8 +1955,9 @@ impl Corpus {
     pub fn model_id(&self) -> &str;
 
     // Estate lifecycle primitive:
-    /// Clear BM25 + chunk_source_map + all vectors + all basis rows (no orphans).
-    /// BundleStore rows preserved (append-only).
+    /// Clear BM25 + CorpusKit id maps + CorpusKit-scoped vectors + basis/count
+    /// rows and checkpoints. Preserve canonical content and unrelated GLK vectors;
+    /// an unqualified destroy-all-vectors operation is forbidden.
     pub fn destroy_recall_index(&self) -> CorpusKitResult<()>;
 
     // Rust-only bulk-import path (no Swift counterpart):
@@ -1710,7 +1981,7 @@ pub struct PersistedBasis {
 impl BasisStore {
     /// corpus_provider_basis(model_id TEXT, model_version TEXT, basis BLOB,
     /// trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER, ext JSON nullable
-    /// — ADR-012 forward-compat slot, inert in 1.0), PK (model_id, model_version).
+    /// — the forward-compatible ext-slot contract forward-compat slot, inert in 1.0), PK (model_id, model_version).
     /// kit-ID "CorpusKitBasis", version 2. No Bool columns; dates TEXT ISO8601.
     pub fn schema_declaration() -> SchemaDeclaration;
     pub fn new(storage: Arc<dyn Storage>) -> Self;
@@ -1720,9 +1991,9 @@ impl BasisStore {
 }
 ```
 
-### `RemovedSourceStore`
+### `RemovedSourceStore` (standalone 1.0 compatibility)
 
-Persistence for the set of source IDs whose recall has been suppressed by
+Standalone persistence for source IDs whose recall has been suppressed by
 `Corpus.remove`. Because `BundleStore.chunks` is append-only (I-2), a reindex
 would re-embed and re-index a removed source's chunks, resurrecting it in
 recall. `RemovedSourceStore` records which sources are removed so every rebuild
@@ -1765,7 +2036,10 @@ impl RemovedSourceStore {
 }
 ```
 
-Both ports are at parity. `Corpus` owns the `RemovedSourceStore` instance
+Both ports are at parity for standalone compatibility. A GLK-composed Corpus
+does not open this content-lifecycle table; it derives active membership from
+LocusKit changes and its own Drawer-keyed checkpoint/index state. A standalone
+`Corpus` owns the `RemovedSourceStore` instance
 internally and drives it through `remove` / `expunge` / `ingest` / `reindex` /
 `destroyRecallIndex`; external callers do not hold a reference to it directly.
 
@@ -1782,6 +2056,10 @@ provider, so no Swift protocol change is required.
 ---
 
 ## § 8 — Examples
+
+The example below exercises standalone CorpusKit's 1.0 compatibility surface.
+GLK composition uses the § 1.1 attached-content surface and does not call
+`Chunker`, `BundleStore`, or `HybridRecall.recall` directly.
 
 ```swift
 import CorpusKit
@@ -1817,10 +2095,16 @@ The test/vector binding names the conformance/parity test that proves
 Swift == Rust for that concept.
 
 Status legend: **Confirmed** = both present and test-bound;
+**Accepted target** = normative 1.1 surface awaiting implementation;
 **Exempt** = Apple-platform binding, no Rust counterpart by design.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
+| Canonical content identity | `CorpusContentID` | `CorpusContentId` | public alias / pub alias | String identity; GLK value is exactly `Drawer.id` | shared content-source fixture | Accepted target |
+| Content source | `CorpusContentSource` | `CorpusContentSource` | public protocol / pub trait | read-by-id plus cursor-based changes; same values and error semantics | source-adapter conformance suite | Accepted target |
+| Standalone content store | `CorpusContentStore` | `CorpusContentStore` | public protocol / pub trait | extends source with put/remove; unavailable in attached mode | standalone content conformance suite | Accepted target |
+| Index-unit policy | `CorpusIndexUnitPolicy` | `CorpusIndexUnitPolicy` | public enum / pub enum | whole content in GLK; optional token-budgeted range-only passages in standalone | policy conformance suite | Accepted target |
+| Canonical recall result | `CorpusHit` | `CorpusHit` | public struct / pub struct | identical canonical content id, fused scores, range evidence | recall conformance suite | Accepted target |
 | Chunk | `Chunk` (`Chunk.swift:34`) | `Chunk` (`chunk.rs:37`) | public struct / pub struct | identical fields; idiom: Swift `UUID`/`Int`/`[String:String]` ↔ Rust `Uuid`/`usize`/`BTreeMap`; content-addressed v5 id | `ChunkTests.swift` / `chunk_tests.rs` | Confirmed |
 | ScoredChunk | `ScoredChunk` (`Chunk.swift:147`) | `ScoredChunk` (`chunk.rs:136`) | public struct / pub struct | identical; Swift `Float`/`Float?` ↔ Rust `f32`/`Option<f32>` | `ChunkTests.swift` / `chunk_tests.rs` | Confirmed |
 | ChunkerConfiguration | `ChunkerConfiguration` (`Chunker.swift:29`) | `ChunkerConfiguration` (`chunker.rs:27`) | public struct / pub struct | identical; defaults 800/100/true (Swift default-arg init / Rust `Default`) | `ChunkerTests.swift` / `chunker_tests.rs` | Confirmed |
@@ -1832,7 +2116,7 @@ Status legend: **Confirmed** = both present and test-bound;
 | HybridRecall (namespace) | `HybridRecall` (`HybridRecall.swift:36`) | `recall` free fn (`hybrid_recall.rs`) | public enum (caseless) / pub fn | Swift caseless-enum namespace `HybridRecall.recall` / Rust free function — sanctioned stateless-namespace idiom; Swift `async throws` ↔ Rust sync `CorpusKitResult` (no async runtime) | `HybridRecallTests.swift` / `hybrid_recall_tests.rs` | Confirmed |
 | Tokenizer | `Tokenizer` (`Tokenizer.swift:10`) | `Tokenizer` (`tokenizer.rs:8`) | public protocol / pub trait | identical surface; Swift protocol-extension default `keywordTokens` ↔ Rust trait default delegating to `default_keyword_tokens`; idiom `vocabID`↔`vocab_id`, `Int32`↔`i32` | `TokenizerTests.swift` / `tokenizer_tests.rs` | Confirmed |
 | CorpusKitSync | `CorpusKitSync` (`SyncManifest.swift:11`) | `CorpusKitSync` (`sync_manifest.rs:9`) | public enum (caseless) / pub struct | Swift caseless-enum namespace / Rust unit struct — sanctioned stateless-namespace idiom; both expose `manifest(...)→SyncManifest` (ConvergenceKit's type) | `SyncManifestTests.swift` / `hybrid_recall_tests.rs` (manifest exercised) | Confirmed |
-| CorpusKitError | `CorpusKitError` (`CorpusKitError.swift:5`) | `CorpusKitError` (`error.rs:4`) | public enum / pub enum | identical six cases; Rust adds `Display`+`Error` impls; case idiom `encodingFailure`↔`EncodingFailure` | `CorpusKitErrorTests.swift` / `chunk_tests.rs` + `error.rs` Display impl | Confirmed |
+| CorpusKitError | `CorpusKitError` (`CorpusKitError.swift:5`) | `CorpusKitError` (`error.rs:4`) | public enum / pub enum | 1.1 target adds matching content-unavailable, mode-violation, and migration-incomplete cases to the existing six; Rust adds `Display`+`Error` impls | target error parity suite | Accepted target |
 | CorpusKitResult | (Swift uses `async throws`) | `CorpusKitResult` (`error.rs:28`) | — / pub type alias | Rust `Result<T, CorpusKitError>` alias ↔ Swift typed `throws` — sanctioned error-channel idiom (Swift has no Result-alias surface) | `chunk_tests.rs` / `corpus_tests.rs` (result threaded through) | Confirmed |
 | EmbeddingModel selector | `EmbeddingModel` (`CorpusKit.swift:40`) | `EmbeddingModelConfig` (`corpus.rs:56`) | public enum / pub enum | Swift four cases (`deterministic`/`miniLM`/`mpNet`/`embeddingGemma` with async closure); Rust four cases (`Deterministic`/`MiniLM`/`MPNet`/`EmbeddingGemma` with sync `NamedInferenceFn`); async↔sync seam is sanctioned (Rust has no async runtime). Projection seeds byte-identical across ports. | `CorpusTests.swift` / `corpus_tests.rs` + `embedding_conformance_tests.rs` | Confirmed |
 | Corpus | `Corpus` (`CorpusKit.swift:99`) | `Corpus` (`corpus.rs:113`) | public actor / pub struct | Swift `actor` (`init async throws`) / Rust `struct` (`open()`, `bm25: Mutex<BM25Index>`); Swift `async throws`+`Date` ↔ Rust sync `CorpusKitResult`+`now_millis` — sanctioned actor↔owned-state + async↔sync seam | `CorpusTests.swift` / `corpus_tests.rs` | Confirmed |
@@ -1842,13 +2126,13 @@ Status legend: **Confirmed** = both present and test-bound;
 | EmbeddingGemmaProvider | `EmbeddingGemmaProvider` (`EmbeddingGemmaProvider.swift:33`) | `EmbeddingGemmaProvider` (`rust-providers/src/text_providers.rs`) | public struct / pub struct | Both ports: model_id "embedding-gemma-300m", projectionSeed 0x454D_4247_4D5F_7631, FNV-1a tokenizer (vocab 256000, max 2048), host inference closure (same async↔sync seam). Conforms to VectorKit `EmbeddingProvider`. Bit-identical engram for shared pooled vector (SPEC C-8b) | `EmbeddingProviderConformanceTests.swift` + `embedding_provider_vectors.json` / `embedding_conformance_tests.rs` | Confirmed |
 | Telemetry — ingest | `Intellectus.report` ×2 in `BundleStore.insert` emitting `corpuskit.ingest.latency_ms` + `corpuskit.ingest.chunk_count` | `report!` ×2 in `BundleStore::insert` | internal emit / internal emit | identical metric names, tags (`kit=CorpusKit`), value semantics; SPEC § 7.2 | `CorpusKitTelemetryTests.swift` §1-§4 / `corpuskit_telemetry_tests.rs` §1-§4 | Confirmed |
 | Telemetry — recall | `Intellectus.report` ×4 in `HybridRecall.recall` emitting `corpuskit.recall.*` | `report!` ×4 in `hybrid_recall::recall` | internal emit / internal emit | identical metric names, tags (`kit=CorpusKit`, `model_id`), value semantics; SPEC § 7.2 | `CorpusKitTelemetryTests.swift` §1-§4 / `corpuskit_telemetry_tests.rs` §1-§4 | Confirmed |
-| Sparse-lane outcome | `FloatLaneOutcome` (`CorpusKit.swift:45`) | `FloatLaneOutcome` (`corpus.rs:67`) | both public/pub | identical 3-case enum: `hit(ScoredChunk)`/`Hit(ScoredChunk)`, `dark(String)`/`Dark(String)`, `unavailable`/`Unavailable` — float nearest-neighbour lane result; Swift lowerCamel / Rust UpperCamel cases — idiom. `dark` is an EXPECTED degradation (indexed with no corpus, expected miss — not an error). | `CorpusTests.swift` / `corpus_tests.rs` | Confirmed |
+| Sparse-lane outcome | `FloatLaneOutcome` (`CorpusKit.swift:45`) | `FloatLaneOutcome` (`corpus.rs:67`) | both public/pub | standalone 1.0 compatibility shape carries `ScoredChunk`; the 1.1 attached Corpus surface exposes canonical `CorpusHit` outcomes instead | legacy corpus tests + target recall suite | Confirmed legacy / Accepted target |
 | BM25 weighting (Lane D) | `BM25Weighting` (`BM25Weighting.swift:71`) | `BM25Weighting` (`engine/bm25_weighting.rs:69`) | both public/pub | Swift caseless-enum namespace (static methods `weight`, `quantizeImpact`) / Rust unit struct with associated methods — sanctioned stateless-namespace idiom; weight computation and impact quantization are byte-identical | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
 | Impact posting | `ImpactPosting` (`Engine/SparseTypes.swift:57`) | `ImpactPosting` (`engine/sparse_types.rs:32`) | both public/pub | identical 2-field struct: `termID: UInt32`/`term_id: u32`, `impact: Int32`/`impact: i32` — one (termID, impact) entry in the sorted impact list | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
 | Sparse search result | `SparseHit` (`Engine/SparseTypes.swift:95`) | `SparseHit` (`engine/sparse_types.rs:53`) | both public/pub | identical 2-field struct: `id: String`, `score: Float`/`f32` — one ranked BM25 result | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
 | Fused (sparse+dense) hit | `FusedHit` (`Engine/SparseTypes.swift:137`) | `FusedHit` (`engine/sparse_types.rs:76`) | both public/pub | identical 3-field struct: `id: String`, `score: Float`/`f32`, `perLane: [LaneTag: Float]`/`per_lane: HashMap<LaneTag, f32>` — merged result from RRF lane fusion; `perLane`/`per_lane` carries per-lane score contributions | `HybridRecallTests.swift` / `hybrid_recall_tests.rs` | Confirmed |
 | Inverted index | `InvertedIndex` (`Engine/InvertedIndex.swift:116`) | `InvertedIndex` (`engine/inverted_index.rs:98`) | both public/pub | identical postings store: Swift `struct` / Rust `struct`; both implement `topK(query:k:)` / `top_k(query, k, algorithm)` against a sorted impact list; Rust adds `Algorithm` enum (WAND / BlockMaxWand) as a query-time parameter (Swift uses WAND implicitly) | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
-| Inverted index store | `InvertedIndexStore` (`Engine/InvertedIndexStore.swift:47`) | `InvertedIndexStore` (`engine/inverted_index_store.rs:29`) | both public/pub | Swift `actor` (async isolation) / Rust `struct` (owned-state, sync) — sanctioned actor↔owned-state seam; both wrap an `InvertedIndex` with a `BundleStore`-backed build path | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
+| Inverted index store | `InvertedIndexStore` (`Engine/InvertedIndexStore.swift:47`) | `InvertedIndexStore` (`engine/inverted_index_store.rs:29`) | both public/pub | Swift `actor` / Rust owned-state struct; 1.1 build path enumerates `CorpusContentSource`, while the `BundleStore` path remains standalone 1.0 compatibility only | legacy BM25 tests + target source rebuild suite | Confirmed legacy / Accepted target |
 | Lane tag (alias) | `LaneTag` (`Engine/SparseTypes.swift:40`, `public typealias LaneTag = VectorKit.LaneTag`) | re-exported `vectorkit::engine::hit::LaneTag` (`engine/mod.rs`) | both public/pub | CorpusKit re-exports the canonical `VectorKit.LaneTag` in both ports; the type is owned by VectorKit (see VectorKit concordance). In Swift this is an explicit typealias; in Rust it is a re-export at `use vectorkit::engine::hit::LaneTag`. The canonical concordance row lives in VectorKit's concordance table. | (governed by VectorKit parity) | Confirmed (re-export alias; canonical row in VectorKit) |
 | Fusion (Lane E) | `Fusion` (`Engine/Fusion.swift:48`) | — (`engine/fusion.rs`: free fns `fuse`, `fuse_scored`) | Swift public caseless-enum namespace / Rust pub free functions | Swift groups lane-fusion under a caseless-enum namespace `Fusion.fuse(sparse:dense:limit:)` / `Fusion.fuseScored(sparse:dense:limit:)`; Rust exposes the identical operations as module-level free functions `fuse(...)` / `fuse_scored(...)` — sanctioned stateless-namespace idiom. Fusion logic (RRF rank combination) is byte-identical. | `HybridRecallTests.swift` / `hybrid_recall_tests.rs` | **Confirmed (Swift namespace / Rust free-fn idiom)** |
 | WAND query algorithms (Rust) | — | `Algorithm` (`engine/inverted_index.rs:85`) | Rust-only pub enum | Two query strategies: `Wand` and `BlockMaxWand`. Parametrises `InvertedIndex::top_k` at query time. Swift `InvertedIndex.topK` always uses WAND internally — the enum exposes what the Rust port makes explicit at the call site. This is a Rust-side API ergonomic extension; the WAND algorithm itself is byte-identical both ports. | `bm25_tests.rs` (WAND and BlockMaxWand paths exercised) | **Confirmed (Rust-only parameter enum; WAND logic parity holds)** |
@@ -1872,6 +2156,31 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-07-22
+
+- Attached maintained counts now use a published provider base plus
+  reference-only canonical-content deltas. Queue commits no longer serialize
+  the complete RI/PPMI counts blobs; provider publication compacts deltas
+  atomically. The delta table stores no Drawer text. Document and vocabulary
+  anchors commit transactionally with each admitted reference, remain
+  nondecreasing across revision/reopen cycles, and drive identical governor
+  decisions before and after restart.
+- Full `CorpusContentEngine.reindex` operations defer resident-index
+  publication across the corpus rewrite and publish once at completion.
+- Recorded the FDC cross-port tokenizer and macOS writable-artifact contract.
+- Historical shared basis fixtures remain pinned to their 1.0 envelope while
+  production trainable-provider defaults remain 1.1.
+
+### 1.17.0 -- 2026-07-20
+
+- Added the shared `CorpusContentSource`/`CorpusContentStore` engine boundary,
+  operating modes, canonical `CorpusHit`, and whole-content/range-only passage
+  policies for the accepted 1.1 target.
+- Limited `Chunk`, `ScoredChunk`, `Chunker`, and `BundleStore` to standalone
+  1.0 compatibility; GLK uses no passage content table or chunk identity.
+- Added source-change queue payloads, attached/standalone schema profiles, and
+  Corpus-owned selective teardown/migration contracts.
 
 ### 1.15.0 -- 2026-07-16
 Surface audit: documented the full public API of both ports.
@@ -1961,7 +2270,7 @@ trigger (NeuronKit). ADDITIVE — no existing surface changed; the counts table 
 maintained on write, restored on open, persisted at batch boundaries.
 
 ### 1.10.0 -- 2026-06-24
-Added two Apple NaturalLanguage embedding providers (ADR-019), Swift-only
+Added two Apple NaturalLanguage embedding providers (the Apple embedding-provider contract), Swift-only
 (`#if canImport(NaturalLanguage)`), no Rust counterpart (sanctioned divergence):
 `NLEmbeddingProvider` (model_id "apple-nlembedding-v1", seed "APNLEMB1"
 `0x4150_4E4C_454D_4231`) and `NLContextualEmbeddingProvider` (model_id
@@ -1984,10 +2293,10 @@ Behaviorally specified in CORPUSKIT_SPEC § 11. Additive; no existing signature
 removed.
 
 ### 1.8.0 -- 2026-06-21
-BundleStore schema v2 → v3 (NT-C1, ADR-017 §19): all six query methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`) now accept an `AsOfCoordinate` parameter for temporal reads (I-12); `count` accepts it for API parity but does not forward it. New `content_hash` BLOB nullable column on `chunks` (hash-on-write via HashingRowStore, I-11). New `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable). New public methods: `corpusMerkleRoot(for:)` / `corpus_merkle_root` returns per-corpus Merkle root (I-13), `globalCorpusMerkleRoot()` / `global_corpus_merkle_root` returns interior hash over all per-corpus roots. Updated schemaDeclaration comment from v2 to v3. Additive; no existing signature removed.
+BundleStore schema v2 → v3 (NT-C1, the node-integrity contract §19): all six query methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`) now accept an `AsOfCoordinate` parameter for temporal reads (I-12); `count` accepts it for API parity but does not forward it. New `content_hash` BLOB nullable column on `chunks` (hash-on-write via HashingRowStore, I-11). New `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable). New public methods: `corpusMerkleRoot(for:)` / `corpus_merkle_root` returns per-corpus Merkle root (I-13), `globalCorpusMerkleRoot()` / `global_corpus_merkle_root` returns interior hash over all per-corpus roots. Updated schemaDeclaration comment from v2 to v3. Additive; no existing signature removed.
 
 ### 1.7.0 -- 2026-06-17
-Schema bumps (ADR-012): `chunks` (BundleStore, kit-ID "CorpusKit") v1 → v2 and `corpus_provider_basis` (BasisStore, kit-ID "CorpusKitBasis") v1 → v2, each gaining a nullable `.json` `ext` forward-compat slot. Both ports; inert in 1.0 (NULL / omitted on insert, never read). `chunks.ext` is distinct from the existing per-chunk `metadata` column. Updated the BundleStore / BasisStore schema concordance.
+Schema bumps (the forward-compatible ext-slot contract): `chunks` (BundleStore, kit-ID "CorpusKit") v1 → v2 and `corpus_provider_basis` (BasisStore, kit-ID "CorpusKitBasis") v1 → v2, each gaining a nullable `.json` `ext` forward-compat slot. Both ports; inert in 1.0 (NULL / omitted on insert, never read). `chunks.ext` is distinct from the existing per-chunk `metadata` column. Updated the BundleStore / BasisStore schema concordance.
 
 ### 1.6.0 -- 2026-06-17
 Added `Corpus.floatFarthestPerSignal` / `Corpus::float_farthest_per_signal`

@@ -52,7 +52,7 @@
 //   - Never read a clock inside SubstrateML. The `ts` argument is passed
 //     in from the call site and forwarded directly to Intellectus.report.
 //
-// Dependency authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+// Dependency authority: in-repository dependency direction.
 
 import Foundation
 import IntellectusLib

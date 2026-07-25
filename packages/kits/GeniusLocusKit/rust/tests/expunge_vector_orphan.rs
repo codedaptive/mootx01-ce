@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::{EstateCoordinator, VerbDispatchError, VerbError};
 use locus_kit::{
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
@@ -72,9 +72,9 @@ fn cap_frame(content: &str) -> CaptureFrame {
 }
 
 /// Open a Corpus on its own storage (deterministic embedding, no CoreML).
-fn make_corpus() -> Arc<Corpus> {
+fn make_corpus() -> Arc<CorpusContentEngine> {
     let storage = make_storage();
-    Arc::new(Corpus::open(storage, EmbeddingModelConfig::Deterministic).expect("Corpus::open"))
+    Arc::new(CorpusContentEngine::standalone_on(storage, vec![EmbeddingModelConfig::Deterministic]).expect("Corpus::open"))
 }
 
 /// Open a standalone VectorStore on its own storage.
@@ -105,9 +105,9 @@ fn e1_expunge_removes_drawer_from_corpus_recall() {
 
     // Verify corpus recalls the chunk BEFORE expunge.
     let before = corpus
-        .recall("noble gas argon", 10, NOW)
+        .recall("noble gas argon", 10)
         .expect("recall before");
-    let found_before = before.iter().any(|sc| sc.chunk.source_id == drawer.id);
+    let found_before = before.iter().any(|sc| sc.id == drawer.id);
     assert!(
         found_before,
         "corpus must recall drawer '{}' before expunge; got {} hit(s)",
@@ -122,9 +122,9 @@ fn e1_expunge_removes_drawer_from_corpus_recall() {
 
     // Verify corpus NO LONGER recalls the chunk after expunge.
     let after = corpus
-        .recall("noble gas argon", 10, NOW)
+        .recall("noble gas argon", 10)
         .expect("recall after");
-    let found_after = after.iter().any(|sc| sc.chunk.source_id == drawer.id);
+    let found_after = after.iter().any(|sc| sc.id == drawer.id);
     assert!(
         !found_after,
         "corpus must NOT recall drawer '{}' after expunge; the vector and BM25 index entries must be purged",
@@ -322,11 +322,11 @@ fn e5_expunge_success_audit_sealed_after_vector_delete() {
     // ran; §B-2a ordering verified because success audit exists AND corpus
     // is empty).
     let chunks_after = corpus
-        .recall("noble gas argon", 10, NOW)
+        .recall("noble gas argon", 10)
         .expect("recall after expunge");
     let vector_survived = chunks_after
         .iter()
-        .any(|sc| sc.chunk.source_id == drawer.id);
+        .any(|sc| sc.id == drawer.id);
     assert!(
         !vector_survived,
         "no corpus chunk must survive after a successful expunge — \
@@ -480,11 +480,11 @@ fn e7_expunge_validation_failure_leaves_row_untouched() {
 
     // Corpus must still have the vector (validation fires before cross-kit delete).
     let chunks_after = corpus
-        .recall("actinide radioactive", 10, NOW)
+        .recall("actinide radioactive", 10)
         .expect("recall after rejected expunge");
     let vector_present = chunks_after
         .iter()
-        .any(|sc| sc.chunk.source_id == drawer.id);
+        .any(|sc| sc.id == drawer.id);
     assert!(
         vector_present,
         "corpus vector must survive when expunge is rejected by validation — \

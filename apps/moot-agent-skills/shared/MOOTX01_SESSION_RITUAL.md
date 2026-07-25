@@ -35,7 +35,7 @@ When new durable knowledge appears:
 
 1. Import with `moot_vault_import` or `moot_palace_import`.
 2. Poll with `moot_vault_job` (vault imports) or check estate status (palace imports).
-3. Run `moot_reindex` to populate BM25 and vector indexes. Semantic recall is dark until this completes.
+3. If the estate was just bulk-imported, poll `moot_drain_status` until the encode queue settles. Imports index themselves; do not run `moot_reindex` as a routine step.
 4. Verify with `moot_estate_map`.
 5. Run `moot_dream`.
 6. Optionally run `moot_consolidate` to populate the distilled factoid tier.

@@ -7,7 +7,7 @@ authors: MOOTx01 maintainers
 date: 2026-06-14
 description: Specification for moot-mgr, the GUI control and monitor surface for the headless mootx01 daemon — store ownership, the global monitoring switch, retention, the CLI read/status surface, and the read-plane wire deltas.
 relates_to:
-  - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
+  - docs/engineering/STANDARD_CODE_AUTHORING_PRACTICE.md#dependency-manifest-rule
   - docs/reference/OBSERVERSINK_SPEC.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/ARIA_MCP_SPEC.md
@@ -58,7 +58,7 @@ IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-
 ```
 
 In-repo dependencies are declared in `Package.swift` per
-DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28. Zero external (third-party) Swift dependencies.
+the package-dependency rule. Zero external (third-party) Swift dependencies.
 
 ## 3. Store ownership
 

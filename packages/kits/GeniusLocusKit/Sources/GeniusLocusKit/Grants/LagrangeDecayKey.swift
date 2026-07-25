@@ -11,7 +11,7 @@ import SubstrateKernel
 // description only. The activating party's
 // `experimentalIPClearanceConfirmed: true` assertion is recorded in the
 // grant audit record and is their legal responsibility, not the
-// substrate's. See DECISION_FEDERATION_SHARING_MODEL_2026-05-21
+// substrate's. See federation disclosure controls
 // Appendix B.3 and B.8.
 
 /// A 256-bit field element in GF(p), the prime field custody mode 3's

@@ -1,19 +1,14 @@
 ---
 title: GeniusLocus Engineering Specification Cookbook
-version: 1.2.0
-status: implementation-grade specification
+version: 1.3.0
+status: accepted-1.1-target
 description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (23 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
 author: MOOTx01 maintainers
-date: 2026-06-21
+date: 2026-07-20
 relates_to:
   - docs/engineering/HARNESS_REFERENCE.md (the 23 conformance-gated primitives, agentic discovery index)
-  - docs/decisions/DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md (HLC maker, integrity triangle, custody mode, three-time model)
-  - docs/decisions/DECISION_CAPTURE_GENESIS_EVENT_2026-05-28.md (capture emits a gated genesis event)
-  - docs/decisions/DECISION_ROW_IDENTITY_UUID_2026-05-28.md (row identity is a UUID, everywhere)
-  - docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md (six-phase refactor; §6 here is its summary)
-  - docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md (federation appendix; nested-triangle wrap)
-  - docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md (sync identity model)
-  - docs/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md (kernel layer measured selection)
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md (cross-cutting system, identity, persistence, and federation rules)
+  - docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md (measured backend and performance authority)
 ---
 
 # GeniusLocus Engineering Specification Cookbook
@@ -284,8 +279,7 @@ Background: CloudKit's `CKRecord.ID.recordName` replaces a
 non-UUID-parseable string with a freshly-generated UUID on
 receive, silently breaking identity round-trip — convergence
 fails for that row with no exception thrown. The UUID-everywhere
-contract closes that path. Per
-`DECISION_ROW_IDENTITY_UUID_2026-05-28.md`.
+contract closes that path.
 
 Bitmap-tier size per row: 192 bits (3 × Int64) + 256 bits
 (fingerprint) = 448 bits = 56 bytes. Plus 16 bytes lattice anchor
@@ -833,9 +827,8 @@ total compute: ~1ms/day. Bandwidth-dominated.
 > Measured outcomes on apple-m5-max are 2-3x faster than the
 > cookbook estimate: unbatched scalar Swift is ~166 ns per
 > fingerprint, batched SimdKernel bulk is ~59 ns per input at
-> bs=256. See §17.6 for the full reconciliation and
-> `docs/decisions/DECISION_SIMHASH_BACKENDS_2026-05-18.md` for
-> the per-kernel breakdown.
+> bs=256. See §17.6 for the full reconciliation and per-kernel
+> selection breakdown.
 
 ### §3.7. Hyperplane seed families (manifest)
 
@@ -1280,9 +1273,7 @@ intrinsics where necessary.
 > rejection is specific to the bandwidth-bound bit-tensor ops
 > documented here.
 >
-> See `docs/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`
-> for the per-op selection table and `§17.6` for the empirical
-> outcomes.
+> See `§17.6` for the per-op selection table and empirical outcomes.
 
 ### §4.5. Bandwidth budgets
 
@@ -1395,8 +1386,7 @@ the federation decision's verbatim-carry rule was designed to
 prevent. v1.0 capture is the fifth gated write path (joining the
 four mutators); the `AuditGate`'s `prior == nil` branch runs
 `ForbiddenCombinations.check` over the captured basis, so I-22
-is enforced at capture as it is at mutation. Per
-`DECISION_CAPTURE_GENESIS_EVENT_2026-05-28.md`.
+is enforced at capture as it is at mutation.
 
 The reference implementation `AuditLogFold::project_current_state`
 (Rust) / `AuditLogFold.projectStateAt` (Swift) is conformance-
@@ -1487,8 +1477,6 @@ same sequence and same node id; they order against each other
 with no kit-to-kit coordination. Sync is structural, not an
 operation.
 
-Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §2.
-
 ---
 
 ## §5.7. The integrity triangle (v1.0)
@@ -1535,8 +1523,6 @@ are exactly those where `sealed = 0`.
 The kind of seal (lazy-consolidated vs strict-contemporaneous,
 plus any attestation identity) rides with the proof, not in the
 bitmap; the bit says only sealed yes or no.
-
-Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §3.
 
 ---
 
@@ -1598,8 +1584,6 @@ per write because it pays the SHA-256 contemporaneously. The
 felt latency is the deliberate notarization of an intentional
 act, not a drag on every interaction.
 
-Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §7.
-
 ---
 
 ## §5.9. Three time concepts, kept distinct (v1.0)
@@ -1632,8 +1616,6 @@ in. The empirical date is a content attribute to filter and sort
 on, never a fold axis for state. Dual-clock projection was
 considered and rejected; see Appendix A entry OQ-V1-1.
 
-Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §4 and §11.
-
 ---
 
 ## §5.10. Federation wrap — verbatim, nested triangles (v1.0)
@@ -1659,8 +1641,6 @@ time, not corruption.
 **Backlog is the same structure as federation.** A permanently
 ingested decade-spanning backlog has origin and empirical dates
 far in the past and a recent ingest HLC: same wrap, same nesting.
-
-Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §6.
 
 ---
 
@@ -1692,9 +1672,7 @@ verifiable read-only replica that can project state and verify
 every seal but structurally cannot mint an event — useful as a
 federation or audit-verification sandbox.
 
-Per `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §8.
-
-## §5.12. Merkle attestation composition (ADR-017, v1.0)
+## §5.12. Merkle attestation composition (1.1 shared-content target)
 
 Snapshot attestations compose across kits. A snapshot is an atomic
 point-in-time record with one or more `SnapshotAttestation` rows,
@@ -1706,14 +1684,21 @@ Merkle root hash.
   containment hierarchy.
 - Estate-root attestation: interior hash over all per-wing roots.
 
-**CorpusKit** provides content attestations:
-- Per-corpus attestation: Merkle root over a single source
-  document's chunk hashes (via `BundleStore.corpusMerkleRoot`).
-- Global-corpus attestation: interior hash over all per-corpus
-  roots (via `BundleStore.globalCorpusMerkleRoot`).
+In a GLK composition, **CorpusKit does not provide a second content
+attestation**. The LocusKit Drawer root already attests the canonical bytes.
+CorpusKit may provide a clearly typed *derived-index attestation* over canonical
+Drawer id + revision/digest + index version/checkpoint. That attestation proves
+which content revision the rebuildable BM25/vector state represents; it must not
+hash or persist another copy of Drawer text.
 
-**GeniusLocusKit** composes both sets via
-`createComposedSnapshot(for:label:now:)`. Both kit roots land in
+Standalone CorpusKit may attest its own canonical document store. Optional
+passage state contributes only revision-bound range/index metadata. The legacy
+`BundleStore.corpusMerkleRoot` / `globalCorpusMerkleRoot` surface remains a
+standalone 1.0 compatibility mechanism and is not part of GLK 1.1.
+
+**GeniusLocusKit** composes the canonical LocusKit content root and any
+CorpusKit derived-index root via `createComposedSnapshot(for:label:now:)`. Both
+typed roots land in
 one atomic `snapshot_attestations` table write. When no Corpus is
 registered, falls back to LocusKit-only attestations.
 
@@ -1724,10 +1709,11 @@ attestations alongside the LocusKit-generated ones. The
 estate assigns the real snapshot ID atomically.
 
 **Verification.** Replay the Merkle root computations from current
-data and compare to the stored attestation roots. A mismatch
-indicates tampering or silent corruption. The per-kit roots are
-independently verifiable: LocusKit's root can be recomputed from
-the node tree alone, CorpusKit's from the chunk store alone.
+data and compare to the stored attestation roots. A mismatch indicates
+tampering, silent corruption, or a stale derived index. The roots are
+independently verifiable without duplicating content: LocusKit's content root is
+recomputed from canonical Drawers; CorpusKit's optional derived root is
+recomputed from Drawer revision/digest plus derived index state.
 
 ---
 
@@ -2763,7 +2749,7 @@ expunge(row_id: RowId, reason: String) -> Result<(), SubstrateError>
   roll-ups, tier summaries — "little-big data") NOT touched — they
   remain valid statistical summaries; per §9.5.1.
 - Audit row tombstoned (per v0.35 I-6); fact-of-expunge preserved.
-- **Keyed-commitment provenance (ADR-017).** After content-zero
+- **Keyed-commitment provenance.** After content-zero
   and RAG-vector deletion, the snapshot attestation for the
   affected wing (or corpus source) is invalidated. A new snapshot
   with recomputed Merkle roots must be taken to re-establish
@@ -3757,9 +3743,8 @@ Per primitive, 1M-row estate, Apple Silicon M-series:
 > proportionally faster (block 0 only = 8 MB / 60 GB/s = ~133 µs).
 >
 > Until substrate-level bit-slice lands, the 100 µs budget should
-> be read as bit-slice-dependent. See `§17.6` and
-> `docs/decisions/DECISION_PHASE_2_DELTA_3_BITSLICE_DISPOSITION_2026-05-18.md`
-> for the architectural-math derivation.
+> be read as bit-slice-dependent. See `§17.6` for the measured
+> bandwidth floor and architectural derivation.
 
 ### §17.2. Cold-path budgets
 
@@ -3886,9 +3871,7 @@ Well within cookbook §15.4 dreaming-daemon resource budgets.
 
 #### §17.6.4. Selected approach per documented production need
 
-The full Phase 2 selection table lives in
-`docs/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`.
-Summary:
+The selected production approaches are:
 
   or_reduce_256:           SimdKernel SIMD4<UInt64> accumulator
   or_reduce_batch:         SimdKernel overridden default loop
@@ -3927,10 +3910,9 @@ in absolute terms; the SimdKernel selection should hold because
 the candidate kernels were rejected by ratio, not absolute
 threshold.
 
-Methodology gate ledger (8 measured findings, 2 architectural-
-math declines) lives in
-`docs/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`
-§Methodology Gate Ledger.
+The methodology gate produced eight measured findings and two
+architectural-math declines. The reproducible procedure and the
+selection table above are the stable ledger.
 
 #### §17.6.6. What this section does NOT cover
 
@@ -4119,9 +4101,8 @@ v1.0 harness has explicitly left out per cookbook §7.3.
 
 ## §20. SubstrateLib package layout (v1.0)
 
-**I-30. The substrate ships as four packages.** Per the
-DECISION_SUBSTRATELIB_PRESHIP_REFACTOR addendum (2026-05-29), the
-substrate splits into four SPM packages (Swift) / Cargo crates (Rust):
+**I-30. The substrate ships as four packages.** The substrate splits
+into four SPM packages (Swift) / Cargo crates (Rust):
 `SubstrateTypes` (pure data, incl. HLC + HLCGenerator),
 `SubstrateKernel` (hot-path kernels + SHA256, HammingNN, BitField),
 `SubstrateML` (cold-path / ML algorithms), and `SubstrateLib` — the
@@ -4226,8 +4207,7 @@ re-export was removed 2026-05-29). The split serves four purposes:
 
 `I-25` (one implementation per atomic) applies across all four:
 atomics live in whichever package they belong to, and every
-consumer imports them by name. Per
-`DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md` Phase 6.
+consumer imports them by name.
 
 ---
 
@@ -4243,21 +4223,18 @@ by the v1.0 decision set are listed first with their resolution.
   of custody. Empirical date is a content attribute to filter
   and sort on, never a fold axis for state. The "as-of empirical
   date" projection is undefined: row state evolved in ingest
-  time, not in the order the world produced events. Per
-  `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §11.
+  time, not in the order the world produced events.
 
 - **OQ-V1-2 (Open-core split by custody mode).** Resolved
   REJECTED. Strict and lazy are one scheduling flag over one
   seal; cleaving the codebase along that flag protects a moat
   that does not yet exist and creates an artificial seam. The
   substrate stays the clean open mechanism; future optional
-  attestation business layers stack above it. Per
-  `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §11.
+  attestation business layers stack above it.
 
 - **OQ-V1-3 (HLC promotion mechanism).** Resolved REFUSE-PLUS-
   EXPLICIT-TAKEOVER. `open` refuses on an already-owned log; a
-  `takeover` operation records the handoff as an event. Per
-  `DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md` §9.
+  `takeover` operation records the handoff as an event.
 
 - **OQ-V1-4 (Checkpoint cadence).** Resolved CONSTANT INTERVAL,
   defaulting to 1000 events, configurable per moot.
@@ -4266,15 +4243,14 @@ by the v1.0 decision set are listed first with their resolution.
   on the event row, not a sibling table.
 
 - **OQ-V1-6 (Capture genesis path).** Resolved CAPTURE EMITS A
-  GATED GENESIS EVENT (§5.3 / I-26). Per
-  `DECISION_CAPTURE_GENESIS_EVENT_2026-05-28.md`.
+  GATED GENESIS EVENT (§5.3 / I-26).
 
 - **OQ-V1-7 (Row identity for sync).** Resolved UUID EVERYWHERE
-  (I-29). Per `DECISION_ROW_IDENTITY_UUID_2026-05-28.md`.
+  (I-29).
 
-- **OQ-V1-8 (SubstrateLib boundary).** Resolved THREE PACKAGES:
-  SubstrateTypes / SubstrateKernel / SubstrateML (§20, I-30).
-  Per `DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md`.
+- **OQ-V1-8 (SubstrateLib boundary).** Resolved FOUR PACKAGES:
+  SubstrateTypes / SubstrateKernel / SubstrateML / SubstrateLib
+  (§20, I-30).
 
 ### A.2. Carried forward (v0.36 open questions)
 
@@ -4355,8 +4331,14 @@ Sections trace back to designer artifacts as follows:
 
 ## Changelog
 
+### 1.3.0 -- 2026-07-20
+
+- Revised §5.12 for the 1.1 shared-content architecture: LocusKit attests
+  canonical Drawer content once; CorpusKit may attest only rebuildable index
+  state in GLK. Legacy chunk-store roots are standalone compatibility only.
+
 ### 1.1.0 -- 2026-06-21
-- §5.12: Merkle attestation composition (ADR-017). Documents how LocusKit
+- §5.12: Merkle attestation composition. Documents how LocusKit
   and CorpusKit Merkle roots compose into unified snapshot attestations
   via GeniusLocusKit.createComposedSnapshot.
 - §10.5 expunge: keyed-commitment provenance. Documents that expunge

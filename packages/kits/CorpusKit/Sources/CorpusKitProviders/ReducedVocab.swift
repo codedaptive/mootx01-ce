@@ -1,5 +1,5 @@
 // ReducedVocab.swift — shared IDF-reduced vocabulary selection for the dense
-// distributional-factorization providers (LSA, NMF). ADR-022.
+// distributional-factorization providers (LSA, NMF). shared reduced embedding vocabulary.
 //
 // ## Why this exists
 //
@@ -29,7 +29,7 @@ import Foundation
 /// ~K²·numDocs, so K trades reindex latency against how many terms feed the
 /// latent factors. 512 keeps a large-corpus reindex in the seconds range while
 /// still giving far more input columns than the providers' rank (LSA 64 /
-/// NMF 32). Parameterized so the quality optimizer can tune it (ADR-022).
+/// NMF 32). Parameterized so the quality optimizer can tune it.
 public let defaultReducedVocabCap: Int = 512
 
 /// A frozen reduced vocabulary: the ordered kept terms plus the maps needed to
@@ -70,7 +70,7 @@ public func selectReducedVocabulary(
 
     // No-op below the cap: keep the FULL vocabulary in its existing column
     // order. Estates whose vocab already fits K (including every small
-    // conformance fixture) train a byte-identical basis to the pre-ADR-022
+    // conformance fixture) train a byte-identical basis to the pre-shared reduced embedding vocabulary
     // behavior — the reduction engages ONLY when the dense factorization would
     // otherwise be infeasible.
     if fullSize <= max(1, cap) {

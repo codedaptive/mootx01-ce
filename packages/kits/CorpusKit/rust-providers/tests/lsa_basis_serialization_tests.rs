@@ -27,7 +27,9 @@ fn load() -> LsaBasisFixture {
 fn trained_from_fixture(f: &LsaBasisFixture) -> LsaProvider {
     use corpus_kit_providers::LSA_PROJECTION_SEED;
     // rank=3, sweeps=30 — identical to the Swift fixture builder.
-    let mut p = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = LsaProvider::with_parameters("lsa-v1", "1.0.0", 3, 30, LSA_PROJECTION_SEED);
     for doc in &f.corpus {
         p.train(doc);
     }

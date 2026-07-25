@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-28
-version: 1.9.0
+date: 2026-07-20
+version: 1.11.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -39,7 +39,7 @@ targets:
   `CachingRowStore.swift`, `CacheInvalidator.swift`,
   `EncryptionMode.swift`, `StorageIntrospection.swift`,
   `StorageError.swift`, `NoOpObserver.swift`.
-  (No `VectorIndex.swift`: PersistenceKit owns no vector engine — ADR-008.)
+  (No `VectorIndex.swift`: PersistenceKit owns no vector engine — the vector-ownership contract.)
 - `Sources/PersistenceKitInMemory/` — `InMemoryStorage` (test +
   conformance reference).
 - `Sources/PersistenceKitSQLite/` — `SQLiteStorage` (raw SQLite, WAL).
@@ -54,7 +54,7 @@ targets:
   `schema.rs`, `generated_column.rs`, `error.rs`, `cache_config.rs`,
   `caching_row_store.rs`, `cache_invalidator.rs`, `introspection.rs`,
   `inmemory.rs`, `sqlite.rs`, `postgres.rs`.
-  (No `vector_index.rs`: removed with the vector engine — ADR-008.)
+  (No `vector_index.rs`: removed with the vector engine — the vector-ownership contract.)
 - Traits are synchronous (`Result<T, StorageError>`); the Swift side is
   `async` because Swift actors require it, while the in-process Rust
   backends do no real async I/O. All three backends ship in both ports:
@@ -239,7 +239,7 @@ public protocol RowStore: Sendable {
 }
 public extension RowStore {
     func query(table: String, where predicate: StoragePredicate?) async throws -> [StorageRow] // orderBy [], no paging
-    // As-of temporal variants (ADR-017 §15; currently gated — returns
+    // As-of temporal variants (currently gated — returns
     // StorageError.featureGated("asOfQuery") for any non-present coordinate):
     func query(table: String, where predicate: StoragePredicate?,
                orderBy: [OrderClause], limit: Int?, offset: Int?,
@@ -289,7 +289,7 @@ public protocol BlobStore: Sendable {
 
 PersistenceKit exposes **no** `VectorIndex` protocol, `knn` method, or
 `DistanceMetric`/`IndexParameters`/`SearchParameters`/`VectorSearchResult`
-type. Dense-embedding k-NN lives solely in VectorKit (ADR-008). Storage does
+type. Dense-embedding k-NN lives solely in VectorKit (the vector-ownership contract). Storage does
 not surface a VectorIndex (SPEC § 1, B-9).
 
 Instead, every backend accommodates a vector workload's STORAGE needs
@@ -700,7 +700,7 @@ cited file. Promote a type into Tier 1 when a consumer adopts it.
 > schema-emission, predicate-compilation, store, observer, and crypto
 > implementation types are `internal`/`package`-scoped and are not part
 > of the public surface. (The former `CSQLiteVec` C shim target was
-> removed with the vector engine — ADR-008.)
+> removed with the vector engine — the vector-ownership contract.)
 
 ## § 3 — Public functions
 
@@ -717,7 +717,7 @@ let rows   = try await storage.rowStore.query(table: "drawers",
                 orderBy: [OrderClause(column: createdCol, direction: .descending)],
                 limit: 50, offset: 0)
 // Vector embeddings persist as ordinary rows (a .blob payload column);
-// dense-embedding k-NN is VectorKit's, not PersistenceKit's (ADR-008).
+// dense-embedding k-NN is VectorKit's, not PersistenceKit's (the vector-ownership contract).
 _ = try await storage.rowStore.insert(table: "vectors", values: vectorRow)
 try await storage.auditLog.append(event)                            // idempotent on (eventID, hlc)
 let stream = storage.observer.observe(table: "drawers", events: [.insert, .update])
@@ -914,7 +914,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `SchemaDeclaration` | `SchemaDeclaration` | Schema manifest: `kitID`/`kit_id`, `version`, `tables`, `indices`, `migrations`. |
 | `TableDeclaration` | `TableDeclaration` | Table manifest: `name`, `columns`, `primaryKey`/`primary_key`, `uniqueConstraints`/`unique_constraints`, `generatedColumns`/`generated_columns`, `appendOnly`/`append_only`. |
 | `ColumnDeclaration` | `ColumnDeclaration` | Column manifest: `name`, `type`/`col_type`, `nullable`, `defaultValue`/`default_value`, `role: ColumnRole?`/`role: Option<ColumnRole>`. |
-| `ColumnRole` | `ColumnRole` | Semantic role for temporal filtering (ADR-017 §15). Two cases: `createdHlc`/`CreatedHlc`, `tombstonedHlc`/`TombstonedHlc`. |
+| `ColumnRole` | `ColumnRole` | Semantic role for temporal filtering (the node-integrity contract §15). Two cases: `createdHlc`/`CreatedHlc`, `tombstonedHlc`/`TombstonedHlc`. |
 | `IndexDeclaration` | `IndexDeclaration` | Index manifest: `name`, `table`, `columns`, `unique`. |
 | `Migration` | `Migration` | Schema migration step: `fromVersion`/`from_version` (Int/i32), `toVersion`/`to_version` (Int/i32), `operations` ([SchemaOperation]/Vec<SchemaOperation>). |
 | `SchemaOperation` | `SchemaOperation` | Closed migration-operation enum: `createTable`/`CreateTable`, `dropTable`/`DropTable`, `addColumn`/`AddColumn`, `dropColumn`/`DropColumn`, `renameColumn`/`RenameColumn`, `addIndex`/`AddIndex`, `dropIndex`/`DropIndex`, `custom(sqlite:postgresql:)`/`Custom{sqlite,postgresql}` (per-backend SQL escape hatch). |
@@ -923,7 +923,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `EstateConfiguration` | `EstateConfiguration` | See EstateConfiguration field parity table below. |
 | `BackendConfiguration` | `BackendConfiguration` | Three cases: `sqlite(url:busyTimeout:)`/`Sqlite{…}`, `postgresql(…)`/`Postgresql{…}`, `inMemory`/`InMemory`. |
 | `NovelTokenTaggerChoice` | `NovelTokenTaggerChoice` | See NovelTokenTaggerChoice parity table below. |
-| `ResidencyHint` | `ResidencyHint` | ADR-026: `.diskBacked`/`DiskBacked` (default), `.ramResident`/`RamResident`. Kits read this to choose index caching strategy. |
+| `ResidencyHint` | `ResidencyHint` | the storage-residency rule: `.diskBacked`/`DiskBacked` (default), `.ramResident`/`RamResident`. Kits read this to choose index caching strategy. |
 | `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Fifteen cases, case-for-case identical. |
 | `InMemoryStorage` | `InMemoryStorage` | In-memory `Storage` conformer/implementor. |
 | `SQLiteStorage` | `SqliteStorage` | SQLite backend (name idiom: `SQLite`/`Sqlite`). |
@@ -968,9 +968,9 @@ struct inside `IncrementalReplicationSession.swift`.
 | `HashParentChainProvider` | `HashParentChainProvider` | Callback type that returns the Merkle containment parent chain for a row. Swift: `public typealias HashParentChainProvider = @Sendable (...) -> (parentNodeId: UUID, grandparentNodeId: UUID)?`. Rust: `pub type HashParentChainProvider = Box<dyn Fn(&str, RowKey) -> Option<(uuid::Uuid, uuid::Uuid)> + Send + Sync>`. Returns `nil`/`None` for rows without a parent chain (root nodes, non-Merkle tables). NT-P2. |
 | `DirtyChainEvent` | `DirtyChainEvent` | Three-identifier dirty-chain event emitted by `HashingRowStore` on every write to a hashable table. Swift: `public struct DirtyChainEvent: Sendable`. Rust: `pub struct DirtyChainEvent`. Five fields: `changedRowId`/`changed_row_id`, `parentNodeId`/`parent_node_id`, `grandparentNodeId`/`grandparent_node_id` (UUID/Uuid), `contentHash`/`content_hash` (ContentHash), `table` (String). Consumed by `CachingRowStore` (Merkle invalidation, NT-P4) and Merkle rollup (NT-L3). NT-P2. |
 
-### Snapshot registry (ADR-017 §15, swift+rust)
+### Snapshot registry (Swift and Rust)
 
-Snapshot and attestation primitives. Both legs ship in `Sources/PersistenceKit/SnapshotRegistry.swift` (Swift) and `rust/src/snapshot_registry.rs` (Rust). The registry records WHEN (an HLC); attestation rows record WHAT the Merkle roots were at that HLC. PersistenceKit is the correct home for these per ADR-017 layering; they are not LocusKit types.
+Snapshot and attestation primitives. Both legs ship in `Sources/PersistenceKit/SnapshotRegistry.swift` (Swift) and `rust/src/snapshot_registry.rs` (Rust). The registry records WHEN (an HLC); attestation rows record WHAT the Merkle roots were at that HLC. PersistenceKit owns these primitives; they are not LocusKit types.
 
 | Swift | Rust | Notes |
 |---|---|---|
@@ -981,11 +981,11 @@ Snapshot and attestation primitives. Both legs ship in `Sources/PersistenceKit/S
 | `SnapshotSchema` (`enum SnapshotSchema`) | `pub fn registry_table_declaration()`, `pub fn attestations_table_declaration()` | Swift: caseless-enum namespace with `static let registryTable: TableDeclaration` and `static let attestationsTable: TableDeclaration`. Rust: two `pub fn` returning `TableDeclaration`. Both produce identical schema: `snapshot_registry(snapshot_id TEXT PK, hlc HLC, label TEXT?, created_at TIMESTAMP)` and `snapshot_attestations(snapshot_id TEXT, subject_kind TEXT, subject_id TEXT, merkle_root TEXT, key_version INT?, PK(snapshot_id, subject_kind, subject_id))`. |
 | `SnapshotRegistryOps` (`enum SnapshotRegistryOps`) | Free functions in `snapshot_registry.rs` | Swift: caseless-enum namespace with four `public static` funcs: `createSnapshot(rowStore:hlc:label:createdAt:attestations:) async throws -> SnapshotRecord`, `listSnapshots(rowStore:) async throws -> [SnapshotRecord]`, `deleteSnapshot(rowStore:snapshotId:) async throws -> Bool`, `attestations(rowStore:snapshotId:) async throws -> [SnapshotAttestation]`. Rust: equivalent `pub fn create_snapshot(…) -> StorageResult<SnapshotRecord>`, `pub fn list_snapshots(…) -> StorageResult<Vec<SnapshotRecord>>`, `pub fn delete_snapshot(…) -> StorageResult<bool>`, `pub fn snapshot_attestations(…) -> StorageResult<Vec<SnapshotAttestation>>`. Semantics identical on both legs. |
 
-#### GC pin (ADR-017 §15, swift+rust)
+#### GC pin (Swift and Rust)
 
 | Swift | Rust | Notes |
 |---|---|---|
-| `GCPin` (`enum GCPin`) | Free functions in `rust/src/gc_pin.rs` | Swift: caseless-enum namespace with `static func minimumRetainableHlc(rowStore:) async throws -> HLC?` and `static func isPinned(rowStore:rowHlc:) async throws -> Bool`. Rust: `pub fn minimum_retainable_hlc(row_store: &dyn RowStore) -> StorageResult<Option<HLC>>` and `pub fn is_pinned(row_store: &dyn RowStore, row_hlc: HLC) -> StorageResult<bool>` — free functions in `persistence_kit::gc_pin`, not a type. The caseless-enum namespace type has no Rust counterpart; the operations are present on both legs with identical semantics (ADR-017 §12 GC pin boundary). |
+| `GCPin` (`enum GCPin`) | Free functions in `rust/src/gc_pin.rs` | Swift: caseless-enum namespace with `static func minimumRetainableHlc(rowStore:) async throws -> HLC?` and `static func isPinned(rowStore:rowHlc:) async throws -> Bool`. Rust: `pub fn minimum_retainable_hlc(row_store: &dyn RowStore) -> StorageResult<Option<HLC>>` and `pub fn is_pinned(row_store: &dyn RowStore, row_hlc: HLC) -> StorageResult<bool>` — free functions in `persistence_kit::gc_pin`, not a type. The caseless-enum namespace type has no Rust counterpart; the operations are present on both legs with identical GC-pin semantics. |
 
 ### Rust-only types (no Swift public counterpart)
 
@@ -1001,8 +1001,8 @@ Snapshot and attestation primitives. Both legs ship in `Sources/PersistenceKit/S
 | Swift type | Source file | Reason for Swift-only |
 |---|---|---|
 | `StorageReplicator` | `Sources/PersistenceKitReplication/StorageReplicator.swift` | Caseless-enum namespace for the full-snapshot replication entry points (`replicate(from:to:schema:)`, `flush(from:into:schema:)`, `hydrate(into:from:schema:)`). Rust exposes identical operations as free functions (`replicate`, `flush`, `hydrate`) in `replication.rs`; there is no named namespace type. The audit regex does not match free functions by default; this is a shape-idiom difference, not a parity gap. |
-| `ErasureLedgerEntry` | `Sources/PersistenceKit/ErasureLedger.swift:15` | Ledger row for expunge provenance (ADR-017 §13). Swift: `public struct ErasureLedgerEntry: Sendable, Equatable`. Records that a row id was erased — stores the fact of erasure, never the content. Rust parity pending; NT-P3/L4. |
-| `ErasureOverlay` | `Sources/PersistenceKit/ErasureOverlay.swift:50` | Read-path decorator (caseless enum namespace) that hides expunged content. Swift: `public enum ErasureOverlay`. Two-phase fail-closed: any row id in the erasure ledger returns payload nulled regardless of which temporal version was selected (ADR-017 §14). Rust parity pending; NT-P3. |
+| `ErasureLedgerEntry` | `Sources/PersistenceKit/ErasureLedger.swift:15` | Ledger row for expunge provenance (the node-integrity contract §13). Swift: `public struct ErasureLedgerEntry: Sendable, Equatable`. Records that a row id was erased — stores the fact of erasure, never the content. Rust parity pending; NT-P3/L4. |
+| `ErasureOverlay` | `Sources/PersistenceKit/ErasureOverlay.swift:50` | Read-path decorator (caseless enum namespace) that hides expunged content. Swift: `public enum ErasureOverlay`. Two-phase fail-closed: any row id in the erasure ledger returns payload nulled regardless of which temporal version was selected (the node-integrity contract §14). Rust parity pending; NT-P3. |
 | `ErasureOverlayConfig` | `Sources/PersistenceKit/ErasureOverlay.swift:22` | Configuration for the `ErasureOverlay` decorator. Swift: `public struct ErasureOverlayConfig: Sendable`. Rust parity pending; NT-P3. |
 | `GCPin` | `Sources/PersistenceKit/GCPin.swift:17` | Snapshot-aware garbage collection pin (caseless enum namespace). Swift: `public enum GCPin`. Rust ships equivalent free functions (`minimum_retainable_hlc`, `is_pinned`) in `rust/src/gc_pin.rs`; there is no Rust type named `GCPin`. See "GC pin" cross-leg table in the Snapshot registry subsection above. |
 
@@ -1365,11 +1365,154 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 | Swift | `Tests/PersistenceKitSQLiteTests/GlobalTestLock.swift` | Actor mutex — Intellectus singleton isolation |
 | Rust | `rust/tests/telemetry_tests.rs` | 10 tests (InMemory backend) |
 
+## § 11 — Layout signatures and table inventories (SPEC § 10)
+
+### `SchemaDeclaration.layoutSignatureText()` / `layout_signature_text`
+
+Canonical, cross-port byte-identical structural rendering of a schema
+declaration (kitID/version deliberately excluded). Companion digest
+helper for logs.
+
+**Swift:**
+
+```swift
+extension SchemaDeclaration {
+    public func layoutSignatureText() -> String
+    public func layoutSignatureDigest() -> String   // FNV-1a 64, hex
+}
+extension TableDeclaration {
+    public func layoutSignatureText() -> String
+}
+```
+
+**Rust:**
+
+```rust
+pub fn layout_signature_text(schema: &SchemaDeclaration) -> String;
+pub fn layout_signature_digest(schema: &SchemaDeclaration) -> String;
+pub fn table_layout_signature_text(table: &TableDeclaration) -> String;
+```
+
+### `DatabaseInventory.capture` / `capture_inventory`
+
+Deterministic per-table row counts + order-independent content folds
+over canonically encoded rows, with per-table column exclusions for
+wall-clock-stamped columns. See SPEC § 10 for the encoding table.
+
+**Swift:**
+
+```swift
+public struct TableInventory: Sendable, Equatable {
+    public let table: String
+    public let rowCount: Int
+    public let contentFold: String
+}
+public enum DatabaseInventory {
+    public static func capture(
+        storage: any Storage,
+        tables: [String],
+        excludingColumns: [String: Set<String>] = [:]
+    ) async throws -> [TableInventory]
+    public static func canonicalRowEncoding(_ row: StorageRow, excluding: Set<String>) -> String
+    public static func canonicalValueEncoding(_ value: TypedValue) -> String
+}
+```
+
+**Rust:**
+
+```rust
+pub struct TableInventory { pub table: String, pub row_count: usize, pub content_fold: String }
+pub fn capture_inventory(
+    storage: &Arc<dyn Storage>,
+    tables: &[&str],
+    excluding_columns: &BTreeMap<String, BTreeSet<String>>,
+) -> StorageResult<Vec<TableInventory>>;
+pub fn canonical_row_encoding(row: &StorageRow, excluded: &BTreeSet<String>) -> String;
+pub fn canonical_value_encoding(value: &TypedValue) -> String;
+```
+
 ---
 
 *End of PersistenceKit Interface.*
 
+## § 12 — Storage maintenance surface (SPEC § 11)
+
+Swift (`PersistenceKit` core declares the protocol; backends conform):
+
+```swift
+public enum StorageMaintenancePhase: String, Sendable, Codable, CaseIterable {
+    case preflight, walCheckpoint, vacuum, introspection
+}
+public struct StorageMaintenanceProgress: Sendable, Equatable {
+    public let phase: StorageMaintenancePhase
+    public let completedPhases: Int
+    public let totalPhases: Int
+}
+public struct StorageMaintenanceReport: Sendable, Equatable, Codable {
+    public let backend: String          // "sqlite" | "postgresql" | "inmemory"
+    public let performed: Bool
+    public let note: String?
+    public let pageSizeBytes, pageCountBefore, pageCountAfter: Int64
+    public let freelistPagesBefore, freelistPagesAfter: Int64
+    public let fileSizeBytesBefore, fileSizeBytesAfter: Int64
+    public let walBytesBefore, walBytesAfter: Int64
+    public let reclaimedBytes: Int64
+    public let durationSeconds: Double
+}
+public enum StorageMaintenanceError: Error, Equatable, Sendable {
+    case notQuiescent(reason: String)
+    case insufficientDiskCapacity(requiredBytes: Int64, availableBytes: Int64)
+    case cancelled(atPhase: StorageMaintenancePhase)
+    case backendFailure(reason: String)
+}
+public protocol StorageMaintenance: Sendable {
+    func estimatedReclaimableBytes() async throws -> Int64
+    func performMaintenance(
+        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
+        shouldCancel: (@Sendable () -> Bool)?
+    ) async throws -> StorageMaintenanceReport
+}
+// + zero-argument performMaintenance() convenience.
+// Conformers: SQLiteStorage (real), InMemoryStorage and PostgreSQLStorage
+// (explicit no-op reports). Probe with `storage as? StorageMaintenance`.
+```
+
+Rust (`persistence_kit::maintenance` module; defaulted `Storage` trait
+methods because `dyn Storage` cannot be capability-probed):
+
+```rust
+pub enum MaintenancePhase { Preflight, WalCheckpoint, Vacuum, Introspection }
+pub struct MaintenanceProgress { pub phase: MaintenancePhase,
+    pub completed_phases: usize, pub total_phases: usize }
+pub struct MaintenanceReport { /* field-for-field twin of the Swift report */ }
+pub enum MaintenanceError { NotQuiescent { .. },
+    InsufficientDiskCapacity { .. }, Cancelled { .. }, BackendFailure { .. } }
+
+// On the Storage trait (default = explicit "not implemented" no-op):
+fn estimated_reclaimable_bytes(&self) -> Result<i64, MaintenanceError>;
+fn perform_maintenance(
+    &self,
+    progress: Option<&(dyn Fn(MaintenanceProgress) + Send + Sync)>,
+    should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> Result<MaintenanceReport, MaintenanceError>;
+// Overridden by SqliteStorage (real), InMemoryStorage, PostgresStorage.
+```
+
 ## Changelog
+
+### 1.11.0 -- 2026-07-20
+Shared-content 1.1 P5: added the storage maintenance surface (§ 12) —
+`StorageMaintenance` protocol + phase/progress/report/error types (Swift),
+`persistence_kit::maintenance` module + defaulted `Storage` trait methods
+(Rust). Additive (MINOR).
+
+### 1.10.0 -- 2026-07-20
+GLK shared-content 1.1 P0: added § 11 — canonical layout signatures
+(`layoutSignatureText` / `layout_signature_text` + digest helpers) and
+deterministic table inventories (`DatabaseInventory` / `capture_inventory`).
+Cross-port DDL parity fix: Rust `ColumnDeclaration::bitmap` now mints
+`DEFAULT 0` (matching Swift) and the Rust SQLite emitter renders declared
+column defaults. Additive (MINOR).
 
 ### 1.9.0 -- 2026-07-16
 CVK-ICLOUD P1-M1: Added `ChangeOrigin` enum (`case local`, `case syncApply`)
@@ -1408,19 +1551,19 @@ I-21 — CAND-047). Also documents SPEC I-22 (CAND-052): SQLite backend refuses
 a symlink at the DB path and sets 0600 on newly-created estate files.
 
 ### 1.5.0 -- 2026-06-25
-Additive (ADR-021 Decision 7, T3): `EstateConfiguration.queueSibling(filename:)`
+Additive (the recall-driven dreaming contract Decision 7, T3): `EstateConfiguration.queueSibling(filename:)`
 (Swift `throws`) / `queue_sibling(&self, filename:)` (Rust `StorageResult`).
 Derives a sibling-DB config for the per-estate queue — for a `.sqlite` estate, a
 `.sqlite` config at the same directory with the leaf replaced by `filename`,
 **carrying the estate's `encryptionConfig` verbatim** (the queue DB is encrypted
 with the same key); InMemory → InMemory sibling; PostgreSQL → throws/returns
-`StorageError.featureGated` (deferred to the ADR-021 Postgres pass). The sibling
+`StorageError.featureGated` (deferred to the the recall-driven dreaming contract Postgres pass). The sibling
 estate-id is derived deterministically (XOR-fold of the filename into the parent
 UUID — byte-identical across ports), no `UUID()`/random. Lets mootx01 open the
 one encrypted per-estate `queue.sqlite`.
 
 ### 1.4.0 -- 2026-06-21
-NT-DOC-1: Added 12 concordance rows for ADR-017 node-tree migration types. New
+NT-DOC-1: Added 12 concordance rows for the node-integrity contract node-tree migration types. New
 `### Hash-on-write decorator (NT-P2)` subsection documents `HashingRowStore`,
 `HashOnWriteConfig`, `ContentHashProvider`, `HashParentChainProvider`, and
 `DirtyChainEvent` (Swift+Rust, 5 rows). Expanded `### Swift-only types` section
@@ -1443,7 +1586,7 @@ NT-P1: Added `ColumnRole` enum (`createdHlc`/`CreatedHlc`,
 `RowStore` (`query(..., asOf:)` / `query_as_of`, projected and skip-corrupt
 variants). Added three error cases to `StorageError`: `corruptStoredValue`,
 `invalidConfiguration`, `featureGated` (the latter gates the as-of query
-surface per ADR-017 §17). Updated § 7 parity table: `StorageError` fifteen
+surface per the node-integrity contract §17). Updated § 7 parity table: `StorageError` fifteen
 cases; `ColumnDeclaration` includes `role`; new `ColumnRole` row; `RowStore`
 notes as-of default methods.
 

@@ -187,7 +187,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     // removed on clean shutdown. The resident daemon also writes mootx01.pid
     // (status reports it) and mootx01.estate (the served-estate marker a stdio
     // serve reads for T4 forwarding), and enforces the single-writer rule: one
-    // resident AutonomicGovernor per estate (ADR-LOOPBACKHTTP-001). Liveness is the
+    // resident AutonomicGovernor per estate. Liveness is the
     // recorded port answering on loopback — portable where kill(pid, 0) is not.
     // An stdio serve either forwards to a live resident (T4, above) or opens the
     // estate directly; it files none of these markers.
@@ -224,7 +224,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
         }
     }
 
-    // T10 on-startup dreaming trigger (ADR-021 Phase 5): if the dreaming queue
+    //  on-startup dreaming trigger: if the dreaming queue
     // has pending items from a prior session, spawn a detached dreamer so
     // dreaming catches up without waiting for the next recall event.
     if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
@@ -234,7 +234,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
         }
     }
 
-    // ADR-024 §5: computed once at startup (not per-call). Empty whenever no
+    // computed once at startup (not per-call). Empty whenever no
     // plugin is detected or its version matches this binary — the common
     // case, which leaves ping/status unchanged.
     let version_skew = mcp_ownership::version_skew_advisory(
@@ -252,7 +252,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     // silence. stdio one-shots stay network-free on purpose: ping is
     // documented as returning immediately, and an offline probe timeout
     // there would break that; every plugin-capable host talks to the
-    // resident over HTTP anyway (ADR-024 §2). The probe itself is bounded
+    // resident over HTTP anyway. The probe itself is bounded
     // (curl --max-time 4) because it runs behind the dispatcher mutex.
     // Mirrors Swift ServeCommand's `residentPort != nil` gate.
     let update_advisory: Option<aria_mcp::dispatcher::UpdateAdvisoryProvider> =
@@ -294,11 +294,11 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
             if encode_queue_has_pending(&estate) {
                 spawn_detached_drain();
             }
-            // T10 on-exit dreaming trigger (ADR-021 Phase 5): if the dreaming
+            //  on-exit dreaming trigger: if the dreaming
             // queue has items (enqueued during this session or from prior sessions),
             // spawn a detached `dream` finisher so dreaming work is not lost when
             // the stdio serve exits. Independent of the encode drain — both can be
-            // held simultaneously (ADR-021 Decision 7).
+            // held simultaneously.
             if dreaming_queue_has_pending(&estate) {
                 eprintln!("mootx01: dreaming queue has pending items on exit — spawning detached dreamer (T10 exit)");
                 spawn_detached_dream();
@@ -338,7 +338,7 @@ fn dreaming_queue_has_pending(estate_path: &str) -> bool {
         None => return false,
     };
     // The dreaming queue lives at <estate-stem>.queue.sqlite beside the estate
-    // file (ADR-021 Decision 7 per-estate isolation). The stem prefix ensures two
+    // file (recall-driven dreaming per-estate isolation). The stem prefix ensures two
     // estates in the same directory each have their own queue and cannot drain
     // each other's jobs. Its existence signals at least one dreaming-eligible
     // recall has occurred — actual pending count is verified inside dream_runner.
@@ -354,7 +354,7 @@ fn dreaming_queue_has_pending(estate_path: &str) -> bool {
 
 /// Spawn `mootx01 dream` detached to run one REM-ALPHA cycle after a
 /// direct-open stdio serve exits or starts up with a pending dreaming queue
-/// (T10 / ADR-021 Phase 5). The child `setsid`s itself (unix) / is created
+///. The child `setsid`s itself (unix) / is created
 /// detached (windows); we inherit env (so ARIA_MCP_SQLITE_PATH targets the same
 /// estate) and do not wait on it.
 fn spawn_detached_dream() {

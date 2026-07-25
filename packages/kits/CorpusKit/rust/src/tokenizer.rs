@@ -31,15 +31,16 @@ pub trait Tokenizer: Send + Sync {
     }
 }
 
-/// Default keyword tokenization: lowercase and split on
-/// Unicode word boundaries. Matches the Swift default in
-/// `Tokenizer.keywordTokens`.
+/// Default keyword tokenization: lowercase and split on Unicode-alphabetic /
+/// ASCII-digit boundaries. The contextual Greek final-sigma form is folded to
+/// U+03C3 so the canonical token bytes do not depend on the platform Unicode
+/// engine.
 pub fn default_keyword_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     for c in text.to_lowercase().chars() {
         if c.is_alphabetic() || c.is_ascii_digit() {
-            current.push(c);
+            current.push(if c == '\u{03C2}' { '\u{03C3}' } else { c });
         } else if !current.is_empty() {
             out.push(std::mem::take(&mut current));
         }

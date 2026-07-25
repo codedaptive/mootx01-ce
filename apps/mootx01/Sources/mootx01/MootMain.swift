@@ -51,13 +51,13 @@ enum MootEntry {
 
 struct Mootx01: AsyncParsableCommand {
 
-    /// Bare semver for the installed binary. Compared numerically by --check /
-    /// upgrade against the latest release tag, so it must stay a pure semver.
+    /// SemVer for the installed binary. Development builds carry the beta
+    /// pre-release component; stable builds use a bare numeric version.
     /// The human-facing --version string adds the date via `versionDisplay`.
-    static let currentVersion = "1.1.0"
+    static let currentVersion = "1.1.0-beta-04"
 
     /// Release date stamp shown alongside the version by --version.
-    static let releaseDate = "2026-07-15"
+    static let releaseDate = "2026-07-24"
 
     /// The exact string --version prints. The Rust port must print an identical
     /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).
@@ -86,7 +86,7 @@ struct Mootx01: AsyncParsableCommand {
                 DbCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
-                // ADR-025 — out-of-band sensitivity unlock / lock.
+                // — out-of-band sensitivity unlock / lock.
                 UnlockCommand.self,
                 LockCommand.self,
                 // Feature toggles (M-MEMTOOL-1).

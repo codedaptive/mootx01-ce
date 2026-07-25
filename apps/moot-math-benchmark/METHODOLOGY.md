@@ -5,10 +5,39 @@ candidate kernel that's compiled in gets measured here, across every
 (op, batch_size, mode) cell. Decision docs cite specific runs of this
 framework instead of paper estimates.
 
+## Evidence layers
+
+The current evidence deliberately separates five questions:
+
+1. `catalog-bench` proves that all 29 canonical primitives validate in each
+   port, then times the validator-shaped workload for broad regressions.
+2. `stress-test`, `topk-bench`, and `ml-bench` measure operation-shaped math
+   without product transport or storage.
+3. `fdc-bench` measures the current deterministic classifier v4 and semantic
+   model paths, which are newer than the canonical primitive catalog.
+4. `product-bench.py` measures a built `mootx01` binary over resident loopback
+   MCP against a disposable estate, preserving raw samples and percentiles.
+5. The EE `tools/mcp-benchmarker` gauntlet measures retrieval quality and latency
+   through the product MCP boundary on a deterministic adversarial corpus. The
+   current CE evidence reruns only MOOT; historical MemPalace numbers remain
+   non-current context.
+
+These layers are not interchangeable. Catalog per-case time includes
+comparison and CRC work over pre-parsed cases; a microbenchmark does not establish product latency;
+and a 120-row product run does not establish 1M-row scaling. The current
+claim-by-claim interpretation is in `PERFORMANCE.md`.
+
+The gauntlet adds recall@k, MRR, exact returned-content completeness,
+distractor contamination, mean latency, and P95 latency at 1,040 records. A
+DegeneracyGuard refuses a run when distinct probe queries do not produce a
+healthy ranking. Its full query run reuses the already loaded and dreamed
+scratch estate, so it is not an ingest benchmark. Details and provenance are in
+`GAUNTLET.md` and the published evidence bundle.
+
 ## Why this exists
 
 The methodology gate (see
-`docs/decisions/METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md`)
+`docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`)
 requires every kernel candidate to be implemented and measured, not
 rejected on paper. The first OR-reduce decision record contained a
 line like "rejected for 8x bandwidth amplification" that was a

@@ -1,0 +1,31 @@
+table=chunks
+  col=id type=uuid null=0 default=- role=-
+  col=source_id type=text null=0 default=- role=-
+  col=start_offset type=int null=0 default=- role=-
+  col=length type=int null=0 default=- role=-
+  col=text type=text null=0 default=- role=-
+  col=hlc type=hlc null=0 default=- role=-
+  col=metadata type=json null=0 default=- role=-
+  col=created_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=vectors
+  col=id type=uuid null=0 default=- role=-
+  col=item_id type=text null=0 default=- role=-
+  col=vector_index type=int null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=kind type=int null=0 default=- role=-
+  col=dim type=int null=0 default=- role=-
+  col=payload type=blob null=0 default=- role=-
+  col=scale type=float null=1 default=- role=-
+  col=filed_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  unique=item_id,vector_index,model_id
+  appendOnly=0 hashable=0
+index=idx_chunks_hlc table=chunks cols=hlc unique=0
+index=idx_chunks_source table=chunks cols=source_id unique=0
+index=idx_vectors_item table=vectors cols=item_id unique=0
+index=idx_vectors_model_item table=vectors cols=model_id,item_id unique=0

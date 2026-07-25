@@ -1,4 +1,4 @@
-//! Autonomic Governor integration tests (see ADR-LOOPBACKHTTP-001 §17).
+//! Autonomic Governor integration tests (see bounded loopback HTTP).
 //!
 //! Mirrors the Swift `AutonomicGovernorTests` suite in
 //! `packages/kits/AriaMcpKit/Tests/AriaMCPTests/AutonomicGovernorTests.swift`.
@@ -154,7 +154,7 @@ fn make_governor_with_flag(flag: Arc<AtomicBool>, base_tick_ms: u64) -> Autonomi
 /// (`dreaming_queue_pending_count_for_gate`) returns `Some(n > 0)` on the
 /// next governor tick.
 ///
-/// The v2 gate (§12.2 REM-ALPHA, ADR-021 Phase 4) skips the dreaming cycle
+/// The REM-ALPHA gate skips the dreaming cycle
 /// entirely when the estate's dreaming queue is empty or not yet mounted —
 /// an idle tick costs nothing. Tests that assert `dreaming_fired == true`
 /// must therefore ensure ≥1 pending item is in the queue before the tick.

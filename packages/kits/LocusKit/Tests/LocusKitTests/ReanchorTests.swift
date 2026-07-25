@@ -16,7 +16,7 @@ import Testing
 ///      `invalidContent`), drawerNotFound, forwards to `DrawerStore.reanchorGated`.
 ///
 /// Coverage mandated by VERB-REA-01 BRR:
-///   - room move completes without error (Drawer.room removed per ADR-017;
+///   - room move completes without error (Drawer.room removed under the node-tree model;
 ///     direct room-position verification is not available via Drawer)
 ///   - reanchor to a new lattice updates the anchor
 ///   - empty reanchor → `invalidContent`
@@ -229,13 +229,13 @@ struct ReanchorTests {
         }
     }
 
-    @Test("Estate.reanchor: toRoom call succeeds without error (Drawer.room removed per ADR-017)")
+    @Test("Estate.reanchor: toRoom call succeeds without error (Drawer.room removed under the node-tree model)")
     func estateReanchorToRoom() async throws {
         let (estate, _) = try await makeEstate()
         let drawer = try await captureOne(estate: estate, room: "original-room")
 
         // Call succeeds; no assertion on room position — Drawer no longer carries
-        // a .room field per ADR-017, so peek cannot surface the move directly.
+        // a.room field under the node-tree model, so peek cannot surface the move directly.
         try await estate.reanchor(rowID: drawer.id, toRoom: "moved-room")
         _ = try await estate._peekDrawer(id: drawer.id)
     }

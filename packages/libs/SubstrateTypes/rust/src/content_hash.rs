@@ -1,7 +1,7 @@
 // content_hash.rs
 //
 // Typed 32-byte SHA-256 digest over a leaf payload (drawer
-// content + vectors) per ADR-017 §16. ContentHash is semantically
+// content + vectors) under the node-tree model. ContentHash is semantically
 // distinct from MerkleRoot — a content hash summarizes ONE
 // payload, a Merkle root summarizes a subtree of children's
 // hashes. The type system prevents mixing them.
@@ -33,7 +33,7 @@ impl ContentHash {
     /// Sentinel hash for a tombstoned (expunged) drawer payload.
     ///
     /// SHA-256 of the bare TOMBSTONE domain tag byte (0x02).
-    /// Per ADR-017 §16 and the I-25 layering constraint, this is
+    /// Under the node-tree model and the I-25 layering constraint, this is
     /// a byte literal — substrate-types (layer 1) cannot depend on
     /// substrate-kernel (layer 2) to compute it at runtime.
     /// A substrate-kernel bridge test verifies the literal equals

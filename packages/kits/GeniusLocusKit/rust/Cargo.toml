@@ -22,7 +22,7 @@ path = "src/lib.rs"
 # (sentence utility lib) does NOT invert — eidetic-lib has no dependency
 # on GeniusLocusKit. eidetic-lib already depends on lattice-lib, which
 # GLK also depends on, so this adds no new transitive external crate.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 # F18.3 (2026-05-27): GLK now depends on SubstrateLib so the unified
 # audit log can consume the canonical SHA-256 content-hash and HLC
@@ -34,7 +34,7 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # SubstrateML (Layer 3 algorithms) is required so `MatrixTier::rebuild_temporal`
 # can delegate to `temporal_causality_fold::fold` — the canonical T-matrix engine
 # (cookbook §6.4). Mirrors the Swift dependency added 2026-06-04 per
-# DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md. Layering: GeniusLocusKit
+# hourly temporal-matrix scheduling. Layering: GeniusLocusKit
 # (composition) → SubstrateML (algorithms) does NOT invert.
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 # The coordinator, handle, and lattice-overlap fan-out logic remain pure
@@ -57,7 +57,7 @@ corpus-kit = { path = "../../CorpusKit/rust" }
 # queuekit with the persistencekit feature. Mirrors the Swift
 # `import QueueKit` in EncodeIntake.swift. Layering: genius-locus-kit
 # (composition) → queuekit (substrate) does NOT invert.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
@@ -67,7 +67,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # adding it as a direct dep makes the dependency explicit and enables the
 # Zeroizing<> wrapper on mediated_keys storage.
 # C-1 rationale: crypto hygiene companion to the approved aes-gcm crate.
-# See DECISION_RUST_AEAD_CRATE_2026-06-05.
+# See the Rust AES-GCM seam.
 zeroize = "1"
 # D9 grant signature verification: decode the source estate's base64-encoded
 # Ed25519 public key from the manifest before calling convergence_kit::verify_signature.
@@ -79,14 +79,14 @@ base64 = "0.22"
 # and at the verb-error boundary. Off-path cost: single AtomicBool::load(Acquire) +
 # branch — zero allocation, no lock. Results byte-identical when disabled.
 # Layering: genius-locus-kit (composition) → intellectus-lib (floor). No inversion.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust equivalent: no inversion rule).
+# Per in-repository dependency direction (Rust equivalent: no inversion rule).
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # ConvergenceKit: sync-backend abstraction. GeniusLocusKit stores the active
 # SyncEngine per estate and exposes sync_state_token so ARIA surfaces can
 # report honest sync status. Layering: genius-locus-kit (composition) →
 # convergence-kit (sync tier) does NOT invert. convergence-kit has no
 # dependency on genius-locus-kit.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 convergence-kit = { path = "../../ConvergenceKit/rust" }
 # EngramLib: promoted from dev-dep to production dep by DG3 (findNearestDistilled).
 # The `find_nearest_distilled` function takes `&Engram` in its public signature —
@@ -94,7 +94,7 @@ convergence-kit = { path = "../../ConvergenceKit/rust" }
 # Engram must be nameable in production code. Engram was already a transitive dep
 # via vectorkit → engram-lib; this entry makes the dependency explicit per the
 # production signature. Layering: genius-locus-kit (composition) → engram-lib
-# (substrate primitive) does NOT invert. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# (substrate primitive) does NOT invert. Per in-repository dependency direction.
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 # One-door FDC classification seam (fix/fdc-capture-seam): capture_with_mode
 # now classifies the lattice anchor via Fdc::encode_anchor when the incoming
@@ -102,28 +102,32 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # single place every capture path (file_memory, vault import, branch promotion)
 # runs FDC. Layering: genius-locus-kit (composition) → lattice-lib (algorithm
 # substrate) does NOT invert (lattice-lib has no dependency on GLK).
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 
 [features]
 # test-seams: exposes EstateCoordinator::inject_vector_hamming_error and
 # inject_embed_error for P1 degradation force-tests in the integration test suite
 # (tests/recall_scored_parity.rs GROUP E). Compiled out of the production binary.
-# Pattern mirrors corpus-kit's test-seams feature (same crate, same technique).
 # Also enables locus-kit/test-seams so the LocusKit recall internal-read fault
 # seam (Estate::set_test_force_internal_read_error) is reachable from GLK
 # integration tests that drive recall through the RecallDirector (P0-5 sites
 # 1-5). Without this, the dependency crate's `test` cfg does NOT apply to GLK's
 # integration tests and the seam method would be absent.
-test-seams = ["locus-kit/test-seams", "corpus-kit/test-seams"]
+test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
 
 [dev-dependencies]
+# P6 scale-qualification driver (tests/scale_qualification.rs, #[ignore],
+# env-gated): raw read-only metrics probe (page/freelist counts, dbstat
+# per-table bytes) on the qualification clone. Dev-dep only; rusqlite is
+# already in the tree via persistence-kit. Version matches persistence-kit's.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
 # integration tests (D5: ThrowingFloatProvider for dense_lane_status parity tests).
 # engram-lib is already a transitive dependency via vectorkit → engram-lib;
 # this dev-dep makes it directly nameable in tests/ without altering the
 # production dependency graph.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (dev-dep, no layering inversion:
+# Per in-repository dependency direction (dev-dep, no layering inversion:
 # engram-lib is a substrate lib below GLK).
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 # test-seams feature enables Corpus::open_with_provider and

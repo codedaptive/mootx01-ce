@@ -183,3 +183,60 @@ Xcode ▸ scheme Mootx01-macOS ▸ Archive ▸ Distribute App ▸ Developer ID
      ▸ Upload (notarize) ▸ staple the ticket
 # or route through the existing CE notarization pipeline
 ```
+
+## Step 10 — Export Compliance Declaration
+
+`ITSAppUsesNonExemptEncryption` is set to `false` in both the iOS and macOS
+Info.plist outputs. This answer is correct: the app uses only exempt encryption
+(SQLCipher data-at-rest, CryptoKit SHA-256 hashing, OS-provided TLS). Uploads
+to App Store Connect will not be held at the encryption compliance prompt.
+
+**What "non-exempt encryption" means in this context:**
+
+The EAR (Export Administration Regulations) define non-exempt encryption as
+encryption using non-standard algorithms or key lengths exceeding 64 bits that
+is NOT one of: (a) an OS-provided API, (b) TLS/HTTPS over a standard protocol,
+or (c) data-protection/at-rest encryption provided by the platform. SQLCipher
+uses AES-256 under the data-protection exemption. All other cryptography in
+this app is OS-provided.
+
+**App Store Connect workflow:**
+
+When you upload a build, ASC will ask: "Does your app use encryption?"
+Answer: **Yes** (the app does use encryption).
+Follow-up: "Does your app qualify for any of the exemptions?"
+Answer: **Yes — encryption is used for data protection (exempt)**.
+This tells ASC to set `ITSAppUsesNonExemptEncryption = NO` on the record,
+consistent with the Info.plist value, and no annual self-classification report
+(SNAP-R) is required.
+
+## Step 11 — France Cryptography Declaration (Déclaration Simplifiée)
+
+France requires notification to ANSSI for apps using cryptography, even if
+the cryptography is standard and exempt under US EAR.
+
+**Who this applies to:** any release distributed to French users via the App
+Store (including EU-wide releases).
+
+**Procedure:**
+
+```
+1. Go to https://www.ssi.gouv.fr/declaration
+2. Select "Déclaration simplifiée" (simplified declaration)
+3. Describe the cryptographic functions:
+     - SQLCipher: AES-256 symmetric encryption at rest
+     - CryptoKit: SHA-256 one-way hashing (no key exchange)
+     - TLS/HTTPS: standard protocol via Apple OS frameworks
+4. Submit and note the declaration reference number
+5. Keep the reference number for compliance inspection — ASC does not
+   require it to be entered but it must be on file
+```
+
+The simplified declaration is a one-time notification, not an approval process.
+It typically takes a few business days for the reference number to arrive.
+Distribution to France can begin before the reference number is received, as
+long as the declaration has been submitted.
+
+**Timing:** file before the first public release that reaches French users.
+TestFlight internal testing does not require it. External TestFlight and App
+Store submission do.

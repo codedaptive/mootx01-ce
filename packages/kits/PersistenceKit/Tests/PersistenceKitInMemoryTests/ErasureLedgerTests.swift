@@ -1,6 +1,6 @@
 // ErasureLedgerTests.swift
 //
-// Tests for the erasure ledger (ADR-017 §17).
+// Tests for the erasure ledger.
 // Part 3 of mission NT-P3.
 
 import Testing

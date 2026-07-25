@@ -1,8 +1,8 @@
 ---
 title: Reference Directory Index
-version: 1.0.1
+version: 1.0.3
 status: active
-date: 2026-06-15
+date: 2026-07-23
 description: Index of the reference contract surface — the SPEC and INTERFACE documents for every kit, lib, protocol, and canonical encoder.
 authors: MOOTx01 maintainers
 relates_to:
@@ -52,14 +52,14 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 | Package | Spec | Interface | What it is |
 |---|---|---|---|
 | LocusKit | [SPEC](LOCUSKIT_SPEC.md) | [INTERFACE](LOCUSKIT_INTERFACE.md) | Spatial memory and the knowledge graph for one estate — the four nouns, bitmap state, full audit trail. |
-| VectorKit | [SPEC](VECTORKIT_SPEC.md) | [INTERFACE](VECTORKIT_INTERFACE.md) | On-device embeddings and nearest-neighbour search (HNSW, hybrid BM25 plus vector). |
-| CorpusKit | [SPEC](CORPUSKIT_SPEC.md) | [INTERFACE](CORPUSKIT_INTERFACE.md) | Content-plus-vector RAG bundles, built over VectorKit. |
+| VectorKit | [SPEC](VECTORKIT_SPEC.md) | [INTERFACE](VECTORKIT_INTERFACE.md) | On-device model-tagged vector storage and nearest-neighbour machinery. |
+| CorpusKit | [SPEC](CORPUSKIT_SPEC.md) | [INTERFACE](CORPUSKIT_INTERFACE.md) | Standalone-capable RAG database; in GLK, derived indexing over the canonical LocusKit Drawer source. |
 
 ## Composition and brain
 
 | Package | Spec | Interface | What it is |
 |---|---|---|---|
-| GeniusLocusKit | [SPEC](GENIUSLOCUSKIT_SPEC.md) | [INTERFACE](GENIUSLOCUSKIT_INTERFACE.md) | The composition layer and write surface: unifies LocusKit and CorpusKit, exposes the nine verbs, runs the Brain layer. |
+| GeniusLocusKit | [SPEC](GENIUSLOCUSKIT_SPEC.md) | [INTERFACE](GENIUSLOCUSKIT_INTERFACE.md) | GLK Super System and write surface: composes LocusKit and CorpusKit over one canonical Drawer dataset, exposes the nine verbs, and runs the Brain layer. |
 | NeuronKit | [SPEC](NEURONKIT_SPEC.md) | [INTERFACE](NEURONKIT_INTERFACE.md) | The algorithm BrainKit: hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit. |
 | CognitionKit | [SPEC](COGNITIONKIT_SPEC.md) | [INTERFACE](COGNITIONKIT_INTERFACE.md) | The behaviour BrainKit: named, composable workflows (recipes). Sequences NeuronKit; contains no algorithms of its own. |
 | VaultKit | — | [INTERFACE](VAULTKIT_INTERFACE.md) | A bidirectional bridge between a MOOTx01 estate and a human-readable vault. |
@@ -70,6 +70,7 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 |---|---|---|---|
 | aria-mcp | [SPEC](ARIA_MCP_SPEC.md) | [INTERFACE](ARIA_MCP_INTERFACE.md) | The external access surface — the ARIA language projected onto MCP primitives (tools, resources, prompts, sampling, elicitation). |
 | moot-mgr | [SPEC](MOOT_MGR_SPEC.md) | — | The GUI control and monitor surface for the headless mootx01 daemon. |
+| MOOTx01-App | [SPEC](MOOTX01_APP_SPEC.md) | [Developer guide](../../apps/Mootx01-App/README.md) | The native macOS, iOS, and iPadOS presentation layer: embedded estate, Apple intelligence and automation, opt-in sync, LAN serving, and on-demand federation. |
 | mootx01 CLI | — | [INTERFACE](INSTALLER_INTERFACE.md) | The Swift CLI / host that installs and runs a MOOTx01 estate. |
 
 ## Cross-cutting specifications
@@ -83,9 +84,9 @@ contract every conforming implementation must satisfy. Read this first.
 deterministic linguistic pipeline that maps text to a Free Decimal
 Correspondence (FDC) code. No learned model, no network call at runtime;
 the classification backbone the substrate adopted as its 1.0 scheme. The
-former MOOT Decimal Classification Codes (MDCC) taxonomy was removed in
-the MDCC→FDC migration; the superseded MDCC specs are kept in
-[`../archive/`](../archive/) for history only.
+former MOOT Decimal Classification Codes (MDCC) taxonomy was removed in the
+MDCC→FDC migration. Its superseded specifications remain available through
+Git history and dated validation records.
 
 ## Conventions
 
@@ -93,8 +94,8 @@ Spec filenames are bare — no version suffix (VERSIONING.md §3). The
 version lives in front matter (`version: MAJOR.MINOR.PATCH`). Material
 changes are made in place: bump the front-matter `version` and append a
 changelog entry — the filename does not change, so citations from code
-and other docs stay stable. A spec moves to [`../archive/`](../archive/)
-only when it is superseded outright.
+and other docs stay stable. A superseded spec leaves the active index and
+remains recoverable through Git history.
 
 Each document opens with a front-matter block (`title`, `version`,
 `status`, `date`, `description`, `spec_type`, `authors`, `relates_to`).

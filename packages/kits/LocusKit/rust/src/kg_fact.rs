@@ -18,7 +18,7 @@
 //!   See `kg_fact_operational.rs` for the four enums and the
 //!   computed accessors.
 //! - `provenance_bitmap` — source type, confirmation, confidence,
-//!   channel, sensitivity per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+//!   channel, sensitivity per `the packed provenance layout`.
 //!   Carried verbatim from the source drawer's provenance at extraction
 //!   time.
 //!
@@ -29,7 +29,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Same convention
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, epoch-millisecond instants). Same convention
 //!   used across the LocusKit Rust port.
 //! - `id: String = UUID().uuidString` Swift default → Rust callers
 //!   supply `id` explicitly. Tests build deterministic ids;
@@ -93,7 +93,7 @@ pub struct KGFact {
     pub operational_bitmap: i64,
 
     /// Provenance bitmap carried from the source drawer at extraction
-    /// time per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+    /// time per `the packed provenance layout`.
     pub provenance_bitmap: i64,
 
     /// When this fact was filed. Epoch seconds in the Rust port; the

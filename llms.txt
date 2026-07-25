@@ -1,0 +1,77 @@
+# MOOTx01 CE documentation map
+
+MOOTx01 is a local-first long-term memory substrate and MCP server for AI
+clients. This file routes humans and AI agents to the maintained sources.
+
+## Start here
+
+- Product overview: README.md
+- Public product roadmap: ROADMAP.md
+- Binding product-core license: LICENSE
+- Plain-language licensing and commercial tiers: LICENSING.md
+- Community and Enterprise Edition boundaries: EDITIONS.md
+- AI-assisted explanation and install: AI_START_HERE.md
+- Documentation index: docs/README.md
+- Install guide: docs/start-here/INSTALLING_MOOTX01.md
+- SDK quickstart: docs/start-here/SDK_QUICKSTART.md
+- Repository topology: docs/concepts/TOPOLOGY.md
+- Framework and standalone SDK map: SDK.MD
+
+Use ROADMAP.md for current product direction and version placement. Historical
+completion reports can describe earlier scheduling decisions.
+
+For licensing questions, read LICENSE first because it is the binding grant,
+then use LICENSING.md and EDITIONS.md for the product model. The short rule is:
+one-person MOOTs are free at home, at work, and across that person's devices.
+Companies may install, compile, sign, and deploy separate single-user MOOTs for
+their employees for free. The official Apple App Store build is a separate,
+optional convenience purchase, currently expected to be about three dollars
+per major x.0.0 release. Multiuser, client-facing, and paid hosted system
+integrations are licensed; support and regulated security hardening are
+Enterprise Edition offerings.
+
+## Standalone Apache-2.0 SDK repositories
+
+- https://github.com/codedaptive/moot-memory
+  LocusKit, VectorKit, and CorpusKit.
+- https://github.com/codedaptive/moot-semantics
+  ARIA grammar, FDC lattice, and deterministic grounding.
+- https://github.com/codedaptive/moot-system
+  Persistence, queueing, synchronization, telemetry, and loopback transport.
+- https://github.com/codedaptive/moot-core
+  Typed substrate math, kernels, learning, and graph algorithms.
+
+Use SDK.MD for package ownership and install snippets. Do not infer that every
+package in the MOOTx01 product repository belongs to a standalone SDK.
+
+## Operator and advanced tools
+
+- Manager/dashboard: apps/moot-mgr/README.md
+- Optional two-backend MCP bridge: apps/moot-bridge/README.md
+- Benchmark program: apps/moot-math-benchmark/README.md
+- Tracked benchmark data: apps/moot-math-benchmark/results/README.md
+- Obsidian vault workflow: docs/start-here/OBSIDIAN_VAULT.md
+
+## Contracts and evidence
+
+- Package contracts: docs/reference/README.md
+- ARIA MCP interface: docs/reference/ARIA_MCP_INTERFACE.md
+- Manager specification: docs/reference/MOOT_MGR_SPEC.md
+- Vault interface: docs/reference/VAULTKIT_INTERFACE.md
+- Architecture decisions: docs/decisions/
+- Validation and audits: docs/validation/
+
+## Version note
+
+This branch is `develop/1.1.x`, currently versioned `1.1.0-beta-04`. It is the
+fast-moving beta for 1.1 feature updates, not the supported product release.
+Stable install links resolve to the current 1.0 release; beta evaluation builds
+this checkout and records both the beta version and tested commit. The `04`
+records four pushes to `candidate/1.1.x` since its creation.
+
+Stable 1.0.x already ships explicit, agent-directed vault import, export,
+status, and reconcile operations. The resulting Markdown vault opens in
+Obsidian, and the default output is a superset of Google's Open Knowledge
+Format (OKF) v0.1. The 1.1 plan adds an optional resident, continuously
+maintained Obsidian mode with automatic resync. That planned mode excludes
+private/non-exportable, restricted, and secret data from automation.

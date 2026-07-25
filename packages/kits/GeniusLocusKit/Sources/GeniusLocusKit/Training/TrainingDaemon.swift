@@ -4,7 +4,7 @@
 //
 // The training daemon enriches captured content and trains the GLK-06
 // matrices, but only once the estate crosses the transition-count
-// threshold defined by DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21.
+// threshold defined by the training transition threshold.
 // Below the threshold the daemon is dormant — every tick still
 // surfaces a diagnostic emission, but no enrichment work runs and no
 // matrix cells move.
@@ -13,7 +13,7 @@
 // because its only mutable state is the high-water mark, and the
 // daemon is run from inside the GLK-04 scheduler's per-estate actor.
 // The scheduler already serialises every tick against one estate
-// (DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21); adding an actor
+//; adding an actor
 // here would double-isolate without buying anything.
 //
 // Registration. A consumer wires the daemon into the scheduler by

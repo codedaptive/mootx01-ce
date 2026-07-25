@@ -191,7 +191,7 @@ public enum EmbeddingModel: Sendable {
     /// (the trained vocabulary) is built externally by the caller before
     /// constructing the Corpus.
     ///
-    /// See ADR-010 Decision B for the rationale and `RandomIndexingProvider`
+    /// See honest semantic fusion for the rationale and `RandomIndexingProvider`
     /// in `CorpusKitProviders` for the full training API.
     case randomIndexing(provider: any EmbeddingProvider & Sendable)
 
@@ -208,7 +208,7 @@ public enum EmbeddingModel: Sendable {
     /// informative associations dominate.  The distinction is real: it is not
     /// an alias for `.randomIndexing`.
     ///
-    /// See ADR-010 Decision B for the rationale and `PpmiProvider`
+    /// See honest semantic fusion for the rationale and `PpmiProvider`
     /// in `CorpusKitProviders` for the full training API.
     case ppmi(provider: any EmbeddingProvider & Sendable)
 
@@ -217,7 +217,7 @@ public enum EmbeddingModel: Sendable {
     /// The caller constructs and trains an `LsaProvider` (term-document matrix +
     /// deterministic Jacobi SVD truncated to k dimensions) and passes it here.
     ///
-    /// See ADR-010 Decision B for the rationale and `LsaProvider` in
+    /// See honest semantic fusion for the rationale and `LsaProvider` in
     /// `CorpusKitProviders` for the full training API.
     case lsa(provider: any EmbeddingProvider & Sendable)
 
@@ -230,7 +230,7 @@ public enum EmbeddingModel: Sendable {
     /// Document embeddings are the L2-normalised column vectors of the H factor;
     /// query embeddings use the pseudo-inverse fold-in formula on W.
     ///
-    /// See ADR-010 Decision B for the rationale and `NmfProvider` in
+    /// See honest semantic fusion for the rationale and `NmfProvider` in
     /// `CorpusKitProviders` for the full training API.
     case nmf(provider: any EmbeddingProvider & Sendable)
 
@@ -251,7 +251,7 @@ public enum EmbeddingModel: Sendable {
     /// The float lane is dark (returns `[]`) for texts the FDC engine cannot
     /// classify (UNRESOLVED). This is the expected opt-out, not an error.
     ///
-    /// See ADR-010 Decision B (FDC lattice co-classification) and `FDCProvider`
+    /// See honest semantic fusion (FDC lattice co-classification) and `FDCProvider`
     /// in `CorpusKitProviders` for the encoding details.
     case fdc(provider: any EmbeddingProvider & Sendable)
 
@@ -273,7 +273,7 @@ public enum EmbeddingModel: Sendable {
     ///
     /// Swift-only: `NaturalLanguage` is an Apple system framework (same
     /// sanctioned divergence as the `.nlTagger` word-class path). Rust has no
-    /// counterpart. Recorded in ADR-019.
+    /// counterpart. Recorded in opt-in Apple embedding providers.
     case nlEmbedding(provider: any EmbeddingProvider & Sendable)
 
     /// Apple NaturalLanguage contextual (transformer) embedding provider (Swift-only).
@@ -291,7 +291,7 @@ public enum EmbeddingModel: Sendable {
     /// This is an ADDITIVE lane — item-local, no training step, no basis.
     ///
     /// Swift-only: same sanctioned divergence as `.nlEmbedding`. Rust has no
-    /// counterpart. Recorded in ADR-019.
+    /// counterpart. Recorded in opt-in Apple embedding providers.
     case nlContextualEmbedding(provider: any EmbeddingProvider & Sendable)
 #endif // canImport(NaturalLanguage)
 
@@ -631,7 +631,7 @@ public actor Corpus {
     /// estates, which are single-process and need no lease. The drain loop drains
     /// a pass only while it holds this lease, so exactly one process drains the
     /// shared `encode` stream at a time. Stream-keyed (`"encode"`) so the dreaming
-    /// drainer can hold its own lease concurrently (ADR-021 Decision 7). Released in
+    /// drainer can hold its own lease concurrently. Released in
     /// `dropIngestQueue`. Uses the QueueKit-provided `DrainLease` (T2).
     var drainLease: DrainLease?
 
@@ -885,7 +885,10 @@ public actor Corpus {
     /// never names the concrete provider type, so layering (providers → core) is
     /// preserved. A corrupt/version-mismatched blob throws `decodingFailure`
     /// rather than silently serving an untrained provider.
-    private static func resolveProvider(
+    // Internal — not private — so the shared-content `CorpusContentEngine`
+    // resolves providers through the SAME open-time logic (one engine, not
+    // a fork; GLK shared-content 1.1 P2).
+    static func resolveProvider(
         freshProvider: any EmbeddingProvider,
         isTrainable: Bool,
         basisStore: BasisStore,
@@ -1435,7 +1438,7 @@ public actor Corpus {
     /// chunks, same vectors, same content-addressed idempotency. This is the
     /// cross-drawer parallelism the per-estate encode drain drives (the 1.0
     /// separate-pump fix; the global cross-estate cap is the 1.1 central drain
-    /// master, DECISION_CENTRAL_DRAIN_MASTER_2026-06-23).
+    /// master, the deferred process-global drain master).
     ///
     /// First-ingest training cannot run concurrently (it mutates a slot's basis),
     /// so when a trainable slot still lacks a persisted basis the batch trains it
@@ -1773,8 +1776,8 @@ public actor Corpus {
         // instead. The heavy compute (reconstructBasis + trainOnCorpus) is a pure
         // function of (freshBlob, texts) — hoisted OFF the actor into a task
         // group; install + persist stay serial on the actor. Per-slot output is
-        // byte-identical to the serial loop (kernels untouched, ADR-022). LSA and
-        // NMF each derive the ADR-022 reduced vocabulary with the same pure
+        // byte-identical to the serial loop (kernels untouched, shared reduced embedding vocabulary). LSA and
+        // NMF each derive the shared reduced embedding vocabulary reduced vocabulary with the same pure
         // deterministic selection, so concurrent duplicate computation of it is
         // benign (identical artifact). For N=1 this runs one task — same result.
         // Rust twin: the scoped-thread Phase 1 in `Corpus::reindex`.
@@ -1844,7 +1847,7 @@ public actor Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         try await persistMaintainedCounts(now: now)
 
-        // ADR-026 NOTE: releaseBasis() was here but is REMOVED because the
+        // disk-default storage residency NOTE: releaseBasis was here but is REMOVED because the
         // serving providers have no on-demand reconstruction path. Calling
         // releaseBasis() clears the live vocab, making subsequent embeds
         // return Engram.zero until the next full reindex or process restart.
@@ -2114,8 +2117,10 @@ public actor Corpus {
     /// Destroy the corpus's recall index.
     ///
     /// Clears the durable InvertedIndexStore (SQLite iix_termfreqs + iix_doclens
-    /// rows), the chunk-source map, and all vector rows from the VectorStore so
-    /// this corpus no longer participates in recall.
+    /// rows), the chunk-source map, and THIS CORPUS'S vector rows from the
+    /// VectorStore (ownership-scoped: its own chunk IDs under its held models —
+    /// never rows other lanes wrote to shared storage) so this corpus no longer
+    /// participates in recall.
     ///
     /// Chunk rows are not deleted by this call — they remain in the backing
     /// storage. What is destroyed is the corpus's active recall capability:
@@ -2133,11 +2138,28 @@ public actor Corpus {
         try await invertedIndex.deleteAll()
         chunkSourceMap.removeAll()
 
-        // 2. Delete all vector rows from the VectorStore.
-        //    VectorStore.destroyAllVectors() deletes every row in the vectors
-        //    table regardless of modelID, so it clears ALL held signals' rows
-        //    in one call (no per-slot fan-out needed).
-        try await vectorStore.destroyAllVectors()
+        // 2. Delete THIS CORPUS'S vector rows from the VectorStore —
+        //    OWNERSHIP-SCOPED (shared-content 1.1 P5). The corpus owns
+        //    exactly the rows keyed by its own chunk IDs under its held
+        //    models' modelIDs; on shared storage the vectors table can also
+        //    hold rows written by other lanes (drawer-keyed signals, other
+        //    consumers), and destroying the corpus's recall index must never
+        //    delete those. The chunk inventory comes from the append-only
+        //    chunks table, so it covers every chunk this corpus ever wrote
+        //    vectors for (already-removed sources' deletes are no-ops).
+        //    Whole-table teardown (`destroyAllVectors`) is reserved for the
+        //    whole-estate destruction path in GeniusLocusKit.destroy.
+        let heldModelIDs = slots.map { $0.provider.modelID }
+        for sourceID in try await bundleStore.allSourceIDs() {
+            for chunk in try await bundleStore.chunksForSource(sourceID) {
+                for modelID in heldModelIDs {
+                    try await vectorStore.deleteAllVectors(
+                        itemID: chunk.id.uuidString,
+                        modelID: modelID
+                    )
+                }
+            }
+        }
 
         // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
         //    corpus must leave no orphaned basis row FOR ANY held modelID: the
@@ -2710,9 +2732,12 @@ extension EmbeddingModel {
     private static let deterministicSeed: UInt64 = 0xC05B_D15C_A15D_1B00
 
     /// Construct the concrete EmbeddingProvider for this model selection.
-    /// The returned value is held privately inside the Corpus actor and
-    /// never exposed on the public API.
-    fileprivate func makeProvider() -> any EmbeddingProvider {
+    /// The returned value is held privately inside the Corpus actor (or the
+    /// shared-content `CorpusContentEngine`) and never exposed on the public
+    /// API. Internal — not fileprivate — so the content engine reuses the
+    /// SAME provider construction (one engine, not a fork; GLK
+    /// shared-content 1.1 P2).
+    func makeProvider() -> any EmbeddingProvider {
         switch self {
         case .randomIndexing(let provider):
             // The caller built and trained the provider externally. Pass it

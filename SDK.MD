@@ -16,6 +16,19 @@ your AI out of the box — that is MOOTx01, and it lives in this repository.
 This document is the detailed map. The short version is in the
 [README](README.md#developer-sdks).
 
+## Pick a repository
+
+| Start here | Choose it for | Repository documentation |
+|---|---|---|
+| [`moot-memory`](https://github.com/codedaptive/moot-memory) | Structured memory, vector search, and local RAG | [`docs/README.md`](https://github.com/codedaptive/moot-memory/blob/main/docs/README.md) |
+| [`moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA vocabulary and deterministic local classification | [`docs/README.md`](https://github.com/codedaptive/moot-semantics/blob/main/docs/README.md) |
+| [`moot-system`](https://github.com/codedaptive/moot-system) | Storage, datasets, queues, sync, telemetry, and loopback HTTP | [`docs/README.md`](https://github.com/codedaptive/moot-system/blob/main/docs/README.md) |
+| [`moot-core`](https://github.com/codedaptive/moot-core) | Shared types, kernel, fingerprints, lifecycle rules, and memory math | [`docs/README.md`](https://github.com/codedaptive/moot-core/blob/main/docs/README.md) |
+
+If you are building memory or retrieval, begin with `moot-memory`. Its
+dependencies bring in the lower repositories. Each venue README lists exact
+Swift products, Rust crate names, tests, package guides, and source provenance.
+
 ---
 
 ## The four venue repositories
@@ -64,6 +77,12 @@ with the same determinism guarantees as the rest of the framework.
 **Use it when:** you are building memory, search, or retrieval into your own
 application — this is the layer most builders want first.
 
+On `develop/1.1.x`, the
+[`CorpusKit development guide`](packages/kits/CorpusKit/README.md) explains
+the new standalone/attached content-source engine, canonical IDs, provider
+state, migration, and compatibility boundary. The public `moot-memory`
+repository remains the stable SDK release line until 1.1 is published.
+
 ### [`moot-semantics`](https://github.com/codedaptive/moot-semantics) — vocabulary and grounding
 
 | Package | What it is |
@@ -82,14 +101,14 @@ the same anchor out, every time, no model in the loop.
 SwiftPM — depend on a venue directly:
 
 ```swift
-.package(url: "https://github.com/codedaptive/moot-memory.git", from: "1.0.5")
+.package(url: "https://github.com/codedaptive/moot-memory.git", from: "1.0.32")
 ```
 
 Cargo — git dependency; each repo's `docs/PACKAGE_MAP.md` lists the crate names:
 
 ```toml
 [dependencies]
-locuskit = { git = "https://github.com/codedaptive/moot-memory", tag = "v1.0.5" }
+locus-kit = { git = "https://github.com/codedaptive/moot-memory", tag = "v1.0.32" }
 ```
 
 No clone of this repository is required. The venues are self-contained.

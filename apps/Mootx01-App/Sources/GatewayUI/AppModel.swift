@@ -27,6 +27,18 @@ struct ToolDescriptor: Identifiable, Sendable {
 @Observable
 public final class AppModel {
 
+    // First-run flag — shown once; UserDefaults-backed so it survives app restarts.
+    // Default false (not completed). Set to true when onboarding is dismissed or skipped.
+    var hasCompletedOnboarding: Bool = UserDefaults.standard.bool(forKey: "com.mootx01.gateway.hasCompletedOnboarding") {
+        didSet { UserDefaults.standard.set(hasCompletedOnboarding, forKey: "com.mootx01.gateway.hasCompletedOnboarding") }
+    }
+
+    // Tab profile — false = Standard (Capture/Recall/Intelligence/Settings only);
+    // true = Advanced (Standard + engineering tabs). Default Standard.
+    var isAdvancedMode: Bool = UserDefaults.standard.bool(forKey: "com.mootx01.gateway.isAdvancedMode") {
+        didSet { UserDefaults.standard.set(isAdvancedMode, forKey: "com.mootx01.gateway.isAdvancedMode") }
+    }
+
     // Lifecycle
     public private(set) var bridge: MootBridge?
     var statusLine: String = "Not attached"
@@ -82,7 +94,7 @@ public final class AppModel {
         guard probe.text.contains("found 0") else { return }
         let samples = [
             ("MOOTx01 projects ARIA onto Apple surfaces — Siri, Spotlight, Shortcuts.", "gateway"),
-            ("The engine is the clean, Rust-mirrored server; the app envelopes it (ADR-005).", "architecture"),
+            ("The engine is the clean, Rust-mirrored server; the app envelopes it.", "architecture"),
             ("One estate, one host: embedded server-in-app, or a handed-off daemon.", "architecture"),
         ]
         for (content, room) in samples {

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.18.0
-status: active
-date: 2026-07-16
+version: 1.19.0
+status: accepted-1.1-target
+date: 2026-07-20
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -46,9 +46,9 @@ The `capture_drawer` tool's frame carries a single lattice-anchor classification
 
 ## § 3. Instance mode, API mode, and the dispatch path
 
-A MOOTx01 instance runs in GLK mode (canon). The write surface is always GLK. The write verbs (capture, mutate, withdraw, expunge, reanchor, learn) always target GLK, which keeps the databases in sync through QueueKit, which uses PersistenceKit directly. ARIA calls only the GLK verb surface for writes and never reaches the kits beneath; GLK is what fans out and coordinates.
+A MOOTx01 instance runs in GLK mode (canon). The write surface is always GLK. The write verbs (capture, mutate, withdraw, expunge, reanchor, learn) always target GLK, which stores content once as a canonical LocusKit Drawer and advances CorpusKit's derived indexes for that same Drawer ID through QueueKit over PersistenceKit. ARIA calls only the GLK verb surface for writes and never reaches the kits beneath; GLK owns the content-source adapter and coordination.
 
-recall is the verb that may be lensed. In GLK mode the default recall is hybrid, spanning LocusKit spatial and KG retrieval and CorpusKit BM25-plus-vector retrieval (CorpusKit exposes Chunk, ScoredChunk, BundleStore, BM25Index, HybridRecall). On the same instance a caller may request a narrower read lens, CorpusKit-only or LocusKit-only, as a recall argument. The lens narrows the read; it does not create a separate store, and it does not change the write path.
+recall is the verb that may be lensed. In GLK mode the default recall is hybrid, spanning LocusKit spatial and KG retrieval and CorpusKit BM25-plus-vector retrieval. Both lanes return the same canonical Drawer IDs; CorpusKit's standalone `Chunk`, `ScoredChunk`, and `BundleStore` compatibility surface is unreachable, and passage chunking is dark in MOOTx01. On the same instance a caller may request a narrower read lens, CorpusKit-only or LocusKit-only, as a recall argument. The lens narrows the read over the same Drawer objects; it does not create a separate content store or change the write path.
 
 API mode is the fleet. An operator configures many separate instances of different kinds, for example three CorpusKit, two LocusKit, three GeniusLocus, and ARIA routes each call to the database it belongs to. QueueKit over PersistenceKit is the mechanism for both the per-database operations and the cross-database coherence. Fleet routing is an API-layer concern (v1.1), distinct from the read-lensing available inside a single instance.
 
@@ -774,7 +774,7 @@ and kgFact edges are emitted by both legs.
 On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
-## § 19. Sensitivity unlock/lock control endpoints (ADR-025)
+## § 19. Sensitivity unlock/lock control endpoints (the sensitivity-grant contract)
 
 Two loopback-only POST endpoints accept out-of-band sensitivity-tier grants and
 revocations. They share the HTTP transport's CSRF/DNS-rebinding Origin guard. The
@@ -816,7 +816,7 @@ The daemon rejects proofs where `|now_ms - proof.ts| > 10_000` (10-second window
 to prevent replay attacks on the loopback socket. `"tier"` must be one of the two
 legal strings; any other value returns HTTP 400.
 
-**TTL semantics (ADR-025 §1):**
+**TTL semantics (the sensitivity-grant contract §1):**
 
 | Tier | Grant TTL |
 |---|---|
@@ -839,7 +839,7 @@ legal strings; any other value returns HTTP 400.
 ### POST /api/control/lock — revoke all grants
 
 Immediately clears all active sensitivity grants. No identity verification is
-required (ADR-025 §1: "locking reduces the user's own access and is always
+required (the sensitivity-grant contract §1: "locking reduces the user's own access and is always
 permitted").
 
 **Request body:** empty (`{}`)
@@ -876,6 +876,14 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.19.0 -- 2026-07-20
+
+- Aligned the ARIA projection with GLK 1.1 shared content: writes store one
+  canonical Drawer, CorpusKit indexes that Drawer ID, and every recall lens
+  returns the same object identity.
+- Made standalone Corpus passage/chunk compatibility explicitly unreachable
+  from MOOTx01.
 
 ### 1.18.0 -- 2026-07-16
 Upstream-release advisory: `moot_estate_ping` / `moot_estate_status` gain an
@@ -942,7 +950,7 @@ default, flagged). Total tool count: 68 (was 66). Permission tier `ask`
 for both new tools. Both Swift and Rust ports at parity.
 
 ### 1.13.0 -- 2026-07-05
-ADR-025 wave 8.2: adds `moot_monitoring_status` to the interface-tool surface.
+the sensitivity-grant contract wave 8.2: adds `moot_monitoring_status` to the interface-tool surface.
 Reifies the ARIA `read` verb on the monitoring object (estate-scoped, daemon
 daemon-global flag). Args: absent `enabled` → read current state; present
 `enabled: bool` → write flag + echo new state with `monitoring_source: user`.
@@ -952,7 +960,7 @@ Permission tier: `ask` in both `mcp__mootx01__` and `mcp__plugin_mootx01_mootx01
 namespaces. Total tool count: 64 (was 63). Both Swift and Rust ports at parity.
 
 ### 1.12.0 -- 2026-07-05
-ADR-025: sensitivity unlock/lock control endpoints (§19). Adds
+the sensitivity-grant contract: sensitivity unlock/lock control endpoints (§19). Adds
 `POST /api/control/unlock` and `POST /api/control/lock` — loopback-only
 endpoints for out-of-band sensitivity-tier grants and revocations. Grant
 TTLs: restricted → next local midnight; secret → 30 minutes. Proof
@@ -982,7 +990,7 @@ added on both. New tests: `MemoryGetTests.swift` (10 tests, AriaMcpKit);
 `memory_get_*` (7 tests) + 1 teachme test in Rust `dispatch_tests.rs`.
 
 ### 1.10.0 -- 2026-07-04
-ADR-024 §5 (MCP connection ownership, plugin transport, and install-moment
+the connection-ownership contract §5 (MCP connection ownership, plugin transport, and install-moment
 dedupe): `moot_estate_ping` / `moot_estate_status` gain an opt-in
 `version_skew:` line when the host has detected a mismatch between an
 installed plugin (currently Claude Code's `mootx01@mootx01`) and this

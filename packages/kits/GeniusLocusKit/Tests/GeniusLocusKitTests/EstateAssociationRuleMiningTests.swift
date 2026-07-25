@@ -28,7 +28,7 @@ import PersistenceKitInMemory
 // Appends synthetic, mutate-shaped audit events to the estate's DURABLE
 // audit log (`storage.auditLog`) — the store `auditLog(for:)` paginates
 // and bridges for the miners. Audit data lives only in `_storagekit_audit`
-// (ADR-026 removed the in-memory G-Set), so fixtures must land there to be
+// (disk-default storage residency removed the in-memory G-Set), so fixtures must land there to be
 // visible to mining.
 //
 // Event shape: verb "mutate", beforeBitmaps all-zero, afterBitmaps as

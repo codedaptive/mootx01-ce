@@ -69,6 +69,29 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// - Parameter texts: raw document texts (NOT pre-tokenized term arrays).
     func trainOnCorpus(texts: [String])
 
+    // MARK: - Streamed training (GLK shared-content 1.1 corrective pass)
+    //
+    // The bounded-memory training seam: callers stream the corpus in pages,
+    // folding each page via `accumulateTraining` and running the method's
+    // finalization pass exactly ONCE via `finalizeTraining`. For every
+    // conformer, `accumulateTraining(pages...) + finalizeTraining()` is
+    // BYTE-IDENTICAL to a single `trainOnCorpus(allTexts)` call — the pair
+    // is the same per-text accumulation split from the same finalize, so
+    // the trained basis (and its digest) does not depend on page size.
+    // Peak memory is bounded by the accumulator (vocabulary-scale), never
+    // by the corpus text.
+
+    /// Fold one page of raw document texts into the SAME accumulation
+    /// `trainOnCorpus` uses, WITHOUT finalizing. Deterministic; additive;
+    /// order-sensitive exactly as `trainOnCorpus` is (callers stream in
+    /// canonical ascending-ID order).
+    func accumulateTraining(texts: [String])
+
+    /// Run the method-specific finalization pass over the accumulated
+    /// state (PPMI/LSA/NMF; RI has none — no-op). Call exactly once,
+    /// after the last `accumulateTraining` page.
+    func finalizeTraining()
+
     /// Serialize the trained basis to a versioned, little-endian blob.
     ///
     /// This is the same blob the concrete provider's `serializeBasis()`
@@ -99,7 +122,7 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     ///   unknown format version, or a provider-magic mismatch — never crashes.
     func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable
 
-    /// Release the in-memory trained vocabulary (ADR-026). The next
+    /// Release the in-memory trained vocabulary. The next
     /// `embed` call will need to reload from BasisStore. Called after
     /// reindex/reembed completes to free the ~2GB of `[Float]` arrays
     /// that the vocab dictionary holds. Providers that have no in-memory
@@ -161,4 +184,20 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
     var countsVocabularySize: Int { get }
+
+    /// Whether the published counts generation already contains `term`.
+    ///
+    /// Attached engines use this read-only seam to persist only the hashes of
+    /// genuinely novel terms in their compact growth references. The published
+    /// counts blob remains frozen between provider publications: revisions do
+    /// not append obsolete text into an in-memory accumulator, so live and
+    /// reopened growth state are identical.
+    func countsContainsTerm(_ term: String) -> Bool
+}
+
+public extension TrainableEmbeddingBasis {
+    /// Synthetic/test providers that do not expose a vocabulary conservatively
+    /// treat every term as novel. Production distributional providers override
+    /// this with their exact maintained-vocabulary lookup.
+    func countsContainsTerm(_ term: String) -> Bool { false }
 }

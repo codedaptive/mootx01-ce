@@ -18,7 +18,7 @@ import VectorKit
 /// order is a property of this helper rather than of the scheduler.
 ///
 /// Signal 7 (TemporalCausalitySignal) was added 2026-06-04 per
-/// DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md, superseding the
+/// hourly temporal-matrix scheduling, superseding the
 /// weekly cadence in cookbook §6.4. It is registered using
 /// `defaultSpec()` (diagnostic no-op); production callers wire a live
 /// fold closure via `TemporalCausalitySignal.spec(foldCycle:)`.
@@ -27,11 +27,11 @@ import VectorKit
 /// supply a `distillationCycle` closure that runs the per-item
 /// distillation sweep and returns the count of factoids produced.
 ///
-/// Signal 9 (TrainingSignal) was wired per ADR-018 F1. Production
+/// Signal 9 (TrainingSignal) was wired. Production
 /// callers supply a `trainingCycle` closure that invokes
 /// `TrainingDaemon.runOnce` against the estate's audit log, matrix
 /// tier, and calibration registry. The daemon's own threshold gate
-/// (DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21) handles the
+/// handles the
 /// dormant/active decision; the signal fires the daemon unconditionally
 /// and the gate short-circuits below the threshold.
 public extension GeniusLocusKit {
@@ -147,9 +147,9 @@ public extension GeniusLocusKit {
             // no-op (returns 0) is appropriate for tests without a live sweep engine.
             DistillationSignal.spec(distillationCycle: distillationCycle),
             // TrainingSignal wired with the injected trainingCycle closure per
-            // ADR-018 F1. The caller wraps TrainingDaemon.runOnce against the
+            // brain-layer governor ownership. The caller wraps TrainingDaemon.runOnce against the
             // estate's audit log, matrix tier, and calibration registry. The
-            // daemon's threshold gate (DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21)
+            // daemon's threshold gate
             // decides whether to actually enrich on each hourly fire; the signal
             // invokes runOnce unconditionally. The default no-op is appropriate
             // for tests without a live daemon instance.

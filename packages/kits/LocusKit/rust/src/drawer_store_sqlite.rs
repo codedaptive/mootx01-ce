@@ -428,7 +428,7 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.all_tunnels()
     }
 
-    // Retirement methods forward to DrawerStoreCore — T13 / ADR-021 Phase 7.
+    // Retirement methods forward to DrawerStoreCore —  / recall-driven dreaming
     fn retire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
         self.0.retire_tunnel(tunnel_id, changed_by, now)
     }

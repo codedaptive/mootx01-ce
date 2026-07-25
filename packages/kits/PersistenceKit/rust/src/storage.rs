@@ -90,13 +90,13 @@ pub struct EstateConfiguration {
     /// On Rust, constructing a configuration with `NlTagger` via
     /// `new_with_tagger` returns an error (fail-closed).
     pub novel_token_tagger: NovelTokenTaggerChoice,
-    /// ADR-026: controls whether kits hold computed indexes in heap
+    /// controls whether kits hold computed indexes in heap
     /// between queries (RamResident) or load from the durable store
     /// on demand (DiskBacked, the default).
     pub residency_hint: ResidencyHint,
 }
 
-/// ADR-026: controls whether kits hold computed indexes in heap
+/// controls whether kits hold computed indexes in heap
 /// between queries or load from the durable store on demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidencyHint {
@@ -126,7 +126,7 @@ impl EstateConfiguration {
     }
 
     /// Derive a sibling `EstateConfiguration` pointing at a per-estate queue
-    /// database file beside the estate's own database file (ADR-021 Decision 7, T3).
+    /// database file beside the estate's own database file.
     ///
     /// The sibling file is named `<estate-stem>.<filename>` (e.g. for estate
     /// `<dir>/<uuid>.sqlite` and filename `"queue.sqlite"` the result is
@@ -135,7 +135,7 @@ impl EstateConfiguration {
     /// one estate's encode/dreaming queue is never accessible to another estate's
     /// workers. Within the same estate, the path is deterministic across
     /// processes — all processes that open the same estate file share exactly
-    /// one queue file (ADR-021 Decision 7: one per-estate queue).
+    /// one queue file (recall-driven dreaming: one per-estate queue).
     ///
     /// The encryption configuration is carried over verbatim — an encrypted
     /// estate produces an encrypted queue, sharing the cipher key so QueueKit
@@ -149,8 +149,8 @@ impl EstateConfiguration {
     /// - `InMemory` — returns an InMemory config. The queue is ephemeral
     ///   alongside the ephemeral estate, which is correct for testing and
     ///   transient session estates.
-    /// - `Postgresql { ... }` — **deferred** per ADR-021 §SQLite-first
-    ///   sequencing. Returns `StorageError::FeatureGated` with a clear message.
+    /// - `Postgresql {... }` — **deferred**. The queue sibling is SQLite-first;
+    ///   this branch returns `StorageError::FeatureGated` with a clear message.
     ///   A caller relying on a Postgres-backed queue will learn immediately
     ///   that this path is not yet implemented, rather than receiving a
     ///   silently wrong or half-initialised configuration.
@@ -174,7 +174,7 @@ impl EstateConfiguration {
             BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
                 // Derive the per-estate sibling filename from the estate's own
                 // file stem so two estates in the same directory never share a
-                // queue file (ADR-021 Decision 7 isolation correctness).
+                // queue file (recall-driven dreaming isolation correctness).
                 // Estate: <dir>/<stem>.sqlite → sibling: <dir>/<stem>.<filename>
                 // E.g. <dir>/abc123.sqlite + "queue.sqlite" → <dir>/abc123.queue.sqlite
                 let estate_path = std::path::Path::new(path);
@@ -224,16 +224,16 @@ impl EstateConfiguration {
             }
 
             BackendConfiguration::Postgresql { .. } => {
-                // TODO(ADR-021 Postgres pass): implement the PostgreSQL queue-sibling
+                // TODO: implement the PostgreSQL queue-sibling
                 // path. The Postgres backend requires coordination primitives beyond
                 // a simple file-sibling (connection-string scoping, schema namespacing)
-                // and is explicitly deferred in ADR-021's SQLite-first sequencing.
+                // and is explicitly deferred while queue storage remains SQLite-first.
                 // Fail loud so any caller depending on a Postgres queue learns
                 // immediately that this is not implemented, rather than receiving a
                 // silently wrong or half-initialised configuration.
                 Err(StorageError::FeatureGated {
-                    feature: "queue_sibling for PostgreSQL backend is deferred \
-                              (ADR-021 Postgres pass). Use SQLite or InMemory estates \
+                    feature: "queue_sibling for PostgreSQL backend is deferred. \
+                              Use SQLite or InMemory estates \
                               for per-estate queue configuration."
                         .to_owned(),
                 })
@@ -369,6 +369,42 @@ pub trait Storage: Send + Sync {
         isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()>;
+
+    /// Estimate of the filesystem bytes `perform_maintenance` would release
+    /// (shared-content 1.1 P5). SQLite: freelist pages × page size + WAL
+    /// file bytes. Default (and the explicit contract for backends with no
+    /// client-reclaimable pages): 0.
+    ///
+    /// Lives on `Storage` (defaulted) rather than a separate trait because
+    /// `dyn Storage` cannot be capability-probed the way Swift's
+    /// `as? StorageMaintenance` can. Mirrors Swift's
+    /// `StorageMaintenance.estimatedReclaimableBytes`.
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        Ok(0)
+    }
+
+    /// Run the physical maintenance pass (SQLite: WAL checkpoint + VACUUM)
+    /// with the contract declared in `crate::maintenance`: quiescence check,
+    /// disk-capacity preflight, per-phase progress, phase-boundary
+    /// cancellation, and post-operation introspection. The default is the
+    /// explicit "not implemented" no-op report; SQLite overrides with the
+    /// real operation, in-memory and PostgreSQL override with their
+    /// documented no-op reports. Mirrors Swift's
+    /// `StorageMaintenance.performMaintenance(progress:shouldCancel:)`.
+    fn perform_maintenance(
+        &self,
+        progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        let _ = (progress, should_cancel);
+        Ok(crate::maintenance::MaintenanceReport::no_op(
+            "unsupported",
+            "backend does not implement physical maintenance",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

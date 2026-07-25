@@ -14,7 +14,7 @@
 //       graph / preference columns are LIVE: excluding them (weight 0) changes a
 //       fused final, and graph weight < 0 subtracts strictly below weight 0 —
 //       mirroring Swift RecallShapeMatrixSteerTests (a)/(b)/(c). This closes the
-//       ADR-011 D-4 parity violation (Rust no longer hardcodes the columns dark).
+//       cross-port RecallShape steering parity violation (Rust no longer hardcodes the columns dark).
 //   (e) nil shape == an explicit all-ones shape over EVERY steerable key is
 //       BYTE-IDENTICAL (back-compat).
 //
@@ -272,7 +272,7 @@ fn temporal_up_ranks_relevant_no_lower() {
 /// (weight 0) must change at least one fused final relative to the neutral (nil)
 /// recall — the live column contributed mass that exclusion removes. Mirrors
 /// Swift RecallShapeMatrixSteerTests.graphWeightZeroExcludesColumn. This is the
-/// proof the Rust column is no longer hardcoded dark (ADR-011 D-4).
+/// proof the Rust column is no longer hardcoded dark (cross-port RecallShape steering).
 #[test]
 fn graph_weight_zero_excludes_live_column() {
     let (mut coord, h, d1, d2) = two_drawer_estate();
@@ -397,7 +397,7 @@ fn nil_shape_equals_all_ones_across_all_columns() {
         assert_eq!(a.score.field_fit, b.score.field_fit, "fieldFit byte-identical; {}", a.id);
         assert_eq!(a.score.graph, b.score.graph, "graph byte-identical; {}", a.id);
         assert_eq!(a.score.preference, b.score.preference, "preference byte-identical; {}", a.id);
-        // CROSS-PORT CONFORMANCE (ADR-011 D-4): a constant cache (0.8 graph,
+        // CROSS-PORT CONFORMANCE (cross-port RecallShape steering): a constant cache (0.8 graph,
         // 0.9 preference) gives every candidate the same column value, so it is
         // measured-uniform and normalizes to exactly 0.5 — the SAME value Swift's
         // RecallShapeMatrixSteerTests produces over the same fixture. Pinning the

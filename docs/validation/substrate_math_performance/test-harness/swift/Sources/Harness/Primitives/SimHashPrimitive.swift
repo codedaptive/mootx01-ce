@@ -32,7 +32,7 @@
 //   block_values : [u64]                 (length = batch_size)
 //
 // Per the kernel-learned-dispatch decision
-// (DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17), batched output
+//, batched output
 // MUST equal sequential output byte-for-byte in at-rest
 // little-endian canonical form. The conformance gate enforces
 // this.

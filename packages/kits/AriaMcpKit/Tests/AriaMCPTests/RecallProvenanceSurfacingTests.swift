@@ -21,11 +21,9 @@
 //      a recall over a bare locus-only estate surfaces a provenance line that is
 //      present. Section E verifies the bare-locus (sparse-only) path explicitly.
 //
-// Rationale: the embedding ADR (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12)
-// requires the ARIA surface to let callers distinguish "real semantic space" from
-// "deterministic/structural fallback". Before this mission, denseLaneStatus and
-// degradedStages were computed in the kit but silently dropped at the ARIA
-// boundary. These tests close that gap.
+// The ARIA surface lets callers distinguish "real semantic space" from
+// "deterministic/structural fallback" by returning denseLaneStatus and
+// degradedStages at the boundary.
 
 import Testing
 import Foundation
@@ -61,10 +59,9 @@ private func openInMemoryEstateWithSemanticRecall()
         configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-    let corpus = try await Corpus(storage: storage, model: .deterministic)
-    await kit.registerCorpus(corpus, for: handle)
-    let vectorStore = VectorStore(storage: storage)
-    await kit.registerVectorStore(vectorStore, for: handle)
+    // Shared-content 1.1: canonical wiring seam — attached engine over the
+    // LocusKit adapter, engine + shared VectorStore registered.
+    try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
     let dispatcher = ToolDispatcher(kit: kit, handle: handle)
     return (dispatcher, kit, handle)
 }

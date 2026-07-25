@@ -134,6 +134,14 @@ public struct SyncManifest: Sendable {
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
 
+    /// Columns to route through `CKRecord.encryptedValues` (CloudKit only).
+    /// Key: table name matching an entry in `tables`. Value: set of column names
+    /// to encrypt. Empty default → every existing caller's behavior is byte-identical.
+    /// Not wire-carried: this is a local CloudKit encoding directive, never transmitted
+    /// in a SyncRecord. Columns starting with `_sync` and tables starting with `_ck_`
+    /// are rejected by `validateEncryptedColumns()`. Registry columns stay plaintext.
+    public let encryptedContentColumns: [String: Set<String>]
+
     /// Optional callback invoked once per pull batch AFTER all
     /// inbound records have been applied. Use it to restore cross-row or
     /// cross-table structural invariants that row-grain conflict policies
@@ -161,13 +169,36 @@ public struct SyncManifest: Sendable {
         schemaVersion: Int,
         zoneIdentifier: String,
         tables: [SyncedTable],
+        encryptedContentColumns: [String: Set<String>] = [:],
         postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil
     ) {
         self.kitID = kitID
         self.schemaVersion = schemaVersion
         self.zoneIdentifier = zoneIdentifier
         self.tables = tables
+        self.encryptedContentColumns = encryptedContentColumns
         self.postApplyIntegrityHook = postApplyIntegrityHook
+    }
+
+    /// Validate `encryptedContentColumns` entries before use.
+    /// Rejects `_sync*` columns (reserved sync-metadata fields) and `_ck_*`
+    /// tables (registry tables that must stay plaintext per the mission spec).
+    /// Phase-2 engine wiring will call this from CloudKitSyncEngine.enable(); tests call it directly.
+    public func validateEncryptedColumns() throws {
+        for (table, columns) in encryptedContentColumns {
+            if table.hasPrefix("_ck_") {
+                throw SyncError.encodingFailure(
+                    detail: "encryptedContentColumns: '\(table)' is a registry table (_ck_*) and must stay plaintext"
+                )
+            }
+            for column in columns {
+                if column.hasPrefix("_sync") {
+                    throw SyncError.encodingFailure(
+                        detail: "encryptedContentColumns: column '\(column)' in '\(table)' is a reserved _sync* field"
+                    )
+                }
+            }
+        }
     }
 
     public func table(named name: String) -> SyncedTable? {
@@ -254,7 +285,7 @@ public enum SyncError: Error, Sendable, Equatable {
     // ── N2 slot-registry errors ─────────────────────────────────────────────
     // CloudKit-only. Vocabulary is mirrored in the Rust SyncError enum for
     // cross-port parity even though the CloudKit backend is Swift-only (N4).
-    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+    // Slot and fence epoch identify the writer across concurrent devices.
 
     /// This device's (slot, epoch) pair has been superseded: the slot was
     /// evicted and its epoch bumped while this device was inactive.

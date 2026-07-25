@@ -25,6 +25,9 @@ Use GeniusLocusKit to build:
 
 GeniusLocusKit composes LocusKit + VectorKit + CorpusKit and adds:
 
+- **One canonical content object** — LocusKit owns each GLK Drawer; CorpusKit builds BM25/provider-derived state over that same Drawer and never stores a copied chunk/document body in GLK mode
+- **Optional historical migrations** — the current runtime is history-free; applications declare their oldest supported estate-format floor and compile only the required migration capsules
+
 - **N-estate coordination** — open, manage, and query multiple estates; mediate cross-estate operations (spec invariant I-13)
 - **Unified nine-verb surface** — `capture`, `recall`, `withdraw`, `mutate`, `expunge`, `reanchor`, `learn`, `propose`, `associate` — across all three storage tiers
 - **Brain layer:**

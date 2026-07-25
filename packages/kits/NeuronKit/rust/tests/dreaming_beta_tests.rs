@@ -1,4 +1,4 @@
-//! T12 REM-BETA prune/GC cycle tests (ADR-021 Phase 7, NEURONKIT_SPEC § 12.6).
+//! REM-BETA prune/GC cycle tests.
 //!
 //! Rust parity of `NeuronKitTests/DreamingBetaTests.swift`.
 //!

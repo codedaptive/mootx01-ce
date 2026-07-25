@@ -1,10 +1,10 @@
 // UnlockCommand.swift — `mootx01 unlock private|secret` and `mootx01 lock`
 //
-// ADR-025 §2: the out-of-band approval mechanism for sensitivity tiers.
+// the out-of-band approval mechanism for sensitivity tiers.
 //
 //   mootx01 unlock private   — authenticate with LocalAuthentication and
 //                              issue a restricted-tier grant to the daemon.
-//                              Grant resets at local midnight (ADR-025 §1).
+//                              Grant resets at local midnight.
 //   mootx01 unlock secret    — authenticate and issue a 30-min secret-tier
 //                              grant.
 //   mootx01 lock             — immediately clear all grants (no auth needed;
@@ -17,7 +17,8 @@
 // The command calls `LocalAuthenticationAuthority.requestApproval(tier:reason:)`
 // to obtain Touch ID / Apple Watch / macOS account-password attestation via the
 // OS, then POSTs to the daemon's REST endpoint `/api/control/unlock` (not an
-// MCP tool — ADR-025 §4: "No `moot_unlock` tool and there never will be").
+// MCP tool; unlock is deliberately available only through the authenticated
+// control endpoint.
 //
 // macOS-only — the `#if os(macOS)` guard covers both LocalAuthentication and
 // the URLSession-based HTTP call (URLSession is available on macOS 10.15+, but
@@ -103,7 +104,7 @@ struct UnlockCommand: AsyncParsableCommand {
         //
         // Body: {"tier": "restricted"|"secret", "proof": {"ts": <epoch_ms>}}
         // The daemon verifies the timestamp freshness (±10 s) and issues the
-        // in-RAM grant — no MCP tool is involved (ADR-025 §4).
+        // in-RAM grant — no MCP tool is involved.
         let resolvedPort = MootPaths.resolvedResidentPort(dataDir: dataDir)
         let tierValue = sensitivityTier == .restricted ? "restricted" : "secret"
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -150,7 +151,7 @@ struct UnlockCommand: AsyncParsableCommand {
 /// Revoke all active sensitivity grants immediately.
 ///
 /// No authentication is required — locking reduces the user's own access and
-/// is always permitted (ADR-025 §1). Calls the daemon's `/api/control/lock`
+/// is always permitted. Calls the daemon's `/api/control/lock`
 /// endpoint.
 struct LockCommand: AsyncParsableCommand {
 

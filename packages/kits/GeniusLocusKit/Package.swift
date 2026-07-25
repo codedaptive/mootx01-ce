@@ -40,6 +40,31 @@ let package = Package(
             name: "GeniusLocusKit",
             targets: ["GeniusLocusKit"]
         ),
+        .library(
+            name: "GeniusLocusKitMigrations",
+            targets: ["GeniusLocusKitMigrations"]
+        ),
+        // Maintainer tool: the shared-content scale-qualification driver.
+        // A standalone executable (NOT a test) so large-estate qualification
+        // runs free of the swiftpm test harness; env-gated exactly like the
+        // Rust twin (MOOT_SCF_QUAL_DB names a recoverable clone).
+        .executable(
+            name: "glk-scale-qual",
+            targets: ["GLKScaleQual"]
+        ),
+    ],
+    traits: [
+        // Step traits name concrete historical code. Floor traits are the
+        // consumer-facing cumulative selection and enable every required step.
+        .trait(
+            name: "MigrationV1_0ToV1_1",
+            description: "Compile the historical GLK 1.0 to 1.1 shared-content migration capsule."
+        ),
+        .trait(
+            name: "MigrationFloor1_0",
+            description: "Support estates as old as GLK format 1.0.",
+            enabledTraits: ["MigrationV1_0ToV1_1"]
+        ),
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
@@ -53,10 +78,10 @@ let package = Package(
         // capture_with_mode seam classifies the lattice anchor via EideticLib.lookup
         // when the incoming frame carries the unclassified sentinel "000" and has
         // non-empty content — the one-door principle (all capture paths classify once,
-        // here). Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; layering is
+        // here). Per in-repository dependency direction; layering is
         // EideticLib → LatticeLib (below GLK), no inversion.
         .package(name: "EideticLib", path: "../../libs/EideticLib"),
-        // QueueKit is the twelfth kit in the graph (DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21).
+        // QueueKit is the twelfth kit in the graph.
         // GLK-04 consumes it as the single-serial-dispatch substrate for
         // standing signals: scheduler enqueues jobs through QueueKit; a
         // single drainer applies them through the propose verb.
@@ -64,7 +89,7 @@ let package = Package(
         // SubstrateML (Layer 3 algorithms) is required by GeniusLocusKit so
         // MatrixTier.rebuildTemporal can call TemporalCausalityFold — the
         // canonical T-matrix population engine (cookbook §6.4).
-        // Dependency added 2026-06-04 per DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+        // Dependency added 2026-06-04.
         // Layering: GeniusLocusKit (composition) → SubstrateML (algorithms) does
         // NOT invert — SubstrateML is below GeniusLocusKit in the kit graph.
         .package(path: "../../libs/SubstrateML"),
@@ -73,7 +98,7 @@ let package = Package(
         // and at the verb-error boundary (GLK_ROLLUPS_001). When monitoring is
         // disabled (the default), each emit is a single Atomic<Bool> load —
         // zero allocation, no lock, results byte-identical to the pre-telemetry
-        // code. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28: layering is
+        // code. Per in-repository dependency direction: layering is
         // GeniusLocusKit (composition) → IntellectusLib (floor). No inversion.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
         // ConvergenceKit: sync-backend abstraction. GeniusLocusKit stores the
@@ -81,10 +106,59 @@ let package = Package(
         // syncState(for:) so ARIA surfaces can report honest sync status.
         // Layering: GeniusLocusKit (composition) → ConvergenceKit (sync tier)
         // does NOT invert. ConvergenceKit has no dependency on GLK.
-        // Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Per in-repository dependency direction.
         .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
     ],
     targets: [
+        .executableTarget(
+            name: "GLKScaleQual",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKScaleQual",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
+        .target(
+            name: "GLKMigrationV1_0ToV1_1",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+            ],
+            path: "Sources/GLKMigrationV1_0ToV1_1"
+        ),
+        .target(
+            name: "GeniusLocusKitMigrations",
+            dependencies: [
+                "GeniusLocusKit",
+                .target(
+                    name: "GLKMigrationV1_0ToV1_1",
+                    condition: .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ],
+            path: "Sources/GeniusLocusKitMigrations",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
         .target(
             name: "GeniusLocusKit",
             dependencies: [
@@ -98,7 +172,7 @@ let package = Package(
                 // provision path defaults the Corpus to CorpusEnsemble.defaultEnsemble()
                 // (the 1.0 five-signal default), which NEWs concrete providers — so
                 // the composition layer needs the providers product. Dependency per
-                // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; layering is
+                // in-repository dependency direction; layering is
                 // upstream→downstream (CorpusKitProviders ← GeniusLocusKit), no inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
@@ -107,16 +181,16 @@ let package = Package(
                 // Required by EstateHydration.swift — open(inMemory:owner:hydrateFrom:)
                 // and rebuildDerivedAccelerators(for:) call StorageReplicator.hydrate to
                 // populate an in-memory estate from a durable backend on launch.
-                // Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28: recorded in
+                // Dependency per in-repository dependency direction: recorded in
                 // GLK_HYDRATE_01_BLAST_RADIUS.md §Symbol 2. Layering is upstream→downstream
                 // (PersistenceKit ← GeniusLocusKit); no inversion.
                 .product(name: "PersistenceKitReplication", package: "PersistenceKit"),
                 // PersistenceKitSQLite: `ensureScheduler` opens the shared encrypted
                 // `queue.sqlite` sibling via `SQLiteStorage(configuration:)` for
-                // persistent estates (T5, ADR-021 Decision 7). Same encrypted SQLite
+                // persistent estates. Same encrypted SQLite
                 // the encode stream uses — `queueSibling` derives the sibling config
                 // so signal jobs share the per-estate queue.sqlite without a separate
-                // file. Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28;
+                // file. Dependency per in-repository dependency direction;
                 // layering is upstream→downstream (PersistenceKit ← GeniusLocusKit).
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
@@ -166,6 +240,31 @@ let package = Package(
                 .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
             ],
             path: "Tests/GeniusLocusKitTests"
+        ),
+        .testTarget(
+            name: "GLKMigrationV1_0ToV1_1Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_0ToV1_1",
+                    condition: .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "VectorKit", package: "VectorKit"),
+            ],
+            path: "Tests/GLKMigrationV1_0ToV1_1Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
         ),
     ]
 )

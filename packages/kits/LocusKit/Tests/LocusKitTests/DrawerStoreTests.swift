@@ -524,7 +524,7 @@ struct DrawerStoreTests {
     /// Round-trip a non-trivial adjective bitmap value through insert
     /// and fetch. `0x40400` is the canonical mission test bitmap:
     /// state=active(0) | sensitivity=elevated(16<<6) | trust=observed(1<<18).
-    /// Capture's initial state must be active or pending (DECISION_CLOCK_TRIANGLE:
+    /// Capture's initial state must be active or pending (single-maker HLC and event integrity:
     /// genesis can't start contested — that arises via the contest verb).
     @Test("addDrawer persists adjectiveBitmap and fetch returns it byte-for-byte")
     func adjectiveBitmapRoundTrip() async throws {

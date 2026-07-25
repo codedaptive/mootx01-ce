@@ -52,7 +52,7 @@ let package = Package(
         // IntellectusLib is the zero-dependency telemetry leaf.
         // NeuronKit emits self-report metrics at hybrid recall, dreaming
         // cycle, and Bradley-Terry boundaries (MANAGER_1.0_PLAN §4 P2
-        // self-report coverage; DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
+        // self-report coverage; in-repository dependency direction).
         // When monitoring is off (the default), every Intellectus.report(...)
         // call is a single atomic load + branch — zero allocation, no clock.
         // IntellectusLib depends on nothing; layering is safe (it is the
@@ -103,7 +103,7 @@ let package = Package(
                 // Tokenizer + HMM wordClass tagger for the production feature extractor
                 // (HMMFeatureExtractor.swift). Direct dep required: NeuronKit calls
                 // LatticeLib symbols directly; transitive access via EideticLib is not
-                // stable. Citation: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+                // stable. Citation: in-repository dependency direction.
                 .product(name: "LatticeLib", package: "LatticeLib"),
                 // Telemetry leaf — see dependency note above.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),

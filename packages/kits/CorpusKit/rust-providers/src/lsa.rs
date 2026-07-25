@@ -1,7 +1,7 @@
 //! LSA (Latent Semantic Analysis) distributional-semantics embedding provider.
 //! Rust port of Swift's `LsaProvider` in `CorpusKitProviders`.
 //!
-//! ADR-010 Decision B, signal #1 — LSA/SVD provider in the classical-
+//! honest semantic fusion, signal #1 — LSA/SVD provider in the classical-
 //! fusion dense recall lane.
 //!
 //! ## Algorithm
@@ -26,7 +26,7 @@
 //! ## Constants
 //!
 //!   LSA_PROJECTION_SEED = 0x4C53415F56315F4D  ("LSA_V1_M" in ASCII)
-//!   Model ID = "lsa-v1",  version = "1.0.0"
+//!   Model ID = "lsa-v1",  version = "1.1.0"
 //!   Default rank = 64
 //!   SVD sweeps = 30 (pinned for cross-port bit-identity)
 //!
@@ -133,11 +133,11 @@ pub struct LsaProvider {
     /// Effective SVD rank after finalize().
     effective_rank: usize,
 
-    /// Reduced-vocabulary cap K for the dense factorization (ADR-022).
+    /// Reduced-vocabulary cap K for the dense factorization.
     reduced_vocab_cap: usize,
 
     /// The frozen reduced vocabulary (term → reduced column) the basis was
-    /// trained on (ADR-022). Projection + serialization key on THIS, not the
+    /// trained on. Projection + serialization key on THIS, not the
     /// full `counts.vocab`. Empty until `finalize()`.
     basis_vocab: HashMap<String, usize>,
 }
@@ -150,9 +150,21 @@ impl LsaProvider {
     ///   cross-port conformance — do not change without updating both ports
     ///   and regenerating canonical vectors).
     pub fn new(rank: usize, svd_sweeps: usize, projection_seed: u64) -> Self {
+        Self::with_parameters("lsa-v1", "1.1.0", rank, svd_sweeps, projection_seed)
+    }
+
+    /// Build with explicit identity — the Swift `LsaProvider(modelID:modelVersion:…)`
+    /// twin (fixture tests pin the historical 1.0 envelope through this).
+    pub fn with_parameters(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        rank: usize,
+        svd_sweeps: usize,
+        projection_seed: u64,
+    ) -> Self {
         LsaProvider {
-            model_id: "lsa-v1".to_string(),
-            model_version: "1.0.0".to_string(),
+            model_id: model_id.into(),
+            model_version: model_version.into(),
             rank: rank.max(1),
             svd_sweeps,
             projection_seed,
@@ -201,7 +213,7 @@ impl LsaProvider {
             return;
         }
 
-        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
         // (~10^15 ops, infeasible). Shared with NMF; frozen here; drives query
         // projection. `vocab_size` below is the REDUCED column count — the SVD
@@ -369,7 +381,7 @@ impl LsaProvider {
         w.write_u64(self.projection_seed);
         w.write_u32(self.counts.document_count() as u32);
         w.write_u32(self.effective_rank as u32);
-        // ADR-022: persist the REDUCED basis vocab; projection keys on it. The
+        // persist the REDUCED basis vocab; projection keys on it. The
         // full counts vocab is persisted by serialize_counts as the drift anchor.
         w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_array(&self.idf_weights);
@@ -441,7 +453,7 @@ impl LsaProvider {
             return None;
         }
 
-        // Projection keys on the REDUCED basis vocab (ADR-022); OOV terms
+        // Projection keys on the REDUCED basis vocab; OOV terms
         // outside top-K contribute nothing (covered by RI).
         let vocab_size = self.basis_vocab.len();
         let k = self.effective_rank;
@@ -609,6 +621,18 @@ impl TrainableEmbeddingBasis for LsaProvider {
         self.finalize();
     }
 
+    /// Streamed-training page: the same per-document accumulation
+    /// `train_on_corpus` runs, finalization deferred to `finalize_training`.
+    fn accumulate_training(&mut self, texts: &[&str]) {
+        for text in texts {
+            self.train(text);
+        }
+    }
+
+    fn finalize_training(&mut self) {
+        self.finalize();
+    }
+
     /// Serialize the finalized LSA basis (6a-i codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         LsaProvider::serialize_basis(self)
@@ -671,6 +695,10 @@ impl TrainableEmbeddingBasis for LsaProvider {
     /// Maintained vocabulary size for the growth trigger.
     fn counts_vocabulary_size(&self) -> usize {
         self.counts.vocabulary_size()
+    }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.counts.vocab.contains_key(term)
     }
 }
 

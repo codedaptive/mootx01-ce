@@ -16,6 +16,7 @@ import Foundation
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -96,7 +97,7 @@ struct ServeCommand: AsyncParsableCommand {
         }
         #endif
         // Single-writer guard (resident only): the estate has exactly one writer —
-        // the resident AutonomicGovernor (see ADR-LOOPBACKHTTP-001). Refuse to start the resident
+        // the resident AutonomicGovernor (see bounded loopback HTTP). Refuse to start the resident
         // daemon if another LIVE process already holds this estate's PID file.
         // stdio is not guarded here: when a resident is live it FORWARDS to it
         // (T4, above) rather than opening a second writer, and when none is live it
@@ -140,9 +141,27 @@ struct ServeCommand: AsyncParsableCommand {
         // check pre-existence to decide whether to call create (first-run only).
         let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path)
 
+        // At-rest posture. A new estate is created encrypted; an already-encrypted
+        // estate loads its existing key; a plaintext estate keeps opening as
+        // plaintext. serve runs under launchd with NO TTY, so this must never
+        // prompt and never migrate — migration is `mootx01 upgrade` only.
+        let encryption: EstateEncryptionConfig
+        do {
+            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            encryption = resolved.encryption
+        } catch {
+            // Fail closed, in the same style the SQLite open failure below uses.
+            // Never fall back to a plaintext open: that would silently downgrade
+            // at-rest protection, and for an encrypted estate it would look like
+            // the estate had vanished.
+            Logging.stderr.log("mootx01 serve fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0)
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
         )
         let storage: SQLiteStorage
         do {
@@ -163,13 +182,15 @@ struct ServeCommand: AsyncParsableCommand {
                 _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             }
             handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(
+                kit: kit, handle: handle, now: Date())
             // `open` admits a BARE estate — it does not register a Corpus or
             // VectorStore, so dense vector recall and distillation are dark. Wire
             // the GLK semantic layer (Corpus + VectorStore + encode queue) here so
             // a served estate is fully live. Idempotent on reopen; does not
             // re-stamp the manifest (which is why we wire rather than `provision`).
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
-            // Seed the seven ADR-016 default wings if they are not already present.
+            // Seed the seven default wings if they are not already present.
             // `seedDefaultWings` is idempotent: it reads existing charter drawers
             // and skips wings that are already seeded, so calling it on every open
             // is safe for both fresh estates (wings missing) and previously-served
@@ -221,7 +242,7 @@ struct ServeCommand: AsyncParsableCommand {
             name: "mootx01",
             version: "1.0.0"
         )
-        // ADR-024 §5: computed once at startup (not per-call) and threaded
+        // computed once at startup (not per-call) and threaded
         // into every tool response via ToolDispatcher.versionSkewAdvisory.
         // nil whenever no plugin is detected or its version matches this
         // binary — the common case, which leaves ping/status unchanged.
@@ -237,7 +258,7 @@ struct ServeCommand: AsyncParsableCommand {
         // silence. stdio one-shots stay network-free on purpose: ping is
         // documented as returning immediately, and an offline probe timeout
         // there would break that; every plugin-capable host talks to the
-        // resident over HTTP anyway (ADR-024 §2). Repo slug honors the same
+        // resident over HTTP anyway. Repo slug honors the same
         // MOOTX01_REPO override as `mootx01 upgrade`.
         let updateAdvisoryProvider: (@Sendable () async -> String?)?
         if residentPort != nil {
@@ -271,7 +292,9 @@ struct ServeCommand: AsyncParsableCommand {
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(env: environment),
                 brainTickMs: AriaResident.brainTickMs(env: environment),
                 monitoringPollMs: AriaResident.monitoringPollMs(env: environment),
-                statsStorePath: environment["ARIA_MCP_STATS_STORE"]
+                statsStorePath: environment["ARIA_MCP_STATS_STORE"],
+                vaultPath: AriaResident.vaultPath(env: environment),
+                vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment)
             )
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, resident HTTP on 127.0.0.1:\(port))")
             do {
@@ -284,7 +307,7 @@ struct ServeCommand: AsyncParsableCommand {
             }
             Logging.stderr.log("mootx01 serve exiting (HTTP transport stopped)")
         } else {
-            // T10 — on-startup dreaming trigger (ADR-021 Phase 5): if the
+            //  — on-startup dreaming trigger: if the
             // dreaming queue already has pending items from a prior session
             // (jobs in queue.sqlite that were not processed before the last
             // serve exited), fork a detached dreamer immediately so they are
@@ -321,7 +344,7 @@ struct ServeCommand: AsyncParsableCommand {
                 Self.spawnDetachedDrain(estateName: estateName, environment: environment)
             }
 
-            // T10 — on-exit dreaming trigger (ADR-021 Phase 5): if the dreaming
+            //  — on-exit dreaming trigger: if the dreaming
             // queue has pending items at stdio exit (from recall events during this
             // session, or from a prior session not yet processed), fork a detached
             // dreamer to run one REM-ALPHA cycle before the estate closes. Mirrors
@@ -376,14 +399,14 @@ struct ServeCommand: AsyncParsableCommand {
 
     /// Launch a detached `mootx01 dream` to run one REM-ALPHA dreaming cycle
     /// after a direct-open stdio serve exits or starts with pending dreaming
-    /// queue items (T10, ADR-021 Phase 5). The child `setsid`s itself into its
+    /// queue items. The child `setsid`s itself into its
     /// own session so a process-group kill aimed at this serve does not reach it;
     /// we do not wait on it. The estate is passed via `--db` and the inherited
     /// environment (so an `ARIA_MCP_SQLITE_PATH` override targets the same file).
     ///
     /// The dreamer acquires its own `"dreaming"` DrainLease — independent of the
     /// encode drain's `"encode.drain.lease"` — so both can run concurrently
-    /// without blocking each other (ADR-021 Decision 7).
+    /// without blocking each other.
     static func spawnDetachedDream(estateName: String, environment: [String: String]) {
         guard let executableURL = resolvedCurrentExecutableURL() else {
             Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: could not resolve current executable path")

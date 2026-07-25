@@ -3,7 +3,7 @@
 // Ships ExternalCorpus, ExternalEntry, and the migration verb types
 // (ParallelRunHandle, MigrationVerification, MigrationDivergence,
 // ParallelCaptureMode, MigrationError). The hybrid_recall method
-// routes through CorpusKit's Corpus struct, mirroring Swift's
+// routes through CorpusKit's canonical-content engine, mirroring Swift's
 // ExternalCorpus.hybridRecall(via:limit:now:).
 //
 // The `run_parallel` and `verify_migration` verb entry points live on
@@ -16,7 +16,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use corpus_kit::{Corpus, CorpusKitResult, ScoredChunk};
+use corpus_kit::{CorpusContentEngine, CorpusContentHit, CorpusKitResult};
 
 use crate::coordinator::{EstateCoordinator, VerbDispatchError};
 use crate::handle::EstateHandle;
@@ -70,29 +70,28 @@ impl ExternalCorpus {
     }
 
     /// Execute hybrid BM25+vector recall for each corpus entry via the
-    /// supplied `Corpus`. Returns one `Vec<ScoredChunk>` per entry, in
+    /// supplied canonical-content engine. Returns one `Vec<CorpusContentHit>`
+    /// per entry, in
     /// entry order. Entries with empty content return an empty vec.
     ///
     /// Mirrors Swift's `ExternalCorpus.hybridRecall(via:limit:now:)`.
     ///
-    /// - `corpus`: the estate's `Corpus`. Caller opens it from the same
-    ///   storage backing the estate so chunk embeddings index the estate's
-    ///   content.
-    /// - `limit`: maximum scored chunks per entry.
+    /// - `corpus`: the estate's `CorpusContentEngine`.
+    /// - `limit`: maximum canonical content hits per entry.
     /// - `now_millis`: Unix epoch milliseconds for deterministic time.
     pub fn hybrid_recall(
         &self,
-        corpus: &Corpus,
+        corpus: &CorpusContentEngine,
         limit: usize,
-        now_millis: i64,
-    ) -> CorpusKitResult<Vec<Vec<ScoredChunk>>> {
-        let mut results: Vec<Vec<ScoredChunk>> = Vec::with_capacity(self.entries.len());
+        _now_millis: i64,
+    ) -> CorpusKitResult<Vec<Vec<CorpusContentHit>>> {
+        let mut results: Vec<Vec<CorpusContentHit>> = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             if entry.content.trim().is_empty() {
                 results.push(Vec::new());
                 continue;
             }
-            let hits = corpus.recall(&entry.content, limit, now_millis)?;
+            let hits = corpus.recall(&entry.content, limit)?;
             results.push(hits);
         }
         Ok(results)

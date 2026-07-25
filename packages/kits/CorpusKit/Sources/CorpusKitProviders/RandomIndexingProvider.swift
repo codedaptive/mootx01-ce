@@ -12,7 +12,7 @@
 // This is a GENUINE distributional method — "car" and "vehicle"
 // share similar context vectors when they co-occur with the same
 // neighbours ("drive", "road", "engine"). It captures co-occurrence
-// meaning, not surface form, satisfying ADR-010 D-1's honesty
+// meaning, not surface form, satisfying honest semantic fusion D-1's honesty
 // requirement: the dense lane must not lie about what it computes.
 //
 // The provider conforms to VectorKit.EmbeddingProvider:
@@ -46,11 +46,11 @@
 // ## Projection seed
 //
 //   RI_PROJECTION_SEED = 0x5249_5F56_315F_4D58  ("RI_V1_MX")
-//   Model ID = "random-indexing-v1",  version = "1.0.0"
+//   Model ID = "random-indexing-v1",  version = "1.1.0"
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/random_indexing.rs
 //
-// ADR-010 reference: Decision B, signal #2 of the honest fusion.
+// honest semantic fusion reference: Decision B, signal #2 of the honest fusion.
 
 import Foundation
 import CorpusKit
@@ -156,9 +156,9 @@ public func riIndexVector(term: String) -> [Float] {
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`. modelID = "random-indexing-v1",
-/// modelVersion = "1.0.0". Projection seed = `riProjectionSeed`.
+/// modelVersion = "1.1.0". Projection seed = `riProjectionSeed`.
 ///
-/// ADR-010 Decision B, signal #2 — the first honest distributional
+/// honest semantic fusion, signal #2 — the first honest distributional
 /// provider in the dense recall lane.
 public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendable {
 
@@ -179,7 +179,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
 
     public init(
         modelID: String = "random-indexing-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         projectionSeed: UInt64 = riProjectionSeed
     ) {
         self.modelID = modelID
@@ -426,13 +426,26 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
         }
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `trainOnCorpus` runs. RI has no finalization pass.
+    public func accumulateTraining(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: riWindow)
+        }
+    }
+
+    public func finalizeTraining() {
+        // Random Indexing is finalization-free: vectors are the accumulated
+        // state itself (mirrors trainOnCorpus, which runs no finalize).
+    }
+
     /// Reconstruct a fresh `RandomIndexingProvider` from a serialized basis,
     /// type-erased. Delegates to `init(deserializing:)` (6a-i).
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try RandomIndexingProvider(deserializing: basis)
     }
 
-    /// ADR-026: release the in-memory vocab dictionary (~1GB on a 50K estate).
+    /// release the in-memory vocab dictionary (~1GB on a 50K estate).
     /// The next embed call must go through reconstructBasis from BasisStore.
     public func releaseBasis() {
         vocab.removeAll(keepingCapacity: false)
@@ -484,4 +497,8 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
 
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { vocab.count }
+
+    public func countsContainsTerm(_ term: String) -> Bool {
+        vocab[term] != nil
+    }
 }

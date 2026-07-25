@@ -49,34 +49,35 @@ import PersistenceKitSQLite
 import PersistenceKitReplication
 @testable import GeniusLocusKit
 
-// MARK: - Composite schema-version conformance (ADR-012 ext-slot coupling)
+// MARK: - Composite schema-version conformance (nullable entity ext slots ext-slot coupling)
 
-@Suite("GLK composite schema version == sum of component versions (ADR-012)")
+@Suite("GLK composite schema version == sum of component versions")
 struct CompositeSchemaVersionTests {
 
-    /// The composite version is the sum of component versions.
-    /// Components after matrix_snapshot inclusion:
-    ///   LocusKit v10 + VectorKit v4 + CorpusKit/BundleStore v3 + Grants v1 + MatrixSnapshot v1 = 19.
-    /// LocusKit bumped to v10 for associations natural-key uniqueness constraint (FINDING-3).
-    /// VectorKit bumped to v4 when idx_vectors_filed_at_item was added (VK-PERF-FIX-2026-07-13).
-    /// This guards the version coupling the Rust replication gate depends on:
-    /// a drift between composite and the gate's expected value would let a
-    /// fresh estate open at a version the gate rejects.
-    @Test("composite version includes grant and matrix_snapshot tables and equals 19")
+    /// The composite version is the sum of the LIVE component declaration
+    /// versions plus the two GLK-owned addends — computed here from those
+    /// declarations, never restated as a magic number (stale-literal rule,
+    /// GLK shared-content 1.1 P0; the layout itself is frozen structurally
+    /// by `CompositeSchemaSignatureTests`). This guards the version coupling
+    /// the Rust replication gate depends on: a drift between composite and
+    /// the gate's expected value would let a fresh estate open at a version
+    /// the gate rejects.
+    @Test("composite version includes grant and matrix_snapshot tables and equals the component sum")
     func compositeVersionEqualsComponentSum() {
-        // +1 grants addend, +1 matrix_snapshot addend = two GLK-owned table addends
+        // +grants addend, +matrix_snapshot addend = two GLK-owned table addends
         let componentSum =
             LocusKitSchema.version
             + VectorStore.schemaDeclaration.version
-            + BundleStore.schemaDeclaration.version
+            + VectorRepresentationClaims.schemaDeclaration.version
+            + CorpusSchemaProfile.attachedDeclaration.version
+            + EstateFormatStore.schemaDeclaration.version
             + 1  // grants
-            + 1  // matrix_snapshot
+            + MatrixSnapshotStore.schemaDeclaration.version
         #expect(GeniusLocusKitSchema.version == componentSum)
-        #expect(GeniusLocusKitSchema.version == 19)
         // The declaration the gate actually consumes carries the same version
         // and includes grant authorization state and matrix snapshot state
         // in hydrate/flush snapshots.
-        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 19)
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == componentSum)
         #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "grants" })
         // matrix_snapshot must be in the composite so hydration copies persisted
         // calibration state from the durable backend into the in-memory backend.
@@ -86,12 +87,12 @@ struct CompositeSchemaVersionTests {
     /// A fresh in-memory estate opens with the composite schema and registers
     /// the composite version under the "GeniusLocusKit" kit ID — the value the
     /// replication schema gate checks.
-    @Test("fresh estate opens and registers composite version 19")
+    @Test("fresh estate opens and registers the live composite version")
     func freshEstateOpensAtCompositeVersion() async throws {
         let storage = makeInMemoryStorage()
         try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
         let registered = try await storage.currentSchemaVersion(for: GeniusLocusKitSchema.kitID)
-        #expect(registered == 19)
+        #expect(registered == GeniusLocusKitSchema.version)
     }
 }
 
@@ -367,6 +368,7 @@ struct VectorSidecarUnificationTests {
         let handle = try await kit.open(
             storage: sqlite, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore())
+        try await EstateFormatStore(storage: sqlite).stamp(.current, now: t0)
         try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
 
         let glkVS = await kit.vectorStores[handle]
@@ -399,6 +401,7 @@ struct VectorSidecarUnificationTests {
         let handle = try await kit.open(
             storage: sqlite, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore())
+        try await EstateFormatStore(storage: sqlite).stamp(.current, now: t0)
         try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
 
         let vs = await kit.vectorStores[handle]
@@ -488,7 +491,7 @@ struct MatrixSnapshotPersistenceTests {
         // audit log — proving load+fold-forward is exact, not an approximation.
         // The oracle must use the SAME eventTime map the hydration path builds:
         // the temporal (T) matrix keys off eventTime, not the capture HLC
-        // (ADR-004), so a no-map fullRebuild would fold on the wrong clock and
+        //, so a no-map fullRebuild would fold on the wrong clock and
         // diverge by sub-ms eventTime/HLC rounding.
         let registered = await kit.matrixTiers[handle]
         let fullLog = try await kit.auditLog(for: handle)

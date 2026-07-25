@@ -12,9 +12,10 @@
 // Transport: every client uses native HTTP (supportsLocalHTTP: true) where
 // their config schema accepts a local HTTP url, or the proxy bridge
 // (useProxyBridge: true) where a stdio command entry is required. No client
-// uses bare stdio (isHeadlessStdio) — all clients have full monitoring.
+// defaults to bare stdio (isHeadlessStdio). `install --no-daemon` is the
+// explicit direct-stdio override for users who do not want a resident listener.
 //
-// Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): HTTP clients are
+// Entry transport is PER-CLIENT (see bounded loopback HTTP): HTTP clients are
 // wired to the resident daemon's loopback endpoint so concurrent clients share
 // the one running daemon + autonomic governor. Claude Desktop uses the native proxy
 // subcommand (`mootx01 proxy`) so its calls execute inside
@@ -65,23 +66,19 @@ public struct MCPClient: Sendable, Equatable {
     /// running daemon + autonomic governor) instead of a stdio `command` entry.
     /// `false` → stdio command entry (e.g. Claude Desktop, whose config schema
     /// requires a command/args entry — the proxy bridge handles daemon routing).
-    /// See ADR-LOOPBACKHTTP-001.
+    /// See bounded loopback HTTP.
     ///
-    /// SECURITY AUDIT DISPOSITION — a `true` here makes the installer write the
-    /// fixed unauthenticated `http://127.0.0.1:4242` into the client config
-    /// (codex 7a245e3e, MEDIUM: a same-user process pre-binding the port could
-    /// impersonate the daemon). This is the intended shared-resident-daemon
-    /// design (the stdio alternative was the unauthorized flip reverted in
-    /// 5c035e6), ACCEPTED for CE — the mitigation and rationale live in the
-    /// transport's disposition note in `AriaMCP/HTTPServer.swift`. Endpoint
-    /// authentication arrives with EE v1.1 (auth scheme + off-localhost hosting);
-    /// do not re-flip these to stdio to "fix" the finding.
+    /// A `true` here makes the default installer path write the fixed
+    /// `http://127.0.0.1:4242` endpoint so supported clients share one resident
+    /// writer, governor, and telemetry stream. `install --no-daemon` overrides
+    /// this per install and writes a direct stdio command entry without changing
+    /// the registry's default transport.
     public let supportsLocalHTTP: Bool
 
     /// For JSON HTTP clients, whether the entry carries an explicit
     /// `"type": "http"` field. Claude Code and Cline require it; Cursor infers
     /// HTTP from a bare `url`. Ignored for stdio clients and for Continue (YAML,
-    /// handled separately). See ADR-LOOPBACKHTTP-001.
+    /// handled separately). See bounded loopback HTTP.
     public let httpEntryIncludesType: Bool
 
     /// Whether this client should be wired via the native proxy subcommand
@@ -101,10 +98,10 @@ public struct MCPClient: Sendable, Equatable {
     /// is invisible to moot-mgr. Use only for lightweight headless or embedded
     /// scenarios where the resident daemon is intentionally absent.
     ///
-    /// No current entry in `MCPClients.supported` is in headless stdio mode
-    /// (all supported clients use HTTP or the proxy bridge). This property is
-    /// the canonical name for the mode so future headless clients and their
-    /// tests can reference it explicitly.
+    /// No current entry in `MCPClients.supported` defaults to headless stdio
+    /// (all supported clients use HTTP or the proxy bridge). `install
+    /// --no-daemon` explicitly overrides that default and writes `mootx01
+    /// serve` command entries for the selected clients.
     public var isHeadlessStdio: Bool {
         !supportsLocalHTTP && !useProxyBridge
     }
@@ -256,7 +253,7 @@ public enum MCPClients {
     ///   Antigravity     → /Applications/Antigravity.app (macOS app bundle)
     ///   Kiro            → /Applications/Kiro.app (macOS app bundle)
     public static let supported: [MCPClient] = [
-        // Transport per client (see ADR-LOOPBACKHTTP-001): clients are wired to the resident
+        // Transport per client (see bounded loopback HTTP): clients are wired to the resident
         // daemon over HTTP where their config schema accepts a local HTTP/url entry, so
         // concurrent clients share the one running daemon + autonomic governor. Claude Desktop
         // uses the native proxy subcommand (`mootx01 proxy`) — its

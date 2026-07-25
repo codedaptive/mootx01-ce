@@ -16,8 +16,8 @@ pub mod cli;
 pub mod commands;
 pub mod core;
 
-/// Bare semver for the installed binary. Compared numerically by the online
-/// upgrade path against the latest release tag, so it stays a pure semver;
+/// SemVer for the installed binary. Development builds carry the beta
+/// pre-release component; stable builds use a bare numeric version.
 /// `--version` prints it alongside `RELEASE_DATE`. The Swift equivalent is
 /// `Mootx01.currentVersion` in the Swift CLI entrypoint.
 ///
@@ -29,7 +29,7 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Release date stamp printed next to the version by `--version`. Must match
 /// the Swift port's `Mootx01.releaseDate` so both binaries print an identical
 /// `--version` line.
-pub const RELEASE_DATE: &str = "2026-07-15";
+pub const RELEASE_DATE: &str = "2026-07-24";
 
 /// Exit codes per spec §5.
 pub mod exit {

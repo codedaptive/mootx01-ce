@@ -1,7 +1,7 @@
 # moot-math-benchmark output schema
 
 Every moot-math-benchmark port — Rust, Swift, Go, Python, anything else
-— emits results in **one of two JSON schemas**. Tooling that ingests
+— emits results in one of the schema families below. Tooling that ingests
 results (`results/AGGREGATED.md` generator, decision-doc citations,
 default-kernel-selection scripts) treats these as a hard contract:
 *every field is required*, *no unknown fields*, *types must match
@@ -110,10 +110,10 @@ across batch sizes and modes for every available kernel.
       "batch_size": 1,
       "mode": "batched",
       "iterations": 4378250,
-      "ns_per_call_min": 0,
+      "ns_per_call_min": 3,
       "ns_per_call_mean": 14,
       "ns_per_call_stddev": 33,
-      "ns_per_element_min": 0.0
+      "ns_per_element_min": 3.0
     }
     /* ... one entry per (kernel, batch_size, mode) cell */
   ]
@@ -152,7 +152,7 @@ cold-path / dreaming-daemon algorithms across realistic input
 sizes. This is the methodology-data-manipulator-gate evidence
 for cold-path algorithms — measured, not calculated — that
 informs the dreaming-daemon schedule and default-backend
-selection (see DECISION_METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md).
+selection (see the performance methodology gate).
 
 ```json
 {
@@ -242,6 +242,67 @@ is linear in dim; MI is ~2× entropy because of the joint matrix.
 None of these numbers come from a calculation. All come from this
 file. Decision docs cite specific `(date, hardware_tag, commit)`
 triples from this schema.
+
+---
+
+## Schema `catalog-1` — canonical primitive validation
+
+Produced by `catalog-bench`. The runner loads every checked-in canonical
+vector file, requires validation to pass, and then times repeated calls through
+the production validator. One row is emitted for each of the 29 conformant
+primitives. This is deliberately a broad **math + comparison + CRC**
+measurement, not an isolated kernel timing.
+
+Required top-level fields are `schema_version`, `language`, `op`, `date`,
+`generated_at`, `hardware_tag`, `commit_sha`, `vector_root`, `timing`,
+`platform`, and `measurements`. Each measurement contains:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `primitive` | string | Canonical primitive name from the registry |
+| `cookbook_section` | string | Governing cookbook section |
+| `cases_per_iteration` | int | Vector cases validated per batch |
+| `iterations` | int | Timed validation batches |
+| `ns_per_batch_min/mean/stddev` | number | Distribution for a full vector validation |
+| `ns_per_case_min` | float | Best batch time divided by case count |
+
+## Schema `fdc-1` — deterministic classifier v4
+
+Produced by `fdc-bench`. Required provenance includes classifier, data, and
+semantic-model versions and the semantic-model SHA-256. `cold_start_ns`
+captures first-use initialization. Each row identifies `operation`, `workload`,
+input `bytes` and `tokens`, `iterations`, and the usual
+`ns_per_call_min/mean/stddev`. The canonical workload set covers short,
+medium, long/mixed, unresolved, and code input; the operation set covers full
+encode, anchor encode without novelty recording, eight semantic candidates,
+and semantic decision.
+
+## Schema `product-1` — shipped product boundary
+
+Produced by `product-bench.py`, not by a language port. It records the absolute
+binary path, version, SHA-256, git SHA, platform, daemon startup, dataset size,
+and the fact that a disposable estate was used. Each named MCP operation has
+the raw wall-clock samples plus `min_ns`, `mean_ns`, `p50_ns`, `p95_ns`,
+`p99_ns`, and `max_ns`. Raw samples make the published percentiles auditable
+without rerunning the product.
+
+Product results are workload-specific. In particular, row count and query pool
+are evidence fields, not implicit claims about a one-million-row estate.
+
+## External schema `gauntlet-v1` — adversarial product retrieval
+
+The historical retrieval gauntlet is owned by the EE
+`tools/mcp-benchmarker`, not by the local language-port schema. Its source-native
+JSON records the seed, columns, every per-query score and latency, retained
+failures, guard result, and superiority verdict. It intentionally remains in
+that native shape so the evidence can be audited with the tool that produced it.
+
+The CE evidence bundle adds a `gauntlet-provenance-1` companion that pins the
+tested product version and binary hash, EE harness SHA, historical report path,
+corpus dimensions and hashes, isolation, background-work state, and artifact
+hashes. A MOOT-only report must set `mempalace_rerun` and
+`superiority_evaluable` to false; historical competitor rows cannot be promoted
+to a current comparison.
 
 ---
 

@@ -80,7 +80,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_vault_import") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_export") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_reconcile") == .ask)
-        // ADR-025 wave 8.2: monitoring_status mutates daemon behaviour when `enabled` is supplied.
+        // monitoring_status mutates daemon behaviour when `enabled` is supplied.
         #expect(PermissionsWriter.classify("moot_monitoring_status") == .ask, "monitoring_status is mutating — ask tier")
 
         // Destructive.

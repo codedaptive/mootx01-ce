@@ -25,11 +25,11 @@ Then initialize it:
 mootx01 install
 ```
 
-> Without the binary installed and its resident daemon running (`mootx01
-> install` places both and starts the daemon via launchd), the plugin
+> Without the binary installed and its resident daemon running, the plugin
 > installs fine but has nothing to connect to — your client's MCP status
-> will show `mootx01` as unreachable. Install the binary and restart the
-> client to fix it.
+> will show `mootx01` as unreachable. `mootx01 install` registers and starts
+> the resident service through the platform's supported mechanism (launchd
+> on macOS). Install the binary and restart the client to fix it.
 
 ## 2 · Install this plugin
 
@@ -76,7 +76,7 @@ Or run the orientation command in Claude Code:
   loopback HTTP, so every session shares the one running daemon instead of
   spawning a private `serve` process per session
 
-Version 1.0.33 — this plugin tracks the MOOTx01 product release.
+Version 1.1.0-beta-04 — this plugin tracks the MOOTx01 product version.
 
 ## Documentation
 

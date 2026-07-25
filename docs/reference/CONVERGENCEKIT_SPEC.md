@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Specification
-version: 1.3
+version: 1.4
 status: active
 date: 2026-07-17
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -12,8 +12,8 @@ relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
-  - docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md
-  - docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#72-disclosure-model
 purpose: |
   ConvergenceKit is the optional sync layer for the substrate. It
   replicates PersistenceKit row mutations across device or perimeter
@@ -279,6 +279,23 @@ CVK-WC5).
 from the manifest, not from per-entity hardcoding. Each table maps to
 record type `kitID_tableName`; sync metadata travels in reserved fields
 (`_syncHLC`, `_syncSchemaVersion`, `_syncKitID`).
+
+*Wire note (FAB5-EV — encryptedValues):* columns declared in
+`SyncManifest.encryptedContentColumns` are routed through
+`CKRecord.encryptedValues` at encode time. All other columns remain on the
+plaintext `CKRecord` channel. The `_sync*` metadata fields and registry
+(`_ck_*`) tables are always plaintext. The decode path performs dual-read:
+`encryptedValues` channel is checked first; the plaintext channel is the
+fallback for pre-migration rows. This is the zone-feed pull design
+(`fetchZoneChanges`) that neutralises the server-side no-query restriction
+on encrypted fields. No schema version bump — the empty-default preserves
+byte-identical wire format for unencrypted tables. Federation twin: this
+wire note is CloudKit-only (N4 Swift vertical; Rust leg not required).
+Phase 2 (FAB5-EV2): the declaration is enforced at `CloudKitSyncEngine.enable()` —
+`validateEncryptedColumns()` runs before zone setup so an invalid declaration
+fails loud before any push occurs — and applied on every push via `PushCycle`,
+which passes `manifest.encryptedContentColumns[tableName]` to `CKRecordMapping.record(...)`
+so declared columns never reach the wire in plaintext.
 
 Two distinct HLC packing layouts coexist in this package — applied at
 different layers and never mixed:
@@ -604,7 +621,7 @@ CloudKit has no Rust API, and the no-FFI constraint between Swift and Rust
 legs is immutable. Vocabulary and wire-format changes (including additions
 from B-8) still carry byte-identical Rust twins per C-8. The Rust
 vertical's multi-machine story is Federation
-(`DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md`).
+(the engineering disclosure model in `SYSTEM_ENGINEERING_REFERENCE.md` § 7.2).
 
 ## § 6 — Error model (conceptual)
 

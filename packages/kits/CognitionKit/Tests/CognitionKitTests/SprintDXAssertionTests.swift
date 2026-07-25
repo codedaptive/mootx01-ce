@@ -10,7 +10,7 @@
 //     diffusion node-layer lens).
 //
 //   • GeniusLocusKit.defaultStandingSignalNames.count == 10 — 7 baseline
-//     + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1)
+//     + DistillationSignal (Dg4) + TrainingSignal
 //     + ContradictionScoutSignal (contradiction hunter).
 //
 // isRecipeTool assertions for the three distillation tools live in
@@ -29,7 +29,7 @@ struct SprintDXAssertionTests {
     ///
     /// Baseline 26 + 3 distillation-family recipes (consolidate,
     /// distilled_recall, recollect) registered by Dc4; + 1 diffusion
-    /// node-layer lens (node_motion, ADR-DIFFUSION-001).
+    /// node-layer lens (node_motion, node motion modeling).
     @Test("CK-DX-1: RecipeCatalog.all.count == 30 (26 baseline + 3 distillation + node_motion)")
     func recipeCatalogCountIncludesDistillationTriple() {
         #expect(RecipeCatalog.all.count == 30,
@@ -39,11 +39,11 @@ struct SprintDXAssertionTests {
     /// CK-DX-2: defaultStandingSignalNames contains all 10 standing signals.
     ///
     /// Ten signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
-    /// (ADR-018 F1) + ContradictionScoutSignal (contradiction hunter).
+    /// + ContradictionScoutSignal (contradiction hunter).
     /// The signal inventory table in GENIUSLOCUSKIT_SPEC.md defines the set.
     @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 10 (includes ContradictionScoutSignal)")
     func defaultStandingSignalNamesCountIsTen() {
         #expect(GeniusLocusKit.defaultStandingSignalNames.count == 10,
-            "defaultStandingSignalNames must contain exactly 10 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1) + ContradictionScoutSignal")
+            "defaultStandingSignalNames must contain exactly 10 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal + ContradictionScoutSignal")
     }
 }

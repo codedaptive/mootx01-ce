@@ -26,6 +26,7 @@
 //! disabled + NoOpSink before releasing, so the singleton is clean
 //! for the next test regardless of execution order.
 
+use corpus_kit::CorpusContentEngine;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use genius_locus_kit::coordinator::{
@@ -664,13 +665,13 @@ fn dense_store_error_emits_dark_and_store_error_counters() {
         use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
         let cfg = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
         let st: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(cfg));
-        Arc::new(Corpus::open(st, EmbeddingModelConfig::Deterministic).expect("Corpus::open"))
+        Arc::new(CorpusContentEngine::standalone_on(st, vec![EmbeddingModelConfig::Deterministic]).expect("Corpus::open"))
     };
     corpus.ingest(&drawer.content, &drawer.id, 1_700_000_000).expect("ingest");
     coord.register_corpus(&h, Arc::clone(&corpus));
 
     // Force storeError on the next float_nearest (single-use test seam).
-    *corpus.forced_float_error.lock().unwrap() = Some("forced-d6-counter".to_string());
+    corpus.test_force_float_store_error("forced-d6-counter");
 
     let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)

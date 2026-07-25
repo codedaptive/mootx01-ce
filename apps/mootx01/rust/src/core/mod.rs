@@ -16,10 +16,10 @@ pub mod permissions;
 pub mod release;
 pub mod sensitivity_crypto;
 /// Sidecar storage for per-tier PBKDF2-HMAC-SHA256 password hashes
-/// (ADR-025 §2, Rust/Linux/Windows path).
+/// (out-of-band sensitivity grants, Rust/Linux/Windows path).
 pub mod sensitivity_hashes;
 pub mod service;
-/// Identity-verification seam for `mootx01 unlock/lock` (ADR-025 §2,
+/// Identity-verification seam for `mootx01 unlock/lock` (out-of-band sensitivity grants,
 /// Rust/Linux/Windows path). Reads the sensitivity_hashes sidecar, prompts
 /// for the tier-specific password with echo disabled, verifies via PBKDF2,
 /// and on success POSTs to the daemon's /api/control/unlock endpoint.

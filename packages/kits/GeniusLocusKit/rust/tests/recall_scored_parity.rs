@@ -586,15 +586,15 @@ fn b10_plain_recall_unchanged_after_scored_recall() {
 // GROUP C — BM25 and vector lane contributions (real hybrid recall)
 // ---------------------------------------------------------------------------
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
 use vectorkit::vector_store::VectorStore;
 
-fn make_corpus_for_test() -> Arc<Corpus> {
+fn make_corpus_for_test() -> Arc<CorpusContentEngine> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
-    let corpus = Corpus::open(storage, EmbeddingModelConfig::Deterministic)
+    let corpus = CorpusContentEngine::standalone_on(storage, vec![EmbeddingModelConfig::Deterministic])
         .expect("Corpus::open");
     Arc::new(corpus)
 }
@@ -788,7 +788,7 @@ fn c6_vector_lane_contributes_with_registered_corpus_and_vector_store() {
     let vector_store = make_vector_store_for_test();
     let engram = corpus.embed(&drawer.content).expect("embed");
     vector_store
-        .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+        .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
         .expect("add_vector");
 
     coord.register_corpus(&h, corpus);
@@ -833,7 +833,7 @@ fn c7_union_best_with_corpus_and_vector_populates_union_profile() {
     let vector_store = make_vector_store_for_test();
     let engram = corpus.embed(&drawer.content).expect("embed");
     vector_store
-        .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+        .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
         .expect("add_vector");
 
     coord.register_corpus(&h, corpus);
@@ -983,39 +983,13 @@ fn d4_union_best_with_ingest_dense_lane_status_is_none_on_hits() {
     );
 }
 
-/// D-5: unionBest with ThrowingFloatProvider → dark:providerOptOut.
-/// Injects a provider whose embed_float always errors via open_with_provider.
+/// D-5: unionBest with forced provider opt-out → dark:providerOptOut.
 #[test]
 fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
-    use persistence_kit::inmemory::InMemoryStorage;
-    use persistence_kit::{BackendConfiguration, EstateConfiguration};
-    use uuid::Uuid;
-
-    struct ThrowingFloatProvider;
-    impl vectorkit::EmbeddingProvider for ThrowingFloatProvider {
-        fn model_id(&self) -> &str { "test-throwing-v1" }
-        fn model_version(&self) -> &str { "1.0.0" }
-        fn embed(&self, _: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
-            // Returns ZERO — sufficient for BM25/vector Hamming lanes.
-            // This provider's purpose is to force providerOptOut on embed_float.
-            Ok(engram_lib::Engram::ZERO)
-        }
-        fn embed_float(&self, _: &str) -> Result<Vec<f32>, vectorkit::VectorKitError> {
-            // Always opt out — this is the path we are testing.
-            Err(vectorkit::VectorKitError::EmbeddingFailed(
-                "ThrowingFloatProvider: embed_float is disabled (test-only opt-out)".to_string(),
-            ))
-        }
-    }
-
     let (mut coord, h) = open_one();
-
-    let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
-    let storage = std::sync::Arc::new(InMemoryStorage::new(config));
-    let corpus =
-        Corpus::open_with_provider(storage, Box::new(ThrowingFloatProvider))
-            .expect("open_with_provider");
-    coord.register_corpus(&h, std::sync::Arc::new(corpus));
+    let corpus = make_corpus_for_test();
+    corpus.test_force_float_provider_opt_out();
+    coord.register_corpus(&h, corpus);
 
     let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
@@ -1043,8 +1017,7 @@ fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
 ///    this test — emitting is covered by D-2/D-3; we verify the chain rather
 ///    than the counter here).
 ///
-/// This test uses the `test-seams` feature which gates corpus_kit::Corpus's
-/// `forced_float_error` field and `open_with_provider` constructor.
+/// The seam is on the canonical-content engine; no legacy Corpus is opened.
 #[test]
 fn d6_union_best_forced_store_error_full_chain() {
     let (mut coord, h) = open_one();
@@ -1065,7 +1038,7 @@ fn d6_union_best_forced_store_error_full_chain() {
 
     // Install a forced storeError — the NEXT call to float_nearest will return
     // StoreError and consume this value (single-use, mirrors Swift seam).
-    *corpus.forced_float_error.lock().unwrap() = Some("forced-store-error-for-d6".to_string());
+    corpus.test_force_float_store_error("forced-store-error-for-d6");
 
     let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
@@ -1246,7 +1219,7 @@ fn e1_forced_vector_hamming_failure_degrades_stage_and_query_survives() {
     let vector_store = make_vector_store_for_test();
     let engram = corpus.embed(&drawer.content).expect("embed for index");
     vector_store
-        .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+        .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
         .expect("add_vector");
 
     coord.register_corpus(&h, corpus);
@@ -1308,7 +1281,7 @@ fn e2_forced_embed_failure_degrades_stage_and_query_survives() {
     let vector_store = make_vector_store_for_test();
     let engram = corpus.embed(&drawer.content).expect("embed for index");
     vector_store
-        .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+        .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
         .expect("add_vector");
 
     coord.register_corpus(&h, corpus);
@@ -1368,7 +1341,7 @@ fn e3_happy_path_no_degraded_stages_when_lanes_succeed() {
     let vector_store = make_vector_store_for_test();
     let engram = corpus.embed(&drawer.content).expect("embed for index");
     vector_store
-        .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+        .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
         .expect("add_vector");
 
     coord.register_corpus(&h, corpus);
@@ -1778,7 +1751,7 @@ fn open_wired_estate() -> (EstateCoordinator, genius_locus_kit::handle::EstateHa
     let vector_store = make_vector_store_for_test();
     let engram = corpus.embed(&drawer.content).expect("embed for index");
     vector_store
-        .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+        .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
         .expect("add_vector");
     coord.register_corpus(&h, corpus);
     coord.register_vector_store(&h, vector_store);
@@ -2063,10 +2036,10 @@ fn mpnet_config() -> EmbeddingModelConfig {
     }
 }
 
-fn corpus_with_models(models: Vec<EmbeddingModelConfig>) -> Arc<Corpus> {
+fn corpus_with_models(models: Vec<EmbeddingModelConfig>) -> Arc<CorpusContentEngine> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
-    Arc::new(Corpus::open_many(storage, models).expect("Corpus::open_many"))
+    Arc::new(CorpusContentEngine::standalone_on(storage, models).expect("Corpus::open_many"))
 }
 
 // H-1: single-provider (production default) dense lane runs and surfaces a

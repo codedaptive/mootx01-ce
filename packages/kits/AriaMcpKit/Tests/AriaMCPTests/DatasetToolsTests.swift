@@ -778,7 +778,7 @@ struct DatasetToolsTests {
         // never produce a companion .csv in the vault.
         //
         // Note on observable behavior: the vault bridge (VaultExportScope /
-        // ADR-007) already excludes restricted-sensitivity drawers from the
+        // The export trust boundary already excludes restricted-sensitivity drawers from the
         // note export by default. This means bridge.export does not write the
         // .md note either, so A4's loop body never fires for this path.
         //

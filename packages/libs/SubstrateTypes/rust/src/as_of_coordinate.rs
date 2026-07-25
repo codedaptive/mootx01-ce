@@ -1,6 +1,6 @@
 // as_of_coordinate.rs
 //
-// Temporal query parameter for as-of reads per ADR-017 §15–§17.
+// Temporal query parameter for as-of reads under the node-tree model.
 // AsOfCoordinate is a discriminated value — `Present` means
 // "the live state now" and `AsOf(hlc)` means "the state at
 // this HLC." This prevents the class of bug where a caller

@@ -48,7 +48,7 @@ struct FDCRuntimeTests {
     //
     // What the guard does NOT catch:
     //   • Text where a few INCIDENTAL high-IDF Q-IDs happen to match the
-    //     winning code's large signature. "ADR-016 wings as the provenance
+    //     winning code's large signature. "wings as the provenance
     //     organizational axis" produces ≤ 4 tied codes because "wing" maps
     //     to Q1172934 (IDF ≈ 4.1, present in 17 codes) — a high-IDF Q-ID
     //     that coincidentally appears in the 974.x US-history signatures.

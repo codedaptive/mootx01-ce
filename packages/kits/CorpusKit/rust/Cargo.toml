@@ -5,7 +5,7 @@ edition = "2021"
 # P8-secfix: trait-object upcasting (dyn Trait as dyn SuperTrait) requires 1.86;
 # CorpusKit uses this pattern so the 1.75 declaration was wrong.
 rust-version = "1.86"
-description = "Rust port of the Swift CorpusKit: Chunk, sentence-aware chunker (fallback path), BM25 inverted index, BundleStore on persistence-kit, hybrid recall (RRF fusion of vector kNN + BM25), CorpusKitSync manifest."
+description = "Rust CorpusKit: canonical-content BM25/vector retrieval with optional standalone range-only passages and legacy 1.0 chunk compatibility."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -16,8 +16,8 @@ path = "src/lib.rs"
 [dependencies]
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # SubstrateLib: MerkleHash::leaf for the ContentHashProvider callback
-# that HashingRowStore invokes on every chunk insert (ADR-017 §16).
-# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + ADR-017 §19.
+# that HashingRowStore invokes on every chunk insert.
+# Authority: in-repository dependency direction + node-tree integrity.
 substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 # SubstrateKernel: sha256::hash for deterministic corpus UUID derivation,
 # used by the HashParentChainProvider (chunk → corpus parent chain).
@@ -41,7 +41,7 @@ vectorkit = { path = "../../VectorKit/rust" }
 # the Swift `import QueueKit` in CorpusKit. QueueKit is a low-level primitive
 # (substrate-types + persistence-kit + intellectus-lib); corpus-kit → queuekit
 # is downstream→upstream, no inversion.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 # IntellectusLib: zero-dependency telemetry leaf. Added for P2
 # self-report coverage (cp-corpuskit-report). When monitoring is
@@ -62,6 +62,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # crate (mirrors the Swift `CorpusKitProviders` target). Dev-only so
 # the core kit stays provider-free in normal builds.
 [features]
+# Optional standalone passage indexing. GLK/MOOTx01 dependencies do not
+# enable this feature, so the segmenter, range table, and configuration
+# persistence are absent from their production build.
+standalone-passages = []
+# Canonical-engine fault seams used by GLK integration tests. Kept separate
+# from the legacy Corpus test seams and absent from production builds.
+canonical-test-seams = []
 # test-seams: enables the `open_with_provider` constructor and the
 # `forced_float_error` field on `Corpus`. These surfaces are deliberately
 # absent from normal production builds. GLK declares corpus-kit with this

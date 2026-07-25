@@ -16,6 +16,7 @@ import Foundation
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -60,9 +61,23 @@ struct DrainCommand: AsyncParsableCommand {
         // Nothing to drain if the estate file does not exist.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
 
+        // At-rest posture — the SAME shared decision serve and dream use, so the
+        // three commands cannot drift. drain reaches here only when the estate
+        // file already exists (guarded above), so in practice this resolves to
+        // either the existing-ciphertext or the existing-plaintext branch.
+        let encryption: EstateEncryptionConfig
+        do {
+            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            encryption = resolved.encryption
+        } catch {
+            Logging.stderr.log("mootx01 drain fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0)
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
         )
         let storage: SQLiteStorage
         do {
@@ -77,6 +92,8 @@ struct DrainCommand: AsyncParsableCommand {
         let handle: EstateHandle
         do {
             handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(
+                kit: kit, handle: handle, now: Date())
             // Wire the semantic layer so the corpus + its lease-gated drain worker
             // mount; the worker drains the persisted queue (taking the T3 lease
             // unless a resident holds it). Idempotent on reopen.

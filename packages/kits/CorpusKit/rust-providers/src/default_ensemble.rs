@@ -1,8 +1,8 @@
-//! The ONE definition of the 1.0 default recall ensemble (Rust port).
+//! The ONE definition of the default recall ensemble (Rust port).
 //!
 //! Mission 6a-iii-wire: flip the production default from a single deterministic
 //! provider to the canonical five honest signals. `default_ensemble()` is the
-//! single source of truth for "the 1.0 default recall ensemble" — every
+//! single source of truth for the default recall ensemble — every
 //! production provision / open site threads THIS list, so the five honest
 //! signals (RI / PPMI / LSA / NMF / FDC) are the live default everywhere.
 //!

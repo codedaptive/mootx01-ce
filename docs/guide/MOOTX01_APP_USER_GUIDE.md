@@ -1,6 +1,6 @@
 ---
 title: MOOTx01 — User Guide
-version: v0.3
+version: v0.6
 status: draft
 ---
 
@@ -30,13 +30,32 @@ called out.
 
 ---
 
+## First launch — what to expect
+
+The first time you open MOOTx01, a short guided walkthrough helps you save
+your first memory and retrieve it. It takes under a minute. You can also tap
+**Skip** to jump straight into the app.
+
+Once the walkthrough is complete it never appears again.
+
+---
+
 ## The app at a glance
 
-The app has these tabs:
+MOOTx01 uses two tab profiles:
 
-- **Capture** — file a new memory, and choose whether it's private or public.
+**Standard profile (default)** — everything a new user needs:
+
+- **Capture** — save a thought, note, or idea to your memory.
 - **Recall** — search your memories.
-- **Intelligence** — ask an on-device assistant that answers from your estate.
+- **Review** — the Review Center: what your estate remembers now, what matters
+  today, what changed, and what may be ready to retire.
+- **Intelligence** — ask an on-device assistant that answers from your memories.
+- **Settings** — iCloud Sync switch and the Advanced Mode toggle (see below).
+
+**Advanced Mode** — adds engineering and power-user tabs. Turn it on in
+**Settings → Advanced Mode**:
+
 - **The Top** — your most relevant / recent memories.
 - **Apple Surfaces** — see how MOOTx01 shows up in Siri, Spotlight, and
   Shortcuts.
@@ -45,6 +64,9 @@ The app has these tabs:
 - **Miners** — optional automatic capture from Calendar and Contacts.
 - **Federation** — share selected memories with another Mootx01 estate on your
   local network, on demand, for a limited time.
+
+Advanced Mode persists across launches. You can switch back to Standard any
+time from **Settings**.
 
 ---
 
@@ -99,6 +121,90 @@ feed them to another action).
 
 ---
 
+## The Review Center (ask what MOOT remembers)
+
+As an estate grows, "search it" stops being enough — you also want to know what
+it holds now, what it surfaced today, and what has gone stale. That is the
+**Review** tab.
+
+Open **Review** and pick one of four reviews from the selector at the top:
+
+- **Dashboard** — what your estate remembers now. Which rooms are gaining
+  attention, which memories hold the graph together, and what currently
+  conflicts.
+- **Morning** — the context and open work that matter today: yesterday's
+  journal, a recall of recent work, and the findings still waiting on you.
+- **End of Day** — what changed, what was decided, and what still wants
+  attention.
+- **Weekly** — memories that may be fading, contradicted, or ready to retire.
+
+Each review builds when you first open it, and the result is held while you
+switch between them. **Refresh** rebuilds the one you are looking at. A review
+reads your estate; opening one never changes anything.
+
+### Where every line comes from
+
+Every row has a **Where this came from** disclosure. Open it and you see the
+exact MOOT tool that produced the row, the arguments it was called with, and the
+raw line the row was read out of. Nothing in a review is generated prose — if a
+number is on screen, some part of MOOT computed it and the row will show you
+which.
+
+Numbers are shown as MOOT reported them. A momentum or centrality score is a
+raw score, not a percentage.
+
+### When a section is empty
+
+An empty section always says why, in MOOT's own words — "0 result(s)", a
+refusal, or a note that nothing in the window qualified. A blank area would
+leave you guessing whether the review ran.
+
+One section says something stronger. Weekly's **Duplicates** explains that MOOT
+has no way to find duplicate memories yet, so nothing can be reported there. It
+is a missing capability, named rather than hidden, and it will stay that way
+until MOOT can answer the question.
+
+### Suggestions, and staying in control
+
+Some rows offer a suggestion. Nothing acts on its own:
+
+- **Retire** — on a Weekly row where two or more facts claim the same thing
+  about the same subject. Retiring makes one of them inactive.
+- **Accept** / **Reject** — on a proposed contradiction between two memories,
+  which MOOT found but has not settled. Accept records the link; Reject
+  withdraws it.
+- **Confirm** — on a memory row. Marks it as verified by you.
+
+Tapping a suggestion **never changes anything by itself.** It asks first, and
+tells you what the change does before you agree. Only the confirm button in
+that prompt changes your estate. Rows whose decision is already made show no
+buttons.
+
+### What can and cannot be undone
+
+Two of these are permanent, and the app says so plainly in the prompt rather
+than letting you find out afterwards:
+
+| Suggestion | Afterwards |
+|---|---|
+| **Confirm** | Reversible — you can contest a confirmed memory later. |
+| **Accept** | The link is recorded. Nothing is destroyed, and both memories stay fully editable. |
+| **Reject** | **Permanent.** The proposed link is withdrawn and that pair is never suggested again. |
+| **Retire** | **Permanent.** The fact stops being active. There is no un-retire; filing the same fact again later creates a *new* fact rather than restoring this one. |
+
+There is no Undo button in the Review Center, because for Retire and Reject
+there is nothing an Undo could do. Retired facts are not erased — they remain
+in your estate's history, and MOOT can still show you the timeline of how a
+fact changed.
+
+### If the review says it is not attached
+
+Reviews read through your running estate. If the app has not attached yet, the
+Review tab says so instead of showing an empty review, and fills in once the
+estate is up.
+
+---
+
 ## The Intelligence tab (ask your memory)
 
 Open **Intelligence** and ask a question. An on-device language model answers
@@ -115,6 +221,45 @@ Two things are true by design and worth knowing:
 
 The assistant runs on your device. It doesn't need an internet connection or a
 cloud account to answer from your memories.
+
+### The six workers
+
+Under the ask box is a row of **Workers** — six one-tap jobs that read your
+estate and hand you a result. None of them ever writes to your memory; anything
+they propose is yours to accept or ignore.
+
+| Worker | What it does | What it needs in the box above |
+|---|---|---|
+| **Summarize recent work** | A few sentences on what you've been doing lately. | Nothing. Type a topic to narrow it. |
+| **Extract facts** | Proposes a subject–relationship–object fact from your memories. Always marked *proposed*; never filed for you. | Nothing. Type a topic to narrow it. |
+| **Classify this text** | Suggests a room and tags for something you're about to file. | The text to classify. |
+| **Morning brief** | Builds this morning's review — yesterday's journal, today's context, what's still open — and narrates it in plain language, naming the tools it read. | Nothing. |
+| **Compare two bodies** | Takes two pieces of research on the same question and tells you where they agree, where they *don't*, and what a combined answer could say. | Both pieces, separated by a line containing only `---`. |
+| **Draft a handoff** | Writes the message to paste into a more capable model, with the estate material it used quoted and its sources listed. | The objective, in a sentence. |
+
+Each row shows its own state:
+
+- **Ready** — Apple Intelligence is on and the worker has what it needs.
+- **Needs input** — the box above is missing something; the row says what.
+- **Without Apple Intelligence** — the worker still runs and gives you a
+  deterministic result (a plain digest, the sources as filed) rather than
+  nothing.
+
+Two behaviours worth knowing:
+
+- **Compare never hides a disagreement.** If the two pieces conflict, the
+  conflict is shown with both positions in full, and a combined answer is
+  labelled with the disputes it leaves open. It will not report agreement it
+  didn't find, and a comparison it couldn't make says so instead of coming back
+  empty.
+- **A worker may decline.** Apple Intelligence sometimes declines to answer on
+  particular content, even when it's switched on. When that happens you get the
+  deterministic result instead, and the text tells you it wasn't written by the
+  model. Nothing is lost and nothing is invented.
+
+**Draft a handoff sends nothing anywhere.** It writes text and hands it to you;
+you decide whether to paste it into another service. The sources are listed so
+you always know which memories are in the message before it leaves your machine.
 
 ---
 
@@ -190,10 +335,15 @@ Sync requires two things:
 1. You are **signed into iCloud** on every device.
 2. You are running a build of MOOTx01 that has the iCloud container enabled.
    Sync is off by default — the app does nothing with iCloud until you
-   enable it in the Engine tab.
+   enable the master switch in Settings.
 
-Once both conditions are met, open the **Engine** tab, find the **iCloud Sync**
-toggle, and turn it on. The setting persists across launches.
+Once both conditions are met, open the **Settings** tab and turn on the
+**iCloud Sync** switch. The setting persists across launches.
+
+- **Mac:** Settings also opens from the app menu (⌘,).
+- **iPhone / iPad (Standard profile):** tap the **Settings** tab.
+- **iPhone / iPad (Advanced profile):** tap the **Settings** tab or the gear
+  icon in the Engine tab toolbar — both control the same switch.
 
 ### What syncs — and what never leaves the machine
 
@@ -204,20 +354,27 @@ toggle, and turn it on. The setting persists across launches.
 - Knowledge-graph facts
 - Diary entries
 
-**Never synced — stays on this device only:**
+**Never synced by default — requires explicit authorization:**
 
-- Memories marked **Restricted** or **Secret**. This is a hard boundary at the
-  sync layer, not a preference you can override in the app. A Restricted or
-  Secret memory is never placed in the sync outbox, and inbound records at
-  those tiers are rejected if they arrive. The boundary holds regardless of
-  whether iCloud sync is enabled.
+- Memories marked **Restricted**. You can opt in to syncing Restricted memories
+  across your devices from **Settings → Sensitive Tier Sync**. Enabling requires
+  biometric authentication (Face ID, Touch ID, or passcode). Once authorized,
+  Restricted memories sync like Normal and Elevated ones. You can revoke at any
+  time — revocation removes the authorization without a second challenge and
+  immediately retracts above-ceiling memories from the local sync view.
+  If iCloud sync is off, this setting has no effect.
+
+- Memories marked **Secret**. The Secret tier sync option is visible in Settings
+  but is not yet available. It is reserved for a future release pending an
+  additional security review.
+
 - Computed data (scores, rankings, index data). These are rebuilt locally on
   every device from the underlying memories — sending them would waste space
   and risk stale values overwriting fresh ones.
 
-**In plain terms:** your sensitive memories stay on the machine they were
-created on. The sync ceiling is fixed at Elevated — the two highest tiers do
-not cross any device boundary.
+**In plain terms:** Normal and Elevated memories sync whenever iCloud sync is
+on. Restricted memories sync only if you explicitly authorize it on each device.
+Secret memories never sync in this release.
 
 ### What two devices at once actually looks like
 
@@ -291,17 +448,25 @@ that persist across multiple beats are usually caused by a temporary CloudKit
 error — check iCloud status and your connection.
 
 **Sync not starting at all:** verify both conditions in "Before you begin"
-above, and confirm the **iCloud Sync** toggle in the Engine tab is turned on.
+above, and confirm the **iCloud Sync** toggle in the Settings tab is turned on.
 The app makes no iCloud calls — and shows no sync status — until both the
 build supports sync and the toggle is on.
 
 ### Turning iCloud Sync on or off
 
-Open the **Engine** tab and look for the **iCloud Sync** section. There is a
-toggle labelled **iCloud Sync**. Turn it on to enable syncing; turn it off to
-stop. The change takes effect immediately — toggling off stops the sync engine
-and stops the app from forwarding push notifications to CloudKit; toggling on
+Open the **Settings** tab and find the **iCloud Sync** switch:
+
+- **Mac:** Settings tab, or the app menu (⌘,).
+- **iPhone / iPad (Standard profile):** Settings tab.
+- **iPhone / iPad (Advanced profile):** Settings tab or the gear icon in the
+  Engine tab toolbar — both toggle the same switch.
+
+The change takes effect immediately — turning it off stops the sync engine and
+stops the app from forwarding push notifications to CloudKit; turning it on
 fires an immediate sync beat.
+
+The **Engine** tab also shows the current sync state in its iCloud Sync tile.
+The tile mirrors the same switch as Settings — changing either one changes both.
 
 The setting is saved and respected on every future launch. A device that has
 never enabled sync makes no iCloud calls and requires no iCloud container
