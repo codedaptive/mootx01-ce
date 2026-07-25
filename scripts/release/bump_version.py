@@ -9,7 +9,7 @@ replacement, never re-serialization — the embedded copies must stay byte-ident
 to what the packager produces), then runs verify_version.py as the gate.
 
   python3 scripts/release/bump_version.py 1.0.32
-  python3 scripts/release/bump_version.py 1.1.0-beta-03 --date 2026-07-23
+  python3 scripts/release/bump_version.py 1.1.0-beta-04 --date 2026-07-24
 
 It REFUSES to run unless the tree is already consistent at the current version
 (verify_version passes first), so it can never compound an existing drift.
