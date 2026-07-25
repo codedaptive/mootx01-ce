@@ -54,8 +54,8 @@ public actor WorkPacketStore {
     /// - Parameters:
     ///   - client: estate operation surface (use `EstateAdapter` in production).
     ///   - wing: wing within the estate to file packets into. Defaults to
-    ///     `defaultWingName` ("Agentic Memory").
-    public init(client: any WorkPacketEstateClient, wing: String = defaultWingName) {
+    ///     `LocusKit.defaultWingName` ("Agentic Memory").
+    public init(client: any WorkPacketEstateClient, wing: String = LocusKit.defaultWingName) {
         self.client = client
         self.wing = wing
         self.encoder = JSONEncoder()
@@ -81,7 +81,10 @@ public actor WorkPacketStore {
     ///     `LatticeAnchor.udc("004")` (Computer Science — default for agentic
     ///     work records). Supply a domain-specific anchor when the packet
     ///     describes content in a different UDC class.
-    /// - Returns: the drawer ID of the filed packet, which equals `packet.id`.
+    /// - Returns: the estate-assigned drawer ID for the filed packet. The estate
+    ///   issues its own UUID at capture time; this is NOT `packet.id`. Retain
+    ///   the returned value and pass it as `LineageLink.targetPacketID` when
+    ///   building links that point to this packet.
     @discardableResult
     public func store(
         _ packet: WorkPacket,
@@ -106,17 +109,18 @@ public actor WorkPacketStore {
         frame.wing = wing
         frame.eventTime = now
 
-        _ = try await client.capture(frame)
+        // captured.id is the estate-assigned drawer UUID — different from packet.id.
+        let captured = try await client.capture(frame)
 
         // Best-effort tunnel filing — tunnel failure does not roll back the drawer.
         for link in packet.lineageLinks {
             try? await storeTunnel(
-                sourcePacketID: packet.id,
+                sourcePacketID: captured.id,
                 link: link
             )
         }
 
-        return packet.id
+        return captured.id
     }
 
     // MARK: - fetch

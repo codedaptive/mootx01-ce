@@ -37,7 +37,8 @@ struct WorkPacketStoreTests {
         let (store, client) = makeStore()
         let packet = makePacket(id: "pkt-001")
         let drawerID = try await store.store(packet, now: fixedDate)
-        #expect(drawerID == "pkt-001")
+        // The estate assigns a UUID at capture time; drawerID ≠ packet.id.
+        #expect(!drawerID.isEmpty)
         #expect(client.captureDrawerCount == 1)
     }
 
@@ -78,21 +79,11 @@ struct WorkPacketStoreTests {
 
     @Test("fetch returns a stored packet by drawer ID")
     func fetchReturnsStoredPacket() async throws {
-        let (store, client) = makeStore()
+        let (store, _) = makeStore()
         let original = makePacket(id: "fetch-test-001", objective: "Fetchable packet")
-        _ = try await store.store(original, now: fixedDate)
-
-        // Fetch returns the packet with the same id the store was given.
-        // NOTE: The mock assigns a new UUID as drawer.id in capture,
-        // but fetch uses the drawer ID from the mock's allDrawers list.
-        // For the test to be round-trip correct, plant the packet directly.
-        _ = client  // mock already recorded the capture
-
-        // Re-plant via mock to align drawer.id with packet.id.
-        let mock2 = MockEstateClient()
-        try mock2.plant(original)
-        let store2 = WorkPacketStore(client: mock2)
-        let fetched = try await store2.fetch(drawerID: original.id)
+        // store() returns the estate-assigned drawer ID (not original.id).
+        let estateID = try await store.store(original, now: fixedDate)
+        let fetched = try await store.fetch(drawerID: estateID)
         #expect(fetched?.id == original.id)
         #expect(fetched?.objective == original.objective)
     }

@@ -27,7 +27,9 @@ public struct WorkPacket: Sendable, Equatable {
     public let schemaVersion: Int
 
     /// Stable identifier for this packet. UUID string; issued at creation and
-    /// preserved across mutations. Also the estate drawer ID after filing.
+    /// preserved across mutations. NOT the estate drawer ID — the estate assigns
+    /// its own UUID when the packet is stored via `WorkPacketStore`. Use the
+    /// drawer ID returned by `store()` for retrieval and for `LineageLink.targetPacketID`.
     public let id: String
 
     /// What this unit of work is trying to achieve.
@@ -258,7 +260,9 @@ public struct LineageLink: Codable, Sendable, Equatable {
     /// Relationship kind.
     public let kind: LineageLinkKind
 
-    /// The drawer ID of the target (antecedent) packet in the estate.
+    /// The estate-assigned drawer ID of the target (antecedent) packet, as
+    /// returned by `WorkPacketStore.store()`. NOT the target packet's own `id`
+    /// field — the estate assigns a separate UUID at capture time.
     public let targetPacketID: String
 
     public init(kind: LineageLinkKind, targetPacketID: String) {
