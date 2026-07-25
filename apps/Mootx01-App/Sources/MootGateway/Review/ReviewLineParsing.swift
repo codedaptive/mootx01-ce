@@ -187,10 +187,14 @@ enum ReviewLineParsing {
     static func contradictionTunnels(_ text: String, _ context: ReviewProvenanceContext) -> [ReviewItem] {
         var items: [ReviewItem] = []
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            // Two-space indent, and the `contradicts` infix distinguishes tunnel
-            // lines from the conflicting-facts block below.
+            // Two-space indent, and BOTH markers the lens writes on every tunnel
+            // row: the ` contradicts ` infix and the `(tunnel <id>)` annotation.
+            // Requiring the annotation matters — the conflicting-facts block uses
+            // the same two-space indent for its group headers, and a fact
+            // predicate or subject containing the word "contradicts" would
+            // otherwise be misread as a tunnel row.
             guard line.hasPrefix("  "), !line.hasPrefix("    "),
-                  line.contains(" contradicts ") else { continue }
+                  line.contains(" contradicts "), line.contains("(tunnel ") else { continue }
             let body = line.trimmingCharacters(in: .whitespaces)
             let tunnelID = tunnelIdentifier(in: body)
             let isProposed = body.contains("[proposed")
@@ -245,9 +249,11 @@ enum ReviewLineParsing {
                     subjectID: String(factID),
                     occurredAt: field(body, key: "filed").flatMap(instant),
                     provenance: context.provenance(line: String(line))))
-            } else if line.hasPrefix("  "), !line.contains(" contradicts "),
-                      line.contains("[") {
-                // Group header: "  [<subject>] <predicate>".
+            } else if line.hasPrefix("  "), !line.contains("(tunnel "),
+                      line.trimmingCharacters(in: .whitespaces).hasPrefix("[") {
+                // Group header: "  [<subject>] <predicate>". Keyed on the leading
+                // bracket and the ABSENCE of a tunnel annotation, so the two
+                // two-space-indented block formats can never be confused.
                 currentGroup = line.trimmingCharacters(in: .whitespaces)
             }
         }
@@ -265,11 +271,21 @@ enum ReviewLineParsing {
             guard line.contains("  ["), let (subject, rest) = bracketed(line) else { continue }
             let factID = String(line.prefix { !$0.isWhitespace })
             guard !factID.isEmpty else { continue }
-            // Remainder is " <predicate> [<object>]  filed=…  source=…".
-            let predicate = rest
+            // Remainder is " <predicate> [<object>]  filed=…  source=…". Cut the
+            // trailing metadata off first, then read the object from its first `[`
+            // to the LAST `]` in what remains — object values are free text and do
+            // contain brackets (estate rows carry values like
+            // "[a_verb_applied_to_a_noun]"), which a first-`]` scan would truncate.
+            let head = rest.range(of: "  filed=")
+                .map { String(rest[rest.startIndex..<$0.lowerBound]) } ?? String(rest)
+            let predicate = head
                 .prefix { $0 != "[" }
                 .trimmingCharacters(in: .whitespaces)
-            let object = bracketed(rest)?.inner ?? ""
+            var object = ""
+            if let open = head.firstIndex(of: "["), let close = head.lastIndex(of: "]"),
+               open < close {
+                object = String(head[head.index(after: open)..<close])
+            }
             let body = line.trimmingCharacters(in: .whitespaces)
             items.append(ReviewItem(
                 id: ReviewItem.makeID(

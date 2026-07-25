@@ -112,6 +112,27 @@ extension ReviewBuilder {
         parse: (String, ReviewProvenanceContext) -> [ReviewItem]
     ) async -> ReviewSection {
         let response = await reader.call(surface, arguments: arguments)
+        return self.section(
+            id: id, title: title, surface: surface, arguments: arguments,
+            response: response, keep: keep, keepDescription: keepDescription, parse: parse)
+    }
+
+    /// Build a section from a response that has ALREADY been fetched.
+    ///
+    /// Exists so one response can feed more than one section: the weekly review
+    /// reads `moot_lens_contradiction` once and parses it twice (tunnels for
+    /// "contradicted", conflicting facts for "retire-ready") instead of paying for
+    /// the lens — a full tunnel walk plus a KG scan — a second time.
+    func section(
+        id: String,
+        title: String,
+        surface: ReviewSurface,
+        arguments: [String: JSONValue],
+        response: ReviewToolResponse,
+        keep: (ReviewItem) -> Bool = { _ in true },
+        keepDescription: String? = nil,
+        parse: (String, ReviewProvenanceContext) -> [ReviewItem]
+    ) -> ReviewSection {
         let context = ReviewProvenanceContext(
             surface: surface,
             arguments: ReviewProvenance.renderArguments(arguments))
@@ -364,12 +385,12 @@ public struct EndOfDayReviewBuilder: ReviewBuilder {
 /// The week's housekeeping: what is fading, how the estate's shape shifted, what
 /// contradicts, and what is retire-ready.
 ///
-/// The mission also asks for "duplicate". No READ-ONLY surface answers it: the
-/// cohesion lens finds odd-ones-out (the opposite of duplicates), and the one
-/// tool that reasons about redundancy — `moot_consolidate` — mutates the estate,
-/// which this module never does. That facet ships as a named gap section rather
-/// than a near-miss mapping. Closing it needs a read-only similarity surface in
-/// the substrate; it is not work this layer can do.
+/// The mission also asks for "duplicate". No surface answers it: the cohesion
+/// lens finds odd-ones-out (the opposite of duplicates), and `moot_consolidate`
+/// distills individual memories rather than detecting redundant pairs — and
+/// mutates the estate besides, which this module never does. That facet ships as
+/// a named gap section rather than a near-miss mapping. Closing it needs a
+/// read-only similarity surface in the substrate; it is not work this layer can do.
 public struct WeeklyReviewBuilder: ReviewBuilder {
     public let kind = ReviewKind.weekly
     public let configuration: ReviewConfiguration
@@ -380,7 +401,8 @@ public struct WeeklyReviewBuilder: ReviewBuilder {
     static let duplicateGapNotice = """
         No read-only duplicate-detection surface exists yet: moot_lens_cohesion \
         reports lexical outliers (the opposite of duplicates) and moot_consolidate \
-        mutates the estate, which reviews never do.
+        distills single memories rather than finding redundant pairs, besides \
+        mutating the estate, which reviews never do.
         """
 
     public init(
@@ -408,15 +430,22 @@ public struct WeeklyReviewBuilder: ReviewBuilder {
             arguments: driftArguments(splitAt: schedule.splitInstant(for: window)),
             reader: reader,
             parse: ReviewLineParsing.drift)
-        let contradicted = await section(
+        // One contradiction-lens call feeds both remaining sections: the response
+        // carries the tunnel block AND the conflicting-fact block, and the lens is
+        // the most expensive read here (full tunnel walk + KG scan).
+        let contradictionResponse = await reader.call(
+            .contradiction, arguments: contradictionArguments)
+        let contradicted = section(
             id: "contradicted", title: "review.section.contradicted",
-            surface: .contradiction, arguments: contradictionArguments, reader: reader,
+            surface: .contradiction, arguments: contradictionArguments,
+            response: contradictionResponse,
             parse: ReviewLineParsing.contradictionTunnels)
         // Retire-ready = subject+predicate keys with more than one active object.
         // Settled with moot_retire_fact, by the user, in a view — never here.
-        let retireReady = await section(
+        let retireReady = section(
             id: "retire-ready", title: "review.section.retireReady",
-            surface: .contradiction, arguments: contradictionArguments, reader: reader,
+            surface: .contradiction, arguments: contradictionArguments,
+            response: contradictionResponse,
             parse: ReviewLineParsing.conflictingFacts)
         let duplicates = gapSection(
             id: "duplicates", title: "review.section.duplicates",

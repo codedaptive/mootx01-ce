@@ -341,6 +341,59 @@ struct ReviewBuilderTests {
         }
     }
 
+    @Test("weekly reads the contradiction lens once and parses it for both sections")
+    func weeklyReadsContradictionOnce() async {
+        // The lens is the most expensive read in the weekly review (tunnel walk
+        // plus KG scan); its response feeds both "contradicted" and "retire-ready".
+        let reader = StubReviewReader(responses: ReviewFixtures.populated)
+        _ = await Self.builder(.weekly).build(now: Self.now, reader: reader)
+        let calls = await reader.calls
+        #expect(calls.filter { $0 == "moot_lens_contradiction" }.count == 1)
+    }
+
+    @Test("a fact predicate containing 'contradicts' is not misread as a tunnel row")
+    func contradictionBlocksAreDisambiguated() async throws {
+        // Both blocks of the contradiction response use a two-space indent, so the
+        // tunnel parse keys on the "(tunnel …)" annotation and the fact-group parse
+        // on a leading bracket. Without that, this group header would surface as a
+        // phantom tunnel item.
+        var responses = ReviewFixtures.populated
+        responses[.contradiction] = """
+            contradicts_tunnels: 1
+              AAAA1111-1111-4111-8111-111111111111 contradicts BBBB2222-2222-4222-8222-222222222222 (tunnel CCCC3333-3333-4333-8333-333333333333)
+            conflicting_facts: 1 subject+predicate pair(s)
+              [design-note] contradicts_claim
+                DDDD4444-4444-4444-8444-444444444444  object=[the first reading]  source=  filed=2026-07-04T05:46:42Z
+            """
+        let report = await Self.builder(.weekly).build(
+            now: Self.now, reader: StubReviewReader(responses: responses))
+        let contradicted = try #require(report.sections.first { $0.id == "contradicted" })
+        #expect(contradicted.items.count == 1)
+        #expect(contradicted.items[0].subjectID == "CCCC3333-3333-4333-8333-333333333333")
+        let retireReady = try #require(report.sections.first { $0.id == "retire-ready" })
+        #expect(retireReady.items.count == 1)
+        #expect(retireReady.items[0].title == "[design-note] contradicts_claim")
+        #expect(retireReady.items[0].subjectID == "DDDD4444-4444-4444-8444-444444444444")
+    }
+
+    @Test("a fact object containing a bracket is not truncated")
+    func factObjectWithBracketSurvives() async throws {
+        // Real estate rows carry bracketed text inside object values; the object
+        // field runs to the LAST bracket before `filed=`, not the first.
+        var responses = ReviewFixtures.populated
+        responses[.factSearch] = """
+            facts: 1
+            33333333-3333-4333-8333-333333333333  [aria] grammar_is [a_verb_applied_to_a_noun_[optionally_constrained]]  filed=2026-07-13T09:00:00Z  source=mootx01
+            """
+        let report = await Self.builder(.endOfDay).build(
+            now: Self.now, reader: StubReviewReader(responses: responses))
+        let decisions = try #require(report.sections.first { $0.id == "decisions" })
+        #expect(decisions.items.count == 1)
+        #expect(decisions.items[0].title == "aria")
+        #expect(decisions.items[0].detail
+                == "grammar_is a_verb_applied_to_a_noun_[optionally_constrained]")
+    }
+
     @Test("drift on an estate with nothing either side of the split reports no finding")
     func driftWithEmptyDistributions() async throws {
         // The lens still answers 0.0/0.0; a divergence between two empty
