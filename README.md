@@ -75,6 +75,8 @@ Search my MOOT for what we decided about the importer.
   history; deletion is reversible.
 - **Native and local-first.** MOOTx01 ships as native applications and
   binaries across supported platforms.
+- **Secure by design.** Compiled native binaries, signed release artifacts,
+  and encrypted local storage reduce the runtime and dependency surface.
 
 ## What it is
 
