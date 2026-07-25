@@ -309,6 +309,16 @@ public enum EstateEncryptionMigrator {
     /// (EstateKeyProvider owns key custody; this type never touches the
     /// Keychain). Throws on any failure that left the plaintext original in
     /// place; the error says so explicitly.
+    ///
+    /// KNOWN WINDOW (accepted, per the mission's Part 4 ordering): the
+    /// daemon is stopped by the SWAP, after export and verification. Rows a
+    /// live daemon writes between the export and the stop confirmation land
+    /// in the plaintext original (and its WAL, which goes to the Trash with
+    /// it) but not in the encrypted copy that gets swapped in. The
+    /// working-estate invariant holds throughout; completeness for writes
+    /// inside that window does not. Stopping the daemon before the export
+    /// would close it at the cost of a longer outage — a deliberate
+    /// trade-off to revisit if migrations of large live estates surface it.
     public static func migrate(
         estateURL: URL,
         key: Data,
