@@ -1404,7 +1404,13 @@ jobs:
   # package build/install — only the upload of the artifact from build-pypi.
   publish-pypi:
     name: Publish moot-memory to PyPI
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    # Tag push ONLY, same reasoning as the Windows signing jobs above. This job
+    # holds `environment: pypi` plus `id-token: write`, so any step in it can
+    # mint a PyPI-trusted publish token. workflow_dispatch accepts a TAG as its
+    # ref, so gating on the ref string alone let a manual run against a release
+    # tag enter the pypi environment and publish under the project's name. The
+    # event type is the trust boundary, not the ref.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
     needs: [build-pypi]
     runs-on: ubuntu-latest
     environment:

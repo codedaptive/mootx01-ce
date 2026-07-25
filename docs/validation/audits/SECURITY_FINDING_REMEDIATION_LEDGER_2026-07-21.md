@@ -1,12 +1,12 @@
 ---
 status: recorded
 created: 2026-07-22
-last_updated: 2026-07-22
-review_window: 2026-06-25 through 2026-07-22
+last_updated: 2026-07-21
+review_window: 2026-06-25 through 2026-07-21
 claims_ledger: none; process and remediation record
 ---
 
-# Continuous Security Review Record — June 25 to July 22, 2026
+# Continuous Security Review Record — June 25 to July 21, 2026
 
 MOOTx01 closed **537 security finding records** during this review period.
 The work began in Enterprise Edition on June 25, moved through the shared
