@@ -152,11 +152,18 @@ struct EstateEncryptionMigratorTests {
         let dir = manifest.estateURL.deletingLastPathComponent()
         let (trash, trashDir) = makeTestTrash(in: dir)
 
-        // A daemon recorder proving stop-before-swap and restart-after.
+        // A daemon recorder proving stop-BEFORE-EXPORT (Bob's ruling: never
+        // lose data — no write may land after the clone is taken) and
+        // restart-after. The stop closure checks that no clone exists yet.
         let log = EventLog()
+        let clonePath = manifest.estateURL.path + ".encrypting"
         let daemon = EstateEncryptionMigrator.DaemonControl(
             isRunning: { log.append("isRunning"); return true },
-            stop: { log.append("stop"); return true },
+            stop: {
+                log.append(FileManager.default.fileExists(atPath: clonePath)
+                    ? "stop-AFTER-export (data-loss window!)" : "stop")
+                return true
+            },
             start: { log.append("start"); return true })
 
         let result = try EstateEncryptionMigrator.migrate(
@@ -274,8 +281,8 @@ struct EstateEncryptionMigratorTests {
         #expect(leftovers.isEmpty, "an aborted swap must clean up its working files: \(leftovers)")
     }
 
-    @Test("A swap that cannot write beside the estate unwinds and restarts the daemon")
-    func swapWriteFailureUnwindsAndRestartsDaemon() async throws {
+    @Test("A swap that cannot write beside the estate unwinds to the original")
+    func swapWriteFailureUnwinds() async throws {
         let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
         let dir = manifest.estateURL.deletingLastPathComponent()
         let fm = FileManager.default
@@ -291,22 +298,44 @@ struct EstateEncryptionMigratorTests {
         // A read-only estate directory makes the aside hard-link fail —
         // the same unwind path a failed rename takes.
         try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
-        let log = EventLog()
-        let daemon = EstateEncryptionMigrator.DaemonControl(
-            isRunning: { true },
-            stop: { log.append("stop"); return true },
-            start: { log.append("start"); return true })
-
         #expect(throws: (any Error).self) {
             _ = try EstateEncryptionMigrator.swapInEncryptedCopy(
                 original: manifest.estateURL, encryptedCopy: copy,
-                daemon: daemon, trash: { _ in throw CocoaError(.fileNoSuchFile) })
+                trash: { _ in throw CocoaError(.fileNoSuchFile) })
         }
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
 
         try await assertOriginalIntact(manifest)
-        #expect(log.events == ["stop", "start"],
-            "a failed swap must restart the daemon it stopped")
+    }
+
+    @Test("A failure after the daemon stopped restarts it over the original")
+    func postStopFailureRestartsDaemon() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        let dir = manifest.estateURL.deletingLastPathComponent()
+        let fm = FileManager.default
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+            TwentyRowEstateFixture.cleanup(manifest)
+        }
+        // A read-only directory fails the migration at the export's ATTACH —
+        // the first step after the daemon stop.
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+        let log = EventLog()
+        let daemon = EstateEncryptionMigrator.DaemonControl(
+            isRunning: { log.append("isRunning"); return true },
+            stop: { log.append("stop"); return true },
+            start: { log.append("start"); return true })
+
+        #expect(throws: (any Error).self) {
+            _ = try EstateEncryptionMigrator.migrate(
+                estateURL: manifest.estateURL, key: makeKey(), daemon: daemon,
+                trash: { _ in throw CocoaError(.fileNoSuchFile) })
+        }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+
+        try await assertOriginalIntact(manifest)
+        #expect(log.events == ["isRunning", "stop", "start"],
+            "a failed migration must restart the daemon it stopped")
     }
 
     @Test("A trash failure reports the plaintext path instead of proceeding silently")

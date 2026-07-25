@@ -190,53 +190,44 @@ public enum EstateEncryptionMigrator {
     /// Swap the verified encrypted copy onto the canonical estate path and
     /// move the plaintext original to the Trash.
     ///
+    /// FILE WORK ONLY: the caller (`migrate`) owns the daemon lifecycle and
+    /// has already stopped it — before the export, so no write can land in
+    /// the original after the copy was taken.
+    ///
     /// Sequence, chosen so the canonical path holds a complete, openable
     /// estate at every instant — including across a crash of this process:
     ///
-    ///   1. stop the daemon (if running) so no connection spans the swap
-    ///   2. move the original's `-wal`/`-shm` siblings aside (they belong to
+    ///   1. move the original's `-wal`/`-shm` siblings aside (they belong to
     ///      the plaintext file and must never sit next to the encrypted one)
-    ///   3. HARD-LINK the original to an aside name — the original's bytes
-    ///      now have two directory entries, so step 4 can atomically replace
+    ///   2. HARD-LINK the original to an aside name — the original's bytes
+    ///      now have two directory entries, so step 3 can atomically replace
     ///      the canonical entry without ever orphaning the plaintext data
-    ///   4. `rename()` the encrypted copy onto the canonical path (atomic
+    ///   3. `rename()` the encrypted copy onto the canonical path (atomic
     ///      replace; the path stays constant for the launchd plist and every
     ///      client config)
-    ///   5. restart the daemon if it was running
-    ///   6. move the aside original (+ siblings) to the Trash
+    ///   4. move the aside original (+ siblings) to the Trash
     ///
-    /// A failure in 1–4 unwinds to the plaintext original at the canonical
-    /// path (and deletes the copy). Failures in 5–6 are reported, not fatal:
+    /// A failure in 1–3 unwinds to the plaintext original at the canonical
+    /// path (and deletes the copy). A trash failure is reported, not fatal:
     /// the encrypted estate is already in place and working.
     public static func swapInEncryptedCopy(
         original: URL,
         encryptedCopy: URL,
-        daemon: DaemonControl,
         trash: TrashItem = systemTrash
-    ) throws -> SwapOutcome {
+    ) throws -> (trashedOriginalURL: URL?, untrashedOriginalPath: String?) {
         let fm = FileManager.default
         let dir = original.deletingLastPathComponent()
         let asideName = original.lastPathComponent + ".pre-encryption"
         let aside = dir.appendingPathComponent(asideName)
-
-        // 1. Quiesce. A rename under a live daemon connection is the data
-        //    race this whole sequence exists to prevent.
-        let wasRunning = daemon.isRunning()
-        if wasRunning, !daemon.stop() {
-            removeDatabase(at: encryptedCopy)
-            throw MigrationError.swapFailed(
-                detail: "the resident daemon would not stop; nothing was changed")
-        }
 
         // Unwind helper for failures before the rename lands.
         func unwind(_ movedSiblings: [(from: URL, to: URL)], linked: Bool) {
             for pair in movedSiblings.reversed() { try? fm.moveItem(at: pair.to, to: pair.from) }
             if linked { try? fm.removeItem(at: aside) }
             removeDatabase(at: encryptedCopy)
-            if wasRunning { _ = daemon.start() }
         }
 
-        // 2. Plaintext siblings aside. Normally absent after the export's
+        // 1. Plaintext siblings aside. Normally absent after the export's
         //    checkpoint(TRUNCATE); moved rather than deleted so an unwind can
         //    put them back exactly as found.
         var movedSiblings: [(from: URL, to: URL)] = []
@@ -276,11 +267,7 @@ public enum EstateEncryptionMigrator {
                 detail: "atomic rename onto \(original.path) failed: \(err)")
         }
 
-        // 5. Bring the daemon back over the encrypted estate. Failure here is
-        //    reported, never fatal: the migration itself has succeeded.
-        let restarted = wasRunning ? daemon.start() : false
-
-        // 6. Trash the plaintext original and any sidelined siblings. The
+        // 4. Trash the plaintext original and any sidelined siblings. The
         //    trashed copy is STILL UNENCRYPTED — the caller's success message
         //    must say so, so emptying the Trash reads as the final step of
         //    the migration and not optional cleanup.
@@ -295,30 +282,23 @@ public enum EstateEncryptionMigrator {
             untrashedPath = aside.path
         }
 
-        return SwapOutcome(
-            daemonWasRunning: wasRunning,
-            daemonRestarted: restarted,
-            trashedOriginalURL: trashedURL,
-            untrashedOriginalPath: untrashedPath)
+        return (trashedOriginalURL: trashedURL, untrashedOriginalPath: untrashedPath)
     }
 
     // MARK: - The full migration
 
-    /// End-to-end migration for a plaintext estate at `estateURL`: clone →
-    /// verify → swap → trash, with `key` already provisioned by the caller
-    /// (EstateKeyProvider owns key custody; this type never touches the
-    /// Keychain). Throws on any failure that left the plaintext original in
-    /// place; the error says so explicitly.
+    /// End-to-end migration for a plaintext estate at `estateURL`:
+    /// stop daemon → clone → verify → swap → restart → trash, with `key`
+    /// already provisioned by the caller (EstateKeyProvider owns key
+    /// custody; this type never touches the Keychain). Throws on any
+    /// failure that left the plaintext original in place; the error says so
+    /// explicitly.
     ///
-    /// KNOWN WINDOW (accepted, per the mission's Part 4 ordering): the
-    /// daemon is stopped by the SWAP, after export and verification. Rows a
-    /// live daemon writes between the export and the stop confirmation land
-    /// in the plaintext original (and its WAL, which goes to the Trash with
-    /// it) but not in the encrypted copy that gets swapped in. The
-    /// working-estate invariant holds throughout; completeness for writes
-    /// inside that window does not. Stopping the daemon before the export
-    /// would close it at the cost of a longer outage — a deliberate
-    /// trade-off to revisit if migrations of large live estates surface it.
+    /// The daemon stops BEFORE the export (Bob's ruling: never lose data).
+    /// Stopping only at swap time would leave a window where rows written
+    /// after the copy was taken exist only in the original that goes to the
+    /// Trash. With the daemon quiesced first, the encrypted copy is
+    /// guaranteed complete relative to every write that ever committed.
     public static func migrate(
         estateURL: URL,
         key: Data,
@@ -331,12 +311,35 @@ public enum EstateEncryptionMigrator {
         // definition — regenerate rather than resume.
         removeDatabase(at: copy)
 
-        try exportEncryptedCopy(from: estateURL, to: copy, key: key)
-        let counts = try verifyEncryptedCopy(
-            original: estateURL, encryptedCopy: copy, key: key)
-        let outcome = try swapInEncryptedCopy(
-            original: estateURL, encryptedCopy: copy, daemon: daemon, trash: trash)
-        return (counts, outcome)
+        // Quiesce FIRST, so nothing can write to the original once the
+        // clone exists. Refusing to proceed when the daemon will not stop
+        // is the safe direction: nothing has been touched yet.
+        let wasRunning = daemon.isRunning()
+        if wasRunning, !daemon.stop() {
+            throw MigrationError.swapFailed(
+                detail: "the resident daemon would not stop; nothing was changed")
+        }
+
+        do {
+            try exportEncryptedCopy(from: estateURL, to: copy, key: key)
+            let counts = try verifyEncryptedCopy(
+                original: estateURL, encryptedCopy: copy, key: key)
+            let files = try swapInEncryptedCopy(
+                original: estateURL, encryptedCopy: copy, trash: trash)
+            // Bring the daemon back over the encrypted estate. Failure here
+            // is reported, never fatal: the migration itself has succeeded.
+            let restarted = wasRunning ? daemon.start() : false
+            return (counts, SwapOutcome(
+                daemonWasRunning: wasRunning,
+                daemonRestarted: restarted,
+                trashedOriginalURL: files.trashedOriginalURL,
+                untrashedOriginalPath: files.untrashedOriginalPath))
+        } catch {
+            // Every failure between stop and swap leaves the plaintext
+            // original at the canonical path; put the daemon back over it.
+            if wasRunning { _ = daemon.start() }
+            throw error
+        }
     }
 
     // MARK: - Part 3: verification counts
