@@ -294,6 +294,42 @@ struct ReviewReportFormattingTests {
         #expect(coverage.contains("–"))
         #expect(!coverage.contains("0001"))
     }
+
+    @Test("a multi-day span names both dates, not one date and a bare time")
+    func multiDaySpanNamesBothDates() async {
+        // The live walk on a real estate produced
+        // "Jul 18, 2026 at 12:19 AM – 12:19 AM" for the weekly review when each
+        // end was formatted independently: the end had dropped its date, so a
+        // seven-day window read as a zero-minute one. Both spanned reviews below
+        // cross a day boundary, so both must name two dates.
+        for kind in [ReviewKind.weekly, .morning] {
+            let report = await ReviewUIFixtures.report(kind)
+            let span = ReviewReportView.span(of: report)
+            let startDay = report.window.start.formatted(
+                Date.FormatStyle().month(.abbreviated).day())
+            let endDay = report.generatedAt.formatted(
+                Date.FormatStyle().month(.abbreviated).day())
+            #expect(startDay != endDay, "\(kind.rawValue) fixture must span days")
+            #expect(span.contains(startDay), "\(kind.rawValue): \(span)")
+            #expect(span.contains(endDay), "\(kind.rawValue): \(span)")
+        }
+    }
+
+    @Test("a zero-width window falls back to one instant instead of crashing")
+    func zeroWidthWindowIsSafe() {
+        // Range requires lower < upper. A review generated exactly at its own
+        // window start is reachable, so the fallback path must hold.
+        let instant = ReviewUIFixtures.referenceNow
+        let report = ReviewReport(
+            kind: .endOfDay,
+            generatedAt: instant,
+            window: ReviewWindow(start: instant, end: instant),
+            sections: [])
+        let span = ReviewReportView.span(of: report)
+        #expect(!span.isEmpty)
+        #expect(!span.contains("–"))
+        #expect(ReviewReportView.coverage(of: report).contains("0 items"))
+    }
 }
 
 // MARK: - 3. Rendering the four reports

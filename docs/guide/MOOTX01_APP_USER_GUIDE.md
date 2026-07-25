@@ -48,6 +48,8 @@ MOOTx01 uses two tab profiles:
 
 - **Capture** — save a thought, note, or idea to your memory.
 - **Recall** — search your memories.
+- **Review** — the Review Center: what your estate remembers now, what matters
+  today, what changed, and what may be ready to retire.
 - **Intelligence** — ask an on-device assistant that answers from your memories.
 - **Settings** — iCloud Sync switch and the Advanced Mode toggle (see below).
 
@@ -116,6 +118,90 @@ feed them to another action).
   confirmation, and it's deliberately blocked from the URL/link surface.
 - **Batch actions** — mutate or withdraw many memories at once, with a single
   **Undo** for the last batch withdrawal.
+
+---
+
+## The Review Center (ask what MOOT remembers)
+
+As an estate grows, "search it" stops being enough — you also want to know what
+it holds now, what it surfaced today, and what has gone stale. That is the
+**Review** tab.
+
+Open **Review** and pick one of four reviews from the selector at the top:
+
+- **Dashboard** — what your estate remembers now. Which rooms are gaining
+  attention, which memories hold the graph together, and what currently
+  conflicts.
+- **Morning** — the context and open work that matter today: yesterday's
+  journal, a recall of recent work, and the findings still waiting on you.
+- **End of Day** — what changed, what was decided, and what still wants
+  attention.
+- **Weekly** — memories that may be fading, contradicted, or ready to retire.
+
+Each review builds when you first open it, and the result is held while you
+switch between them. **Refresh** rebuilds the one you are looking at. A review
+reads your estate; opening one never changes anything.
+
+### Where every line comes from
+
+Every row has a **Where this came from** disclosure. Open it and you see the
+exact MOOT tool that produced the row, the arguments it was called with, and the
+raw line the row was read out of. Nothing in a review is generated prose — if a
+number is on screen, some part of MOOT computed it and the row will show you
+which.
+
+Numbers are shown as MOOT reported them. A momentum or centrality score is a
+raw score, not a percentage.
+
+### When a section is empty
+
+An empty section always says why, in MOOT's own words — "0 result(s)", a
+refusal, or a note that nothing in the window qualified. A blank area would
+leave you guessing whether the review ran.
+
+One section says something stronger. Weekly's **Duplicates** explains that MOOT
+has no way to find duplicate memories yet, so nothing can be reported there. It
+is a missing capability, named rather than hidden, and it will stay that way
+until MOOT can answer the question.
+
+### Suggestions, and staying in control
+
+Some rows offer a suggestion. Nothing acts on its own:
+
+- **Retire** — on a Weekly row where two or more facts claim the same thing
+  about the same subject. Retiring makes one of them inactive.
+- **Accept** / **Reject** — on a proposed contradiction between two memories,
+  which MOOT found but has not settled. Accept records the link; Reject
+  withdraws it.
+- **Confirm** — on a memory row. Marks it as verified by you.
+
+Tapping a suggestion **never changes anything by itself.** It asks first, and
+tells you what the change does before you agree. Only the confirm button in
+that prompt changes your estate. Rows whose decision is already made show no
+buttons.
+
+### What can and cannot be undone
+
+Two of these are permanent, and the app says so plainly in the prompt rather
+than letting you find out afterwards:
+
+| Suggestion | Afterwards |
+|---|---|
+| **Confirm** | Reversible — you can contest a confirmed memory later. |
+| **Accept** | The link is recorded. Nothing is destroyed, and both memories stay fully editable. |
+| **Reject** | **Permanent.** The proposed link is withdrawn and that pair is never suggested again. |
+| **Retire** | **Permanent.** The fact stops being active. There is no un-retire; filing the same fact again later creates a *new* fact rather than restoring this one. |
+
+There is no Undo button in the Review Center, because for Retire and Reject
+there is nothing an Undo could do. Retired facts are not erased — they remain
+in your estate's history, and MOOT can still show you the timeline of how a
+fact changed.
+
+### If the review says it is not attached
+
+Reviews read through your running estate. If the app has not attached yet, the
+Review tab says so instead of showing an empty review, and fills in once the
+estate is up.
 
 ---
 

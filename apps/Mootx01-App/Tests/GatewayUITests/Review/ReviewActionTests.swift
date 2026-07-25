@@ -320,6 +320,26 @@ struct ReviewSuggestionPolicyTests {
             #expect(ReviewAction.suggestions(forSectionID: "keystones", item: item)
                 == [.confirmMemory(id: item.subjectID ?? "")])
         }
+        // The dashboard's tunnel-action section. Load-bearing: it must offer
+        // Accept/Reject on a proposed edge and nothing on a settled one. Pinned
+        // like `open-work` is, because `conflicts` and `retire-ready` both come
+        // out of the contradiction lens and only the former is a tunnel section
+        // (Kong polish P-2).
+        let conflicts = dashboard.sections.first { $0.id == "conflicts" }
+        #expect(conflicts?.items.isEmpty == false)
+        for item in conflicts?.items ?? [] {
+            let actions = ReviewAction.suggestions(forSectionID: "conflicts", item: item)
+            if item.status == .proposed {
+                #expect(actions == [
+                    .acceptTunnel(id: item.subjectID ?? ""),
+                    .rejectTunnel(id: item.subjectID ?? ""),
+                ])
+            } else {
+                #expect(actions.isEmpty)
+            }
+            // Never a fact verb on a tunnel row, whatever the status.
+            #expect(!actions.contains { $0.tool == "moot_retire_fact" })
+        }
 
         let morning = await ReviewUIFixtures.report(.morning)
         let openWork = morning.sections.first { $0.id == "open-work" }

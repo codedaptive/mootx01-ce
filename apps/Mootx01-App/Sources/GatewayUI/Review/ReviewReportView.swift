@@ -72,17 +72,35 @@ struct ReviewReportView: View {
     /// (`ReviewWindow.unbounded`), so printing its start would read as a
     /// year-1-AD bug. Kind is the documented way to tell the two apart
     /// (`ReviewSchedule.swift`: "callers that care use kind == .dashboard").
+    ///
+    /// The span goes through the RANGE format style rather than two separate
+    /// instants joined by a dash. Formatting each end independently produced
+    /// "Jul 18, 2026 at 12:19 AM – 12:19 AM" for the weekly review on a live
+    /// estate — the end instant had dropped its date, so a seven-day window read
+    /// as a zero-minute one. The range style decides for itself which components
+    /// to repeat, and does it per locale.
     nonisolated static func coverage(of report: ReviewReport) -> String {
         let count = itemCountText(report.itemCount)
-        let generated = report.generatedAt.formatted(
-            date: .omitted, time: .shortened)
         guard report.kind != .dashboard else {
             // No window to state: the dashboard is the estate as it stands.
+            let generated = report.generatedAt.formatted(
+                date: .omitted, time: .shortened)
             return "\(count) · \(String(localized: "as of")) \(generated)"
         }
-        let start = report.window.start.formatted(
-            date: .abbreviated, time: .shortened)
-        return "\(count) · \(start) – \(generated)"
+        return "\(count) · \(span(of: report))"
+    }
+
+    /// The window as one phrase. Falls back to the single instant when the window
+    /// has no width — `Range` requires a lower bound strictly below its upper, and
+    /// a zero-width window is reachable for a review generated exactly at its own
+    /// window start.
+    nonisolated static func span(of report: ReviewReport) -> String {
+        let start = report.window.start
+        let end = report.generatedAt
+        guard start < end else {
+            return end.formatted(date: .abbreviated, time: .shortened)
+        }
+        return (start..<end).formatted(date: .abbreviated, time: .shortened)
     }
 
     /// Item count as words. Plural forms would normally come from a
@@ -153,9 +171,17 @@ struct ReviewActionableReportView: View {
                 coordinator.cancelPending()
             }
         } message: { action in
-            // The estate row this touches, then what the action does — and, for a
-            // verb the substrate cannot reverse, that it cannot be undone.
-            Text("\(action.subjectID)\n\n\(action.confirmationMessage)")
+            // What the action does FIRST — and, for a verb the substrate cannot
+            // reverse, that it cannot be undone. The estate row id follows as a
+            // cross-reference: it is what the user needs to identify the row
+            // afterwards, but it is a UUID, so leading with it would bury the
+            // sentence that actually informs the decision (Kong polish P-1).
+            //
+            // `verbatim:` because this is composed at runtime from an
+            // already-localized sentence and an estate id. The plain `Text("…")`
+            // initializer would take the interpolated result as a LOCALIZATION KEY
+            // and try to look the whole thing up.
+            Text(verbatim: "\(action.confirmationMessage)\n\n\(action.subjectID)")
         }
     }
 }
@@ -176,20 +202,13 @@ struct ReviewActionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                ForEach(actions, id: \.self) { action in
-                    Button(action.label) { request(action) }
-                        .buttonStyle(.bordered)
-                        .frame(minHeight: Self.minimumTouchTarget)
-                        .disabled(isBusy)
-                        .accessibilityLabel(action.accessibilityLabel)
-                        // Says out loud what the visual destructive role implies,
-                        // so the permanence is not a colour-only signal.
-                        .accessibilityHint(
-                            action.isPermanent
-                                ? String(localized: "Asks you to confirm. Cannot be undone.")
-                                : String(localized: "Asks you to confirm."))
-                }
+            // Side by side when they fit, stacked when they do not. Two buttons
+            // plus their labels overflow a narrow phone at the largest
+            // accessibility type sizes, and a clipped action button is an
+            // unreachable action (Kong polish P-3).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { buttons }
+                VStack(alignment: .leading, spacing: 8) { buttons }
             }
             if let outcomeMessage {
                 // The substrate's own words about what happened — verbatim.
@@ -201,6 +220,25 @@ struct ReviewActionRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The buttons themselves, shared by both `ViewThatFits` candidates so the
+    /// two layouts cannot drift apart.
+    @ViewBuilder
+    private var buttons: some View {
+        ForEach(actions, id: \.self) { action in
+            Button(action.label) { request(action) }
+                .buttonStyle(.bordered)
+                .frame(minHeight: Self.minimumTouchTarget)
+                .disabled(isBusy)
+                .accessibilityLabel(action.accessibilityLabel)
+                // Says out loud what the visual destructive role implies, so the
+                // permanence is not a colour-only signal.
+                .accessibilityHint(
+                    action.isPermanent
+                        ? String(localized: "Asks you to confirm. Cannot be undone.")
+                        : String(localized: "Asks you to confirm."))
+        }
     }
 }
 
@@ -290,11 +328,15 @@ struct ReviewItemRow: View {
                 }
                 Spacer(minLength: 8)
                 if let magnitude = Self.magnitudeText(item.magnitude) {
+                    // "score 0.0654" rather than a bare number read aloud with no
+                    // idea what it measures. Composed into a String first: an
+                    // interpolated literal passed straight to accessibilityLabel
+                    // would be taken as a localization key.
+                    let spoken = "\(String(localized: "score")) \(magnitude)"
                     Text(magnitude)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .accessibilityLabel(
-                            "\(String(localized: "score")) \(magnitude)")
+                        .accessibilityLabel(spoken)
                 }
             }
             if let action {
