@@ -9,7 +9,8 @@ verified independently by Smythe at pre-flight
 **Depends on:** FAB5-G1 (TASK-MXC-2026-0063, merged at `d38728a9`)
 **Worker:** Bilby
 **Date:** 2026-07-25
-**Status:** COMPLETE — pending Adams post-flight (recorded below)
+**Status:** COMPLETE — Adams' CRITICAL and both WARNINGs fixed in-cycle; final
+verdict recorded in the Adams section below
 
 ---
 
@@ -33,7 +34,7 @@ and exactly two pre-existing source/test edits.
 | `Review/WeeklyReviewView.swift` | "Memories that may be stale, contradicted, or ready to retire." |
 | `Tests/GatewayUITests/Review/ReviewCenterTests.swift` | Key resolution, row/report formatting, fixture rendering of all four reports, the load state machine |
 | `Tests/GatewayUITests/Review/ReviewActionTests.swift` | The no-mutation-without-a-tap gate, tool routing, the suggestion policy, and the honesty of the confirmation text |
-| `Tests/GatewayUITests/Review/ReviewCenterLiveSmokeTests.swift` | The live-estate walk (mission Verification) |
+| `Tests/GatewayUITests/Review/ReviewCenterLiveSmokeTests.swift` | The live-estate walk (mission Verification) — added during Part 3, so the Blast Radius Report, written at mission start, lists only the two above |
 
 Pre-existing edits: `Sources/GatewayUI/ContentView.swift` (the tab wire),
 `Tests/GatewayUITests/FirstRunAndTabProfileTests.swift` (Standard 4 → 5 tabs),
@@ -202,24 +203,27 @@ report: three tests and one suite landed between G1 merging and g4 cutting.
 Smythe re-confirmed 40 / 9 is what the tree at `d38728a9` actually produces, so
 the delta below is a true delta.
 
-### Final (commit `e4ad1dd9`)
+### Final (commit `604109e4`)
 
 - Command: `swift test --package-path apps/Mootx01-App 2>&1 | tail -5`
 - Exit code: **0**
 - Pass count: **229 tests in 36 suites** (MootGatewayTests — unchanged, zero
-  regressions) + **95 tests in 18 suites** (GatewayUITests) — net **+55** tests,
+  regressions) + **96 tests in 18 suites** (GatewayUITests) — net **+56** tests,
   **+9** suites
 - Zero compiler warnings
 - Tail output (verbatim):
 
 ```
-􀟈  Test "posture raw values are stable (no key drift)" started.
-􁁛  Test "posture raw values are stable (no key drift)" passed after 0.001 seconds.
 􀟈  Test "endSession updates lastSession timestamp on the known peer (real manager)" started.
 􁁛  Test "endSession updates lastSession timestamp on the known peer (real manager)" passed after 0.004 seconds.
-􁁛  Suite "FederationPanel — state transitions and F1 invariants (FED-OD-6b)" passed after 0.032 seconds.
-􁁛  Test run with 95 tests in 18 suites passed after 0.032 seconds.
+􁁛  Suite "FederationPanel — state transitions and F1 invariants (FED-OD-6b)" passed after 0.030 seconds.
+􁁛  Test run with 96 tests in 18 suites passed after 0.031 seconds.
 ```
+
+Adams re-ran the suite independently at `e4ad1dd9` and reported 229 / 36 and
+95 / 18, exit 0 — an exact match to the claim at that commit. The 96th
+GatewayUITests case is the SF Symbol pin added while fixing Adams' own
+finding #2.
 
 Every run was wrapped in a hard watchdog kill (900 s) per fleet doctrine, with a
 `pgrep` check for stale swiftpm lock-holders first. No run approached the
@@ -396,7 +400,70 @@ of the design memo contradicted each other on which reviews carry actions.
 
 Full report: `docs/analysis/ADAMS_FAB5_G2_POSTFLIGHT.md` (gitignored, on disk).
 
-**Verdict: recorded below once Adams reports.**
+**First pass at `e4ad1dd9`: BLOCKED on one CRITICAL.** Two WARNINGs, three
+INFOs. Adams re-ran the suite independently and confirmed 229 / 36 and 95 / 18,
+exit 0, counts matching the claim exactly; verified the base commit and zero
+drift itself; read `iPadAdaptivityTests.swift` in full to confirm it encodes no
+tab count; confirmed both `ContentView(model:)` construction sites need no edit;
+re-ran the BRR's own greps for drift and found no new call sites; confirmed all
+seven MUST-NOT-MODIFY paths absent from the diff and all three commits authored
+as Bilby.
+
+All three actionable findings were **fixed in-cycle** in `604109e4` rather than
+catalogued:
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | **CRITICAL** | `ReviewDisplayStrings.humanized`'s comment example read `"retireReady" → "retire Ready"`, but the loop lowercases the boundary letter, so the real intermediate is `"retire ready"` and the function returns `"Retire ready"`. A comment that overstates what the algorithm preserves is how the next agent builds on a wrong premise. | Comment rewritten to state the lowercasing as the deliberate choice it is (sentence case, not Title Case) and to carry the value through both steps, so the reader can see where the capital comes from. |
+| 2 | WARNING | The proposed-status glyph shipped as `questionmark.circle` where Kong ruling B named `circle.badge.questionmark` — an undocumented deviation from the design. | Switched to Kong's symbol, **after verifying the glyph exists**: both names checked against the system symbol manifest (`circle.badge.questionmark` since 2023, `checkmark.circle` since 2019, both under the 27 floor). That check is load-bearing — a misspelled SF Symbol is not a compile error, it renders as nothing, and an empty glyph would silently reduce status to a colour difference and defeat the no-colour-only rule the glyph exists to satisfy. Both names are now behind `ReviewItemRow.statusSymbolName(_:)` and pinned by a test, so a future typo fails the suite. |
+| 3 | WARNING | No completion report existed when Adams looked. | This document. |
+
+Two INFOs Adams adjudicated ACCEPT, recorded here rather than dropped:
+
+- **#4** The Blast Radius Report was authored at mission start and lists two new
+  test files; **three** shipped, because `ReviewCenterLiveSmokeTests.swift` was
+  added during Part 3 as the Verification evidence. No blast radius — nothing
+  depends on it, and it is inside the "tests (new)" scope the mission names.
+- **#6** `itemCountText`'s explicit plural branches stand in for the
+  `.stringsdict` that localization rule 3 prescribes, because this app ships no
+  catalog at all. Documented in-code and reviewed by Kong.
+
+Adams also independently verified the two claims most worth doubting:
+
+- **The action gate.** Traced end-to-end and ruled it airtight: `request(_:)`
+  stages and calls nothing; the confirmation prompt's confirm button is the only
+  reachable call site of `commitPending()`; the `guard let action = pending,
+  !isPerforming` has no suspension point before `isPerforming = true`, so on
+  `@MainActor` it is atomic and a second tap cannot race it; `pending` is cleared
+  before the `await`; and `performer` is `private let` so no external code can
+  reach it.
+- **The no-Undo claim.** Re-verified against `ToolProjection.swift` and
+  `ToolDispatch.swift` rather than taken from the pre-flight: no
+  `moot_unretire_fact`, no un-activate verb for a tunnel, and
+  `moot_review_tunnel(verdict: "reject")` permanent by design.
+
+Adams adjudicated the live-walk-instead-of-simulator substitution **ACCEPT**, on
+three grounds: G1 set the precedent with the same pattern; `ReviewCenterModel` is
+the production object the view instantiates and whose output drives what renders,
+so driving it exercises the code a tab tap would run; and the read-only proof is
+a measurement rather than a convention. It flagged explicitly what the walk does
+not cover — SwiftUI rendering, screen layout, Simulator — which is the gap
+recorded at item 7 of the known gaps below.
+
+All five mission deviations ruled ACCEPT.
+
+**Re-inspection at `604109e4`: PASS.** Verbatim: "All three actionable findings
+(1 CRITICAL, 2 WARNINGs) confirmed closed in commit `604109e4`. Tests pass:
+229/36 + 96/18, exit 0, independently verified." Adams re-ran the suite rather
+than accepting the new count — 96 is only knowable from a fresh run, since the
+SF Symbol pin was added after its first pass.
+
+One inconsistency in Adams' own report, noted rather than smoothed over: it
+updated its header to PASS and to `HEAD at final verdict: 604109e4`, but left
+the "Verification Pass" table at the bottom showing findings 1–3 as
+pending/open. The header, the closure statement, and the re-measured 96 count
+are the verdict; the stale table is a documentation slip in the report, not an
+open finding against the code.
 
 ---
 
@@ -524,7 +591,9 @@ undo that does not exist.
 | `34b94c15` | feat(app-ui): Review Center tab with Dashboard and Morning views |
 | `df698fd0` | feat(app-ui): EOD and Weekly reviews with reversible suggestions |
 | `e4ad1dd9` | style(app-ui): Review Center polish (Kong-directed) + guide |
+| `604109e4` | fix(app-review): Adams post-flight punch list |
 
 Estate: one `W2-INTERFACE FAB5-G2:` drawer filed to wing "Agentic Memory",
-location `fab5-w2`, carrying the view APIs, the action-routing decisions, and
-the gap list above for downstream missions.
+location `fab5-w2`, id `CCC1B0A6`, carrying the view APIs, the localization-key
+resolution, the action-routing table, the reversibility limits, the rendering
+decisions downstream should not re-litigate, and the gap list above.
