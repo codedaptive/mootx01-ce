@@ -77,7 +77,16 @@ enum ReviewLineParsing {
     }
 
     /// Text between the first `[` and the following `]`, and the remainder after
-    /// it. Used for the bracketed subject/object fields the KG surfaces emit.
+    /// it.
+    ///
+    /// Sole caller: the SUBJECT field in `facts(_:_:)`. First-`]` matching, which
+    /// is correct for subjects — every subject the KG surfaces emit is a short
+    /// slug (`ce-release`, `forge_v10`, `aria`). It would TRUNCATE a subject
+    /// containing a literal `]`; no such subject has been observed on a real
+    /// estate. Object values are different — they are free text and do carry
+    /// brackets — which is why `facts(_:_:)` reads the object with its own
+    /// last-`]` span instead of calling this. The asymmetry is deliberate; if a
+    /// bracket-bearing subject ever appears, this helper is the place to fix.
     private static func bracketed(_ line: Substring) -> (inner: String, rest: Substring)? {
         guard let open = line.firstIndex(of: "["),
               let close = line[open...].firstIndex(of: "]") else { return nil }

@@ -204,7 +204,20 @@ rather than catalogued as known items:
 | 4 | WARNING — the duplicate-gap notice claimed `moot_consolidate` "reasons about redundancy"; it distills individual memories instead | Corrected in the builder comment and in the user-visible notice text. The gap conclusion was right; the stated reason was wrong. |
 | 5 | WARNING — no completion report, and the dispatch signal absent | This document, and the signal filed after it. |
 
-Re-inspection of `dd8e92d5` was requested from Adams after the fixes.
+**Adams re-inspection of `dd8e92d5`: PASS.** Adams verified each fix line-by-line
+against the producing code, re-ran the full suite independently (229 + 37, exit 0,
+exact match), re-checked `make check-edition-boundary`, and confirmed the no-edit
+claim still holds. Finding 3 was verified structurally — the new sync overload's
+body is the same lines the async overload used to hold inline, so notice semantics
+are identical by construction rather than by inspection.
+
+One non-blocking INFO remains and is now documented in the code: the shared
+`bracketed(_:)` helper is still first-`]` matching and is used for the fact SUBJECT
+field only. Subjects observed on a real estate are short slugs; a subject
+containing a literal `]` would truncate the same way an object used to. The
+asymmetry with the object path (which now spans to the last `]`) is deliberate and
+commented at the helper, so the next agent is not misled into thinking both fields
+share one rule.
 
 ---
 
@@ -257,6 +270,9 @@ Re-inspection of `dd8e92d5` was requested from Adams after the fixes.
    were examined. The wording is the surface's own; consumers should not read it as
    an examined-row count.
 5. **No `ReviewKitTests` target exists** (Deviation 2).
+6. **`bracketed(_:)` truncates a fact subject containing a literal `]`** — first-`]`
+   matching, unconfirmed in practice (all observed subjects are short slugs), and
+   documented at the helper. The object path is already hardened.
 
 ## Success criteria
 
