@@ -35,6 +35,16 @@ let package = Package(
             name: "LocusKit",
             targets: ["LocusKit"]
         ),
+        // Test-support product, not shipped in any binary. Consumers are test
+        // targets in packages ABOVE LocusKit (AriaMcpKit, apps/mootx01) that
+        // need a real on-disk estate to exercise. It lives here, at the layer
+        // that owns Drawer/KGFact/Tunnel, so the generator exists once rather
+        // than being copied per package. Follows the PersistenceKitConformance
+        // precedent: a plain library target that test targets depend on.
+        .library(
+            name: "LocusKitEstateFixture",
+            targets: ["LocusKitEstateFixture"]
+        ),
     ],
     dependencies: [
         .package(name: "SubstrateLib", path: "../../libs/SubstrateLib"),
@@ -70,6 +80,18 @@ let package = Package(
             ],
             path: "Sources/LocusKit"
         ),
+        // Shared test-support generator (see the product comment above). Depends
+        // on PersistenceKitSQLite because the fixture's whole point is a real
+        // SQLite file on disk, not an in-memory store.
+        .target(
+            name: "LocusKitEstateFixture",
+            dependencies: [
+                "LocusKit",
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Sources/LocusKitEstateFixture"
+        ),
         .testTarget(
             name: "LocusKitTests",
             dependencies: [
@@ -79,6 +101,15 @@ let package = Package(
                 "IntellectusLib",
             ],
             path: "Tests/LocusKitTests"
+        ),
+        .testTarget(
+            name: "LocusKitEstateFixtureTests",
+            dependencies: [
+                "LocusKitEstateFixture",
+                "LocusKit",
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/LocusKitEstateFixtureTests"
         ),
     ]
 )
