@@ -53,14 +53,22 @@ struct OnboardingView: View {
                     .padding(.horizontal, 24)
             }
             Spacer()
-            Button {
-                step = 1
-            } label: {
-                Text(String(localized: "Get Started"))
-                    .frame(maxWidth: .infinity)
+            // FAB5-L1 D1: cap CTA to modalCTAMaxWidth and center it so the button
+            // doesn't span ~960pt on iPad Pro landscape. On iPhone the button fills
+            // the padded width unchanged (iPhone width < modalCTAMaxWidth).
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                Button {
+                    step = 1
+                } label: {
+                    Text(String(localized: "Get Started"))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .frame(maxWidth: UIAdaptivity.modalCTAMaxWidth)
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
             .padding(.horizontal, 32)
             .padding(.bottom, 48)
         }
