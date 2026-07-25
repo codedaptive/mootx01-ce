@@ -5,6 +5,32 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.35 — 2026-07-25
+
+Estate encryption, retrieval-gate parity, and release-pipeline hardening.
+
+- **New estates are encrypted at rest by default.** Both ports provision a
+  256-bit per-install key before the estate is opened and fail closed if the
+  key cannot be prepared. `mootx01 install --no-encrypt` opts out, and
+  `mootx01 db create` follows the same default. An existing unencrypted
+  estate keeps opening as it did before.
+- **`mootx01 upgrade` offers to convert an unencrypted estate.** The
+  conversion clones the estate into an encrypted copy, verifies drawer, fact,
+  tunnel, and trace counts before swapping, and keeps the estate path
+  constant so client configuration continues to resolve. The original moves
+  to the Trash and is still unencrypted there. Every failure path leaves a
+  working estate in place.
+- **`moot_memory_get` applies provenance sensitivity.** Retrieval by id now
+  reports `restricted` and `secret` rows as not found, matching the redaction
+  `moot_memory_search` already applied. Swift and Rust behave identically.
+- **`--no-daemon` and `--vault-off` reach sandboxed client configs.** Parall
+  instance configurations receive the same direct-stdio wiring and vault
+  posture as native configurations.
+- **Release signing runs only on tag pushes.** The Windows signing jobs and
+  the PyPI publish job no longer run from manual dispatches.
+- **The security policy states posture only.** SECURITY.md documents what the
+  project guarantees. The finding record lives in `docs/validation/audits`.
+
 ## v1.0.34 — 2026-07-23
 
 Direct-stdio transport, documentation-authority, and packaging-integrity
