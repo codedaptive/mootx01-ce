@@ -242,6 +242,137 @@ struct EstateEncryptionMigratorTests {
         return result
     }
 
+    // MARK: - Part 5: every failure path leaves a working estate
+
+    /// Prove the canonical path still holds the complete plaintext original.
+    private func assertOriginalIntact(_ manifest: TwentyRowEstateFixture.Manifest) async throws {
+        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .plaintext)
+        let count = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: manifest.estateURL, busyTimeout: 5.0),
+            encryptionConfig: .plaintext))
+        #expect(count == manifest.drawerCount,
+            "after a failed migration the canonical path must hold the complete plaintext original")
+    }
+
+    @Test("A daemon that will not stop aborts the swap with the original untouched")
+    func daemonStopFailureAborts() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let daemon = EstateEncryptionMigrator.DaemonControl(
+            isRunning: { true }, stop: { false }, start: { true })
+
+        #expect(throws: (any Error).self) {
+            _ = try EstateEncryptionMigrator.migrate(
+                estateURL: manifest.estateURL, key: makeKey(), daemon: daemon,
+                trash: { _ in throw CocoaError(.fileNoSuchFile) })
+        }
+        try await assertOriginalIntact(manifest)
+        let dir = manifest.estateURL.deletingLastPathComponent()
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.contains(".encrypting") || $0.contains(".pre-encryption") }
+        #expect(leftovers.isEmpty, "an aborted swap must clean up its working files: \(leftovers)")
+    }
+
+    @Test("A swap that cannot write beside the estate unwinds and restarts the daemon")
+    func swapWriteFailureUnwindsAndRestartsDaemon() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        let dir = manifest.estateURL.deletingLastPathComponent()
+        let fm = FileManager.default
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+            TwentyRowEstateFixture.cleanup(manifest)
+        }
+        let key = makeKey()
+        let copy = encryptedSibling(of: manifest.estateURL)
+        try EstateEncryptionMigrator.exportEncryptedCopy(
+            from: manifest.estateURL, to: copy, key: key)
+
+        // A read-only estate directory makes the aside hard-link fail —
+        // the same unwind path a failed rename takes.
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+        let log = EventLog()
+        let daemon = EstateEncryptionMigrator.DaemonControl(
+            isRunning: { true },
+            stop: { log.append("stop"); return true },
+            start: { log.append("start"); return true })
+
+        #expect(throws: (any Error).self) {
+            _ = try EstateEncryptionMigrator.swapInEncryptedCopy(
+                original: manifest.estateURL, encryptedCopy: copy,
+                daemon: daemon, trash: { _ in throw CocoaError(.fileNoSuchFile) })
+        }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+
+        try await assertOriginalIntact(manifest)
+        #expect(log.events == ["stop", "start"],
+            "a failed swap must restart the daemon it stopped")
+    }
+
+    @Test("A trash failure reports the plaintext path instead of proceeding silently")
+    func trashFailureReportsPath() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let key = makeKey()
+
+        let result = try EstateEncryptionMigrator.migrate(
+            estateURL: manifest.estateURL, key: key, daemon: .none,
+            trash: { _ in throw CocoaError(.fileWriteNoPermission) })
+
+        // The migration itself succeeded: canonical path is ciphertext.
+        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .ciphertext)
+        // And the failure is reported, with the plaintext copy still on disk.
+        let reported = try #require(result.swap.untrashedOriginalPath)
+        #expect(FileManager.default.fileExists(atPath: reported))
+        #expect(EstateKeyProvider.detectEstateFileState(
+            at: URL(fileURLWithPath: reported)) == .plaintext,
+            "the reported path must be the untrashed plaintext original")
+        // Clean up the aside file the failed trash left behind.
+        try? FileManager.default.removeItem(atPath: reported)
+    }
+
+    @Test("A daemon restart failure is reported but does not fail the migration")
+    func daemonRestartFailureIsNonFatal() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let (trash, _) = makeTestTrash(in: manifest.estateURL.deletingLastPathComponent())
+        let daemon = EstateEncryptionMigrator.DaemonControl(
+            isRunning: { true }, stop: { true }, start: { false })
+
+        let result = try EstateEncryptionMigrator.migrate(
+            estateURL: manifest.estateURL, key: makeKey(), daemon: daemon, trash: trash)
+
+        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .ciphertext,
+            "the encrypted estate is in place regardless of the restart failure")
+        #expect(result.swap.daemonWasRunning)
+        #expect(!result.swap.daemonRestarted,
+            "the restart failure must be visible to the caller for honest reporting")
+    }
+
+    @Test("Migration declines to run on a non-plaintext source")
+    func migrateRefusesNonPlaintextSource() async throws {
+        // The full driver, not just the export, must refuse: this is what
+        // makes a re-run after success (or a race with serve's first-run
+        // encryption) a no-op instead of a double-wrap.
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let key = makeKey()
+        let (trash, _) = makeTestTrash(in: manifest.estateURL.deletingLastPathComponent())
+        _ = try EstateEncryptionMigrator.migrate(
+            estateURL: manifest.estateURL, key: key, daemon: .none, trash: trash)
+
+        #expect(throws: (any Error).self) {
+            _ = try EstateEncryptionMigrator.migrate(
+                estateURL: manifest.estateURL, key: key, daemon: .none, trash: trash)
+        }
+        // Still openable with the key — the refused second run changed nothing.
+        let count = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: manifest.estateURL, busyTimeout: 5.0),
+            encryptionConfig: .fullDatabase(key: key)))
+        #expect(count == manifest.drawerCount)
+    }
+
     // MARK: - Part 2: the clone
 
     @Test("Export produces a ciphertext file that opens with the key")
