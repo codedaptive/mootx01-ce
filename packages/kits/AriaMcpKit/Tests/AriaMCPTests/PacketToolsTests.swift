@@ -274,4 +274,62 @@ struct PacketToolsTests {
             arguments: .object(["drawer_id": .string(UUID().uuidString)]))
         #expect(isError(result), "Non-existent drawer_id must return isError: true")
     }
+
+    // MARK: - End-to-end round-trip over MCP surface (Part 2)
+
+    /// MCP round-trip proof: file a packet via moot_file_packet, then retrieve it
+    /// via BOTH the generic memory surface (moot_memory_get) AND the packet-specific
+    /// surface (moot_packet_get). This confirms packets are first-class drawers
+    /// reachable through the full estate substrate.
+    @Test func e2eFilePacketRetrievableViaMemoryGetAndPacketGet() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-e2e"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // File a packet with representative fields.
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_packet",
+            arguments: .object([
+                "objective": .string("Prove the MCP surface round-trip for work packets."),
+                "model":     .string("claude-sonnet-4-6"),
+                "agent":     .string("PacketToolsTests/e2e"),
+                "claims": .array([
+                    .object([
+                        "statement":  .string("Packets are reachable via the generic memory surface."),
+                        "confidence": .double(1.0),
+                    ])
+                ]),
+                "next_steps": .array([.string("Deploy to production.")]),
+            ]))
+        let fileBody = try text(fileResult)
+        #expect(fileBody.hasPrefix("packet_filed:"))
+
+        let drawerID = try #require(extractValue(key: "drawer_id", from: fileBody))
+        #expect(!drawerID.isEmpty)
+
+        // Retrieve via the GENERIC memory surface (moot_memory_get).
+        // Packets are structuredJSON drawers; moot_memory_get retrieves any drawer by ID.
+        let memGetResult = try await dispatcher.dispatch(
+            name: "moot_memory_get",
+            arguments: .object(["id": .string(drawerID)]))
+        let memGetBody = try text(memGetResult)
+        // The generic memory view returns the raw drawer content — the packet JSON.
+        // Verify the objective text survives in the drawer content.
+        #expect(memGetBody.contains("Prove the MCP surface round-trip for work packets."),
+            "moot_memory_get must return the packet's objective in drawer content")
+
+        // Retrieve via the PACKET-SPECIFIC surface (moot_packet_get).
+        let pkgGetResult = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(drawerID)]))
+        let pkgGetBody = try text(pkgGetResult)
+        #expect(pkgGetBody.contains("Prove the MCP surface round-trip for work packets."),
+            "moot_packet_get must decode the objective from the packet JSON")
+        #expect(pkgGetBody.contains("claude-sonnet-4-6"))
+        #expect(pkgGetBody.contains("Packets are reachable via the generic memory surface."),
+            "moot_packet_get must decode claims from the packet JSON")
+        #expect(pkgGetBody.contains("Deploy to production."),
+            "moot_packet_get must decode next_steps from the packet JSON")
+    }
 }
