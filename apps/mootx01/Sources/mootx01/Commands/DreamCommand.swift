@@ -110,9 +110,21 @@ struct DreamCommand: AsyncParsableCommand {
         // Open the estate and wire the GLK semantic layer (corpus + vector store
         // + encode queue), exactly as DrainCommand does. wireGLKSubstores is
         // idempotent on reopen.
+        // At-rest posture — the SAME shared decision serve and drain use, so the
+        // three commands cannot drift.
+        let encryption: EstateEncryptionConfig
+        do {
+            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            encryption = resolved.encryption
+        } catch {
+            Logging.stderr.log("mootx01 dream fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0)
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
         )
         let storage: SQLiteStorage
         do {
