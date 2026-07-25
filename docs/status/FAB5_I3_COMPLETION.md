@@ -109,6 +109,18 @@ All named tools/verbs validated against develop at execution time:
 Demo includes: ARIA tool reference table, verification steps using the app's
 Packets tab, troubleshooting section, execution log template.
 
+### Friedlander Visual Fixes (commit `7e8cd379`)
+
+Friedlander advisory findings — all resolved:
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | LineageView missing UIAdaptivity.readableContentMaxWidth (iPad parity gap) | Applied `.frame(maxWidth:)` + centering after `.task` |
+| 2 | Link-kind badge used raw `Color.blue`/`Color.orange` — PaperPalette escape | Changed to `.secondary.opacity(0.15)` + `.foregroundStyle(.secondary)` |
+| 3 | Static font size on decorative icon: documented pattern | `.system(size: 40/48)` retained; `.relativeTo(textStyle:)` has no system-font overload in SwiftUI |
+
+Note: Finding #3 could not be applied as originally specified. `Font.system(size:)` has no `relativeTo` parameter (that overload exists only for `Font.custom`). The static sizes are appropriate for decorative empty-state icons and match the pattern used in adjacent shipped views (OnboardingView).
+
 ### Adams Fixes (commit `0c113f22`)
 
 Adams post-flight found 2 CRITICAL + 2 WARNING findings. All resolved:
@@ -194,6 +206,7 @@ W2-INTERFACE drawer to be filed at completion (estate integration step).
 | `3e92c353` | feat(app-ui): work-packet list, detail, lineage views |
 | `f5e730a0` | docs(guide): Three Minds One Memory demo script |
 | `0c113f22` | fix(app-ui): Adams post-flight fixes (FAB5-I3) |
+| `7e8cd379` | fix(app-ui): Friedlander visual fixes (FAB5-I3) |
 
 ---
 
