@@ -102,6 +102,15 @@ let package = Package(
             ],
             path: "Tests/LocusKitTests"
         ),
+        // Regenerates the checked-in Rust fixture artifact. Deliberately NOT a
+        // product: it ships in nothing and exists so the binary artifact under
+        // rust/tests/fixtures can always be rebuilt instead of rotting.
+        //   swift run EstateFixtureEmit <output-directory>
+        .executableTarget(
+            name: "EstateFixtureEmit",
+            dependencies: ["LocusKitEstateFixture"],
+            path: "Sources/EstateFixtureEmit"
+        ),
         .testTarget(
             name: "LocusKitEstateFixtureTests",
             dependencies: [
