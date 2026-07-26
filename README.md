@@ -10,6 +10,8 @@ Different models. Different harnesses. Different roles. One durable memory. Secu
 
 > The frontier intelligence is rented. The memory is yours.
 
+<img src="docs/assets/mootx01-live.webp" alt="MOOTx01 live — one personal MOOT shared across AI clients" width="100%">
+
 [![release](https://img.shields.io/github/v/release/codedaptive/mootx01-ce?label=release&color=success)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/codedaptive/mootx01-ce/total?color=blue)](https://github.com/codedaptive/mootx01-ce/releases)
 ![signed](https://img.shields.io/badge/releases-minisign%20signed-success)
