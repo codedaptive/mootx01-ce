@@ -126,6 +126,23 @@ extension EstateKeyProvider {
             """.utf8).write(to: marker, options: .atomic)
     }
 
+    /// Remove a recorded opt-out for the estate at `estateURL`, if present.
+    /// Returns true when a marker existed and was removed.
+    ///
+    /// The marker records a choice about an estate that does not exist yet.
+    /// When a NEW estate is requested with encryption (the default), a marker
+    /// left over from an earlier estate at the same path — a prior
+    /// `--no-encrypt` install, or a `--replace-db` that trashed the database
+    /// but not the marker — must not survive to downgrade the estate the
+    /// current invocation promised would be encrypted.
+    @discardableResult
+    public static func removeEncryptionOptOut(forEstateAt estateURL: URL) throws -> Bool {
+        let marker = encryptionOptOutMarkerURL(forEstateAt: estateURL)
+        guard FileManager.default.fileExists(atPath: marker.path) else { return false }
+        try FileManager.default.removeItem(at: marker)
+        return true
+    }
+
     #if canImport(PersistenceKit)
     /// Resolve the at-rest posture for the estate at `estateURL`.
     ///

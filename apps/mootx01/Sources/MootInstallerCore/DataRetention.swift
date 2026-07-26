@@ -253,6 +253,11 @@ public enum DataRetention {
             "estate.sqlite", "estate.sqlite-wal", "estate.sqlite-shm",
             "estate.vectors.vec",
             "estate.queue.sqlite", "estate.queue.sqlite-wal", "estate.queue.sqlite-shm",
+            // The encryption opt-out marker describes the estate being replaced;
+            // it dies with it. Leaving it behind would silently downgrade the
+            // NEXT estate to plaintext despite the encrypted default the install
+            // just advertised (stale-marker downgrade, Codex fe2cf887).
+            EstateKeyProvider.encryptionOptOutMarkerName,
         ] {
             let url = dataDirectory.appendingPathComponent(name, isDirectory: false)
             if fm.fileExists(atPath: url.path) {
