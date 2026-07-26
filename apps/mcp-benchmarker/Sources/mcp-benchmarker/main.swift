@@ -776,13 +776,22 @@ func runLongMemEval(_ args: [String]) async throws {
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
 
-    // Print a summary to stdout. The scorer (Part 5) will compute full metrics;
-    // here we print a progress tally so the operator can see the run completed.
-    let guardHealthyCount = results.filter(\.guardHealthy).count
-    let guardRefusals = results.count - guardHealthyCount
+    // Score the results (LongMemEvalScorer.swift). Guard-excluded questions are
+    // counted but excluded from aggregate recall/MRR per the contract §1.2 guarantee 1.
+    let scores = results.map { scoreLMEQuestion($0) }
+
+    // Build and write the report.
+    let report = buildLMEReport(config: runConfig, corpus: corpus, scores: scores)
+    let reportFilename = "lme-report-\(report.variant)-seed\(runConfig.seed).json"
+    let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        .appendingPathComponent(reportFilename)
+    try writeLMEReport(report, to: reportURL)
+
+    // Print scored summary to stdout.
+    let guardHealthyCount = scores.filter(\.guardHealthy).count
+    let guardRefusals = scores.count - guardHealthyCount
     let totalTurns = results.map(\.turnsIngested).reduce(0, +)
-    let meanQueryLatencyMs = results.isEmpty ? 0.0
-        : results.map(\.queryLatencySeconds).reduce(0, +) / Double(results.count) * 1000.0
+    let (agg, lat) = aggregateLMEScores(scores)
 
     let summary = """
         [longmemeval] run complete
@@ -790,9 +799,17 @@ func runLongMemEval(_ args: [String]) async throws {
           guard healthy:        \(guardHealthyCount)
           guard refusals:       \(guardRefusals)
           turns ingested total: \(totalTurns)
-          query latency mean:   \(String(format: "%.1f", meanQueryLatencyMs)) ms
+          recall-any@1:         \(String(format: "%.4f", agg.recallAnyAt1))
+          recall-any@5:         \(String(format: "%.4f", agg.recallAnyAt5))
+          recall-any@10:        \(String(format: "%.4f", agg.recallAnyAt10))
+          recall-all@1:         \(String(format: "%.4f", agg.recallAllAt1))
+          recall-all@5:         \(String(format: "%.4f", agg.recallAllAt5))
+          recall-all@10:        \(String(format: "%.4f", agg.recallAllAt10))
+          mrr:                  \(String(format: "%.4f", agg.mrr))
+          query p50:            \(String(format: "%.1f", lat.queryP50Seconds * 1000)) ms
+          query p95:            \(String(format: "%.1f", lat.queryP95Seconds * 1000)) ms
           estate strategy:      \(sharedEstate ? "shared" : "fresh-per-question")
-        NOTE: Recall/MRR scoring and report writing land in Part 5 (LongMemEvalScorer.swift).
+          report written to:    \(reportURL.path)
 
         """
     FileHandle.standardOutput.write(Data(summary.utf8))
