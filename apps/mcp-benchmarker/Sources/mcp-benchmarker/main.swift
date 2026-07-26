@@ -721,7 +721,11 @@ func runLongMemEval(_ args: [String]) async throws {
     guard ["s", "m", "oracle"].contains(variant) else {
         throw MCPError(description: "--variant must be 's', 'm', or 'oracle'; got '\(variant)'")
     }
-    let dataDirStr = try requireOption("--data-dir", in: args)
+    // --corpus is the Rust twin's canonical flag name; --data-dir is the Swift-native spelling.
+    // Both are accepted; --data-dir takes priority when both are present.
+    guard let dataDirStr = optionValue("--data-dir", in: args) ?? optionValue("--corpus", in: args) else {
+        throw MCPError(description: "missing required option --data-dir (or --corpus)")
+    }
     // Resolve variant filename from the variant flag.
     let variantFilename: String
     switch variant {
@@ -739,9 +743,10 @@ func runLongMemEval(_ args: [String]) async throws {
             + "Run scripts/fetch-longmemeval.sh to download the dataset.")
     }
 
-    // mootx01 binary: explicit flag takes priority over auto-discovery.
+    // mootx01 binary: --mootx01-binary is the Swift-native spelling; --binary is the
+    // Rust twin's name. Both are accepted for CLI contract parity (Defect 4).
     let mootBinary: String
-    if let explicit = optionValue("--mootx01-binary", in: args) {
+    if let explicit = optionValue("--mootx01-binary", in: args) ?? optionValue("--binary", in: args) {
         mootBinary = explicit
     } else if let discovered = discoverMootBinary() {
         mootBinary = discovered
@@ -761,6 +766,20 @@ func runLongMemEval(_ args: [String]) async throws {
     let limit = optionValue("--limit", in: args).flatMap(Int.init)
     let offset = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
     let seed = optionValue("--seed", in: args).flatMap(UInt64.init) ?? 20_260_725
+    // --encode-barrier drain|impatient|none (default: drain).
+    //   drain:     write without inline-encoding, poll moot_drain_status post-ingest.
+    //   impatient: write with impatient:true for inline encoding per write.
+    //   none:      no barrier — documents the background-encoding race.
+    let encodeBarrierStr = optionValue("--encode-barrier", in: args) ?? "drain"
+    let lmeEncodeBarrier: EncodeBarrier
+    switch encodeBarrierStr {
+    case "drain":     lmeEncodeBarrier = .drain
+    case "impatient": lmeEncodeBarrier = .impatient
+    case "none":      lmeEncodeBarrier = .none
+    default:
+        throw MCPError(description:
+            "--encode-barrier must be 'drain', 'impatient', or 'none'; got '\(encodeBarrierStr)'")
+    }
     // --arm exact|dense|both (default: both). Controls which recall paths are exercised.
     //   exact: moot_memory_search only (LME-01 baseline path)
     //   dense: moot_recall_distilled only (requires moot_consolidate after ingest)
@@ -808,7 +827,8 @@ func runLongMemEval(_ args: [String]) async throws {
         outDir: outDir,
         runLabel: "lme-\(variant)-seed\(seed)-arm\(armStr)",
         arm: arm,
-        judgeCmd: judgeCmd
+        judgeCmd: judgeCmd,
+        encodeBarrier: lmeEncodeBarrier
     )
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
@@ -921,11 +941,15 @@ func runLongMemEval(_ args: [String]) async throws {
 ///       [--out <dir>]
 ///
 /// Provisions one scratch estate per conversation (10 total), ingests all turns
-/// via live moot_file_memory (n=true), and reports Recall-any@k / MRR / latency
-/// with per-category breakdown. Dataset must be pre-fetched with
-/// scripts/fetch-locomo.sh. License: CC BY-NC 4.0 (non-commercial use only).
+/// via live moot_file_memory with the configured encode barrier, and reports
+/// Recall-any@k / MRR / latency with per-category breakdown. Dataset must be
+/// pre-fetched with scripts/fetch-locomo.sh. License: CC BY-NC 4.0 (non-commercial).
 func runLoCoMo(_ args: [String]) async throws {
-    let dataFileStr = try requireOption("--data-file", in: args)
+    // --corpus is the Rust twin's canonical flag name; --data-file is the Swift-native spelling.
+    // Both are accepted; --data-file takes priority when both are present.
+    guard let dataFileStr = optionValue("--data-file", in: args) ?? optionValue("--corpus", in: args) else {
+        throw MCPError(description: "missing required option --data-file (or --corpus)")
+    }
     let datasetPath = URL(fileURLWithPath: dataFileStr)
 
     guard FileManager.default.fileExists(atPath: datasetPath.path) else {
@@ -934,9 +958,10 @@ func runLoCoMo(_ args: [String]) async throws {
             + "Run scripts/fetch-locomo.sh to download the dataset.")
     }
 
-    // mootx01 binary: explicit flag takes priority over auto-discovery.
+    // mootx01 binary: --mootx01-binary is the Swift-native spelling; --binary is the
+    // Rust twin's name. Both are accepted for CLI contract parity (Defect 4).
     let mootBinary: String
-    if let explicit = optionValue("--mootx01-binary", in: args) {
+    if let explicit = optionValue("--mootx01-binary", in: args) ?? optionValue("--binary", in: args) {
         mootBinary = explicit
     } else if let discovered = discoverMootBinary() {
         mootBinary = discovered
@@ -956,6 +981,16 @@ func runLoCoMo(_ args: [String]) async throws {
     let limit = optionValue("--limit", in: args).flatMap(Int.init)
     let offset = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
     let seed = optionValue("--seed", in: args).flatMap(UInt64.init) ?? 20_260_725
+    let encodeBarrierStr = optionValue("--encode-barrier", in: args) ?? "drain"
+    let loCoMoEncodeBarrier: EncodeBarrier
+    switch encodeBarrierStr {
+    case "drain":     loCoMoEncodeBarrier = .drain
+    case "impatient": loCoMoEncodeBarrier = .impatient
+    case "none":      loCoMoEncodeBarrier = .none
+    default:
+        throw MCPError(description:
+            "--encode-barrier must be 'drain', 'impatient', or 'none'; got '\(encodeBarrierStr)'")
+    }
     let outDirStr = optionValue("--out", in: args)
     let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
 
@@ -975,7 +1010,8 @@ func runLoCoMo(_ args: [String]) async throws {
         offset: offset,
         seed: seed,
         outDir: outDir,
-        runLabel: "locomo-seed\(seed)"
+        runLabel: "locomo-seed\(seed)",
+        encodeBarrier: loCoMoEncodeBarrier
     )
 
     let results = try await runLoCoMoQuestions(
@@ -1063,9 +1099,10 @@ func runLMEB(_ args: [String]) async throws {
         evidenceTypes = allEvidenceTypes
     }
 
-    // mootx01 binary: explicit flag takes priority over auto-discovery.
+    // mootx01 binary: --mootx01-binary is the Swift-native spelling; --binary is the
+    // Rust twin's name. Both are accepted for CLI contract parity (Defect 4).
     let mootBinary: String
-    if let explicit = optionValue("--mootx01-binary", in: args) {
+    if let explicit = optionValue("--mootx01-binary", in: args) ?? optionValue("--binary", in: args) {
         mootBinary = explicit
     } else if let discovered = discoverMootBinary() {
         mootBinary = discovered
@@ -1086,6 +1123,16 @@ func runLMEB(_ args: [String]) async throws {
     let offset  = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
     let seed    = optionValue("--seed",   in: args).flatMap(UInt64.init) ?? 20_260_725
     let outDir  = optionValue("--out",    in: args).map { URL(fileURLWithPath: $0) }
+    let lmebEncodeBarrierStr = optionValue("--encode-barrier", in: args) ?? "drain"
+    let lmebEncodeBarrier: EncodeBarrier
+    switch lmebEncodeBarrierStr {
+    case "drain":     lmebEncodeBarrier = .drain
+    case "impatient": lmebEncodeBarrier = .impatient
+    case "none":      lmebEncodeBarrier = .none
+    default:
+        throw MCPError(description:
+            "--encode-barrier must be 'drain', 'impatient', or 'none'; got '\(lmebEncodeBarrierStr)'")
+    }
 
     let loadMsg = "[lmeb] loading corpus from \(dataDir.path) "
         + "(evidence types: \(evidenceTypes.joined(separator: ", ")))\n"
@@ -1105,7 +1152,8 @@ func runLMEB(_ args: [String]) async throws {
         offset: offset,
         seed: seed,
         outDir: outDir,
-        runLabel: runLabel
+        runLabel: runLabel,
+        encodeBarrier: lmebEncodeBarrier
     )
 
     // Sort queries by ID for deterministic shuffle baseline.
@@ -1121,7 +1169,8 @@ func runLMEB(_ args: [String]) async throws {
         runLabel: runConfig.runLabel,
         evidenceTypes: evidenceTypes,
         queriesLoaded: corpus.queryCount,
-        scores: scores
+        scores: scores,
+        encodeBarrier: runConfig.encodeBarrier.rawValue
     )
     let reportFilename = "lmeb-report-seed\(seed).json"
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))

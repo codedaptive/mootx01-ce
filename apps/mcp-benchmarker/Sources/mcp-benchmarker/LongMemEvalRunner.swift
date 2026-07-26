@@ -172,6 +172,10 @@ struct LMERunConfig: Sendable {
     /// the command subprocess per arm per question (prompt on stdin, answer on stdout)
     /// and grades deterministically against the gold `answer`. Off by default.
     let judgeCmd: String?
+    /// Encode-queue synchronization strategy. Controls whether ingest uses inline
+    /// encoding (impatient), a post-ingest drain barrier (drain, default), or no
+    /// barrier (none). Recorded in the report JSON as "encode_barrier".
+    let encodeBarrier: EncodeBarrier
 }
 
 // MARK: - Scratch estate management
@@ -344,13 +348,15 @@ func runLMEQuestions(
                 for (k, v) in lmeMootVerbMap.constantArgs {
                     writeArgs[k] = .string(v)
                 }
-                // Inline encoding: n=true ensures the turn is semantically encoded
-                // BEFORE the write returns. Without it encoding is background — a
-                // recall query issued after full ingest may run before the encoding
-                // queue drains, producing artificially low recall numbers. This is
-                // the LME harness' correctness invariant: ingest → encode → query,
-                // with no race between background encoding and the recall query.
-                writeArgs["n"] = .bool(true)
+                // Encode barrier: impatient mode sends impatient:true so the backend
+                // encodes inline before each write returns. For drain mode (default),
+                // writes proceed without the flag and a single drain barrier is applied
+                // after the full ingest loop. For none, no barrier — documents the race.
+                // Previously this code sent "n":true, which was silently ignored by the
+                // product because the correct key is "impatient".
+                if config.encodeBarrier == .impatient {
+                    writeArgs["impatient"] = .bool(true)
+                }
                 let writeStart = Date()
                 let writeResult = try await client.callTool(
                     lmeMootVerbMap.write,
@@ -370,6 +376,17 @@ func runLMEQuestions(
                     ))
                 }
             }
+        }
+
+        // Encode barrier (drain mode): after all haystack turns are ingested, poll
+        // moot_drain_status until the encode queue is idle before issuing any recall
+        // query. This serializes ingest → encode → query without per-write latency.
+        // The drain poll is a no-op for impatient and none modes.
+        if config.encodeBarrier == .drain {
+            let _ = await waitForEncodeDrain(
+                client: client,
+                label: "lme \(question.questionID)"
+            )
         }
 
         // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.
