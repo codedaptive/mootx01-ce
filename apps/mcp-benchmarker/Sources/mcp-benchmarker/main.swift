@@ -799,7 +799,7 @@ func runLongMemEval(_ args: [String]) async throws {
     let scores = results.map { scoreLMEQuestion($0) }
 
     // Build and write the report.
-    let report = buildLMEReport(config: runConfig, corpus: corpus, scores: scores)
+    let report = buildLMEReport(config: runConfig, corpus: corpus, results: results, scores: scores)
     let reportFilename = "lme-report-\(report.variant)-seed\(runConfig.seed).json"
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
         .appendingPathComponent(reportFilename)
@@ -862,6 +862,12 @@ func runLongMemEval(_ args: [String]) async throws {
     let totalTurns = results.map(\.turnsIngested).reduce(0, +)
     let (agg, lat) = aggregateLMEScores(scores)
 
+    // Token efficiency summary lines (nil when arm absent or no has_answer).
+    let te = report.tokenEfficiency
+    func fmtTokens(_ t: Double?) -> String { t.map { String(format: "%.0f", $0) } ?? "N/A" }
+    func fmtRatio(_ r: Double?) -> String  { r.map { String(format: "%.3f", $0) } ?? "N/A" }
+    func fmtRate(_ r: Double?)  -> String  { r.map { String(format: "%.3f", $0) } ?? "N/A (no has_answer)" }
+
     let summary = """
         [longmemeval] run complete
           questions processed:  \(results.count)
@@ -877,6 +883,11 @@ func runLongMemEval(_ args: [String]) async throws {
           mrr:                  \(String(format: "%.4f", agg.mrr))
           query p50:            \(String(format: "%.1f", lat.queryP50Seconds * 1000)) ms
           query p95:            \(String(format: "%.1f", lat.queryP95Seconds * 1000)) ms
+          exact mean tokens:    \(fmtTokens(te.exactArmMeanTokens))
+          dense mean tokens:    \(fmtTokens(te.denseArmMeanTokens))
+          dense/exact ratio:    \(fmtRatio(te.denseExactTokenRatio))
+          exact evidence rate:  \(fmtRate(te.exactEvidenceHitRate))
+          dense evidence rate:  \(fmtRate(te.denseEvidenceHitRate))
           estate strategy:      \(sharedEstate ? "shared" : "fresh-per-question")
           report written to:    \(reportURL.path)
 

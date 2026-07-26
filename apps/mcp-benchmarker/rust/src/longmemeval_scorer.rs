@@ -19,6 +19,8 @@
 //!      BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2 guarantee 1.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::longmemeval_corpus::LmeCorpus;
+use crate::longmemeval_token_efficiency::{lme_estimate_tokens, lme_evidence_hit};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Manifest entry (UUID → haystack position)
@@ -410,6 +412,41 @@ pub struct LmeReportPerQuestion {
     pub retrieved_uuid_count: usize,
 }
 
+/// Token efficiency block of the LME report. Additive key added by LME-03.
+/// All fields are Option: nil when the arm was not active, or when `has_answer`
+/// annotations are absent from the corpus (real HuggingFace corpus always lacks
+/// them — only the hand-authored synthetic sample carries them).
+///
+/// Token estimate: `(utf8_byte_len + 3) / 4` — deterministic, zero deps.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LmeReportTokenEfficiency {
+    /// Mean estimated token count for the exact-arm (`moot_memory_search`) payload.
+    /// None when the exact arm was not active or returned no payloads.
+    pub exact_arm_mean_tokens: Option<f64>,
+    /// Mean estimated token count for the dense-arm (`moot_recall_distilled`) payload.
+    pub dense_arm_mean_tokens: Option<f64>,
+    /// dense / exact token ratio. None when either arm absent or exact mean is 0.
+    pub dense_exact_token_ratio: Option<f64>,
+    /// Fraction of questions where the exact payload contained the has_answer text.
+    /// None when no has_answer annotations present (real corpus).
+    pub exact_evidence_hit_rate: Option<f64>,
+    /// Same for the dense arm.
+    pub dense_evidence_hit_rate: Option<f64>,
+    /// Evidence hits per 1000 tokens for the exact arm.
+    pub exact_hits_per_1k_tokens: Option<f64>,
+    /// Evidence hits per 1000 tokens for the dense arm.
+    pub dense_hits_per_1k_tokens: Option<f64>,
+}
+
+/// Lightweight per-question payload snapshot, extracted before results are
+/// consumed by `score_lme_question`. Passed to `build_lme_report` so it can
+/// compute the `token_efficiency` block without needing the full results vec.
+pub struct LmePayloadEntry {
+    pub question_id: String,
+    pub exact_payload_text: Option<String>,
+    pub dense_payload_text: Option<String>,
+}
+
 /// The full LME run report.
 /// Additive/compatible with BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -422,9 +459,15 @@ pub struct LmeReport {
     pub aggregate: LmeReportAggregate,
     pub latency: LmeReportLatency,
     pub per_question: Vec<LmeReportPerQuestion>,
+    /// Token efficiency metrics (LME-03, additive per BENCHMARKER_OPTIMIZER_CONTRACT.md).
+    pub token_efficiency: LmeReportTokenEfficiency,
 }
 
 /// Assembles an `LmeReport` from scores and metadata.
+///
+/// `corpus` and `payload_entries` are needed to compute the `token_efficiency`
+/// block: the corpus provides `has_answer` turn annotations; payload_entries
+/// carry per-question payload texts extracted before results were consumed.
 pub fn build_lme_report(
     run_id: String,
     run_label: String,
@@ -433,6 +476,8 @@ pub fn build_lme_report(
     questions_loaded: usize,
     abstention_excluded: usize,
     scores: &[LmeQuestionScore],
+    corpus: &LmeCorpus,
+    payload_entries: &[LmePayloadEntry],
 ) -> LmeReport {
     let (aggregate, latency) = aggregate_lme_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
@@ -485,6 +530,88 @@ pub fn build_lme_report(
         })
         .collect();
 
+    // ── Token efficiency (LME-03 additive key) ─────────────────────────────────
+    // Build questionID → concatenated has_answer turn text. Real HuggingFace
+    // corpus has no has_answer annotations — lookup will be empty, making all
+    // evidence hit fields None. Only the hand-authored synthetic sample carries them.
+    let has_answer_lookup: HashMap<&str, String> = corpus
+        .questions
+        .iter()
+        .filter_map(|q| {
+            let evidence: String = q.haystack_sessions
+                .iter()
+                .flat_map(|s| s.iter())
+                .filter(|t| t.has_answer)
+                .map(|t| t.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if evidence.is_empty() { None } else { Some((q.question_id.as_str(), evidence)) }
+        })
+        .collect();
+
+    let mut exact_tokens: Vec<usize> = Vec::new();
+    let mut dense_tokens: Vec<usize> = Vec::new();
+    let mut exact_hits: usize = 0;
+    let mut dense_hits: usize = 0;
+    let mut exact_evidence_count: usize = 0;
+    let mut dense_evidence_count: usize = 0;
+
+    for entry in payload_entries {
+        if let Some(ref text) = entry.exact_payload_text {
+            exact_tokens.push(lme_estimate_tokens(text));
+            if let Some(evidence) = has_answer_lookup.get(entry.question_id.as_str()) {
+                exact_evidence_count += 1;
+                if lme_evidence_hit(evidence, text) {
+                    exact_hits += 1;
+                }
+            }
+        }
+        if let Some(ref text) = entry.dense_payload_text {
+            dense_tokens.push(lme_estimate_tokens(text));
+            if let Some(evidence) = has_answer_lookup.get(entry.question_id.as_str()) {
+                dense_evidence_count += 1;
+                if lme_evidence_hit(evidence, text) {
+                    dense_hits += 1;
+                }
+            }
+        }
+    }
+
+    let exact_mean: Option<f64> = if exact_tokens.is_empty() { None } else {
+        Some(exact_tokens.iter().sum::<usize>() as f64 / exact_tokens.len() as f64)
+    };
+    let dense_mean: Option<f64> = if dense_tokens.is_empty() { None } else {
+        Some(dense_tokens.iter().sum::<usize>() as f64 / dense_tokens.len() as f64)
+    };
+    let ratio: Option<f64> = match (exact_mean, dense_mean) {
+        (Some(e), Some(d)) if e > 0.0 => Some(d / e),
+        _ => None,
+    };
+    let exact_hit_rate: Option<f64> = if exact_evidence_count > 0 {
+        Some(exact_hits as f64 / exact_evidence_count as f64)
+    } else { None };
+    let dense_hit_rate: Option<f64> = if dense_evidence_count > 0 {
+        Some(dense_hits as f64 / dense_evidence_count as f64)
+    } else { None };
+    let exact_hits_per_1k: Option<f64> = match (exact_hit_rate, exact_mean) {
+        (Some(r), Some(m)) if m > 0.0 => Some(r * 1000.0 / m),
+        _ => None,
+    };
+    let dense_hits_per_1k: Option<f64> = match (dense_hit_rate, dense_mean) {
+        (Some(r), Some(m)) if m > 0.0 => Some(r * 1000.0 / m),
+        _ => None,
+    };
+
+    let token_efficiency = LmeReportTokenEfficiency {
+        exact_arm_mean_tokens:    exact_mean,
+        dense_arm_mean_tokens:    dense_mean,
+        dense_exact_token_ratio:  ratio,
+        exact_evidence_hit_rate:  exact_hit_rate,
+        dense_evidence_hit_rate:  dense_hit_rate,
+        exact_hits_per_1k_tokens: exact_hits_per_1k,
+        dense_hits_per_1k_tokens: dense_hits_per_1k,
+    };
+
     LmeReport {
         run_id,
         run_label,
@@ -494,6 +621,7 @@ pub fn build_lme_report(
         aggregate: report_aggregate,
         latency: report_latency,
         per_question,
+        token_efficiency,
     }
 }
 

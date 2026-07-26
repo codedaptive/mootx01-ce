@@ -22,7 +22,7 @@ use mcp_benchmarker_rs::longmemeval_runner::{
     discover_moot_binary, run_lme_questions, LmeArm, LmeRunConfig,
 };
 use mcp_benchmarker_rs::longmemeval_scorer::{
-    build_lme_report, score_lme_question, write_lme_report,
+    build_lme_report, score_lme_question, write_lme_report, LmePayloadEntry,
 };
 use mcp_benchmarker_rs::mcp_client::MCPClient;
 use mcp_benchmarker_rs::transfer::TransferEngine;
@@ -228,12 +228,13 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         judge_cmd: judge_cmd.clone(),
     };
 
-    // Keep results alongside scores so the transcript writer can read judge fields.
+    // Keep results alongside scores so the transcript writer can read judge fields,
+    // and the report builder can compute token efficiency metrics.
+    // score_lme_question takes LmeQuestionResult by value — clone the parts needed
+    // before consuming results.
     let results = run_lme_questions(&corpus, &run_config);
-    // score_lme_question takes by value — clone the parts needed for the transcript
-    // before consuming results. For the transcript we need: question_id,
-    // exact_judge_answer, exact_judge_correct, dense_judge_answer, dense_judge_correct.
-    // We extract these first, then move results into the scorer.
+
+    // Extract judge fields (for transcript writer, LME-03 Part 4).
     struct JudgeEntry {
         question_id: String,
         exact_judge_answer: Option<String>,
@@ -251,6 +252,17 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
             dense_judge_correct: r.dense_judge_correct,
         })
         .collect();
+
+    // Extract payload texts (for token efficiency block, LME-03 Part 5).
+    let payload_entries: Vec<LmePayloadEntry> = results
+        .iter()
+        .map(|r| LmePayloadEntry {
+            question_id: r.question_id.clone(),
+            exact_payload_text: r.exact_payload_text.clone(),
+            dense_payload_text: r.dense_payload_text.clone(),
+        })
+        .collect();
+
     let scores: Vec<_> = results.into_iter().map(score_lme_question).collect();
 
     let run_id = {
@@ -270,9 +282,12 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         corpus.questions.len() + corpus.abstention_count,
         corpus.abstention_count,
         &scores,
+        &corpus,
+        &payload_entries,
     );
 
     // Print summary.
+    let te = &report.token_efficiency;
     println!("LongMemEval results (variant={variant}, seed={seed}):");
     println!("  questions_run:      {}", report.corpus_stats.questions_run);
     println!("  guard_excluded:     {}", report.corpus_stats.guard_excluded);
@@ -286,6 +301,26 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     println!("  mrr:                {:.4}", report.aggregate.mrr);
     println!("  query_p50_s:        {:.4}", report.latency.query_p50_seconds);
     println!("  query_p95_s:        {:.4}", report.latency.query_p95_seconds);
+    match te.exact_arm_mean_tokens {
+        Some(t) => println!("  exact_mean_tokens:  {:.0}", t),
+        None    => println!("  exact_mean_tokens:  N/A"),
+    }
+    match te.dense_arm_mean_tokens {
+        Some(t) => println!("  dense_mean_tokens:  {:.0}", t),
+        None    => println!("  dense_mean_tokens:  N/A"),
+    }
+    match te.dense_exact_token_ratio {
+        Some(r) => println!("  dense/exact ratio:  {:.3}", r),
+        None    => println!("  dense/exact ratio:  N/A"),
+    }
+    match te.exact_evidence_hit_rate {
+        Some(r) => println!("  exact_evidence_rate:{:.3}", r),
+        None    => println!("  exact_evidence_rate:N/A (no has_answer)"),
+    }
+    match te.dense_evidence_hit_rate {
+        Some(r) => println!("  dense_evidence_rate:{:.3}", r),
+        None    => println!("  dense_evidence_rate:N/A (no has_answer)"),
+    }
 
     // Write report file.
     let report_filename = format!("lme-report-{}-seed{}.json", variant, seed);
