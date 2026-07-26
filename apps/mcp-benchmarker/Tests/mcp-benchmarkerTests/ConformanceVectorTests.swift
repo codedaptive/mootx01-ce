@@ -277,3 +277,43 @@ private func loadJSON(_ url: URL) throws -> [String: Any] {
         }
     }
 }
+
+// MARK: - Token efficiency conformance vectors (LME-03)
+
+@Suite struct ConformanceVectorTokenEfficiencyTests {
+
+    @Test("lmeEstimateTokens: all shared vectors match Rust leg")
+    func tokenEstimatorVectors() throws {
+        let json = try loadJSON(conformancePath("token_efficiency_vectors.json"))
+        let cases = try #require(json["token_estimator_cases"] as? [[String: Any]])
+
+        for c in cases {
+            let id = c["id"] as? String ?? "(unknown)"
+            let input = try #require(c["input"] as? String)
+            let expected = try #require(c["expected_tokens"] as? Int)
+            let actual = lmeEstimateTokens(input)
+            #expect(
+                actual == expected,
+                "token estimator vector '\(id)': expected \(expected), got \(actual)"
+            )
+        }
+    }
+
+    @Test("lmeEvidenceHit: all shared vectors match Rust leg")
+    func evidenceHitVectors() throws {
+        let json = try loadJSON(conformancePath("token_efficiency_vectors.json"))
+        let cases = try #require(json["evidence_hit_cases"] as? [[String: Any]])
+
+        for c in cases {
+            let id = c["id"] as? String ?? "(unknown)"
+            let evidenceText = try #require(c["evidence_text"] as? String)
+            let payloadText = try #require(c["payload_text"] as? String)
+            let expected = try #require(c["expected_hit"] as? Bool)
+            let actual = lmeEvidenceHit(evidenceText: evidenceText, payloadText: payloadText)
+            #expect(
+                actual == expected,
+                "evidence hit vector '\(id)': expected \(expected), got \(actual)"
+            )
+        }
+    }
+}
