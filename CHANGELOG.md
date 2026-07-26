@@ -5,6 +5,30 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## Unreleased (LME-03 stream)
+
+**mcp-benchmarker: Token-Efficiency Benchmark — Exact vs Dense Recall**
+
+- **Two-arm comparison**: `--arm both` runs `moot_memory_search` (exact) and
+  `moot_recall_distilled` (dense/distilled) per question. Dense arm calls
+  `moot_consolidate` after ingest before issuing the distilled query.
+- **Token estimator**: `(utf8_byte_count + 3) / 4` — deterministic, zero
+  external deps, consistent across Swift and Rust twins.
+- **Evidence-density scorer**: normalized substring match of `has_answer`
+  turn text against the returned payload. Real corpus lacks `has_answer`
+  annotations; the scorer returns nil for real-corpus runs and is validated
+  by `conformance/token_efficiency_vectors.json`.
+- **`token_efficiency` additive JSON key**: new top-level block in
+  `lme-report-*.json` carrying per-arm mean tokens, dense/exact ratio,
+  evidence hit rate, and hits-per-1000-tokens. Additive per
+  BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2.
+- **Judge mode**: `--judge-cmd <cmd>` hooks an external LLM evaluator.
+  Prompt on stdin, answer on stdout. Deterministic grading via the same
+  normalized-substring primitive. Judge transcript written to
+  `judge-transcript-<variant>-seed<N>.jsonl`.
+- **Cross-language conformance**: `conformance/token_efficiency_vectors.json`
+  covers token estimator and evidence scorer. Both twins pass.
+
 ## Unreleased (LME-01 stream)
 
 **mcp-benchmarker: LongMemEval session-recall benchmarking**
