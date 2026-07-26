@@ -1,0 +1,297 @@
+import Foundation
+
+// LMEBRunner.swift — LMEB/ConvoMem retrieval harness.
+//
+// This runner OWNS the test-estate lifecycle: for each query it provisions a
+// fresh scratch estate under /tmp/lmeb-bench-XXXXXX, launches mootx01 with
+// MOOTX01_DATA_DIR pointing at it, ingests candidate documents via live MCP
+// write, queries via live MCP query, records the UUID→docID manifest, scores,
+// and tears down the estate.
+//
+// Key differences from LongMemEvalRunner.swift:
+//   - Ground truth is a SET OF DOCUMENT IDs (not session IDs). The retrieval
+//     scope per query is the scene's candidate pool (10–168 docs), not all 500k.
+//   - Scratch dir prefix is /tmp/lmeb-bench- (distinct from /tmp/lme-bench-).
+//   - VerbMap location is "benchmark/lmeb" (distinct from "benchmark/longmemeval").
+//   - Each corpus doc is ingested as a single moot_file_memory call; there is
+//     no session/turn structure.
+//
+// Safety guarantees:
+//   - lmebScratchDir() names the dir with /tmp/lmeb-bench- so the teardown
+//     guard can distinguish LMEB scratch dirs from arbitrary /tmp directories.
+//   - lmebGuardedTeardown() refuses any path without the /tmp/lmeb-bench- prefix.
+//   - The built EndpointConfig always carries MOOTX01_DATA_DIR=/tmp/lmeb-bench-...
+//     so assertScratchBackend (GauntletCLI.swift) independently verifies the
+//     scratch constraint before any write begins.
+
+// MARK: - VerbMap
+
+/// Standard mootx01 VerbMap used for LMEB ingestion + recall queries.
+///
+/// location: "benchmark/lmeb" scopes all writes to the LMEB namespace —
+/// distinct from the longmemeval namespace so the two benchmarks never share
+/// content when run on the same estate.
+let lmebMootVerbMap = EndpointConfig.VerbMap(
+    write: "moot_file_memory",
+    query: "moot_memory_search",
+    list: nil,
+    constantArgs: ["location": "benchmark/lmeb"],
+    resultFormat: .mootText
+)
+
+// MARK: - Manifest entry
+
+/// Maps a filed-memory UUID back to its origin doc in the candidate pool.
+struct LMEBManifestEntry: Sendable {
+    /// The UUID returned by moot_file_memory ("filed memory <UUID>").
+    let uuid: String
+    /// The corpus document ID this ingestion represents.
+    let docID: String
+}
+
+// MARK: - Per-query result
+
+/// The raw result of running the LMEB harness against one query.
+struct LMEBQueryResult: Sendable {
+    /// Query identifier, e.g. "scene_42_q_0".
+    let queryID: String
+    /// Time taken for the moot_memory_search call, in seconds.
+    let queryLatencySeconds: Double
+    /// Doc IDs retrieved by moot_memory_search, in ranked order (UUID→docID mapped).
+    /// UUIDs not in the manifest are dropped (conservative: unmappable hits never
+    /// earn credit).
+    let retrievedDocIDs: [String]
+    /// Ground-truth relevant document IDs for this query.
+    let relevantDocIDs: Set<String>
+    /// True when the DegeneracyGuard classified the backend as healthy.
+    let guardHealthy: Bool
+    /// Diagnostic message when the guard was not healthy.
+    let guardDiagnostic: String?
+    /// Total number of candidate docs ingested for this query.
+    let docsIngested: Int
+    /// Mean write latency (seconds) across all ingested docs.
+    let writeMeanLatencySeconds: Double
+}
+
+// MARK: - Run config
+
+/// Configuration for one LMEB run.
+struct LMEBRunConfig: Sendable {
+    /// Path to the mootx01 binary.
+    let mootBinaryPath: String
+    /// Root data directory (contains one subdirectory per evidence type).
+    let dataDir: URL
+    /// Evidence types to include, e.g. ["user_evidence", "preference_evidence"].
+    let evidenceTypes: [String]
+    /// Maximum number of queries to run. nil = all queries.
+    let limit: Int?
+    /// Skip this many queries from the (seeded-shuffled) list.
+    let offset: Int
+    /// Seed for deterministic query shuffling.
+    let seed: UInt64
+    /// Directory to write the results report. nil = current directory.
+    let outDir: URL?
+    /// Run label for the report filename and header.
+    let runLabel: String
+}
+
+// MARK: - Scratch estate management
+
+/// Creates a fresh scratch directory under /tmp/lmeb-bench-<12hex> for LMEB use.
+///
+/// The /tmp/lmeb-bench- prefix is the contract with `lmebGuardedTeardown`.
+/// The UUID suffix guarantees uniqueness across concurrent runs.
+func lmebScratchDir() throws -> URL {
+    let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)
+    let path = "/tmp/lmeb-bench-\(suffix)"
+    let url = URL(fileURLWithPath: path)
+    do {
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    } catch {
+        throw MCPError(description: "lmebScratchDir: could not create \(path): \(error)")
+    }
+}
+
+/// Deletes a scratch directory created by `lmebScratchDir`. Refuses any path
+/// that does not carry the `/tmp/lmeb-bench-` prefix — mirrors the safety
+/// guard in `lmeGuardedTeardown` (commit f5e51a50).
+func lmebGuardedTeardown(_ url: URL) throws {
+    let path = url.path
+    guard path.hasPrefix("/tmp/lmeb-bench-") else {
+        throw MCPError(description:
+            "SAFETY: lmebGuardedTeardown refused to delete '\(path)' — "
+            + "path must have the /tmp/lmeb-bench- prefix. "
+            + "Only directories created by lmebScratchDir() may be torn down by this guard.")
+    }
+    do {
+        try FileManager.default.removeItem(at: url)
+    } catch {
+        FileHandle.standardError.write(Data(
+            "[lmeb] teardown warning: could not remove \(path): \(error)\n".utf8))
+    }
+}
+
+// MARK: - EndpointConfig builder
+
+/// Builds an EndpointConfig for mootx01 pointing at a scratch estate.
+func lmebEndpointConfig(scratchDir: URL, mootBinaryPath: String) throws -> EndpointConfig {
+    let command = "MOOTX01_DATA_DIR=\(scratchDir.path) \(mootBinaryPath)"
+    let endpoint = EndpointConfig(
+        name: "mootx01-lmeb",
+        transport: .stdio(command: command),
+        auth: nil,
+        verbMap: lmebMootVerbMap,
+        role: .target
+    )
+    // Belt-and-suspenders: assertScratchBackend verifies the scratch constraint
+    // independently before any write begins.
+    try assertScratchBackend(endpoint)
+    return endpoint
+}
+
+// MARK: - Runner
+
+/// Runs the LMEB harness against a loaded corpus. Returns per-query results
+/// with manifest, latency, and guard verdict for each query.
+///
+/// Strategy: fresh-per-query estate. Each query gets its own /tmp/lmeb-bench-*
+/// directory → clean ingest → guard probe → retrieval query → teardown.
+/// This matches the `longmemeval` default (--fresh-per-question) and gives
+/// correct isolation across queries from different scenes.
+func runLMEBQueries(
+    queries: [LMEBQuery],
+    corpus: LMEBCorpus,
+    config: LMEBRunConfig
+) async throws -> [LMEBQueryResult] {
+    // Deterministic shuffle using SplitMix64 (fleet-standard PRNG).
+    var rng = SplitMix64(seed: config.seed)
+    var shuffled = queries
+    for i in stride(from: shuffled.count - 1, through: 1, by: -1) {
+        let j = rng.upTo(i + 1)
+        shuffled.swapAt(i, j)
+    }
+    let afterOffset = Array(shuffled.dropFirst(config.offset))
+    let sliced: [LMEBQuery]
+    if let limit = config.limit {
+        sliced = Array(afterOffset.prefix(limit))
+    } else {
+        sliced = afterOffset
+    }
+
+    var results: [LMEBQueryResult] = []
+    results.reserveCapacity(sliced.count)
+
+    for query in sliced {
+        // Candidate pool for this query's scene.
+        let candidateDocIDs = corpus.candidateDocs(forQuery: query.id)
+        let relevantDocIDs = corpus.relevantDocs(forQuery: query.id)
+
+        // Provision fresh estate.
+        let scratchURL = try lmebScratchDir()
+        let endpoint = try lmebEndpointConfig(scratchDir: scratchURL,
+                                               mootBinaryPath: config.mootBinaryPath)
+        let client = MCPClient(endpoint: endpoint)
+        try await client.connect()
+        defer {
+            Task { await client.disconnect() }
+            try? lmebGuardedTeardown(scratchURL)
+        }
+
+        // Ingest each candidate doc via live moot_file_memory.
+        // n=true: inline-encoding barrier — encoding completes synchronously before
+        // the write returns, so the recall query cannot race the encoding queue.
+        // This is the same correctness invariant as the LME harness.
+        var manifest: [LMEBManifestEntry] = []
+        var writeTimes: [Double] = []
+
+        for docID in candidateDocIDs {
+            guard let doc = corpus.docsByID[docID] else {
+                // Candidate doc not in corpus (cross-evidence-type ID or filtered load).
+                // Skip gracefully — the scorer treats it as unretrieved.
+                continue
+            }
+            var writeArgs: [String: JSONValue] = [
+                lmebMootVerbMap.contentArg: .string(doc.text),
+            ]
+            for (k, v) in lmebMootVerbMap.constantArgs {
+                writeArgs[k] = .string(v)
+            }
+            // Inline encoding: n=true ensures encoding completes before write returns.
+            writeArgs["n"] = .bool(true)
+
+            let writeStart = Date()
+            let writeResult = try await client.callTool(
+                lmebMootVerbMap.write,
+                arguments: writeArgs,
+                format: lmebMootVerbMap.resultFormat
+            )
+            let writeDuration = Date().timeIntervalSince(writeStart)
+            writeTimes.append(writeDuration)
+
+            if let uuid = writeResult.writeAssignedID {
+                manifest.append(LMEBManifestEntry(uuid: uuid, docID: docID))
+            }
+        }
+
+        // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.
+        let guard_ = DegeneracyGuard()
+        let probeRankings = await probeMCPClient(client, verbMap: lmebMootVerbMap,
+                                                  name: "mootx01-lmeb")
+        let verdict = guard_.classify(probeRankings: probeRankings)
+        let guardHealthy: Bool
+        if case .healthy = verdict { guardHealthy = true } else { guardHealthy = false }
+        let guardDiagnostic: String? = guardHealthy ? nil : verdict.diagnostic
+
+        // Query via moot_memory_search.
+        var queryArgs: [String: JSONValue] = [
+            lmebMootVerbMap.queryArg: .string(query.text),
+        ]
+        for (k, v) in lmebMootVerbMap.constantArgs { queryArgs[k] = .string(v) }
+        let queryStart = Date()
+        let queryResult = try await client.callTool(
+            lmebMootVerbMap.query,
+            arguments: queryArgs,
+            format: lmebMootVerbMap.resultFormat
+        )
+        let queryLatency = Date().timeIntervalSince(queryStart)
+
+        // Map returned UUIDs → docIDs using the manifest.
+        // UUIDs not in the manifest are dropped (conservative: unmappable hits never
+        // earn credit, matching the LME UUID→session mapping policy).
+        let uuidToDocID: [String: String] = Dictionary(
+            manifest.map { ($0.uuid, $0.docID) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var seen: Set<String> = []
+        var rankedDocIDs: [String] = []
+        for uuid in queryResult.orderedIDs {
+            guard let docID = uuidToDocID[uuid] else { continue }
+            if seen.insert(docID).inserted {
+                rankedDocIDs.append(docID)
+            }
+        }
+
+        let writeMean = writeTimes.isEmpty ? 0.0
+            : writeTimes.reduce(0, +) / Double(writeTimes.count)
+
+        results.append(LMEBQueryResult(
+            queryID: query.id,
+            queryLatencySeconds: queryLatency,
+            retrievedDocIDs: rankedDocIDs,
+            relevantDocIDs: relevantDocIDs,
+            guardHealthy: guardHealthy,
+            guardDiagnostic: guardDiagnostic,
+            docsIngested: manifest.count,
+            writeMeanLatencySeconds: writeMean
+        ))
+
+        let progressMsg = "[lmeb] query \(results.count)/\(sliced.count) "
+            + "\(query.id): ingested \(manifest.count) docs, "
+            + "guard=\(guardHealthy ? "healthy" : "EXCLUDED"), "
+            + "retrieved \(rankedDocIDs.count) docs\n"
+        FileHandle.standardError.write(Data(progressMsg.utf8))
+    }
+
+    return results
+}

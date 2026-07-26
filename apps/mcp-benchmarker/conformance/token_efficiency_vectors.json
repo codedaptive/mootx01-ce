@@ -1,0 +1,170 @@
+{
+  "_comment": "Conformance vectors for LME-03 token estimator and evidence-density scorer. Both the Swift leg (LongMemEvalTokenEfficiency.swift) and the Rust twin must produce identical results for every case. Token estimator: (utf8_byte_count + 3) / 4 (ceiling integer division). Evidence hit: normalized-substring match (lowercase, whitespace-collapsed).",
+  "token_estimator_cases": [
+    {
+      "id": "empty-string",
+      "input": "",
+      "expected_tokens": 0,
+      "note": "Empty string: 0 bytes → 0 tokens"
+    },
+    {
+      "id": "single-ascii-char",
+      "input": "a",
+      "expected_tokens": 1,
+      "note": "1 byte: ceiling(1/4) = 1"
+    },
+    {
+      "id": "four-ascii-chars-exact",
+      "input": "abcd",
+      "expected_tokens": 1,
+      "note": "4 bytes: ceiling(4/4) = 1 (exact multiple)"
+    },
+    {
+      "id": "five-ascii-chars",
+      "input": "abcde",
+      "expected_tokens": 2,
+      "note": "5 bytes: ceiling(5/4) = 2"
+    },
+    {
+      "id": "hello-world",
+      "input": "hello world",
+      "expected_tokens": 3,
+      "note": "11 bytes: (11+3)/4 = 3"
+    },
+    {
+      "id": "twelve-ascii-chars-exact",
+      "input": "abcdefghijkl",
+      "expected_tokens": 3,
+      "note": "12 bytes: ceiling(12/4) = 3 (exact multiple)"
+    },
+    {
+      "id": "thirteen-ascii-chars",
+      "input": "abcdefghijklm",
+      "expected_tokens": 4,
+      "note": "13 bytes: (13+3)/4 = 4"
+    },
+    {
+      "id": "multibyte-utf8-cafe",
+      "input": "café",
+      "expected_tokens": 2,
+      "note": "c=1, a=1, f=1, é=2 bytes = 5 bytes total: (5+3)/4 = 2"
+    },
+    {
+      "id": "multibyte-utf8-japanese",
+      "input": "こんにちは",
+      "expected_tokens": 4,
+      "note": "5 chars × 3 bytes each = 15 bytes: (15+3)/4 = 4"
+    },
+    {
+      "id": "english-pangram",
+      "input": "The quick brown fox jumps over the lazy dog",
+      "expected_tokens": 11,
+      "note": "43 bytes: (43+3)/4 = 11"
+    },
+    {
+      "id": "sixteen-ascii-exact",
+      "input": "1234567890abcdef",
+      "expected_tokens": 4,
+      "note": "16 bytes: ceiling(16/4) = 4 (exact multiple)"
+    },
+    {
+      "id": "seventeen-ascii",
+      "input": "1234567890abcdefg",
+      "expected_tokens": 5,
+      "note": "17 bytes: (17+3)/4 = 5"
+    }
+  ],
+  "evidence_hit_cases": [
+    {
+      "id": "exact-match",
+      "evidence_text": "the meeting is on monday",
+      "payload_text": "the meeting is on monday",
+      "expected_hit": true,
+      "note": "Identical strings → hit"
+    },
+    {
+      "id": "case-insensitive-hit",
+      "evidence_text": "The Meeting Is On Monday",
+      "payload_text": "the meeting is on monday at 9am",
+      "expected_hit": true,
+      "note": "Evidence uppercase, payload lowercase — normalized match"
+    },
+    {
+      "id": "evidence-is-substring-of-payload",
+      "evidence_text": "meeting is on monday",
+      "payload_text": "reminder: the meeting is on monday at 9am in room 3",
+      "expected_hit": true,
+      "note": "Evidence phrase embedded in larger payload"
+    },
+    {
+      "id": "whitespace-normalization-hit",
+      "evidence_text": "meeting  is  on  monday",
+      "payload_text": "meeting is on monday",
+      "expected_hit": true,
+      "note": "Multi-space in evidence collapses to single space → matches"
+    },
+    {
+      "id": "newline-in-evidence",
+      "evidence_text": "meeting\nis\non\nmonday",
+      "payload_text": "meeting is on monday",
+      "expected_hit": true,
+      "note": "Newlines in evidence normalized to spaces → matches"
+    },
+    {
+      "id": "not-found",
+      "evidence_text": "the meeting is on tuesday",
+      "payload_text": "the meeting is on monday",
+      "expected_hit": false,
+      "note": "Different day → no hit"
+    },
+    {
+      "id": "empty-evidence",
+      "evidence_text": "",
+      "payload_text": "some payload text",
+      "expected_hit": false,
+      "note": "Empty evidence always returns false — no fact to match"
+    },
+    {
+      "id": "empty-payload",
+      "evidence_text": "some evidence",
+      "payload_text": "",
+      "expected_hit": false,
+      "note": "Empty payload → evidence cannot appear in it"
+    },
+    {
+      "id": "both-empty",
+      "evidence_text": "",
+      "payload_text": "",
+      "expected_hit": false,
+      "note": "Both empty → evidence is empty → false"
+    },
+    {
+      "id": "partial-word-in-payload",
+      "evidence_text": "monday meeting room",
+      "payload_text": "the meeting is on monday",
+      "expected_hit": false,
+      "note": "Evidence phrase order differs — substring match requires contiguous sequence"
+    },
+    {
+      "id": "moot-factoid-style-match",
+      "evidence_text": "user prefers tea over coffee",
+      "payload_text": "found 2 distilled factoid(s) for: beverage preference\n[1] drawer_id: abc123\n    user prefers tea over coffee in the mornings\n    confidence: 0.91 | sources: 2 | snr: 0.88",
+      "expected_hit": true,
+      "note": "Evidence phrase found within moot_recall_distilled factoid output format"
+    },
+    {
+      "id": "moot-exact-style-match",
+      "evidence_text": "user prefers tea over coffee",
+      "payload_text": "found 5 memory(s) matching: beverage preference\nabc123  [benchmark/longmemeval]  user prefers tea over coffee in the morning.\ndef456  [benchmark/longmemeval]  likes green tea.",
+      "expected_hit": true,
+      "note": "Evidence phrase found within moot_memory_search output format"
+    },
+    {
+      "id": "moot-factoid-style-miss",
+      "evidence_text": "user prefers coffee over tea",
+      "payload_text": "found 2 distilled factoid(s) for: beverage preference\n[1] drawer_id: abc123\n    user prefers tea over coffee in the mornings\n    confidence: 0.91 | sources: 2 | snr: 0.88",
+      "expected_hit": false,
+      "note": "Evidence has inverted order — 'coffee over tea' vs 'tea over coffee' → miss"
+    }
+  ]
+}

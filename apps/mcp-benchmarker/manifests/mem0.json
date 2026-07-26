@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "product": {
+    "id": "mem0",
+    "displayName": "Mem0",
+    "version": "current",
+    "homepage": "https://github.com/mem0ai/mem0-mcp",
+    "provenance": "authored-from-public-docs",
+    "provenanceNote": "DRAFT. Tool names (add_memory, search_memories, get_memories, get_memory) are from the mem0ai/mem0-mcp docs and are believed correct. Argument keys, result-field keys, the transport command, and the technique mapping are INFERRED and NOT yet verified against a live mem0 MCP server — verify before publishing any number. Architecture: vector store + LLM-based fact extraction on write (add distills/summarizes via an LLM before embedding); optional graph memory (MEM0_ENABLE_GRAPH_DEFAULT)."
+  },
+  "transport": { "stdio": { "command": "mem0-mcp" } },
+  "role": "both",
+  "calls": {
+    "write": {
+      "tool": "add_memory",
+      "args": { "content": "messages" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "memory" },
+      "technique": ["llm_extraction", "embedding"]
+    },
+    "query": {
+      "tool": "search_memories",
+      "args": { "query": "query" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "memory" },
+      "technique": ["vector_cosine"]
+    },
+    "list": {
+      "tool": "get_memories",
+      "args": {},
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "memory" },
+      "technique": ["none"],
+      "pagination": { "limitArg": "limit", "offsetArg": "offset", "pageSize": 100 }
+    },
+    "fetch": {
+      "tool": "get_memory",
+      "args": { "id": "memory_id" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "memory", "fetchContentKey": "memory" },
+      "technique": ["none"]
+    }
+  }
+}
