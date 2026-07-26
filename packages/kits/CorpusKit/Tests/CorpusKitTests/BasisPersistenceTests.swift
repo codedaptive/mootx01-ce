@@ -9,14 +9,22 @@
 //      UPSERT (one row per (modelID, modelVersion), retrain replaces in place);
 //      deleteAll wipes the table.
 //   2. reindex on a trainable Corpus: trains + persists a basis, re-embeds.
-//   3. First-ingest auto-train: ingesting into a fresh trainable Corpus with no
-//      basis trains+persists on the first ingest; a second ingest does NOT
-//      retrain (fold-in path, basis row unchanged).
+//   3. First-ingest auto-train + growth retrain: ingesting into a fresh trainable
+//      Corpus trains on the first ingest; a SECOND ingest also retrains when the
+//      corpus has doubled (growth-retrain, Kinsta-fix), but a third ingest does
+//      NOT retrain unless it crosses the next doubling threshold (fold-in path).
 //   4. Load-on-open: after reindex + close, reopening a trainable Corpus loads
 //      the persisted basis (dense lane trained-ready) and serves embeddings
 //      identical to the pre-close provider.
 //   5. Lifecycle: destroyRecallIndex wipes basis rows (no orphans); a
 //      non-trainable Corpus persists no basis.
+//   6. Cross-port conformance: persist → reopen → embed matches the α canonical
+//      fixture (byte-for-byte parity with the Rust port).
+//   7. Per-doc ingest non-degeneracy (REGRESSION — fixes Kinsta-verified recall
+//      collapse): after 20+ docs ingested one-at-a-time, LSA-basis query
+//      discrimination is non-degenerate (relevant docs rank in top-k).
+//   8. Reindex recovers a deliberately-degenerate basis: inject a 1-doc-trained
+//      LSA basis, reopen, confirm OOV, reindex, confirm recovery.
 //
 // The trainable provider is RI (RandomIndexingProvider) — the simplest
 // distributional provider with no finalize step. The fixed corpus is the α RI
@@ -161,10 +169,10 @@ struct BasisPersistenceTests {
         }
     }
 
-    // MARK: - §3 first-ingest auto-train
+    // MARK: - §3 first-ingest auto-train + growth retrain
 
-    @Test("first ingest into a fresh trainable Corpus auto-trains and persists")
-    func firstIngestAutoTrains() async throws {
+    @Test("first ingest auto-trains; second ingest growth-retrains; third fold-ins")
+    func firstIngestAutoTrainsAndGrowthRetrains() async throws {
         try await GlobalTestLock.shared.withLock {
             let storage = try storage(at: scratchURL())
             let corpus = try await freshRICorpus(storage)
@@ -173,18 +181,26 @@ struct BasisPersistenceTests {
             // No basis before the first ingest.
             #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0") == nil)
 
+            // Doc 0: first-ingest auto-train fires, basis trained on 1 chunk.
             try await corpus.ingest(riDocs[0], sourceID: "doc-0", now: now)
-
-            // A basis now exists (auto-trained on the first-ingest snapshot).
             let afterFirst = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
             #expect(afterFirst != nil)
-            let countAfterFirst = afterFirst?.trainedChunkCount
+            #expect(afterFirst?.trainedChunkCount == 1,
+                    "first ingest must auto-train on the 1-chunk corpus")
 
-            // A SECOND ingest must NOT retrain: the basis row (chunk count) is
-            // unchanged — the fold-in path embeds the new chunk on the frozen basis.
+            // Doc 1: corpus grows to 2 chunks, 2 >= 1 * 2 → growth retrain fires.
+            // This prevents a rank-1 LSA SVD (trained on 1 doc) from persisting
+            // as the frozen basis (Kinsta-verified recall regression fix).
             try await corpus.ingest(riDocs[1], sourceID: "doc-1", now: now.addingTimeInterval(60))
             let afterSecond = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
-            #expect(afterSecond?.trainedChunkCount == countAfterFirst)
+            #expect(afterSecond?.trainedChunkCount == 2,
+                    "second ingest must growth-retrain: corpus doubled from 1 to 2 chunks")
+
+            // Doc 2: corpus grows to 3 chunks, 3 < 2 * 2 = 4 → fold-in (no retrain).
+            try await corpus.ingest(riDocs[2], sourceID: "doc-2", now: now.addingTimeInterval(120))
+            let afterThird = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
+            #expect(afterThird?.trainedChunkCount == 2,
+                    "third ingest must fold-in: corpus 3 < 4 (2 * 2), no retrain yet")
         }
     }
 
@@ -478,6 +494,186 @@ struct BasisPersistenceTests {
                     "batch re-import must not inflate the maintained document count")
             #expect(a1?.vocabSize == a0?.vocabSize,
                     "batch re-import must not inflate the maintained vocabulary anchor")
+        }
+    }
+
+    // MARK: - §8 per-doc ingest non-degeneracy (REGRESSION — Kinsta-verified bug)
+
+    /// 20 documents split evenly between two topics: cars and animals.
+    /// Each doc uses distinct vocabulary so that a well-trained LSA basis
+    /// can separate them into different semantic directions. A degenerate basis
+    /// (trained on 1 doc only) would have only car vocabulary, so animal-topic
+    /// queries would be all-OOV.
+    private let lsaCarDocs: [String] = (1...10).map {
+        "car engine fuel road vehicle drive speed combustion power auto document \($0)"
+    }
+    private let lsaAnimalDocs: [String] = (1...10).map {
+        "dog cat bark fetch run animal pet fur forest wild document \($0)"
+    }
+
+    private func freshLSACorpus(_ storage: any Storage) async throws -> Corpus {
+        // Default LsaProvider: rank=3, svdSweeps=30, modelID="lsa-v1".
+        try await Corpus(storage: storage, model: .lsa(provider: LsaProvider()))
+    }
+
+    /// REGRESSION TEST — fails on code with degenerate-basis bug, passes after fix.
+    ///
+    /// Per-document ingest (the impatient encode path) used to train the LSA basis
+    /// on the FIRST document only, producing a rank-1 SVD. All subsequent documents
+    /// would fold onto this 1-doc basis, collapsing all query vectors to the same
+    /// direction — Kinsta-verified recall from 0.853 to 0.56 any@5 on LongMemEval
+    /// 50q (2026-07-26).
+    ///
+    /// After the fix, growth retrains fire at 2× chunk doublings until the corpus
+    /// reaches the stability threshold (50 chunks), so the basis reflects the full
+    /// accumulated corpus. With 20 docs the final auto-train covers 16 of them,
+    /// giving a much richer vocabulary and non-degenerate semantic directions.
+    ///
+    /// Degenerate-basis signal: "dog bark fetch animal" are all OOV in a 1-car-doc
+    /// vocabulary → floatNearest returns .unavailableNoVocabHit. After the fix,
+    /// those terms are in-vocabulary and the animal docs rank in the top results.
+    @Test("per-doc ingest of 20 docs produces a non-degenerate LSA basis (REGRESSION)")
+    func perDocIngestProducesNonDegenerateBasis() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try storage(at: scratchURL())
+            let corpus = try await freshLSACorpus(storage)
+
+            // Ingest all 20 docs ONE AT A TIME (the impatient path).
+            let allDocs = lsaCarDocs + lsaAnimalDocs
+            for (i, doc) in allDocs.enumerated() {
+                let category = i < 10 ? "car" : "animal"
+                try await corpus.ingest(
+                    doc,
+                    sourceID: "\(category)-\(i)",
+                    now: now.addingTimeInterval(TimeInterval(i))
+                )
+            }
+
+            // Degenerate-basis signal: on old code, animal query is OOV (only
+            // car vocabulary in the 1-doc trained basis). After the fix the
+            // growth-retrain path trains on all 16+ docs before this query runs,
+            // so animal terms ARE in-vocabulary.
+            let animalQuery = await corpus.floatNearest(query: "dog bark fetch animal", limit: 5)
+            guard case .hits(let animalHits) = animalQuery else {
+                // If we get .unavailableNoVocabHit (OOV) or .unavailableProviderOptOut,
+                // the basis was degenerate — this is the regression we're catching.
+                Issue.record("""
+                    animal query returned a dark outcome (\(animalQuery)) — \
+                    basis is degenerate (trained on too few docs). \
+                    Expected .hits from a non-degenerate 20-doc basis.
+                    """)
+                return
+            }
+
+            // At least one animal doc should rank in the top 5. A non-degenerate
+            // basis separates car and animal semantic directions; a degenerate one
+            // would rank them randomly or return no results.
+            let hasAnimalDoc = animalHits.prefix(5).contains { $0.itemID.hasPrefix("animal-") }
+            #expect(hasAnimalDoc,
+                    "animal query must retrieve an animal doc from a non-degenerate 20-doc LSA basis")
+
+        }
+    }
+
+    // MARK: - §9 reindex recovers a deliberately-degenerate basis
+
+    /// Verify that reindex(now:) retrains on the FULL corpus and restores a basis
+    /// that was deliberately degraded to a 1-doc-trained state.
+    ///
+    /// Flow:
+    ///   1. Ingest 20 docs via ingestBatch (Phase 1b trains on full corpus).
+    ///   2. Overwrite the basis in BasisStore with a 1-doc-trained "degenerate" blob.
+    ///   3. Reopen the corpus — it loads the degenerate basis from BasisStore.
+    ///   4. Confirm degenerate state: animal query is OOV (car-only vocabulary).
+    ///   5. Call corpus.reindex(now:) — must retrain on all 20 docs.
+    ///   6. Confirm recovery: trainedChunkCount == 20 and animal query returns hits.
+    @Test("reindex recovers a deliberately-degenerate LSA basis")
+    func reindexRecoversDegenerateBasis() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = scratchURL()
+            let allDocs = lsaCarDocs + lsaAnimalDocs
+            let lsaModelID = "lsa-v1"
+            let lsaModelVersion = "1.0.0"
+
+            // Phase 1: ingest all 20 docs via batch (Phase 1b trains on full corpus).
+            do {
+                let s1 = try storage(at: url)
+                let corpus = try await freshLSACorpus(s1)
+                let items: [(text: String, sourceID: String, now: Date)] =
+                    allDocs.enumerated().map { (i, doc) in
+                        let cat = i < 10 ? "car" : "animal"
+                        return (text: doc, sourceID: "\(cat)-\(i)",
+                                now: now.addingTimeInterval(TimeInterval(i)))
+                    }
+                try await corpus.ingestBatch(items)
+                // Verify batch trained on full corpus.
+                let store = BasisStore(storage: s1)
+                let goodBasis = try await store.load(modelID: lsaModelID, modelVersion: lsaModelVersion)
+                #expect(goodBasis?.trainedChunkCount == allDocs.count,
+                        "ingestBatch must train on the full 20-doc corpus")
+            }
+
+            // Phase 2: inject a degenerate (1-doc-trained) basis blob into BasisStore.
+            let degradedBlob: Data = {
+                let p = LsaProvider()
+                p.trainOnCorpus(texts: [allDocs[0]])    // car-only vocabulary
+                return p.serializeBasis()
+            }()
+            let s2 = try storage(at: url)
+            let basisStore2 = BasisStore(storage: s2)
+            try await basisStore2.upsert(PersistedBasis(
+                modelID: lsaModelID,
+                modelVersion: lsaModelVersion,
+                basis: degradedBlob,
+                trainedAt: now,
+                trainedChunkCount: 1
+            ))
+
+            // Phase 3: reopen the corpus — resolveProvider loads the degenerate basis.
+            let s3 = try storage(at: url)
+            let corpus3 = try await freshLSACorpus(s3)
+
+            // Phase 4: confirm the degenerate state. "dog bark fetch animal" are
+            // all-OOV in the 1-car-doc vocabulary → the float lane should be dark.
+            // We assert this as a soft check: the injection is expected to produce
+            // OOV (unavailableNoVocabHit) or a provider opt-out, but even if the
+            // degenerate blob behaves differently, Phases 5–6 still test recovery.
+            let animalBefore = await corpus3.floatNearest(
+                query: "dog bark fetch animal", limit: 5)
+            let isDark: Bool
+            switch animalBefore {
+            case .unavailableNoVocabHit, .unavailableProviderOptOut, .unavailableNoFloatRows:
+                isDark = true
+            default:
+                isDark = false
+            }
+            #expect(isDark,
+                    "animal query must be dark before reindex — degenerate 1-doc basis has no animal vocabulary")
+
+            // Phase 5: reindex retrains on the full corpus.
+            try await corpus3.reindex(now: now.addingTimeInterval(100))
+
+            // Phase 6: verify recovery — basis now trained on all 20 docs.
+            let basisStore3 = BasisStore(storage: s3)
+            let reindexedBasis = try await basisStore3.load(
+                modelID: lsaModelID, modelVersion: lsaModelVersion)
+            #expect(reindexedBasis?.trainedChunkCount == allDocs.count,
+                    "reindex must retrain on the full corpus (all 20 docs)")
+
+            // Animal query must now return hits — vocabulary restored by full retrain.
+            let animalAfter = await corpus3.floatNearest(
+                query: "dog bark fetch animal", limit: 5)
+            guard case .hits(let animalHits) = animalAfter else {
+                Issue.record("""
+                    animal query still dark after reindex (\(animalAfter)). \
+                    reindex must restore the full vocabulary so animal terms are \
+                    in-vocabulary and animal docs rank in results.
+                    """)
+                return
+            }
+            let hasAnimalDoc = animalHits.prefix(5).contains { $0.itemID.hasPrefix("animal-") }
+            #expect(hasAnimalDoc,
+                    "animal doc must rank in top-5 after reindex on the full 20-doc corpus")
         }
     }
 }
