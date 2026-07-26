@@ -264,6 +264,12 @@ fn ingest_turn(
     for (k, v) in &verb_map.constant_args {
         args.insert(k.clone(), JsonValue::String(v.clone()));
     }
+    // Inline encoding: n=true ensures the turn is semantically encoded BEFORE
+    // this call returns. Without it, encoding is background — a recall query
+    // issued immediately after ingest may run before encoding completes, leading
+    // to artificially low recall numbers. This is the LME harness' correctness
+    // invariant: ingest → encode → query, with no race between encode and query.
+    args.insert("n".to_string(), JsonValue::Bool(true));
     let start = Instant::now();
     let result = client.call_tool(&verb_map.write, args, &verb_map.result_format)?;
     let elapsed = start.elapsed().as_secs_f64();

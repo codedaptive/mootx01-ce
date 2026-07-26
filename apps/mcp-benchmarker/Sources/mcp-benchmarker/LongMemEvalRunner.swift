@@ -281,6 +281,13 @@ func runLMEQuestions(
                 for (k, v) in lmeMootVerbMap.constantArgs {
                     writeArgs[k] = .string(v)
                 }
+                // Inline encoding: n=true ensures the turn is semantically encoded
+                // BEFORE the write returns. Without it encoding is background — a
+                // recall query issued after full ingest may run before the encoding
+                // queue drains, producing artificially low recall numbers. This is
+                // the LME harness' correctness invariant: ingest → encode → query,
+                // with no race between background encoding and the recall query.
+                writeArgs["n"] = .bool(true)
                 let writeStart = Date()
                 let writeResult = try await client.callTool(
                     lmeMootVerbMap.write,
