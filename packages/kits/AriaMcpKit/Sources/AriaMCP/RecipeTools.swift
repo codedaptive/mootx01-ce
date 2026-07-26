@@ -1382,9 +1382,9 @@ enum RecipeTools {
 
     // MARK: - JSON schema helpers
     //
-    // ToolProjection's schema helpers are private to that type, so the
-    // recipe surface carries its own minimal copies. Identical shapes —
-    // a future refactor could promote one shared set.
+    // `booleanSchema` is internal on ToolProjection and called directly from
+    // this type. `objectSchema`, `stringSchema`, and `integerSchema` below
+    // are RecipeTools-local helpers; ToolProjection has no equivalents.
 
     private static func objectSchema(
         properties: [String: JSONValue], required: [String]
