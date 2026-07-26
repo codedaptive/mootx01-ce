@@ -208,11 +208,18 @@ struct LMEScorerInfrastructureTests {
             answerSessionIDs: ["sess_a", "sess_c"],
             retrievedUUIDCount: 8
         )
+        let tokenEfficiency = LMEReportTokenEfficiency(
+            exactArmMeanTokens: 1200.0, denseArmMeanTokens: 300.0,
+            denseExactTokenRatio: 0.25,
+            exactEvidenceHitRate: nil, denseEvidenceHitRate: nil,
+            exactHitsPer1kTokens: nil, denseHitsPer1kTokens: nil
+        )
         let report = LMEReport(
             runID: "TEST-RUN-ID", runLabel: "lme-s-seed20260725",
             variant: "s", generatedAt: "2026-07-25T00:00:00Z",
             corpusStats: corpusStats, aggregate: aggregate,
-            latency: latency, perQuestion: [pq]
+            latency: latency, perQuestion: [pq],
+            tokenEfficiency: tokenEfficiency
         )
 
         let encoder = JSONEncoder()
@@ -233,6 +240,12 @@ struct LMEScorerInfrastructureTests {
         #expect(aggJSON["mrr"] != nil, "contract key 'mrr' must be present")
         #expect(aggJSON["recall_any_at_1"] != nil, "key 'recall_any_at_1' must be present")
         #expect(aggJSON["recall_all_at_1"] != nil, "key 'recall_all_at_1' must be present")
+        // Verify the LME-03 additive token_efficiency key is present (and has correct sub-keys).
+        #expect(rawJSON["token_efficiency"] != nil, "additive key 'token_efficiency' must be present")
+        let teJSON = try #require(rawJSON["token_efficiency"] as? [String: Any])
+        #expect(teJSON["exact_arm_mean_tokens"] != nil, "key 'exact_arm_mean_tokens' must be present")
+        #expect(teJSON["dense_arm_mean_tokens"] != nil, "key 'dense_arm_mean_tokens' must be present")
+        #expect(teJSON["dense_exact_token_ratio"] != nil, "key 'dense_exact_token_ratio' must be present")
 
         // Verify aggregate round-trips correctly.
         #expect(abs(decoded.aggregate.recallAnyAt1 - 0.75) < 1e-9)
@@ -261,7 +274,14 @@ struct LMEScorerInfrastructureTests {
             guardHealthy: false,
             guardDiagnostic: "queryInvariant: identical rankings across all probes",
             turnsIngested: 3,
-            writeMeanLatencySeconds: 0.05
+            writeMeanLatencySeconds: 0.05,
+            exactPayloadText: nil,
+            densePayloadText: nil,
+            denseQueryLatencySeconds: nil,
+            exactJudgeAnswer: nil,
+            exactJudgeCorrect: nil,
+            denseJudgeAnswer: nil,
+            denseJudgeCorrect: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == false)
@@ -291,7 +311,14 @@ struct LMEScorerInfrastructureTests {
             guardHealthy: true,
             guardDiagnostic: nil,
             turnsIngested: 2,
-            writeMeanLatencySeconds: 0.04
+            writeMeanLatencySeconds: 0.04,
+            exactPayloadText: nil,
+            densePayloadText: nil,
+            denseQueryLatencySeconds: nil,
+            exactJudgeAnswer: nil,
+            exactJudgeCorrect: nil,
+            denseJudgeAnswer: nil,
+            denseJudgeCorrect: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == true)

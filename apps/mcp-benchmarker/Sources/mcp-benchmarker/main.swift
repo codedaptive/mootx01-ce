@@ -761,9 +761,26 @@ func runLongMemEval(_ args: [String]) async throws {
     let limit = optionValue("--limit", in: args).flatMap(Int.init)
     let offset = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
     let seed = optionValue("--seed", in: args).flatMap(UInt64.init) ?? 20_260_725
+    // --arm exact|dense|both (default: both). Controls which recall paths are exercised.
+    //   exact: moot_memory_search only (LME-01 baseline path)
+    //   dense: moot_recall_distilled only (requires moot_consolidate after ingest)
+    //   both:  both arms per question for the two-arm token-efficiency comparison
+    let armStr = optionValue("--arm", in: args) ?? "both"
+    let arm: LMEArm
+    switch armStr {
+    case "exact": arm = .exact
+    case "dense": arm = .dense
+    case "both":  arm = .both
+    default:
+        throw MCPError(description: "--arm must be 'exact', 'dense', or 'both'; got '\(armStr)'")
+    }
     let sharedEstate = flagPresent("--shared-estate", in: args)
     let outDirStr = optionValue("--out", in: args)
     let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
+    // Judge mode (LME-03 Part 4): optional LLM-judged QA. Off by default.
+    // The command receives the prompt on stdin and writes its answer on stdout.
+    // Example: --judge-cmd "claude -p" or --judge-cmd "./judge.sh"
+    let judgeCmd = optionValue("--judge-cmd", in: args)
 
     // Warn on shared-estate: methodology-affecting (haystack contamination).
     if sharedEstate {
@@ -789,7 +806,9 @@ func runLongMemEval(_ args: [String]) async throws {
         seed: seed,
         freshPerQuestion: !sharedEstate,
         outDir: outDir,
-        runLabel: "lme-\(variant)-seed\(seed)"
+        runLabel: "lme-\(variant)-seed\(seed)-arm\(armStr)",
+        arm: arm,
+        judgeCmd: judgeCmd
     )
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
@@ -799,17 +818,74 @@ func runLongMemEval(_ args: [String]) async throws {
     let scores = results.map { scoreLMEQuestion($0) }
 
     // Build and write the report.
-    let report = buildLMEReport(config: runConfig, corpus: corpus, scores: scores)
+    let report = buildLMEReport(config: runConfig, corpus: corpus, results: results, scores: scores)
     let reportFilename = "lme-report-\(report.variant)-seed\(runConfig.seed).json"
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
         .appendingPathComponent(reportFilename)
     try writeLMEReport(report, to: reportURL)
+
+    // Judge transcript (LME-03 Part 4): write per-question judge calls to JSONL.
+    // Each line: {question_id, arm, gold_answer, judge_answer, correct}.
+    // Written only when --judge-cmd was supplied.
+    if judgeCmd != nil {
+        // Build a question-id → gold-answer lookup from the corpus.
+        let goldLookup = Dictionary(uniqueKeysWithValues:
+            corpus.questions.map { ($0.questionID, $0.answer) })
+        var lines: [String] = []
+        for result in results {
+            let gold = goldLookup[result.questionID] ?? ""
+            if let answer = result.exactJudgeAnswer {
+                let entry: [String: Any] = [
+                    "question_id": result.questionID,
+                    "arm": "exact",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": result.exactJudgeCorrect ?? false,
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: entry,
+                                                          options: [.sortedKeys]),
+                   let line = String(data: data, encoding: .utf8) {
+                    lines.append(line)
+                }
+            }
+            if let answer = result.denseJudgeAnswer {
+                let entry: [String: Any] = [
+                    "question_id": result.questionID,
+                    "arm": "dense",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": result.denseJudgeCorrect ?? false,
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: entry,
+                                                          options: [.sortedKeys]),
+                   let line = String(data: data, encoding: .utf8) {
+                    lines.append(line)
+                }
+            }
+        }
+        let transcriptContent = lines.joined(separator: "\n")
+            + (lines.isEmpty ? "" : "\n")
+        let transcriptFilename =
+            "judge-transcript-\(report.variant)-seed\(runConfig.seed).jsonl"
+        let transcriptURL = (outDir
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+            .appendingPathComponent(transcriptFilename)
+        try Data(transcriptContent.utf8).write(to: transcriptURL)
+        FileHandle.standardOutput.write(Data(
+            "[longmemeval] judge transcript: \(transcriptURL.path)\n".utf8))
+    }
 
     // Print scored summary to stdout.
     let guardHealthyCount = scores.filter(\.guardHealthy).count
     let guardRefusals = scores.count - guardHealthyCount
     let totalTurns = results.map(\.turnsIngested).reduce(0, +)
     let (agg, lat) = aggregateLMEScores(scores)
+
+    // Token efficiency summary lines (nil when arm absent or no has_answer).
+    let te = report.tokenEfficiency
+    func fmtTokens(_ t: Double?) -> String { t.map { String(format: "%.0f", $0) } ?? "N/A" }
+    func fmtRatio(_ r: Double?) -> String  { r.map { String(format: "%.3f", $0) } ?? "N/A" }
+    func fmtRate(_ r: Double?)  -> String  { r.map { String(format: "%.3f", $0) } ?? "N/A (no has_answer)" }
 
     let summary = """
         [longmemeval] run complete
@@ -826,6 +902,11 @@ func runLongMemEval(_ args: [String]) async throws {
           mrr:                  \(String(format: "%.4f", agg.mrr))
           query p50:            \(String(format: "%.1f", lat.queryP50Seconds * 1000)) ms
           query p95:            \(String(format: "%.1f", lat.queryP95Seconds * 1000)) ms
+          exact mean tokens:    \(fmtTokens(te.exactArmMeanTokens))
+          dense mean tokens:    \(fmtTokens(te.denseArmMeanTokens))
+          dense/exact ratio:    \(fmtRatio(te.denseExactTokenRatio))
+          exact evidence rate:  \(fmtRate(te.exactEvidenceHitRate))
+          dense evidence rate:  \(fmtRate(te.denseEvidenceHitRate))
           estate strategy:      \(sharedEstate ? "shared" : "fresh-per-question")
           report written to:    \(reportURL.path)
 

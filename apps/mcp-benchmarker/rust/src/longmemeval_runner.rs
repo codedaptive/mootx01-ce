@@ -17,12 +17,29 @@ use crate::config::{EndpointConfig, EndpointRole, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::json_value::JsonValue;
 use crate::longmemeval_corpus::{LmeCorpus, LmeTurn};
+use crate::longmemeval_judge::{lme_grade_judge_answer, lme_judge_prompt, lme_run_judge};
 use crate::longmemeval_scorer::{LmeManifestEntry, LmeQuestionResult};
 use crate::mcp_client::{MCPClient, MCPError, ToolCaller};
 use crate::config::ResultFormat;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recall arm
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which recall arm(s) the LME token-efficiency benchmark exercises.
+/// Twin of Swift `LMEArm`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LmeArm {
+    /// Only the exact-recall arm — `moot_memory_search` with full content payload.
+    Exact,
+    /// Only the dense-recall arm — `moot_recall_distilled` with distilled factoid payload.
+    Dense,
+    /// Both arms per question, same estate, same ingest (default).
+    Both,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Run configuration
@@ -36,6 +53,13 @@ pub struct LmeRunConfig {
     pub limit: Option<usize>,
     pub label: Option<String>,
     pub out_dir: Option<PathBuf>,
+    /// Which recall arm(s) to benchmark. Default LmeArm::Both.
+    pub arm: LmeArm,
+    /// Optional judge command for LLM-judged QA mode.
+    /// When set, the harness runs the command subprocess per arm per question
+    /// (prompt on stdin, answer on stdout) and grades against the gold answer.
+    /// Off by default (None).
+    pub judge_cmd: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +130,27 @@ pub fn lme_verb_map() -> VerbMap {
         None,                                 // content_arg: defaults to "content"
         None,                                 // query_arg: defaults to "query"
         Some(constant_args),
+        Some(ResultFormat::MootText),
+    )
+}
+
+/// Returns the VerbMap for the dense recall arm of the LME token-efficiency benchmark.
+///
+/// Uses `moot_recall_distilled`, which:
+///   - Returns ~10-token distilled factoid prose per hit (capped at ~300 chars)
+///   - Requires `moot_consolidate` to be called after ingest, before the first query
+///   - Does NOT use a location constant arg (queries the estate-default wing)
+///
+/// Twin of Swift `lmeDenseMootVerbMap`.
+pub fn lme_dense_verb_map() -> VerbMap {
+    VerbMap::new(
+        "moot_file_memory",       // same ingest tool
+        "moot_recall_distilled",  // dense query tool
+        None,                     // list: not used
+        None,                     // fetch: not used
+        None,                     // content_arg: defaults to "content"
+        None,                     // query_arg: defaults to "query"
+        Some(BTreeMap::new()),    // constantArgs: empty (no location needed)
         Some(ResultFormat::MootText),
     )
 }
@@ -282,20 +327,24 @@ fn ingest_turn(
 }
 
 /// Runs the LME harness for a single question: create scratch dir → launch
-/// mootx01 → ingest haystack → probe → query → teardown.
+/// mootx01 → ingest haystack → probe → consolidate (dense arm) → query → teardown.
 ///
 /// Returns `Err` only for unrecoverable setup failures (scratch dir, binary
 /// launch). Guard failures are encoded as `LmeQuestionResult.guard_healthy=false`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_one_question(
     question_id: &str,
     question_type: &str,
     question_text: &str,
+    gold_answer: &str,
     haystack_session_ids: &[String],
     haystack_sessions: &[Vec<LmeTurn>],
     answer_session_ids: &[String],
     moot_binary: &str,
     seed: u64,
     question_index: usize,
+    arm: &LmeArm,
+    judge_cmd: Option<&str>,
 ) -> Result<LmeQuestionResult, MCPError> {
     let scratch = lme_scratch_dir(seed, question_index)?;
     let guard = DegeneracyGuard::new();
@@ -351,6 +400,8 @@ pub fn run_one_question(
     };
 
     // ── Probe for degeneracy guard ────────────────────────────────────────────
+    // Guard probes always use the exact verbMap (moot_memory_search) regardless of arm —
+    // the guard verifies estate health, not arm-specific retrieval quality.
     let probe_rankings = probe_mcp_client(&mut client, &verb_map);
     let guard_verdict = guard.classify(&probe_rankings);
     let guard_healthy = guard_verdict.discriminant() == "healthy";
@@ -360,28 +411,121 @@ pub fn run_one_question(
         Some(guard_verdict.diagnostic().to_string())
     };
 
-    // ── Query the actual question ─────────────────────────────────────────────
-    let query_start = Instant::now();
-    let retrieved_uuids: Vec<String> = if guard_healthy {
-        let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
-        args.insert(
-            verb_map.query_arg.clone(),
-            JsonValue::String(question_text.to_string()),
-        );
-        match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
-            Ok(result) => result.ordered_ids,
-            Err(e) => {
-                eprintln!(
-                    "  [lme] query error for {question_id}: {}",
-                    e.description
-                );
-                vec![]
+    // ── Dense arm: consolidate before querying ────────────────────────────────
+    // moot_consolidate builds distilled factoids from the ingested memories.
+    // Must run after ingest and before moot_recall_distilled.
+    if arm == &LmeArm::Dense || arm == &LmeArm::Both {
+        let consolidate_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+        if let Err(e) = client.call_tool("moot_consolidate", consolidate_args, &verb_map.result_format) {
+            eprintln!(
+                "  [lme] consolidate warning for {question_id}: {}",
+                e.description
+            );
+            // Non-fatal: dense arm query may return empty results, but we continue.
+        }
+    }
+
+    // ── Exact arm: moot_memory_search ─────────────────────────────────────────
+    let mut exact_payload_text: Option<String> = None;
+    let mut exact_query_latency: Option<f64> = None;
+    let mut retrieved_uuids: Vec<String> = Vec::new();
+    if arm == &LmeArm::Exact || arm == &LmeArm::Both {
+        let query_start = Instant::now();
+        if guard_healthy {
+            let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
+            args.insert(
+                verb_map.query_arg.clone(),
+                JsonValue::String(question_text.to_string()),
+            );
+            // No constant_args for moot_memory_search in LME mode (location is already
+            // set on the ingest constant_args, not the query).
+            match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
+                Ok(result) => {
+                    retrieved_uuids = result.ordered_ids;
+                    // Capture raw payload text for token counting in the scorer.
+                    exact_payload_text = Some(result.text_blocks.join("\n"));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  [lme] exact query error for {question_id}: {}",
+                        e.description
+                    );
+                }
             }
         }
-    } else {
-        vec![]
-    };
-    let query_latency_seconds = query_start.elapsed().as_secs_f64();
+        exact_query_latency = Some(query_start.elapsed().as_secs_f64());
+    }
+
+    // ── Dense arm: moot_recall_distilled ──────────────────────────────────────
+    let mut dense_payload_text: Option<String> = None;
+    let mut dense_query_latency: Option<f64> = None;
+    if arm == &LmeArm::Dense || arm == &LmeArm::Both {
+        let dense_verb_map = lme_dense_verb_map();
+        let dense_start = Instant::now();
+        let mut dense_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+        dense_args.insert(
+            dense_verb_map.query_arg.clone(),
+            JsonValue::String(question_text.to_string()),
+        );
+        // No constant_args for moot_recall_distilled (no location needed).
+        match client.call_tool(&dense_verb_map.query, dense_args, &dense_verb_map.result_format) {
+            Ok(result) => {
+                // Capture raw payload text (joined text_blocks) for token counting.
+                dense_payload_text = Some(result.text_blocks.join("\n"));
+            }
+            Err(e) => {
+                eprintln!(
+                    "  [lme] dense query error for {question_id}: {}",
+                    e.description
+                );
+                dense_payload_text = Some(String::new()); // empty payload on error
+            }
+        }
+        dense_query_latency = Some(dense_start.elapsed().as_secs_f64());
+    }
+
+    // ── Judge mode (Part 4): optional LLM-judged QA per arm ──────────────────
+    // Soft errors from the judge subprocess are logged and skipped — a judge
+    // failure does not fail the question; the answer fields stay None.
+    let mut exact_judge_answer: Option<String> = None;
+    let mut exact_judge_correct: Option<bool> = None;
+    if let Some(cmd) = judge_cmd {
+        if let Some(ref payload) = exact_payload_text {
+            if !payload.is_empty() {
+                let prompt = lme_judge_prompt(question_text, payload);
+                match lme_run_judge(cmd, &prompt) {
+                    Ok(answer) => {
+                        let correct = lme_grade_judge_answer(&answer, gold_answer);
+                        exact_judge_answer = Some(answer);
+                        exact_judge_correct = Some(correct);
+                    }
+                    Err(e) => {
+                        eprintln!("  [lme] judge error (exact) for {question_id}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    let mut dense_judge_answer: Option<String> = None;
+    let mut dense_judge_correct: Option<bool> = None;
+    if let Some(cmd) = judge_cmd {
+        if let Some(ref payload) = dense_payload_text {
+            if !payload.is_empty() {
+                let prompt = lme_judge_prompt(question_text, payload);
+                match lme_run_judge(cmd, &prompt) {
+                    Ok(answer) => {
+                        let correct = lme_grade_judge_answer(&answer, gold_answer);
+                        dense_judge_answer = Some(answer);
+                        dense_judge_correct = Some(correct);
+                    }
+                    Err(e) => {
+                        eprintln!("  [lme] judge error (dense) for {question_id}: {e}");
+                    }
+                }
+            }
+        }
+    }
 
     // ── Teardown ──────────────────────────────────────────────────────────────
     client.disconnect();
@@ -395,7 +539,7 @@ pub fn run_one_question(
     Ok(LmeQuestionResult {
         question_id: question_id.to_string(),
         question_type: question_type.to_string(),
-        query_latency_seconds,
+        query_latency_seconds: exact_query_latency,
         retrieved_uuids,
         manifest,
         answer_session_ids: answer_session_ids.to_vec(),
@@ -403,6 +547,13 @@ pub fn run_one_question(
         guard_diagnostic,
         turns_ingested,
         write_mean_latency_seconds: write_mean_latency,
+        exact_payload_text,
+        dense_payload_text,
+        dense_query_latency_seconds: dense_query_latency,
+        exact_judge_answer,
+        exact_judge_correct,
+        dense_judge_answer,
+        dense_judge_correct,
     })
 }
 
@@ -444,19 +595,24 @@ pub fn run_lme_questions(
             &q.question_id,
             &q.question_type,
             &q.question,
+            &q.answer,
             &q.haystack_session_ids,
             &q.haystack_sessions,
             &q.answer_session_ids,
             &config.moot_binary,
             config.seed,
             question_index,
+            &config.arm,
+            config.judge_cmd.as_deref(),
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
+                let query_ms = result.query_latency_seconds
+                    .map(|s| format!("{:.0}", s * 1000.0))
+                    .unwrap_or_else(|| "n/a".to_string());
                 eprintln!(
-                    "  guard={guard_str} turns={} query_ms={:.0}",
+                    "  guard={guard_str} turns={} query_ms={query_ms}",
                     result.turns_ingested,
-                    result.query_latency_seconds * 1000.0,
                 );
                 results.push(result);
             }
@@ -466,7 +622,7 @@ pub fn run_lme_questions(
                 results.push(LmeQuestionResult {
                     question_id: q.question_id.clone(),
                     question_type: q.question_type.clone(),
-                    query_latency_seconds: 0.0,
+                    query_latency_seconds: None,
                     retrieved_uuids: vec![],
                     manifest: vec![],
                     answer_session_ids: q.answer_session_ids.clone(),
@@ -474,6 +630,13 @@ pub fn run_lme_questions(
                     guard_diagnostic: Some(e.description),
                     turns_ingested: 0,
                     write_mean_latency_seconds: 0.0,
+                    exact_payload_text: None,
+                    dense_payload_text: None,
+                    dense_query_latency_seconds: None,
+                    exact_judge_answer: None,
+                    exact_judge_correct: None,
+                    dense_judge_answer: None,
+                    dense_judge_correct: None,
                 });
             }
         }

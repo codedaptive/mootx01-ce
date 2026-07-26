@@ -181,7 +181,10 @@ func scoreLMEQuestion(_ result: LMEQuestionResult) -> LMEQuestionScore {
         mrr: mrrVal,
         rankedSessionIDs: rankedSessions,
         answerSessionIDs: result.answerSessionIDs,
-        queryLatencySeconds: result.queryLatencySeconds,
+        // queryLatencySeconds is Optional (nil when only the dense arm ran).
+        // Use 0.0 as the sentinel — the aggregate/latency tables treat it as
+        // "no exact query was issued" rather than "query was instantaneous."
+        queryLatencySeconds: result.queryLatencySeconds ?? 0.0,
         writeMeanLatencySeconds: result.writeMeanLatencySeconds,
         turnsIngested: result.turnsIngested,
         retrievedUUIDCount: result.retrievedUUIDs.count
@@ -382,6 +385,45 @@ struct LMEReportPerQuestion: Codable, Sendable {
     }
 }
 
+/// Token efficiency block of the LME report. Added by LME-03 (additive per
+/// BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2).
+///
+/// All fields are optional: nil when the arm was not active in the run, or
+/// when `has_answer` annotations are absent from the corpus (real HuggingFace
+/// corpus always lacks them — only the hand-authored synthetic sample carries them).
+///
+/// Token estimate: `(utf8_byte_count + 3) / 4` — deterministic, zero deps.
+struct LMEReportTokenEfficiency: Codable, Sendable {
+    /// Mean estimated token count for the exact-arm (`moot_memory_search`) payload.
+    /// Nil when the exact arm was not active or returned no payloads.
+    let exactArmMeanTokens: Double?
+    /// Mean estimated token count for the dense-arm (`moot_recall_distilled`) payload.
+    let denseArmMeanTokens: Double?
+    /// dense / exact token ratio. Nil when either arm is absent or exact mean is 0.
+    let denseExactTokenRatio: Double?
+    /// Fraction of guard-healthy questions where the exact payload contained the
+    /// `has_answer` turn text (normalized substring match). Nil when no
+    /// `has_answer` annotations are present in the corpus.
+    let exactEvidenceHitRate: Double?
+    /// Same for the dense arm.
+    let denseEvidenceHitRate: Double?
+    /// Evidence hits per 1000 tokens for the exact arm. Nil when evidence data or
+    /// token data are absent.
+    let exactHitsPer1kTokens: Double?
+    /// Evidence hits per 1000 tokens for the dense arm.
+    let denseHitsPer1kTokens: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case exactArmMeanTokens    = "exact_arm_mean_tokens"
+        case denseArmMeanTokens    = "dense_arm_mean_tokens"
+        case denseExactTokenRatio  = "dense_exact_token_ratio"
+        case exactEvidenceHitRate  = "exact_evidence_hit_rate"
+        case denseEvidenceHitRate  = "dense_evidence_hit_rate"
+        case exactHitsPer1kTokens  = "exact_hits_per_1k_tokens"
+        case denseHitsPer1kTokens  = "dense_hits_per_1k_tokens"
+    }
+}
+
 /// The full LME run report. Written to disk after a `longmemeval` run and
 /// consumed by the quality-optimizer when it reads the benchmarker's output.
 ///
@@ -402,27 +444,32 @@ struct LMEReport: Codable, Sendable {
     let aggregate: LMEReportAggregate
     let latency: LMEReportLatency
     let perQuestion: [LMEReportPerQuestion]
+    /// Token efficiency metrics (LME-03, additive per BENCHMARKER_OPTIMIZER_CONTRACT.md).
+    let tokenEfficiency: LMEReportTokenEfficiency
 
     enum CodingKeys: String, CodingKey {
-        case runID       = "run_id"
-        case runLabel    = "run_label"
+        case runID          = "run_id"
+        case runLabel       = "run_label"
         case variant
-        case generatedAt = "generated_at"
-        case corpusStats = "corpus_stats"
+        case generatedAt    = "generated_at"
+        case corpusStats    = "corpus_stats"
         case aggregate
         case latency
-        case perQuestion = "per_question"
+        case perQuestion    = "per_question"
+        case tokenEfficiency = "token_efficiency"
     }
 }
 
 // MARK: - Report builder
 
-/// Assembles an `LMEReport` from the run config, corpus, and scored results.
+/// Assembles an `LMEReport` from the run config, corpus, scored results, and
+/// the raw per-question results (needed for token efficiency metrics).
 ///
 /// Called in `runLongMemEval` (main.swift) after the harness completes.
 func buildLMEReport(
     config: LMERunConfig,
     corpus: LMECorpus,
+    results: [LMEQuestionResult],
     scores: [LMEQuestionScore]
 ) -> LMEReport {
     let (aggregate, latency) = aggregateLMEScores(scores)
@@ -475,6 +522,80 @@ func buildLMEReport(
         )
     }
 
+    // ── Token efficiency (LME-03 additive key) ─────────────────────────────────
+    // Build a questionID → concatenated has_answer turn text lookup.
+    // The real HuggingFace corpus has no has_answer annotations, so this
+    // lookup is empty for real runs. Only the hand-authored synthetic sample
+    // carries has_answer turns. Evidence hit rate is nil when the lookup is empty.
+    var hasAnswerLookup: [String: String] = [:]
+    for q in corpus.questions {
+        let evidence = q.haystackSessions
+            .flatMap { $0 }
+            .filter(\.hasAnswer)
+            .map(\.content)
+            .joined(separator: "\n")
+        if !evidence.isEmpty { hasAnswerLookup[q.questionID] = evidence }
+    }
+
+    var exactTokensList: [Int] = []
+    var denseTokensList: [Int] = []
+    var exactHits = 0
+    var denseHits = 0
+    var exactEvidenceCount = 0
+    var denseEvidenceCount = 0
+
+    for result in results {
+        if let text = result.exactPayloadText {
+            exactTokensList.append(lmeEstimateTokens(text))
+            if let evidence = hasAnswerLookup[result.questionID] {
+                exactEvidenceCount += 1
+                if lmeEvidenceHit(evidenceText: evidence, payloadText: text) {
+                    exactHits += 1
+                }
+            }
+        }
+        if let text = result.densePayloadText {
+            denseTokensList.append(lmeEstimateTokens(text))
+            if let evidence = hasAnswerLookup[result.questionID] {
+                denseEvidenceCount += 1
+                if lmeEvidenceHit(evidenceText: evidence, payloadText: text) {
+                    denseHits += 1
+                }
+            }
+        }
+    }
+
+    let exactMean: Double? = exactTokensList.isEmpty ? nil
+        : Double(exactTokensList.reduce(0, +)) / Double(exactTokensList.count)
+    let denseMean: Double? = denseTokensList.isEmpty ? nil
+        : Double(denseTokensList.reduce(0, +)) / Double(denseTokensList.count)
+    let ratio: Double? = {
+        guard let e = exactMean, let d = denseMean, e > 0 else { return nil }
+        return d / e
+    }()
+    let exactHitRate: Double? = exactEvidenceCount > 0
+        ? Double(exactHits) / Double(exactEvidenceCount) : nil
+    let denseHitRate: Double? = denseEvidenceCount > 0
+        ? Double(denseHits) / Double(denseEvidenceCount) : nil
+    let exactHitsPer1k: Double? = {
+        guard let r = exactHitRate, let m = exactMean, m > 0 else { return nil }
+        return r * 1000.0 / m
+    }()
+    let denseHitsPer1k: Double? = {
+        guard let r = denseHitRate, let m = denseMean, m > 0 else { return nil }
+        return r * 1000.0 / m
+    }()
+
+    let tokenEfficiency = LMEReportTokenEfficiency(
+        exactArmMeanTokens:   exactMean,
+        denseArmMeanTokens:   denseMean,
+        denseExactTokenRatio: ratio,
+        exactEvidenceHitRate: exactHitRate,
+        denseEvidenceHitRate: denseHitRate,
+        exactHitsPer1kTokens: exactHitsPer1k,
+        denseHitsPer1kTokens: denseHitsPer1k
+    )
+
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     let generatedAt = formatter.string(from: Date())
@@ -487,7 +608,8 @@ func buildLMEReport(
         corpusStats: corpusStats,
         aggregate: reportAggregate,
         latency: reportLatency,
-        perQuestion: perQuestion
+        perQuestion: perQuestion,
+        tokenEfficiency: tokenEfficiency
     )
 }
 

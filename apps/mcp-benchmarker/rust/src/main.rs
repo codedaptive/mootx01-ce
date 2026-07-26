@@ -27,10 +27,10 @@ use mcp_benchmarker_rs::locomo_scorer::{
 };
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
 use mcp_benchmarker_rs::longmemeval_runner::{
-    discover_moot_binary, run_lme_questions, SplitMix64, LmeRunConfig,
+    discover_moot_binary, run_lme_questions, LmeArm, LmeRunConfig, SplitMix64,
 };
 use mcp_benchmarker_rs::longmemeval_scorer::{
-    build_lme_report, score_lme_question, write_lme_report,
+    build_lme_report, score_lme_question, write_lme_report, LmePayloadEntry,
 };
 use mcp_benchmarker_rs::mcp_client::MCPClient;
 use mcp_benchmarker_rs::transfer::TransferEngine;
@@ -205,6 +205,17 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     let limit = option_value("--limit", args).and_then(|s| s.parse::<usize>().ok());
     let label = option_value("--label", args).map(str::to_string);
     let out_dir = option_value("--out", args).map(PathBuf::from);
+    // --arm exact|dense|both (default: both). Controls which recall arms run.
+    let arm_str = option_value("--arm", args).unwrap_or("both");
+    let arm = match arm_str {
+        "exact" => LmeArm::Exact,
+        "dense" => LmeArm::Dense,
+        "both"  => LmeArm::Both,
+        other   => return Err(format!("--arm must be 'exact', 'dense', or 'both'; got '{other}'")),
+    };
+    // Judge mode (LME-03 Part 4): optional LLM-judged QA. Off by default.
+    // The command receives the prompt on stdin and writes its answer on stdout.
+    let judge_cmd = option_value("--judge-cmd", args).map(str::to_string);
 
     eprintln!("[lme] loading corpus from {corpus_path}");
     let corpus = load_corpus(Path::new(&corpus_path))
@@ -226,9 +237,45 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         limit,
         label: label.clone(),
         out_dir: out_dir.clone(),
+        arm,
+        judge_cmd: judge_cmd.clone(),
     };
 
+    // Keep results alongside scores so the transcript writer can read judge fields,
+    // and the report builder can compute token efficiency metrics.
+    // score_lme_question takes LmeQuestionResult by value — clone the parts needed
+    // before consuming results.
     let results = run_lme_questions(&corpus, &run_config);
+
+    // Extract judge fields (for transcript writer, LME-03 Part 4).
+    struct JudgeEntry {
+        question_id: String,
+        exact_judge_answer: Option<String>,
+        exact_judge_correct: Option<bool>,
+        dense_judge_answer: Option<String>,
+        dense_judge_correct: Option<bool>,
+    }
+    let judge_entries: Vec<JudgeEntry> = results
+        .iter()
+        .map(|r| JudgeEntry {
+            question_id: r.question_id.clone(),
+            exact_judge_answer: r.exact_judge_answer.clone(),
+            exact_judge_correct: r.exact_judge_correct,
+            dense_judge_answer: r.dense_judge_answer.clone(),
+            dense_judge_correct: r.dense_judge_correct,
+        })
+        .collect();
+
+    // Extract payload texts (for token efficiency block, LME-03 Part 5).
+    let payload_entries: Vec<LmePayloadEntry> = results
+        .iter()
+        .map(|r| LmePayloadEntry {
+            question_id: r.question_id.clone(),
+            exact_payload_text: r.exact_payload_text.clone(),
+            dense_payload_text: r.dense_payload_text.clone(),
+        })
+        .collect();
+
     let scores: Vec<_> = results.into_iter().map(score_lme_question).collect();
 
     let run_id = {
@@ -248,9 +295,12 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         corpus.questions.len() + corpus.abstention_count,
         corpus.abstention_count,
         &scores,
+        &corpus,
+        &payload_entries,
     );
 
     // Print summary.
+    let te = &report.token_efficiency;
     println!("LongMemEval results (variant={variant}, seed={seed}):");
     println!("  questions_run:      {}", report.corpus_stats.questions_run);
     println!("  guard_excluded:     {}", report.corpus_stats.guard_excluded);
@@ -264,6 +314,26 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     println!("  mrr:                {:.4}", report.aggregate.mrr);
     println!("  query_p50_s:        {:.4}", report.latency.query_p50_seconds);
     println!("  query_p95_s:        {:.4}", report.latency.query_p95_seconds);
+    match te.exact_arm_mean_tokens {
+        Some(t) => println!("  exact_mean_tokens:  {:.0}", t),
+        None    => println!("  exact_mean_tokens:  N/A"),
+    }
+    match te.dense_arm_mean_tokens {
+        Some(t) => println!("  dense_mean_tokens:  {:.0}", t),
+        None    => println!("  dense_mean_tokens:  N/A"),
+    }
+    match te.dense_exact_token_ratio {
+        Some(r) => println!("  dense/exact ratio:  {:.3}", r),
+        None    => println!("  dense/exact ratio:  N/A"),
+    }
+    match te.exact_evidence_hit_rate {
+        Some(r) => println!("  exact_evidence_rate:{:.3}", r),
+        None    => println!("  exact_evidence_rate:N/A (no has_answer)"),
+    }
+    match te.dense_evidence_hit_rate {
+        Some(r) => println!("  dense_evidence_rate:{:.3}", r),
+        None    => println!("  dense_evidence_rate:N/A (no has_answer)"),
+    }
 
     // Write report file.
     let report_filename = format!("lme-report-{}-seed{}.json", variant, seed);
@@ -273,6 +343,53 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         .join(&report_filename);
     write_lme_report(&report, &report_path)?;
     println!("report written to {}", report_path.display());
+
+    // Judge transcript (LME-03 Part 4): write per-question judge calls to JSONL.
+    // Written only when --judge-cmd was supplied.
+    if judge_cmd.is_some() {
+        // Build a question_id → gold_answer lookup from the corpus.
+        let gold_lookup: std::collections::HashMap<&str, &str> = corpus
+            .questions
+            .iter()
+            .map(|q| (q.question_id.as_str(), q.answer.as_str()))
+            .collect();
+
+        let mut lines: Vec<String> = Vec::new();
+        for entry in &judge_entries {
+            let gold = gold_lookup.get(entry.question_id.as_str()).copied().unwrap_or("");
+            if let Some(ref answer) = entry.exact_judge_answer {
+                let correct = entry.exact_judge_correct.unwrap_or(false);
+                let row = serde_json::json!({
+                    "question_id": entry.question_id,
+                    "arm": "exact",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": correct,
+                });
+                lines.push(row.to_string());
+            }
+            if let Some(ref answer) = entry.dense_judge_answer {
+                let correct = entry.dense_judge_correct.unwrap_or(false);
+                let row = serde_json::json!({
+                    "question_id": entry.question_id,
+                    "arm": "dense",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": correct,
+                });
+                lines.push(row.to_string());
+            }
+        }
+        let transcript_content = lines.join("\n") + if lines.is_empty() { "" } else { "\n" };
+        let transcript_filename = format!("judge-transcript-{}-seed{}.jsonl", variant, seed);
+        let transcript_path = out_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&transcript_filename);
+        std::fs::write(&transcript_path, transcript_content)
+            .map_err(|e| format!("transcript write failed: {e}"))?;
+        println!("judge transcript: {}", transcript_path.display());
+    }
 
     Ok(())
 }

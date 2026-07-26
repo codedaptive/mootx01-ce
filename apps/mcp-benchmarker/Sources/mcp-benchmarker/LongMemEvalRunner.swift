@@ -23,13 +23,25 @@ import Foundation
 //     Faster, but haystack contamination across questions is methodology-affecting
 //     (prior sessions' content can influence recall for later questions).
 
+// MARK: - Recall arm
+
+/// Which recall arm(s) the LME token-efficiency benchmark exercises.
+enum LMEArm: String, Sendable, Codable {
+    /// Only the exact-recall arm — `moot_memory_search` with full content payload.
+    case exact
+    /// Only the dense-recall arm — `moot_recall_distilled` with distilled factoid payload.
+    case dense
+    /// Both arms per question, same estate, same ingest (default).
+    case both
+}
+
 // MARK: - Verbmap for mootx01 in LME mode
 
-/// Standard mootx01 VerbMap used for LME ingestion + recall queries.
+/// Standard mootx01 VerbMap used for LME ingestion + exact recall queries.
 /// Matches the live E2E test's mootEndpoint verbMap convention.
 ///
 /// write:         moot_file_memory
-/// query:         moot_memory_search (moot_memory_search default, no override needed)
+/// query:         moot_memory_search
 /// constantArgs:  { "location": "benchmark/longmemeval" }
 /// resultFormat:  .mootText
 let lmeMootVerbMap = EndpointConfig.VerbMap(
@@ -37,6 +49,24 @@ let lmeMootVerbMap = EndpointConfig.VerbMap(
     query: "moot_memory_search",
     list: nil,
     constantArgs: ["location": "benchmark/longmemeval"],
+    resultFormat: .mootText
+)
+
+/// Dense recall VerbMap for the token-efficiency benchmark.
+/// Uses `moot_recall_distilled`, which:
+///   - Returns ~10-token distilled factoid prose per hit (capped at ~300 chars)
+///   - Requires `moot_consolidate` to be called BEFORE the first dense query
+///   - Does NOT use a location constant arg (queries the estate-default wing)
+///
+/// write:         moot_file_memory  (same ingest tool as lmeMootVerbMap)
+/// query:         moot_recall_distilled
+/// constantArgs:  {} (no location needed)
+/// resultFormat:  .mootText
+let lmeDenseMootVerbMap = EndpointConfig.VerbMap(
+    write: "moot_file_memory",
+    query: "moot_recall_distilled",
+    list: nil,
+    constantArgs: [:],
     resultFormat: .mootText
 )
 
@@ -60,14 +90,17 @@ struct LMEManifestEntry: Sendable, Codable {
 // MARK: - Per-question result
 
 /// The result of running the LME harness against one question.
+/// Optional dense-arm fields are nil when arm = .exact (dense was not run).
+/// Optional exact-arm payload text is nil when arm = .dense (exact was not run).
 struct LMEQuestionResult: Sendable {
     /// The question's unique identifier.
     let questionID: String
     /// The question type (non-abstention: not *_abs).
     let questionType: String
-    /// Time taken for the moot_memory_search call, in seconds.
-    let queryLatencySeconds: Double
-    /// UUIDs returned by moot_memory_search, in ranked order.
+    /// Time taken for the exact-arm moot_memory_search call, in seconds.
+    /// nil when arm = .dense.
+    let queryLatencySeconds: Double?
+    /// UUIDs returned by moot_memory_search, in ranked order. Empty when arm = .dense.
     let retrievedUUIDs: [String]
     /// Manifest: filed UUID → haystack position for every ingested turn.
     let manifest: [LMEManifestEntry]
@@ -83,6 +116,30 @@ struct LMEQuestionResult: Sendable {
     let turnsIngested: Int
     /// Mean write latency (seconds) across all ingested turns.
     let writeMeanLatencySeconds: Double
+    /// Raw payload text from the exact-arm moot_memory_search call.
+    /// The joined textBlocks from the MCPToolResult — used by Part 2's token
+    /// estimator and evidence scorer. nil when arm = .dense.
+    let exactPayloadText: String?
+    /// Raw payload text from the dense-arm moot_recall_distilled call.
+    /// Contains distilled factoid prose (~300 chars/factoid cap).
+    /// nil when arm = .exact.
+    let densePayloadText: String?
+    /// Time taken for the dense-arm moot_recall_distilled call, in seconds.
+    /// nil when arm = .exact.
+    let denseQueryLatencySeconds: Double?
+    // MARK: Judge mode fields (Part 4, LME-03)
+    /// Judge subprocess answer for the exact arm. nil when judgeCmd was not set
+    /// or the exact arm was not run.
+    let exactJudgeAnswer: String?
+    /// True when exactJudgeAnswer contains the normalized gold answer as a substring.
+    /// nil when exactJudgeAnswer is nil.
+    let exactJudgeCorrect: Bool?
+    /// Judge subprocess answer for the dense arm. nil when judgeCmd was not set
+    /// or the dense arm was not run.
+    let denseJudgeAnswer: String?
+    /// True when denseJudgeAnswer contains the normalized gold answer as a substring.
+    /// nil when denseJudgeAnswer is nil.
+    let denseJudgeCorrect: Bool?
 }
 
 // MARK: - Run config
@@ -109,6 +166,12 @@ struct LMERunConfig: Sendable {
     let outDir: URL?
     /// Run label for the report filename and header.
     let runLabel: String
+    /// Which recall arm(s) to benchmark. Default .both runs exact + dense per question.
+    let arm: LMEArm
+    /// Optional judge command for LLM-judged QA mode. When set, the harness runs
+    /// the command subprocess per arm per question (prompt on stdin, answer on stdout)
+    /// and grades deterministically against the gold `answer`. Off by default.
+    let judgeCmd: String?
 }
 
 // MARK: - Scratch estate management
@@ -311,42 +374,123 @@ func runLMEQuestions(
 
         // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.
         // Uses the same probe queries and classification as the gauntlet path.
+        // Always probes via the exact verbMap (moot_memory_search) regardless of arm —
+        // the guard verifies estate health, not arm-specific retrieval quality.
         let guard_ = DegeneracyGuard()
-        let probeRankings = await probeMCPClient(client, verbMap: lmeMootVerbMap, name: "mootx01-lme")
+        let probeVerbMap = lmeMootVerbMap
+        let probeRankings = await probeMCPClient(client, verbMap: probeVerbMap, name: "mootx01-lme")
         let verdict = guard_.classify(probeRankings: probeRankings)
         // Use pattern matching: Verdict has associated values so `==` is unavailable.
         let guardHealthy: Bool
         if case .healthy = verdict { guardHealthy = true } else { guardHealthy = false }
         let guardDiagnostic: String? = guardHealthy ? nil : verdict.diagnostic
 
-        // Query: issue the question text via moot_memory_search.
-        var queryArgs: [String: JSONValue] = [
-            lmeMootVerbMap.queryArg: .string(question.question),
-        ]
-        for (k, v) in lmeMootVerbMap.constantArgs { queryArgs[k] = .string(v) }
-        let queryStart = Date()
-        let queryResult = try await client.callTool(
-            lmeMootVerbMap.query,
-            arguments: queryArgs,
-            format: lmeMootVerbMap.resultFormat
-        )
-        let queryLatency = Date().timeIntervalSince(queryStart)
-
-        let retrievedUUIDs = queryResult.orderedIDs
-
         let writeMean = writeTimes.isEmpty ? 0.0 : writeTimes.reduce(0, +) / Double(writeTimes.count)
+
+        // Dense arm: build distilled factoids via moot_consolidate before querying.
+        // moot_consolidate is idempotent and takes no required args — it sweeps the
+        // current estate and builds distilled representations for the recall_distilled path.
+        if config.arm == .dense || config.arm == .both {
+            let _ = try await client.callTool(
+                "moot_consolidate",
+                arguments: [:],
+                format: .mootText
+            )
+        }
+
+        // Exact arm query: moot_memory_search.
+        var exactPayloadText: String? = nil
+        var exactQueryLatency: Double? = nil
+        var retrievedUUIDs: [String] = []
+        if config.arm == .exact || config.arm == .both {
+            var queryArgs: [String: JSONValue] = [
+                lmeMootVerbMap.queryArg: .string(question.question),
+            ]
+            for (k, v) in lmeMootVerbMap.constantArgs { queryArgs[k] = .string(v) }
+            let queryStart = Date()
+            let queryResult = try await client.callTool(
+                lmeMootVerbMap.query,
+                arguments: queryArgs,
+                format: lmeMootVerbMap.resultFormat
+            )
+            exactQueryLatency = Date().timeIntervalSince(queryStart)
+            retrievedUUIDs = queryResult.orderedIDs
+            // Capture raw payload text (joined textBlocks) for Part 2 token counting.
+            exactPayloadText = queryResult.textBlocks.joined(separator: "\n")
+        }
+
+        // Dense arm query: moot_recall_distilled.
+        var densePayloadText: String? = nil
+        var denseQueryLatency: Double? = nil
+        if config.arm == .dense || config.arm == .both {
+            var denseArgs: [String: JSONValue] = [
+                lmeDenseMootVerbMap.queryArg: .string(question.question),
+            ]
+            for (k, v) in lmeDenseMootVerbMap.constantArgs { denseArgs[k] = .string(v) }
+            let denseStart = Date()
+            let denseResult = try await client.callTool(
+                lmeDenseMootVerbMap.query,
+                arguments: denseArgs,
+                format: lmeDenseMootVerbMap.resultFormat
+            )
+            denseQueryLatency = Date().timeIntervalSince(denseStart)
+            // Capture raw payload text for Part 2 token counting and evidence scoring.
+            densePayloadText = denseResult.textBlocks.joined(separator: "\n")
+        }
+
+        // Judge mode (Part 4): optional LLM-judged QA per arm.
+        // Soft errors (failed subprocess, non-zero exit) are logged and skipped —
+        // a judge failure does not fail the question; the answer fields stay nil.
+        var exactJudgeAnswer: String? = nil
+        var exactJudgeCorrect: Bool? = nil
+        if let judgeCmd = config.judgeCmd,
+           let payload = exactPayloadText,
+           !payload.isEmpty {
+            let prompt = lmeJudgePrompt(question: question.question, payload: payload)
+            do {
+                let answer = try lmeRunJudge(cmd: judgeCmd, prompt: prompt)
+                exactJudgeAnswer = answer
+                exactJudgeCorrect = lmeGradeJudgeAnswer(answer, goldAnswer: question.answer)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[lme] judge error (exact) for \(question.questionID): \(error)\n".utf8))
+            }
+        }
+
+        var denseJudgeAnswer: String? = nil
+        var denseJudgeCorrect: Bool? = nil
+        if let judgeCmd = config.judgeCmd,
+           let payload = densePayloadText,
+           !payload.isEmpty {
+            let prompt = lmeJudgePrompt(question: question.question, payload: payload)
+            do {
+                let answer = try lmeRunJudge(cmd: judgeCmd, prompt: prompt)
+                denseJudgeAnswer = answer
+                denseJudgeCorrect = lmeGradeJudgeAnswer(answer, goldAnswer: question.answer)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[lme] judge error (dense) for \(question.questionID): \(error)\n".utf8))
+            }
+        }
 
         results.append(LMEQuestionResult(
             questionID: question.questionID,
             questionType: question.questionType,
-            queryLatencySeconds: queryLatency,
+            queryLatencySeconds: exactQueryLatency,
             retrievedUUIDs: retrievedUUIDs,
             manifest: manifest,
             answerSessionIDs: question.answerSessionIDs,
             guardHealthy: guardHealthy,
             guardDiagnostic: guardDiagnostic,
             turnsIngested: manifest.count,
-            writeMeanLatencySeconds: writeMean
+            writeMeanLatencySeconds: writeMean,
+            exactPayloadText: exactPayloadText,
+            densePayloadText: densePayloadText,
+            denseQueryLatencySeconds: denseQueryLatency,
+            exactJudgeAnswer: exactJudgeAnswer,
+            exactJudgeCorrect: exactJudgeCorrect,
+            denseJudgeAnswer: denseJudgeAnswer,
+            denseJudgeCorrect: denseJudgeCorrect
         ))
     }
 
