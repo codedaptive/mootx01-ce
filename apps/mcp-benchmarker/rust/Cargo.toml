@@ -1,0 +1,27 @@
+[package]
+name = "mcp-benchmarker-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "mcp-benchmarker Rust twin — full parity with the Swift leg: divergence + capability-manifest + degeneracy-guard conformance core, config/VerbMap decode, MCP stdio JSON-RPC client, result parsing (jsonObjects + mootText), transfer engine, and proxy translation."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "mcp_benchmarker_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-benchmarker-rs"
+path = "src/main.rs"
+
+[dependencies]
+# JSON decode/encode for config, manifests, and the JSON-RPC wire. serde_json
+# also backs the loosely-typed JsonValue (Swift JSONValue) so the wire bytes
+# match the Foundation encoder for the same logical value. No other external
+# deps — std + serde + serde_json only, holding the zero-extra-dep line.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# No external test deps — std + serde_json only.
