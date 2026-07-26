@@ -5,6 +5,27 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## Unreleased (LME-01 stream)
+
+**mcp-benchmarker: LongMemEval session-recall benchmarking**
+
+- **New `longmemeval` subcommand** on both twins (Swift + Rust). Provisions an
+  isolated mootx01 estate per question, ingests all haystack sessions via
+  `moot_file_memory`, runs a three-query DegeneracyGuard probe, queries the
+  question, and scores session-recall. Output: `lme-report-<variant>-seed<N>.json`.
+- **Recall metrics:** `recall_any@k` (any answer session in top-k),
+  `recall_all@k` (all answer sessions in top-k), `mrr` (reciprocal rank of
+  first answer session). Additive extension of the existing benchmarker outcome
+  record (BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2).
+- **Cross-language conformance verified** by `longmemeval_vectors.json`:
+  10 recall cases + 5 uuid-mapping cases, tolerance 1e-9, both legs pass.
+- **Corpus loader fix:** `has_answer` field absent in the real HuggingFace
+  corpus (present only in hand-authored test sample); made optional with
+  `false` default in both loaders.
+- **Diagnostic smoke run:** 50-question Rust run (variant=s, seed=20260725)
+  → recall_any@10=0.88, recall_all@10=0.62, mrr=0.64, 0 guard refusals.
+  See `docs_internal/analysis/LONGMEMEVAL_DIAGNOSTIC_SMOKE_2026-07-25.md`.
+
 ## v1.0.35 — 2026-07-25
 
 Estate encryption, retrieval-gate parity, and release-pipeline hardening.

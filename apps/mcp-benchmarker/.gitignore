@@ -1,0 +1,10 @@
+# LongMemEval corpus data — large dataset files fetched via scripts/fetch-longmemeval.sh.
+# Never committed; see scripts/fetch-longmemeval.sh for download instructions.
+fixtures/longmemeval/data/
+
+# Rust build artifacts.
+rust/target/
+
+# Swift build artifacts.
+.build/
+*.xcuserdata/

@@ -35,11 +35,20 @@ struct LMETurn: Codable, Sendable {
     let content: String
     /// True when this turn contains evidence for the answer. Used to verify
     /// the manifest correlation after ingest.
+    /// Absent in the real HuggingFace corpus (only in hand-authored synthetic
+    /// test sample) — defaults to false when missing.
     let hasAnswer: Bool
 
     enum CodingKeys: String, CodingKey {
         case role, content
         case hasAnswer = "has_answer"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(String.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        hasAnswer = try container.decodeIfPresent(Bool.self, forKey: .hasAnswer) ?? false
     }
 }
 
