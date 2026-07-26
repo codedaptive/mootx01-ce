@@ -65,6 +65,8 @@ pub mod degeneracy_guard;
 pub mod divergence;
 pub mod json_value;
 pub mod locomo_corpus;
+pub mod locomo_runner;
+pub mod locomo_scorer;
 pub mod longmemeval_corpus;
 pub mod longmemeval_runner;
 pub mod longmemeval_scorer;

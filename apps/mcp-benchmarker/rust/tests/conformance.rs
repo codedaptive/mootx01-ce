@@ -16,6 +16,7 @@
 use mcp_benchmarker_rs::degeneracy_guard::DegeneracyGuard;
 use mcp_benchmarker_rs::divergence::{jaccard_divergence, rank_divergence};
 use mcp_benchmarker_rs::locomo_corpus::load_locomo_corpus;
+use mcp_benchmarker_rs::locomo_scorer::{locomo_manifest_as_lme, LoCoMoManifestEntry};
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
 use mcp_benchmarker_rs::longmemeval_scorer::{
     lme_ranked_sessions, lme_recall_all, lme_recall_any, lme_session_mrr, LmeManifestEntry,
@@ -815,4 +816,121 @@ fn locomo_corpus_error_no_sessions() {
     assert!(err.0.to_lowercase().contains("session"),
         "error should mention 'session': {}", err.0);
     let _ = std::fs::remove_file(&tmp);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Part 4 — LoCoMo scorer conformance vectors
+//
+// Driven by `apps/mcp-benchmarker/conformance/locomo_vectors.json`.
+// Same vectors drive both Swift (LoCoMoScorerTests.swift) and Rust legs.
+// Expected values are pre-computed; float tolerance is 1e-9.
+//
+// recall_cases:     verify the string-agnostic LME math works with dia_id format
+//                   strings ("D1:3"). Uses lme_recall_any/all/session_mrr directly.
+// uuid_mapping_cases: verify locomo_manifest_as_lme + lme_ranked_sessions bridges
+//                   UUIDs correctly to dia_ids.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Loads `locomo_vectors.json` as a parsed JSON value.
+fn load_locomo_vectors() -> Value {
+    let path = conformance_path("locomo_vectors.json");
+    load_json(&path)
+}
+
+/// Recall conformance: verify the LME scoring math (string-agnostic) works
+/// correctly when given dia_id format strings ("D1:3") as the ranked list and
+/// evidence set. Pins all 7 metrics to hand-computed expected values.
+#[test]
+fn locomo_scorer_recall_vectors() {
+    let json = load_locomo_vectors();
+    let cases = json["recall_cases"]
+        .as_array()
+        .expect("locomo_vectors.json must have recall_cases");
+
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+
+        // ranked_dia_ids is the pre-computed dia_id ranking (the string-agnostic
+        // math operates directly on these, matching Swift scoreLoCoMoQuestion).
+        let ranked: Vec<String> = case["ranked_dia_ids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+
+        let evidence_vec: Vec<String> = case["evidence_dia_ids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let evidence_set: HashSet<String> = evidence_vec.into_iter().collect();
+
+        let exp_ra1  = case["recall_any_at_1"].as_f64().unwrap();
+        let exp_ra5  = case["recall_any_at_5"].as_f64().unwrap();
+        let exp_ra10 = case["recall_any_at_10"].as_f64().unwrap();
+        let exp_rl1  = case["recall_all_at_1"].as_f64().unwrap();
+        let exp_rl5  = case["recall_all_at_5"].as_f64().unwrap();
+        let exp_rl10 = case["recall_all_at_10"].as_f64().unwrap();
+        let exp_mrr  = case["mrr"].as_f64().unwrap();
+
+        let tol = 1e-9;
+
+        let got_ra1  = lme_recall_any(&ranked, &evidence_set, 1);
+        let got_ra5  = lme_recall_any(&ranked, &evidence_set, 5);
+        let got_ra10 = lme_recall_any(&ranked, &evidence_set, 10);
+        let got_rl1  = lme_recall_all(&ranked, &evidence_set, 1);
+        let got_rl5  = lme_recall_all(&ranked, &evidence_set, 5);
+        let got_rl10 = lme_recall_all(&ranked, &evidence_set, 10);
+        let got_mrr  = lme_session_mrr(&ranked, &evidence_set);
+
+        assert!((got_ra1  - exp_ra1).abs()  < tol, "locomo '{id}' recall_any_at_1:  exp {exp_ra1}, got {got_ra1}");
+        assert!((got_ra5  - exp_ra5).abs()  < tol, "locomo '{id}' recall_any_at_5:  exp {exp_ra5}, got {got_ra5}");
+        assert!((got_ra10 - exp_ra10).abs() < tol, "locomo '{id}' recall_any_at_10: exp {exp_ra10}, got {got_ra10}");
+        assert!((got_rl1  - exp_rl1).abs()  < tol, "locomo '{id}' recall_all_at_1:  exp {exp_rl1}, got {got_rl1}");
+        assert!((got_rl5  - exp_rl5).abs()  < tol, "locomo '{id}' recall_all_at_5:  exp {exp_rl5}, got {got_rl5}");
+        assert!((got_rl10 - exp_rl10).abs() < tol, "locomo '{id}' recall_all_at_10: exp {exp_rl10}, got {got_rl10}");
+        assert!((got_mrr  - exp_mrr).abs()  < tol, "locomo '{id}' mrr:              exp {exp_mrr}, got {got_mrr}");
+    }
+}
+
+/// UUID-mapping conformance: verify `locomo_manifest_as_lme` + `lme_ranked_sessions`
+/// correctly bridges UUIDs → dia_ids, including deduplication and order preservation.
+#[test]
+fn locomo_scorer_uuid_mapping_vectors() {
+    let json = load_locomo_vectors();
+    let cases = json["uuid_mapping_cases"]
+        .as_array()
+        .expect("locomo_vectors.json must have uuid_mapping_cases");
+
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+
+        let retrieved_uuids: Vec<String> = case["retrieved_uuids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+
+        // Build LoCoMoManifestEntry list from the "manifest" array.
+        // Each entry has "uuid" and "dia_id" fields.
+        let locomo_manifest: Vec<LoCoMoManifestEntry> = case["manifest"]
+            .as_array().unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| LoCoMoManifestEntry {
+                uuid:           entry["uuid"].as_str().unwrap().to_string(),
+                dia_id:         entry["dia_id"].as_str().unwrap().to_string(),
+                session_number: 1,     // unused in mapping math; stable dummy
+                turn_index:     i,     // unused in mapping math; stable dummy
+                speaker:        "A".to_string(), // unused in mapping math
+            })
+            .collect();
+
+        // Bridge to LmeManifestEntry (dia_id → session_id slot) and rank.
+        let lme_manifest = locomo_manifest_as_lme(&locomo_manifest);
+        let got = lme_ranked_sessions(&retrieved_uuids, &lme_manifest);
+
+        let expected: Vec<String> = case["expected_ranked_dia_ids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+
+        assert_eq!(
+            got, expected,
+            "locomo uuid_mapping '{id}': expected {expected:?}, got {got:?}"
+        );
+    }
 }
