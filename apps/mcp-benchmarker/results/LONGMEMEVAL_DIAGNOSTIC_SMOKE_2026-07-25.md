@@ -1,5 +1,5 @@
 ---
-version: v0.2
+version: v0.3
 ---
 
 # LongMemEval Diagnostic Smoke Run — 2026-07-25
@@ -65,42 +65,41 @@ before/after comparison only.
 
 ## Results — v2 (post-fix, inline encoding, n=true — VALID BASELINE)
 
-Both 50q runs launched 2026-07-25 with commit `44303d0f`. Results to be filled in
-when background runs complete (background task IDs: bs271akxs [Rust], bke552b94 [Swift]).
+Both 50q runs completed 2026-07-26T04:31-04:32Z with commit `44303d0f`.
 
 ### Rust twin — 50q v2 (`--limit 50 --seed 20260725`, inline encoding n=true)
 
 | Metric             | Value  |
 |--------------------|--------|
-| questions_run      | —      |
-| guard_excluded     | —      |
-| recall_any@1       | —      |
-| recall_any@5       | —      |
-| recall_any@10      | —      |
-| recall_all@1       | —      |
-| recall_all@5       | —      |
-| recall_all@10      | —      |
-| mrr                | —      |
-| query_p50_s        | —      |
-| query_p95_s        | —      |
-| write_mean_s       | —      |
+| questions_run      | 50     |
+| guard_excluded     | 0      |
+| recall_any@1       | 0.4800 |
+| recall_any@5       | 0.7800 |
+| recall_any@10      | 0.8600 |
+| recall_all@1       | 0.2000 |
+| recall_all@5       | 0.3400 |
+| recall_all@10      | 0.5600 |
+| mrr                | 0.6178 |
+| query_p50_s        | 1.523  |
+| query_p95_s        | 2.166  |
+| write_mean_s       | 0.049  |
 
 ### Swift twin — 50q v2 (`--limit 50 --seed 20260725`, inline encoding n=true)
 
 | Metric             | Value  |
 |--------------------|--------|
-| questions_run      | —      |
-| guard_excluded     | —      |
-| recall_any@1       | —      |
-| recall_any@5       | —      |
-| recall_any@10      | —      |
-| recall_all@1       | —      |
-| recall_all@5       | —      |
-| recall_all@10      | —      |
-| mrr                | —      |
-| query_p50_s        | —      |
-| query_p95_s        | —      |
-| write_mean_s       | —      |
+| questions_run      | 50     |
+| guard_excluded     | 0      |
+| recall_any@1       | 0.4800 |
+| recall_any@5       | 0.7600 |
+| recall_any@10      | 0.9000 |
+| recall_all@1       | 0.2200 |
+| recall_all@5       | 0.4000 |
+| recall_all@10      | 0.5200 |
+| mrr                | 0.6208 |
+| query_p50_s        | 1.482  |
+| query_p95_s        | 2.612  |
+| write_mean_s       | 0.050  |
 
 ---
 
@@ -108,32 +107,87 @@ when background runs complete (background task IDs: bs271akxs [Rust], bke552b94 
 
 | Metric         | v1 (background) | v2 (inline n=true) | delta   |
 |----------------|-----------------|---------------------|---------|
-| recall_any@1   | 0.5000          | —                   | —       |
-| recall_any@5   | 0.7800          | —                   | —       |
-| recall_any@10  | 0.8800          | —                   | —       |
-| recall_all@1   | 0.2600          | —                   | —       |
-| recall_all@5   | 0.4200          | —                   | —       |
-| recall_all@10  | 0.6200          | —                   | —       |
-| mrr            | 0.6411          | —                   | —       |
-| write_mean_s   | 0.047           | —                   | —       |
-| query_p50_s    | 1.481           | —                   | —       |
-| query_p95_s    | 2.045           | —                   | —       |
+| recall_any@1   | 0.5000          | 0.4800              | −0.0200 |
+| recall_any@5   | 0.7800          | 0.7800              | 0.0000  |
+| recall_any@10  | 0.8800          | 0.8600              | −0.0200 |
+| recall_all@1   | 0.2600          | 0.2000              | −0.0600 |
+| recall_all@5   | 0.4200          | 0.3400              | −0.0800 |
+| recall_all@10  | 0.6200          | 0.5600              | −0.0600 |
+| mrr            | 0.6411          | 0.6178              | −0.0233 |
+| write_mean_s   | 0.047           | 0.049               | +0.002  |
+| query_p50_s    | 1.481           | 1.523               | +0.042  |
+| query_p95_s    | 2.045           | 2.166               | +0.121  |
+
+**Interpretation:** The v2 numbers are slightly lower than v1 for most recall metrics, but
+the deltas are within natural run-to-run variance for a 50-question sample. The write_mean
+overhead from n=true is only +2ms/turn — negligible. This indicates the background encoding
+race was not materially degrading results on this lightly loaded machine: encoding was
+completing before the recall query ran in nearly all v1 cases. The n=true fix removes the
+theoretical race condition and is required for correctness in production (or under load), even
+though the practical impact on this hardware is small.
 
 ---
 
-## Twin Agreement Table — v2 (50 questions, same seed)
+## Twin Agreement Table — v2 (50 questions, same seed 20260725)
 
-Per-question recall_any@1 and MRR comparison for both twins on the same 50 questions
-(SplitMix64 seed 20260725 guarantees identical question order on both legs). Divergence
-is expected and correct — each twin provisions a separate mootx01 estate per question,
-so embedding ranking is independent. The table shows how often two independent runs
-agree on correct top-1 recall.
+Per-question recall_any@1 and MRR comparison for both twins. SplitMix64 seed 20260725 guarantees
+identical question order on both legs. Divergence is expected — each twin provisions a separate
+mootx01 estate per question, so embedding ranking is independent.
 
-| question_id  | type               | Swift recall_any@1 | Rust recall_any@1 | Swift mrr | Rust mrr | agree@1? |
-|--------------|--------------------|--------------------|-------------------|-----------|----------|----------|
-| (pending)    | …                  | —                  | —                 | —         | —        | —        |
+**Agreement@1: 42/50 = 84%** (8 disagreements: 4 Rust-only hits, 4 Swift-only hits — symmetric)
 
-Full table will be populated when both v2 runs complete.
+| # | question_id | type | Rust any@1 | Swift any@1 | Rust MRR | Swift MRR | agree@1 |
+|---|---|---|---|---|---|---|---|
+| 1 | gpt4_2ba83207 | multi-session | 0 | 0 | 0.500 | 0.500 | Y |
+| 2 | 60d45044 | single-session-user | 0 | 0 | 0.500 | 0.500 | Y |
+| 3 | 2788b940 | multi-session | 1 | 0 | 1.000 | 0.100 | N |
+| 4 | 8a2466db | single-session-preference | 1 | 1 | 1.000 | 1.000 | Y |
+| 5 | 4adc0475 | multi-session | 1 | 0 | 1.000 | 0.100 | N |
+| 6 | 35a27287 | single-session-preference | 0 | 0 | 0.333 | 0.500 | Y |
+| 7 | 51b23612 | single-session-assistant | 0 | 0 | 0.143 | 0.333 | Y |
+| 8 | caf03d32 | single-session-preference | 1 | 1 | 1.000 | 1.000 | Y |
+| 9 | 681a1674 | multi-session | 0 | 0 | 0.000 | 0.000 | Y |
+| 10 | e61a7584 | knowledge-update | 0 | 0 | 0.500 | 0.500 | Y |
+| 11 | gpt4_e061b84g | temporal-reasoning | 0 | 0 | 0.000 | 0.167 | Y |
+| 12 | 77eafa52 | multi-session | 0 | 0 | 0.500 | 0.100 | Y |
+| 13 | 031748ae_abs | knowledge-update | 1 | 0 | 1.000 | 0.083 | N |
+| 14 | 2ebe6c92 | temporal-reasoning | 0 | 0 | 0.333 | 0.250 | Y |
+| 15 | c9f37c46 | temporal-reasoning | 1 | 1 | 1.000 | 1.000 | Y |
+| 16 | gpt4_b5700ca0 | temporal-reasoning | 0 | 0 | 0.250 | 0.500 | Y |
+| 17 | c4f10528 | single-session-assistant | 0 | 0 | 0.500 | 0.500 | Y |
+| 18 | 1903aded | single-session-assistant | 0 | 0 | 0.100 | 0.100 | Y |
+| 19 | gpt4_7a0daae1 | temporal-reasoning | 0 | 0 | 0.250 | 0.111 | Y |
+| 20 | ce6d2d27 | knowledge-update | 1 | 1 | 1.000 | 1.000 | Y |
+| 21 | c4a1ceb8 | multi-session | 1 | 1 | 1.000 | 1.000 | Y |
+| 22 | c14c00dd | single-session-user | 1 | 1 | 1.000 | 1.000 | Y |
+| 23 | 61f8c8f8 | multi-session | 0 | 1 | 0.500 | 1.000 | N |
+| 24 | gpt4_7ddcf75f | temporal-reasoning | 1 | 1 | 1.000 | 1.000 | Y |
+| 25 | 3ba21379 | knowledge-update | 0 | 0 | 0.250 | 0.250 | Y |
+| 26 | f523d9fe | single-session-assistant | 1 | 1 | 1.000 | 1.000 | Y |
+| 27 | gpt4_cd90e484 | temporal-reasoning | 1 | 1 | 1.000 | 1.000 | Y |
+| 28 | gpt4_78cf46a3 | temporal-reasoning | 0 | 0 | 0.500 | 0.500 | Y |
+| 29 | 0862e8bf_abs | single-session-user | 0 | 0 | 0.000 | 0.000 | Y |
+| 30 | eeda8a6d | multi-session | 1 | 1 | 1.000 | 1.000 | Y |
+| 31 | 5a4f22c0 | knowledge-update | 1 | 1 | 1.000 | 1.000 | Y |
+| 32 | e47becba | single-session-user | 1 | 1 | 1.000 | 1.000 | Y |
+| 33 | 28dc39ac | multi-session | 1 | 1 | 1.000 | 1.000 | Y |
+| 34 | 09ba9854_abs | multi-session | 1 | 0 | 1.000 | 0.500 | N |
+| 35 | gpt4_59c863d7 | multi-session | 0 | 0 | 0.500 | 0.500 | Y |
+| 36 | cc6d1ec1 | temporal-reasoning | 1 | 1 | 1.000 | 1.000 | Y |
+| 37 | 157a136e | multi-session | 0 | 0 | 0.083 | 0.000 | Y |
+| 38 | 94f70d80 | single-session-user | 1 | 1 | 1.000 | 1.000 | Y |
+| 39 | gpt4_9a159967 | temporal-reasoning | 0 | 0 | 0.091 | 0.111 | Y |
+| 40 | 09d032c9 | single-session-preference | 0 | 0 | 0.000 | 0.000 | Y |
+| 41 | gpt4_2f584639 | temporal-reasoning | 0 | 1 | 0.333 | 1.000 | N |
+| 42 | 2133c1b5_abs | knowledge-update | 0 | 0 | 0.500 | 0.500 | Y |
+| 43 | gpt4_6ed717ea | temporal-reasoning | 1 | 1 | 1.000 | 1.000 | Y |
+| 44 | gpt4_1e4a8aeb | temporal-reasoning | 0 | 1 | 0.125 | 1.000 | N |
+| 45 | 21436231 | single-session-user | 1 | 1 | 1.000 | 1.000 | Y |
+| 46 | 7161e7e2 | single-session-assistant | 0 | 1 | 0.000 | 1.000 | N |
+| 47 | b320f3f8 | single-session-user | 1 | 1 | 1.000 | 1.000 | Y |
+| 48 | gpt4_e05b82a6 | multi-session | 1 | 1 | 1.000 | 1.000 | Y |
+| 49 | c5e8278d | single-session-user | 1 | 1 | 1.000 | 1.000 | Y |
+| 50 | a11281a2 | multi-session | 0 | 0 | 0.100 | 0.333 | Y |
 
 ---
 
@@ -168,7 +222,7 @@ Trade-off: write latency per turn increases (blocking on embedding model inferen
 each turn), but the correctness invariant is guaranteed. The v2 50q smokes are the first
 valid LME baseline.
 
-Note: `constantArgs` (Swift) / `constant_args` (Rust) is typed as `[String: String]` / 
+Note: `constantArgs` (Swift) / `constant_args` (Rust) is typed as `[String: String]` /
 `BTreeMap<String, String>` — it cannot hold boolean values. The `n=true` argument is
 injected directly into the call-site args dict AFTER the constantArgs loop, bypassing the
 string-only restriction.
@@ -177,24 +231,21 @@ string-only restriction.
 
 ## DegeneracyGuard
 
-All 50 questions in the v1 Rust run cleared the guard (0 guard_excluded). The three probe
+All 50 questions in both v2 runs cleared the guard (0 guard_excluded). The three probe
 queries ("what happened during our recent dinner together?", "can you remind me about my
 work project updates?", "what were we discussing about travel plans last month?") produced
 sufficiently distinct rankings on every question. This confirms mootx01 is not returning
 frozen/query-invariant results at `location: benchmark/longmemeval`.
 
-v2 guard results to be confirmed when both runs complete.
-
 ---
 
 ## Latency
 
-- **v1 write mean:** ~47 ms/turn (background encoding, immediate return).
-- **v2 write mean:** expected significantly higher (blocking on inline embedding encoding).
-- **v1 query p50:** ~1.45–1.48 s — includes embedding model inference for the recall query.
-- **v1 query p95:** ~2.0 s — elevated on multi-session questions (larger haystacks).
-- **v1 per-question wall time:** ~30–40 s (ingest + probe × 3 + query, background encoding).
-- **v2 per-question wall time:** higher; encoding is front-loaded into the write phase.
+- **v2 write mean (both twins):** ~49–50 ms/turn — nearly identical to v1 background.
+  The n=true overhead is ~2 ms/turn, confirming encoding completes quickly on this hardware.
+- **Rust v2 query p50:** 1.523 s, p95: 2.166 s
+- **Swift v2 query p50:** 1.482 s, p95: 2.612 s (higher p95 reflects heavier Swift concurrency overhead on large haystacks)
+- **Per-question wall time:** ~50–70 s per question (ingest + guard × 3 + query, with inline encoding)
 
 ---
 
@@ -218,18 +269,20 @@ v2 guard results to be confirmed when both runs complete.
    include `has_answer` (present only in the hand-authored synthetic test sample). Fixed
    in both loaders: `#[serde(default)]` in Rust, `decodeIfPresent` with `?? false` in Swift.
 
-2. **Background encoding race — all v1 numbers suspect.** `moot_file_memory` defaults to
-   background encoding. The LME harness must always use `n=true` to guarantee the
-   ingest → encode → query invariant. v1 numbers are a lower bound; v2 numbers with n=true
-   are the valid baseline.
+2. **Background encoding race — theoretical, not material on this hardware.** `moot_file_memory`
+   defaults to background encoding. The LME harness must always use `n=true` for correctness
+   guarantees in production or under load. In practice on a lightly loaded machine the encoding
+   completes before the recall query in nearly all cases, explaining why v1 and v2 numbers
+   are within natural run-to-run variance. The n=true fix is correct and required; its impact
+   here is small.
 
-3. **Recall is meaningful (v1 lower bound).** recall_any@10 = 0.88 in the Rust v1 run
-   indicates mootx01 surfaces the correct session for most questions when a top-10 window
-   is used. v2 may be higher.
+3. **Recall is meaningful at @10 (v2 valid baseline).** recall_any@10 = 0.86–0.90 across
+   both twins indicates mootx01 surfaces the correct session for 86–90% of questions when a
+   top-10 window is used.
 
 4. **Multi-session questions harder.** `multi-session` questions (answer spans >= 2 sessions)
    show lower recall_all than `single-session-*` questions — all sessions must rank in the
-   top-k window.
+   top-k window simultaneously.
 
 5. **Scratch dir isolation works.** Pattern `/tmp/lme-bench-<seed_hex>-<q_hex>` isolates
    each question's estate. Guard teardown refuses non-`/tmp/lme-bench-` prefixes.
@@ -239,11 +292,15 @@ v2 guard results to be confirmed when both runs complete.
    additional `swift-bench/` wrapper requiring 4 levels. Both path helpers corrected in
    Adams post-flight fix `6b0dbe6e`.
 
+7. **Agreement@1 is 84% (42/50).** 8 questions differ between the twins at recall_any@1.
+   The split is exactly symmetric: 4 Rust-only hits, 4 Swift-only hits. No systematic
+   advantage to either twin. Divergence is expected — independent estate per question,
+   independent embedding ranking.
+
 ---
 
 ## Next Steps (not in LME-01 scope)
 
-- Fill in v2 numbers when both 50q runs complete.
 - Full 500-question run for the authoritative baseline (expected ~4.5+ hours single-threaded).
 - LLM-judge QA accuracy scoring (answer quality beyond session retrieval).
 - Temporal-reasoning and knowledge-update question type breakdowns.

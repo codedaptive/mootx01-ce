@@ -1,10 +1,10 @@
 ---
-version: v0.2
+version: v0.3
 ---
 
 # COMPLETION: LME-01
 
-Status: COMPLETE (follow-up pass in progress — 50q re-smokes with n=true encoding fix running)
+Status: COMPLETE
 
 ## Pre-flight and Post-flight Verdicts
 
@@ -43,11 +43,11 @@ are on the same stream branch and are auditable in git log.
 - --limit 2 live smoke (Rust, pre-fix): exit 0, guard=healthy, recall_any@5=1.0 on both questions
 - --limit 10 live smoke (Swift, pre-fix): exit 0, guard=healthy, 0 guard refusals, recall_any@10=0.70
 - --limit 50 live smoke (Rust, pre-fix): exit 0, guard=healthy, 0 guard refusals, recall_any@10=0.88
-- --limit 50 live smoke (Rust, post-fix, n=true): in progress — see FINDINGS for results
-- --limit 50 live smoke (Swift, post-fix, n=true): in progress — see FINDINGS for results
+- --limit 50 live smoke (Rust, post-fix n=true): exit 0, 50 questions, 0 guard_excluded — recall_any@5=0.78, recall_any@10=0.86, MRR=0.618, p50=1.52s, p95=2.17s
+- --limit 50 live smoke (Swift, post-fix n=true): exit 0, 50 questions, 0 guard_excluded — recall_any@5=0.76, recall_any@10=0.90, MRR=0.621, p50=1.48s, p95=2.61s
 
 Pre-fix numbers are documented in FINDINGS as a baseline comparison.
-Post-fix numbers will be updated in FINDINGS when both runs complete.
+Post-fix v2 numbers are the valid baseline; see FINDINGS for full tables and per-question agreement analysis.
 
 ## Correctness Finding: Background Encoding Race (n=true Fix)
 
