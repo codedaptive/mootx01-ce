@@ -149,9 +149,25 @@ fn offer_estate_encryption_if_needed() {
 
     // Key custody: the sibling db.key convention — the same key
     // `SqliteStorage` resolves on every open, minted here if absent.
-    let key = match aria_mcp::ensure_install_key(estate.parent().unwrap_or(&data)) {
+    //
+    // Track whether THIS run minted it: every failure exit below rolls a
+    // freshly-minted key back. Leaving it beside the still-plaintext estate
+    // is a mismatched state — every subsequent open resolves the key
+    // against a plaintext file and fails, so the estate is unopenable until
+    // a retry succeeds (Codex 5ca9538f). A PREEXISTING key is never
+    // touched: deleting it would orphan every encrypted estate it opens.
+    let estates_dir = estate.parent().unwrap_or(&data).to_path_buf();
+    let key_path = estates_dir.join(aria_mcp::INSTALL_KEY_FILE);
+    let key_preexisted = key_path.exists();
+    let rollback_minted_key = || {
+        if !key_preexisted {
+            let _ = std::fs::remove_file(&key_path);
+        }
+    };
+    let key = match aria_mcp::ensure_install_key(&estates_dir) {
         Ok(k) => k,
         Err(e) => {
+            rollback_minted_key();
             println!(
                 "Could not provision an encryption key ({e}).\n\
                  Nothing was changed; the estate is untouched."
@@ -165,6 +181,7 @@ fn offer_estate_encryption_if_needed() {
     // stop is the safe direction — nothing has been touched yet.
     let was_running = daemon_is_running();
     if was_running && !daemon_stop() {
+        rollback_minted_key();
         println!(
             "The resident daemon would not stop; nothing was changed.\n\
              Stop it manually and run `mootx01 upgrade` again."
@@ -209,16 +226,34 @@ fn offer_estate_encryption_if_needed() {
         }
         Err(e) => {
             // Every failure path left the plaintext original at the
-            // canonical path; put the daemon back over it.
+            // canonical path; roll back a key this run minted, then put the
+            // daemon back over the original. Order matters: the daemon's
+            // startup resolves the sibling key, so the mismatched
+            // key-beside-plaintext state must be gone before it opens.
+            rollback_minted_key();
             if was_running {
                 let _ = daemon_start();
             }
             println!(
                 "Migration failed: {e}\n\
-                 Your estate is still the plaintext original at {} and\n\
-                 remains fully usable. Run `mootx01 upgrade` to try again.",
+                 Your estate is still the plaintext original at {}.",
                 estate.display()
             );
+            if key_preexisted {
+                // With a preexisting key beside a plaintext estate, encrypted
+                // opens were already failing before this run — do not claim
+                // otherwise.
+                println!(
+                    "Note: an encryption key (db.key) that predates this run exists beside\n\
+                     the estate; the daemon cannot open the estate until the migration\n\
+                     succeeds. Run `mootx01 upgrade` to try again."
+                );
+            } else {
+                println!(
+                    "The encryption key created for this run was removed; the estate\n\
+                     opens exactly as before. Run `mootx01 upgrade` to try again."
+                );
+            }
         }
     }
 }
