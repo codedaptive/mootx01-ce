@@ -124,7 +124,12 @@ def main() -> None:
 
     cur = current_version()
     if cur == new:
-        raise SystemExit(f"bump: tree is already at {new}; nothing to do")
+        # Idempotent no-op: the tree already carries the target version (e.g. the
+        # bump was committed on the branch and the candidate workflow re-stamps
+        # ephemerally). Verify consistency at the target and exit cleanly; only
+        # a genuinely drifted tree fails here.
+        print(f"bump: tree is already at {new}; verifying consistency")
+        raise SystemExit(run_verify(new))
     cur_date = current_release_date()
 
     # Guard: refuse to bump a tree that isn't already consistent at `cur`, so a
