@@ -62,6 +62,15 @@ struct DbCreateCommand: AsyncParsableCommand {
             // eagerly is what keeps create and delete symmetric instead of leaving
             // a key to be minted later by whoever opens the estate first.
             do {
+                // A re-created estate name can inherit a stale --no-encrypt
+                // marker from an earlier estate at the same path. The open
+                // posture honors the marker for an absent file — so without
+                // this sweep, first open would create the estate PLAINTEXT
+                // even though a key was just provisioned and the user did not
+                // opt out (stale-marker downgrade, Codex fe2cf887).
+                if try EstateKeyProvider.removeEncryptionOptOut(forEstateAt: estateURL) {
+                    print("Removed a stale --no-encrypt marker for '\(name)'; the estate will be encrypted (the default).")
+                }
                 _ = try EstateKeyProvider.provideKey(for: estateURL)
                 print("Created estate '\(name)' (encrypted at rest).")
             } catch {

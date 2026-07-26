@@ -148,6 +148,14 @@ struct ServeCommand: AsyncParsableCommand {
         do {
             let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
             encryption = resolved.encryption
+            // A plaintext-by-marker open must never be silent: name the posture
+            // AND its source, so a downgrade caused by a stale or planted
+            // no-encrypt marker is visible in the serve log instead of being
+            // discovered months later (Codex fe2cf887).
+            if resolved.posture == .newPlaintextByOptOut {
+                Logging.stderr.log(
+                    "mootx01 serve: creating estate UNENCRYPTED — opt-out marker present at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path). Run `mootx01 upgrade` to encrypt.")
+            }
         } catch {
             // Fail closed, in the same style the SQLite open failure below uses.
             // Never fall back to a plaintext open: that would silently downgrade

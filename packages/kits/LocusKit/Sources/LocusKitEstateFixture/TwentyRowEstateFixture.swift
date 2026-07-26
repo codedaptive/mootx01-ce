@@ -451,7 +451,22 @@ public enum TwentyRowEstateFixture {
     }
 
     /// Remove an estate file and its WAL/SHM siblings.
+    ///
+    /// Guarded: refuses to delete anything inside the real data directory —
+    /// the same constraint `generate(at:)` enforces, applied here so no
+    /// caller-side ordering mistake (cleanup before the guarded generate)
+    /// can turn fixture cleanup into production data loss. The refusal is a
+    /// logged no-op rather than a throw so `defer { cleanup(...) }` call
+    /// sites remain valid; every legitimate caller passes a temp path and
+    /// never hits the guard.
     public static func cleanup(_ estateURL: URL) {
+        do {
+            try assertNotProductionPath(estateURL)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "TwentyRowEstateFixture.cleanup refused: \(estateURL.path) is inside the real data directory; nothing was deleted.\n".utf8))
+            return
+        }
         let fileManager = FileManager.default
         try? fileManager.removeItem(at: estateURL)
         for suffix in ["-wal", "-shm"] {
