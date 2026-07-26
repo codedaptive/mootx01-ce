@@ -385,7 +385,7 @@ public struct ToolDispatcher: Sendable {
             }
             // Route to the appropriate runner and capture the result so
             // the coaching engine can inspect it before it is returned.
-            let runnerResult: JSONValue
+            var runnerResult: JSONValue
             if name == Self.federatedSearchToolName {
                 // Federation tool above the interface tier — matched by name.
                 runnerResult = try await runFederatedSearch(args)
@@ -418,6 +418,10 @@ public struct ToolDispatcher: Sendable {
                     message: "Unknown tool: \(name)"
                 )
             }
+            // Append a hint for any argument keys the tool schema does not declare.
+            // Non-error results only. Also mirrors the hint to stderr so daemon logs
+            // capture the ignored arg without the LLM client having to relay it.
+            runnerResult = appendUnknownArgsHint(name: name, args: args, to: runnerResult)
             // Append a coaching hint to non-error results when a trigger fires.
             return applyHint(name: name, args: args, to: runnerResult)
         } catch let error as JSONRPCError {
@@ -458,6 +462,35 @@ public struct ToolDispatcher: Sendable {
             return result
         }
         return Self.textResult(text + "\nhint: " + hint)
+    }
+
+    /// Append a hint line when the caller sent argument keys not declared in the
+    /// tool's inputSchema. Returns the result unchanged on error results or when
+    /// all keys are recognized. Also logs unrecognized keys to stderr for the
+    /// daemon log — callers (LLM clients) may not relay warnings.
+    ///
+    /// Accepted keys are extracted from `ToolProjection.acceptedArgKeys(for:)`,
+    /// which reads the live tool schema (post-`withEstateID`/`withTeachme`
+    /// wrappers), so `estateID` and `teachme` are always recognized.
+    /// Returns nil from `acceptedArgKeys` for unknown tool names — no check runs.
+    ///
+    /// Hint format: `hint: unrecognized argument(s) ignored: <sorted, comma-joined>`
+    private func appendUnknownArgsHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
+        guard let accepted = ToolProjection.acceptedArgKeys(for: name) else {
+            return result
+        }
+        let unknown = Set(args.keys).subtracting(accepted)
+        guard !unknown.isEmpty else { return result }
+        let sorted = unknown.sorted().joined(separator: ", ")
+        fputs("aria-mcp: \(name): unrecognized argument(s) ignored: \(sorted)\n", stderr)
+        // Append hint to non-error results only — error results carry their own
+        // message and must not be silently augmented.
+        guard let obj = result.objectValue,
+              obj["isError"]?.boolValue == false,
+              let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue else {
+            return result
+        }
+        return Self.textResult(text + "\nhint: unrecognized argument(s) ignored: \(sorted)")
     }
 
     // MARK: - Federation tool
