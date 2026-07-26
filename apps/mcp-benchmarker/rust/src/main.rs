@@ -17,6 +17,11 @@
 //! exposed by the Rust CLI (see the crate-level parity notes).
 
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
+use mcp_benchmarker_rs::locomo_corpus::load_locomo_corpus;
+use mcp_benchmarker_rs::locomo_runner::{run_locomo_questions, LoCoMoRunConfig};
+use mcp_benchmarker_rs::locomo_scorer::{
+    build_locomo_report, score_locomo_question, write_locomo_report,
+};
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
 use mcp_benchmarker_rs::longmemeval_runner::{
     discover_moot_binary, run_lme_questions, LmeRunConfig,
@@ -31,13 +36,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "mcp-benchmarker-rs — Rust twin of the mcp-benchmarker transport/transfer/LME core\n\
+    "mcp-benchmarker-rs — Rust twin of the mcp-benchmarker transport/transfer/LME/LoCoMo core\n\
      \n\
      USAGE:\n\
      \x20\x20mcp-benchmarker-rs transfer    --config <c.json> --manifest <out.json> [--limit N] [--no-verify]\n\
      \x20\x20mcp-benchmarker-rs report      --manifest <m.json>\n\
      \x20\x20mcp-benchmarker-rs longmemeval --corpus <path.json> [--binary <path>]\n\
      \x20\x20                               [--variant s|m|oracle] [--seed N] [--limit N]\n\
+     \x20\x20                               [--out <dir>] [--label <label>]\n\
+     \x20\x20mcp-benchmarker-rs locomo      --corpus <path.json> [--binary <path>]\n\
+     \x20\x20                               [--seed N] [--limit N] [--offset N]\n\
      \x20\x20                               [--out <dir>] [--label <label>]\n"
 }
 
@@ -264,6 +272,101 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_locomo(args: &[String]) -> Result<(), String> {
+    let corpus_path = require_option("--corpus", args)?;
+    let binary = option_value("--binary", args)
+        .map(str::to_string)
+        .or_else(discover_moot_binary)
+        .ok_or_else(|| {
+            "could not find mootx01 binary; pass --binary <path> or set $MOOTX01_BINARY".to_string()
+        })?;
+    let seed: u64 = option_value("--seed", args)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_260_725_u64);
+    let limit = option_value("--limit", args).and_then(|s| s.parse::<usize>().ok());
+    let offset: usize = option_value("--offset", args)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let label = option_value("--label", args).map(str::to_string);
+    let out_dir = option_value("--out", args).map(PathBuf::from);
+
+    eprintln!("[locomo] loading corpus from {corpus_path}");
+    let corpus = load_locomo_corpus(Path::new(&corpus_path))
+        .map_err(|e| format!("corpus load failed: {e}"))?;
+    eprintln!(
+        "[locomo] corpus: {} conversations, {} questions ({} adversarial excluded)",
+        corpus.conversations.len(),
+        corpus.questions.len(),
+        corpus.adversarial_count,
+    );
+    eprintln!("[locomo] binary: {binary}  seed: {seed}");
+    if let Some(n) = limit {
+        eprintln!("[locomo] limit: {n}");
+    }
+    if offset > 0 {
+        eprintln!("[locomo] offset: {offset}");
+    }
+
+    let run_config = LoCoMoRunConfig {
+        moot_binary: binary,
+        seed,
+        limit,
+        offset,
+        label: label.clone(),
+        out_dir: out_dir.clone(),
+    };
+
+    let results = run_locomo_questions(&corpus, &run_config);
+    let scores: Vec<_> = results.into_iter().map(score_locomo_question).collect();
+
+    let run_id = {
+        let mut rng = mcp_benchmarker_rs::longmemeval_runner::SplitMix64::new(seed ^ 0xDEADBEEF_CAFEBABE);
+        format!("{:016x}", rng.next_u64())
+    };
+    let run_label = label.unwrap_or_else(|| format!("locomo-seed{seed}"));
+    let generated_at = now_iso8601();
+
+    let report = build_locomo_report(
+        run_id,
+        run_label,
+        generated_at,
+        corpus.questions.len() + corpus.adversarial_count,
+        corpus.adversarial_count,
+        &scores,
+    );
+
+    // Print summary.
+    println!("LoCoMo results (seed={seed}):");
+    println!("  questions_run:      {}", report.corpus_stats.questions_run);
+    println!("  guard_excluded:     {}", report.corpus_stats.guard_excluded);
+    println!("  query_count:        {}", report.aggregate.query_count);
+    println!("  recall_any@5:       {:.4}", report.aggregate.recall_any_at_5);
+    println!("  recall_all@5:       {:.4}", report.aggregate.recall_all_at_5);
+    println!("  recall_any@10:      {:.4}", report.aggregate.recall_any_at_10);
+    println!("  mrr:                {:.4}", report.aggregate.mrr);
+    println!("  query_p50_s:        {:.4}", report.latency.query_p50_seconds);
+    println!("  query_p95_s:        {:.4}", report.latency.query_p95_seconds);
+    println!("  category_breakdown:");
+    for cat in &report.category_breakdown {
+        println!(
+            "    {:12}  n={:4}  any@5={:.4}  all@5={:.4}  mrr={:.4}",
+            cat.label, cat.query_count,
+            cat.recall_any_at_5, cat.recall_all_at_5, cat.mrr
+        );
+    }
+
+    // Write report file.
+    let report_filename = format!("locomo-report-seed{seed}.json");
+    let report_path = out_dir
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&report_filename);
+    write_locomo_report(&report, &report_path)?;
+    println!("report written to {}", report_path.display());
+
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (subcommand, rest) = match args.split_first() {
@@ -277,6 +380,7 @@ fn main() -> ExitCode {
         "transfer" => run_transfer(rest),
         "report" => run_report(rest),
         "longmemeval" | "lme" => run_longmemeval(rest),
+        "locomo" => run_locomo(rest),
         "--help" | "-h" | "help" => {
             print!("{}", usage());
             return ExitCode::SUCCESS;

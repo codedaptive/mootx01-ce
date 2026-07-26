@@ -5,6 +5,29 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## Unreleased (LME-04 stream)
+
+**mcp-benchmarker: LoCoMo session-recall benchmarking**
+
+- **New `locomo` subcommand** on both twins (Swift + Rust). Provisions one
+  isolated mootx01 estate per conversation (O(10) per run vs O(1,536) for
+  per-question), ingests all turns via `moot_file_memory` with `n=true`
+  (inline encoding), runs a DegeneracyGuard probe, then queries all selected
+  questions for that conversation. Output: `locomo-report-seed<N>.json`.
+- **LoCoMo dataset:** Snap Research, ACL 2024 — 10 multi-session conversations,
+  1,536 scoreable questions (450 adversarial excluded), CC BY-NC 4.0 license.
+  Dataset is gitignored; download via `scripts/fetch-locomo.sh`.
+- **Recall metrics:** `recall_any@k` / `recall_all@k` / `mrr` per question,
+  plus per-category breakdown (single_hop, temporal, multi_hop, open_domain).
+  Reuses LME-01 scoring math via `locomo_manifest_as_lme` bridge (dia_id →
+  session_id mapping). Additive extension per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+- **Cross-language conformance verified** by `conformance/locomo_vectors.json`:
+  recall cases + uuid-mapping cases, tolerance 1e-9, both legs pass.
+- **Diagnostic smoke run:** 50 questions, seed 20260725, both twins. Category
+  n-counts match across twins (single_hop=8, temporal=12, multi_hop=2,
+  open_domain=28); agreement@5 = 46/50 = 92%. Full results in
+  `apps/mcp-benchmarker/results/LOCOMO_DIAGNOSTIC_SMOKE_2026-07-26.md`.
+
 ## Unreleased (LME-01 stream)
 
 **mcp-benchmarker: LongMemEval session-recall benchmarking**
