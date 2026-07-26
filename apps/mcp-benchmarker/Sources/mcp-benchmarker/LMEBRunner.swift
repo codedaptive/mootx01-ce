@@ -115,7 +115,7 @@ func lmebScratchDir() throws -> URL {
 
 /// Deletes a scratch directory created by `lmebScratchDir`. Refuses any path
 /// that does not carry the `/tmp/lmeb-bench-` prefix — mirrors the safety
-/// guard in `lmeGuardedTeardown` (commit 253cebf1).
+/// guard in `lmeGuardedTeardown` (commit f5e51a50).
 func lmebGuardedTeardown(_ url: URL) throws {
     let path = url.path
     guard path.hasPrefix("/tmp/lmeb-bench-") else {
