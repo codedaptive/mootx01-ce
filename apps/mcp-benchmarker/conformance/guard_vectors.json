@@ -1,0 +1,145 @@
+{
+  "_comment": "Conformance vectors for DegeneracyGuard. Both legs must produce identical verdicts for each input. Verdict is encoded as the case discriminant string. Diagnostic strings are not compared — they are implementation-defined text. See DegeneracyGuard.swift for the algorithm.",
+  "classify_cases": [
+    {
+      "id": "classify-identical-three-probes",
+      "probe_rankings": [
+        ["id-a", "id-b", "id-c", "id-d"],
+        ["id-a", "id-b", "id-c", "id-d"],
+        ["id-a", "id-b", "id-c", "id-d"]
+      ],
+      "expected_verdict": "queryInvariant",
+      "note": "Three identical rankings → Jaccard divergence 0.0 and rank divergence 0.0 across all pairs → queryInvariant"
+    },
+    {
+      "id": "classify-distinct-three-probes",
+      "probe_rankings": [
+        ["apple", "banana", "cherry", "date"],
+        ["date", "cherry", "elderberry", "fig"],
+        ["grape", "honeydew", "apple", "kiwi"]
+      ],
+      "expected_verdict": "healthy",
+      "note": "Three meaningfully distinct rankings → high pairwise divergence → healthy"
+    },
+    {
+      "id": "classify-single-probe",
+      "probe_rankings": [
+        ["id-a", "id-b"]
+      ],
+      "expected_verdict": "healthy",
+      "note": "Fewer than 2 probes → cannot detect invariance → healthy"
+    },
+    {
+      "id": "classify-empty-probes",
+      "probe_rankings": [],
+      "expected_verdict": "healthy",
+      "note": "Empty probe set → healthy (no evidence of invariance)"
+    },
+    {
+      "id": "classify-two-identical-probes",
+      "probe_rankings": [
+        ["x", "y", "z"],
+        ["x", "y", "z"]
+      ],
+      "expected_verdict": "queryInvariant",
+      "note": "Two identical probes → both axes 0.0 < threshold → queryInvariant"
+    },
+    {
+      "id": "classify-two-different-probes",
+      "probe_rankings": [
+        ["a", "b", "c"],
+        ["c", "b", "a"]
+      ],
+      "expected_verdict": "healthy",
+      "note": "Two probes with reversed order → rank divergence 1.0 > threshold → healthy"
+    }
+  ],
+  "fallback_cases": [
+    {
+      "id": "fallback-found-n-plus-no-results",
+      "text_blocks": ["found 4 memory(s)", "hint: No results matched your query."],
+      "expected": true,
+      "note": "found N > 0 AND hint: keyword → degraded fallback signal"
+    },
+    {
+      "id": "fallback-found-zero",
+      "text_blocks": ["found 0 memory(s)"],
+      "expected": false,
+      "note": "found 0 is honest empty result, not a fallback contradiction"
+    },
+    {
+      "id": "fallback-clean-result",
+      "text_blocks": ["found 3 memory(s)", "abc-123  [location]  some content here"],
+      "expected": false,
+      "note": "found N with actual result lines — not a degraded fallback"
+    },
+    {
+      "id": "fallback-no-results-keyword",
+      "text_blocks": ["found 5 memory(s)", "no results for this query"],
+      "expected": true,
+      "note": "found N > 0 AND 'no results' keyword co-present → fallback"
+    },
+    {
+      "id": "fallback-fallback-keyword",
+      "text_blocks": ["found 2 memory(s)", "fallback mode active"],
+      "expected": true,
+      "note": "found N > 0 AND 'fallback' keyword co-present → fallback"
+    },
+    {
+      "id": "fallback-empty-blocks",
+      "text_blocks": [],
+      "expected": false,
+      "note": "Empty text blocks → no found-N pattern → false"
+    }
+  ],
+  "confirmation_cases": [
+    {
+      "id": "confirm-zero-with-perfect-recall",
+      "confirmed_count": 0,
+      "total": 5,
+      "recall": 1.0,
+      "expected": true,
+      "note": "confirmedCount=0, recall=1.0 → contradiction above the 0.5 floor"
+    },
+    {
+      "id": "confirm-matches-total",
+      "confirmed_count": 5,
+      "total": 5,
+      "recall": 0.95,
+      "expected": false,
+      "note": "confirmed == total → no contradiction"
+    },
+    {
+      "id": "confirm-zero-with-zero-recall",
+      "confirmed_count": 0,
+      "total": 5,
+      "recall": 0.0,
+      "expected": false,
+      "note": "confirmedCount=0 with recall=0 → consistent (nothing recalled, nothing confirmed)"
+    },
+    {
+      "id": "confirm-zero-total",
+      "confirmed_count": 0,
+      "total": 0,
+      "recall": 0.0,
+      "expected": false,
+      "note": "total=0 → guard returns false (no data to contradict)"
+    },
+    {
+      "id": "confirm-zero-at-floor",
+      "confirmed_count": 0,
+      "total": 3,
+      "recall": 0.5,
+      "expected": false,
+      "note": "recall=0.5 is NOT above the floor (floor is 0.5, check is >0.5) → no contradiction"
+    },
+    {
+      "id": "confirm-zero-above-floor",
+      "confirmed_count": 0,
+      "total": 3,
+      "recall": 0.51,
+      "expected": true,
+      "note": "recall=0.51 is above the 0.5 floor → contradiction"
+    }
+  ]
+}
