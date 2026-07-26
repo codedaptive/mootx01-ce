@@ -5,13 +5,15 @@ import ObserverSink
 // main.swift — CLI entry point.
 //
 // Hand-rolled argument parsing (swift-subprocess is the only external dep —
-// no swift-argument-parser). Eight subcommands:
+// no swift-argument-parser). Ten subcommands:
 //
 //   mcp-benchmarker transfer  --config c.json --manifest out.json [--limit N] [--no-verify] [--stats-store stats.sqlite]
 //   mcp-benchmarker benchmark --config c.json --manifest out.json --report report.json [--compare-source] [--stats-store stats.sqlite]
 //   mcp-benchmarker serve     --config c.json [--primary source|target] [--mirror] [--mirror-reads-only] [--report-interval N] [--stats-store stats.sqlite]
 //   mcp-benchmarker pressure  --config c.json [--concurrency N] [--duration S] [--stats-store stats.sqlite]
 //   mcp-benchmarker quality   --config c.json [--fixtures DIR] [--limit-clusters N]   (DIAGNOSTIC ONLY)
+//   mcp-benchmarker locomo    --data-file <locomo10.json> [--mootx01-binary <path>]
+//                             [--limit N] [--offset K] [--seed S] [--out <dir>]
 //   mcp-benchmarker report    --report report.json
 //
 // transfer  : paginate + full-content-fetch the source corpus, write it to the
@@ -50,6 +52,8 @@ func usageText() -> String {
       mcp-benchmarker gauntlet  --config <c.json> --corpus <dir> --run-label <label> [--out <dir>] [--k 1,5,10] [--limit N] [--quick] [--moot-only]
       mcp-benchmarker longmemeval --data-dir <dir> --variant s|m|oracle [--mootx01-binary <path>]
                         [--limit N] [--offset K] [--seed S] [--shared-estate] [--out <dir>]
+      mcp-benchmarker locomo    --data-file <locomo10.json> [--mootx01-binary <path>]
+                        [--limit N] [--offset K] [--seed S] [--out <dir>]
       mcp-benchmarker report    --report <report.json>
 
       transfer/benchmark/serve/pressure accept --stats-store <stats.sqlite> to
@@ -89,6 +93,17 @@ func usageText() -> String {
         --offset K               skip the first K questions (default 0)
         --seed S                 seed for deterministic question order (default 20260725)
         --shared-estate          use one estate for all questions (methodology-affecting)
+        --out <dir>              write results to <dir> (default: current directory)
+
+      locomo: provision per-conversation scratch mootx01 estates, ingest LoCoMo
+        conversation turns, and measure turn-level recall quality with per-category
+        breakdown (single_hop/temporal/multi_hop/open_domain). The dataset must be
+        pre-fetched with scripts/fetch-locomo.sh. License: CC BY-NC 4.0 (non-commercial).
+        --data-file <path>       path to locomo10.json
+        --mootx01-binary <path>  path to the mootx01 binary (auto-discovered if absent)
+        --limit N                run only the first N questions
+        --offset K               skip the first K questions (default 0)
+        --seed S                 seed for deterministic question order (default 20260725)
         --out <dir>              write results to <dir> (default: current directory)
 
     """
@@ -814,6 +829,117 @@ func runLongMemEval(_ args: [String]) async throws {
     FileHandle.standardOutput.write(Data(summary.utf8))
 }
 
+/// locomo subcommand — LoCoMo turn-level recall harness.
+///
+///   mcp-benchmarker locomo --data-file <locomo10.json>
+///       [--mootx01-binary <path>] [--limit N] [--offset K] [--seed S]
+///       [--out <dir>]
+///
+/// Provisions one scratch estate per conversation (10 total), ingests all turns
+/// via live moot_file_memory (n=true), and reports Recall-any@k / MRR / latency
+/// with per-category breakdown. Dataset must be pre-fetched with
+/// scripts/fetch-locomo.sh. License: CC BY-NC 4.0 (non-commercial use only).
+func runLoCoMo(_ args: [String]) async throws {
+    let dataFileStr = try requireOption("--data-file", in: args)
+    let datasetPath = URL(fileURLWithPath: dataFileStr)
+
+    guard FileManager.default.fileExists(atPath: datasetPath.path) else {
+        throw MCPError(description:
+            "LoCoMo dataset file not found at \(datasetPath.path). "
+            + "Run scripts/fetch-locomo.sh to download the dataset.")
+    }
+
+    // mootx01 binary: explicit flag takes priority over auto-discovery.
+    let mootBinary: String
+    if let explicit = optionValue("--mootx01-binary", in: args) {
+        mootBinary = explicit
+    } else if let discovered = discoverMootBinary() {
+        mootBinary = discovered
+        FileHandle.standardError.write(Data(
+            "[locomo] auto-discovered mootx01 at: \(mootBinary)\n".utf8))
+    } else {
+        throw MCPError(description:
+            "mootx01 binary not found. Build with `swift build --package-path apps/mootx01` "
+            + "or pass --mootx01-binary <path>.")
+    }
+    guard FileManager.default.isExecutableFile(atPath: mootBinary) else {
+        throw MCPError(description:
+            "mootx01 binary not executable at '\(mootBinary)'. "
+            + "Build with `swift build --package-path apps/mootx01`.")
+    }
+
+    let limit = optionValue("--limit", in: args).flatMap(Int.init)
+    let offset = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
+    let seed = optionValue("--seed", in: args).flatMap(UInt64.init) ?? 20_260_725
+    let outDirStr = optionValue("--out", in: args)
+    let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
+
+    FileHandle.standardOutput.write(Data(
+        "[locomo] loading corpus from \(datasetPath.path)\n".utf8))
+
+    let corpus = try loadLoCoMoCorpus(from: datasetPath)
+    FileHandle.standardOutput.write(Data((
+        "[locomo] loaded \(corpus.conversations.count) conversations, "
+        + "\(corpus.questions.count) scoreable questions "
+        + "(\(corpus.adversarialCount) adversarial excluded)\n").utf8))
+
+    let runConfig = LoCoMoRunConfig(
+        mootBinaryPath: mootBinary,
+        datasetPath: datasetPath,
+        limit: limit,
+        offset: offset,
+        seed: seed,
+        outDir: outDir,
+        runLabel: "locomo-seed\(seed)"
+    )
+
+    let results = try await runLoCoMoQuestions(
+        questions: corpus.questions,
+        conversations: corpus.conversations,
+        config: runConfig
+    )
+
+    let scores = results.map { scoreLoCoMoQuestion($0) }
+    let report = buildLoCoMoReport(config: runConfig, corpus: corpus, scores: scores)
+
+    let reportFilename = "locomo-report-seed\(runConfig.seed).json"
+    let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        .appendingPathComponent(reportFilename)
+    try writeLoCoMoReport(report, to: reportURL)
+
+    let guardHealthyCount = scores.filter(\.guardHealthy).count
+    let guardRefusals = scores.count - guardHealthyCount
+    let totalTurns = results.map(\.turnsIngested).reduce(0, +)
+    let (agg, cats, lat) = aggregateLoCoMoScores(scores)
+
+    var summary = """
+        [locomo] run complete
+          questions processed:  \(results.count)
+          guard healthy:        \(guardHealthyCount)
+          guard refusals:       \(guardRefusals)
+          conversations used:   \(Set(corpus.questions.prefix(results.count).map(\.conversationIndex)).count)
+          turns ingested total: \(totalTurns)
+          recall-any@1:         \(String(format: "%.4f", agg.recallAnyAt1))
+          recall-any@5:         \(String(format: "%.4f", agg.recallAnyAt5))
+          recall-any@10:        \(String(format: "%.4f", agg.recallAnyAt10))
+          recall-all@1:         \(String(format: "%.4f", agg.recallAllAt1))
+          recall-all@5:         \(String(format: "%.4f", agg.recallAllAt5))
+          recall-all@10:        \(String(format: "%.4f", agg.recallAllAt10))
+          mrr:                  \(String(format: "%.4f", agg.mrr))
+          query p50:            \(String(format: "%.1f", lat.queryP50Seconds * 1000)) ms
+          query p95:            \(String(format: "%.1f", lat.queryP95Seconds * 1000)) ms
+
+        """
+    // Per-category breakdown.
+    for cat in cats {
+        summary += String(format:
+            "  %-14s @5 any=%.4f all=%.4f mrr=%.4f (n=%d)\n",
+            cat.label, cat.recallAnyAt5, cat.recallAllAt5, cat.mrr, cat.queryCount)
+    }
+    summary += "  report written to: \(reportURL.path)\n\n"
+    FileHandle.standardOutput.write(Data(summary.utf8))
+}
+
 /// Dispatches one subcommand.
 func dispatch(_ arguments: [String]) async throws {
     guard let subcommand = arguments.first else {
@@ -830,6 +956,7 @@ func dispatch(_ arguments: [String]) async throws {
     case "gauntlet-corpus": try runGauntletCorpus(rest)
     case "gauntlet":       try await runGauntlet(rest)
     case "longmemeval":    try await runLongMemEval(rest)
+    case "locomo":         try await runLoCoMo(rest)
     case "report":         try runReport(rest)
     case "--help", "-h", "help":
         FileHandle.standardOutput.write(Data(usageText().utf8))
