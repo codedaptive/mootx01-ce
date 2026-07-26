@@ -64,6 +64,7 @@ pub mod config;
 pub mod degeneracy_guard;
 pub mod divergence;
 pub mod json_value;
+pub mod longmemeval_corpus;
 pub mod manifest;
 pub mod mcp_client;
 pub mod mcp_result;

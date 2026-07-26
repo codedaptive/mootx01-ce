@@ -15,6 +15,7 @@
 
 use mcp_benchmarker_rs::degeneracy_guard::DegeneracyGuard;
 use mcp_benchmarker_rs::divergence::{jaccard_divergence, rank_divergence};
+use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
 use mcp_benchmarker_rs::manifest::{CapabilityManifest, ManifestValidationError};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -41,6 +42,21 @@ fn conformance_path(filename: &str) -> PathBuf {
         .expect("apps/mcp-benchmarker/ parent must exist")
         .join("conformance")
         .join(filename)
+}
+
+/// Resolve the path to the hand-authored synthetic LongMemEval test sample.
+/// The sample lives beside the Swift test files at
+/// `apps/mcp-benchmarker/Tests/mcp-benchmarkerTests/longmemeval_sample.json`.
+fn lme_sample_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // manifest_dir = apps/mcp-benchmarker/rust/
+    // parent() → apps/mcp-benchmarker/
+    manifest_dir
+        .parent()
+        .expect("apps/mcp-benchmarker/ parent must exist")
+        .join("Tests")
+        .join("mcp-benchmarkerTests")
+        .join("longmemeval_sample.json")
 }
 
 /// Resolve the path to a shipped manifest: `apps/mcp-benchmarker/manifests/<filename>`.
@@ -372,4 +388,118 @@ fn guard_confirmation_vectors() {
             "confirmation vector '{id}': expected {expected}, got {actual}"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Part 3 — LongMemEval corpus loader tests
+//
+// All tests run against the hand-authored synthetic sample shared with Swift:
+//   apps/mcp-benchmarker/Tests/mcp-benchmarkerTests/longmemeval_sample.json
+//
+// synthetic_001: question_type "single-session-user"  → scored (non-abstention)
+// synthetic_002: question_type "single-session-user_abs" → excluded (abstention)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn lme_corpus_loads_synthetic_sample() {
+    let path = lme_sample_path();
+    let corpus = load_corpus(&path)
+        .unwrap_or_else(|e| panic!("load_corpus failed: {e}"));
+    assert_eq!(corpus.questions.len(), 1, "expected 1 non-abstention question");
+    assert_eq!(corpus.abstention_count, 1, "expected 1 abstention excluded");
+    assert_eq!(corpus.total_count(), 2, "expected 2 total questions");
+}
+
+#[test]
+fn lme_corpus_question_fields() {
+    let corpus = load_corpus(&lme_sample_path()).expect("load_corpus failed");
+    let q = corpus.questions.first().expect("must have one question");
+
+    assert_eq!(q.question_id, "synthetic_001");
+    assert_eq!(q.question_type, "single-session-user");
+    assert_eq!(q.question, "What color was the apple Alice mentioned on Monday?");
+    assert_eq!(q.answer, "Red");
+    assert_eq!(q.question_date, "2024/01/15 (Mon) 10:00");
+    assert_eq!(q.answer_session_ids, vec!["session_abc"]);
+}
+
+#[test]
+fn lme_corpus_haystack_parallel_arrays() {
+    let corpus = load_corpus(&lme_sample_path()).expect("load_corpus failed");
+    let q = corpus.questions.first().expect("must have one question");
+
+    assert_eq!(q.haystack_session_ids.len(), q.haystack_sessions.len(),
+        "haystack_session_ids and haystack_sessions must be parallel");
+    assert_eq!(q.haystack_dates.len(), q.haystack_session_ids.len(),
+        "haystack_dates and haystack_session_ids must be parallel");
+    assert_eq!(q.haystack_session_ids, vec!["session_abc"]);
+    assert_eq!(q.haystack_dates, vec!["2024/01/14 (Sun) 09:00"]);
+}
+
+#[test]
+fn lme_corpus_turn_decoding() {
+    let corpus = load_corpus(&lme_sample_path()).expect("load_corpus failed");
+    let q = corpus.questions.first().expect("must have one question");
+    let session = q.haystack_sessions.first().expect("must have one session");
+
+    assert_eq!(session.len(), 2, "session must have 2 turns");
+    assert_eq!(session[0].role, "user");
+    assert_eq!(session[0].content, "I saw a red apple at the market.");
+    assert!(session[0].has_answer, "turn 0 has_answer must be true");
+    assert_eq!(session[1].role, "assistant");
+    assert!(!session[1].has_answer, "turn 1 has_answer must be false");
+}
+
+#[test]
+fn lme_corpus_abstention_excluded_from_questions() {
+    let corpus = load_corpus(&lme_sample_path()).expect("load_corpus failed");
+    for q in &corpus.questions {
+        assert!(!q.question_type.ends_with("_abs"),
+            "abstention question '{}' should not appear in corpus.questions", q.question_id);
+    }
+}
+
+#[test]
+fn lme_corpus_error_empty_question_id() {
+    let bad_json = r#"[{
+        "question_id": "", "question_type": "single-session-user",
+        "question": "q", "answer": "a", "question_date": "2024/01/01 (Mon) 00:00",
+        "haystack_dates": [], "haystack_session_ids": [],
+        "haystack_sessions": [], "answer_session_ids": []
+    }]"#;
+    let tmp = std::env::temp_dir().join("lme_bad_id_rs.json");
+    std::fs::write(&tmp, bad_json).expect("write tmp failed");
+    let err = load_corpus(&tmp).expect_err("expected error for empty question_id");
+    assert!(err.0.contains("question_id"),
+        "error should name 'question_id': {}", err.0);
+    assert!(err.0.contains("question[0]"),
+        "error should name index 0: {}", err.0);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn lme_corpus_error_parallel_array_mismatch() {
+    // haystack_session_ids has 1 entry; haystack_sessions has 0.
+    let bad_json = r#"[{
+        "question_id": "x1", "question_type": "single-session-user",
+        "question": "q", "answer": "a", "question_date": "2024/01/01 (Mon) 00:00",
+        "haystack_dates": ["2024/01/01 (Mon) 00:00"],
+        "haystack_session_ids": ["sess1"],
+        "haystack_sessions": [],
+        "answer_session_ids": []
+    }]"#;
+    let tmp = std::env::temp_dir().join("lme_bad_parallel_rs.json");
+    std::fs::write(&tmp, bad_json).expect("write tmp failed");
+    let err = load_corpus(&tmp).expect_err("expected error for parallel-array mismatch");
+    assert!(err.0.contains("haystack_session_ids"),
+        "error should name the mismatched field: {}", err.0);
+    assert!(err.0.contains("question[0]"),
+        "error should name index 0: {}", err.0);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn lme_corpus_nonexistent_file_errors() {
+    let path = PathBuf::from("/nonexistent/path/lme_does_not_exist.json");
+    assert!(load_corpus(&path).is_err(), "expected error for nonexistent file");
 }
