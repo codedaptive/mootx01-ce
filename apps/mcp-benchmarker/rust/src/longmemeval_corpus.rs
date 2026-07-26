@@ -10,7 +10,9 @@
 //!   `"single-session-user"`, `"temporal-reasoning"`.
 //!   Abstention variants end in `"_abs"` (e.g. `"multi-session_abs"`).
 //! - `question`:             String   — question text
-//! - `answer`:               String   — reference answer (for LLM-judge QA)
+//! - `answer`:               String or Number — reference answer (for LLM-judge QA).
+//!   The oracle variant has 32 questions with numeric answers (e.g. `3` for a count).
+//!   Not used in retrieval scoring; decoded as String in both loaders (verified 2026-07-25).
 //! - `question_date`:        String   — date/time string (e.g. `"2023/04/10 (Mon) 23:07"`)
 //! - `haystack_dates`:       `[String]` — one date string per haystack session
 //! - `haystack_session_ids`: `[String]` — session IDs in haystack order
@@ -95,15 +97,40 @@ impl std::error::Error for LmeLoadError {}
 
 // ─── Internal (Deserialize) type ─────────────────────────────────────────────
 
+/// A flexible string-or-number answer field, matching the LongMemEval oracle
+/// variant where some questions carry a numeric answer (e.g. `3` for a count).
+/// The answer is not used in retrieval scoring; both types are normalised to
+/// `String` to avoid a decode failure.
+#[derive(Debug)]
+struct FlexString(String);
+
+impl<'de> serde::Deserialize<'de> for FlexString {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde_json::Value;
+        let v = Value::deserialize(d)?;
+        let s = match v {
+            Value::String(s) => s,
+            Value::Number(n) => n.to_string(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        Ok(FlexString(s))
+    }
+}
+
 /// Codec for the raw per-question JSON. Separate from `LmeQuestion` so that
 /// `Deserialize` machinery handles the snake_case mapping and we validate
 /// afterwards (matching the Swift loader's post-decode validation pattern).
+///
+/// Schema note: `answer` uses `FlexString` to handle numeric answers observed
+/// in the oracle variant (verified 2026-07-25). The answer is not used in
+/// retrieval scoring.
 #[derive(Debug, Deserialize)]
 struct LmeQuestionRaw {
     question_id: String,
     question_type: String,
     question: String,
-    answer: String,
+    answer: FlexString,
     question_date: String,
     haystack_dates: Vec<String>,
     haystack_session_ids: Vec<String>,
@@ -186,7 +213,7 @@ pub fn load_corpus(path: &Path) -> Result<LmeCorpus, LmeLoadError> {
             question_id: raw.question_id,
             question_type: raw.question_type,
             question: raw.question,
-            answer: raw.answer,
+            answer: raw.answer.0,  // unwrap FlexString
             question_date: raw.question_date,
             haystack_dates: raw.haystack_dates,
             haystack_session_ids: raw.haystack_session_ids,

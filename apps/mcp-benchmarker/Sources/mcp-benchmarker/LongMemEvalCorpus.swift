@@ -12,7 +12,9 @@ import Foundation
 //                                     "single-session-user", "temporal-reasoning".
 //                                     Abstention variants end in "_abs" (e.g. "multi-session_abs").
 //   question:             String   — the question text
-//   answer:               String   — reference answer (for LLM-judge QA, not used here)
+//   answer:               String or Number — reference answer (for LLM-judge QA, not used here).
+//                         The oracle variant has 32 questions with integer answers (e.g. count: 3).
+//                         Both types are decoded as String (verified 2026-07-25).
 //   question_date:        String   — date/time string (not ISO8601; e.g. "2023/04/10 (Mon) 23:07")
 //   haystack_dates:       [String] — one date string per haystack session
 //   haystack_session_ids: [String] — session IDs in haystack order
@@ -79,10 +81,16 @@ struct LMECorpus: Sendable {
 }
 
 /// Codec for the raw per-question JSON representation.
+///
+/// Schema note: `answer` is usually a String but some oracle-variant questions
+/// carry a numeric answer (e.g. a count: `3`). The field is not used in
+/// retrieval scoring, so it is decoded as a string with numeric coercion to
+/// avoid a decode failure on those questions.
 private struct LMEQuestionRaw: Decodable {
     let questionID: String
     let questionType: String
     let question: String
+    /// Answer decoded as String regardless of JSON type (String or numeric).
     let answer: String
     let questionDate: String
     let haystackDates: [String]
@@ -100,6 +108,30 @@ private struct LMEQuestionRaw: Decodable {
         case haystackSessionIDs  = "haystack_session_ids"
         case haystackSessions    = "haystack_sessions"
         case answerSessionIDs    = "answer_session_ids"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.questionID     = try c.decode(String.self,   forKey: .questionID)
+        self.questionType   = try c.decode(String.self,   forKey: .questionType)
+        self.question       = try c.decode(String.self,   forKey: .question)
+        self.questionDate   = try c.decode(String.self,   forKey: .questionDate)
+        self.haystackDates  = try c.decode([String].self, forKey: .haystackDates)
+        self.haystackSessionIDs = try c.decode([String].self, forKey: .haystackSessionIDs)
+        self.haystackSessions   = try c.decode([[LMETurn]].self, forKey: .haystackSessions)
+        self.answerSessionIDs   = try c.decode([String].self, forKey: .answerSessionIDs)
+        // `answer` may be a String or a number (observed in oracle variant, verified 2026-07-25).
+        // Normalise both to String; the field is unused in retrieval scoring.
+        if let s = try? c.decode(String.self, forKey: .answer) {
+            self.answer = s
+        } else if let n = try? c.decode(Int.self, forKey: .answer) {
+            self.answer = String(n)
+        } else if let d = try? c.decode(Double.self, forKey: .answer) {
+            self.answer = String(d)
+        } else {
+            // Absent or null — acceptable for oracle variant questions.
+            self.answer = ""
+        }
     }
 }
 

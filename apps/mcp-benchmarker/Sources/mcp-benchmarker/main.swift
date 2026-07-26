@@ -48,6 +48,8 @@ func usageText() -> String {
       mcp-benchmarker quality   --config <c.json> [--fixtures <dir>] [--limit-clusters N]
       mcp-benchmarker gauntlet-corpus --seed <N> --out <dir> [--per-tier N] [--distractors N] [--tiers T1=a,T2=b,…]
       mcp-benchmarker gauntlet  --config <c.json> --corpus <dir> --run-label <label> [--out <dir>] [--k 1,5,10] [--limit N] [--quick] [--moot-only]
+      mcp-benchmarker longmemeval --data-dir <dir> --variant s|m|oracle [--mootx01-binary <path>]
+                        [--limit N] [--offset K] [--seed S] [--shared-estate] [--out <dir>]
       mcp-benchmarker report    --report <report.json>
 
       transfer/benchmark/serve/pressure accept --stats-store <stats.sqlite> to
@@ -75,6 +77,19 @@ func usageText() -> String {
       gauntlet --moot-only: run and score only the MOOT backend. MemPalace is
         not started, loaded, guarded, or reported. The corpus, MOOT load/dream,
         query arguments, scorer, and MOOT DegeneracyGuard are unchanged.
+
+      longmemeval: provision a scratch mootx01 estate, ingest LongMemEval
+        haystack sessions, and measure session-recall quality. The estate
+        lifecycle (provision, teardown) is owned by the runner. The dataset
+        must be pre-fetched with scripts/fetch-longmemeval.sh.
+        --variant s|m|oracle     which LongMemEval variant file to load
+        --data-dir <dir>         directory containing the variant JSON files
+        --mootx01-binary <path>  path to the mootx01 binary (auto-discovered if absent)
+        --limit N                run only the first N questions
+        --offset K               skip the first K questions (default 0)
+        --seed S                 seed for deterministic question order (default 20260725)
+        --shared-estate          use one estate for all questions (methodology-affecting)
+        --out <dir>              write results to <dir> (default: current directory)
 
     """
 }
@@ -673,6 +688,116 @@ func runQuality(_ args: [String]) async throws {
         + report.rendered()).utf8))
 }
 
+/// longmemeval subcommand — LongMemEval session-recall harness.
+///
+///   mcp-benchmarker longmemeval --data-dir <dir> --variant s|m|oracle
+///       [--mootx01-binary <path>] [--limit N] [--offset K] [--seed S]
+///       [--shared-estate] [--out <dir>]
+///
+/// Provisions a fresh scratch estate per question (default) under /tmp/lme-bench-,
+/// ingests haystack sessions via live MCP write, queries via MCP query, and
+/// reports Recall-any@k / MRR / latency. Dataset must be pre-fetched with
+/// scripts/fetch-longmemeval.sh.
+func runLongMemEval(_ args: [String]) async throws {
+    let variant = try requireOption("--variant", in: args)
+    guard ["s", "m", "oracle"].contains(variant) else {
+        throw MCPError(description: "--variant must be 's', 'm', or 'oracle'; got '\(variant)'")
+    }
+    let dataDirStr = try requireOption("--data-dir", in: args)
+    // Resolve variant filename from the variant flag.
+    let variantFilename: String
+    switch variant {
+    case "s":      variantFilename = "longmemeval_s_cleaned.json"
+    case "m":      variantFilename = "longmemeval_m_cleaned.json"
+    case "oracle": variantFilename = "longmemeval_oracle.json"
+    default: fatalError("unreachable")
+    }
+    let datasetPath = URL(fileURLWithPath: dataDirStr)
+        .appendingPathComponent(variantFilename)
+
+    guard FileManager.default.fileExists(atPath: datasetPath.path) else {
+        throw MCPError(description:
+            "dataset file not found at \(datasetPath.path). "
+            + "Run scripts/fetch-longmemeval.sh to download the dataset.")
+    }
+
+    // mootx01 binary: explicit flag takes priority over auto-discovery.
+    let mootBinary: String
+    if let explicit = optionValue("--mootx01-binary", in: args) {
+        mootBinary = explicit
+    } else if let discovered = discoverMootBinary() {
+        mootBinary = discovered
+        FileHandle.standardError.write(Data(
+            "[longmemeval] auto-discovered mootx01 at: \(mootBinary)\n".utf8))
+    } else {
+        throw MCPError(description:
+            "mootx01 binary not found. Build with `swift build --package-path apps/mootx01` "
+            + "or pass --mootx01-binary <path>.")
+    }
+    guard FileManager.default.isExecutableFile(atPath: mootBinary) else {
+        throw MCPError(description:
+            "mootx01 binary not executable at '\(mootBinary)'. "
+            + "Build with `swift build --package-path apps/mootx01`.")
+    }
+
+    let limit = optionValue("--limit", in: args).flatMap(Int.init)
+    let offset = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
+    let seed = optionValue("--seed", in: args).flatMap(UInt64.init) ?? 20_260_725
+    let sharedEstate = flagPresent("--shared-estate", in: args)
+    let outDirStr = optionValue("--out", in: args)
+    let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
+
+    // Warn on shared-estate: methodology-affecting (haystack contamination).
+    if sharedEstate {
+        let warn = "[longmemeval] WARNING: --shared-estate is methodology-affecting. "
+            + "Prior sessions' content can influence recall for later questions.\n"
+        FileHandle.standardError.write(Data(warn.utf8))
+    }
+
+    let loadMsg = "[longmemeval] loading corpus from \(datasetPath.path)\n"
+    FileHandle.standardOutput.write(Data(loadMsg.utf8))
+
+    let corpus = try loadLMECorpus(from: datasetPath)
+    let loadedMsg = "[longmemeval] loaded \(corpus.questions.count) questions "
+        + "(\(corpus.abstentionCount) abstentions excluded)\n"
+    FileHandle.standardOutput.write(Data(loadedMsg.utf8))
+
+    let runConfig = LMERunConfig(
+        mootBinaryPath: mootBinary,
+        datasetPath: datasetPath,
+        variant: variant,
+        limit: limit,
+        offset: offset,
+        seed: seed,
+        freshPerQuestion: !sharedEstate,
+        outDir: outDir,
+        runLabel: "lme-\(variant)-seed\(seed)"
+    )
+
+    let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
+
+    // Print a summary to stdout. The scorer (Part 5) will compute full metrics;
+    // here we print a progress tally so the operator can see the run completed.
+    let guardHealthyCount = results.filter(\.guardHealthy).count
+    let guardRefusals = results.count - guardHealthyCount
+    let totalTurns = results.map(\.turnsIngested).reduce(0, +)
+    let meanQueryLatencyMs = results.isEmpty ? 0.0
+        : results.map(\.queryLatencySeconds).reduce(0, +) / Double(results.count) * 1000.0
+
+    let summary = """
+        [longmemeval] run complete
+          questions processed:  \(results.count)
+          guard healthy:        \(guardHealthyCount)
+          guard refusals:       \(guardRefusals)
+          turns ingested total: \(totalTurns)
+          query latency mean:   \(String(format: "%.1f", meanQueryLatencyMs)) ms
+          estate strategy:      \(sharedEstate ? "shared" : "fresh-per-question")
+        NOTE: Recall/MRR scoring and report writing land in Part 5 (LongMemEvalScorer.swift).
+
+        """
+    FileHandle.standardOutput.write(Data(summary.utf8))
+}
+
 /// Dispatches one subcommand.
 func dispatch(_ arguments: [String]) async throws {
     guard let subcommand = arguments.first else {
@@ -681,14 +806,15 @@ func dispatch(_ arguments: [String]) async throws {
     }
     let rest = Array(arguments.dropFirst())
     switch subcommand {
-    case "transfer":  try await runTransfer(rest)
-    case "benchmark": try await runBenchmark(rest)
-    case "serve":     try await runServe(rest)
-    case "pressure":  try await runPressure(rest)
-    case "quality":   try await runQuality(rest)
+    case "transfer":       try await runTransfer(rest)
+    case "benchmark":      try await runBenchmark(rest)
+    case "serve":          try await runServe(rest)
+    case "pressure":       try await runPressure(rest)
+    case "quality":        try await runQuality(rest)
     case "gauntlet-corpus": try runGauntletCorpus(rest)
-    case "gauntlet":  try await runGauntlet(rest)
-    case "report":    try runReport(rest)
+    case "gauntlet":       try await runGauntlet(rest)
+    case "longmemeval":    try await runLongMemEval(rest)
+    case "report":         try runReport(rest)
     case "--help", "-h", "help":
         FileHandle.standardOutput.write(Data(usageText().utf8))
     default:
