@@ -58,9 +58,14 @@ cp "$DIST_DIR/Info.plist"    "$APP/Contents/Info.plist"
 chmod 755 "$APP/Contents/MacOS/Mootx01Setup"
 
 # Copy any SPM resource bundles beside the setup binary into the .app.
+# Resource bundles belong in Contents/Resources (Bundle.main.resourceURL is
+# the first place SPM's resource accessor looks inside an .app); staging them
+# in Contents/MacOS both violates bundle layout and made codesign treat them
+# as code bundles ("bundle format unrecognized" on resource-only bundles).
 SETUP_DIR="$(dirname "$SETUP_BIN")"
+mkdir -p "$APP/Contents/Resources"
 for bundle in "$SETUP_DIR"/*.bundle; do
-    [ -d "$bundle" ] && ditto "$bundle" "$APP/Contents/MacOS/$(basename "$bundle")"
+    [ -d "$bundle" ] && ditto "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
 done
 
 # Seal the assembled .app bundle. The bare setup executable was already
@@ -72,10 +77,18 @@ done
 if [ -n "${APP_IDENTITY:-}" ]; then
     # sign-retry.sh: --timestamp contacts Apple's TSA, which blips; retry
     # transient outages instead of failing the build (see sign-retry.sh).
-    find "$APP/Contents/MacOS" -name '*.bundle' -type d -print0 \
+    # Sign only nested bundles that actually embed Mach-O code. Resource-only
+    # bundles (e.g. PersistenceKit_SQLCipher.bundle) are not code and are
+    # covered by the outer .app seal; codesigning them directly fails with
+    # "bundle format unrecognized, invalid, or unsuitable".
+    find "$APP/Contents" -name '*.bundle' -type d -print0 \
         | while IFS= read -r -d '' nested; do
-            "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
-                --sign "$APP_IDENTITY" "$nested"
+            if find "$nested" -type f -print0 | xargs -0 file 2>/dev/null | grep -q 'Mach-O'; then
+                "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
+                    --sign "$APP_IDENTITY" "$nested"
+            else
+                echo "Skipping resource-only bundle (sealed by .app signature): $nested"
+            fi
         done
     "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
         --sign "$APP_IDENTITY" "$APP"

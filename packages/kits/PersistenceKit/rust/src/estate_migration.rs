@@ -241,14 +241,140 @@ pub fn verification_counts(path: &Path, key: Option<&[u8]>) -> StorageResult<Ver
     })
 }
 
+/// Every user table (name → TOTAL row count) of the database at `path`,
+/// enumerated from `sqlite_master`. Enumerated, not listed: a gate built on
+/// a fixed table list goes silently incomplete the day the schema grows a
+/// table (audit history, diary, erasure ledger…), and an unfaithful copy
+/// could then pass by preserving only the listed four. Mirrors Swift
+/// `allTableCounts`.
+pub fn all_table_counts(
+    path: &Path,
+    key: Option<&[u8]>,
+) -> StorageResult<std::collections::BTreeMap<String, i64>> {
+    let conn = open_raw(path, key)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite_%' ORDER BY name;",
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("estate encryption list tables failed: {e}"),
+        })?;
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .and_then(|rows| rows.collect())
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("estate encryption list tables failed: {e}"),
+        })?;
+    let mut counts = std::collections::BTreeMap::new();
+    for table in names {
+        let n: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM \"{table}\";"), [], |r| r.get(0))
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("estate encryption count {table} failed: {e}"),
+            })?;
+        counts.insert(table, n);
+    }
+    Ok(counts)
+}
+
+/// `PRAGMA integrity_check` on the database at `path`. Errors unless the
+/// result is exactly the single row "ok". Structural soundness is a
+/// precondition the row-count gate cannot see: counts read intact B-tree
+/// paths and say nothing about corruption elsewhere in a page. Mirrors
+/// Swift `assertIntegrity`.
+pub fn assert_integrity(path: &Path, key: Option<&[u8]>) -> StorageResult<()> {
+    let conn = open_raw(path, key)?;
+    let mut stmt = conn
+        .prepare("PRAGMA integrity_check;")
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("estate encryption integrity_check failed: {e}"),
+        })?;
+    let findings: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .and_then(|rows| rows.collect())
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("estate encryption integrity_check failed: {e}"),
+        })?;
+    if findings != ["ok"] {
+        return Err(StorageError::BackendError {
+            underlying: format!(
+                "estate encryption integrity_check failed: {}",
+                if findings.is_empty() {
+                    "no result rows".to_string()
+                } else {
+                    findings.join("; ")
+                }
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Compare the plaintext original against the encrypted copy. On any
 /// difference the copy is deleted and an error returned — the original is
 /// never touched by this function.
+///
+/// The gate is three layers, strongest first (hardened in lockstep with
+/// Swift `verifyEncryptedCopy` per Codex 06fa2bc2 — once the swap is live,
+/// this comparison is the only thing standing between an unfaithful copy
+/// and the plaintext original being displaced):
+///   1. `PRAGMA integrity_check` on the encrypted copy — structural
+///      soundness of every page, which row counts cannot see.
+///   2. Schema-complete comparison — every user table in either database
+///      by name, TOTAL rows each. Catches dropped tables, gained tables,
+///      and row loss anywhere in the estate, not just the four headline
+///      tables.
+///   3. The four headline counts, returned for display and logging.
 pub fn verify_encrypted_copy(
     original: &Path,
     encrypted_copy: &Path,
     key: &[u8],
 ) -> StorageResult<VerificationCounts> {
+    let layered = (|| -> StorageResult<()> {
+        assert_integrity(encrypted_copy, Some(key))?;
+        let source_tables = all_table_counts(original, None)?;
+        let copy_tables = all_table_counts(encrypted_copy, Some(key))?;
+        if source_tables != copy_tables {
+            let differing: Vec<String> = source_tables
+                .iter()
+                .filter(|(name, n)| copy_tables.get(*name) != Some(n))
+                .map(|(name, n)| {
+                    format!(
+                        "{name}: original={n} copy={}",
+                        copy_tables
+                            .get(name)
+                            .map_or_else(|| "absent".to_string(), i64::to_string)
+                    )
+                })
+                .chain(
+                    copy_tables
+                        .keys()
+                        .filter(|name| !source_tables.contains_key(*name))
+                        .map(|name| format!("{name}: original=absent copy={}", copy_tables[name])),
+                )
+                .collect();
+            return Err(StorageError::BackendError {
+                underlying: format!(
+                    "the encrypted copy does not match the original ({} tables compared; \
+                     differing: {})",
+                    source_tables.len(),
+                    differing.join(", ")
+                ),
+            });
+        }
+        Ok(())
+    })();
+    if let Err(e) = layered {
+        // Any failed layer condemns the copy: never leave a ciphertext file
+        // that failed verification where a retry could adopt it.
+        remove_database(encrypted_copy);
+        return Err(StorageError::BackendError {
+            underlying: format!(
+                "{e}; the copy has been deleted and the original estate is untouched"
+            ),
+        });
+    }
     let source = verification_counts(original, None)?;
     let copy = verification_counts(encrypted_copy, Some(key))?;
     if source != copy {

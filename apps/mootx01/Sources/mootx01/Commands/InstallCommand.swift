@@ -108,6 +108,37 @@ struct InstallCommand: AsyncParsableCommand {
                 // It does not, and there is deliberately no path that does.
                 print("Estate encryption: the existing estate is already ENCRYPTED; --no-encrypt does not decrypt it and was ignored.")
             }
+        } else {
+            // Encrypted is the default for THIS install. A stale --no-encrypt
+            // marker left by an earlier estate at the same path (a prior
+            // opt-out install whose database was later removed outside
+            // --replace-db) must not survive to downgrade the estate this
+            // install just promised would be encrypted: resolveOpenPosture
+            // honors the marker for an ABSENT estate, so first serve would
+            // silently create plaintext (stale-marker downgrade, Codex
+            // fe2cf887). --replace-db trashes the marker with the estate in
+            // DataRetention.applyReplace; this branch covers every other way
+            // a marker outlives its database. Only the absent case is touched
+            // — an existing estate's posture is a fact about the file, never
+            // the marker.
+            let dataDir = MootPaths.resolveDataDirectory(
+                environment: ProcessInfo.processInfo.environment,
+                homeDirectory: home
+            )
+            let estateURL = MootPaths.estateURL(in: dataDir)
+            if case .absent = EstateKeyProvider.detectEstateFileState(at: estateURL) {
+                do {
+                    if try EstateKeyProvider.removeEncryptionOptOut(forEstateAt: estateURL) {
+                        print("Estate encryption: removed a stale --no-encrypt marker; the new estate will be created ENCRYPTED (the default).")
+                    }
+                } catch {
+                    // Failing to enact the default must not silently produce
+                    // the opposite posture — the same rule the opt-out branch
+                    // applies to recording the choice.
+                    throw ValidationError(
+                        "could not remove a stale --no-encrypt marker at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path): \(error). Remove it manually, or pass --no-encrypt if plaintext was intended.")
+                }
+            }
         }
 
         // Resolve the SOURCE binary (the running executable). We never
