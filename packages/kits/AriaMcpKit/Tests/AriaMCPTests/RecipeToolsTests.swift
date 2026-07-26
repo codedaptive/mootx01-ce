@@ -730,11 +730,14 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Output starts with "found N distilled factoid(s) for: {query}" per spec §2.3.
+        // Default output starts with "found N distilled factoid(s)" — no query echo.
+        // (echo_query:true opt-in restores the old "for: {query}" suffix.)
         #expect(text.hasPrefix("found "),
                 "moot_recall_distilled output must start with 'found N distilled factoid(s)'")
-        #expect(text.contains("distilled factoid(s) for:"),
-                "output header must include 'distilled factoid(s) for:' per spec §2.3")
+        #expect(text.contains("distilled factoid(s)"),
+                "output header must include 'distilled factoid(s)'")
+        #expect(!text.hasPrefix("found 0 distilled factoid(s) for:"),
+                "default response must NOT echo the query in the header")
     }
 
     @Test func testRecallDistilledOutputFormatStartsWithFoundN() async throws {
@@ -758,6 +761,58 @@ struct RecipeToolsTests {
         let firstLine = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
         #expect(firstLine.hasPrefix("found "),
                 "first line must start with 'found N distilled factoid(s) for:'")
+    }
+
+    @Test func testRecallDistilledEchoQueryOptIn() async throws {
+        // echo_query:true restores the "for: {query}" suffix that is OFF by default.
+        // This test also proves echo_query is DECODED — if it were silently ignored
+        // the header would stay short and the assertion at line 2 would fail.
+        // If it were treated as unrecognized, the unknown-arg hint mechanism would
+        // append "hint: unrecognized argument(s) ignored: echo_query" — line 3 catches that.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-optin"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_distilled",
+            arguments: .object([
+                "query": .string("test echo query"),
+                "echo_query": .bool(true),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // With echo_query:true, header must echo the query.
+        #expect(text.hasPrefix("found 0 distilled factoid(s) for: test echo query"),
+                "echo_query:true must restore 'for: {query}' suffix in header")
+        // echo_query is a declared arg — no unrecognized-arg hint must appear.
+        #expect(!text.contains("hint: unrecognized argument(s) ignored"),
+                "echo_query is declared — must NOT trigger the unrecognized-arg hint")
+    }
+
+    @Test func testRecallDistilledEchoQueryDefaultOff() async throws {
+        // Without echo_query (or echo_query:false), header must NOT contain the query.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-off"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_distilled",
+            arguments: .object(["query": .string("silent query test")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // Default (no echo_query) must omit the query from the header.
+        #expect(!text.hasPrefix("found 0 distilled factoid(s) for:"),
+                "default response must NOT echo the query in the header")
+        #expect(text.contains("found 0 distilled factoid(s)"),
+                "header must still contain the factoid count line")
     }
 
     // MARK: - moot_recollect dispatch

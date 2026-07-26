@@ -86,8 +86,8 @@ use neuron_kit::RecallFrameTuning;
 use uuid::Uuid;
 
 use crate::dispatch::{
-    clamp_limit, decode_filter_chain, error_result, optional_integer, optional_string,
-    require_string, text_result, LIMIT_HARD_CEILING,
+    clamp_limit, decode_filter_chain, error_result, optional_bool, optional_integer,
+    optional_string, require_string, text_result, LIMIT_HARD_CEILING,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
@@ -1157,6 +1157,12 @@ fn run_recall_distilled_tool(
     // BitmapEvaluator inside coord.recall(). Parity: Swift awaits the async
     // kit call which resolves now internally; Rust receives it as a parameter.
     let now = crate::dispatch::wall_now();
+    // echo_query: opt-in flag — when true, appends the query text to the
+    // response header ("found N distilled factoid(s) for: {query}"). Default
+    // false — the AI client already knows what it queried; echoing it adds
+    // ~120+ chars of pure token tax on every dense recall call.
+    // Parity: Swift runRecallDistilled uses the same flag.
+    let echo_query = optional_bool(args, "echo_query")?.unwrap_or(false);
 
     let coord = estate.coord.lock().unwrap();
     // Route through the CognitionKit library recipe — parity with Swift's
@@ -1175,16 +1181,22 @@ fn run_recall_distilled_tool(
         })?;
 
     if out.matches.is_empty() {
+        let header = if echo_query {
+            format!("found 0 distilled factoid(s) for: {query}")
+        } else {
+            "found 0 distilled factoid(s)".to_owned()
+        };
         return Ok(text_result(&format!(
-            "found 0 distilled factoid(s) for: {query}\ndiscrimination: not_found"
+            "{header}\ndiscrimination: not_found"
         )));
     }
 
-    let mut lines = vec![format!(
-        "found {} distilled factoid(s) for: {}",
-        out.matches.len(),
-        query
-    )];
+    let first_line = if echo_query {
+        format!("found {} distilled factoid(s) for: {}", out.matches.len(), query)
+    } else {
+        format!("found {} distilled factoid(s)", out.matches.len())
+    };
+    let mut lines = vec![first_line];
     for (idx, m) in out.matches.iter().enumerate() {
         lines.push(String::new());
         lines.push(format!("[{}] drawer_id: {}", idx + 1, m.id));

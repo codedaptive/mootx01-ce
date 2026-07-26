@@ -168,3 +168,73 @@ fn multiple_unrecognized_keys_are_sorted_in_hint() {
         "multiple unrecognized keys must be listed sorted alphabetically; got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Part B — echo_query schema parity tests
+// ---------------------------------------------------------------------------
+//
+// Note: testing the header FORMAT requires a populated distillation tier, which
+// the in-memory test estate does not have. The Rust bare estate returns an error
+// result (isError:true) when the distillation lane is absent — a pre-existing
+// behavior difference from Swift (which catches the error and returns
+// "found 0 distilled factoid(s)" as a success result).
+//
+// We test what IS testable without a full estate:
+//   1. `accepted_arg_keys` includes "echo_query" — proves the schema was updated.
+//   2. echo_query:true does NOT produce the unrecognized-arg hint.
+//   3. Error results are not augmented with hint text.
+//
+// The header format behavior (default off / opt-in on) is covered by the Swift
+// RecipeToolsTests.swift end-to-end tests.
+
+use aria_mcp::tool_list::accepted_arg_keys;
+
+#[test]
+fn recall_distilled_echo_query_is_in_accepted_keys() {
+    // echo_query must be declared in the moot_recall_distilled inputSchema.
+    // This proves the schema was updated — not just the handler.
+    let keys = accepted_arg_keys("moot_recall_distilled")
+        .expect("moot_recall_distilled must be a known tool");
+    assert!(
+        keys.contains("echo_query"),
+        "echo_query must be a declared arg on moot_recall_distilled; got: {:?}", keys
+    );
+}
+
+#[test]
+fn recall_distilled_echo_query_true_does_not_trigger_unrecognized_hint() {
+    // Calling moot_recall_distilled with echo_query:true must NOT produce the
+    // "hint: unrecognized argument(s) ignored" line — echo_query is declared.
+    // The call itself may return isError:true (missing distillation lane — pre-existing
+    // Rust behavior on bare test estates); the hint mechanism checks the schema,
+    // not the result content.
+    let result = dispatch(
+        "moot_recall_distilled",
+        &args!["query" => "test echo query", "echo_query" => true],
+    );
+    // Whether success or error, no unrecognized-arg hint must appear.
+    let text = content_text(&result);
+    assert!(
+        !text.contains("hint: unrecognized argument(s) ignored"),
+        "echo_query is a declared arg — must NOT trigger unrecognized-arg hint; got: {text}"
+    );
+}
+
+#[test]
+fn recall_distilled_error_result_is_not_augmented_with_hint() {
+    // Error results (isError:true) must NOT have hint text appended — they carry
+    // their own message and the hint check is not meaningful there.
+    // On a bare test estate, moot_recall_distilled returns isError:true (missing
+    // distillation lane). A bogus arg key produces a stderr log but no text augmentation.
+    let result = dispatch(
+        "moot_recall_distilled",
+        &args!["query" => "test", "totally_bogus" => "value"],
+    );
+    if result["isError"] == serde_json::json!(true) {
+        let text = content_text(&result);
+        assert!(
+            !text.contains("hint: unrecognized argument(s) ignored"),
+            "error results must NOT be augmented with hint text; got: {text}"
+        );
+    }
+}

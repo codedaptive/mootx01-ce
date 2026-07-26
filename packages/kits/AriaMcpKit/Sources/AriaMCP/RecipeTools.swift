@@ -394,6 +394,11 @@ enum RecipeTools {
                         "Filter kind: unconfirmed, userConfirmed, exportable, contained, "
                             + "currentlyBelieve. Omit for ordinary recall across any confirmation "
                             + "state. null is invalid."),
+                    "echo_query": ToolProjection.booleanSchema(
+                        "Optional. When true, appends the query text to the response header "
+                            + "(e.g. 'found N distilled factoid(s) for: {query}'). "
+                            + "Default false — the AI already knows what it queried. "
+                            + "Omit to use the default; null is invalid."),
                     "estateID": stringSchema(
                         "Optional UUID of the open estate to target. Omit for the default estate; "
                             + "null is invalid."),
@@ -1095,6 +1100,23 @@ enum RecipeTools {
         let limit = try ToolDispatcher.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         let filter = try decodeSingleFilter(args["filter"])
+        // echo_query: opt-in to append the query text to the response header.
+        // Default false — the AI client already knows what it queried; echoing
+        // it adds ~120+ chars of pure token tax on every dense recall call.
+        // Parity: Rust run_recall_distilled_tool uses the same flag.
+        // echo_query: boolean — absent means false (the safe default, avoids token tax).
+        // Present non-bool values are rejected so the caller knows what went wrong.
+        let echoQuery: Bool
+        if let raw = args["echo_query"] {
+            guard let b = raw.boolValue else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "echo_query must be a boolean; omit it to use the default (false)")
+            }
+            echoQuery = b
+        } else {
+            echoQuery = false
+        }
 
         let out: DistilledRecall.Output
         do {
@@ -1105,8 +1127,10 @@ enum RecipeTools {
             // Any error from DistilledRecall().run — including a missing
             // distillation-features-v1 VectorKit lane — returns "found 0"
             // and suggests moot_consolidate to build the distilled tier.
+            let header = "found 0 distilled factoid(s)"
+                + (echoQuery ? " for: \(query)" : "")
             let body = """
-            found 0 distilled factoid(s) for: \(query)
+            \(header)
 
             discrimination: single — only one result.
             hint: distilled tier not yet available for this estate. \
@@ -1115,9 +1139,11 @@ enum RecipeTools {
             return ToolDispatcher.textResult(body)
         }
 
-        var lines: [String] = [
-            "found \(out.matches.count) distilled factoid(s) for: \(query)",
-        ]
+        // Header: no query echo by default; opt-in via echo_query:true.
+        let header = echoQuery
+            ? "found \(out.matches.count) distilled factoid(s) for: \(query)"
+            : "found \(out.matches.count) distilled factoid(s)"
+        var lines: [String] = [header]
 
         for (idx, match) in out.matches.enumerated() {
             lines.append("")

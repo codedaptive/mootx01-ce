@@ -883,7 +883,8 @@ fn recall_distilled_tool() -> serde_json::Value {
             json!({
                 "query": string_schema("Natural-language query to recall distilled factoids for."),
                 "limit": integer_schema("Max factoids to return (default 10)."),
-                "filter": filter_schema()
+                "filter": filter_schema(),
+                "echo_query": boolean_schema("Optional. When true, appends the query text to the response header (e.g. 'found N distilled factoid(s) for: {query}'). Default false — the AI already knows what it queried. Omit to use the default; null is invalid.")
             }),
             json!(["query"])
         )))
