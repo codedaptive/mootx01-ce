@@ -933,8 +933,8 @@ func runLoCoMo(_ args: [String]) async throws {
     // Per-category breakdown.
     for cat in cats {
         summary += String(format:
-            "  %-14s @5 any=%.4f all=%.4f mrr=%.4f (n=%d)\n",
-            cat.label, cat.recallAnyAt5, cat.recallAllAt5, cat.mrr, cat.queryCount)
+            "  %-14@ @5 any=%.4f all=%.4f mrr=%.4f (n=%d)\n",
+            cat.label as NSString, cat.recallAnyAt5, cat.recallAllAt5, cat.mrr, cat.queryCount)
     }
     summary += "  report written to: \(reportURL.path)\n\n"
     FileHandle.standardOutput.write(Data(summary.utf8))

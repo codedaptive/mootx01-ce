@@ -2,6 +2,18 @@
 # Never committed; see scripts/fetch-longmemeval.sh for download instructions.
 fixtures/longmemeval/data/
 
+# LoCoMo corpus data — CC BY-NC 4.0 (NonCommercial), internal diagnostic use only.
+# Fetched via scripts/fetch-locomo.sh; never committed to version control.
+# See https://github.com/snap-research/locomo for dataset and license.
+fixtures/locomo/
+
+# Runner-generated JSON report files — written to /tmp or wherever --out points;
+# never committed. Use results/ for manually curated markdown summaries.
+rust/lme-report-*.json
+rust/locomo-report-*.json
+lme-report-*.json
+locomo-report-*.json
+
 # Rust build artifacts.
 rust/target/
 
