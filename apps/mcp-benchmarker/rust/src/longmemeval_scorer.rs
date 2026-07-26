@@ -352,6 +352,54 @@ pub fn aggregate_lme_scores(scores: &[LmeQuestionScore]) -> (LmeAggregateMetrics
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Provenance parsing helpers (Defect 3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parses the result count N from the first line of a payload text.
+/// Expected formats: "found N memory(s)" or "found N distilled factoid(s)".
+/// Twin of Swift `lmeParseResultCount(_:)`.
+pub fn lme_parse_result_count(payload_text: &str) -> Option<usize> {
+    let first_line = payload_text.lines().next()?;
+    let lower = first_line.to_lowercase();
+    if !lower.contains("found ") {
+        return None;
+    }
+    // Find "found " token, then parse the next whitespace-separated word as usize.
+    let after = first_line.find("found ")
+        .map(|i| &first_line[i + 6..])?;
+    after.split_whitespace().next()?.parse::<usize>().ok()
+}
+
+/// Finds the first line containing "discrimination:" in payload text.
+/// Twin of Swift `lmeParseDiscriminationLine(_:)`.
+pub fn lme_parse_discrimination_line(payload_text: &str) -> Option<String> {
+    payload_text
+        .lines()
+        .find(|l| l.contains("discrimination:"))
+        .map(|l| l.trim().to_string())
+}
+
+/// Finds the first line containing "recall_provenance:" in payload text.
+/// Twin of Swift `lmeParseRecallProvenanceLine(_:)`.
+pub fn lme_parse_recall_provenance_line(payload_text: &str) -> Option<String> {
+    payload_text
+        .lines()
+        .find(|l| l.contains("recall_provenance:"))
+        .map(|l| l.trim().to_string())
+}
+
+/// Extracts the discrimination level token from a discrimination diagnostic line.
+/// Expected format: "discrimination: <level>" where level is one of:
+///   high | medium | low | not_found | n/a
+/// Twin of Swift `lmeExtractDiscriminationLevel(_:)`.
+pub fn lme_extract_discrimination_level(line: &str) -> String {
+    line.split(':')
+        .nth(1)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // JSON report types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -390,6 +438,25 @@ pub struct LmeReportLatency {
     pub write_mean_seconds: f64,
 }
 
+/// Aggregate discrimination and recall provenance health across the run (Defect 3).
+/// Summarizes how often each discrimination level was observed and whether the
+/// dense lane was active or dark.
+/// Twin of Swift `LMEReportLaneHealth`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LmeReportLaneHealth {
+    /// Distribution of discrimination levels seen in exact-arm responses.
+    /// Keys: "high" | "medium" | "low" | "not_found" | "n/a".
+    pub exact_discrimination_distribution: BTreeMap<String, usize>,
+    /// Distribution of discrimination levels seen in dense-arm responses.
+    pub dense_discrimination_distribution: BTreeMap<String, usize>,
+    /// Number of questions where the dense lane was dark (not active).
+    pub exact_dense_lane_dark_count: usize,
+    /// Number of exact-arm questions with degraded retrieval stages.
+    pub exact_degraded_count: usize,
+    /// Number of dense-arm questions with degraded retrieval stages.
+    pub dense_degraded_count: usize,
+}
+
 /// Per-question entry in the LME report.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct LmeReportPerQuestion {
@@ -410,6 +477,19 @@ pub struct LmeReportPerQuestion {
     pub ranked_session_ids: Vec<String>,
     pub answer_session_ids: Vec<String>,
     pub retrieved_uuid_count: usize,
+    // ── Provenance fields (Defect 3) ──────────────────────────────────────────
+    /// Parsed "discrimination: <level>" diagnostic from exact-arm response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_discrimination: Option<String>,
+    /// Parsed "recall_provenance: ..." diagnostic from exact-arm response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_recall_provenance: Option<String>,
+    /// Parsed "discrimination: <level>" diagnostic from dense-arm response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dense_discrimination: Option<String>,
+    /// Parsed "recall_provenance: ..." diagnostic from dense-arm response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dense_recall_provenance: Option<String>,
 }
 
 /// Token efficiency block of the LME report. Additive key added by LME-03.
@@ -436,6 +516,22 @@ pub struct LmeReportTokenEfficiency {
     pub exact_hits_per_1k_tokens: Option<f64>,
     /// Evidence hits per 1000 tokens for the dense arm.
     pub dense_hits_per_1k_tokens: Option<f64>,
+    // ── Per-result token metrics (Defect 2) ───────────────────────────────────
+    /// Mean tokens per returned result for the exact arm.
+    /// Parsed result count N from "found N memory(s)" prefix in payload text.
+    /// None when result count could not be parsed or no exact payloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_tokens_per_result: Option<f64>,
+    /// Mean tokens per returned result for the dense arm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dense_tokens_per_result: Option<f64>,
+    /// dense / exact per-result token ratio.
+    /// Exposes arithmetic-cancellation: when result counts differ between arms,
+    /// this ratio diverges from the simple byte/token ratio even when total
+    /// byte counts are similar.
+    /// None when either per-result value is absent or exact is 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dense_exact_tokens_per_result_ratio: Option<f64>,
 }
 
 /// Lightweight per-question payload snapshot, extracted before results are
@@ -455,24 +551,31 @@ pub struct LmeReport {
     pub run_label: String,
     pub variant: String,
     pub generated_at: String,
+    /// Encode-queue synchronization strategy used for this run (Defect 1).
+    /// One of: "drain" | "impatient" | "none". Self-documenting in the report.
+    pub encode_barrier: String,
     pub corpus_stats: LmeReportCorpusStats,
     pub aggregate: LmeReportAggregate,
     pub latency: LmeReportLatency,
     pub per_question: Vec<LmeReportPerQuestion>,
     /// Token efficiency metrics (LME-03, additive per BENCHMARKER_OPTIMIZER_CONTRACT.md).
     pub token_efficiency: LmeReportTokenEfficiency,
+    /// Aggregate discrimination and recall provenance health (Defect 3).
+    pub lane_health: LmeReportLaneHealth,
 }
 
 /// Assembles an `LmeReport` from scores and metadata.
 ///
 /// `corpus` and `payload_entries` are needed to compute the `token_efficiency`
-/// block: the corpus provides `has_answer` turn annotations; payload_entries
-/// carry per-question payload texts extracted before results were consumed.
+/// and `lane_health` blocks: the corpus provides `has_answer` turn annotations;
+/// payload_entries carry per-question payload texts extracted before results were
+/// consumed. `encode_barrier` records the ingest methodology in the report JSON.
 pub fn build_lme_report(
     run_id: String,
     run_label: String,
     variant: String,
     generated_at: String,
+    encode_barrier: String,
     questions_loaded: usize,
     abstention_excluded: usize,
     scores: &[LmeQuestionScore],
@@ -507,26 +610,62 @@ pub fn build_lme_report(
         write_mean_seconds: latency.write_mean_seconds,
     };
 
+    // ── Provenance lookup (Defect 3): parse per-question provenances ──────────
+    // Build a map from question_id → (exact_discrimination, exact_recall_provenance,
+    // dense_discrimination, dense_recall_provenance) from payload_entries.
+    struct ProvenanceEntry {
+        exact_discrimination: Option<String>,
+        exact_recall_provenance: Option<String>,
+        dense_discrimination: Option<String>,
+        dense_recall_provenance: Option<String>,
+    }
+    let provenance_lookup: HashMap<String, ProvenanceEntry> = payload_entries
+        .iter()
+        .map(|entry| {
+            let exact_discrimination = entry.exact_payload_text.as_deref()
+                .and_then(lme_parse_discrimination_line);
+            let exact_recall_provenance = entry.exact_payload_text.as_deref()
+                .and_then(lme_parse_recall_provenance_line);
+            let dense_discrimination = entry.dense_payload_text.as_deref()
+                .and_then(lme_parse_discrimination_line);
+            let dense_recall_provenance = entry.dense_payload_text.as_deref()
+                .and_then(lme_parse_recall_provenance_line);
+            (entry.question_id.clone(), ProvenanceEntry {
+                exact_discrimination,
+                exact_recall_provenance,
+                dense_discrimination,
+                dense_recall_provenance,
+            })
+        })
+        .collect();
+
     let per_question: Vec<LmeReportPerQuestion> = scores
         .iter()
-        .map(|s| LmeReportPerQuestion {
-            question_id:              s.question_id.clone(),
-            question_type:            s.question_type.clone(),
-            turns_ingested:           s.turns_ingested,
-            guard_healthy:            s.guard_healthy,
-            guard_diagnostic:         s.guard_diagnostic.clone(),
-            recall_any_at_1:          s.recall_any_at_1,
-            recall_any_at_5:          s.recall_any_at_5,
-            recall_any_at_10:         s.recall_any_at_10,
-            recall_all_at_1:          s.recall_all_at_1,
-            recall_all_at_5:          s.recall_all_at_5,
-            recall_all_at_10:         s.recall_all_at_10,
-            mrr:                      s.mrr,
-            query_latency_seconds:    s.query_latency_seconds,
-            write_mean_latency_seconds: s.write_mean_latency_seconds,
-            ranked_session_ids:       s.ranked_session_ids.clone(),
-            answer_session_ids:       s.answer_session_ids.clone(),
-            retrieved_uuid_count:     s.retrieved_uuid_count,
+        .map(|s| {
+            let prov = provenance_lookup.get(&s.question_id);
+            LmeReportPerQuestion {
+                question_id:              s.question_id.clone(),
+                question_type:            s.question_type.clone(),
+                turns_ingested:           s.turns_ingested,
+                guard_healthy:            s.guard_healthy,
+                guard_diagnostic:         s.guard_diagnostic.clone(),
+                recall_any_at_1:          s.recall_any_at_1,
+                recall_any_at_5:          s.recall_any_at_5,
+                recall_any_at_10:         s.recall_any_at_10,
+                recall_all_at_1:          s.recall_all_at_1,
+                recall_all_at_5:          s.recall_all_at_5,
+                recall_all_at_10:         s.recall_all_at_10,
+                mrr:                      s.mrr,
+                query_latency_seconds:    s.query_latency_seconds,
+                write_mean_latency_seconds: s.write_mean_latency_seconds,
+                ranked_session_ids:       s.ranked_session_ids.clone(),
+                answer_session_ids:       s.answer_session_ids.clone(),
+                retrieved_uuid_count:     s.retrieved_uuid_count,
+                exact_discrimination:     prov.and_then(|p| p.exact_discrimination.clone()),
+                exact_recall_provenance:  prov.and_then(|p| p.exact_recall_provenance.clone()),
+                dense_discrimination:     prov.and_then(|p| p.dense_discrimination.clone()),
+                dense_recall_provenance:  prov.and_then(|p| p.dense_recall_provenance.clone()),
+            }
         })
         .collect();
 
@@ -551,6 +690,8 @@ pub fn build_lme_report(
 
     let mut exact_tokens: Vec<usize> = Vec::new();
     let mut dense_tokens: Vec<usize> = Vec::new();
+    let mut exact_result_counts: Vec<usize> = Vec::new();
+    let mut dense_result_counts: Vec<usize> = Vec::new();
     let mut exact_hits: usize = 0;
     let mut dense_hits: usize = 0;
     let mut exact_evidence_count: usize = 0;
@@ -559,6 +700,9 @@ pub fn build_lme_report(
     for entry in payload_entries {
         if let Some(ref text) = entry.exact_payload_text {
             exact_tokens.push(lme_estimate_tokens(text));
+            if let Some(n) = lme_parse_result_count(text) {
+                exact_result_counts.push(n);
+            }
             if let Some(evidence) = has_answer_lookup.get(entry.question_id.as_str()) {
                 exact_evidence_count += 1;
                 if lme_evidence_hit(evidence, text) {
@@ -568,6 +712,9 @@ pub fn build_lme_report(
         }
         if let Some(ref text) = entry.dense_payload_text {
             dense_tokens.push(lme_estimate_tokens(text));
+            if let Some(n) = lme_parse_result_count(text) {
+                dense_result_counts.push(n);
+            }
             if let Some(evidence) = has_answer_lookup.get(entry.question_id.as_str()) {
                 dense_evidence_count += 1;
                 if lme_evidence_hit(evidence, text) {
@@ -602,6 +749,32 @@ pub fn build_lme_report(
         _ => None,
     };
 
+    // ── Per-result token metrics (Defect 2) ───────────────────────────────────
+    let exact_tpr: Option<f64> = if exact_tokens.len() == exact_result_counts.len()
+        && !exact_tokens.is_empty()
+    {
+        let total_tokens: usize = exact_tokens.iter().sum();
+        let total_results: usize = exact_result_counts.iter().sum();
+        if total_results > 0 {
+            Some(total_tokens as f64 / total_results as f64)
+        } else { None }
+    } else { None };
+
+    let dense_tpr: Option<f64> = if dense_tokens.len() == dense_result_counts.len()
+        && !dense_tokens.is_empty()
+    {
+        let total_tokens: usize = dense_tokens.iter().sum();
+        let total_results: usize = dense_result_counts.iter().sum();
+        if total_results > 0 {
+            Some(total_tokens as f64 / total_results as f64)
+        } else { None }
+    } else { None };
+
+    let tpr_ratio: Option<f64> = match (exact_tpr, dense_tpr) {
+        (Some(e), Some(d)) if e > 0.0 => Some(d / e),
+        _ => None,
+    };
+
     let token_efficiency = LmeReportTokenEfficiency {
         exact_arm_mean_tokens:    exact_mean,
         dense_arm_mean_tokens:    dense_mean,
@@ -610,6 +783,53 @@ pub fn build_lme_report(
         dense_evidence_hit_rate:  dense_hit_rate,
         exact_hits_per_1k_tokens: exact_hits_per_1k,
         dense_hits_per_1k_tokens: dense_hits_per_1k,
+        exact_tokens_per_result:  exact_tpr,
+        dense_tokens_per_result:  dense_tpr,
+        dense_exact_tokens_per_result_ratio: tpr_ratio,
+    };
+
+    // ── Lane health (Defect 3) ────────────────────────────────────────────────
+    // Aggregate discrimination and provenance health across all questions.
+    let mut exact_disc_dist: BTreeMap<String, usize> = BTreeMap::new();
+    let mut dense_disc_dist: BTreeMap<String, usize> = BTreeMap::new();
+    let mut dense_lane_dark_count: usize = 0;
+    let mut exact_degraded_count: usize = 0;
+    let mut dense_degraded_count: usize = 0;
+
+    for entry in payload_entries {
+        if let Some(ref text) = entry.exact_payload_text {
+            if let Some(disc_line) = lme_parse_discrimination_line(text) {
+                let level = lme_extract_discrimination_level(&disc_line);
+                *exact_disc_dist.entry(level).or_insert(0) += 1;
+            }
+            if let Some(prov_line) = lme_parse_recall_provenance_line(text) {
+                if prov_line.contains("dark:") {
+                    dense_lane_dark_count += 1;
+                }
+                if !prov_line.contains("degraded_stages:none") {
+                    exact_degraded_count += 1;
+                }
+            }
+        }
+        if let Some(ref text) = entry.dense_payload_text {
+            if let Some(disc_line) = lme_parse_discrimination_line(text) {
+                let level = lme_extract_discrimination_level(&disc_line);
+                *dense_disc_dist.entry(level).or_insert(0) += 1;
+            }
+            if let Some(prov_line) = lme_parse_recall_provenance_line(text) {
+                if !prov_line.contains("degraded_stages:none") {
+                    dense_degraded_count += 1;
+                }
+            }
+        }
+    }
+
+    let lane_health = LmeReportLaneHealth {
+        exact_discrimination_distribution: exact_disc_dist,
+        dense_discrimination_distribution: dense_disc_dist,
+        exact_dense_lane_dark_count: dense_lane_dark_count,
+        exact_degraded_count,
+        dense_degraded_count,
     };
 
     LmeReport {
@@ -617,11 +837,13 @@ pub fn build_lme_report(
         run_label,
         variant,
         generated_at,
+        encode_barrier,
         corpus_stats,
         aggregate: report_aggregate,
         latency: report_latency,
         per_question,
         token_efficiency,
+        lane_health,
     }
 }
 
@@ -642,7 +864,7 @@ pub fn write_lme_report(report: &LmeReport, path: &std::path::Path) -> Result<()
 }
 
 /// Recursively sorts JSON object keys (matching JSONEncoder `.sortedKeys`).
-fn sorted_json_value(v: &serde_json::Value) -> serde_json::Value {
+pub fn sorted_json_value(v: &serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(obj) => {
             let sorted: serde_json::Map<String, serde_json::Value> = obj
@@ -657,5 +879,132 @@ fn sorted_json_value(v: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(arr.iter().map(sorted_json_value).collect())
         }
         other => other.clone(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // MARK: - Provenance parsing (Defect 3)
+
+    #[test]
+    fn parse_result_count_memory() {
+        // "found N memory(s)" prefix
+        let payload = "found 5 memory(s)\nsome content\ndiscrimination: high";
+        assert_eq!(lme_parse_result_count(payload), Some(5));
+    }
+
+    #[test]
+    fn parse_result_count_distilled() {
+        // "found N distilled factoid(s)" prefix (dense arm)
+        let payload = "found 3 distilled factoid(s)\nsome factoid text";
+        assert_eq!(lme_parse_result_count(payload), Some(3));
+    }
+
+    #[test]
+    fn parse_result_count_no_found() {
+        let payload = "no results returned";
+        assert_eq!(lme_parse_result_count(payload), None);
+    }
+
+    #[test]
+    fn parse_result_count_zero() {
+        let payload = "found 0 memory(s)";
+        assert_eq!(lme_parse_result_count(payload), Some(0));
+    }
+
+    #[test]
+    fn parse_discrimination_line_present() {
+        let payload = "found 5 memory(s)\ndiscrimination: high\nrecall_provenance: dense_lane:active dark:false";
+        let line = lme_parse_discrimination_line(payload);
+        assert!(line.is_some());
+        assert!(line.unwrap().contains("discrimination:"));
+    }
+
+    #[test]
+    fn parse_discrimination_line_absent() {
+        let payload = "found 5 memory(s)\nsome content";
+        assert_eq!(lme_parse_discrimination_line(payload), None);
+    }
+
+    #[test]
+    fn parse_recall_provenance_line_present() {
+        let payload = "found 3 memory(s)\nrecall_provenance: dense_lane:active dark:false degraded_stages:none";
+        let line = lme_parse_recall_provenance_line(payload);
+        assert!(line.is_some());
+        assert!(line.unwrap().contains("recall_provenance:"));
+    }
+
+    #[test]
+    fn parse_recall_provenance_line_absent() {
+        let payload = "found 3 memory(s)\nno provenance here";
+        assert_eq!(lme_parse_recall_provenance_line(payload), None);
+    }
+
+    #[test]
+    fn extract_discrimination_level_high() {
+        assert_eq!(lme_extract_discrimination_level("discrimination: high"), "high");
+    }
+
+    #[test]
+    fn extract_discrimination_level_medium() {
+        assert_eq!(lme_extract_discrimination_level("discrimination: medium"), "medium");
+    }
+
+    #[test]
+    fn extract_discrimination_level_not_found() {
+        assert_eq!(lme_extract_discrimination_level("discrimination: not_found"), "not_found");
+    }
+
+    // MARK: - Tokens per result (Defect 2): arithmetic cancellation case
+    //
+    // 20 exact results × 168 chars each = 3360 bytes → ~840 tokens → 840/20 = 42 tpr
+    // 8 dense results  × 414 chars each = 3312 bytes → ~828 tokens → 828/8  = ~103.5 tpr
+    // Per-result ratio: ~103.5 / 42 ≈ 2.46 — clearly non-1.
+    // Simple byte ratio: 3312 / 3360 ≈ 0.986 — almost 1.
+    //
+    // This is the arithmetic-cancellation case: per-result ratio diverges while
+    // the simple byte ratio stays near 1. Confirms the metric is non-trivial.
+    //
+    // Twin of Swift `LMETokensPerResultTests.arithmeticCancellationCase`.
+    #[test]
+    fn arithmetic_cancellation_case() {
+        use crate::longmemeval_token_efficiency::lme_estimate_tokens;
+
+        let exact_char_count = 168_usize;
+        let exact_result_count = 20_usize;
+        let dense_char_count = 414_usize;
+        let dense_result_count = 8_usize;
+
+        let exact_payload = "a".repeat(exact_char_count * exact_result_count);
+        let dense_payload  = "a".repeat(dense_char_count  * dense_result_count);
+
+        // Prepend "found N" lines so the result-count parser fires.
+        let exact_text = format!("found {} memory(s)\n{}", exact_result_count, &exact_payload);
+        let dense_text = format!("found {} distilled factoid(s)\n{}", dense_result_count, &dense_payload);
+
+        let exact_tokens = lme_estimate_tokens(&exact_text) as f64;
+        let dense_tokens  = lme_estimate_tokens(&dense_text)  as f64;
+
+        // Simple byte ratio should be close to 1.0.
+        let byte_ratio = dense_tokens / exact_tokens;
+        assert!((byte_ratio - 1.0).abs() < 0.05,
+            "byte_ratio should be near 1.0, got {byte_ratio:.4}");
+
+        // Per-result token counts.
+        let exact_tpr = exact_tokens / exact_result_count as f64;
+        let dense_tpr  = dense_tokens  / dense_result_count  as f64;
+        let tpr_ratio  = dense_tpr / exact_tpr;
+
+        // Per-result ratio should be significantly > 1.0 (approximately 2.5).
+        assert!(tpr_ratio > 2.0,
+            "tpr_ratio should be > 2.0, got {tpr_ratio:.4}");
+        assert!(tpr_ratio < 4.0,
+            "tpr_ratio should be < 4.0, got {tpr_ratio:.4}");
     }
 }

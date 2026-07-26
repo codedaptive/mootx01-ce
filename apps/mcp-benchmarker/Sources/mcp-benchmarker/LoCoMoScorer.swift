@@ -353,6 +353,8 @@ struct LoCoMoReport: Codable, Sendable {
     let categoryBreakdown: [LoCoMoReportCategoryEntry]
     let latency: LoCoMoReportLatency
     let perQuestion: [LoCoMoReportPerQuestion]
+    /// Encode barrier mode used for ingest (drain / impatient / none). Additive key.
+    let encodeBarrier: String
 
     enum CodingKeys: String, CodingKey {
         case runID             = "run_id"
@@ -363,6 +365,7 @@ struct LoCoMoReport: Codable, Sendable {
         case categoryBreakdown = "category_breakdown"
         case latency
         case perQuestion       = "per_question"
+        case encodeBarrier     = "encode_barrier"
     }
 }
 
@@ -447,7 +450,8 @@ func buildLoCoMoReport(
         aggregate: reportAggregate,
         categoryBreakdown: categoryEntries,
         latency: reportLatency,
-        perQuestion: perQuestion
+        perQuestion: perQuestion,
+        encodeBarrier: config.encodeBarrier.rawValue
     )
 }
 

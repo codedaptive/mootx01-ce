@@ -149,6 +149,80 @@ struct LongMemEvalRunnerTests {
         try assertScratchBackend(endpoint)
     }
 
+    // MARK: - EncodeBarrier
+
+    @Test("LMERunConfig accepts EncodeBarrier.drain as default")
+    func lmeRunConfigEncodeBarrierDefault() {
+        let config = LMERunConfig(
+            mootBinaryPath: "/bin/moot",
+            datasetPath: URL(fileURLWithPath: "/tmp/lme.json"),
+            variant: "s",
+            limit: nil, offset: 0, seed: 42,
+            freshPerQuestion: true,
+            outDir: nil,
+            runLabel: "test",
+            arm: .both,
+            judgeCmd: nil,
+            encodeBarrier: .drain
+        )
+        #expect(config.encodeBarrier == .drain)
+        #expect(config.encodeBarrier.rawValue == "drain")
+    }
+
+    @Test("EncodeBarrier raw values match their JSON key names")
+    func encodeBarrierRawValues() {
+        #expect(EncodeBarrier.drain.rawValue == "drain")
+        #expect(EncodeBarrier.impatient.rawValue == "impatient")
+        #expect(EncodeBarrier.none.rawValue == "none")
+    }
+
+    // MARK: - Twin CLI contract (Defect 4)
+
+    // Verifies that the Swift CLI helper accepts both the Swift-native flag
+    // spelling and the Rust twin's spelling, and that --data-dir takes priority
+    // when both are present. This mirrors the Rust test `cli_alias_data_dir`.
+    @Test("optionValue: --data-dir takes priority over --corpus when both present")
+    func dataDirTakesPriorityOverCorpus() {
+        let args = ["--corpus", "/corpus-path", "--data-dir", "/datadir-path"]
+        let chosen = optionValue("--data-dir", in: args) ?? optionValue("--corpus", in: args)
+        #expect(chosen == "/datadir-path", "explicit --data-dir should win over --corpus alias")
+    }
+
+    @Test("optionValue: --corpus alias works when --data-dir is absent")
+    func corpusAliasWorksForLME() {
+        let args = ["--corpus", "/corpus-path", "--variant", "s"]
+        let chosen = optionValue("--data-dir", in: args) ?? optionValue("--corpus", in: args)
+        #expect(chosen == "/corpus-path", "--corpus alias should be used when --data-dir is absent")
+    }
+
+    @Test("optionValue: --data-file takes priority over --corpus for LoCoMo when both present")
+    func dataFileTakesPriorityOverCorpus() {
+        let args = ["--corpus", "/corpus-path", "--data-file", "/datafile-path"]
+        let chosen = optionValue("--data-file", in: args) ?? optionValue("--corpus", in: args)
+        #expect(chosen == "/datafile-path", "--data-file should win over --corpus alias")
+    }
+
+    @Test("optionValue: --corpus alias works for LoCoMo when --data-file is absent")
+    func corpusAliasWorksForLoCoMo() {
+        let args = ["--corpus", "/locomo.json"]
+        let chosen = optionValue("--data-file", in: args) ?? optionValue("--corpus", in: args)
+        #expect(chosen == "/locomo.json", "--corpus alias should work as --data-file substitute")
+    }
+
+    @Test("optionValue: --mootx01-binary takes priority over --binary when both present")
+    func mootx01BinaryTakesPriorityOverBinary() {
+        let args = ["--binary", "/bin/moot-b", "--mootx01-binary", "/bin/moot-a"]
+        let chosen = optionValue("--mootx01-binary", in: args) ?? optionValue("--binary", in: args)
+        #expect(chosen == "/bin/moot-a", "--mootx01-binary should win over --binary alias")
+    }
+
+    @Test("optionValue: --binary alias works when --mootx01-binary is absent")
+    func binaryAliasWorks() {
+        let args = ["--binary", "/usr/local/bin/mootx01"]
+        let chosen = optionValue("--mootx01-binary", in: args) ?? optionValue("--binary", in: args)
+        #expect(chosen == "/usr/local/bin/mootx01", "--binary alias should work as --mootx01-binary substitute")
+    }
+
     // MARK: - VerbMap
 
     @Test("lmeMootVerbMap uses the correct mootx01 tool names")
