@@ -21,7 +21,7 @@ the tag carries the pre-release qualifier.
   plus per-category breakdown (single_hop, temporal, multi_hop, open_domain).
   Reuses LME-01 scoring math via `locomo_manifest_as_lme` bridge (dia_id →
   session_id mapping). Additive extension per BENCHMARKER_OPTIMIZER_CONTRACT.md.
-- **Cross-language conformance verified** by `fixtures/conformance/locomo_vectors.json`:
+- **Cross-language conformance verified** by `conformance/locomo_vectors.json`:
   recall cases + uuid-mapping cases, tolerance 1e-9, both legs pass.
 - **Diagnostic smoke run:** 50 questions, seed 20260725, both twins. Category
   n-counts match across twins (single_hop=8, temporal=12, multi_hop=2,
