@@ -8,11 +8,16 @@ Signing). Signing attaches a verified publisher identity, which:
   (the `validationDefender` error), and
 - removes the **SmartScreen** warning on direct `setup.exe` download.
 
-This is a two-part setup. The **Azure provisioning** below is a one-time manual
-step (only a subscription owner can do it, and identity validation takes time).
-The **CI wiring** is already in place in `release.yml` and `candidate.yml`; it
-is best-effort and no-ops until the GitHub secrets below exist, so the pipeline
-keeps shipping (unsigned) until provisioning completes.
+This is a two-part setup. The **Azure provisioning** below was completed on
+2026-07-16 (v1.0.33 was the first stable release to ship Authenticode-signed
+Windows artifacts). The **CI wiring** in `release.yml` and `candidate.yml`
+differs by lane: the stable release lane FAILS CLOSED — a tag-push release
+refuses to ship if `AZURE_CLIENT_ID` is missing (rotated, expired, deleted),
+because SECURITY.md promises signed Windows binaries and an unsigned stable
+must never ship silently against that promise. The candidate lane stays
+best-effort (warns and ships unsigned) so credential work never blocks
+testing builds. If the Azure identity is ever re-provisioned, the steps below
+remain the runbook.
 
 macOS uses Apple Developer ID (see `distribution/macos/`); this doc is Windows
 only.

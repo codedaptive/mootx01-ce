@@ -376,6 +376,63 @@ public enum EstateEncryptionMigrator {
             recallTraces: try countRows(db, table: "recall_trace"))
     }
 
+    /// Every user table (name → TOTAL row count) of the database at `path`,
+    /// enumerated from `sqlite_master`. Enumerated, not listed: a gate built
+    /// on a fixed table list goes silently incomplete the day the schema
+    /// grows a table (audit history, diary, erasure ledger…), and an
+    /// unfaithful copy could then pass by preserving only the listed four.
+    static func allTableCounts(atPath path: String, keyHex: String? = nil) throws -> [String: Int] {
+        let db = try openRaw(path: path, keyHex: keyHex)
+        defer { sqlite3_close_v2(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;",
+            -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            throw MigrationError.sqlite(
+                step: "list tables", detail: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var names: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) {
+                names.append(String(cString: c))
+            }
+        }
+        var counts: [String: Int] = [:]
+        for table in names {
+            counts[table] = try countRows(db, table: table)
+        }
+        return counts
+    }
+
+    /// `PRAGMA integrity_check` on the database at `path`. Throws unless the
+    /// result is exactly the single row "ok". Structural soundness is a
+    /// precondition the row-count gate cannot see: counts read intact B-tree
+    /// paths and say nothing about corruption elsewhere in a page.
+    static func assertIntegrity(atPath path: String, keyHex: String? = nil) throws {
+        let db = try openRaw(path: path, keyHex: keyHex)
+        defer { sqlite3_close_v2(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &stmt, nil) == SQLITE_OK,
+              let stmt else {
+            throw MigrationError.sqlite(
+                step: "integrity_check", detail: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var findings: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) {
+                findings.append(String(cString: c))
+            }
+        }
+        guard findings == ["ok"] else {
+            throw MigrationError.sqlite(
+                step: "integrity_check",
+                detail: findings.isEmpty ? "no result rows" : findings.joined(separator: "; "))
+        }
+    }
+
     /// `SELECT COUNT(*)` on one table. A missing table (or a wrong key,
     /// which makes page 1 undecodable) surfaces as a thrown error, never
     /// as zero — a fabricated zero could make a truncated copy "match" an
@@ -399,9 +456,36 @@ public enum EstateEncryptionMigrator {
     /// Part 3's gate: compare the plaintext original against the encrypted
     /// copy. Throws `.verificationFailed` (after deleting the copy) on any
     /// difference — the original is never touched by this function.
+    ///
+    /// The gate is three layers, strongest first (hardened per Codex 06fa2bc2
+    /// once the swap became live: this comparison is now the only thing
+    /// standing between an unfaithful copy and the plaintext original going
+    /// to the Trash):
+    ///   1. `PRAGMA integrity_check` on the encrypted copy — structural
+    ///      soundness of every page, which row counts cannot see.
+    ///   2. Schema-complete comparison — every user table in either database
+    ///      by name, TOTAL rows each. Catches dropped tables, gained tables,
+    ///      and row loss anywhere in the estate (audit history, diary,
+    ///      erasure ledger, snapshots), not just the four headline tables.
+    ///   3. The four headline counts, returned for display and logging.
     public static func verifyEncryptedCopy(
         original: URL, encryptedCopy: URL, key: Data
     ) throws -> VerificationCounts {
+        do {
+            try assertIntegrity(atPath: encryptedCopy.path, keyHex: keyHex(key))
+            let sourceTables = try allTableCounts(atPath: original.path)
+            let copyTables = try allTableCounts(atPath: encryptedCopy.path, keyHex: keyHex(key))
+            guard sourceTables == copyTables else {
+                throw MigrationError.verificationFailed(
+                    source: tableCountsDescription(sourceTables, versus: copyTables),
+                    copy: tableCountsDescription(copyTables, versus: sourceTables))
+            }
+        } catch {
+            // Any failed layer condemns the copy: never leave a ciphertext
+            // file that failed verification where a retry could adopt it.
+            removeDatabase(at: encryptedCopy)
+            throw error
+        }
         let source = try verificationCounts(atPath: original.path)
         let copy = try verificationCounts(atPath: encryptedCopy.path, keyHex: keyHex(key))
         guard source == copy else {
@@ -410,6 +494,26 @@ public enum EstateEncryptionMigrator {
                 source: "\(source)", copy: "\(copy)")
         }
         return copy
+    }
+
+    /// One side of a failed table-complete comparison, with the tables that
+    /// differ from `other` singled out so the error names the divergence
+    /// instead of dumping two full maps.
+    static func tableCountsDescription(
+        _ counts: [String: Int], versus other: [String: Int]
+    ) -> String {
+        let differing = counts
+            .filter { other[$0.key] != $0.value }
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+        let missing = other.keys
+            .filter { counts[$0] == nil }
+            .sorted()
+            .map { "\($0)=absent" }
+        let parts = differing + missing
+        return parts.isEmpty
+            ? "\(counts.count) tables, all matching"
+            : "\(counts.count) tables; differing: " + parts.joined(separator: " ")
     }
 
     // MARK: - Part 2: the clone
