@@ -67,6 +67,12 @@ let estateURL = outputDirectory.appendingPathComponent("estate.sqlite")
 let manifestURL = outputDirectory.appendingPathComponent("manifest.json")
 
 do {
+    // Refuse the real data directory BEFORE any filesystem side effect —
+    // directory creation and cleanup included. generate(at:) runs the same
+    // guard, but by then cleanup would already have deleted files; the tool
+    // must fail before it touches anything.
+    try TwentyRowEstateFixture.assertNotProductionPath(estateURL)
+
     try FileManager.default.createDirectory(
         at: outputDirectory, withIntermediateDirectories: true)
 
