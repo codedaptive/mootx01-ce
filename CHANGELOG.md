@@ -24,7 +24,7 @@ the tag carries the pre-release qualifier.
   `false` default in both loaders.
 - **Diagnostic smoke run:** 50-question Rust run (variant=s, seed=20260725)
   → recall_any@10=0.88, recall_all@10=0.62, mrr=0.64, 0 guard refusals.
-  See `docs_internal/analysis/LONGMEMEVAL_DIAGNOSTIC_SMOKE_2026-07-25.md`.
+  See `apps/mcp-benchmarker/results/LONGMEMEVAL_DIAGNOSTIC_SMOKE_2026-07-25.md`.
 
 ## v1.0.35 — 2026-07-25
 

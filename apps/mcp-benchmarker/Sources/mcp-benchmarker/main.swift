@@ -616,15 +616,14 @@ func runPressure(_ args: [String]) async throws {
 
 /// The default fixtures root, relative to this source file, so `quality` finds
 /// the in-repo wiki-quality fixture without a flag. `#filePath` is this file
-/// (…/swift-bench/Sources/mcp-benchmarker/main.swift); the fixture sits four
-/// levels up at …/mcp-benchmarker/fixtures/wiki-quality (shared, above swift-bench).
+/// (apps/mcp-benchmarker/Sources/mcp-benchmarker/main.swift); CE has no
+/// swift-bench/ wrapper — 3 levels up reaches apps/mcp-benchmarker/fixtures/.
 /// `--fixtures DIR` overrides it.
 func defaultFixturesRoot() -> URL {
-    URL(fileURLWithPath: #filePath)            // …/swift-bench/Sources/mcp-benchmarker/main.swift
-        .deletingLastPathComponent()           // …/swift-bench/Sources/mcp-benchmarker
-        .deletingLastPathComponent()           // …/swift-bench/Sources
-        .deletingLastPathComponent()           // …/swift-bench
-        .deletingLastPathComponent()           // …/mcp-benchmarker
+    URL(fileURLWithPath: #filePath)            // apps/mcp-benchmarker/Sources/mcp-benchmarker/main.swift
+        .deletingLastPathComponent()           // apps/mcp-benchmarker/Sources/mcp-benchmarker
+        .deletingLastPathComponent()           // apps/mcp-benchmarker/Sources
+        .deletingLastPathComponent()           // apps/mcp-benchmarker
         .appendingPathComponent("fixtures")
         .appendingPathComponent("wiki-quality")
 }

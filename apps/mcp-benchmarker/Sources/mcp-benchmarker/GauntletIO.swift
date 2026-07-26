@@ -196,16 +196,14 @@ enum GauntletIO {
             strategies: strategies, worstFailures: failures)
     }
 
-    /// The tool's default results root: …/mcp-benchmarker/results (shared, above
-    /// swift-bench). Derived from this source file's path
-    /// (…/swift-bench/Sources/mcp-benchmarker/GauntletIO.swift), the same way the
-    /// quality fixtures root is derived in main.swift.
+    /// The tool's default results root: apps/mcp-benchmarker/results. Derived
+    /// from this source file's path (apps/mcp-benchmarker/Sources/mcp-benchmarker/GauntletIO.swift).
+    /// CE has no swift-bench/ wrapper; 3 levels up reaches apps/mcp-benchmarker/.
     static func defaultResultsRoot() -> URL {
-        URL(fileURLWithPath: #filePath)        // …/swift-bench/Sources/mcp-benchmarker/GauntletIO.swift
-            .deletingLastPathComponent()        // …/swift-bench/Sources/mcp-benchmarker
-            .deletingLastPathComponent()        // …/swift-bench/Sources
-            .deletingLastPathComponent()        // …/swift-bench
-            .deletingLastPathComponent()        // …/mcp-benchmarker
+        URL(fileURLWithPath: #filePath)        // apps/mcp-benchmarker/Sources/mcp-benchmarker/GauntletIO.swift
+            .deletingLastPathComponent()        // apps/mcp-benchmarker/Sources/mcp-benchmarker
+            .deletingLastPathComponent()        // apps/mcp-benchmarker/Sources
+            .deletingLastPathComponent()        // apps/mcp-benchmarker
             .appendingPathComponent("results")
     }
 }
