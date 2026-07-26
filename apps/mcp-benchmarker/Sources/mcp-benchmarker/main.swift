@@ -758,6 +758,10 @@ func runLongMemEval(_ args: [String]) async throws {
     let sharedEstate = flagPresent("--shared-estate", in: args)
     let outDirStr = optionValue("--out", in: args)
     let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
+    // Judge mode (LME-03 Part 4): optional LLM-judged QA. Off by default.
+    // The command receives the prompt on stdin and writes its answer on stdout.
+    // Example: --judge-cmd "claude -p" or --judge-cmd "./judge.sh"
+    let judgeCmd = optionValue("--judge-cmd", in: args)
 
     // Warn on shared-estate: methodology-affecting (haystack contamination).
     if sharedEstate {
@@ -784,7 +788,8 @@ func runLongMemEval(_ args: [String]) async throws {
         freshPerQuestion: !sharedEstate,
         outDir: outDir,
         runLabel: "lme-\(variant)-seed\(seed)-arm\(armStr)",
-        arm: arm
+        arm: arm,
+        judgeCmd: judgeCmd
     )
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
@@ -799,6 +804,57 @@ func runLongMemEval(_ args: [String]) async throws {
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
         .appendingPathComponent(reportFilename)
     try writeLMEReport(report, to: reportURL)
+
+    // Judge transcript (LME-03 Part 4): write per-question judge calls to JSONL.
+    // Each line: {question_id, arm, gold_answer, judge_answer, correct}.
+    // Written only when --judge-cmd was supplied.
+    if judgeCmd != nil {
+        // Build a question-id → gold-answer lookup from the corpus.
+        let goldLookup = Dictionary(uniqueKeysWithValues:
+            corpus.questions.map { ($0.questionID, $0.answer) })
+        var lines: [String] = []
+        for result in results {
+            let gold = goldLookup[result.questionID] ?? ""
+            if let answer = result.exactJudgeAnswer {
+                let entry: [String: Any] = [
+                    "question_id": result.questionID,
+                    "arm": "exact",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": result.exactJudgeCorrect ?? false,
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: entry,
+                                                          options: [.sortedKeys]),
+                   let line = String(data: data, encoding: .utf8) {
+                    lines.append(line)
+                }
+            }
+            if let answer = result.denseJudgeAnswer {
+                let entry: [String: Any] = [
+                    "question_id": result.questionID,
+                    "arm": "dense",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": result.denseJudgeCorrect ?? false,
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: entry,
+                                                          options: [.sortedKeys]),
+                   let line = String(data: data, encoding: .utf8) {
+                    lines.append(line)
+                }
+            }
+        }
+        let transcriptContent = lines.joined(separator: "\n")
+            + (lines.isEmpty ? "" : "\n")
+        let transcriptFilename =
+            "judge-transcript-\(report.variant)-seed\(runConfig.seed).jsonl"
+        let transcriptURL = (outDir
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+            .appendingPathComponent(transcriptFilename)
+        try Data(transcriptContent.utf8).write(to: transcriptURL)
+        FileHandle.standardOutput.write(Data(
+            "[longmemeval] judge transcript: \(transcriptURL.path)\n".utf8))
+    }
 
     // Print scored summary to stdout.
     let guardHealthyCount = scores.filter(\.guardHealthy).count

@@ -127,6 +127,19 @@ struct LMEQuestionResult: Sendable {
     /// Time taken for the dense-arm moot_recall_distilled call, in seconds.
     /// nil when arm = .exact.
     let denseQueryLatencySeconds: Double?
+    // MARK: Judge mode fields (Part 4, LME-03)
+    /// Judge subprocess answer for the exact arm. nil when judgeCmd was not set
+    /// or the exact arm was not run.
+    let exactJudgeAnswer: String?
+    /// True when exactJudgeAnswer contains the normalized gold answer as a substring.
+    /// nil when exactJudgeAnswer is nil.
+    let exactJudgeCorrect: Bool?
+    /// Judge subprocess answer for the dense arm. nil when judgeCmd was not set
+    /// or the dense arm was not run.
+    let denseJudgeAnswer: String?
+    /// True when denseJudgeAnswer contains the normalized gold answer as a substring.
+    /// nil when denseJudgeAnswer is nil.
+    let denseJudgeCorrect: Bool?
 }
 
 // MARK: - Run config
@@ -155,6 +168,10 @@ struct LMERunConfig: Sendable {
     let runLabel: String
     /// Which recall arm(s) to benchmark. Default .both runs exact + dense per question.
     let arm: LMEArm
+    /// Optional judge command for LLM-judged QA mode. When set, the harness runs
+    /// the command subprocess per arm per question (prompt on stdin, answer on stdout)
+    /// and grades deterministically against the gold `answer`. Off by default.
+    let judgeCmd: String?
 }
 
 // MARK: - Scratch estate management
@@ -421,6 +438,41 @@ func runLMEQuestions(
             densePayloadText = denseResult.textBlocks.joined(separator: "\n")
         }
 
+        // Judge mode (Part 4): optional LLM-judged QA per arm.
+        // Soft errors (failed subprocess, non-zero exit) are logged and skipped —
+        // a judge failure does not fail the question; the answer fields stay nil.
+        var exactJudgeAnswer: String? = nil
+        var exactJudgeCorrect: Bool? = nil
+        if let judgeCmd = config.judgeCmd,
+           let payload = exactPayloadText,
+           !payload.isEmpty {
+            let prompt = lmeJudgePrompt(question: question.question, payload: payload)
+            do {
+                let answer = try lmeRunJudge(cmd: judgeCmd, prompt: prompt)
+                exactJudgeAnswer = answer
+                exactJudgeCorrect = lmeGradeJudgeAnswer(answer, goldAnswer: question.answer)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[lme] judge error (exact) for \(question.questionID): \(error)\n".utf8))
+            }
+        }
+
+        var denseJudgeAnswer: String? = nil
+        var denseJudgeCorrect: Bool? = nil
+        if let judgeCmd = config.judgeCmd,
+           let payload = densePayloadText,
+           !payload.isEmpty {
+            let prompt = lmeJudgePrompt(question: question.question, payload: payload)
+            do {
+                let answer = try lmeRunJudge(cmd: judgeCmd, prompt: prompt)
+                denseJudgeAnswer = answer
+                denseJudgeCorrect = lmeGradeJudgeAnswer(answer, goldAnswer: question.answer)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[lme] judge error (dense) for \(question.questionID): \(error)\n".utf8))
+            }
+        }
+
         results.append(LMEQuestionResult(
             questionID: question.questionID,
             questionType: question.questionType,
@@ -434,7 +486,11 @@ func runLMEQuestions(
             writeMeanLatencySeconds: writeMean,
             exactPayloadText: exactPayloadText,
             densePayloadText: densePayloadText,
-            denseQueryLatencySeconds: denseQueryLatency
+            denseQueryLatencySeconds: denseQueryLatency,
+            exactJudgeAnswer: exactJudgeAnswer,
+            exactJudgeCorrect: exactJudgeCorrect,
+            denseJudgeAnswer: denseJudgeAnswer,
+            denseJudgeCorrect: denseJudgeCorrect
         ))
     }
 

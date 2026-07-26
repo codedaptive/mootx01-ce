@@ -200,6 +200,9 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         "both"  => LmeArm::Both,
         other   => return Err(format!("--arm must be 'exact', 'dense', or 'both'; got '{other}'")),
     };
+    // Judge mode (LME-03 Part 4): optional LLM-judged QA. Off by default.
+    // The command receives the prompt on stdin and writes its answer on stdout.
+    let judge_cmd = option_value("--judge-cmd", args).map(str::to_string);
 
     eprintln!("[lme] loading corpus from {corpus_path}");
     let corpus = load_corpus(Path::new(&corpus_path))
@@ -222,9 +225,32 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         label: label.clone(),
         out_dir: out_dir.clone(),
         arm,
+        judge_cmd: judge_cmd.clone(),
     };
 
+    // Keep results alongside scores so the transcript writer can read judge fields.
     let results = run_lme_questions(&corpus, &run_config);
+    // score_lme_question takes by value — clone the parts needed for the transcript
+    // before consuming results. For the transcript we need: question_id,
+    // exact_judge_answer, exact_judge_correct, dense_judge_answer, dense_judge_correct.
+    // We extract these first, then move results into the scorer.
+    struct JudgeEntry {
+        question_id: String,
+        exact_judge_answer: Option<String>,
+        exact_judge_correct: Option<bool>,
+        dense_judge_answer: Option<String>,
+        dense_judge_correct: Option<bool>,
+    }
+    let judge_entries: Vec<JudgeEntry> = results
+        .iter()
+        .map(|r| JudgeEntry {
+            question_id: r.question_id.clone(),
+            exact_judge_answer: r.exact_judge_answer.clone(),
+            exact_judge_correct: r.exact_judge_correct,
+            dense_judge_answer: r.dense_judge_answer.clone(),
+            dense_judge_correct: r.dense_judge_correct,
+        })
+        .collect();
     let scores: Vec<_> = results.into_iter().map(score_lme_question).collect();
 
     let run_id = {
@@ -269,6 +295,53 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         .join(&report_filename);
     write_lme_report(&report, &report_path)?;
     println!("report written to {}", report_path.display());
+
+    // Judge transcript (LME-03 Part 4): write per-question judge calls to JSONL.
+    // Written only when --judge-cmd was supplied.
+    if judge_cmd.is_some() {
+        // Build a question_id → gold_answer lookup from the corpus.
+        let gold_lookup: std::collections::HashMap<&str, &str> = corpus
+            .questions
+            .iter()
+            .map(|q| (q.question_id.as_str(), q.answer.as_str()))
+            .collect();
+
+        let mut lines: Vec<String> = Vec::new();
+        for entry in &judge_entries {
+            let gold = gold_lookup.get(entry.question_id.as_str()).copied().unwrap_or("");
+            if let Some(ref answer) = entry.exact_judge_answer {
+                let correct = entry.exact_judge_correct.unwrap_or(false);
+                let row = serde_json::json!({
+                    "question_id": entry.question_id,
+                    "arm": "exact",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": correct,
+                });
+                lines.push(row.to_string());
+            }
+            if let Some(ref answer) = entry.dense_judge_answer {
+                let correct = entry.dense_judge_correct.unwrap_or(false);
+                let row = serde_json::json!({
+                    "question_id": entry.question_id,
+                    "arm": "dense",
+                    "gold_answer": gold,
+                    "judge_answer": answer,
+                    "correct": correct,
+                });
+                lines.push(row.to_string());
+            }
+        }
+        let transcript_content = lines.join("\n") + if lines.is_empty() { "" } else { "\n" };
+        let transcript_filename = format!("judge-transcript-{}-seed{}.jsonl", variant, seed);
+        let transcript_path = out_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&transcript_filename);
+        std::fs::write(&transcript_path, transcript_content)
+            .map_err(|e| format!("transcript write failed: {e}"))?;
+        println!("judge transcript: {}", transcript_path.display());
+    }
 
     Ok(())
 }

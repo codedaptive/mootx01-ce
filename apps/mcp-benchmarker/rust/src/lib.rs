@@ -65,6 +65,7 @@ pub mod degeneracy_guard;
 pub mod divergence;
 pub mod json_value;
 pub mod longmemeval_corpus;
+pub mod longmemeval_judge;
 pub mod longmemeval_runner;
 pub mod longmemeval_scorer;
 pub mod longmemeval_token_efficiency;

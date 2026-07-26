@@ -17,6 +17,7 @@ use crate::config::{EndpointConfig, EndpointRole, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::json_value::JsonValue;
 use crate::longmemeval_corpus::{LmeCorpus, LmeTurn};
+use crate::longmemeval_judge::{lme_grade_judge_answer, lme_judge_prompt, lme_run_judge};
 use crate::longmemeval_scorer::{LmeManifestEntry, LmeQuestionResult};
 use crate::mcp_client::{MCPClient, MCPError, ToolCaller};
 use crate::config::ResultFormat;
@@ -54,6 +55,11 @@ pub struct LmeRunConfig {
     pub out_dir: Option<PathBuf>,
     /// Which recall arm(s) to benchmark. Default LmeArm::Both.
     pub arm: LmeArm,
+    /// Optional judge command for LLM-judged QA mode.
+    /// When set, the harness runs the command subprocess per arm per question
+    /// (prompt on stdin, answer on stdout) and grades against the gold answer.
+    /// Off by default (None).
+    pub judge_cmd: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,6 +336,7 @@ pub fn run_one_question(
     question_id: &str,
     question_type: &str,
     question_text: &str,
+    gold_answer: &str,
     haystack_session_ids: &[String],
     haystack_sessions: &[Vec<LmeTurn>],
     answer_session_ids: &[String],
@@ -337,6 +344,7 @@ pub fn run_one_question(
     seed: u64,
     question_index: usize,
     arm: &LmeArm,
+    judge_cmd: Option<&str>,
 ) -> Result<LmeQuestionResult, MCPError> {
     let scratch = lme_scratch_dir(seed, question_index)?;
     let guard = DegeneracyGuard::new();
@@ -476,6 +484,49 @@ pub fn run_one_question(
         dense_query_latency = Some(dense_start.elapsed().as_secs_f64());
     }
 
+    // ── Judge mode (Part 4): optional LLM-judged QA per arm ──────────────────
+    // Soft errors from the judge subprocess are logged and skipped — a judge
+    // failure does not fail the question; the answer fields stay None.
+    let mut exact_judge_answer: Option<String> = None;
+    let mut exact_judge_correct: Option<bool> = None;
+    if let Some(cmd) = judge_cmd {
+        if let Some(ref payload) = exact_payload_text {
+            if !payload.is_empty() {
+                let prompt = lme_judge_prompt(question_text, payload);
+                match lme_run_judge(cmd, &prompt) {
+                    Ok(answer) => {
+                        let correct = lme_grade_judge_answer(&answer, gold_answer);
+                        exact_judge_answer = Some(answer);
+                        exact_judge_correct = Some(correct);
+                    }
+                    Err(e) => {
+                        eprintln!("  [lme] judge error (exact) for {question_id}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    let mut dense_judge_answer: Option<String> = None;
+    let mut dense_judge_correct: Option<bool> = None;
+    if let Some(cmd) = judge_cmd {
+        if let Some(ref payload) = dense_payload_text {
+            if !payload.is_empty() {
+                let prompt = lme_judge_prompt(question_text, payload);
+                match lme_run_judge(cmd, &prompt) {
+                    Ok(answer) => {
+                        let correct = lme_grade_judge_answer(&answer, gold_answer);
+                        dense_judge_answer = Some(answer);
+                        dense_judge_correct = Some(correct);
+                    }
+                    Err(e) => {
+                        eprintln!("  [lme] judge error (dense) for {question_id}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     // ── Teardown ──────────────────────────────────────────────────────────────
     client.disconnect();
     if let Err(e) = lme_guarded_teardown(&scratch) {
@@ -499,6 +550,10 @@ pub fn run_one_question(
         exact_payload_text,
         dense_payload_text,
         dense_query_latency_seconds: dense_query_latency,
+        exact_judge_answer,
+        exact_judge_correct,
+        dense_judge_answer,
+        dense_judge_correct,
     })
 }
 
@@ -540,6 +595,7 @@ pub fn run_lme_questions(
             &q.question_id,
             &q.question_type,
             &q.question,
+            &q.answer,
             &q.haystack_session_ids,
             &q.haystack_sessions,
             &q.answer_session_ids,
@@ -547,6 +603,7 @@ pub fn run_lme_questions(
             config.seed,
             question_index,
             &config.arm,
+            config.judge_cmd.as_deref(),
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
@@ -576,6 +633,10 @@ pub fn run_lme_questions(
                     exact_payload_text: None,
                     dense_payload_text: None,
                     dense_query_latency_seconds: None,
+                    exact_judge_answer: None,
+                    exact_judge_correct: None,
+                    dense_judge_answer: None,
+                    dense_judge_correct: None,
                 });
             }
         }

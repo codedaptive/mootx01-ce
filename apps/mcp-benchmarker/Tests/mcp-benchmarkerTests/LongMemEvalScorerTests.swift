@@ -264,7 +264,11 @@ struct LMEScorerInfrastructureTests {
             writeMeanLatencySeconds: 0.05,
             exactPayloadText: nil,
             densePayloadText: nil,
-            denseQueryLatencySeconds: nil
+            denseQueryLatencySeconds: nil,
+            exactJudgeAnswer: nil,
+            exactJudgeCorrect: nil,
+            denseJudgeAnswer: nil,
+            denseJudgeCorrect: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == false)
@@ -297,7 +301,11 @@ struct LMEScorerInfrastructureTests {
             writeMeanLatencySeconds: 0.04,
             exactPayloadText: nil,
             densePayloadText: nil,
-            denseQueryLatencySeconds: nil
+            denseQueryLatencySeconds: nil,
+            exactJudgeAnswer: nil,
+            exactJudgeCorrect: nil,
+            denseJudgeAnswer: nil,
+            denseJudgeCorrect: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == true)

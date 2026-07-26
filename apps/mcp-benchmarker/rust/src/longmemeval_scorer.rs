@@ -189,6 +189,19 @@ pub struct LmeQuestionResult {
     pub dense_payload_text: Option<String>,
     /// Dense-arm (moot_recall_distilled) query latency. None when arm = Exact.
     pub dense_query_latency_seconds: Option<f64>,
+    // ── Judge mode fields (Part 4, LME-03) ───────────────────────────────────
+    /// Judge subprocess answer for the exact arm. None when judge_cmd was not set
+    /// or the exact arm was not run.
+    pub exact_judge_answer: Option<String>,
+    /// True when exact_judge_answer contains the normalized gold answer as a
+    /// substring. None when exact_judge_answer is None.
+    pub exact_judge_correct: Option<bool>,
+    /// Judge subprocess answer for the dense arm. None when judge_cmd was not set
+    /// or the dense arm was not run.
+    pub dense_judge_answer: Option<String>,
+    /// True when dense_judge_answer contains the normalized gold answer as a
+    /// substring. None when dense_judge_answer is None.
+    pub dense_judge_correct: Option<bool>,
 }
 
 /// The scored result for one LME question.
