@@ -17,9 +17,12 @@
 //! exposed by the Rust CLI (see the crate-level parity notes).
 
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
+use mcp_benchmarker_rs::lmeb_corpus::load_lmeb_corpus;
+use mcp_benchmarker_rs::lmeb_runner::{run_lmeb_queries, LmebRunConfig};
+use mcp_benchmarker_rs::lmeb_scorer::{build_lmeb_report, score_lmeb_query, write_lmeb_report};
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
 use mcp_benchmarker_rs::longmemeval_runner::{
-    discover_moot_binary, run_lme_questions, LmeRunConfig,
+    discover_moot_binary, run_lme_questions, SplitMix64, LmeRunConfig,
 };
 use mcp_benchmarker_rs::longmemeval_scorer::{
     build_lme_report, score_lme_question, write_lme_report,
@@ -31,13 +34,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "mcp-benchmarker-rs — Rust twin of the mcp-benchmarker transport/transfer/LME core\n\
+    "mcp-benchmarker-rs — Rust twin of the mcp-benchmarker transport/transfer/LME/LMEB core\n\
      \n\
      USAGE:\n\
      \x20\x20mcp-benchmarker-rs transfer    --config <c.json> --manifest <out.json> [--limit N] [--no-verify]\n\
      \x20\x20mcp-benchmarker-rs report      --manifest <m.json>\n\
      \x20\x20mcp-benchmarker-rs longmemeval --corpus <path.json> [--binary <path>]\n\
      \x20\x20                               [--variant s|m|oracle] [--seed N] [--limit N]\n\
+     \x20\x20                               [--out <dir>] [--label <label>]\n\
+     \x20\x20mcp-benchmarker-rs lmeb        --data-dir <dir> [--binary <path>]\n\
+     \x20\x20                               [--evidence-types ET1,ET2,...] [--seed N]\n\
+     \x20\x20                               [--limit N] [--offset N]\n\
      \x20\x20                               [--out <dir>] [--label <label>]\n"
 }
 
@@ -264,6 +271,121 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_lmeb(args: &[String]) -> Result<(), String> {
+    // ── Required ──────────────────────────────────────────────────────────────
+    let data_dir = require_option("--data-dir", args)?;
+
+    // ── Optional ──────────────────────────────────────────────────────────────
+    let binary = option_value("--binary", args)
+        .map(str::to_string)
+        .or_else(discover_moot_binary)
+        .ok_or_else(|| {
+            "could not find mootx01 binary; pass --binary <path> or set $MOOTX01_BINARY"
+                .to_string()
+        })?;
+
+    // Default: all six LMEB ConvoMem evidence types.
+    const ALL_EVIDENCE_TYPES: &[&str] = &[
+        "abstention_evidence",
+        "assistant_facts_evidence",
+        "changing_state_evidence",
+        "implicit_connection_evidence",
+        "preference_evidence",
+        "user_evidence",
+    ];
+    let evidence_types_owned: Vec<String> = option_value("--evidence-types", args)
+        .map(|s| s.split(',').map(str::to_string).collect())
+        .unwrap_or_else(|| ALL_EVIDENCE_TYPES.iter().map(|&s| s.to_string()).collect());
+    let evidence_type_refs: Vec<&str> = evidence_types_owned.iter().map(String::as_str).collect();
+
+    let seed: u64 = option_value("--seed", args)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_260_725_u64);
+    let limit = option_value("--limit", args).and_then(|s| s.parse::<usize>().ok());
+    let offset: usize = option_value("--offset", args)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let label = option_value("--label", args).map(str::to_string);
+    let out_dir = option_value("--out", args).map(PathBuf::from);
+
+    // ── Load corpus ───────────────────────────────────────────────────────────
+    eprintln!("[lmeb] loading corpus from {data_dir}");
+    eprintln!("[lmeb] evidence types: {:?}", &evidence_type_refs);
+    let corpus = load_lmeb_corpus(Path::new(&data_dir), &evidence_type_refs)
+        .map_err(|e| format!("corpus load failed: {e}"))?;
+    eprintln!(
+        "[lmeb] corpus: {} docs, {} queries, {} qrels",
+        corpus.doc_count(),
+        corpus.query_count(),
+        corpus.qrel_count()
+    );
+    eprintln!("[lmeb] binary: {binary}  seed: {seed}");
+    if let Some(n) = limit {
+        eprintln!("[lmeb] limit: {n}  offset: {offset}");
+    }
+
+    // ── Build query list ──────────────────────────────────────────────────────
+    let mut all_queries: Vec<_> = corpus.queries_by_id.values().cloned().collect();
+    all_queries.sort_by(|a, b| a.id.cmp(&b.id)); // stable deterministic order before shuffle
+
+    let run_config = LmebRunConfig {
+        moot_binary: binary,
+        seed,
+        limit,
+        offset,
+        label: label.clone(),
+        out_dir: out_dir.clone(),
+    };
+
+    // ── Run harness ───────────────────────────────────────────────────────────
+    let results = run_lmeb_queries(&all_queries, &corpus, &run_config);
+    let queries_loaded = all_queries.len();
+    let scores: Vec<_> = results.into_iter().map(score_lmeb_query).collect();
+
+    // ── Build run ID + label ──────────────────────────────────────────────────
+    let run_id = {
+        let mut rng = SplitMix64::new(seed ^ 0xCAFEF00D);
+        format!("{:016x}", rng.next_u64())
+    };
+    let run_label = label.unwrap_or_else(|| format!("lmeb-seed{seed}"));
+    let generated_at = now_iso8601();
+
+    // ── Build report ──────────────────────────────────────────────────────────
+    let report = build_lmeb_report(
+        run_id,
+        run_label.clone(),
+        evidence_types_owned.clone(),
+        generated_at,
+        queries_loaded,
+        &scores,
+    );
+
+    // ── Print summary ─────────────────────────────────────────────────────────
+    println!("LMEB results (label={run_label}, seed={seed}):");
+    println!("  queries_run:     {}", report.corpus_stats.queries_run);
+    println!("  guard_excluded:  {}", report.corpus_stats.guard_excluded);
+    println!("  query_count:     {}", report.aggregate.query_count);
+    println!("  nDCG@10:         {:.4}", report.aggregate.ndcg_at_10);
+    println!("  MRR:             {:.4}", report.aggregate.mrr);
+    println!("  recall@1:        {:.4}", report.aggregate.recall_at_1);
+    println!("  recall@5:        {:.4}", report.aggregate.recall_at_5);
+    println!("  recall@10:       {:.4}", report.aggregate.recall_at_10);
+    println!("  MAP@10:          {:.4}", report.aggregate.map_at_10);
+    println!("  query_p50_s:     {:.4}", report.latency.query_p50_seconds);
+    println!("  query_p95_s:     {:.4}", report.latency.query_p95_seconds);
+
+    // ── Write report ──────────────────────────────────────────────────────────
+    let report_filename = format!("lmeb-report-seed{}.json", seed);
+    let report_path = out_dir
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&report_filename);
+    write_lmeb_report(&report, &report_path)?;
+    println!("report written to {}", report_path.display());
+
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (subcommand, rest) = match args.split_first() {
@@ -277,6 +399,7 @@ fn main() -> ExitCode {
         "transfer" => run_transfer(rest),
         "report" => run_report(rest),
         "longmemeval" | "lme" => run_longmemeval(rest),
+        "lmeb" => run_lmeb(rest),
         "--help" | "-h" | "help" => {
             print!("{}", usage());
             return ExitCode::SUCCESS;
