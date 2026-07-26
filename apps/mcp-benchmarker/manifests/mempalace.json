@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "product": {
+    "id": "mempalace",
+    "displayName": "MemPalace",
+    "version": "current",
+    "homepage": "https://github.com/garrytan-unused-placeholder",
+    "provenance": "ground-truth-ours",
+    "provenanceNote": "Authored from our own MemPalace MCP server surface (mempalace-mcp). ChromaDB-backed hybrid retrieval: per-hit results carry both a vector similarity/distance and a bm25_score, so the query path is vector_cosine + BM25. Verified against the live tool surface, not a vendor claim."
+  },
+  "transport": { "stdio": { "command": "mempalace-mcp" } },
+  "role": "both",
+  "calls": {
+    "write": {
+      "tool": "mempalace_add_drawer",
+      "args": { "content": "content" },
+      "constantArgs": { "wing": "benchmark", "room": "import" },
+      "result": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "content" },
+      "technique": ["embedding"]
+    },
+    "query": {
+      "tool": "mempalace_search",
+      "args": { "query": "query" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "text" },
+      "technique": ["bm25", "vector_cosine"]
+    },
+    "list": {
+      "tool": "mempalace_list_drawers",
+      "args": {},
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "content_preview" },
+      "technique": ["none"],
+      "pagination": { "limitArg": "limit", "offsetArg": "offset", "pageSize": 100 }
+    },
+    "fetch": {
+      "tool": "mempalace_get_drawer",
+      "args": { "id": "drawer_id" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "content", "fetchContentKey": "content" },
+      "technique": ["none"]
+    }
+  }
+}
