@@ -5,13 +5,15 @@ import ObserverSink
 // main.swift — CLI entry point.
 //
 // Hand-rolled argument parsing (swift-subprocess is the only external dep —
-// no swift-argument-parser). Ten subcommands:
+// no swift-argument-parser). Eleven subcommands:
 //
 //   mcp-benchmarker transfer  --config c.json --manifest out.json [--limit N] [--no-verify] [--stats-store stats.sqlite]
 //   mcp-benchmarker benchmark --config c.json --manifest out.json --report report.json [--compare-source] [--stats-store stats.sqlite]
 //   mcp-benchmarker serve     --config c.json [--primary source|target] [--mirror] [--mirror-reads-only] [--report-interval N] [--stats-store stats.sqlite]
 //   mcp-benchmarker pressure  --config c.json [--concurrency N] [--duration S] [--stats-store stats.sqlite]
 //   mcp-benchmarker quality   --config c.json [--fixtures DIR] [--limit-clusters N]   (DIAGNOSTIC ONLY)
+//   mcp-benchmarker lmeb      --data-dir <dir> [--evidence-types ET1,ET2,...] [--mootx01-binary <path>]
+//                             [--limit N] [--offset K] [--seed S] [--out <dir>]
 //   mcp-benchmarker locomo    --data-file <locomo10.json> [--mootx01-binary <path>]
 //                             [--limit N] [--offset K] [--seed S] [--out <dir>]
 //   mcp-benchmarker report    --report report.json
@@ -52,6 +54,8 @@ func usageText() -> String {
       mcp-benchmarker gauntlet  --config <c.json> --corpus <dir> --run-label <label> [--out <dir>] [--k 1,5,10] [--limit N] [--quick] [--moot-only]
       mcp-benchmarker longmemeval --data-dir <dir> --variant s|m|oracle [--mootx01-binary <path>]
                         [--limit N] [--offset K] [--seed S] [--shared-estate] [--out <dir>]
+      mcp-benchmarker lmeb      --data-dir <dir> [--evidence-types ET1,ET2,...] [--mootx01-binary <path>]
+                        [--limit N] [--offset K] [--seed S] [--out <dir>]
       mcp-benchmarker locomo    --data-file <locomo10.json> [--mootx01-binary <path>]
                         [--limit N] [--offset K] [--seed S] [--out <dir>]
       mcp-benchmarker report    --report <report.json>
@@ -940,6 +944,135 @@ func runLoCoMo(_ args: [String]) async throws {
     FileHandle.standardOutput.write(Data(summary.utf8))
 }
 
+/// Runs the LMEB/ConvoMem retrieval benchmark.
+///
+/// Arguments:
+///   --data-dir <dir>             Root directory containing evidence-type subdirs.
+///   --evidence-types ET1,ET2,... Comma-separated evidence types to include.
+///                                Defaults to all six ConvoMem evidence types.
+///   --mootx01-binary <path>      Path to mootx01 binary (auto-discovered if omitted).
+///   --limit N                    Run only the first N queries (after seeded shuffle).
+///   --offset K                   Skip first K queries from the shuffled list.
+///   --seed S                     Random seed for deterministic shuffling (default 20260725).
+///   --out <dir>                  Output directory for the report file.
+func runLMEB(_ args: [String]) async throws {
+    let allEvidenceTypes = [
+        "abstention_evidence",
+        "assistant_facts_evidence",
+        "changing_evidence",
+        "implicit_connection_evidence",
+        "preference_evidence",
+        "user_evidence",
+    ]
+
+    let dataDirStr = try requireOption("--data-dir", in: args)
+    let dataDir = URL(fileURLWithPath: dataDirStr)
+
+    guard FileManager.default.fileExists(atPath: dataDir.path) else {
+        throw MCPError(description:
+            "LMEB data directory not found at \(dataDir.path). "
+            + "Run scripts/fetch-lmeb.sh to download the dataset.")
+    }
+
+    // Evidence types: comma-separated flag or default to all six.
+    let evidenceTypes: [String]
+    if let etStr = optionValue("--evidence-types", in: args) {
+        evidenceTypes = etStr.split(separator: ",").map(String.init)
+    } else {
+        evidenceTypes = allEvidenceTypes
+    }
+
+    // mootx01 binary: explicit flag takes priority over auto-discovery.
+    let mootBinary: String
+    if let explicit = optionValue("--mootx01-binary", in: args) {
+        mootBinary = explicit
+    } else if let discovered = discoverMootBinary() {
+        mootBinary = discovered
+        FileHandle.standardError.write(Data(
+            "[lmeb] auto-discovered mootx01 at: \(mootBinary)\n".utf8))
+    } else {
+        throw MCPError(description:
+            "mootx01 binary not found. Build with `swift build --package-path apps/mootx01` "
+            + "or pass --mootx01-binary <path>.")
+    }
+    guard FileManager.default.isExecutableFile(atPath: mootBinary) else {
+        throw MCPError(description:
+            "mootx01 binary not executable at '\(mootBinary)'. "
+            + "Build with `swift build --package-path apps/mootx01`.")
+    }
+
+    let limit   = optionValue("--limit",  in: args).flatMap(Int.init)
+    let offset  = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
+    let seed    = optionValue("--seed",   in: args).flatMap(UInt64.init) ?? 20_260_725
+    let outDir  = optionValue("--out",    in: args).map { URL(fileURLWithPath: $0) }
+
+    let loadMsg = "[lmeb] loading corpus from \(dataDir.path) "
+        + "(evidence types: \(evidenceTypes.joined(separator: ", ")))\n"
+    FileHandle.standardOutput.write(Data(loadMsg.utf8))
+
+    let corpus = try loadLMEBCorpus(baseDir: dataDir, evidenceTypes: evidenceTypes)
+    let loadedMsg = "[lmeb] loaded \(corpus.queryCount) queries, "
+        + "\(corpus.docCount) docs, \(corpus.qrelCount) qrels\n"
+    FileHandle.standardOutput.write(Data(loadedMsg.utf8))
+
+    let runLabel = "lmeb-seed\(seed)"
+    let runConfig = LMEBRunConfig(
+        mootBinaryPath: mootBinary,
+        dataDir: dataDir,
+        evidenceTypes: evidenceTypes,
+        limit: limit,
+        offset: offset,
+        seed: seed,
+        outDir: outDir,
+        runLabel: runLabel
+    )
+
+    // Sort queries by ID for deterministic shuffle baseline.
+    let queries = corpus.queriesByID.values.sorted { $0.id < $1.id }
+    let results = try await runLMEBQueries(queries: queries, corpus: corpus,
+                                            config: runConfig)
+
+    // Score results (LMEBScorer.swift).
+    let scores = results.map { scoreLMEBQuery($0) }
+
+    // Build and write the report.
+    let report = buildLMEBReport(
+        runLabel: runConfig.runLabel,
+        evidenceTypes: evidenceTypes,
+        queriesLoaded: corpus.queryCount,
+        scores: scores
+    )
+    let reportFilename = "lmeb-report-seed\(seed).json"
+    let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        .appendingPathComponent(reportFilename)
+    try writeLMEBReport(report, to: reportURL)
+
+    // Print summary to stdout.
+    let guardHealthyCount = scores.filter(\.guardHealthy).count
+    let guardRefusals = scores.count - guardHealthyCount
+    let totalDocs = results.map(\.docsIngested).reduce(0, +)
+    let (agg, lat) = aggregateLMEBScores(scores)
+
+    let summary = """
+        [lmeb] run complete
+          queries processed: \(results.count)
+          guard healthy:     \(guardHealthyCount)
+          guard refusals:    \(guardRefusals)
+          docs ingested:     \(totalDocs)
+          nDCG@10:           \(String(format: "%.4f", agg.nDCGAt10))
+          MRR:               \(String(format: "%.4f", agg.mrr))
+          recall@1:          \(String(format: "%.4f", agg.recallAt1))
+          recall@5:          \(String(format: "%.4f", agg.recallAt5))
+          recall@10:         \(String(format: "%.4f", agg.recallAt10))
+          MAP@10:            \(String(format: "%.4f", agg.mapAt10))
+          query p50:         \(String(format: "%.1f", lat.queryP50Seconds * 1000)) ms
+          query p95:         \(String(format: "%.1f", lat.queryP95Seconds * 1000)) ms
+          report written to: \(reportURL.path)
+
+        """
+    FileHandle.standardOutput.write(Data(summary.utf8))
+}
+
 /// Dispatches one subcommand.
 func dispatch(_ arguments: [String]) async throws {
     guard let subcommand = arguments.first else {
@@ -956,6 +1089,7 @@ func dispatch(_ arguments: [String]) async throws {
     case "gauntlet-corpus": try runGauntletCorpus(rest)
     case "gauntlet":       try await runGauntlet(rest)
     case "longmemeval":    try await runLongMemEval(rest)
+    case "lmeb":           try await runLMEB(rest)
     case "locomo":         try await runLoCoMo(rest)
     case "report":         try runReport(rest)
     case "--help", "-h", "help":

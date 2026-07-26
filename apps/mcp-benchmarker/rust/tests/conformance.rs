@@ -15,6 +15,7 @@
 
 use mcp_benchmarker_rs::degeneracy_guard::DegeneracyGuard;
 use mcp_benchmarker_rs::divergence::{jaccard_divergence, rank_divergence};
+use mcp_benchmarker_rs::lmeb_scorer::{lmeb_ap, lmeb_mrr, lmeb_ndcg, lmeb_recall};
 use mcp_benchmarker_rs::locomo_corpus::load_locomo_corpus;
 use mcp_benchmarker_rs::locomo_scorer::{locomo_manifest_as_lme, LoCoMoManifestEntry};
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
@@ -931,6 +932,129 @@ fn locomo_scorer_uuid_mapping_vectors() {
         assert_eq!(
             got, expected,
             "locomo uuid_mapping '{id}': expected {expected:?}, got {got:?}"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LMEB conformance vectors
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Loads `lmeb_vectors.json` from the conformance directory.
+fn load_lmeb_vectors() -> Value {
+    let path = conformance_path("lmeb_vectors.json");
+    load_json(&path)
+}
+
+/// Converts a JSON array of strings to `Vec<String>`.
+fn json_string_vec(v: &Value) -> Vec<String> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Converts a JSON array of strings to `HashSet<String>`.
+fn json_string_set(v: &Value) -> HashSet<String> {
+    json_string_vec(v).into_iter().collect()
+}
+
+/// LMEB nDCG@k conformance — must reproduce every expected value within 1e-9.
+#[test]
+fn lmeb_scorer_ndcg_vectors() {
+    let json = load_lmeb_vectors();
+    let cases = json["ndcg_cases"]
+        .as_array()
+        .expect("lmeb_vectors.json must have ndcg_cases");
+
+    for case in cases {
+        let id       = case["id"].as_str().unwrap();
+        let ranked   = json_string_vec(&case["ranked_doc_ids"]);
+        let rel      = json_string_set(&case["relevant_doc_ids"]);
+        let k        = case["k"].as_u64().unwrap() as usize;
+        let expected = case["ndcg"].as_f64().unwrap();
+
+        let got = lmeb_ndcg(&ranked, &rel, k);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "LMEB nDCG case '{id}': expected {expected:.15}, got {got:.15}"
+        );
+    }
+}
+
+/// LMEB document-level MRR conformance — must reproduce every expected value within 1e-9.
+#[test]
+fn lmeb_scorer_mrr_vectors() {
+    let json = load_lmeb_vectors();
+    let cases = json["mrr_cases"]
+        .as_array()
+        .expect("lmeb_vectors.json must have mrr_cases");
+
+    for case in cases {
+        let id       = case["id"].as_str().unwrap();
+        let ranked   = json_string_vec(&case["ranked_doc_ids"]);
+        let rel      = json_string_set(&case["relevant_doc_ids"]);
+        let expected = case["mrr"].as_f64().unwrap();
+
+        let got = lmeb_mrr(&ranked, &rel);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "LMEB MRR case '{id}': expected {expected:.15}, got {got:.15}"
+        );
+    }
+}
+
+/// LMEB Recall@k conformance — tests recall@1, @5, @10 for every case.
+#[test]
+fn lmeb_scorer_recall_vectors() {
+    let json = load_lmeb_vectors();
+    let cases = json["recall_cases"]
+        .as_array()
+        .expect("lmeb_vectors.json must have recall_cases");
+
+    for case in cases {
+        let id     = case["id"].as_str().unwrap();
+        let ranked = json_string_vec(&case["ranked_doc_ids"]);
+        let rel    = json_string_set(&case["relevant_doc_ids"]);
+
+        let exp_r1  = case["recall_at_1"].as_f64().unwrap();
+        let exp_r5  = case["recall_at_5"].as_f64().unwrap();
+        let exp_r10 = case["recall_at_10"].as_f64().unwrap();
+
+        let got_r1  = lmeb_recall(&ranked, &rel, 1);
+        let got_r5  = lmeb_recall(&ranked, &rel, 5);
+        let got_r10 = lmeb_recall(&ranked, &rel, 10);
+
+        let tol = 1e-9;
+        assert!((got_r1  - exp_r1).abs()  < tol,
+            "LMEB recall case '{id}' @1:  exp {exp_r1}, got {got_r1}");
+        assert!((got_r5  - exp_r5).abs()  < tol,
+            "LMEB recall case '{id}' @5:  exp {exp_r5}, got {got_r5}");
+        assert!((got_r10 - exp_r10).abs() < tol,
+            "LMEB recall case '{id}' @10: exp {exp_r10}, got {got_r10}");
+    }
+}
+
+/// LMEB AP@k conformance — must reproduce every expected value within 1e-9.
+#[test]
+fn lmeb_scorer_ap_vectors() {
+    let json = load_lmeb_vectors();
+    let cases = json["ap_cases"]
+        .as_array()
+        .expect("lmeb_vectors.json must have ap_cases");
+
+    for case in cases {
+        let id       = case["id"].as_str().unwrap();
+        let ranked   = json_string_vec(&case["ranked_doc_ids"]);
+        let rel      = json_string_set(&case["relevant_doc_ids"]);
+        let k        = case["k"].as_u64().unwrap() as usize;
+        let expected = case["ap"].as_f64().unwrap();
+
+        let got = lmeb_ap(&ranked, &rel, k);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "LMEB AP case '{id}': expected {expected:.15}, got {got:.15}"
         );
     }
 }

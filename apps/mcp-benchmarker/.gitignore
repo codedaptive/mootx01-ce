@@ -7,6 +7,10 @@ fixtures/longmemeval/data/
 # See https://github.com/snap-research/locomo for dataset and license.
 fixtures/locomo/
 
+# LMEB ConvoMem corpus data — fetched via scripts/fetch-lmeb.sh.
+# Never committed; see scripts/fetch-lmeb.sh for download instructions.
+fixtures/lmeb/data/
+
 # Runner-generated JSON report files — written to /tmp or wherever --out points;
 # never committed. Use results/ for manually curated markdown summaries.
 rust/lme-report-*.json
