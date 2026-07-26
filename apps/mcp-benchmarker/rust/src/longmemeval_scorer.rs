@@ -160,12 +160,16 @@ pub fn lme_percentile(values: &[f64], p: f64) -> f64 {
 /// The result of running the LME harness against one question.
 /// Produced by the runner; consumed by the scorer.
 /// Twin of Swift `LMEQuestionResult`.
+///
+/// Optional fields (added for LME-03 token-efficiency arms) are None when the
+/// corresponding arm was not run for this question.
 #[derive(Debug)]
 pub struct LmeQuestionResult {
     pub question_id: String,
     pub question_type: String,
-    pub query_latency_seconds: f64,
-    /// UUIDs returned by moot_memory_search, ranked best-first.
+    /// Exact-arm (moot_memory_search) query latency. None when arm = Dense only.
+    pub query_latency_seconds: Option<f64>,
+    /// UUIDs returned by moot_memory_search, ranked best-first. Empty when arm = Dense.
     pub retrieved_uuids: Vec<String>,
     /// UUID → haystack-position manifest built during ingest.
     pub manifest: Vec<LmeManifestEntry>,
@@ -177,6 +181,14 @@ pub struct LmeQuestionResult {
     pub guard_diagnostic: Option<String>,
     pub turns_ingested: usize,
     pub write_mean_latency_seconds: f64,
+    /// Raw payload text from the exact-arm moot_memory_search call (joined text_blocks).
+    /// None when arm = Dense.
+    pub exact_payload_text: Option<String>,
+    /// Raw payload text from the dense-arm moot_recall_distilled call (joined text_blocks).
+    /// None when arm = Exact.
+    pub dense_payload_text: Option<String>,
+    /// Dense-arm (moot_recall_distilled) query latency. None when arm = Exact.
+    pub dense_query_latency_seconds: Option<f64>,
 }
 
 /// The scored result for one LME question.
@@ -239,7 +251,9 @@ pub fn score_lme_question(result: LmeQuestionResult) -> LmeQuestionScore {
         mrr,
         ranked_session_ids: ranked_sessions,
         answer_session_ids: result.answer_session_ids,
-        query_latency_seconds: result.query_latency_seconds,
+        // query_latency_seconds is Option<f64> (None when only the dense arm ran).
+        // Use 0.0 as sentinel — matches Swift's ?? 0.0 convention.
+        query_latency_seconds: result.query_latency_seconds.unwrap_or(0.0),
         write_mean_latency_seconds: result.write_mean_latency_seconds,
         turns_ingested: result.turns_ingested,
         retrieved_uuid_count,

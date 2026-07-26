@@ -67,6 +67,7 @@ pub mod json_value;
 pub mod longmemeval_corpus;
 pub mod longmemeval_runner;
 pub mod longmemeval_scorer;
+pub mod longmemeval_token_efficiency;
 pub mod manifest;
 pub mod mcp_client;
 pub mod mcp_result;

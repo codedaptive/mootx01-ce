@@ -19,7 +19,7 @@
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
 use mcp_benchmarker_rs::longmemeval_runner::{
-    discover_moot_binary, run_lme_questions, LmeRunConfig,
+    discover_moot_binary, run_lme_questions, LmeArm, LmeRunConfig,
 };
 use mcp_benchmarker_rs::longmemeval_scorer::{
     build_lme_report, score_lme_question, write_lme_report,
@@ -192,6 +192,14 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     let limit = option_value("--limit", args).and_then(|s| s.parse::<usize>().ok());
     let label = option_value("--label", args).map(str::to_string);
     let out_dir = option_value("--out", args).map(PathBuf::from);
+    // --arm exact|dense|both (default: both). Controls which recall arms run.
+    let arm_str = option_value("--arm", args).unwrap_or("both");
+    let arm = match arm_str {
+        "exact" => LmeArm::Exact,
+        "dense" => LmeArm::Dense,
+        "both"  => LmeArm::Both,
+        other   => return Err(format!("--arm must be 'exact', 'dense', or 'both'; got '{other}'")),
+    };
 
     eprintln!("[lme] loading corpus from {corpus_path}");
     let corpus = load_corpus(Path::new(&corpus_path))
@@ -213,6 +221,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         limit,
         label: label.clone(),
         out_dir: out_dir.clone(),
+        arm,
     };
 
     let results = run_lme_questions(&corpus, &run_config);

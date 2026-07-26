@@ -204,6 +204,15 @@ pub struct VerbMap {
     /// Constant args every write call sends in addition to the content.
     /// Stored in a `BTreeMap` for deterministic iteration order.
     pub constant_args: BTreeMap<String, String>,
+
+    // Dense recall (token-efficiency arm, LME-03)
+    /// Optional dense-recall query tool name (e.g. `moot_recall_distilled`).
+    /// None = no dense query configured (single-arm mode).
+    pub dense_query: Option<String>,
+    /// Constant arguments for the dense query tool. Separate from `constant_args`
+    /// because `moot_recall_distilled` needs no location arg.
+    pub dense_query_constant_args: BTreeMap<String, String>,
+
     pub result_format: ResultFormat,
 }
 
@@ -235,6 +244,10 @@ impl VerbMap {
             list_offset_arg: "offset".to_string(),
             list_page_size: 100,
             constant_args: constant_args.unwrap_or_else(default_constant_args),
+            // dense_query fields default to None/empty — existing call sites are
+            // unaffected by the Smythe constraint (new() signature unchanged).
+            dense_query: None,
+            dense_query_constant_args: BTreeMap::new(),
             result_format: result_format.unwrap_or_else(ResultFormat::default_format),
         }
     }
@@ -290,6 +303,17 @@ impl VerbMap {
             None => ResultFormat::default_format(),
         };
 
+        // denseQuery fields: optional with None/empty defaults — existing configs
+        // decode cleanly without them. Mirrors Swift decodeIfPresent behavior.
+        let dense_query = opt_str("denseQuery");
+        let dense_query_constant_args = match obj.get("denseQueryConstantArgs") {
+            Some(Value::Object(map)) => map
+                .iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+
         Ok(VerbMap {
             write,
             query,
@@ -303,6 +327,8 @@ impl VerbMap {
             list_offset_arg: str_or("listOffsetArg", "offset"),
             list_page_size,
             constant_args,
+            dense_query,
+            dense_query_constant_args,
             result_format,
         })
     }
