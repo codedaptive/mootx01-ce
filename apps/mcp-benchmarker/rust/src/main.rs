@@ -285,10 +285,12 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         })?;
 
     // Default: all six LMEB ConvoMem evidence types.
+    // "changing_evidence" is the HuggingFace directory name — matches Swift runner and
+    // fetch-lmeb.sh. Note: NOT "changing_state_evidence".
     const ALL_EVIDENCE_TYPES: &[&str] = &[
         "abstention_evidence",
         "assistant_facts_evidence",
-        "changing_state_evidence",
+        "changing_evidence",
         "implicit_connection_evidence",
         "preference_evidence",
         "user_evidence",
