@@ -261,7 +261,10 @@ struct LMEScorerInfrastructureTests {
             guardHealthy: false,
             guardDiagnostic: "queryInvariant: identical rankings across all probes",
             turnsIngested: 3,
-            writeMeanLatencySeconds: 0.05
+            writeMeanLatencySeconds: 0.05,
+            exactPayloadText: nil,
+            densePayloadText: nil,
+            denseQueryLatencySeconds: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == false)
@@ -291,7 +294,10 @@ struct LMEScorerInfrastructureTests {
             guardHealthy: true,
             guardDiagnostic: nil,
             turnsIngested: 2,
-            writeMeanLatencySeconds: 0.04
+            writeMeanLatencySeconds: 0.04,
+            exactPayloadText: nil,
+            densePayloadText: nil,
+            denseQueryLatencySeconds: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == true)

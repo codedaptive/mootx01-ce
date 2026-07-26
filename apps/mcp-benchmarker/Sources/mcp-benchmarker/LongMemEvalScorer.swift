@@ -181,7 +181,10 @@ func scoreLMEQuestion(_ result: LMEQuestionResult) -> LMEQuestionScore {
         mrr: mrrVal,
         rankedSessionIDs: rankedSessions,
         answerSessionIDs: result.answerSessionIDs,
-        queryLatencySeconds: result.queryLatencySeconds,
+        // queryLatencySeconds is Optional (nil when only the dense arm ran).
+        // Use 0.0 as the sentinel — the aggregate/latency tables treat it as
+        // "no exact query was issued" rather than "query was instantaneous."
+        queryLatencySeconds: result.queryLatencySeconds ?? 0.0,
         writeMeanLatencySeconds: result.writeMeanLatencySeconds,
         turnsIngested: result.turnsIngested,
         retrievedUUIDCount: result.retrievedUUIDs.count

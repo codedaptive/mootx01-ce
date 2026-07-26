@@ -742,6 +742,19 @@ func runLongMemEval(_ args: [String]) async throws {
     let limit = optionValue("--limit", in: args).flatMap(Int.init)
     let offset = optionValue("--offset", in: args).flatMap(Int.init) ?? 0
     let seed = optionValue("--seed", in: args).flatMap(UInt64.init) ?? 20_260_725
+    // --arm exact|dense|both (default: both). Controls which recall paths are exercised.
+    //   exact: moot_memory_search only (LME-01 baseline path)
+    //   dense: moot_recall_distilled only (requires moot_consolidate after ingest)
+    //   both:  both arms per question for the two-arm token-efficiency comparison
+    let armStr = optionValue("--arm", in: args) ?? "both"
+    let arm: LMEArm
+    switch armStr {
+    case "exact": arm = .exact
+    case "dense": arm = .dense
+    case "both":  arm = .both
+    default:
+        throw MCPError(description: "--arm must be 'exact', 'dense', or 'both'; got '\(armStr)'")
+    }
     let sharedEstate = flagPresent("--shared-estate", in: args)
     let outDirStr = optionValue("--out", in: args)
     let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
@@ -770,7 +783,8 @@ func runLongMemEval(_ args: [String]) async throws {
         seed: seed,
         freshPerQuestion: !sharedEstate,
         outDir: outDir,
-        runLabel: "lme-\(variant)-seed\(seed)"
+        runLabel: "lme-\(variant)-seed\(seed)-arm\(armStr)",
+        arm: arm
     )
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)

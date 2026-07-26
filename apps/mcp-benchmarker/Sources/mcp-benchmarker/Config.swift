@@ -197,6 +197,19 @@ struct EndpointConfig: Codable, Sendable, Equatable {
         /// Set to `{}` for a write tool that needs only content.
         let constantArgs: [String: String]
 
+        // MARK: Dense recall (token-efficiency arm)
+
+        /// Optional dense-recall query tool name (e.g. `moot_recall_distilled`).
+        /// When non-nil, the two-arm token-efficiency benchmark can drive the
+        /// dense recall path through this same VerbMap rather than needing a
+        /// separate config block. nil = no dense query configured (single-arm).
+        let denseQuery: String?
+        /// Constant arguments for the dense query tool. Separate from
+        /// `constantArgs` because the dense tool may have different required
+        /// fields (e.g. `moot_recall_distilled` does not need `location`).
+        /// Default: empty (no constant args beyond the query text itself).
+        let denseQueryConstantArgs: [String: String]
+
         // MARK: Result shape
 
         /// How this server encodes the result of `query`/`list` (and how a
@@ -219,6 +232,8 @@ struct EndpointConfig: Codable, Sendable, Equatable {
              listOffsetArg: String = "offset",
              listPageSize: Int = 100,
              constantArgs: [String: String] = ["location": "import/mempalace"],
+             denseQuery: String? = nil,
+             denseQueryConstantArgs: [String: String] = [:],
              resultFormat: ResultFormat = .jsonObjects(idKey: "id", contentKey: "content")) {
             self.write = write
             self.query = query
@@ -232,6 +247,8 @@ struct EndpointConfig: Codable, Sendable, Equatable {
             self.listOffsetArg = listOffsetArg
             self.listPageSize = listPageSize
             self.constantArgs = constantArgs
+            self.denseQuery = denseQuery
+            self.denseQueryConstantArgs = denseQueryConstantArgs
             self.resultFormat = resultFormat
         }
 
@@ -239,7 +256,9 @@ struct EndpointConfig: Codable, Sendable, Equatable {
             case write, query, list, fetch
             case contentArg, queryArg, fetchIDArg, fetchContentKey
             case listLimitArg, listOffsetArg, listPageSize
-            case constantArgs, resultFormat
+            case constantArgs
+            case denseQuery, denseQueryConstantArgs
+            case resultFormat
         }
 
         // Custom decoder so an absent required verb surfaces as
@@ -271,6 +290,11 @@ struct EndpointConfig: Codable, Sendable, Equatable {
             // only content); an explicit map (e.g. wing+room) is sent verbatim.
             self.constantArgs = try c.decodeIfPresent([String: String].self, forKey: .constantArgs)
                 ?? ["location": "import/mempalace"]
+            // denseQuery fields are optional with safe nil/empty defaults — existing
+            // configs decode cleanly without them.
+            self.denseQuery = try c.decodeIfPresent(String.self, forKey: .denseQuery)
+            self.denseQueryConstantArgs = try c.decodeIfPresent(
+                [String: String].self, forKey: .denseQueryConstantArgs) ?? [:]
             self.resultFormat = try c.decodeIfPresent(ResultFormat.self, forKey: .resultFormat)
                 ?? .jsonObjects(idKey: "id", contentKey: "content")
         }
