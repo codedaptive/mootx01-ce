@@ -14,13 +14,14 @@
 //! then pass the slice here.
 
 use crate::config::{EndpointConfig, EndpointRole, Transport, VerbMap};
+use crate::config::ResultFormat;
 use crate::degeneracy_guard::DegeneracyGuard;
+use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
 use crate::json_value::JsonValue;
 use crate::longmemeval_corpus::{LmeCorpus, LmeTurn};
 use crate::longmemeval_judge::{lme_grade_judge_answer, lme_judge_prompt, lme_run_judge};
 use crate::longmemeval_scorer::{LmeManifestEntry, LmeQuestionResult};
 use crate::mcp_client::{MCPClient, MCPError, ToolCaller};
-use crate::config::ResultFormat;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -60,6 +61,11 @@ pub struct LmeRunConfig {
     /// (prompt on stdin, answer on stdout) and grades against the gold answer.
     /// Off by default (None).
     pub judge_cmd: Option<String>,
+    /// Encode-queue synchronization strategy. Default EncodeBarrier::Drain.
+    /// Controls how the harness waits for background encoding to complete before
+    /// issuing recall queries — prevents background-encoding races from producing
+    /// artificially low recall scores.
+    pub encode_barrier: EncodeBarrier,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,10 +301,18 @@ pub fn discover_moot_binary() -> Option<String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Ingest one haystack turn via `moot_file_memory`, returning `(uuid, latency_s)`.
+///
+/// The `encode_barrier` parameter controls inline encoding:
+///   - `Impatient`: adds `impatient: true` so the turn is encoded synchronously
+///     before this call returns. Correct key — the old key "n" was silently
+///     ignored by mootx01's `moot_file_memory` handler.
+///   - `Drain` / `None`: no per-write barrier; caller is responsible for waiting
+///     after all ingest completes (via `wait_for_encode_drain`).
 fn ingest_turn(
     client: &mut MCPClient,
     verb_map: &VerbMap,
     content: &str,
+    encode_barrier: EncodeBarrier,
 ) -> Result<(String, f64), MCPError> {
     let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
     args.insert(
@@ -309,12 +323,12 @@ fn ingest_turn(
     for (k, v) in &verb_map.constant_args {
         args.insert(k.clone(), JsonValue::String(v.clone()));
     }
-    // Inline encoding: n=true ensures the turn is semantically encoded BEFORE
-    // this call returns. Without it, encoding is background — a recall query
-    // issued immediately after ingest may run before encoding completes, leading
-    // to artificially low recall numbers. This is the LME harness' correctness
-    // invariant: ingest → encode → query, with no race between encode and query.
-    args.insert("n".to_string(), JsonValue::Bool(true));
+    // Impatient mode: inline encoding per write (synchronous, before this call
+    // returns). The correct key is "impatient" — the old key "n" was silently
+    // ignored by the moot_file_memory handler in AriaMcpKit ToolDispatch.swift.
+    if encode_barrier == EncodeBarrier::Impatient {
+        args.insert("impatient".to_string(), JsonValue::Bool(true));
+    }
     let start = Instant::now();
     let result = client.call_tool(&verb_map.write, args, &verb_map.result_format)?;
     let elapsed = start.elapsed().as_secs_f64();
@@ -345,6 +359,7 @@ pub fn run_one_question(
     question_index: usize,
     arm: &LmeArm,
     judge_cmd: Option<&str>,
+    encode_barrier: EncodeBarrier,
 ) -> Result<LmeQuestionResult, MCPError> {
     let scratch = lme_scratch_dir(seed, question_index)?;
     let guard = DegeneracyGuard::new();
@@ -369,7 +384,7 @@ pub fn run_one_question(
         for (turn_index, turn) in session_turns.iter().enumerate() {
             // Build the content string: role-tagged turn text.
             let content = format!("[{}] {}", turn.role, turn.content);
-            match ingest_turn(&mut client, &verb_map, &content) {
+            match ingest_turn(&mut client, &verb_map, &content, encode_barrier) {
                 Ok((uuid, latency)) => {
                     manifest.push(LmeManifestEntry {
                         uuid,
@@ -398,6 +413,14 @@ pub fn run_one_question(
     } else {
         write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
     };
+
+    // ── Drain barrier (EncodeBarrier::Drain mode) ─────────────────────────────
+    // After all ingest completes, wait for background encoding to drain before
+    // issuing any recall query. Prevents background-encoding races that produce
+    // artificially low recall scores. Twin of Swift drain barrier call.
+    if encode_barrier == EncodeBarrier::Drain {
+        wait_for_encode_drain(&mut client, &format!("lme {}", question_id), 300.0);
+    }
 
     // ── Probe for degeneracy guard ────────────────────────────────────────────
     // Guard probes always use the exact verbMap (moot_memory_search) regardless of arm —
@@ -604,6 +627,7 @@ pub fn run_lme_questions(
             question_index,
             &config.arm,
             config.judge_cmd.as_deref(),
+            config.encode_barrier,
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };

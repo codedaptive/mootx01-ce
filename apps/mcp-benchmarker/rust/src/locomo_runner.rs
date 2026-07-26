@@ -19,14 +19,20 @@
 //! 5. Issue one query per selected question in this conversation.
 //! 6. Disconnect client, tear down scratch dir.
 //!
-//! # Inline encoding (n=true)
+//! # Encode barrier
 //!
-//! Required on all ingest calls — same correctness invariant as LME:
-//! ingest → encode → query, with no background-encoding race.
+//! The `encode_barrier` field in `LoCoMoRunConfig` controls how the harness
+//! synchronizes with the background encoding queue:
+//!   - `Drain` (default): write without inline encoding, then poll
+//!     `moot_drain_status` after all ingest completes.
+//!   - `Impatient`: write with `impatient: true` — inline encoding per write.
+//!     Correct key (the old key "n" was silently ignored).
+//!   - `None`: no barrier; documents the background-encoding race.
 //! Origin: LME-01 finding (COMPLETION_LME-01.md).
 
 use crate::config::{EndpointConfig, EndpointRole, ResultFormat, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
+use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
 use crate::json_value::JsonValue;
 use crate::locomo_corpus::{LoCoMoCorpus, LoCoMoQuestion};
 use crate::locomo_scorer::{LoCoMoManifestEntry, LoCoMoQuestionResult};
@@ -49,6 +55,8 @@ pub struct LoCoMoRunConfig {
     pub offset: usize,
     pub label: Option<String>,
     pub out_dir: Option<PathBuf>,
+    /// Encode-queue synchronization strategy. Default EncodeBarrier::Drain.
+    pub encode_barrier: EncodeBarrier,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -151,11 +159,15 @@ pub fn locomo_endpoint_config(scratch_dir: &Path, moot_binary: &str) -> Endpoint
 
 /// Ingest one conversation turn via `moot_file_memory`, returning (uuid, latency_s).
 /// Content format: `"speaker: text"` (matches LoCoMo transcript convention).
-/// n=true enforces inline encoding to prevent background-encoding race.
+///
+/// The `encode_barrier` parameter controls inline encoding per the EncodeBarrier mode.
+/// Impatient mode adds `impatient: true` (correct key — the old key "n" was silently
+/// ignored by mootx01's `moot_file_memory` handler).
 fn ingest_turn(
     client: &mut MCPClient,
     verb_map: &VerbMap,
     content: &str,
+    encode_barrier: EncodeBarrier,
 ) -> Result<(String, f64), MCPError> {
     let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
     args.insert(
@@ -166,11 +178,11 @@ fn ingest_turn(
     for (k, v) in &verb_map.constant_args {
         args.insert(k.clone(), JsonValue::String(v.clone()));
     }
-    // Inline encoding: n=true ensures the turn is semantically encoded BEFORE
-    // this call returns. Without it, encoding is background — a recall query
-    // issued immediately after ingest may run before encoding completes.
-    // Origin: LME-01 correctness finding (COMPLETION_LME-01.md).
-    args.insert("n".to_string(), JsonValue::Bool(true));
+    // Impatient mode: inline encoding per write. Correct key is "impatient" —
+    // the old key "n" was silently ignored. Origin: LME-01 correctness finding.
+    if encode_barrier == EncodeBarrier::Impatient {
+        args.insert("impatient".to_string(), JsonValue::Bool(true));
+    }
     let start = Instant::now();
     let result = client.call_tool(&verb_map.write, args, &verb_map.result_format)?;
     let elapsed = start.elapsed().as_secs_f64();
@@ -295,7 +307,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
         'ingest: for (session_number, turn) in &all_turns {
             // Content format: "speaker: text" — matches LoCoMo transcript convention.
             let content = format!("{}: {}", turn.speaker, turn.text);
-            match ingest_turn(&mut client, &verb_map, &content) {
+            match ingest_turn(&mut client, &verb_map, &content, config.encode_barrier) {
                 Ok((uuid, latency)) => {
                     // Derive 0-based turn index within the session.
                     let turn_index = manifest
@@ -327,6 +339,16 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
         } else {
             write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
         };
+
+        // ── Drain barrier (EncodeBarrier::Drain mode) ─────────────────────────
+        // Wait for background encoding to drain before issuing any recall query.
+        if config.encode_barrier == EncodeBarrier::Drain {
+            wait_for_encode_drain(
+                &mut client,
+                &format!("locomo conv-{}", conv_index),
+                300.0,
+            );
+        }
 
         // ── DegeneracyGuard probe (once per estate) ───────────────────────────
         let guard = DegeneracyGuard::new();
