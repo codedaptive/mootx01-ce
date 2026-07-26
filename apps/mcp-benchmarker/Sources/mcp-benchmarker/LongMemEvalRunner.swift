@@ -374,10 +374,10 @@ func runLMEQuestions(
 
         // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.
         // Uses the same probe queries and classification as the gauntlet path.
-        // For the dense arm, probe via the exact verbMap (moot_memory_search) —
+        // Always probes via the exact verbMap (moot_memory_search) regardless of arm —
         // the guard verifies estate health, not arm-specific retrieval quality.
         let guard_ = DegeneracyGuard()
-        let probeVerbMap = (config.arm == .dense) ? lmeMootVerbMap : lmeMootVerbMap
+        let probeVerbMap = lmeMootVerbMap
         let probeRankings = await probeMCPClient(client, verbMap: probeVerbMap, name: "mootx01-lme")
         let verdict = guard_.classify(probeRankings: probeRankings)
         // Use pattern matching: Verdict has associated values so `==` is unavailable.
