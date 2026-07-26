@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 190" role="img" aria-label="Research with ChatGPT. Implement with Claude. Monitor with Grok. Test and critique with Codex. Hand the result to OpenClaw to communicate. Different models, different harnesses, different roles, one durable memory.">
+  <style>
+    .verb  { font: 600 12px/1 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: 0.14em; fill: #6e7781; }
+    .model { font: 700 19px/1 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .sep   { fill: #d97706; }
+    .rail  { stroke: #d0d7de; stroke-width: 1; }
+    .cad   { font: 600 13px/1 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: 0.10em; fill: #6e7781; }
+    .one   { font: 800 15px/1 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: 0.12em; fill: #d97706; }
+    @media (prefers-color-scheme: dark) {
+      .verb { fill: #8b949e; }
+      .model { fill: #e6edf3; }
+      .rail { stroke: #30363d; }
+      .cad  { fill: #8b949e; }
+      .one  { fill: #f0a742; }
+    }
+  </style>
+
+  <!-- five stations -->
+  <g text-anchor="middle">
+    <g transform="translate(92,0)">
+      <text class="verb"  x="0" y="46">RESEARCH</text>
+      <text class="model" x="0" y="74">ChatGPT</text>
+    </g>
+    <g transform="translate(276,0)">
+      <text class="verb"  x="0" y="46">IMPLEMENT</text>
+      <text class="model" x="0" y="74">Claude</text>
+    </g>
+    <g transform="translate(460,0)">
+      <text class="verb"  x="0" y="46">MONITOR</text>
+      <text class="model" x="0" y="74">Grok</text>
+    </g>
+    <g transform="translate(644,0)">
+      <text class="verb"  x="0" y="46">TEST &amp; CRITIQUE</text>
+      <text class="model" x="0" y="74">Codex</text>
+    </g>
+    <g transform="translate(828,0)">
+      <text class="verb"  x="0" y="46">COMMUNICATE</text>
+      <text class="model" x="0" y="74">OpenClaw</text>
+    </g>
+  </g>
+
+  <!-- chevrons between stations -->
+  <g class="sep">
+    <path d="M181 62 l8 5 -8 5 v-3.4 l4.6 -1.6 -4.6 -1.6 z"/>
+    <path d="M365 62 l8 5 -8 5 v-3.4 l4.6 -1.6 -4.6 -1.6 z"/>
+    <path d="M549 62 l8 5 -8 5 v-3.4 l4.6 -1.6 -4.6 -1.6 z"/>
+    <path d="M733 62 l8 5 -8 5 v-3.4 l4.6 -1.6 -4.6 -1.6 z"/>
+  </g>
+
+  <!-- convergence rails into the memory line -->
+  <path class="rail" fill="none" d="M92 92 v14 q0 8 8 8 h352 M276 92 v14 M460 92 v22 M644 92 v14 M828 92 v14 q0 8 -8 8 h-352"/>
+
+  <!-- cadence + thesis -->
+  <g text-anchor="middle">
+    <text class="cad" x="460" y="150">DIFFERENT MODELS. DIFFERENT HARNESSES. DIFFERENT ROLES.</text>
+    <text class="one" x="460" y="176">ONE DURABLE MEMORY.</text>
+  </g>
+</svg>

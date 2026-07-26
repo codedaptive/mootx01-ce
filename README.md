@@ -16,10 +16,7 @@ run: one local-first MOOT of your own, available across your devices.
 
 <div align="center">
 
-*Research with ChatGPT. Implement with Claude. Monitor with Grok.*
-*Test and critique with Codex. Hand the result to OpenClaw.*
-
-**Different models. Different harnesses. Different roles. One durable memory.**
+<img src="docs/assets/role-chain.svg" alt="Research with ChatGPT. Implement with Claude. Monitor with Grok. Test and critique with Codex. Hand the result to OpenClaw to communicate. Different models, different harnesses, different roles: one durable memory." width="92%">
 
 Recall arrives distilled: compact, ranked memory in place of pages of pasted context.
 
