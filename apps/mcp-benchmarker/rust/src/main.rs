@@ -17,18 +17,28 @@
 //! exposed by the Rust CLI (see the crate-level parity notes).
 
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
+use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
+use mcp_benchmarker_rs::longmemeval_runner::{
+    discover_moot_binary, run_lme_questions, LmeRunConfig,
+};
+use mcp_benchmarker_rs::longmemeval_scorer::{
+    build_lme_report, score_lme_question, write_lme_report,
+};
 use mcp_benchmarker_rs::mcp_client::MCPClient;
 use mcp_benchmarker_rs::transfer::TransferEngine;
 use mcp_benchmarker_rs::transfer_manifest::Manifest;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "mcp-benchmarker-rs — Rust twin of the mcp-benchmarker transport/transfer core\n\
+    "mcp-benchmarker-rs — Rust twin of the mcp-benchmarker transport/transfer/LME core\n\
      \n\
      USAGE:\n\
-     \x20\x20mcp-benchmarker-rs transfer --config <c.json> --manifest <out.json> [--limit N] [--no-verify]\n\
-     \x20\x20mcp-benchmarker-rs report   --manifest <m.json>\n"
+     \x20\x20mcp-benchmarker-rs transfer    --config <c.json> --manifest <out.json> [--limit N] [--no-verify]\n\
+     \x20\x20mcp-benchmarker-rs report      --manifest <m.json>\n\
+     \x20\x20mcp-benchmarker-rs longmemeval --corpus <path.json> [--binary <path>]\n\
+     \x20\x20                               [--variant s|m|oracle] [--seed N] [--limit N]\n\
+     \x20\x20                               [--out <dir>] [--label <label>]\n"
 }
 
 /// Returns the value following `--name`, or None if absent / no value. Mirrors
@@ -165,6 +175,95 @@ fn run_report(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_longmemeval(args: &[String]) -> Result<(), String> {
+    let corpus_path = require_option("--corpus", args)?;
+    let binary = option_value("--binary", args)
+        .map(str::to_string)
+        .or_else(discover_moot_binary)
+        .ok_or_else(|| {
+            "could not find mootx01 binary; pass --binary <path> or set $MOOTX01_BINARY".to_string()
+        })?;
+    let variant = option_value("--variant", args)
+        .unwrap_or("s")
+        .to_string();
+    let seed: u64 = option_value("--seed", args)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_260_725_u64);
+    let limit = option_value("--limit", args).and_then(|s| s.parse::<usize>().ok());
+    let label = option_value("--label", args).map(str::to_string);
+    let out_dir = option_value("--out", args).map(PathBuf::from);
+
+    eprintln!("[lme] loading corpus from {corpus_path}");
+    let corpus = load_corpus(Path::new(&corpus_path))
+        .map_err(|e| format!("corpus load failed: {}", e.0))?;
+    eprintln!(
+        "[lme] corpus: {} questions ({} abstention excluded)",
+        corpus.questions.len(),
+        corpus.abstention_count,
+    );
+    eprintln!("[lme] binary: {binary}  variant: {variant}  seed: {seed}");
+    if let Some(n) = limit {
+        eprintln!("[lme] limit: {n}");
+    }
+
+    let run_config = LmeRunConfig {
+        moot_binary: binary,
+        variant: variant.clone(),
+        seed,
+        limit,
+        label: label.clone(),
+        out_dir: out_dir.clone(),
+    };
+
+    let results = run_lme_questions(&corpus, &run_config);
+    let scores: Vec<_> = results.into_iter().map(score_lme_question).collect();
+
+    let run_id = {
+        // Deterministic run ID: seed the same RNG used for shuffling and draw
+        // one u64.  Different seeds / variants produce distinct IDs.
+        let mut rng = mcp_benchmarker_rs::longmemeval_runner::SplitMix64::new(seed ^ 0xDEADBEEF);
+        format!("{:016x}", rng.next_u64())
+    };
+    let run_label = label.unwrap_or_else(|| format!("lme-{variant}-seed{seed}"));
+    let generated_at = now_iso8601();
+
+    let report = build_lme_report(
+        run_id,
+        run_label,
+        variant.clone(),
+        generated_at,
+        corpus.questions.len() + corpus.abstention_count,
+        corpus.abstention_count,
+        &scores,
+    );
+
+    // Print summary.
+    println!("LongMemEval results (variant={variant}, seed={seed}):");
+    println!("  questions_run:      {}", report.corpus_stats.questions_run);
+    println!("  guard_excluded:     {}", report.corpus_stats.guard_excluded);
+    println!("  query_count:        {}", report.aggregate.query_count);
+    println!("  recall_any@1:       {:.4}", report.aggregate.recall_any_at_1);
+    println!("  recall_any@5:       {:.4}", report.aggregate.recall_any_at_5);
+    println!("  recall_any@10:      {:.4}", report.aggregate.recall_any_at_10);
+    println!("  recall_all@1:       {:.4}", report.aggregate.recall_all_at_1);
+    println!("  recall_all@5:       {:.4}", report.aggregate.recall_all_at_5);
+    println!("  recall_all@10:      {:.4}", report.aggregate.recall_all_at_10);
+    println!("  mrr:                {:.4}", report.aggregate.mrr);
+    println!("  query_p50_s:        {:.4}", report.latency.query_p50_seconds);
+    println!("  query_p95_s:        {:.4}", report.latency.query_p95_seconds);
+
+    // Write report file.
+    let report_filename = format!("lme-report-{}-seed{}.json", variant, seed);
+    let report_path = out_dir
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&report_filename);
+    write_lme_report(&report, &report_path)?;
+    println!("report written to {}", report_path.display());
+
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (subcommand, rest) = match args.split_first() {
@@ -177,6 +276,7 @@ fn main() -> ExitCode {
     let result = match subcommand {
         "transfer" => run_transfer(rest),
         "report" => run_report(rest),
+        "longmemeval" | "lme" => run_longmemeval(rest),
         "--help" | "-h" | "help" => {
             print!("{}", usage());
             return ExitCode::SUCCESS;

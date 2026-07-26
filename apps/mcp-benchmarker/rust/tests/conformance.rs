@@ -16,8 +16,12 @@
 use mcp_benchmarker_rs::degeneracy_guard::DegeneracyGuard;
 use mcp_benchmarker_rs::divergence::{jaccard_divergence, rank_divergence};
 use mcp_benchmarker_rs::longmemeval_corpus::load_corpus;
+use mcp_benchmarker_rs::longmemeval_scorer::{
+    lme_ranked_sessions, lme_recall_all, lme_recall_any, lme_session_mrr, LmeManifestEntry,
+};
 use mcp_benchmarker_rs::manifest::{CapabilityManifest, ManifestValidationError};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -502,4 +506,106 @@ fn lme_corpus_error_parallel_array_mismatch() {
 fn lme_corpus_nonexistent_file_errors() {
     let path = PathBuf::from("/nonexistent/path/lme_does_not_exist.json");
     assert!(load_corpus(&path).is_err(), "expected error for nonexistent file");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Part 5 — LongMemEval scorer conformance vectors
+//
+// Driven by `apps/mcp-benchmarker/conformance/longmemeval_vectors.json`.
+// Same vectors drive both Swift (LongMemEvalScorerTests.swift) and Rust legs.
+// Expected values are pre-computed; tolerance for float comparison is 1e-9.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Loads `longmemeval_vectors.json` as a parsed JSON value.
+fn load_lme_vectors() -> Value {
+    let path = conformance_path("longmemeval_vectors.json");
+    load_json(&path)
+}
+
+#[test]
+fn lme_scorer_recall_vectors() {
+    let json = load_lme_vectors();
+    let cases = json["recall_cases"]
+        .as_array()
+        .expect("longmemeval_vectors.json must have recall_cases");
+
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+
+        let ranked: Vec<String> = case["ranked_session_ids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+
+        let answer_vec: Vec<String> = case["answer_session_ids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let answer_set: HashSet<String> = answer_vec.into_iter().collect();
+
+        let exp_ra1  = case["recall_any_at_1"].as_f64().unwrap();
+        let exp_ra5  = case["recall_any_at_5"].as_f64().unwrap();
+        let exp_ra10 = case["recall_any_at_10"].as_f64().unwrap();
+        let exp_rl1  = case["recall_all_at_1"].as_f64().unwrap();
+        let exp_rl5  = case["recall_all_at_5"].as_f64().unwrap();
+        let exp_rl10 = case["recall_all_at_10"].as_f64().unwrap();
+        let exp_mrr  = case["mrr"].as_f64().unwrap();
+
+        let tol = 1e-9;
+
+        let got_ra1  = lme_recall_any(&ranked, &answer_set, 1);
+        let got_ra5  = lme_recall_any(&ranked, &answer_set, 5);
+        let got_ra10 = lme_recall_any(&ranked, &answer_set, 10);
+        let got_rl1  = lme_recall_all(&ranked, &answer_set, 1);
+        let got_rl5  = lme_recall_all(&ranked, &answer_set, 5);
+        let got_rl10 = lme_recall_all(&ranked, &answer_set, 10);
+        let got_mrr  = lme_session_mrr(&ranked, &answer_set);
+
+        assert!((got_ra1  - exp_ra1).abs()  < tol, "'{id}' recall_any_at_1:  exp {exp_ra1}, got {got_ra1}");
+        assert!((got_ra5  - exp_ra5).abs()  < tol, "'{id}' recall_any_at_5:  exp {exp_ra5}, got {got_ra5}");
+        assert!((got_ra10 - exp_ra10).abs() < tol, "'{id}' recall_any_at_10: exp {exp_ra10}, got {got_ra10}");
+        assert!((got_rl1  - exp_rl1).abs()  < tol, "'{id}' recall_all_at_1:  exp {exp_rl1}, got {got_rl1}");
+        assert!((got_rl5  - exp_rl5).abs()  < tol, "'{id}' recall_all_at_5:  exp {exp_rl5}, got {got_rl5}");
+        assert!((got_rl10 - exp_rl10).abs() < tol, "'{id}' recall_all_at_10: exp {exp_rl10}, got {got_rl10}");
+        assert!((got_mrr  - exp_mrr).abs()  < tol, "'{id}' mrr:              exp {exp_mrr}, got {got_mrr}");
+    }
+}
+
+#[test]
+fn lme_scorer_uuid_mapping_vectors() {
+    let json = load_lme_vectors();
+    let cases = json["uuid_mapping_cases"]
+        .as_array()
+        .expect("longmemeval_vectors.json must have uuid_mapping_cases");
+
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+
+        let retrieved_uuids: Vec<String> = case["retrieved_uuids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+
+        let manifest: Vec<LmeManifestEntry> = case["manifest"]
+            .as_array().unwrap()
+            .iter()
+            .map(|entry| LmeManifestEntry {
+                uuid: entry["uuid"].as_str().unwrap().to_string(),
+                session_id: entry["session_id"].as_str().unwrap().to_string(),
+                // turn_index/session_index/role are not in the minimal mapping
+                // vectors; use stable dummy values.
+                turn_index: 0,
+                session_index: 0,
+                role: "user".to_string(),
+            })
+            .collect();
+
+        let expected: Vec<String> = case["expected_ranked_session_ids"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+
+        let got = lme_ranked_sessions(&retrieved_uuids, &manifest);
+
+        assert_eq!(
+            got, expected,
+            "uuid_mapping vector '{id}': expected {expected:?}, got {got:?}"
+        );
+    }
 }

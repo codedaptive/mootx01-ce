@@ -39,7 +39,9 @@ pub struct LmeTurn {
     /// Turn content.
     pub content: String,
     /// True when this turn contains evidence for the answer.
-    #[serde(rename = "has_answer")]
+    /// Absent in the real HuggingFace corpus (only present in our hand-authored
+    /// synthetic test sample) — defaults to false when missing.
+    #[serde(rename = "has_answer", default)]
     pub has_answer: bool,
 }
 

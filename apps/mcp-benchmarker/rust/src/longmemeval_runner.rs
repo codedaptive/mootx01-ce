@@ -1,0 +1,477 @@
+//! longmemeval_runner.rs — live harness driving mootx01 for LongMemEval benchmarking.
+//!
+//! Rust twin of `LongMemEvalRunner.swift`. Mirrors the Swift per-question loop:
+//! create an isolated scratch dir → launch mootx01 pointing at it → ingest all
+//! haystack turns → run degeneracy probe → query the actual question → teardown.
+//!
+//! Each question gets a dedicated mootx01 process so the haystack is fresh per
+//! question — same isolation guarantee as the Swift runner.
+//!
+//! # Layout
+//!
+//! `run_lme_questions(questions, config)` is the main entry point. Callers
+//! (main.rs) load the corpus, shuffle it with `SplitMix64`, slice to `limit`,
+//! then pass the slice here.
+
+use crate::config::{EndpointConfig, EndpointRole, Transport, VerbMap};
+use crate::degeneracy_guard::DegeneracyGuard;
+use crate::json_value::JsonValue;
+use crate::longmemeval_corpus::{LmeCorpus, LmeTurn};
+use crate::longmemeval_scorer::{LmeManifestEntry, LmeQuestionResult};
+use crate::mcp_client::{MCPClient, MCPError, ToolCaller};
+use crate::config::ResultFormat;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Run configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for one LME run.  Constructed by main.rs from CLI flags.
+pub struct LmeRunConfig {
+    pub moot_binary: String,
+    pub variant: String,
+    pub seed: u64,
+    pub limit: Option<usize>,
+    pub label: Option<String>,
+    pub out_dir: Option<PathBuf>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SplitMix64 — reproducible shuffle (twin of `GauntletRNG.swift`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A SplitMix64 PRNG. Implements exactly the same algorithm as Swift
+/// `GauntletRNG` — same seed → same shuffle order on both legs.
+///
+/// Algorithm: state += 0x9E3779B97F4A7C15; two mixing rounds; `next_upto` uses
+/// multiply-high ((draw * bound) >> 64) for unbiased bounded draws.
+pub struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    /// Create a generator seeded at `seed`. Twin of Swift `GauntletRNG(seed:)`.
+    pub fn new(seed: u64) -> Self {
+        SplitMix64 { state: seed }
+    }
+
+    /// Returns the next pseudo-random u64. Twin of Swift `GauntletRNG.next()`.
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    /// Returns a value in `[0, bound)` via multiply-high. Twin of Swift
+    /// `GauntletRNG.next(upTo:)`.
+    pub fn next_upto(&mut self, bound: u64) -> u64 {
+        if bound == 0 {
+            return 0;
+        }
+        let draw = self.next_u64();
+        ((draw as u128 * bound as u128) >> 64) as u64
+    }
+
+    /// Fisher-Yates in-place shuffle. Twin of Swift `GauntletRNG.shuffled(_:)`.
+    pub fn shuffle<T>(&mut self, items: &mut [T]) {
+        let n = items.len();
+        for i in (1..n).rev() {
+            let j = self.next_upto((i + 1) as u64) as usize;
+            items.swap(i, j);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verb map for LME
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the VerbMap for the LME harness.
+///
+/// `location: "benchmark/longmemeval"` is the write constant — all haystack
+/// memories are filed in the benchmark wing so they are isolated from
+/// the operator's real memories and from other benchmark runs.
+pub fn lme_verb_map() -> VerbMap {
+    let mut constant_args = BTreeMap::new();
+    constant_args.insert("location".to_string(), "benchmark/longmemeval".to_string());
+    VerbMap::new(
+        "moot_file_memory",
+        "moot_memory_search",
+        None,                                 // list: not used in LME
+        None,                                 // fetch: not used in LME
+        None,                                 // content_arg: defaults to "content"
+        None,                                 // query_arg: defaults to "query"
+        Some(constant_args),
+        Some(ResultFormat::MootText),
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scratch dir management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Creates a fresh, isolated scratch directory for one question's mootx01 instance.
+/// Path: `/tmp/lme-bench-<seed_hex>-<question_index_hex>`.
+///
+/// The deterministic naming ensures each question has a unique path even across
+/// retries, and the fixed prefix enables guarded teardown.
+pub fn lme_scratch_dir(seed: u64, question_index: usize) -> Result<PathBuf, MCPError> {
+    let name = format!("lme-bench-{seed:016x}-{question_index:08x}");
+    let path = PathBuf::from("/tmp").join(&name);
+    std::fs::create_dir_all(&path).map_err(|e| MCPError {
+        description: format!("failed to create scratch dir {}: {e}", path.display()),
+    })?;
+    Ok(path)
+}
+
+/// Removes a scratch directory.
+///
+/// Guard: path must begin with `/tmp/lme-bench-` (the prefix assigned in
+/// `lme_scratch_dir`). Any other prefix is refused — this prevents a misconfigured
+/// path from deleting real data.
+pub fn lme_guarded_teardown(path: &Path) -> Result<(), MCPError> {
+    let path_str = path.to_string_lossy();
+    if !path_str.starts_with("/tmp/lme-bench-") {
+        return Err(MCPError {
+            description: format!(
+                "teardown refused: path does not begin with /tmp/lme-bench-: {}",
+                path.display()
+            ),
+        });
+    }
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|e| MCPError {
+            description: format!("teardown failed for {}: {e}", path.display()),
+        })?;
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Endpoint config construction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builds an `EndpointConfig` for the LME harness pointing at `scratch_dir`.
+///
+/// The command form is `MOOTX01_DATA_DIR=<scratch> <binary> serve`. The
+/// `MCPClient` splits on whitespace and runs via `/usr/bin/env`, which handles
+/// the `KEY=VALUE` env-var prefix argument natively.
+pub fn lme_endpoint_config(scratch_dir: &Path, moot_binary: &str) -> EndpointConfig {
+    let data_dir = scratch_dir.to_string_lossy();
+    let command = format!("MOOTX01_DATA_DIR={data_dir} {moot_binary} serve");
+    EndpointConfig {
+        name: "mootx01-lme".to_string(),
+        transport: Transport::Stdio { command },
+        auth: None,
+        verb_map: lme_verb_map(),
+        role: EndpointRole::Both,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Probe queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Three semantically distinct probe queries for degeneracy guard check.
+/// The three topics should produce different rankings on a functional search
+/// engine. If all three return the same UUID ordering, the guard fires.
+const PROBE_QUERIES: [&str; 3] = [
+    "what happened during our recent dinner together?",
+    "can you remind me about my work project updates?",
+    "what were we discussing about travel plans last month?",
+];
+
+/// Issues the three probe queries against a connected MCP client and returns
+/// the UUID-ranked response for each. The ordering of the returned vec matches
+/// the ordering of `PROBE_QUERIES`.
+///
+/// Failures (MCP errors on individual probes) are silently replaced with empty
+/// rankings — the degeneracy guard treats fewer than 2 probe responses as
+/// Healthy, so a connectivity failure here does not fabricate a false positive.
+pub fn probe_mcp_client(client: &mut MCPClient, verb_map: &VerbMap) -> Vec<Vec<String>> {
+    PROBE_QUERIES
+        .iter()
+        .map(|&q| {
+            let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
+            args.insert(
+                verb_map.query_arg.clone(),
+                JsonValue::String(q.to_string()),
+            );
+            match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
+                Ok(result) => result.ordered_ids,
+                Err(_) => vec![],
+            }
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Binary discovery
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Finds the mootx01 binary.
+///
+/// Discovery order (matches Swift `LongMemEvalRunner.discoverMootBinary()`):
+///   1. `$MOOTX01_BINARY` env var
+///   2. `/Users/bob/.mootx01/bin/mootx01` (known install location)
+///   3. `which mootx01` (PATH)
+pub fn discover_moot_binary() -> Option<String> {
+    // 1. Explicit override.
+    if let Ok(path) = std::env::var("MOOTX01_BINARY") {
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+    // 2. Known install location.
+    let known = PathBuf::from("/Users/bob/.mootx01/bin/mootx01");
+    if known.exists() {
+        return Some(known.to_string_lossy().into_owned());
+    }
+    // 3. PATH.
+    let output = std::process::Command::new("which")
+        .arg("mootx01")
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-question run
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ingest one haystack turn via `moot_file_memory`, returning `(uuid, latency_s)`.
+fn ingest_turn(
+    client: &mut MCPClient,
+    verb_map: &VerbMap,
+    content: &str,
+) -> Result<(String, f64), MCPError> {
+    let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
+    args.insert(
+        verb_map.content_arg.clone(),
+        JsonValue::String(content.to_string()),
+    );
+    // Constant args (location header).
+    for (k, v) in &verb_map.constant_args {
+        args.insert(k.clone(), JsonValue::String(v.clone()));
+    }
+    let start = Instant::now();
+    let result = client.call_tool(&verb_map.write, args, &verb_map.result_format)?;
+    let elapsed = start.elapsed().as_secs_f64();
+    let uuid = result
+        .write_assigned_id
+        .ok_or_else(|| MCPError {
+            description: "moot_file_memory returned no UUID".to_string(),
+        })?;
+    Ok((uuid, elapsed))
+}
+
+/// Runs the LME harness for a single question: create scratch dir → launch
+/// mootx01 → ingest haystack → probe → query → teardown.
+///
+/// Returns `Err` only for unrecoverable setup failures (scratch dir, binary
+/// launch). Guard failures are encoded as `LmeQuestionResult.guard_healthy=false`.
+pub fn run_one_question(
+    question_id: &str,
+    question_type: &str,
+    question_text: &str,
+    haystack_session_ids: &[String],
+    haystack_sessions: &[Vec<LmeTurn>],
+    answer_session_ids: &[String],
+    moot_binary: &str,
+    seed: u64,
+    question_index: usize,
+) -> Result<LmeQuestionResult, MCPError> {
+    let scratch = lme_scratch_dir(seed, question_index)?;
+    let guard = DegeneracyGuard::new();
+    let verb_map = lme_verb_map();
+    let endpoint = lme_endpoint_config(&scratch, moot_binary);
+
+    let mut client = MCPClient::new(endpoint);
+    client.connect().map_err(|e| {
+        // Teardown best-effort; original connect error is the useful signal.
+        let _ = lme_guarded_teardown(&scratch);
+        e
+    })?;
+
+    // ── Ingest haystack ───────────────────────────────────────────────────────
+    let mut manifest: Vec<LmeManifestEntry> = Vec::new();
+    let mut write_latencies: Vec<f64> = Vec::new();
+    let mut turns_ingested: usize = 0;
+
+    'sessions: for (session_index, (session_id, session_turns)) in
+        haystack_session_ids.iter().zip(haystack_sessions.iter()).enumerate()
+    {
+        for (turn_index, turn) in session_turns.iter().enumerate() {
+            // Build the content string: role-tagged turn text.
+            let content = format!("[{}] {}", turn.role, turn.content);
+            match ingest_turn(&mut client, &verb_map, &content) {
+                Ok((uuid, latency)) => {
+                    manifest.push(LmeManifestEntry {
+                        uuid,
+                        session_id: session_id.clone(),
+                        turn_index,
+                        session_index,
+                        role: turn.role.clone(),
+                    });
+                    write_latencies.push(latency);
+                    turns_ingested += 1;
+                }
+                Err(e) => {
+                    // Ingest failure → short-circuit; guard will fire.
+                    eprintln!(
+                        "  [lme] ingest error for {question_id} session {session_id} turn {turn_index}: {}",
+                        e.description
+                    );
+                    break 'sessions;
+                }
+            }
+        }
+    }
+
+    let write_mean_latency = if write_latencies.is_empty() {
+        0.0
+    } else {
+        write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
+    };
+
+    // ── Probe for degeneracy guard ────────────────────────────────────────────
+    let probe_rankings = probe_mcp_client(&mut client, &verb_map);
+    let guard_verdict = guard.classify(&probe_rankings);
+    let guard_healthy = guard_verdict.discriminant() == "healthy";
+    let guard_diagnostic = if guard_healthy {
+        None
+    } else {
+        Some(guard_verdict.diagnostic().to_string())
+    };
+
+    // ── Query the actual question ─────────────────────────────────────────────
+    let query_start = Instant::now();
+    let retrieved_uuids: Vec<String> = if guard_healthy {
+        let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
+        args.insert(
+            verb_map.query_arg.clone(),
+            JsonValue::String(question_text.to_string()),
+        );
+        match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
+            Ok(result) => result.ordered_ids,
+            Err(e) => {
+                eprintln!(
+                    "  [lme] query error for {question_id}: {}",
+                    e.description
+                );
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+    let query_latency_seconds = query_start.elapsed().as_secs_f64();
+
+    // ── Teardown ──────────────────────────────────────────────────────────────
+    client.disconnect();
+    if let Err(e) = lme_guarded_teardown(&scratch) {
+        eprintln!(
+            "  [lme] teardown warning for {question_id}: {}",
+            e.description
+        );
+    }
+
+    Ok(LmeQuestionResult {
+        question_id: question_id.to_string(),
+        question_type: question_type.to_string(),
+        query_latency_seconds,
+        retrieved_uuids,
+        manifest,
+        answer_session_ids: answer_session_ids.to_vec(),
+        guard_healthy,
+        guard_diagnostic,
+        turns_ingested,
+        write_mean_latency_seconds: write_mean_latency,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level question runner
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Runs the LME harness over a slice of questions.
+///
+/// Questions are run in sequence (one mootx01 instance per question). Progress
+/// is printed to stderr: one line per question. Returns a `Vec<LmeQuestionResult>`
+/// in the same order as the input slice.
+pub fn run_lme_questions(
+    corpus: &LmeCorpus,
+    config: &LmeRunConfig,
+) -> Vec<LmeQuestionResult> {
+    // ── Build the question list ───────────────────────────────────────────────
+    let mut indices: Vec<usize> = (0..corpus.questions.len()).collect();
+    let mut rng = SplitMix64::new(config.seed);
+    rng.shuffle(&mut indices);
+    if let Some(limit) = config.limit {
+        indices.truncate(limit);
+    }
+
+    let total = indices.len();
+    let mut results: Vec<LmeQuestionResult> = Vec::with_capacity(total);
+
+    for (progress_index, &question_index) in indices.iter().enumerate() {
+        let q = &corpus.questions[question_index];
+        eprintln!(
+            "[lme] {}/{}: {} ({})",
+            progress_index + 1,
+            total,
+            q.question_id,
+            q.question_type
+        );
+
+        match run_one_question(
+            &q.question_id,
+            &q.question_type,
+            &q.question,
+            &q.haystack_session_ids,
+            &q.haystack_sessions,
+            &q.answer_session_ids,
+            &config.moot_binary,
+            config.seed,
+            question_index,
+        ) {
+            Ok(result) => {
+                let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
+                eprintln!(
+                    "  guard={guard_str} turns={} query_ms={:.0}",
+                    result.turns_ingested,
+                    result.query_latency_seconds * 1000.0,
+                );
+                results.push(result);
+            }
+            Err(e) => {
+                eprintln!("  ERROR (skipping): {}", e.description);
+                // Emit a guard-excluded result so the question shows in corpus_stats.
+                results.push(LmeQuestionResult {
+                    question_id: q.question_id.clone(),
+                    question_type: q.question_type.clone(),
+                    query_latency_seconds: 0.0,
+                    retrieved_uuids: vec![],
+                    manifest: vec![],
+                    answer_session_ids: q.answer_session_ids.clone(),
+                    guard_healthy: false,
+                    guard_diagnostic: Some(e.description),
+                    turns_ingested: 0,
+                    write_mean_latency_seconds: 0.0,
+                });
+            }
+        }
+    }
+
+    results
+}
