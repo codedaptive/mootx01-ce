@@ -246,10 +246,29 @@ func waitForEncodeDrain(
                 exit(1)
             }
         } catch {
-            // moot_drain_status RPC failed — log and retry; transient failures
-            // are recoverable within the timeout window.
+            // moot_drain_status RPC failed — log, then check for fatal transport
+            // death. Non-fatal (transient) failures are recoverable within the
+            // timeout window and fall through to the retry sleep.
             FileHandle.standardError.write(Data(
                 "[\(label)] drain barrier: moot_drain_status error: \(error)\n".utf8))
+            // When the stdio session dies (server exited, broken stdin pipe, or
+            // stream closed by EOF), all further polls return the same fatal error
+            // until the timeout expires. Detect these conditions and abort
+            // immediately with a clear diagnosis so the run fails fast rather than
+            // spinning for timeoutSeconds and then emitting a misleading
+            // "did not converge" warning. The MCPClient session-closed error
+            // message is "stdio session for … closed"; broken-pipe and stream-
+            // closed arrive as their respective OS error descriptions.
+            let desc = String(describing: error).lowercased()
+            let isFatal = (desc.contains("session") && desc.contains("closed"))
+                || desc.contains("not connected")
+                || desc.contains("disconnected")
+                || desc.contains("broken pipe")
+            if isFatal {
+                FileHandle.standardError.write(Data(
+                    "[\(label)] drain barrier: FATAL — MCP transport died (server exited). Aborting poll.\n".utf8))
+                return false
+            }
         }
         try? await Task.sleep(nanoseconds: pollIntervalNanos)
     }
