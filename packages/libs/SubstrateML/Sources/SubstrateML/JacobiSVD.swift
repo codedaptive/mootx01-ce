@@ -211,6 +211,11 @@ public enum JacobiSVD {
                             DispatchQueue.concurrentPerform(iterations: chunkCount) { ci in
                                 let lo = ci * per
                                 let hi = min(lo + per, round.count)
+                                // Trailing workers get empty ranges when round.count is not
+                                // evenly divisible by chunkCount: lo = ci*per may exceed
+                                // round.count, making hi < lo. Swift Range traps on
+                                // lowerBound > upperBound, so guard before construction.
+                                guard lo < hi else { return }
                                 for idx in lo..<hi {
                                     let pair = round[idx]
                                     rotatePair(mats, m: m, n: n, p: pair.p, q: pair.q, eps: eps)
