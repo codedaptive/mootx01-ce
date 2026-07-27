@@ -800,6 +800,23 @@ func runLongMemEval(_ args: [String]) async throws {
     // The command receives the prompt on stdin and writes its answer on stdout.
     // Example: --judge-cmd "claude -p" or --judge-cmd "./judge.sh"
     let judgeCmd = optionValue("--judge-cmd", in: args)
+    // Estate cache mode (LME-07): --estate-cache off|reuse (default: off).
+    //   off:   fresh ingest every run. Gold standard.
+    //   reuse: snapshot after ingest+encode; copy snapshot on subsequent runs with
+    //          the same (benchmark, variant, question_id, seed, barrier, binary) key.
+    //          Skips ~90% of wall-clock for runs 2..N. Recommended N-run pattern:
+    //          run 1 with off (cold), runs 2..N with reuse (warm).
+    let estateCacheStr = optionValue("--estate-cache", in: args) ?? "off"
+    let lmeEstateCache: EstateCacheMode
+    switch estateCacheStr {
+    case "off":   lmeEstateCache = .off
+    case "reuse": lmeEstateCache = .reuse
+    default:
+        throw MCPError(description:
+            "--estate-cache must be 'off' or 'reuse'; got '\(estateCacheStr)'")
+    }
+    // --cache-dir: override the default estate cache root (<out>/estate-cache).
+    let lmeCacheDir = optionValue("--cache-dir", in: args).map { URL(fileURLWithPath: $0) }
 
     // Warn on shared-estate: methodology-affecting (haystack contamination).
     if sharedEstate {
@@ -828,7 +845,9 @@ func runLongMemEval(_ args: [String]) async throws {
         runLabel: "lme-\(variant)-seed\(seed)-arm\(armStr)",
         arm: arm,
         judgeCmd: judgeCmd,
-        encodeBarrier: lmeEncodeBarrier
+        encodeBarrier: lmeEncodeBarrier,
+        estateCache: lmeEstateCache,
+        cacheDir: lmeCacheDir
     )
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
@@ -993,6 +1012,17 @@ func runLoCoMo(_ args: [String]) async throws {
     }
     let outDirStr = optionValue("--out", in: args)
     let outDir = outDirStr.map { URL(fileURLWithPath: $0) }
+    // Estate cache mode (LME-07).
+    let loCoMoEstateCacheStr = optionValue("--estate-cache", in: args) ?? "off"
+    let loCoMoEstateCache: EstateCacheMode
+    switch loCoMoEstateCacheStr {
+    case "off":   loCoMoEstateCache = .off
+    case "reuse": loCoMoEstateCache = .reuse
+    default:
+        throw MCPError(description:
+            "--estate-cache must be 'off' or 'reuse'; got '\(loCoMoEstateCacheStr)'")
+    }
+    let loCoMoCacheDir = optionValue("--cache-dir", in: args).map { URL(fileURLWithPath: $0) }
 
     FileHandle.standardOutput.write(Data(
         "[locomo] loading corpus from \(datasetPath.path)\n".utf8))
@@ -1011,7 +1041,9 @@ func runLoCoMo(_ args: [String]) async throws {
         seed: seed,
         outDir: outDir,
         runLabel: "locomo-seed\(seed)",
-        encodeBarrier: loCoMoEncodeBarrier
+        encodeBarrier: loCoMoEncodeBarrier,
+        estateCache: loCoMoEstateCache,
+        cacheDir: loCoMoCacheDir
     )
 
     let results = try await runLoCoMoQuestions(
@@ -1021,7 +1053,7 @@ func runLoCoMo(_ args: [String]) async throws {
     )
 
     let scores = results.map { scoreLoCoMoQuestion($0) }
-    let report = buildLoCoMoReport(config: runConfig, corpus: corpus, scores: scores)
+    let report = buildLoCoMoReport(config: runConfig, corpus: corpus, results: results, scores: scores)
 
     let reportFilename = "locomo-report-seed\(runConfig.seed).json"
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
@@ -1133,6 +1165,17 @@ func runLMEB(_ args: [String]) async throws {
         throw MCPError(description:
             "--encode-barrier must be 'drain', 'impatient', or 'none'; got '\(lmebEncodeBarrierStr)'")
     }
+    // Estate cache mode (LME-07).
+    let lmebEstateCacheStr = optionValue("--estate-cache", in: args) ?? "off"
+    let lmebEstateCache: EstateCacheMode
+    switch lmebEstateCacheStr {
+    case "off":   lmebEstateCache = .off
+    case "reuse": lmebEstateCache = .reuse
+    default:
+        throw MCPError(description:
+            "--estate-cache must be 'off' or 'reuse'; got '\(lmebEstateCacheStr)'")
+    }
+    let lmebCacheDir = optionValue("--cache-dir", in: args).map { URL(fileURLWithPath: $0) }
 
     let loadMsg = "[lmeb] loading corpus from \(dataDir.path) "
         + "(evidence types: \(evidenceTypes.joined(separator: ", ")))\n"
@@ -1153,7 +1196,9 @@ func runLMEB(_ args: [String]) async throws {
         seed: seed,
         outDir: outDir,
         runLabel: runLabel,
-        encodeBarrier: lmebEncodeBarrier
+        encodeBarrier: lmebEncodeBarrier,
+        estateCache: lmebEstateCache,
+        cacheDir: lmebCacheDir
     )
 
     // Sort queries by ID for deterministic shuffle baseline.
@@ -1169,8 +1214,10 @@ func runLMEB(_ args: [String]) async throws {
         runLabel: runConfig.runLabel,
         evidenceTypes: evidenceTypes,
         queriesLoaded: corpus.queryCount,
+        results: results,
         scores: scores,
-        encodeBarrier: runConfig.encodeBarrier.rawValue
+        encodeBarrier: runConfig.encodeBarrier.rawValue,
+        estateCache: runConfig.estateCache.rawValue
     )
     let reportFilename = "lmeb-report-seed\(seed).json"
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))

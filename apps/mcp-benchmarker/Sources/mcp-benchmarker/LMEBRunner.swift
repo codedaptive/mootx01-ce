@@ -42,7 +42,8 @@ let lmebMootVerbMap = EndpointConfig.VerbMap(
 // MARK: - Manifest entry
 
 /// Maps a filed-memory UUID back to its origin doc in the candidate pool.
-struct LMEBManifestEntry: Sendable {
+/// Codable so it can round-trip through estate cache manifest.json.
+struct LMEBManifestEntry: Sendable, Codable {
     /// The UUID returned by moot_file_memory ("filed memory <UUID>").
     let uuid: String
     /// The corpus document ID this ingestion represents.
@@ -71,6 +72,10 @@ struct LMEBQueryResult: Sendable {
     let docsIngested: Int
     /// Mean write latency (seconds) across all ingested docs.
     let writeMeanLatencySeconds: Double
+    /// Whether this query's estate was served from the snapshot cache.
+    /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
+    /// nil = --estate-cache off (cache not in use for this run).
+    let cacheHit: Bool?
 }
 
 // MARK: - Run config
@@ -97,6 +102,12 @@ struct LMEBRunConfig: Sendable {
     /// encoding (impatient), a post-ingest drain barrier (drain, default), or no
     /// barrier (none). Recorded in the report JSON as "encode_barrier".
     let encodeBarrier: EncodeBarrier
+    /// Estate snapshot reuse mode (--estate-cache). Defaults to .off (fresh ingest
+    /// every run). .reuse snapshots after ingest+encode and copies on cache hits.
+    let estateCache: EstateCacheMode
+    /// Root directory for estate snapshots (--cache-dir). nil = <outDir>/estate-cache
+    /// (or <cwd>/estate-cache when outDir is also nil).
+    let cacheDir: URL?
 }
 
 // MARK: - Scratch estate management
@@ -186,13 +197,47 @@ func runLMEBQueries(
     var results: [LMEBQueryResult] = []
     results.reserveCapacity(sliced.count)
 
+    // Cache-mode setup (reuse only; zero cost when estateCache == .off).
+    let binaryFingerprint: String = config.estateCache == .reuse
+        ? mootBinaryFingerprint(config.mootBinaryPath) : ""
+    let resolvedCacheDir: URL = config.cacheDir ?? defaultCacheDir(outDir: config.outDir)
+
     for query in sliced {
         // Candidate pool for this query's scene.
         let candidateDocIDs = corpus.candidateDocs(forQuery: query.id)
         let relevantDocIDs = corpus.relevantDocs(forQuery: query.id)
 
-        // Provision fresh estate.
-        let scratchURL = try lmebScratchDir()
+        // --- Cache-aware estate provisioning ---
+        var manifest: [LMEBManifestEntry] = []
+        var writeTimes: [Double] = []
+        var queryCacheHit: Bool? = nil
+        var cacheEntryForSnapshot: URL? = nil
+
+        var scratchURL: URL
+        if config.estateCache == .reuse {
+            let cacheEntry = estateCacheEntryURL(
+                cacheDir: resolvedCacheDir,
+                benchmark: "lmeb",
+                variant: "",
+                seed: config.seed,
+                encodeBarrier: config.encodeBarrier,
+                binaryFingerprint: binaryFingerprint,
+                unitID: query.id
+            )
+            if let (restored, hit): (URL, [LMEBManifestEntry]) =
+                restoreEstateCacheEntry(from: cacheEntry, scratchDirFactory: lmebScratchDir) {
+                scratchURL = restored
+                manifest = hit
+                queryCacheHit = true
+            } else {
+                scratchURL = try lmebScratchDir()
+                queryCacheHit = false
+                cacheEntryForSnapshot = cacheEntry
+            }
+        } else {
+            scratchURL = try lmebScratchDir()
+        }
+
         let endpoint = try lmebEndpointConfig(scratchDir: scratchURL,
                                                mootBinaryPath: config.mootBinaryPath)
         let client = MCPClient(endpoint: endpoint)
@@ -202,14 +247,12 @@ func runLMEBQueries(
             try? lmebGuardedTeardown(scratchURL)
         }
 
-        // Ingest each candidate doc via live moot_file_memory. The encode barrier
-        // strategy is set by config.encodeBarrier: impatient sends impatient:true per
-        // write, drain polls moot_drain_status after full ingest, none has no barrier.
-        // Previously this code sent "n":true, which was silently ignored by the product
-        // because the correct key is "impatient".
-        var manifest: [LMEBManifestEntry] = []
-        var writeTimes: [Double] = []
-
+        // Ingest each candidate doc via live moot_file_memory. Skipped on cache hit.
+        // The encode barrier strategy is set by config.encodeBarrier: impatient sends
+        // impatient:true per write, drain polls moot_drain_status after full ingest,
+        // none has no barrier.
+        let skipIngest = (queryCacheHit == true)
+        if !skipIngest {
         for docID in candidateDocIDs {
             guard let doc = corpus.docsByID[docID] else {
                 // Candidate doc not in corpus (cross-evidence-type ID or filtered load).
@@ -242,11 +285,18 @@ func runLMEBQueries(
 
         // Encode barrier (drain mode): poll moot_drain_status after all candidate
         // docs are ingested, waiting for idle before the retrieval query.
+        // Skipped on cache hit.
         if config.encodeBarrier == .drain {
             let _ = await waitForEncodeDrain(
                 client: client,
                 label: "lmeb q=\(query.id)"
             )
+        }
+        } // end if !skipIngest
+
+        // Snapshot to cache on miss: estate is fully committed after ingest + encode.
+        if let ce = cacheEntryForSnapshot {
+            saveEstateCacheEntry(estateScratchDir: scratchURL, manifest: manifest, to: ce)
         }
 
         // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.
@@ -298,7 +348,8 @@ func runLMEBQueries(
             guardHealthy: guardHealthy,
             guardDiagnostic: guardDiagnostic,
             docsIngested: manifest.count,
-            writeMeanLatencySeconds: writeMean
+            writeMeanLatencySeconds: writeMean,
+            cacheHit: queryCacheHit
         ))
 
         let progressMsg = "[lmeb] query \(results.count)/\(sliced.count) "

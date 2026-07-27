@@ -204,6 +204,9 @@ pub struct LmeQuestionResult {
     /// True when dense_judge_answer contains the normalized gold answer as a
     /// substring. None when dense_judge_answer is None.
     pub dense_judge_correct: Option<bool>,
+    /// Whether this question's estate was served from the snapshot cache.
+    /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
+    pub cache_hit: Option<bool>,
 }
 
 /// The scored result for one LME question.
@@ -490,6 +493,11 @@ pub struct LmeReportPerQuestion {
     /// Parsed "recall_provenance: ..." diagnostic from dense-arm response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dense_recall_provenance: Option<String>,
+    /// Whether this question's estate was served from the snapshot cache.
+    /// Some(true) = hit, Some(false) = miss, None = cache off.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
 }
 
 /// Token efficiency block of the LME report. Additive key added by LME-03.
@@ -562,14 +570,23 @@ pub struct LmeReport {
     pub token_efficiency: LmeReportTokenEfficiency,
     /// Aggregate discrimination and recall provenance health (Defect 3).
     pub lane_health: LmeReportLaneHealth,
+    /// Estate cache mode used for this run: "off" | "reuse".
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub estate_cache: String,
+    /// Number of questions whose estate was served from the snapshot cache.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_hits: usize,
+    /// Number of questions that triggered a new snapshot (cache miss).
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_misses: usize,
 }
 
 /// Assembles an `LmeReport` from scores and metadata.
 ///
 /// `corpus` and `payload_entries` are needed to compute the `token_efficiency`
-/// and `lane_health` blocks: the corpus provides `has_answer` turn annotations;
-/// payload_entries carry per-question payload texts extracted before results were
-/// consumed. `encode_barrier` records the ingest methodology in the report JSON.
+/// and `lane_health` blocks. `cache_hit_by_id` maps question_id → cache_hit for
+/// per-question report population and aggregate counts. `estate_cache` is the
+/// cache-mode string ("off" | "reuse").
 pub fn build_lme_report(
     run_id: String,
     run_label: String,
@@ -581,9 +598,13 @@ pub fn build_lme_report(
     scores: &[LmeQuestionScore],
     corpus: &LmeCorpus,
     payload_entries: &[LmePayloadEntry],
+    cache_hit_by_id: &HashMap<String, Option<bool>>,
+    estate_cache: String,
 ) -> LmeReport {
     let (aggregate, latency) = aggregate_lme_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
+    let cache_hits:   usize = cache_hit_by_id.values().filter(|&&v| v == Some(true)).count();
+    let cache_misses: usize = cache_hit_by_id.values().filter(|&&v| v == Some(false)).count();
 
     let corpus_stats = LmeReportCorpusStats {
         questions_loaded,
@@ -665,6 +686,8 @@ pub fn build_lme_report(
                 exact_recall_provenance:  prov.and_then(|p| p.exact_recall_provenance.clone()),
                 dense_discrimination:     prov.and_then(|p| p.dense_discrimination.clone()),
                 dense_recall_provenance:  prov.and_then(|p| p.dense_recall_provenance.clone()),
+                // Look up cache_hit from the raw results map (key = question_id).
+                cache_hit: cache_hit_by_id.get(&s.question_id).copied().flatten(),
             }
         })
         .collect();
@@ -844,6 +867,9 @@ pub fn build_lme_report(
         per_question,
         token_efficiency,
         lane_health,
+        estate_cache,
+        cache_hits,
+        cache_misses,
     }
 }
 

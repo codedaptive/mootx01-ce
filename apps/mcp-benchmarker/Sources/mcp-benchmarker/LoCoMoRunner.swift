@@ -93,6 +93,12 @@ struct LoCoMoQuestionResult: Sendable {
     let turnsIngested: Int
     /// Mean write latency across all turns for this conversation's estate.
     let writeMeanLatencySeconds: Double
+    /// Whether this question's estate was served from the snapshot cache.
+    /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
+    /// nil = --estate-cache off (cache not in use for this run).
+    /// One conversation estate is shared by all questions; all questions for the same
+    /// conversation carry the same cacheHit value.
+    let cacheHit: Bool?
 }
 
 // MARK: - Run config
@@ -117,6 +123,12 @@ struct LoCoMoRunConfig: Sendable {
     /// encoding (impatient), a post-ingest drain barrier (drain, default), or no
     /// barrier (none). Recorded in the report JSON as "encode_barrier".
     let encodeBarrier: EncodeBarrier
+    /// Estate snapshot reuse mode (--estate-cache). Defaults to .off (fresh ingest
+    /// every run). .reuse snapshots after ingest+encode and copies on cache hits.
+    let estateCache: EstateCacheMode
+    /// Root directory for estate snapshots (--cache-dir). nil = <outDir>/estate-cache
+    /// (or <cwd>/estate-cache when outDir is also nil).
+    let cacheDir: URL?
 }
 
 // MARK: - Scratch estate management
@@ -222,6 +234,11 @@ func runLoCoMoQuestions(
     var allResults: [LoCoMoQuestionResult] = []
     allResults.reserveCapacity(selected.count)
 
+    // Cache-mode setup (reuse only; zero cost when estateCache == .off).
+    let binaryFingerprint: String = config.estateCache == .reuse
+        ? mootBinaryFingerprint(config.mootBinaryPath) : ""
+    let resolvedCacheDir: URL = config.cacheDir ?? defaultCacheDir(outDir: config.outDir)
+
     // Process conversations in ascending index order for determinism.
     let convIndices = questionsByConversation.keys.sorted()
 
@@ -229,26 +246,56 @@ func runLoCoMoQuestions(
         let convQuestions = questionsByConversation[convIndex]!
         let conversation = conversations[convIndex]
 
-        // Provision a scratch estate for this conversation.
-        let scratchDir = try loCoMoScratchDir()
+        // --- Cache-aware estate provisioning (per conversation) ---
+        // LoCoMo uses one estate per conversation; all questions in a conversation share
+        // it. Cache granularity is therefore per-conversation (keyed by sampleID).
+        var manifest: [LoCoMoManifestEntry] = []
+        var writeTimes: [Double] = []
+        var convCacheHit: Bool? = nil  // nil when cache is off
+        var cacheEntryForSnapshot: URL? = nil
+
+        var activeScratchDir: URL
+        if config.estateCache == .reuse {
+            let cacheEntry = estateCacheEntryURL(
+                cacheDir: resolvedCacheDir,
+                benchmark: "locomo",
+                variant: "",
+                seed: config.seed,
+                encodeBarrier: config.encodeBarrier,
+                binaryFingerprint: binaryFingerprint,
+                unitID: conversation.sampleID
+            )
+            if let (restored, hit): (URL, [LoCoMoManifestEntry]) =
+                restoreEstateCacheEntry(from: cacheEntry, scratchDirFactory: loCoMoScratchDir) {
+                activeScratchDir = restored
+                manifest = hit
+                convCacheHit = true
+            } else {
+                activeScratchDir = try loCoMoScratchDir()
+                convCacheHit = false
+                cacheEntryForSnapshot = cacheEntry
+            }
+        } else {
+            activeScratchDir = try loCoMoScratchDir()
+        }
+
         let endpoint = try loCoMoEndpointConfig(
-            scratchDir: scratchDir, mootBinaryPath: config.mootBinaryPath)
+            scratchDir: activeScratchDir, mootBinaryPath: config.mootBinaryPath)
         let client = MCPClient(endpoint: endpoint)
         try await client.connect()
         defer {
             Task { await client.disconnect() }
-            try? loCoMoGuardedTeardown(scratchDir)
+            try? loCoMoGuardedTeardown(activeScratchDir)
         }
 
         let convLabel = "[locomo] conv=\(conversation.sampleID) (\(convQuestions.count) questions, "
-            + "\(conversation.allTurns.count) turns)"
+            + "\(conversation.allTurns.count) turns, cache=\(convCacheHit.map { $0 ? "hit" : "miss" } ?? "off"))"
         FileHandle.standardError.write(Data((convLabel + "\n").utf8))
 
-        // Ingest all turns from this conversation. Each turn becomes one filed memory.
+        // Ingest all turns from this conversation. Skipped on cache hit.
         // Content format: "speaker: text" — matches conversation transcript format.
-        var manifest: [LoCoMoManifestEntry] = []
-        var writeTimes: [Double] = []
-
+        let skipIngest = (convCacheHit == true)
+        if !skipIngest {
         for (sessionNumber, turn) in conversation.allTurns {
             let content = "\(turn.speaker): \(turn.text)"
             var writeArgs: [String: JSONValue] = [
@@ -290,17 +337,24 @@ func runLoCoMoQuestions(
             }
         }
 
+        } // end if !skipIngest (ingest loop)
         let writeMean = writeTimes.isEmpty ? 0.0
             : writeTimes.reduce(0, +) / Double(writeTimes.count)
 
         // Encode barrier (drain mode): after all conversation turns are ingested,
         // poll moot_drain_status until the encode queue is idle. Applied once per
         // estate (not per question — the estate is shared within a conversation).
-        if config.encodeBarrier == .drain {
+        // Skipped on cache hit (estate was already encoded when it was snapshotted).
+        if !skipIngest && config.encodeBarrier == .drain {
             let _ = await waitForEncodeDrain(
                 client: client,
                 label: "locomo conv=\(conversation.sampleID)"
             )
+        }
+
+        // Snapshot to cache on miss: estate is fully committed after ingest + encode.
+        if let ce = cacheEntryForSnapshot {
+            saveEstateCacheEntry(estateScratchDir: activeScratchDir, manifest: manifest, to: ce)
         }
 
         // DegeneracyGuard probe — once per estate (not per question).
@@ -338,7 +392,8 @@ func runLoCoMoQuestions(
                 guardHealthy: guardHealthy,
                 guardDiagnostic: guardDiagnostic,
                 turnsIngested: manifest.count,
-                writeMeanLatencySeconds: writeMean
+                writeMeanLatencySeconds: writeMean,
+                cacheHit: convCacheHit
             ))
         }
     }

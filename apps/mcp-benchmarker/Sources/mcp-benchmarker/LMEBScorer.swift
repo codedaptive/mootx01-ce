@@ -331,6 +331,10 @@ struct LMEBReportPerQuery: Codable, Sendable {
     let rankedDocIDs: [String]
     let relevantDocIDs: [String]
     let retrievedDocCount: Int
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// Whether this query's estate was served from the snapshot cache.
+    /// nil = --estate-cache off (caching not active for this run).
+    let cacheHit: Bool?
 
     enum CodingKeys: String, CodingKey {
         case queryID             = "query_id"
@@ -348,6 +352,7 @@ struct LMEBReportPerQuery: Codable, Sendable {
         case rankedDocIDs        = "ranked_doc_ids"
         case relevantDocIDs      = "relevant_doc_ids"
         case retrievedDocCount   = "retrieved_doc_count"
+        case cacheHit            = "cache_hit"
     }
 }
 
@@ -366,6 +371,13 @@ struct LMEBReport: Codable, Sendable {
     let perQuery: [LMEBReportPerQuery]
     /// Encode barrier mode used for ingest (drain / impatient / none). Additive key.
     let encodeBarrier: String
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// The estate cache mode used for this run: "off" or "reuse".
+    let estateCache: String
+    /// Total number of queries whose estate was served from the snapshot cache.
+    let cacheHits: Int
+    /// Total number of queries that triggered a fresh ingest + snapshot save.
+    let cacheMisses: Int
 
     enum CodingKeys: String, CodingKey {
         case runID         = "run_id"
@@ -377,6 +389,9 @@ struct LMEBReport: Codable, Sendable {
         case latency
         case perQuery      = "per_query"
         case encodeBarrier = "encode_barrier"
+        case estateCache   = "estate_cache"
+        case cacheHits     = "cache_hits"
+        case cacheMisses   = "cache_misses"
     }
 }
 
@@ -387,9 +402,16 @@ func buildLMEBReport(
     runLabel: String,
     evidenceTypes: [String],
     queriesLoaded: Int,
+    results: [LMEBQueryResult],
     scores: [LMEBQueryScore],
-    encodeBarrier: String
+    encodeBarrier: String,
+    estateCache: String
 ) -> LMEBReport {
+    // Build a queryID → raw result lookup for cacheHit propagation.
+    let resultByID = Dictionary(
+        uniqueKeysWithValues: results.map { ($0.queryID, $0) }
+    )
+
     let (aggregate, latency) = aggregateLMEBScores(scores)
     let guardExcluded = scores.filter { !$0.guardHealthy }.count
 
@@ -417,7 +439,8 @@ func buildLMEBReport(
     )
 
     let perQuery = scores.map { score in
-        LMEBReportPerQuery(
+        let raw = resultByID[score.queryID]
+        return LMEBReportPerQuery(
             queryID: score.queryID,
             docsIngested: score.docsIngested,
             guardHealthy: score.guardHealthy,
@@ -432,13 +455,18 @@ func buildLMEBReport(
             writeMeanLatencySeconds: score.writeMeanLatencySeconds,
             rankedDocIDs: score.rankedDocIDs,
             relevantDocIDs: score.relevantDocIDs,
-            retrievedDocCount: score.retrievedDocCount
+            retrievedDocCount: score.retrievedDocCount,
+            cacheHit: raw?.cacheHit ?? nil
         )
     }
 
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     let generatedAt = formatter.string(from: Date())
+
+    // Estate cache aggregate counts (additive — LME-07).
+    let cacheHits   = results.filter { $0.cacheHit == true  }.count
+    let cacheMisses = results.filter { $0.cacheHit == false }.count
 
     return LMEBReport(
         runID: UUID().uuidString,
@@ -449,7 +477,10 @@ func buildLMEBReport(
         aggregate: reportAggregate,
         latency: reportLatency,
         perQuery: perQuery,
-        encodeBarrier: encodeBarrier
+        encodeBarrier: encodeBarrier,
+        estateCache: estateCache,
+        cacheHits: cacheHits,
+        cacheMisses: cacheMisses
     )
 }
 

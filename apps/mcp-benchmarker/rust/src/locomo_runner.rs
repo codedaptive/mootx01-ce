@@ -33,6 +33,10 @@
 use crate::config::{EndpointConfig, EndpointRole, ResultFormat, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
+use crate::estate_cache::{
+    default_cache_dir, estate_cache_entry_path, moot_binary_fingerprint,
+    restore_estate_cache_entry, save_estate_cache_entry, EstateCacheMode,
+};
 use crate::json_value::JsonValue;
 use crate::locomo_corpus::{LoCoMoCorpus, LoCoMoQuestion};
 use crate::locomo_scorer::{LoCoMoManifestEntry, LoCoMoQuestionResult};
@@ -57,6 +61,10 @@ pub struct LoCoMoRunConfig {
     pub out_dir: Option<PathBuf>,
     /// Encode-queue synchronization strategy. Default EncodeBarrier::Drain.
     pub encode_barrier: EncodeBarrier,
+    /// Estate snapshot reuse mode. Default EstateCacheMode::Off.
+    pub estate_cache: EstateCacheMode,
+    /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
+    pub cache_dir: Option<PathBuf>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +246,20 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
     let total = indices.len();
     let mut all_results: Vec<LoCoMoQuestionResult> = Vec::with_capacity(total);
 
+    // ── Estate cache setup (computed once, reused per conversation) ───────────
+    // Binary fingerprint is mtime+size of the mootx01 binary — invalidates the
+    // cache automatically on rebuild (any `swift build` changes mtime).
+    let binary_fingerprint = if config.estate_cache == EstateCacheMode::Reuse {
+        moot_binary_fingerprint(&config.moot_binary)
+    } else {
+        String::new() // unused when cache is off
+    };
+    let resolved_cache_dir = config
+        .cache_dir
+        .as_deref()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| default_cache_dir(config.out_dir.as_deref()));
+
     // ── Process conversations in ascending index order ────────────────────────
     for (&conv_index, conv_questions) in &by_conv {
         let conversation = &corpus.conversations[conv_index];
@@ -250,30 +272,60 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
             all_turns.len()
         );
 
-        // ── Provision scratch estate ──────────────────────────────────────────
-        let scratch = match locomo_scratch_dir(config.seed, conv_index) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("  [locomo] scratch dir error for conv {conv_index}: {}", e.description);
-                // Emit guard-excluded results for all questions in this conversation.
-                for q in conv_questions {
-                    all_results.push(LoCoMoQuestionResult {
-                        question_id: q.question_id.clone(),
-                        category_label: q.category_label().to_string(),
-                        category: q.category,
-                        query_latency_seconds: 0.0,
-                        retrieved_uuids: vec![],
-                        manifest: vec![],
-                        evidence_dia_ids: q.evidence.clone(),
-                        guard_healthy: false,
-                        guard_diagnostic: Some(e.description.clone()),
-                        turns_ingested: 0,
-                        write_mean_latency_seconds: 0.0,
-                    });
-                }
-                continue;
-            }
+        // ── Provision scratch estate (cache-aware) ────────────────────────────
+        // Compute the cache entry path for this conversation (keyed by sample_id).
+        let cache_entry_opt: Option<PathBuf> = if config.estate_cache == EstateCacheMode::Reuse {
+            Some(estate_cache_entry_path(
+                &resolved_cache_dir,
+                "locomo",
+                "",
+                config.seed,
+                config.encode_barrier,
+                &binary_fingerprint,
+                &conversation.sample_id,
+            ))
+        } else {
+            None
         };
+
+        // Try cache restore. On hit: reuse cached estate + manifest, skip ingest.
+        let cache_restore: Option<(PathBuf, Vec<LoCoMoManifestEntry>)> =
+            cache_entry_opt.as_ref().and_then(|entry| {
+                restore_estate_cache_entry(entry, || {
+                    locomo_scratch_dir(config.seed, conv_index)
+                        .map_err(|e| e.description.clone())
+                })
+            });
+
+        let (scratch, manifest_from_cache, skip_ingest, conv_cache_hit) =
+            if let Some((s, m)) = cache_restore {
+                (s, m, true, Some(true))
+            } else {
+                let is_cache_miss = cache_entry_opt.is_some();
+                match locomo_scratch_dir(config.seed, conv_index) {
+                    Ok(s) => (s, Vec::new(), false, if is_cache_miss { Some(false) } else { None }),
+                    Err(e) => {
+                        eprintln!("  [locomo] scratch dir error for conv {conv_index}: {}", e.description);
+                        for q in conv_questions {
+                            all_results.push(LoCoMoQuestionResult {
+                                question_id: q.question_id.clone(),
+                                category_label: q.category_label().to_string(),
+                                category: q.category,
+                                query_latency_seconds: 0.0,
+                                retrieved_uuids: vec![],
+                                manifest: vec![],
+                                evidence_dia_ids: q.evidence.clone(),
+                                guard_healthy: false,
+                                guard_diagnostic: Some(e.description.clone()),
+                                turns_ingested: 0,
+                                write_mean_latency_seconds: 0.0,
+                                cache_hit: None,
+                            });
+                        }
+                        continue;
+                    }
+                }
+            };
 
         let verb_map = locomo_verb_map();
         let endpoint = locomo_endpoint_config(&scratch, &config.moot_binary);
@@ -294,42 +346,51 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                     guard_diagnostic: Some(e.description.clone()),
                     turns_ingested: 0,
                     write_mean_latency_seconds: 0.0,
+                    cache_hit: None,
                 });
             }
             continue;
         }
 
-        // ── Ingest all turns ──────────────────────────────────────────────────
-        let mut manifest: Vec<LoCoMoManifestEntry> = Vec::with_capacity(all_turns.len());
+        // ── Ingest all turns (skip on cache hit) ─────────────────────────────
+        // On a cache hit, manifest_from_cache already holds the manifest entries
+        // from the cached run; ingest is skipped entirely.
+        let mut manifest: Vec<LoCoMoManifestEntry> = if skip_ingest {
+            manifest_from_cache
+        } else {
+            Vec::with_capacity(all_turns.len())
+        };
         let mut write_latencies: Vec<f64> = Vec::with_capacity(all_turns.len());
         let mut ingest_error: Option<String> = None;
 
-        'ingest: for (session_number, turn) in &all_turns {
-            // Content format: "speaker: text" — matches LoCoMo transcript convention.
-            let content = format!("{}: {}", turn.speaker, turn.text);
-            match ingest_turn(&mut client, &verb_map, &content, config.encode_barrier) {
-                Ok((uuid, latency)) => {
-                    // Derive 0-based turn index within the session.
-                    let turn_index = manifest
-                        .iter()
-                        .filter(|e| e.session_number == *session_number)
-                        .count();
-                    manifest.push(LoCoMoManifestEntry {
-                        uuid,
-                        dia_id: turn.dia_id.clone(),
-                        session_number: *session_number,
-                        turn_index,
-                        speaker: turn.speaker.clone(),
-                    });
-                    write_latencies.push(latency);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  [locomo] ingest error for conv {} turn {}: {}",
-                        conversation.sample_id, turn.dia_id, e.description
-                    );
-                    ingest_error = Some(e.description);
-                    break 'ingest;
+        if !skip_ingest {
+            'ingest: for (session_number, turn) in &all_turns {
+                // Content format: "speaker: text" — matches LoCoMo transcript convention.
+                let content = format!("{}: {}", turn.speaker, turn.text);
+                match ingest_turn(&mut client, &verb_map, &content, config.encode_barrier) {
+                    Ok((uuid, latency)) => {
+                        // Derive 0-based turn index within the session.
+                        let turn_index = manifest
+                            .iter()
+                            .filter(|e| e.session_number == *session_number)
+                            .count();
+                        manifest.push(LoCoMoManifestEntry {
+                            uuid,
+                            dia_id: turn.dia_id.clone(),
+                            session_number: *session_number,
+                            turn_index,
+                            speaker: turn.speaker.clone(),
+                        });
+                        write_latencies.push(latency);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  [locomo] ingest error for conv {} turn {}: {}",
+                            conversation.sample_id, turn.dia_id, e.description
+                        );
+                        ingest_error = Some(e.description);
+                        break 'ingest;
+                    }
                 }
             }
         }
@@ -340,14 +401,24 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
             write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
         };
 
-        // ── Drain barrier (EncodeBarrier::Drain mode) ─────────────────────────
-        // Wait for background encoding to drain before issuing any recall query.
-        if config.encode_barrier == EncodeBarrier::Drain {
+        // ── Drain barrier (EncodeBarrier::Drain mode; skipped on cache hit) ───
+        // Wait for background encoding before issuing recall queries.
+        // On a cache hit the estate is already committed — no drain needed.
+        if !skip_ingest && config.encode_barrier == EncodeBarrier::Drain {
             wait_for_encode_drain(
                 &mut client,
                 &format!("locomo conv-{}", conv_index),
                 300.0,
             );
+        }
+
+        // ── Snapshot to cache (on cache miss, after drain) ────────────────────
+        // The estate is fully committed at this point — safe to snapshot.
+        // Cache original is never queried; each run uses a fresh copy.
+        if !skip_ingest {
+            if let Some(ref entry) = cache_entry_opt {
+                save_estate_cache_entry(&scratch, &manifest, entry);
+            }
         }
 
         // ── DegeneracyGuard probe (once per estate) ───────────────────────────
@@ -417,6 +488,9 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                 guard_diagnostic: guard_diagnostic.clone(),
                 turns_ingested: manifest.len(),
                 write_mean_latency_seconds: write_mean,
+                // All questions in the same conversation share the same cache_hit status:
+                // the cache key is per-conversation (not per-question).
+                cache_hit: conv_cache_hit,
             });
         }
 

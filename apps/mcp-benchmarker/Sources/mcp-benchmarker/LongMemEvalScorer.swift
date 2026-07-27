@@ -373,6 +373,11 @@ struct LMEReportPerQuestion: Codable, Sendable {
     let denseDiscrimination: String?
     /// Raw "recall_provenance: ..." diagnostic line from the dense-arm response.
     let denseRecallProvenance: String?
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// Whether this question's estate was served from the snapshot cache.
+    /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved),
+    /// nil = --estate-cache off (caching not active for this run).
+    let cacheHit: Bool?
 
     enum CodingKeys: String, CodingKey {
         case questionID              = "question_id"
@@ -396,6 +401,7 @@ struct LMEReportPerQuestion: Codable, Sendable {
         case exactRecallProvenance   = "exact_recall_provenance"
         case denseDiscrimination     = "dense_discrimination"
         case denseRecallProvenance   = "dense_recall_provenance"
+        case cacheHit                = "cache_hit"
     }
 }
 
@@ -515,6 +521,15 @@ struct LMEReport: Codable, Sendable {
     /// Aggregate lane health summary from per-question discrimination and provenance
     /// diagnostic lines. Additive key.
     let laneHealth: LMEReportLaneHealth
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// The estate cache mode used for this run: "off" or "reuse".
+    let estateCache: String
+    /// Total number of questions whose estate was served from the snapshot cache.
+    /// Zero when estateCache == "off".
+    let cacheHits: Int
+    /// Total number of questions that triggered a fresh ingest + snapshot save.
+    /// Zero when estateCache == "off".
+    let cacheMisses: Int
 
     enum CodingKeys: String, CodingKey {
         case runID           = "run_id"
@@ -528,6 +543,9 @@ struct LMEReport: Codable, Sendable {
         case tokenEfficiency = "token_efficiency"
         case encodeBarrier   = "encode_barrier"
         case laneHealth      = "lane_health"
+        case estateCache     = "estate_cache"
+        case cacheHits       = "cache_hits"
+        case cacheMisses     = "cache_misses"
     }
 }
 
@@ -672,7 +690,10 @@ func buildLMEReport(
             exactDiscrimination: exactDisc,
             exactRecallProvenance: exactProv,
             denseDiscrimination: denseDisc,
-            denseRecallProvenance: denseProv
+            denseRecallProvenance: denseProv,
+            // Thread cacheHit from the raw result (available via resultByID lookup).
+            // Nil when cache was off for this run.
+            cacheHit: raw?.cacheHit ?? nil
         )
     }
 
@@ -823,6 +844,12 @@ func buildLMEReport(
     formatter.formatOptions = [.withInternetDateTime]
     let generatedAt = formatter.string(from: Date())
 
+    // Estate cache aggregate counts (additive — LME-07).
+    // Computed from the raw results array so the report faithfully records
+    // what happened this run without requiring the score struct to carry it.
+    let cacheHits   = results.filter { $0.cacheHit == true  }.count
+    let cacheMisses = results.filter { $0.cacheHit == false }.count
+
     return LMEReport(
         runID: UUID().uuidString,
         runLabel: config.runLabel,
@@ -834,7 +861,10 @@ func buildLMEReport(
         perQuestion: perQuestion,
         tokenEfficiency: tokenEfficiency,
         encodeBarrier: config.encodeBarrier.rawValue,
-        laneHealth: laneHealth
+        laneHealth: laneHealth,
+        estateCache: config.estateCache.rawValue,
+        cacheHits: cacheHits,
+        cacheMisses: cacheMisses
     )
 }
 

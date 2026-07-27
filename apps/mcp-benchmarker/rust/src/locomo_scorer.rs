@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, HashSet};
 /// to correlate retrieved UUIDs → dia_ids for turn-level recall scoring.
 ///
 /// Twin of Swift `LoCoMoManifestEntry`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoCoMoManifestEntry {
     /// UUID returned by moot_file_memory ("filed memory <UUID>").
     pub uuid: String,
@@ -81,6 +81,9 @@ pub struct LoCoMoQuestionResult {
     pub turns_ingested: usize,
     /// Mean write latency across all turns for this conversation's estate.
     pub write_mean_latency_seconds: f64,
+    /// Whether this question's estate was served from the snapshot cache.
+    /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
+    pub cache_hit: Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -392,6 +395,11 @@ pub struct LoCoMoReportPerQuestion {
     pub ranked_dia_ids: Vec<String>,
     pub evidence_dia_ids: Vec<String>,
     pub retrieved_uuid_count: usize,
+    /// Whether this question's estate was served from the snapshot cache.
+    /// Some(true) = hit, Some(false) = miss, None = cache off.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
 }
 
 /// The full LoCoMo run report.
@@ -411,6 +419,15 @@ pub struct LoCoMoReport {
     /// New in LoCoMo, not present in LME reports (additive key).
     pub category_breakdown: Vec<LoCoMoReportCategoryEntry>,
     pub latency: LoCoMoReportLatency,
+    /// Estate cache mode used for this run: "off" | "reuse".
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub estate_cache: String,
+    /// Number of questions whose estate was served from the snapshot cache.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_hits: usize,
+    /// Number of questions that triggered a new snapshot (cache miss).
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_misses: usize,
     pub per_question: Vec<LoCoMoReportPerQuestion>,
 }
 
@@ -420,7 +437,11 @@ pub struct LoCoMoReport {
 
 /// Assembles a `LoCoMoReport` from run metadata, corpus statistics, and scores.
 ///
-/// Twin of Swift `buildLoCoMoReport(config:corpus:scores:)`.
+/// `results` carries the raw per-question results (including `cache_hit`) needed
+/// to populate the `cache_hit` per-question field and the aggregate `cache_hits` /
+/// `cache_misses` counts. `estate_cache` is the cache-mode string ("off" | "reuse").
+///
+/// Twin of Swift `buildLoCoMoReport(config:corpus:scores:results:estateCache:)`.
 pub fn build_locomo_report(
     run_id: String,
     run_label: String,
@@ -429,9 +450,13 @@ pub fn build_locomo_report(
     questions_loaded: usize,
     adversarial_excluded: usize,
     scores: &[LoCoMoQuestionScore],
+    cache_hit_by_id: &std::collections::HashMap<String, Option<bool>>,
+    estate_cache: String,
 ) -> LoCoMoReport {
     let (aggregate, categories, latency) = aggregate_locomo_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
+    let cache_hits:   usize = cache_hit_by_id.values().filter(|&&v| v == Some(true)).count();
+    let cache_misses: usize = cache_hit_by_id.values().filter(|&&v| v == Some(false)).count();
 
     let corpus_stats = LoCoMoReportCorpusStats {
         questions_loaded,
@@ -490,6 +515,8 @@ pub fn build_locomo_report(
             ranked_dia_ids:          s.ranked_dia_ids.clone(),
             evidence_dia_ids:        s.evidence_dia_ids.clone(),
             retrieved_uuid_count:    s.retrieved_uuid_count,
+            // Look up cache_hit from the raw results map (key = question_id).
+            cache_hit: cache_hit_by_id.get(&s.question_id).copied().flatten(),
         })
         .collect();
 
@@ -502,6 +529,9 @@ pub fn build_locomo_report(
         aggregate: report_aggregate,
         category_breakdown,
         latency: report_latency,
+        estate_cache,
+        cache_hits,
+        cache_misses,
         per_question,
     }
 }
