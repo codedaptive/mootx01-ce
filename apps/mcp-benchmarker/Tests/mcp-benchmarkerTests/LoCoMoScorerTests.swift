@@ -239,7 +239,8 @@ final class LoCoMoScorerTests: XCTestCase {
             guardHealthy: true,
             guardDiagnostic: nil,
             turnsIngested: 2,
-            writeMeanLatencySeconds: 0.01
+            writeMeanLatencySeconds: 0.01,
+            cacheHit: nil
         )
         let score = scoreLoCoMoQuestion(result)
         XCTAssertEqual(score.questionID, "test-q-0")
@@ -264,7 +265,8 @@ final class LoCoMoScorerTests: XCTestCase {
             guardHealthy: false,
             guardDiagnostic: "backend returned identical results for all queries",
             turnsIngested: 1,
-            writeMeanLatencySeconds: 0.01
+            writeMeanLatencySeconds: 0.01,
+            cacheHit: nil
         )
         let score = scoreLoCoMoQuestion(result)
         XCTAssertFalse(score.guardHealthy)

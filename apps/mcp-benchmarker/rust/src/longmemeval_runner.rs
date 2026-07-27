@@ -17,6 +17,10 @@ use crate::config::{EndpointConfig, EndpointRole, Transport, VerbMap};
 use crate::config::ResultFormat;
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
+use crate::estate_cache::{
+    default_cache_dir, estate_cache_entry_path, moot_binary_fingerprint,
+    restore_estate_cache_entry, save_estate_cache_entry, EstateCacheMode,
+};
 use crate::json_value::JsonValue;
 use crate::longmemeval_corpus::{LmeCorpus, LmeTurn};
 use crate::longmemeval_judge::{lme_grade_judge_answer, lme_judge_prompt, lme_run_judge};
@@ -66,6 +70,10 @@ pub struct LmeRunConfig {
     /// issuing recall queries — prevents background-encoding races from producing
     /// artificially low recall scores.
     pub encode_barrier: EncodeBarrier,
+    /// Estate snapshot reuse mode. Default EstateCacheMode::Off.
+    pub estate_cache: EstateCacheMode,
+    /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
+    pub cache_dir: Option<PathBuf>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,8 +368,27 @@ pub fn run_one_question(
     arm: &LmeArm,
     judge_cmd: Option<&str>,
     encode_barrier: EncodeBarrier,
+    cache_entry: Option<&Path>,
 ) -> Result<LmeQuestionResult, MCPError> {
-    let scratch = lme_scratch_dir(seed, question_index)?;
+    // ── Cache restore attempt (when cache mode is Reuse) ──────────────────────
+    // Try to restore a previously-snapshotted estate for this question. On hit,
+    // skip ingest and drain entirely. On miss, fall through to normal ingest.
+    let cache_restore: Option<(PathBuf, Vec<LmeManifestEntry>)> =
+        cache_entry.and_then(|entry| {
+            restore_estate_cache_entry(entry, || {
+                lme_scratch_dir(seed, question_index).map_err(|e| e.description.clone())
+            })
+        });
+
+    let (scratch, mut manifest, skip_ingest, cache_hit): (PathBuf, Vec<LmeManifestEntry>, bool, Option<bool>) =
+        if let Some((s, m)) = cache_restore {
+            (s, m, true, Some(true))
+        } else {
+            let is_cache_miss = cache_entry.is_some();
+            let s = lme_scratch_dir(seed, question_index)?;
+            (s, Vec::new(), false, if is_cache_miss { Some(false) } else { None })
+        };
+
     let guard = DegeneracyGuard::new();
     let verb_map = lme_verb_map();
     let endpoint = lme_endpoint_config(&scratch, moot_binary);
@@ -373,36 +400,38 @@ pub fn run_one_question(
         e
     })?;
 
-    // ── Ingest haystack ───────────────────────────────────────────────────────
-    let mut manifest: Vec<LmeManifestEntry> = Vec::new();
+    // ── Ingest haystack (skip on cache hit) ───────────────────────────────────
     let mut write_latencies: Vec<f64> = Vec::new();
-    let mut turns_ingested: usize = 0;
+    // On cache hit, turns_ingested reflects the manifest loaded from cache.
+    let mut turns_ingested: usize = if skip_ingest { manifest.len() } else { 0 };
 
-    'sessions: for (session_index, (session_id, session_turns)) in
-        haystack_session_ids.iter().zip(haystack_sessions.iter()).enumerate()
-    {
-        for (turn_index, turn) in session_turns.iter().enumerate() {
-            // Build the content string: role-tagged turn text.
-            let content = format!("[{}] {}", turn.role, turn.content);
-            match ingest_turn(&mut client, &verb_map, &content, encode_barrier) {
-                Ok((uuid, latency)) => {
-                    manifest.push(LmeManifestEntry {
-                        uuid,
-                        session_id: session_id.clone(),
-                        turn_index,
-                        session_index,
-                        role: turn.role.clone(),
-                    });
-                    write_latencies.push(latency);
-                    turns_ingested += 1;
-                }
-                Err(e) => {
-                    // Ingest failure → short-circuit; guard will fire.
-                    eprintln!(
-                        "  [lme] ingest error for {question_id} session {session_id} turn {turn_index}: {}",
-                        e.description
-                    );
-                    break 'sessions;
+    if !skip_ingest {
+        'sessions: for (session_index, (session_id, session_turns)) in
+            haystack_session_ids.iter().zip(haystack_sessions.iter()).enumerate()
+        {
+            for (turn_index, turn) in session_turns.iter().enumerate() {
+                // Build the content string: role-tagged turn text.
+                let content = format!("[{}] {}", turn.role, turn.content);
+                match ingest_turn(&mut client, &verb_map, &content, encode_barrier) {
+                    Ok((uuid, latency)) => {
+                        manifest.push(LmeManifestEntry {
+                            uuid,
+                            session_id: session_id.clone(),
+                            turn_index,
+                            session_index,
+                            role: turn.role.clone(),
+                        });
+                        write_latencies.push(latency);
+                        turns_ingested += 1;
+                    }
+                    Err(e) => {
+                        // Ingest failure → short-circuit; guard will fire.
+                        eprintln!(
+                            "  [lme] ingest error for {question_id} session {session_id} turn {turn_index}: {}",
+                            e.description
+                        );
+                        break 'sessions;
+                    }
                 }
             }
         }
@@ -414,12 +443,21 @@ pub fn run_one_question(
         write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
     };
 
-    // ── Drain barrier (EncodeBarrier::Drain mode) ─────────────────────────────
+    // ── Drain barrier (EncodeBarrier::Drain mode; skipped on cache hit) ───────
     // After all ingest completes, wait for background encoding to drain before
     // issuing any recall query. Prevents background-encoding races that produce
-    // artificially low recall scores. Twin of Swift drain barrier call.
-    if encode_barrier == EncodeBarrier::Drain {
+    // artificially low recall scores. On a cache hit the estate is already
+    // committed — no drain needed.
+    if !skip_ingest && encode_barrier == EncodeBarrier::Drain {
         wait_for_encode_drain(&mut client, &format!("lme {}", question_id), 300.0);
+    }
+
+    // ── Snapshot to cache (on cache miss, after drain) ────────────────────────
+    // Estate is fully committed at this point — safe to snapshot.
+    if !skip_ingest {
+        if let Some(entry) = cache_entry {
+            save_estate_cache_entry(&scratch, &manifest, entry);
+        }
     }
 
     // ── Probe for degeneracy guard ────────────────────────────────────────────
@@ -577,6 +615,7 @@ pub fn run_one_question(
         exact_judge_correct,
         dense_judge_answer,
         dense_judge_correct,
+        cache_hit,
     })
 }
 
@@ -604,6 +643,18 @@ pub fn run_lme_questions(
     let total = indices.len();
     let mut results: Vec<LmeQuestionResult> = Vec::with_capacity(total);
 
+    // ── Estate cache setup (once per run) ────────────────────────────────────
+    let binary_fingerprint = if config.estate_cache == EstateCacheMode::Reuse {
+        moot_binary_fingerprint(&config.moot_binary)
+    } else {
+        String::new()
+    };
+    let resolved_cache_dir = config
+        .cache_dir
+        .as_deref()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| default_cache_dir(config.out_dir.as_deref()));
+
     for (progress_index, &question_index) in indices.iter().enumerate() {
         let q = &corpus.questions[question_index];
         eprintln!(
@@ -613,6 +664,22 @@ pub fn run_lme_questions(
             q.question_id,
             q.question_type
         );
+
+        // Compute cache entry path for this question (only when cache mode is Reuse).
+        // Variant is part of the key — different variants have different corpora.
+        let cache_entry_opt: Option<PathBuf> = if config.estate_cache == EstateCacheMode::Reuse {
+            Some(estate_cache_entry_path(
+                &resolved_cache_dir,
+                "longmemeval",
+                &config.variant,
+                config.seed,
+                config.encode_barrier,
+                &binary_fingerprint,
+                &q.question_id,
+            ))
+        } else {
+            None
+        };
 
         match run_one_question(
             &q.question_id,
@@ -628,6 +695,7 @@ pub fn run_lme_questions(
             &config.arm,
             config.judge_cmd.as_deref(),
             config.encode_barrier,
+            cache_entry_opt.as_deref(),
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
@@ -661,6 +729,7 @@ pub fn run_lme_questions(
                     exact_judge_correct: None,
                     dense_judge_answer: None,
                     dense_judge_correct: None,
+                    cache_hit: None,
                 });
             }
         }

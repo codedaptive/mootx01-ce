@@ -210,7 +210,8 @@ struct LMEScorerInfrastructureTests {
             exactDiscrimination: "discrimination: high — clear top result.",
             exactRecallProvenance: "recall_provenance: dense_lane:active degraded_stages:none",
             denseDiscrimination: nil,
-            denseRecallProvenance: nil
+            denseRecallProvenance: nil,
+            cacheHit: nil
         )
         let tokenEfficiency = LMEReportTokenEfficiency(
             exactArmMeanTokens: 1200.0, denseArmMeanTokens: 300.0,
@@ -234,7 +235,10 @@ struct LMEScorerInfrastructureTests {
             latency: latency, perQuestion: [pq],
             tokenEfficiency: tokenEfficiency,
             encodeBarrier: "drain",
-            laneHealth: laneHealth
+            laneHealth: laneHealth,
+            estateCache: "off",
+            cacheHits: 0,
+            cacheMisses: 0
         )
 
         let encoder = JSONEncoder()
@@ -307,7 +311,8 @@ struct LMEScorerInfrastructureTests {
             exactJudgeAnswer: nil,
             exactJudgeCorrect: nil,
             denseJudgeAnswer: nil,
-            denseJudgeCorrect: nil
+            denseJudgeCorrect: nil,
+            cacheHit: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == false)
@@ -344,7 +349,8 @@ struct LMEScorerInfrastructureTests {
             exactJudgeAnswer: nil,
             exactJudgeCorrect: nil,
             denseJudgeAnswer: nil,
-            denseJudgeCorrect: nil
+            denseJudgeCorrect: nil,
+            cacheHit: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == true)

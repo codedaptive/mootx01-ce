@@ -163,7 +163,9 @@ struct LongMemEvalRunnerTests {
             runLabel: "test",
             arm: .both,
             judgeCmd: nil,
-            encodeBarrier: .drain
+            encodeBarrier: .drain,
+            estateCache: .off,
+            cacheDir: nil
         )
         #expect(config.encodeBarrier == .drain)
         #expect(config.encodeBarrier.rawValue == "drain")

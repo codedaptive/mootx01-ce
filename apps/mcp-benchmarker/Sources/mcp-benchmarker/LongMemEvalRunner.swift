@@ -140,6 +140,10 @@ struct LMEQuestionResult: Sendable {
     /// True when denseJudgeAnswer contains the normalized gold answer as a substring.
     /// nil when denseJudgeAnswer is nil.
     let denseJudgeCorrect: Bool?
+    /// Whether this question's estate was served from the snapshot cache.
+    /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
+    /// nil = --estate-cache off (cache not in use for this run).
+    let cacheHit: Bool?
 }
 
 // MARK: - Run config
@@ -176,6 +180,12 @@ struct LMERunConfig: Sendable {
     /// encoding (impatient), a post-ingest drain barrier (drain, default), or no
     /// barrier (none). Recorded in the report JSON as "encode_barrier".
     let encodeBarrier: EncodeBarrier
+    /// Estate snapshot reuse mode (--estate-cache). Defaults to .off (fresh ingest
+    /// every run). .reuse snapshots after ingest+encode and copies on cache hits.
+    let estateCache: EstateCacheMode
+    /// Root directory for estate snapshots (--cache-dir). nil = <outDir>/estate-cache
+    /// (or <cwd>/estate-cache when outDir is also nil).
+    let cacheDir: URL?
 }
 
 // MARK: - Scratch estate management
@@ -289,6 +299,12 @@ func runLMEQuestions(
     var results: [LMEQuestionResult] = []
     results.reserveCapacity(sliced.count)
 
+    // Cache-mode setup (reuse only; zero cost when estateCache == .off).
+    // Binary fingerprint is computed once per run so all questions share it.
+    let binaryFingerprint: String = config.estateCache == .reuse
+        ? mootBinaryFingerprint(config.mootBinaryPath) : ""
+    let resolvedCacheDir: URL = config.cacheDir ?? defaultCacheDir(outDir: config.outDir)
+
     // Shared-estate path: provision once and reuse for all questions.
     var sharedScratch: URL?
     var sharedClient: MCPClient?
@@ -312,10 +328,45 @@ func runLMEQuestions(
     }
 
     for question in sliced {
-        // Per-question estate: provision, use, tear down.
+        // --- Cache-aware estate provisioning ---
+        // For fresh-per-question runs in reuse mode, attempt a cache restore before
+        // provisioning a new estate. On hit: the restored scratch dir is ready for
+        // querying without re-ingest. On miss: normal fresh ingest + snapshot after drain.
+        var manifest: [LMEManifestEntry] = []
+        var writeTimes: [Double] = []
+        var questionCacheHit: Bool? = nil  // nil when cache is off
+        var cacheEntryForSnapshot: URL? = nil  // set on miss; used for snapshot after drain
+
         let (client, scratch): (MCPClient, URL?)
         if config.freshPerQuestion {
-            let freshScratch = try lmeScratchDir()
+            var freshScratch: URL
+
+            if config.estateCache == .reuse {
+                let cacheEntry = estateCacheEntryURL(
+                    cacheDir: resolvedCacheDir,
+                    benchmark: "lme",
+                    variant: config.variant,
+                    seed: config.seed,
+                    encodeBarrier: config.encodeBarrier,
+                    binaryFingerprint: binaryFingerprint,
+                    unitID: question.questionID
+                )
+                if let (restored, hit): (URL, [LMEManifestEntry]) =
+                    restoreEstateCacheEntry(from: cacheEntry, scratchDirFactory: lmeScratchDir) {
+                    // Cache hit: restored scratch dir contains the post-ingest estate.
+                    freshScratch = restored
+                    manifest = hit  // pre-populate manifest from snapshot
+                    questionCacheHit = true
+                } else {
+                    // Cache miss: fresh estate; snapshot to cache after ingest + drain.
+                    freshScratch = try lmeScratchDir()
+                    questionCacheHit = false
+                    cacheEntryForSnapshot = cacheEntry
+                }
+            } else {
+                freshScratch = try lmeScratchDir()
+            }
+
             let endpoint = try lmeEndpointConfig(scratchDir: freshScratch,
                                                   mootBinaryPath: config.mootBinaryPath)
             let freshClient = MCPClient(endpoint: endpoint)
@@ -335,8 +386,9 @@ func runLMEQuestions(
         }
 
         // Ingest haystack sessions: write each turn via live moot_file_memory.
-        var manifest: [LMEManifestEntry] = []
-        var writeTimes: [Double] = []
+        // Skipped on cache hit (manifest and estate already restored from snapshot).
+        let skipIngest = (questionCacheHit == true)
+        if !skipIngest {
         for (sessionIndex, session) in question.haystackSessions.enumerated() {
             let sessionID = question.haystackSessionIDs[sessionIndex]
             for (turnIndex, turn) in session.enumerated() {
@@ -387,6 +439,14 @@ func runLMEQuestions(
                 client: client,
                 label: "lme \(question.questionID)"
             )
+        }
+        } // end if !skipIngest
+
+        // Snapshot to cache on cache miss: after ingest + encode barrier, the estate
+        // is in a fully-committed state. Copy it to the cache entry so future runs
+        // with the same key skip ingest entirely.
+        if let ce = cacheEntryForSnapshot, let s = scratch {
+            saveEstateCacheEntry(estateScratchDir: s, manifest: manifest, to: ce)
         }
 
         // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.
@@ -507,7 +567,8 @@ func runLMEQuestions(
             exactJudgeAnswer: exactJudgeAnswer,
             exactJudgeCorrect: exactJudgeCorrect,
             denseJudgeAnswer: denseJudgeAnswer,
-            denseJudgeCorrect: denseJudgeCorrect
+            denseJudgeCorrect: denseJudgeCorrect,
+            cacheHit: questionCacheHit
         ))
     }
 
