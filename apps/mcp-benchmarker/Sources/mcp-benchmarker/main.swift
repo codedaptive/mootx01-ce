@@ -815,6 +815,7 @@ func runLongMemEval(_ args: [String]) async throws {
     let loadedMsg = "[longmemeval] loaded \(corpus.questions.count) questions "
         + "(\(corpus.abstentionCount) abstentions excluded)\n"
     FileHandle.standardOutput.write(Data(loadedMsg.utf8))
+    FileHandle.standardOutput.write(Data("[longmemeval] encode-barrier: \(lmeEncodeBarrier.rawValue)\n".utf8))
 
     let runConfig = LMERunConfig(
         mootBinaryPath: mootBinary,
@@ -1002,6 +1003,7 @@ func runLoCoMo(_ args: [String]) async throws {
         "[locomo] loaded \(corpus.conversations.count) conversations, "
         + "\(corpus.questions.count) scoreable questions "
         + "(\(corpus.adversarialCount) adversarial excluded)\n").utf8))
+    FileHandle.standardOutput.write(Data("[locomo] encode-barrier: \(loCoMoEncodeBarrier.rawValue)\n".utf8))
 
     let runConfig = LoCoMoRunConfig(
         mootBinaryPath: mootBinary,
@@ -1142,6 +1144,7 @@ func runLMEB(_ args: [String]) async throws {
     let loadedMsg = "[lmeb] loaded \(corpus.queryCount) queries, "
         + "\(corpus.docCount) docs, \(corpus.qrelCount) qrels\n"
     FileHandle.standardOutput.write(Data(loadedMsg.utf8))
+    FileHandle.standardOutput.write(Data("[lmeb] encode-barrier: \(lmebEncodeBarrier.rawValue)\n".utf8))
 
     let runLabel = "lmeb-seed\(seed)"
     let runConfig = LMEBRunConfig(
