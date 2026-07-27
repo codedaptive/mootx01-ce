@@ -93,6 +93,10 @@ struct LMEBRunConfig: Sendable {
     let outDir: URL?
     /// Run label for the report filename and header.
     let runLabel: String
+    /// Encode-queue synchronization strategy. Controls whether ingest uses inline
+    /// encoding (impatient), a post-ingest drain barrier (drain, default), or no
+    /// barrier (none). Recorded in the report JSON as "encode_barrier".
+    let encodeBarrier: EncodeBarrier
 }
 
 // MARK: - Scratch estate management
@@ -198,10 +202,11 @@ func runLMEBQueries(
             try? lmebGuardedTeardown(scratchURL)
         }
 
-        // Ingest each candidate doc via live moot_file_memory.
-        // n=true: inline-encoding barrier — encoding completes synchronously before
-        // the write returns, so the recall query cannot race the encoding queue.
-        // This is the same correctness invariant as the LME harness.
+        // Ingest each candidate doc via live moot_file_memory. The encode barrier
+        // strategy is set by config.encodeBarrier: impatient sends impatient:true per
+        // write, drain polls moot_drain_status after full ingest, none has no barrier.
+        // Previously this code sent "n":true, which was silently ignored by the product
+        // because the correct key is "impatient".
         var manifest: [LMEBManifestEntry] = []
         var writeTimes: [Double] = []
 
@@ -217,10 +222,9 @@ func runLMEBQueries(
             for (k, v) in lmebMootVerbMap.constantArgs {
                 writeArgs[k] = .string(v)
             }
-            // Inline encoding: impatient=true ensures encoding completes before write returns.
-            // PORT NOTE (1.1.x): parameter renamed from "n" to "impatient" in
-            // ToolDispatch.swift runFileMemory (D-A inline-encode path). Same semantics.
-            writeArgs["impatient"] = .bool(true)
+            if config.encodeBarrier == .impatient {
+                writeArgs["impatient"] = .bool(true)
+            }
 
             let writeStart = Date()
             let writeResult = try await client.callTool(
@@ -234,6 +238,15 @@ func runLMEBQueries(
             if let uuid = writeResult.writeAssignedID {
                 manifest.append(LMEBManifestEntry(uuid: uuid, docID: docID))
             }
+        }
+
+        // Encode barrier (drain mode): poll moot_drain_status after all candidate
+        // docs are ingested, waiting for idle before the retrieval query.
+        if config.encodeBarrier == .drain {
+            let _ = await waitForEncodeDrain(
+                client: client,
+                label: "lmeb q=\(query.id)"
+            )
         }
 
         // DegeneracyGuard probe: issue ≥3 distinct probes before scoring.

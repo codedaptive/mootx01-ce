@@ -363,6 +363,16 @@ struct LMEReportPerQuestion: Codable, Sendable {
     let answerSessionIDs: [String]
     /// Raw count of UUIDs returned by moot_memory_search (before session dedup).
     let retrievedUUIDCount: Int
+    // MARK: Provenance capture (additive keys — Defect 3)
+    /// Raw "discrimination: ..." diagnostic line from the exact-arm response.
+    /// Nil when the exact arm was not active or the line was absent.
+    let exactDiscrimination: String?
+    /// Raw "recall_provenance: ..." diagnostic line from the exact-arm response.
+    let exactRecallProvenance: String?
+    /// Raw "discrimination: ..." diagnostic line from the dense-arm response.
+    let denseDiscrimination: String?
+    /// Raw "recall_provenance: ..." diagnostic line from the dense-arm response.
+    let denseRecallProvenance: String?
 
     enum CodingKeys: String, CodingKey {
         case questionID              = "question_id"
@@ -382,6 +392,10 @@ struct LMEReportPerQuestion: Codable, Sendable {
         case rankedSessionIDs        = "ranked_session_ids"
         case answerSessionIDs        = "answer_session_ids"
         case retrievedUUIDCount      = "retrieved_uuid_count"
+        case exactDiscrimination     = "exact_discrimination"
+        case exactRecallProvenance   = "exact_recall_provenance"
+        case denseDiscrimination     = "dense_discrimination"
+        case denseRecallProvenance   = "dense_recall_provenance"
     }
 }
 
@@ -412,15 +426,65 @@ struct LMEReportTokenEfficiency: Codable, Sendable {
     let exactHitsPer1kTokens: Double?
     /// Evidence hits per 1000 tokens for the dense arm.
     let denseHitsPer1kTokens: Double?
+    // MARK: Per-result efficiency (additive keys — Defect 2)
+    /// Mean tokens per result for the exact arm, computed as
+    /// mean(payload_tokens / result_count) across all questions where result_count > 0.
+    /// Reveals per-item token cost, independent of how many results were returned.
+    let exactTokensPerResult: Double?
+    /// Mean tokens per result for the dense arm.
+    let denseTokensPerResult: Double?
+    /// Ratio of dense to exact tokens-per-result. Captures the per-item cost
+    /// difference independently of list length — the "arithmetic-cancellation"
+    /// metric (dense/exact per-result can differ significantly from dense/exact
+    /// mean tokens when the two arms return different result counts).
+    let denseExactTokensPerResultRatio: Double?
 
     enum CodingKeys: String, CodingKey {
-        case exactArmMeanTokens    = "exact_arm_mean_tokens"
-        case denseArmMeanTokens    = "dense_arm_mean_tokens"
-        case denseExactTokenRatio  = "dense_exact_token_ratio"
-        case exactEvidenceHitRate  = "exact_evidence_hit_rate"
-        case denseEvidenceHitRate  = "dense_evidence_hit_rate"
-        case exactHitsPer1kTokens  = "exact_hits_per_1k_tokens"
-        case denseHitsPer1kTokens  = "dense_hits_per_1k_tokens"
+        case exactArmMeanTokens             = "exact_arm_mean_tokens"
+        case denseArmMeanTokens             = "dense_arm_mean_tokens"
+        case denseExactTokenRatio           = "dense_exact_token_ratio"
+        case exactEvidenceHitRate           = "exact_evidence_hit_rate"
+        case denseEvidenceHitRate           = "dense_evidence_hit_rate"
+        case exactHitsPer1kTokens           = "exact_hits_per_1k_tokens"
+        case denseHitsPer1kTokens           = "dense_hits_per_1k_tokens"
+        case exactTokensPerResult           = "exact_tokens_per_result"
+        case denseTokensPerResult           = "dense_tokens_per_result"
+        case denseExactTokensPerResultRatio = "dense_exact_tokens_per_result_ratio"
+    }
+}
+
+/// Aggregate lane health summary derived from per-question discrimination and
+/// recall_provenance diagnostic lines appended by moot_memory_search /
+/// moot_recall_distilled. Additive key "lane_health" in LMEReport.
+///
+/// Discrimination levels (from RecallDiscrimination.swift): high, medium, low,
+/// not_found, n/a.
+///
+/// Dense lane dark: "recall_provenance: dense_lane:dark:..." means the semantic
+/// vector lane was unavailable for that query (encoding incomplete or lane
+/// disabled). Queries with dark dense lanes use lexical-only ranking, which has
+/// lower quality than semantic ranking on large estates.
+struct LMEReportLaneHealth: Codable, Sendable {
+    /// Per-level count of exact-arm discrimination signals across all questions.
+    /// Keys are the level tokens: "high", "medium", "low", "not_found", "n/a".
+    let exactDiscriminationDistribution: [String: Int]
+    /// Per-level count of dense-arm discrimination signals.
+    let denseDiscriminationDistribution: [String: Int]
+    /// Number of exact-arm queries where the dense lane was dark
+    /// (recall_provenance line contains "dense_lane:dark:").
+    let exactDenseLaneDarkCount: Int
+    /// Number of exact-arm queries where degraded stages were present
+    /// (recall_provenance line contains "degraded_stages:" but not "degraded_stages:none").
+    let exactDegradedCount: Int
+    /// Same for the dense arm.
+    let denseDegradedCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case exactDiscriminationDistribution = "exact_discrimination_distribution"
+        case denseDiscriminationDistribution = "dense_discrimination_distribution"
+        case exactDenseLaneDarkCount         = "exact_dense_lane_dark_count"
+        case exactDegradedCount              = "exact_degraded_count"
+        case denseDegradedCount              = "dense_degraded_count"
     }
 }
 
@@ -446,18 +510,90 @@ struct LMEReport: Codable, Sendable {
     let perQuestion: [LMEReportPerQuestion]
     /// Token efficiency metrics (LME-03, additive per BENCHMARKER_OPTIMIZER_CONTRACT.md).
     let tokenEfficiency: LMEReportTokenEfficiency
+    /// Encode barrier mode used for ingest (drain / impatient / none). Additive key.
+    let encodeBarrier: String
+    /// Aggregate lane health summary from per-question discrimination and provenance
+    /// diagnostic lines. Additive key.
+    let laneHealth: LMEReportLaneHealth
 
     enum CodingKeys: String, CodingKey {
-        case runID          = "run_id"
-        case runLabel       = "run_label"
+        case runID           = "run_id"
+        case runLabel        = "run_label"
         case variant
-        case generatedAt    = "generated_at"
-        case corpusStats    = "corpus_stats"
+        case generatedAt     = "generated_at"
+        case corpusStats     = "corpus_stats"
         case aggregate
         case latency
-        case perQuestion    = "per_question"
+        case perQuestion     = "per_question"
         case tokenEfficiency = "token_efficiency"
+        case encodeBarrier   = "encode_barrier"
+        case laneHealth      = "lane_health"
     }
+}
+
+// MARK: - Provenance and result-count parsing
+
+/// Extracts the result count N from the first line of a moot_memory_search or
+/// moot_recall_distilled response payload. Formats:
+///   "found N memory(s)"
+///   "found N memory(s) for: ..."
+///   "found N distilled factoid(s)"
+/// Returns nil when the payload is empty or begins with a different prefix
+/// (e.g. "no memories found" or the estate is empty).
+func lmeParseResultCount(_ payloadText: String) -> Int? {
+    guard !payloadText.isEmpty else { return nil }
+    // The result count is always on the first line of the payload.
+    let firstLine = payloadText.components(separatedBy: "\n").first ?? ""
+    let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+    // Must begin with "found " — other response formats (e.g. empty estate)
+    // start differently and should return nil.
+    guard trimmed.hasPrefix("found ") else { return nil }
+    // Second word is the count: "found 7 memory(s)" → parts[1] == "7".
+    let parts = trimmed.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+    guard parts.count >= 2, let n = Int(parts[1]) else { return nil }
+    return n
+}
+
+/// Extracts the "discrimination: ..." diagnostic line from a recall response payload.
+/// This line is appended by RecallDiscrimination.resultLine() and appears at the
+/// end of the response after all result items.
+/// Returns the full line text, or nil when absent (e.g. tool returned an error or
+/// the backend version predates the discrimination signal).
+func lmeParseDiscriminationLine(_ payloadText: String) -> String? {
+    for line in payloadText.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("discrimination:") { return trimmed }
+    }
+    return nil
+}
+
+/// Extracts the "recall_provenance: ..." diagnostic line from a recall response payload.
+/// Format (from AriaMcpKit ToolDispatch.swift):
+///   "recall_provenance: dense_lane:active degraded_stages:none"
+///   "recall_provenance: dense_lane:dark:encode_backlog degraded_stages:none"
+/// Returns the full line, or nil when absent.
+func lmeParseRecallProvenanceLine(_ payloadText: String) -> String? {
+    for line in payloadText.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("recall_provenance:") { return trimmed }
+    }
+    return nil
+}
+
+/// Extracts the discrimination level token from a full discrimination line for
+/// per-level aggregation in LMEReportLaneHealth.
+/// Level is the word immediately after "discrimination: " and before " — ".
+/// Examples:
+///   "discrimination: high — clear top result."  → "high"
+///   "discrimination: n/a — single/zero results." → "n/a"
+///   "discrimination: not_found — query contains..." → "not_found"
+func lmeExtractDiscriminationLevel(_ line: String) -> String {
+    guard line.hasPrefix("discrimination:") else { return "unknown" }
+    let rest = String(line.dropFirst("discrimination:".count))
+        .trimmingCharacters(in: .whitespaces)
+    // Level ends at the first space or em-dash character.
+    let parts = rest.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+    return parts.first.map(String.init) ?? "unknown"
 }
 
 // MARK: - Report builder
@@ -500,8 +636,22 @@ func buildLMEReport(
         writeMeanSeconds: latency.writeMeanSeconds
     )
 
+    // Build a questionID → raw result lookup so the provenance parser can access
+    // exactPayloadText / densePayloadText per question while iterating scores.
+    let resultByID = Dictionary(
+        uniqueKeysWithValues: results.map { ($0.questionID, $0) }
+    )
+
     let perQuestion = scores.map { score in
-        LMEReportPerQuestion(
+        let raw = resultByID[score.questionID]
+        // Parse provenance diagnostic lines from each arm's raw payload text.
+        // These lines are appended by the product at the end of every response;
+        // they may be absent on older product versions — all fields are Optional.
+        let exactDisc = raw?.exactPayloadText.flatMap { lmeParseDiscriminationLine($0) }
+        let exactProv = raw?.exactPayloadText.flatMap { lmeParseRecallProvenanceLine($0) }
+        let denseDisc = raw?.densePayloadText.flatMap { lmeParseDiscriminationLine($0) }
+        let denseProv = raw?.densePayloadText.flatMap { lmeParseRecallProvenanceLine($0) }
+        return LMEReportPerQuestion(
             questionID: score.questionID,
             questionType: score.questionType,
             turnsIngested: score.turnsIngested,
@@ -518,7 +668,11 @@ func buildLMEReport(
             writeMeanLatencySeconds: score.writeMeanLatencySeconds,
             rankedSessionIDs: score.rankedSessionIDs,
             answerSessionIDs: score.answerSessionIDs,
-            retrievedUUIDCount: score.retrievedUUIDCount
+            retrievedUUIDCount: score.retrievedUUIDCount,
+            exactDiscrimination: exactDisc,
+            exactRecallProvenance: exactProv,
+            denseDiscrimination: denseDisc,
+            denseRecallProvenance: denseProv
         )
     }
 
@@ -586,6 +740,32 @@ func buildLMEReport(
         return r * 1000.0 / m
     }()
 
+    // ── Tokens per result (Defect 2 additive keys) ───────────────────────────────
+    // mean(payload_tokens / result_count) across questions with result_count > 0.
+    // This is NOT the same as mean_tokens / mean_result_count — that ratio cancels
+    // out when the two arms return similar total byte counts but very different
+    // result counts (the arithmetic-cancellation case).
+    var exactTokensPerResultList: [Double] = []
+    var denseTokensPerResultList: [Double] = []
+    for result in results {
+        if let text = result.exactPayloadText,
+           let n = lmeParseResultCount(text), n > 0 {
+            exactTokensPerResultList.append(Double(lmeEstimateTokens(text)) / Double(n))
+        }
+        if let text = result.densePayloadText,
+           let n = lmeParseResultCount(text), n > 0 {
+            denseTokensPerResultList.append(Double(lmeEstimateTokens(text)) / Double(n))
+        }
+    }
+    let exactTokensPerResult: Double? = exactTokensPerResultList.isEmpty ? nil
+        : exactTokensPerResultList.reduce(0, +) / Double(exactTokensPerResultList.count)
+    let denseTokensPerResult: Double? = denseTokensPerResultList.isEmpty ? nil
+        : denseTokensPerResultList.reduce(0, +) / Double(denseTokensPerResultList.count)
+    let denseExactTokensPerResultRatio: Double? = {
+        guard let e = exactTokensPerResult, let d = denseTokensPerResult, e > 0 else { return nil }
+        return d / e
+    }()
+
     let tokenEfficiency = LMEReportTokenEfficiency(
         exactArmMeanTokens:   exactMean,
         denseArmMeanTokens:   denseMean,
@@ -593,7 +773,50 @@ func buildLMEReport(
         exactEvidenceHitRate: exactHitRate,
         denseEvidenceHitRate: denseHitRate,
         exactHitsPer1kTokens: exactHitsPer1k,
-        denseHitsPer1kTokens: denseHitsPer1k
+        denseHitsPer1kTokens: denseHitsPer1k,
+        exactTokensPerResult: exactTokensPerResult,
+        denseTokensPerResult: denseTokensPerResult,
+        denseExactTokensPerResultRatio: denseExactTokensPerResultRatio
+    )
+
+    // ── Lane health summary (Defect 3 additive key) ──────────────────────────────
+    // Aggregate per-question discrimination levels and provenance flags.
+    var exactDiscDist: [String: Int] = [:]
+    var denseDiscDist: [String: Int] = [:]
+    var exactDarkCount = 0
+    var exactDegradedCount = 0
+    var denseDegradedCount = 0
+    for result in results {
+        if let text = result.exactPayloadText {
+            if let dl = lmeParseDiscriminationLine(text) {
+                let level = lmeExtractDiscriminationLevel(dl)
+                exactDiscDist[level, default: 0] += 1
+            }
+            if let pl = lmeParseRecallProvenanceLine(text) {
+                if pl.contains("dense_lane:dark:") { exactDarkCount += 1 }
+                if pl.contains("degraded_stages:") && !pl.contains("degraded_stages:none") {
+                    exactDegradedCount += 1
+                }
+            }
+        }
+        if let text = result.densePayloadText {
+            if let dl = lmeParseDiscriminationLine(text) {
+                let level = lmeExtractDiscriminationLevel(dl)
+                denseDiscDist[level, default: 0] += 1
+            }
+            if let pl = lmeParseRecallProvenanceLine(text) {
+                if pl.contains("degraded_stages:") && !pl.contains("degraded_stages:none") {
+                    denseDegradedCount += 1
+                }
+            }
+        }
+    }
+    let laneHealth = LMEReportLaneHealth(
+        exactDiscriminationDistribution: exactDiscDist,
+        denseDiscriminationDistribution: denseDiscDist,
+        exactDenseLaneDarkCount: exactDarkCount,
+        exactDegradedCount: exactDegradedCount,
+        denseDegradedCount: denseDegradedCount
     )
 
     let formatter = ISO8601DateFormatter()
@@ -609,7 +832,9 @@ func buildLMEReport(
         aggregate: reportAggregate,
         latency: reportLatency,
         perQuestion: perQuestion,
-        tokenEfficiency: tokenEfficiency
+        tokenEfficiency: tokenEfficiency,
+        encodeBarrier: config.encodeBarrier.rawValue,
+        laneHealth: laneHealth
     )
 }
 

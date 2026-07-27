@@ -61,6 +61,7 @@
 //!   divergence + content-order primitives they build on ARE ported here.
 
 pub mod config;
+pub mod encode_barrier;
 pub mod degeneracy_guard;
 pub mod divergence;
 pub mod json_value;

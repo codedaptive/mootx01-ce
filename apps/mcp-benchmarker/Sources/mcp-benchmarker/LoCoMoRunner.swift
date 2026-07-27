@@ -113,6 +113,10 @@ struct LoCoMoRunConfig: Sendable {
     let outDir: URL?
     /// Run label for the report filename and header.
     let runLabel: String
+    /// Encode-queue synchronization strategy. Controls whether ingest uses inline
+    /// encoding (impatient), a post-ingest drain barrier (drain, default), or no
+    /// barrier (none). Recorded in the report JSON as "encode_barrier".
+    let encodeBarrier: EncodeBarrier
 }
 
 // MARK: - Scratch estate management
@@ -181,7 +185,7 @@ func loCoMoEndpointConfig(scratchDir: URL, mootBinaryPath: String) throws -> End
 ///   1. Select and shuffle the question list.
 ///   2. For each conversation that has ≥1 selected question:
 ///      a. Provision a fresh scratch estate.
-///      b. Ingest all turns from that conversation (n=true for inline encoding).
+///      b. Ingest all turns from that conversation per the EncodeBarrier mode.
 ///      c. Run the DegeneracyGuard probe.
 ///      d. For each selected question in this conversation, issue a query.
 ///      e. Tear down the estate.
@@ -253,12 +257,15 @@ func runLoCoMoQuestions(
             for (k, v) in loCoMoMootVerbMap.constantArgs {
                 writeArgs[k] = .string(v)
             }
-            // impatient=true: inline encoding barrier. Prevents background-encoding race
-            // where recall queries issue before encoding completes.
-            // Origin: LME-01 correctness finding (COMPLETION_LME-01.md).
-            // PORT NOTE (1.1.x): parameter renamed from "n" to "impatient" in
-            // ToolDispatch.swift runFileMemory (D-A inline-encode path). Same semantics.
-            writeArgs["impatient"] = .bool(true)
+            // Encode barrier: impatient mode sends impatient:true so the backend
+            // encodes inline before each write returns. For drain mode (default),
+            // writes proceed without the flag and a single drain barrier is applied
+            // after all turns are ingested. For none, no barrier — documents the race.
+            // Previously this code sent "n":true, which was silently ignored by the
+            // product because the correct key is "impatient".
+            if config.encodeBarrier == .impatient {
+                writeArgs["impatient"] = .bool(true)
+            }
 
             let writeStart = Date()
             let writeResult = try await client.callTool(
@@ -285,6 +292,16 @@ func runLoCoMoQuestions(
 
         let writeMean = writeTimes.isEmpty ? 0.0
             : writeTimes.reduce(0, +) / Double(writeTimes.count)
+
+        // Encode barrier (drain mode): after all conversation turns are ingested,
+        // poll moot_drain_status until the encode queue is idle. Applied once per
+        // estate (not per question — the estate is shared within a conversation).
+        if config.encodeBarrier == .drain {
+            let _ = await waitForEncodeDrain(
+                client: client,
+                label: "locomo conv=\(conversation.sampleID)"
+            )
+        }
 
         // DegeneracyGuard probe — once per estate (not per question).
         let guard_ = DegeneracyGuard()

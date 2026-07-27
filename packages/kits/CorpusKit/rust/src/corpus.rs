@@ -1077,52 +1077,103 @@ impl Corpus {
         // pre-6a-iii single-provider ingest. Each slot embeds independently under
         // its own model_id; the VectorStore/BasisStore keys keep the N providers'
         // rows apart. `all_chunks` is loaded lazily and shared across slots that
-        // take the first-ingest train path (the corpus snapshot is identical for
-        // every provider). Mirrors Swift's `Corpus.ingest` per-slot loop.
+        // take the first-ingest or growth-retrain path (the corpus snapshot is
+        // identical for every provider). Mirrors Swift's `Corpus.ingest` per-slot loop.
+
+        // Kinsta-verified per-doc ingest degeneracy fix (2026-07-26):
+        //
+        // The original code trained the basis on the FIRST document only
+        // (checking `!has_basis`). Any per-document ingest thereafter folded
+        // new chunks onto the frozen rank-1 SVD, so all subsequent document
+        // and query vectors collapsed to the same direction. Recall dropped
+        // from 0.853 to 0.56 any@5 (LongMemEval 50q).
+        //
+        // The fix uses three-state basis logic that mirrors Swift's growth-retrain
+        // approach (see `CorpusKit.swift` for the full explanation):
+        //
+        //   (1) No basis persisted          → first-ingest train on current corpus.
+        //   (2) Basis exists, young corpus  → retrain if corpus grew to ≥ 2×
+        //       (trained_chunk_count < PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD
+        //        AND current_chunks >= trained_chunk_count * 2). Stops once the
+        //        corpus is stable. Maximum ⌊log₂(THRESHOLD)⌋ retrains.
+        //   (3) Basis stable (trained_chunk_count ≥ THRESHOLD) → fold-in only.
+        //        Above the threshold only explicit `reindex` retrains.
+        //
+        // The constant is chosen to give ~6 auto-retrains max before the basis
+        // stabilises (2^6 = 64 > 50), keeping the impatient path from re-training
+        // indefinitely on large corpora while ensuring dense coverage on small ones.
+        const PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD: usize = 50;
+
         let mut cached_all_chunks: Option<Vec<Chunk>> = None;
         // Fold-in slots are deferred to a concurrent compute phase (phase 2);
-        // first-ingest training stays serial in this loop (phase 1).
+        // training (first-ingest and growth-retrain) stays serial in phase 1.
         let mut fold_in_slots: Vec<usize> = Vec::new();
         for slot_index in 0..self.slots.len() {
-            // First-ingest auto-train (mission 6a-ii-β): when this slot has a
-            // fresh-basis blob (trainable provider) AND no basis has been
-            // persisted yet, train a fresh basis on the CURRENT corpus snapshot
-            // (which now includes the just-inserted chunks) and re-embed every
-            // chunk under the trained basis. This is the ONLY implicit train
-            // trigger. Subsequent ingests (once a basis exists) take the fold-in
-            // path below: `embed_float` projects new chunks onto the FROZEN basis
-            // without retraining — LSA/NMF cannot incrementally refactor a basis,
-            // so a per-ingest retrain would be both wrong and wasteful. Explicit
-            // `reindex` retrains on growth. The auto-train gate is the `!has_basis`
-            // check below, NOT the factory blob's presence: a reopened-from-basis
-            // slot keeps its factory blob (frozen-after-restart fix) but already
-            // has a persisted basis, so it falls through to the fold-in path and
-            // does not auto-train on ingest. Mirrors Swift's first-ingest branch.
+            // Three-state basis decision for trainable providers.
+            //
+            // The fresh_basis_blob presence is the trainability gate: only
+            // providers that carry a factory blob (LSA, NMF, RI, PPMI) enter
+            // the training path. Dense-only and deterministic providers skip
+            // directly to fold_in_slots.
+            //
+            // Borrow-checker note: model_id and model_version are extracted as
+            // owned Strings in a scoped block so the slot borrow is released
+            // before calling active_chunks() or train_and_persist_basis(), both
+            // of which take &mut self.
             if self.slots[slot_index].fresh_basis_blob.is_some() {
-                let slot = &self.slots[slot_index];
-                let has_basis = self
+                let (model_id, model_version) = {
+                    let slot = &self.slots[slot_index];
+                    (slot.model_id.clone(), Self::slot_model_version(slot)?)
+                };
+
+                let persisted = self
                     .basis_store
-                    .load(&slot.model_id, &Self::slot_model_version(slot)?)?
-                    .is_some();
-                if !has_basis {
+                    .load(&model_id, &model_version)?;
+
+                let needs_retrain: bool = if persisted.is_none() {
+                    // Case (1): no basis yet — first-ingest train.
+                    true
+                } else if let Some(ref basis) = persisted {
+                    if basis.trained_chunk_count < PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD {
+                        // Case (2): young basis — check 2× growth.
+                        // Load corpus lazily (shared across slots for this ingest).
+                        if cached_all_chunks.is_none() {
+                            cached_all_chunks = Some(self.active_chunks()?);
+                        }
+                        let current_count = cached_all_chunks
+                            .as_ref()
+                            .expect("just populated")
+                            .len();
+                        current_count >= basis.trained_chunk_count * 2
+                    } else {
+                        // Case (3): stable basis — fold-in only.
+                        false
+                    }
+                } else {
+                    // persisted.is_some() but the if-let arm didn't match —
+                    // impossible in safe Rust, but satisfies the exhaustiveness check.
+                    false
+                };
+
+                if needs_retrain {
                     if cached_all_chunks.is_none() {
                         // Active chunks only — exclude removed sources from the train.
                         cached_all_chunks = Some(self.active_chunks()?);
                     }
                     let all_chunks = cached_all_chunks.as_ref().expect("just populated");
                     // Train a fresh basis + persist, then re-embed the whole
-                    // corpus under the freshly-trained basis so chunks ingested
-                    // before this first-ingest train share the same basis.
+                    // corpus under the freshly-trained basis so all chunks share
+                    // the same basis direction space.
                     self.train_and_persist_basis(slot_index, all_chunks, filed_at_secs)?;
                     self.reembed_chunks(slot_index, all_chunks, filed_at_secs)?;
                     continue;
                 }
             }
 
-            // Fold-in path: a basis already exists (or the provider is not
-            // trainable). Embed only the NEW chunks; deferred to the concurrent
-            // compute phase below (`embed_float` projects new chunks onto the
-            // frozen basis — no retrain — for trainable providers).
+            // Fold-in path: basis is stable or provider is not trainable. Embed
+            // only the NEW chunks; deferred to the concurrent compute phase below
+            // (`embed_float` projects new chunks onto the frozen basis — no retrain
+            // — for trainable providers).
             fold_in_slots.push(slot_index);
         }
 
@@ -2029,12 +2080,16 @@ impl Corpus {
     /// system clock. Training is a pure function of the corpus texts and the
     /// provider's fixed seeds (the seam contract).
     ///
-    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger is
-    /// the first-ingest auto-train in `ingest`. Deciding WHEN to call reindex on
-    /// growth (the vocab-growth trigger that reads the maintained counts anchor)
-    /// is the caller's policy (the autonomic governor) — a documented follow-up
-    /// knob, not wired in this method. The maintained counts table persists the
-    /// vocab/doc growth anchors so that policy can compute the delta cheaply.
+    /// `reindex` is the EXPLICIT retrain trigger. Implicit train triggers in
+    /// `ingest` are:
+    ///   (a) first-ingest: no basis persisted yet → train on the current corpus.
+    ///   (b) growth retrain (Kinsta-fix): basis is young (trained_chunk_count below
+    ///       `PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD`) AND corpus has grown to
+    ///       ≥ 2× trained_chunk_count → retrain on the full corpus. Stops once the
+    ///       basis is stable. Prevents a rank-1 LSA SVD on a 1-doc first-ingest corpus.
+    ///
+    /// Above the stability threshold, `ingest` only folds new chunks onto the
+    /// frozen basis; this method is the only way to retrain for a mature corpus.
     ///
     /// `now_millis`: Unix epoch in milliseconds for the basis `trained_at` stamp
     /// (converted to seconds) and the re-embedded vectors' filing timestamps.

@@ -1080,57 +1080,112 @@ public actor Corpus {
         // serially. For N=1 this is byte-identical to the single-provider ingest.
         // Each slot embeds independently under its own modelID; the
         // VectorStore/BasisStore keys keep the N providers' rows apart.
-        // `allChunks` is loaded lazily and shared across slots that take the
-        // first-ingest train path (the corpus snapshot is the same for every
-        // provider).
+        // `allChunks` is loaded lazily and shared across slots that need it for
+        // either first-ingest train or growth retrain (the corpus snapshot is the
+        // same for every provider in the same ingest call).
+        //
+        // Minimum chunk count the per-doc auto-train grows toward before this
+        // slot's basis is considered stable. Below this count a 2× corpus growth
+        // triggers a retrain, mirroring Phase 1b's full-corpus-first strategy for
+        // the impatient encode path.
+        //
+        // Failure mode prevented: a single-document first ingest produces a
+        // rank-1 LSA SVD (degenerate basis). Without growth retrains, every
+        // subsequent per-doc ingest folds onto this 1-doc basis, collapsing all
+        // query vectors to ~zero cosine — the Kinsta-verified regression where
+        // any@5 recall fell from 0.853 to 0.56 on LongMemEval 50q.
+        //
+        // Growth retrains stop once trainedChunkCount reaches this threshold;
+        // above it only explicit reindex(now:) retrains (same contract as before
+        // for a mature corpus). The constant matches Phase 1b's design intent and
+        // produces at most log₂(50) ≈ 6 retrains before the basis is stable.
+        let perDocAutoRetrainStableChunkThreshold = 50
+
         var cachedAllChunks: [Chunk]?
         var foldInSlotIndices: [Int] = []
         for index in slots.indices {
-            // First-ingest auto-train (mission 6a-ii-β): when this slot has a
-            // fresh-basis blob (trainable provider) AND no basis has been
-            // persisted yet, train a fresh basis on the CURRENT corpus snapshot
-            // (which now includes the just-inserted chunks) and re-embed every
-            // chunk under the trained basis. This is the ONLY implicit train
-            // trigger. Subsequent ingests (once a basis exists) take the fold-in
-            // path: `embedFloat` projects new chunks onto the FROZEN basis
-            // without retraining — LSA/NMF cannot incrementally refactor a basis,
-            // so a per-ingest retrain would be both wrong and wasteful. Explicit
-            // `reindex(now:)` retrains on growth. The auto-train gate is the
-            // `!hasBasis` check below, NOT the presence of the factory blob: a
-            // reopened-from-basis corpus keeps its factory blob (the frozen-after-
-            // restart fix) but already has a persisted basis, so it falls through
-            // to the fold-in path here and does not auto-train on ingest. Training
-            // stays SERIAL — it mutates the slot's basis and re-embeds the whole
-            // corpus; only the fold-in compute (phase 2) is parallelised.
+            // Three-state basis decision (mission fix for Kinsta-verified bug):
+            //
+            // (1) First-ingest: no persisted basis yet → train from scratch on
+            //     the full CURRENT corpus snapshot (which includes just-inserted
+            //     chunks) and re-embed. Same as the original first-ingest path.
+            //
+            // (2) Growth retrain: a basis exists but was trained on too few
+            //     chunks (< stableThreshold) AND the live corpus has grown to
+            //     ≥ 2× that count → retrain on the full corpus. This prevents
+            //     a rank-1 LSA SVD trained on doc-1-only from persisting as the
+            //     frozen basis for the entire early-growth phase. Retrains thin
+            //     out exponentially (1→2→4→8→…) and stop at the threshold.
+            //     Each retrain starts from freshBasisBlob (the empty-basis
+            //     factory) so the result is from-scratch, not additive.
+            //
+            //     NOTE: "per-ingest retrain would be both wrong and wasteful"
+            //     (the original comment) refers to retraining on EVERY ingest
+            //     after the basis is stable — that still does not happen. Growth
+            //     retrains are capped at log₂(stableThreshold) total.
+            //
+            // (3) Fold-in: basis is stable (≥ stableThreshold) or hasn't grown
+            //     2× → project new chunks onto the frozen basis without retrain.
+            //     Explicit reindex(now:) retrains on demand.
+            //
+            // The auto-train gate is the persistedBasis check below, NOT the
+            // factory blob's presence: a reopened-from-basis corpus keeps its
+            // factory blob (frozen-after-restart fix) and already has a persisted
+            // basis with trainedChunkCount ≥ stableThreshold (after reindex), so
+            // it falls through to fold-in and does not auto-train. Training stays
+            // SERIAL — it mutates the slot's basis and re-embeds the whole corpus;
+            // only the fold-in compute (phase 2) is parallelised. Mirrors Phase 1b.
             if slots[index].freshBasisBlob != nil {
                 let slotProvider = slots[index].provider
-                let hasBasis = try await basisStore.load(
+                let persistedBasis = try await basisStore.load(
                     modelID: slotProvider.modelID,
                     modelVersion: slotProvider.modelVersion
-                ) != nil
-                if !hasBasis {
+                )
+
+                let needsRetrain: Bool
+                if persistedBasis == nil {
+                    // Case (1): no basis yet — first-ingest train.
+                    needsRetrain = true
+                } else if let basis = persistedBasis,
+                          basis.trainedChunkCount < perDocAutoRetrainStableChunkThreshold {
+                    // Case (2): young basis — load corpus (lazily) and check 2× growth.
+                    // Active chunks only: a removed source must not resurface.
                     let allChunks: [Chunk]
                     if let cached = cachedAllChunks {
                         allChunks = cached
                     } else {
-                        // Active chunks only — a removed source must not be
-                        // re-trained/re-embedded back into recall.
+                        allChunks = try await activeChunks()
+                        cachedAllChunks = allChunks
+                    }
+                    needsRetrain = allChunks.count >= basis.trainedChunkCount * 2
+                } else {
+                    needsRetrain = false
+                }
+
+                if needsRetrain {
+                    // Load corpus snapshot if not already loaded above (case 1
+                    // skips the young-basis check). Cached so the second slot in
+                    // a multi-slot corpus pays zero extra I/O.
+                    let allChunks: [Chunk]
+                    if let cached = cachedAllChunks {
+                        allChunks = cached
+                    } else {
                         allChunks = try await activeChunks()
                         cachedAllChunks = allChunks
                     }
                     try await trainAndPersistBasis(slotIndex: index, chunks: allChunks, now: now)
                     // Re-embed the whole corpus under the freshly-trained basis
-                    // so the chunks ingested before this first-ingest train (if
-                    // any) are embedded on the same basis as the new ones.
-                    // reembedChunks is delete-first, so no duplicate rows.
+                    // so chunks ingested before this retrain fold onto the new,
+                    // non-degenerate basis. reembedChunks is delete-first, so no
+                    // duplicate rows accumulate.
                     try await reembedChunks(slotIndex: index, allChunks, now: now)
                     continue
                 }
             }
 
-            // Fold-in path: a basis already exists (or the provider is not
-            // trainable). Embed only the NEW chunks; for a trainable provider
-            // `embedFloat` projects them onto the frozen basis (no retrain).
+            // Fold-in path: basis is stable or provider is not trainable. Embed
+            // only the NEW chunks; for a trainable provider `embedFloat` projects
+            // them onto the frozen basis (no retrain).
             foldInSlotIndices.append(index)
         }
 
@@ -1744,14 +1799,17 @@ public actor Corpus {
     /// provider's fixed seeds (the seam contract), so the persisted basis and
     /// the resulting vectors are reproducible and cross-port identical.
     ///
-    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger
-    /// is the first-ingest auto-train inside `ingest` (when a trainable provider
-    /// has no basis yet). A growth-threshold auto-retrain — retraining once the
-    /// live chunk count grows materially past `trained_chunk_count` — is a
-    /// DOCUMENTED FOLLOW-UP KNOB, deliberately NOT wired here: LSA/NMF cannot
-    /// incrementally refactor a frozen basis, so an automatic mid-stream retrain
-    /// policy needs its own decision. The staleness anchor (`trained_chunk_count`)
-    /// is persisted so that future policy can compute the delta.
+    /// `reindex` is the EXPLICIT retrain trigger. Implicit train triggers in
+    /// `ingest` are:
+    ///   (a) first-ingest: no basis persisted yet → train on the current corpus.
+    ///   (b) growth retrain (Kinsta-fix): basis is young (trainedChunkCount below
+    ///       `perDocAutoRetrainStableChunkThreshold`) AND corpus has grown to ≥ 2×
+    ///       trainedChunkCount → retrain on the full corpus. Stops once the basis
+    ///       is stable. Prevents a rank-1 LSA SVD from persisting on a 1-doc
+    ///       first-ingest corpus.
+    ///
+    /// Above the stability threshold, `ingest` only folds new chunks onto the
+    /// frozen basis; this method is the only way to retrain for a mature corpus.
     ///
     /// - Parameter now: wall-clock time for the basis `trained_at` stamp and the
     ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;

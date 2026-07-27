@@ -17,6 +17,7 @@
 //! exposed by the Rust CLI (see the crate-level parity notes).
 
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
+use mcp_benchmarker_rs::encode_barrier::EncodeBarrier;
 use mcp_benchmarker_rs::lmeb_corpus::load_lmeb_corpus;
 use mcp_benchmarker_rs::lmeb_runner::{run_lmeb_queries, LmebRunConfig};
 use mcp_benchmarker_rs::lmeb_scorer::{build_lmeb_report, score_lmeb_query, write_lmeb_report};
@@ -189,8 +190,15 @@ fn run_report(args: &[String]) -> Result<(), String> {
 }
 
 fn run_longmemeval(args: &[String]) -> Result<(), String> {
-    let corpus_path = require_option("--corpus", args)?;
-    let binary = option_value("--binary", args)
+    // --corpus is the Rust-native flag; --data-dir is the Swift twin spelling.
+    // Accept both: --data-dir takes priority when both are present.
+    let corpus_path = option_value("--data-dir", args)
+        .or_else(|| option_value("--corpus", args))
+        .map(str::to_string)
+        .ok_or_else(|| "missing required option --corpus (or --data-dir)".to_string())?;
+    // --binary is the Rust-native flag; --mootx01-binary is the Swift twin spelling.
+    let binary = option_value("--mootx01-binary", args)
+        .or_else(|| option_value("--binary", args))
         .map(str::to_string)
         .or_else(discover_moot_binary)
         .ok_or_else(|| {
@@ -212,6 +220,12 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         "dense" => LmeArm::Dense,
         "both"  => LmeArm::Both,
         other   => return Err(format!("--arm must be 'exact', 'dense', or 'both'; got '{other}'")),
+    };
+    // --encode-barrier drain|impatient|none (default: drain).
+    // Controls encode-queue synchronization strategy.
+    let encode_barrier = match option_value("--encode-barrier", args) {
+        Some(s) => EncodeBarrier::from_str(s).map_err(|e| e)?,
+        None => EncodeBarrier::default(),
     };
     // Judge mode (LME-03 Part 4): optional LLM-judged QA. Off by default.
     // The command receives the prompt on stdin and writes its answer on stdout.
@@ -239,6 +253,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         out_dir: out_dir.clone(),
         arm,
         judge_cmd: judge_cmd.clone(),
+        encode_barrier,
     };
 
     // Keep results alongside scores so the transcript writer can read judge fields,
@@ -292,6 +307,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         run_label,
         variant.clone(),
         generated_at,
+        encode_barrier.as_str().to_string(),
         corpus.questions.len() + corpus.abstention_count,
         corpus.abstention_count,
         &scores,
@@ -395,8 +411,15 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
 }
 
 fn run_locomo(args: &[String]) -> Result<(), String> {
-    let corpus_path = require_option("--corpus", args)?;
-    let binary = option_value("--binary", args)
+    // --corpus is the Rust-native flag; --data-file is the Swift twin spelling.
+    // Accept both: --data-file takes priority when both are present.
+    let corpus_path = option_value("--data-file", args)
+        .or_else(|| option_value("--corpus", args))
+        .map(str::to_string)
+        .ok_or_else(|| "missing required option --corpus (or --data-file)".to_string())?;
+    // --binary is the Rust-native flag; --mootx01-binary is the Swift twin spelling.
+    let binary = option_value("--mootx01-binary", args)
+        .or_else(|| option_value("--binary", args))
         .map(str::to_string)
         .or_else(discover_moot_binary)
         .ok_or_else(|| {
@@ -411,6 +434,11 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         .unwrap_or(0);
     let label = option_value("--label", args).map(str::to_string);
     let out_dir = option_value("--out", args).map(PathBuf::from);
+    // --encode-barrier drain|impatient|none (default: drain).
+    let encode_barrier = match option_value("--encode-barrier", args) {
+        Some(s) => EncodeBarrier::from_str(s).map_err(|e| e)?,
+        None => EncodeBarrier::default(),
+    };
 
     eprintln!("[locomo] loading corpus from {corpus_path}");
     let corpus = load_locomo_corpus(Path::new(&corpus_path))
@@ -436,6 +464,7 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         offset,
         label: label.clone(),
         out_dir: out_dir.clone(),
+        encode_barrier,
     };
 
     let results = run_locomo_questions(&corpus, &run_config);
@@ -452,6 +481,7 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         run_id,
         run_label,
         generated_at,
+        encode_barrier.as_str().to_string(),
         corpus.questions.len() + corpus.adversarial_count,
         corpus.adversarial_count,
         &scores,
@@ -491,10 +521,17 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
 
 fn run_lmeb(args: &[String]) -> Result<(), String> {
     // ── Required ──────────────────────────────────────────────────────────────
-    let data_dir = require_option("--data-dir", args)?;
+    // --data-dir is the Rust-native flag; --corpus is the Swift twin spelling.
+    // Accept both: --data-dir takes priority when both are present.
+    let data_dir = option_value("--data-dir", args)
+        .or_else(|| option_value("--corpus", args))
+        .map(str::to_string)
+        .ok_or_else(|| "missing required option --data-dir (or --corpus)".to_string())?;
 
     // ── Optional ──────────────────────────────────────────────────────────────
-    let binary = option_value("--binary", args)
+    // --binary is the Rust-native flag; --mootx01-binary is the Swift twin spelling.
+    let binary = option_value("--mootx01-binary", args)
+        .or_else(|| option_value("--binary", args))
         .map(str::to_string)
         .or_else(discover_moot_binary)
         .ok_or_else(|| {
@@ -527,6 +564,11 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         .unwrap_or(0);
     let label = option_value("--label", args).map(str::to_string);
     let out_dir = option_value("--out", args).map(PathBuf::from);
+    // --encode-barrier drain|impatient|none (default: drain).
+    let encode_barrier = match option_value("--encode-barrier", args) {
+        Some(s) => EncodeBarrier::from_str(s).map_err(|e| e)?,
+        None => EncodeBarrier::default(),
+    };
 
     // ── Load corpus ───────────────────────────────────────────────────────────
     eprintln!("[lmeb] loading corpus from {data_dir}");
@@ -555,6 +597,7 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         offset,
         label: label.clone(),
         out_dir: out_dir.clone(),
+        encode_barrier,
     };
 
     // ── Run harness ───────────────────────────────────────────────────────────
@@ -576,6 +619,7 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         run_label.clone(),
         evidence_types_owned.clone(),
         generated_at,
+        encode_barrier.as_str().to_string(),
         queries_loaded,
         &scores,
     );

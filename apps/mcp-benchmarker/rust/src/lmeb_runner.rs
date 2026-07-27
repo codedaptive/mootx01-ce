@@ -17,6 +17,8 @@
 //! - Candidate pool: per-query (10–168 docs), not all 500k.
 //! - Ingest: single doc text per `moot_file_memory` call.
 //! - Manifest: UUID → docID (not session/turn/index).
+//! - `encode_barrier` in `LmebRunConfig` controls how the harness synchronizes
+//!   with background encoding (same modes as LME/LoCoMo runners).
 //!
 //! # Safety guarantees
 //!
@@ -28,6 +30,7 @@
 
 use crate::config::{EndpointConfig, EndpointRole, ResultFormat, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
+use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
 use crate::json_value::JsonValue;
 use crate::lmeb_corpus::{LmebCorpus, LmebQuery};
 use crate::lmeb_scorer::LmebQueryResult;
@@ -49,6 +52,8 @@ pub struct LmebRunConfig {
     pub offset: usize,
     pub label: Option<String>,
     pub out_dir: Option<PathBuf>,
+    /// Encode-queue synchronization strategy. Default EncodeBarrier::Drain.
+    pub encode_barrier: EncodeBarrier,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,13 +152,14 @@ pub fn lmeb_endpoint_config(scratch_dir: &Path, moot_binary: &str) -> EndpointCo
 
 /// Ingests one corpus document via `moot_file_memory`, returning `(uuid, latency_s)`.
 ///
-/// n=true: inline-encoding barrier — encoding completes synchronously before the
-/// write returns so the recall query cannot race the encoding queue. This is the
-/// same correctness invariant as the LME harness' `ingest_turn`.
+/// The `encode_barrier` parameter controls inline encoding per the EncodeBarrier mode.
+/// Impatient mode adds `impatient: true` (correct key — the old key "n" was silently
+/// ignored by mootx01's `moot_file_memory` handler in AriaMcpKit ToolDispatch.swift).
 fn ingest_doc(
     client: &mut MCPClient,
     verb_map: &VerbMap,
     doc_text: &str,
+    encode_barrier: EncodeBarrier,
 ) -> Result<(String, f64), MCPError> {
     let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
     args.insert(
@@ -164,11 +170,11 @@ fn ingest_doc(
     for (k, v) in &verb_map.constant_args {
         args.insert(k.clone(), JsonValue::String(v.clone()));
     }
-    // Inline encoding: impatient=true ensures encoding completes before write returns.
-    // Without it, recall may run before encoding finishes → artificially low scores.
-    // PORT NOTE (1.1.x): parameter renamed from "n" to "impatient" in
-    // ToolDispatch runFileMemory (D-A inline-encode path). Same semantics.
-    args.insert("impatient".to_string(), JsonValue::Bool(true));
+    // Impatient mode: inline encoding per write. Correct key is "impatient" —
+    // the old key "n" was silently ignored by the moot_file_memory handler.
+    if encode_barrier == EncodeBarrier::Impatient {
+        args.insert("impatient".to_string(), JsonValue::Bool(true));
+    }
 
     let start = Instant::now();
     let result = client.call_tool(&verb_map.write, args, &verb_map.result_format)?;
@@ -199,6 +205,7 @@ fn run_one_lmeb_query(
     moot_binary: &str,
     seed: u64,
     query_index: usize,
+    encode_barrier: EncodeBarrier,
 ) -> Result<LmebQueryResult, MCPError> {
     let scratch = lmeb_scratch_dir(seed, query_index)?;
     let verb_map = lmeb_verb_map();
@@ -225,7 +232,7 @@ fn run_one_lmeb_query(
                 continue;
             }
         };
-        match ingest_doc(&mut client, &verb_map, &doc.text) {
+        match ingest_doc(&mut client, &verb_map, &doc.text, encode_barrier) {
             Ok((uuid, latency)) => {
                 uuid_to_doc_id.insert(uuid, doc_id.clone());
                 write_latencies.push(latency);
@@ -246,6 +253,12 @@ fn run_one_lmeb_query(
     } else {
         write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
     };
+
+    // ── Drain barrier (EncodeBarrier::Drain mode) ─────────────────────────────
+    // Wait for background encoding to drain before issuing any recall query.
+    if encode_barrier == EncodeBarrier::Drain {
+        wait_for_encode_drain(&mut client, &format!("lmeb {}", query.id), 300.0);
+    }
 
     // ── Probe for degeneracy guard ────────────────────────────────────────────
     let probe_rankings = probe_mcp_client(&mut client, &verb_map);
@@ -367,6 +380,7 @@ pub fn run_lmeb_queries(
             &config.moot_binary,
             config.seed,
             *query_index,
+            config.encode_barrier,
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };

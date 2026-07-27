@@ -375,6 +375,9 @@ pub struct LmebReport {
     pub run_label: String,
     pub evidence_types: Vec<String>,
     pub generated_at: String,
+    /// Encode-queue synchronization strategy used for this run.
+    /// One of: "drain" | "impatient" | "none". Self-documenting in the report.
+    pub encode_barrier: String,
     pub corpus_stats: LmebReportCorpusStats,
     pub aggregate: LmebReportAggregate,
     pub latency: LmebReportLatency,
@@ -389,6 +392,7 @@ pub fn build_lmeb_report(
     run_label: String,
     evidence_types: Vec<String>,
     generated_at: String,
+    encode_barrier: String,
     queries_loaded: usize,
     scores: &[LmebQueryScore],
 ) -> LmebReport {
@@ -444,6 +448,7 @@ pub fn build_lmeb_report(
         run_label,
         evidence_types,
         generated_at,
+        encode_barrier,
         corpus_stats,
         aggregate: report_aggregate,
         latency: report_latency,

@@ -206,20 +206,35 @@ struct LMEScorerInfrastructureTests {
             queryLatencySeconds: 0.15, writeMeanLatencySeconds: 0.05,
             rankedSessionIDs: ["sess_a", "sess_b"],
             answerSessionIDs: ["sess_a", "sess_c"],
-            retrievedUUIDCount: 8
+            retrievedUUIDCount: 8,
+            exactDiscrimination: "discrimination: high — clear top result.",
+            exactRecallProvenance: "recall_provenance: dense_lane:active degraded_stages:none",
+            denseDiscrimination: nil,
+            denseRecallProvenance: nil
         )
         let tokenEfficiency = LMEReportTokenEfficiency(
             exactArmMeanTokens: 1200.0, denseArmMeanTokens: 300.0,
             denseExactTokenRatio: 0.25,
             exactEvidenceHitRate: nil, denseEvidenceHitRate: nil,
-            exactHitsPer1kTokens: nil, denseHitsPer1kTokens: nil
+            exactHitsPer1kTokens: nil, denseHitsPer1kTokens: nil,
+            exactTokensPerResult: 42.0, denseTokensPerResult: nil,
+            denseExactTokensPerResultRatio: nil
+        )
+        let laneHealth = LMEReportLaneHealth(
+            exactDiscriminationDistribution: ["high": 1],
+            denseDiscriminationDistribution: [:],
+            exactDenseLaneDarkCount: 0,
+            exactDegradedCount: 0,
+            denseDegradedCount: 0
         )
         let report = LMEReport(
             runID: "TEST-RUN-ID", runLabel: "lme-s-seed20260725",
             variant: "s", generatedAt: "2026-07-25T00:00:00Z",
             corpusStats: corpusStats, aggregate: aggregate,
             latency: latency, perQuestion: [pq],
-            tokenEfficiency: tokenEfficiency
+            tokenEfficiency: tokenEfficiency,
+            encodeBarrier: "drain",
+            laneHealth: laneHealth
         )
 
         let encoder = JSONEncoder()
@@ -246,6 +261,17 @@ struct LMEScorerInfrastructureTests {
         #expect(teJSON["exact_arm_mean_tokens"] != nil, "key 'exact_arm_mean_tokens' must be present")
         #expect(teJSON["dense_arm_mean_tokens"] != nil, "key 'dense_arm_mean_tokens' must be present")
         #expect(teJSON["dense_exact_token_ratio"] != nil, "key 'dense_exact_token_ratio' must be present")
+        // Defect 2 additive keys.
+        #expect(teJSON["exact_tokens_per_result"] != nil, "key 'exact_tokens_per_result' must be present")
+        // Defect 3 + Defect 1 additive keys.
+        #expect(rawJSON["encode_barrier"] != nil, "key 'encode_barrier' must be present")
+        #expect(rawJSON["lane_health"] != nil, "key 'lane_health' must be present")
+        let lhJSON = try #require(rawJSON["lane_health"] as? [String: Any])
+        #expect(lhJSON["exact_discrimination_distribution"] != nil)
+        #expect(lhJSON["exact_dense_lane_dark_count"] != nil)
+        // Per-question provenance keys.
+        let pqJSON = try #require((rawJSON["per_question"] as? [[String: Any]])?.first)
+        #expect(pqJSON["exact_discrimination"] != nil, "key 'exact_discrimination' must be present")
 
         // Verify aggregate round-trips correctly.
         #expect(abs(decoded.aggregate.recallAnyAt1 - 0.75) < 1e-9)
@@ -325,6 +351,119 @@ struct LMEScorerInfrastructureTests {
         #expect(abs(score.recallAnyAt1 - 1.0) < 1e-9)
         #expect(abs(score.mrr - 1.0) < 1e-9)
         #expect(score.rankedSessionIDs == ["sess_a", "sess_b"])
+    }
+}
+
+// MARK: - Provenance parsing unit tests (Defect 3)
+
+@Suite("LME provenance parsing")
+struct LMEProvenanceParsingTests {
+
+    @Test("lmeParseResultCount: extracts N from 'found N memory(s)'")
+    func parseResultCountMemory() {
+        let payload = "found 7 memory(s)\n\nsome content"
+        #expect(lmeParseResultCount(payload) == 7)
+    }
+
+    @Test("lmeParseResultCount: extracts N from 'found N distilled factoid(s)'")
+    func parseResultCountDistilled() {
+        let payload = "found 3 distilled factoid(s)\n\nsome factoid content"
+        #expect(lmeParseResultCount(payload) == 3)
+    }
+
+    @Test("lmeParseResultCount: handles 'for: ...' suffix correctly")
+    func parseResultCountWithSuffix() {
+        let payload = "found 12 memory(s) for: user: hello\n\nresult text"
+        #expect(lmeParseResultCount(payload) == 12)
+    }
+
+    @Test("lmeParseResultCount: returns nil for 'no memories found'")
+    func parseResultCountNoMemories() {
+        let payload = "no memories found."
+        #expect(lmeParseResultCount(payload) == nil)
+    }
+
+    @Test("lmeParseResultCount: returns nil for empty payload")
+    func parseResultCountEmpty() {
+        #expect(lmeParseResultCount("") == nil)
+    }
+
+    @Test("lmeParseDiscriminationLine: extracts high discrimination line")
+    func parseDiscriminationHigh() {
+        let payload = "found 5 memory(s)\n\nresult text\ndiscrimination: high — clear top result.\nrecall_provenance: dense_lane:active degraded_stages:none"
+        let line = lmeParseDiscriminationLine(payload)
+        #expect(line == "discrimination: high — clear top result.")
+    }
+
+    @Test("lmeParseDiscriminationLine: returns nil when absent")
+    func parseDiscriminationAbsent() {
+        let payload = "found 5 memory(s)\n\nresult text with no diagnostics"
+        #expect(lmeParseDiscriminationLine(payload) == nil)
+    }
+
+    @Test("lmeParseRecallProvenanceLine: extracts active dense lane line")
+    func parseProvenanceActiveLane() {
+        let payload = "found 3 memory(s)\n\nresult\ndiscrimination: medium — partial separation.\nrecall_provenance: dense_lane:active degraded_stages:none"
+        let line = lmeParseRecallProvenanceLine(payload)
+        #expect(line == "recall_provenance: dense_lane:active degraded_stages:none")
+    }
+
+    @Test("lmeParseRecallProvenanceLine: extracts dark dense lane line")
+    func parseProvenanceDarkLane() {
+        let payload = "found 2 memory(s)\n\nresult\nrecall_provenance: dense_lane:dark:encode_backlog degraded_stages:none"
+        let line = lmeParseRecallProvenanceLine(payload)
+        #expect(line?.contains("dense_lane:dark:") == true)
+    }
+
+    @Test("lmeExtractDiscriminationLevel: extracts each level correctly")
+    func extractDiscriminationLevels() {
+        #expect(lmeExtractDiscriminationLevel("discrimination: high — clear top result.") == "high")
+        #expect(lmeExtractDiscriminationLevel("discrimination: medium — partial separation.") == "medium")
+        #expect(lmeExtractDiscriminationLevel("discrimination: low — top results are within epsilon") == "low")
+        #expect(lmeExtractDiscriminationLevel("discrimination: not_found — query contains distinctive tokens") == "not_found")
+        #expect(lmeExtractDiscriminationLevel("discrimination: n/a — single/zero results.") == "n/a")
+    }
+}
+
+// MARK: - Tokens-per-result arithmetic cancellation test (Defect 2)
+
+@Suite("LME tokens-per-result: arithmetic cancellation case")
+struct LMETokensPerResultTests {
+
+    // The arithmetic-cancellation case: 20 exact results × 168 chars each vs
+    // 8 dense results × 414 chars each. Total byte counts are nearly equal
+    // (~3360 vs ~3312), so the naive dense/exact token ratio ≈ 1.0. But
+    // dense delivers far fewer results per token cost:
+    //   exact tpr: (3360+3)/4 tokens / 20 results ≈ 42.05 tokens/result
+    //   dense tpr: (3312+3)/4 tokens / 8 results  ≈ 103.5 tokens/result
+    //   per-result ratio: 103.5 / 42.05 ≈ 2.46 ≈ 2.5 (not 1.0)
+    @Test("Arithmetic cancellation: per-result ratio ≈ 2.5 while token ratio ≈ 1.0")
+    func arithmeticCancellationCase() {
+        // Build 20 exact results × 168 UTF-8 chars each.
+        let exactItemText = String(repeating: "x", count: 168)
+        let exactPayload = "found 20 memory(s)\n" + Array(repeating: exactItemText, count: 20).joined(separator: "\n")
+        // Build 8 dense results × 414 UTF-8 chars each.
+        let denseItemText = String(repeating: "y", count: 414)
+        let densePayload = "found 8 distilled factoid(s)\n" + Array(repeating: denseItemText, count: 8).joined(separator: "\n")
+
+        let exactCount = lmeParseResultCount(exactPayload)
+        let denseCount = lmeParseResultCount(densePayload)
+        #expect(exactCount == 20, "exact result count should be 20")
+        #expect(denseCount == 8, "dense result count should be 8")
+
+        let exactTokens = lmeEstimateTokens(exactPayload)
+        let denseTokens = lmeEstimateTokens(densePayload)
+
+        // Byte ratio ≈ 1.0 (naive test incorrectly signals parity).
+        let byteRatio = Double(exactPayload.utf8.count) / Double(densePayload.utf8.count)
+        #expect(abs(byteRatio - 1.0) < 0.15, "byte ratio should be near 1.0 (≈\(byteRatio))")
+
+        // Per-result ratio ≈ 2.5 (correct signal that dense costs more per result).
+        let exactTPR = Double(exactTokens) / Double(exactCount!)
+        let denseTPR = Double(denseTokens) / Double(denseCount!)
+        let perResultRatio = denseTPR / exactTPR
+        #expect(perResultRatio > 2.0 && perResultRatio < 3.5,
+                "per-result ratio should be ≈ 2.5, got \(perResultRatio)")
     }
 }
 

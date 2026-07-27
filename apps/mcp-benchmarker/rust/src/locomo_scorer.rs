@@ -402,6 +402,9 @@ pub struct LoCoMoReport {
     pub run_id: String,
     pub run_label: String,
     pub generated_at: String,
+    /// Encode-queue synchronization strategy used for this run.
+    /// One of: "drain" | "impatient" | "none". Self-documenting in the report.
+    pub encode_barrier: String,
     pub corpus_stats: LoCoMoReportCorpusStats,
     pub aggregate: LoCoMoReportAggregate,
     /// Per-category breakdown: single_hop / temporal / multi_hop / open_domain.
@@ -422,6 +425,7 @@ pub fn build_locomo_report(
     run_id: String,
     run_label: String,
     generated_at: String,
+    encode_barrier: String,
     questions_loaded: usize,
     adversarial_excluded: usize,
     scores: &[LoCoMoQuestionScore],
@@ -493,6 +497,7 @@ pub fn build_locomo_report(
         run_id,
         run_label,
         generated_at,
+        encode_barrier,
         corpus_stats,
         aggregate: report_aggregate,
         category_breakdown,

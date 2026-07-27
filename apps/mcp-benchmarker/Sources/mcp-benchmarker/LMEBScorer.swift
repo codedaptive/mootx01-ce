@@ -364,16 +364,19 @@ struct LMEBReport: Codable, Sendable {
     let aggregate: LMEBReportAggregate
     let latency: LMEBReportLatency
     let perQuery: [LMEBReportPerQuery]
+    /// Encode barrier mode used for ingest (drain / impatient / none). Additive key.
+    let encodeBarrier: String
 
     enum CodingKeys: String, CodingKey {
-        case runID        = "run_id"
-        case runLabel     = "run_label"
+        case runID         = "run_id"
+        case runLabel      = "run_label"
         case evidenceTypes = "evidence_types"
-        case generatedAt  = "generated_at"
-        case corpusStats  = "corpus_stats"
+        case generatedAt   = "generated_at"
+        case corpusStats   = "corpus_stats"
         case aggregate
         case latency
-        case perQuery     = "per_query"
+        case perQuery      = "per_query"
+        case encodeBarrier = "encode_barrier"
     }
 }
 
@@ -384,7 +387,8 @@ func buildLMEBReport(
     runLabel: String,
     evidenceTypes: [String],
     queriesLoaded: Int,
-    scores: [LMEBQueryScore]
+    scores: [LMEBQueryScore],
+    encodeBarrier: String
 ) -> LMEBReport {
     let (aggregate, latency) = aggregateLMEBScores(scores)
     let guardExcluded = scores.filter { !$0.guardHealthy }.count
@@ -444,7 +448,8 @@ func buildLMEBReport(
         corpusStats: corpusStats,
         aggregate: reportAggregate,
         latency: reportLatency,
-        perQuery: perQuery
+        perQuery: perQuery,
+        encodeBarrier: encodeBarrier
     )
 }
 

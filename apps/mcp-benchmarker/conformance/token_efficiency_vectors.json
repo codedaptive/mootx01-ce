@@ -148,9 +148,9 @@
     {
       "id": "moot-factoid-style-match",
       "evidence_text": "user prefers tea over coffee",
-      "payload_text": "found 2 distilled factoid(s) for: beverage preference\n[1] drawer_id: abc123\n    user prefers tea over coffee in the mornings\n    confidence: 0.91 | sources: 2 | snr: 0.88",
+      "payload_text": "found 2 distilled factoid(s)\n[1] drawer_id: abc123\n    user prefers tea over coffee in the mornings\n    confidence: 0.91 | sources: 2 | snr: 0.88",
       "expected_hit": true,
-      "note": "Evidence phrase found within moot_recall_distilled factoid output format"
+      "note": "Evidence phrase found within moot_recall_distilled factoid output format (default: no query echo)"
     },
     {
       "id": "moot-exact-style-match",
@@ -162,7 +162,7 @@
     {
       "id": "moot-factoid-style-miss",
       "evidence_text": "user prefers coffee over tea",
-      "payload_text": "found 2 distilled factoid(s) for: beverage preference\n[1] drawer_id: abc123\n    user prefers tea over coffee in the mornings\n    confidence: 0.91 | sources: 2 | snr: 0.88",
+      "payload_text": "found 2 distilled factoid(s)\n[1] drawer_id: abc123\n    user prefers tea over coffee in the mornings\n    confidence: 0.91 | sources: 2 | snr: 0.88",
       "expected_hit": false,
       "note": "Evidence has inverted order — 'coffee over tea' vs 'tea over coffee' → miss"
     }
