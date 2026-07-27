@@ -320,6 +320,10 @@ struct LoCoMoReportPerQuestion: Codable, Sendable {
     /// Estimated tokens in the MCP payload divided by the retrieved result count.
     /// Nil when the payload was absent or the result count was zero.
     let tokensPerResult: Double?
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// Whether this question's conversation estate was served from the snapshot cache.
+    /// nil = --estate-cache off (caching not active for this run).
+    let cacheHit: Bool?
 
     enum CodingKeys: String, CodingKey {
         case questionID              = "question_id"
@@ -341,6 +345,7 @@ struct LoCoMoReportPerQuestion: Codable, Sendable {
         case evidenceDiaIDs          = "evidence_dia_ids"
         case retrievedUUIDCount      = "retrieved_uuid_count"
         case tokensPerResult         = "tokens_per_result"
+        case cacheHit                = "cache_hit"
     }
 }
 
@@ -387,6 +392,13 @@ struct LoCoMoReport: Codable, Sendable {
     /// Token-efficiency and barrier provenance summary. Nil when no question had
     /// payload text (e.g. estate was empty during a dry run).
     let provenanceSummary: LoCoMoProvenanceSummary?
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// The estate cache mode used for this run: "off" or "reuse".
+    let estateCache: String
+    /// Total number of conversations whose estate was served from the snapshot cache.
+    let cacheHits: Int
+    /// Total number of conversations that triggered a fresh ingest + snapshot save.
+    let cacheMisses: Int
 
     enum CodingKeys: String, CodingKey {
         case runID             = "run_id"
@@ -399,6 +411,9 @@ struct LoCoMoReport: Codable, Sendable {
         case perQuestion       = "per_question"
         case encodeBarrier     = "encode_barrier"
         case provenanceSummary = "provenance_summary"
+        case estateCache       = "estate_cache"
+        case cacheHits         = "cache_hits"
+        case cacheMisses       = "cache_misses"
     }
 }
 
@@ -408,8 +423,15 @@ struct LoCoMoReport: Codable, Sendable {
 func buildLoCoMoReport(
     config: LoCoMoRunConfig,
     corpus: LoCoMoCorpus,
+    results: [LoCoMoQuestionResult],
     scores: [LoCoMoQuestionScore]
 ) -> LoCoMoReport {
+    // Build a questionID → raw result lookup for cache hit propagation and future
+    // per-question provenance fields (mirrors the LME builder's resultByID pattern).
+    let resultByID = Dictionary(
+        uniqueKeysWithValues: results.map { ($0.questionID, $0) }
+    )
+
     let (agg, cats, lat) = aggregateLoCoMoScores(scores)
     let guardExcluded = scores.filter { !$0.guardHealthy }.count
 
@@ -459,6 +481,7 @@ func buildLoCoMoReport(
             tpr = Double(lmeEstimateTokens(text)) / Double(n)
             tokensPerResultList.append(tpr!)
         }
+        let raw = resultByID[score.questionID]
         return LoCoMoReportPerQuestion(
             questionID: score.questionID,
             categoryLabel: score.categoryLabel,
@@ -478,7 +501,8 @@ func buildLoCoMoReport(
             rankedDiaIDs: score.rankedDiaIDs,
             evidenceDiaIDs: score.evidenceDiaIDs,
             retrievedUUIDCount: score.retrievedUUIDCount,
-            tokensPerResult: tpr
+            tokensPerResult: tpr,
+            cacheHit: raw?.cacheHit ?? nil
         )
     }
 
@@ -496,6 +520,10 @@ func buildLoCoMoReport(
     formatter.formatOptions = [.withInternetDateTime]
     let generatedAt = formatter.string(from: Date())
 
+    // Estate cache aggregate counts (additive — LME-07).
+    let cacheHits   = results.filter { $0.cacheHit == true  }.count
+    let cacheMisses = results.filter { $0.cacheHit == false }.count
+
     return LoCoMoReport(
         runID: UUID().uuidString,
         runLabel: config.runLabel,
@@ -506,7 +534,10 @@ func buildLoCoMoReport(
         latency: reportLatency,
         perQuestion: perQuestion,
         encodeBarrier: config.encodeBarrier.rawValue,
-        provenanceSummary: provenanceSummary
+        provenanceSummary: provenanceSummary,
+        estateCache: config.estateCache.rawValue,
+        cacheHits: cacheHits,
+        cacheMisses: cacheMisses
     )
 }
 

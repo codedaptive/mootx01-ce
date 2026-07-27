@@ -173,6 +173,9 @@ pub struct LmebQueryResult {
     /// Used to compute tokens_per_result in the report builder.
     /// None when no text blocks were present (guard-excluded, error, or empty estate).
     pub payload_text: Option<String>,
+    /// Whether this query's estate was served from the snapshot cache.
+    /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
+    pub cache_hit: Option<bool>,
 }
 
 /// The scored result for one LMEB query.
@@ -377,6 +380,11 @@ pub struct LmebReportPerQuery {
     /// Estimated payload tokens divided by the retrieved result count.
     /// None when payload was absent or the result count was zero.
     pub tokens_per_result: Option<f64>,
+    /// Whether this query's estate was served from the snapshot cache.
+    /// Some(true) = hit, Some(false) = miss, None = cache off.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
 }
 
 /// Token-efficiency and barrier provenance summary for an LMEB run.
@@ -410,6 +418,15 @@ pub struct LmebReport {
     pub corpus_stats: LmebReportCorpusStats,
     pub aggregate: LmebReportAggregate,
     pub latency: LmebReportLatency,
+    /// Estate cache mode used for this run: "off" | "reuse".
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub estate_cache: String,
+    /// Number of queries whose estate was served from the snapshot cache.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_hits: usize,
+    /// Number of queries that triggered a new snapshot (cache miss).
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_misses: usize,
     pub per_query: Vec<LmebReportPerQuery>,
     /// Token-efficiency and barrier provenance summary. None when no query had
     /// payload text (e.g. estate was empty during a dry run).
@@ -418,7 +435,10 @@ pub struct LmebReport {
 
 /// Assembles an `LmebReport` from scores and metadata.
 ///
-/// Twin of Swift `buildLMEBReport(runLabel:evidenceTypes:queriesLoaded:scores:)`.
+/// `cache_hit_by_id` maps query_id → cache_hit for per-query report population.
+/// `estate_cache` is the cache-mode string ("off" | "reuse").
+///
+/// Twin of Swift `buildLMEBReport(runLabel:evidenceTypes:queriesLoaded:scores:results:estateCache:)`.
 pub fn build_lmeb_report(
     run_id: String,
     run_label: String,
@@ -427,9 +447,13 @@ pub fn build_lmeb_report(
     encode_barrier: String,
     queries_loaded: usize,
     scores: &[LmebQueryScore],
+    cache_hit_by_id: &std::collections::HashMap<String, Option<bool>>,
+    estate_cache: String,
 ) -> LmebReport {
     let (aggregate, latency) = aggregate_lmeb_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
+    let cache_hits:   usize = cache_hit_by_id.values().filter(|&&v| v == Some(true)).count();
+    let cache_misses: usize = cache_hit_by_id.values().filter(|&&v| v == Some(false)).count();
 
     let corpus_stats = LmebReportCorpusStats {
         queries_loaded,
@@ -486,6 +510,8 @@ pub fn build_lmeb_report(
                 relevant_doc_ids:        s.relevant_doc_ids.clone(),
                 retrieved_doc_count:     s.retrieved_doc_count,
                 tokens_per_result:       tpr,
+                // Look up cache_hit from the raw results map (key = query_id).
+                cache_hit:               cache_hit_by_id.get(&s.query_id).copied().flatten(),
             }
         })
         .collect();
@@ -514,6 +540,9 @@ pub fn build_lmeb_report(
         corpus_stats,
         aggregate: report_aggregate,
         latency: report_latency,
+        estate_cache,
+        cache_hits,
+        cache_misses,
         per_query,
         provenance_summary,
     }
@@ -584,6 +613,8 @@ mod tests {
             "drain".to_string(),
             1, // queries_loaded
             &scores,
+            &std::collections::HashMap::new(),
+            "off".to_string(),
         );
 
         // Top-level encode_barrier must be "drain".
@@ -622,6 +653,8 @@ mod tests {
             "drain".to_string(),
             1,
             &scores,
+            &std::collections::HashMap::new(),
+            "off".to_string(),
         );
 
         assert!(

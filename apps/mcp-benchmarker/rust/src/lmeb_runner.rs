@@ -31,6 +31,10 @@
 use crate::config::{EndpointConfig, EndpointRole, ResultFormat, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
+use crate::estate_cache::{
+    default_cache_dir, estate_cache_entry_path, moot_binary_fingerprint,
+    restore_estate_cache_entry, save_estate_cache_entry, EstateCacheMode,
+};
 use crate::json_value::JsonValue;
 use crate::lmeb_corpus::{LmebCorpus, LmebQuery};
 use crate::lmeb_scorer::LmebQueryResult;
@@ -54,6 +58,27 @@ pub struct LmebRunConfig {
     pub out_dir: Option<PathBuf>,
     /// Encode-queue synchronization strategy. Default EncodeBarrier::Drain.
     pub encode_barrier: EncodeBarrier,
+    /// Estate snapshot reuse mode. Default EstateCacheMode::Off.
+    pub estate_cache: EstateCacheMode,
+    /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
+    pub cache_dir: Option<PathBuf>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manifest entry for estate cache serialization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Serializable per-document manifest entry for the LMEB estate cache.
+///
+/// LMEB uses an inline `HashMap<String, String>` (uuid → doc_id) during running.
+/// This struct lets the cache serialize and restore that mapping via JSON.
+///
+/// Not in lmeb_scorer.rs because it is runner-internal (scoring does not
+/// need the manifest format; only the runner and cache layer do).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LmebManifestEntry {
+    uuid: String,
+    doc_id: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,10 +218,16 @@ fn ingest_doc(
 /// Runs the LMEB harness for a single query: create scratch dir → launch
 /// mootx01 → ingest candidate docs → probe → query → map UUIDs → teardown.
 ///
+/// `cache_entry`: when `Some`, the runner checks for a cached estate first.
+///   On hit: restores the snapshot and skips ingest + drain.
+///   On miss: ingests normally and saves a snapshot after drain.
+///   `None` disables caching for this query (--estate-cache off).
+///
 /// Returns `Err` only for unrecoverable setup failures (scratch dir, binary
 /// launch). Guard failures are encoded as `LmebQueryResult.guard_healthy = false`.
 ///
 /// Twin of the inner loop in Swift `runLMEBQueries(queries:corpus:config:)`.
+#[allow(clippy::too_many_arguments)]
 fn run_one_lmeb_query(
     query: &LmebQuery,
     candidate_doc_ids: &[String],
@@ -206,8 +237,31 @@ fn run_one_lmeb_query(
     seed: u64,
     query_index: usize,
     encode_barrier: EncodeBarrier,
+    cache_entry: Option<&Path>,
 ) -> Result<LmebQueryResult, MCPError> {
-    let scratch = lmeb_scratch_dir(seed, query_index)?;
+    // ── Cache restore attempt (when cache mode is Reuse) ──────────────────────
+    // Try to restore a previously-snapshotted estate for this query. On hit,
+    // skip ingest and drain entirely. On miss, fall through to normal ingest.
+    let cache_restore: Option<(PathBuf, Vec<LmebManifestEntry>)> =
+        cache_entry.and_then(|entry| {
+            restore_estate_cache_entry(entry, || {
+                lmeb_scratch_dir(seed, query_index).map_err(|e| e.description.clone())
+            })
+        });
+
+    let (scratch, mut uuid_to_doc_id, skip_ingest, cache_hit): (PathBuf, HashMap<String, String>, bool, Option<bool>) =
+        if let Some((s, manifest)) = cache_restore {
+            let map: HashMap<String, String> = manifest
+                .into_iter()
+                .map(|e| (e.uuid, e.doc_id))
+                .collect();
+            (s, map, true, Some(true))
+        } else {
+            let is_cache_miss = cache_entry.is_some();
+            let s = lmeb_scratch_dir(seed, query_index)?;
+            (s, HashMap::new(), false, if is_cache_miss { Some(false) } else { None })
+        };
+
     let verb_map = lmeb_verb_map();
     let endpoint = lmeb_endpoint_config(&scratch, moot_binary);
     let guard = DegeneracyGuard::new();
@@ -218,32 +272,39 @@ fn run_one_lmeb_query(
         e
     })?;
 
-    // ── Ingest candidate docs ─────────────────────────────────────────────────
-    let mut uuid_to_doc_id: HashMap<String, String> = HashMap::new();
+    // ── Ingest candidate docs (skip on cache hit) ─────────────────────────────
     let mut write_latencies: Vec<f64> = Vec::new();
-    let mut docs_ingested: usize = 0;
+    let mut docs_ingested: usize = if skip_ingest {
+        // On cache hit, docs_ingested reflects the estate's actual content
+        // (manifest was populated during the original ingest run).
+        uuid_to_doc_id.len()
+    } else {
+        0
+    };
 
-    'ingest: for doc_id in candidate_doc_ids {
-        let doc = match corpus.docs_by_id.get(doc_id) {
-            Some(d) => d,
-            None => {
-                // Candidate doc absent from loaded corpus (cross-evidence-type ID
-                // or filtered load). Skip gracefully — treated as unretrieved.
-                continue;
-            }
-        };
-        match ingest_doc(&mut client, &verb_map, &doc.text, encode_barrier) {
-            Ok((uuid, latency)) => {
-                uuid_to_doc_id.insert(uuid, doc_id.clone());
-                write_latencies.push(latency);
-                docs_ingested += 1;
-            }
-            Err(e) => {
-                eprintln!(
-                    "  [lmeb] ingest error for {} doc {}: {}",
-                    query.id, doc_id, e.description
-                );
-                break 'ingest;
+    if !skip_ingest {
+        'ingest: for doc_id in candidate_doc_ids {
+            let doc = match corpus.docs_by_id.get(doc_id) {
+                Some(d) => d,
+                None => {
+                    // Candidate doc absent from loaded corpus (cross-evidence-type ID
+                    // or filtered load). Skip gracefully — treated as unretrieved.
+                    continue;
+                }
+            };
+            match ingest_doc(&mut client, &verb_map, &doc.text, encode_barrier) {
+                Ok((uuid, latency)) => {
+                    uuid_to_doc_id.insert(uuid, doc_id.clone());
+                    write_latencies.push(latency);
+                    docs_ingested += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  [lmeb] ingest error for {} doc {}: {}",
+                        query.id, doc_id, e.description
+                    );
+                    break 'ingest;
+                }
             }
         }
     }
@@ -254,10 +315,26 @@ fn run_one_lmeb_query(
         write_latencies.iter().sum::<f64>() / write_latencies.len() as f64
     };
 
-    // ── Drain barrier (EncodeBarrier::Drain mode) ─────────────────────────────
+    // ── Drain barrier (EncodeBarrier::Drain mode; skipped on cache hit) ───────
     // Wait for background encoding to drain before issuing any recall query.
-    if encode_barrier == EncodeBarrier::Drain {
+    // On a cache hit the estate is already committed — no drain needed.
+    if !skip_ingest && encode_barrier == EncodeBarrier::Drain {
         wait_for_encode_drain(&mut client, &format!("lmeb {}", query.id), 300.0);
+    }
+
+    // ── Snapshot to cache (on cache miss, after drain) ────────────────────────
+    // Estate is fully committed at this point — safe to snapshot.
+    if !skip_ingest {
+        if let Some(entry) = cache_entry {
+            let manifest_vec: Vec<LmebManifestEntry> = uuid_to_doc_id
+                .iter()
+                .map(|(uuid, doc_id)| LmebManifestEntry {
+                    uuid: uuid.clone(),
+                    doc_id: doc_id.clone(),
+                })
+                .collect();
+            save_estate_cache_entry(&scratch, &manifest_vec, entry);
+        }
     }
 
     // ── Probe for degeneracy guard ────────────────────────────────────────────
@@ -332,6 +409,7 @@ fn run_one_lmeb_query(
         docs_ingested,
         write_mean_latency_seconds: write_mean_latency,
         payload_text,
+        cache_hit,
     })
 }
 
@@ -365,6 +443,18 @@ pub fn run_lmeb_queries(
     let total = sliced.len();
     let mut results: Vec<LmebQueryResult> = Vec::with_capacity(total);
 
+    // ── Estate cache setup (once per run) ────────────────────────────────────
+    let binary_fingerprint = if config.estate_cache == EstateCacheMode::Reuse {
+        moot_binary_fingerprint(&config.moot_binary)
+    } else {
+        String::new()
+    };
+    let resolved_cache_dir = config
+        .cache_dir
+        .as_deref()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| default_cache_dir(config.out_dir.as_deref()));
+
     for (progress_index, query_index) in sliced.iter().enumerate() {
         let query = &queries[*query_index];
         let candidate_doc_ids = corpus.candidate_docs(&query.id);
@@ -380,6 +470,21 @@ pub fn run_lmeb_queries(
             relevant_doc_ids.len()
         );
 
+        // Compute cache entry path for this query (only when cache mode is Reuse).
+        let cache_entry_opt: Option<PathBuf> = if config.estate_cache == EstateCacheMode::Reuse {
+            Some(estate_cache_entry_path(
+                &resolved_cache_dir,
+                "lmeb",
+                "",
+                config.seed,
+                config.encode_barrier,
+                &binary_fingerprint,
+                &query.id,
+            ))
+        } else {
+            None
+        };
+
         match run_one_lmeb_query(
             query,
             candidate_doc_ids,
@@ -389,6 +494,7 @@ pub fn run_lmeb_queries(
             config.seed,
             *query_index,
             config.encode_barrier,
+            cache_entry_opt.as_deref(),
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
@@ -413,6 +519,7 @@ pub fn run_lmeb_queries(
                     docs_ingested: 0,
                     write_mean_latency_seconds: 0.0,
                     payload_text: None,
+                    cache_hit: None,
                 });
             }
         }

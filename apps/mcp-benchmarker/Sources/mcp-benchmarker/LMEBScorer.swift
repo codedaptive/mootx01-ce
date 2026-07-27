@@ -338,6 +338,10 @@ struct LMEBReportPerQuery: Codable, Sendable {
     /// Estimated tokens in the MCP payload divided by the retrieved result count.
     /// Nil when the payload was absent or the result count was zero.
     let tokensPerResult: Double?
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// Whether this query's estate was served from the snapshot cache.
+    /// nil = --estate-cache off (caching not active for this run).
+    let cacheHit: Bool?
 
     enum CodingKeys: String, CodingKey {
         case queryID             = "query_id"
@@ -356,6 +360,7 @@ struct LMEBReportPerQuery: Codable, Sendable {
         case relevantDocIDs      = "relevant_doc_ids"
         case retrievedDocCount   = "retrieved_doc_count"
         case tokensPerResult     = "tokens_per_result"
+        case cacheHit            = "cache_hit"
     }
 }
 
@@ -398,6 +403,13 @@ struct LMEBReport: Codable, Sendable {
     /// Token-efficiency and barrier provenance summary. Nil when no query had
     /// payload text (e.g. estate was empty during a dry run).
     let provenanceSummary: LMEBProvenanceSummary?
+    // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
+    /// The estate cache mode used for this run: "off" or "reuse".
+    let estateCache: String
+    /// Total number of queries whose estate was served from the snapshot cache.
+    let cacheHits: Int
+    /// Total number of queries that triggered a fresh ingest + snapshot save.
+    let cacheMisses: Int
 
     enum CodingKeys: String, CodingKey {
         case runID             = "run_id"
@@ -410,6 +422,9 @@ struct LMEBReport: Codable, Sendable {
         case perQuery          = "per_query"
         case encodeBarrier     = "encode_barrier"
         case provenanceSummary = "provenance_summary"
+        case estateCache       = "estate_cache"
+        case cacheHits     = "cache_hits"
+        case cacheMisses   = "cache_misses"
     }
 }
 
@@ -420,9 +435,16 @@ func buildLMEBReport(
     runLabel: String,
     evidenceTypes: [String],
     queriesLoaded: Int,
+    results: [LMEBQueryResult],
     scores: [LMEBQueryScore],
-    encodeBarrier: String
+    encodeBarrier: String,
+    estateCache: String
 ) -> LMEBReport {
+    // Build a queryID → raw result lookup for cacheHit propagation.
+    let resultByID = Dictionary(
+        uniqueKeysWithValues: results.map { ($0.queryID, $0) }
+    )
+
     let (aggregate, latency) = aggregateLMEBScores(scores)
     let guardExcluded = scores.filter { !$0.guardHealthy }.count
 
@@ -458,6 +480,7 @@ func buildLMEBReport(
             tpr = Double(lmeEstimateTokens(text)) / Double(n)
             tokensPerResultList.append(tpr!)
         }
+        let raw = resultByID[score.queryID]
         return LMEBReportPerQuery(
             queryID: score.queryID,
             docsIngested: score.docsIngested,
@@ -474,7 +497,8 @@ func buildLMEBReport(
             rankedDocIDs: score.rankedDocIDs,
             relevantDocIDs: score.relevantDocIDs,
             retrievedDocCount: score.retrievedDocCount,
-            tokensPerResult: tpr
+            tokensPerResult: tpr,
+            cacheHit: raw?.cacheHit ?? nil
         )
     }
 
@@ -492,6 +516,10 @@ func buildLMEBReport(
     formatter.formatOptions = [.withInternetDateTime]
     let generatedAt = formatter.string(from: Date())
 
+    // Estate cache aggregate counts (additive — LME-07).
+    let cacheHits   = results.filter { $0.cacheHit == true  }.count
+    let cacheMisses = results.filter { $0.cacheHit == false }.count
+
     return LMEBReport(
         runID: UUID().uuidString,
         runLabel: runLabel,
@@ -502,7 +530,10 @@ func buildLMEBReport(
         latency: reportLatency,
         perQuery: perQuery,
         encodeBarrier: encodeBarrier,
-        provenanceSummary: provenanceSummary
+        provenanceSummary: provenanceSummary,
+        estateCache: estateCache,
+        cacheHits: cacheHits,
+        cacheMisses: cacheMisses
     )
 }
 

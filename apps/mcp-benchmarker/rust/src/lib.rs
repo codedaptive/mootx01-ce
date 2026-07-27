@@ -62,6 +62,7 @@
 
 pub mod config;
 pub mod encode_barrier;
+pub mod estate_cache;
 pub mod degeneracy_guard;
 pub mod divergence;
 pub mod json_value;

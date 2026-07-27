@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, HashSet};
 /// to correlate retrieved UUIDs → dia_ids for turn-level recall scoring.
 ///
 /// Twin of Swift `LoCoMoManifestEntry`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoCoMoManifestEntry {
     /// UUID returned by moot_file_memory ("filed memory <UUID>").
     pub uuid: String,
@@ -86,6 +86,9 @@ pub struct LoCoMoQuestionResult {
     /// Used to compute tokens_per_result in the report builder.
     /// None when no text blocks were present (guard-excluded, error, or empty estate).
     pub payload_text: Option<String>,
+    /// Whether this question's estate was served from the snapshot cache.
+    /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
+    pub cache_hit: Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,6 +407,11 @@ pub struct LoCoMoReportPerQuestion {
     /// Estimated payload tokens divided by the retrieved result count.
     /// Nil when the payload was absent or the result count was zero.
     pub tokens_per_result: Option<f64>,
+    /// Whether this question's estate was served from the snapshot cache.
+    /// Some(true) = hit, Some(false) = miss, None = cache off.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
 }
 
 /// Token-efficiency and barrier provenance summary for a LoCoMo run.
@@ -441,6 +449,15 @@ pub struct LoCoMoReport {
     /// New in LoCoMo, not present in LME reports (additive key).
     pub category_breakdown: Vec<LoCoMoReportCategoryEntry>,
     pub latency: LoCoMoReportLatency,
+    /// Estate cache mode used for this run: "off" | "reuse".
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub estate_cache: String,
+    /// Number of questions whose estate was served from the snapshot cache.
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_hits: usize,
+    /// Number of questions that triggered a new snapshot (cache miss).
+    /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+    pub cache_misses: usize,
     pub per_question: Vec<LoCoMoReportPerQuestion>,
     /// Token-efficiency and barrier provenance summary. None when no question had
     /// payload text (e.g. estate was empty during a dry run).
@@ -453,7 +470,11 @@ pub struct LoCoMoReport {
 
 /// Assembles a `LoCoMoReport` from run metadata, corpus statistics, and scores.
 ///
-/// Twin of Swift `buildLoCoMoReport(config:corpus:scores:)`.
+/// `results` carries the raw per-question results (including `cache_hit`) needed
+/// to populate the `cache_hit` per-question field and the aggregate `cache_hits` /
+/// `cache_misses` counts. `estate_cache` is the cache-mode string ("off" | "reuse").
+///
+/// Twin of Swift `buildLoCoMoReport(config:corpus:scores:results:estateCache:)`.
 pub fn build_locomo_report(
     run_id: String,
     run_label: String,
@@ -462,9 +483,13 @@ pub fn build_locomo_report(
     questions_loaded: usize,
     adversarial_excluded: usize,
     scores: &[LoCoMoQuestionScore],
+    cache_hit_by_id: &std::collections::HashMap<String, Option<bool>>,
+    estate_cache: String,
 ) -> LoCoMoReport {
     let (aggregate, categories, latency) = aggregate_locomo_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
+    let cache_hits:   usize = cache_hit_by_id.values().filter(|&&v| v == Some(true)).count();
+    let cache_misses: usize = cache_hit_by_id.values().filter(|&&v| v == Some(false)).count();
 
     let corpus_stats = LoCoMoReportCorpusStats {
         questions_loaded,
@@ -537,6 +562,8 @@ pub fn build_locomo_report(
                 evidence_dia_ids:        s.evidence_dia_ids.clone(),
                 retrieved_uuid_count:    s.retrieved_uuid_count,
                 tokens_per_result:       tpr,
+                // Look up cache_hit from the raw results map (key = question_id).
+                cache_hit:               cache_hit_by_id.get(&s.question_id).copied().flatten(),
             }
         })
         .collect();
@@ -565,6 +592,9 @@ pub fn build_locomo_report(
         aggregate: report_aggregate,
         category_breakdown,
         latency: report_latency,
+        estate_cache,
+        cache_hits,
+        cache_misses,
         per_question,
         provenance_summary,
     }
@@ -640,6 +670,8 @@ mod tests {
             1,     // questions_loaded
             0,     // adversarial_excluded
             &scores,
+            &std::collections::HashMap::new(),
+            "off".to_string(),
         );
 
         // Top-level encode_barrier must be "drain".
@@ -678,6 +710,8 @@ mod tests {
             "drain".to_string(),
             1, 0,
             &scores,
+            &std::collections::HashMap::new(),
+            "off".to_string(),
         );
 
         assert!(

@@ -18,6 +18,7 @@
 
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
 use mcp_benchmarker_rs::encode_barrier::EncodeBarrier;
+use mcp_benchmarker_rs::estate_cache::EstateCacheMode;
 use mcp_benchmarker_rs::lmeb_corpus::load_lmeb_corpus;
 use mcp_benchmarker_rs::lmeb_runner::{run_lmeb_queries, LmebRunConfig};
 use mcp_benchmarker_rs::lmeb_scorer::{build_lmeb_report, score_lmeb_query, write_lmeb_report};
@@ -230,6 +231,13 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     // Judge mode (LME-03 Part 4): optional LLM-judged QA. Off by default.
     // The command receives the prompt on stdin and writes its answer on stdout.
     let judge_cmd = option_value("--judge-cmd", args).map(str::to_string);
+    // --estate-cache off|reuse (default: off). Controls estate snapshot reuse.
+    let estate_cache = match option_value("--estate-cache", args) {
+        Some(s) => EstateCacheMode::from_str(s).map_err(|e| e)?,
+        None => EstateCacheMode::default(),
+    };
+    // --cache-dir <path>: override cache root (default: <out>/estate-cache).
+    let cache_dir = option_value("--cache-dir", args).map(PathBuf::from);
 
     eprintln!("[lme] loading corpus from {corpus_path}");
     let corpus = load_corpus(Path::new(&corpus_path))
@@ -255,6 +263,8 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         arm,
         judge_cmd: judge_cmd.clone(),
         encode_barrier,
+        estate_cache,
+        cache_dir,
     };
 
     // Keep results alongside scores so the transcript writer can read judge fields,
@@ -292,6 +302,12 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         })
         .collect();
 
+    // Extract cache_hit_by_id before consuming results (required by build_lme_report).
+    let cache_hit_by_id: std::collections::HashMap<String, Option<bool>> = results
+        .iter()
+        .map(|r| (r.question_id.clone(), r.cache_hit))
+        .collect();
+
     let scores: Vec<_> = results.into_iter().map(score_lme_question).collect();
 
     let run_id = {
@@ -314,6 +330,8 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         &scores,
         &corpus,
         &payload_entries,
+        &cache_hit_by_id,
+        estate_cache.as_str().to_string(),
     );
 
     // Print summary.
@@ -440,6 +458,13 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         Some(s) => EncodeBarrier::from_str(s).map_err(|e| e)?,
         None => EncodeBarrier::default(),
     };
+    // --estate-cache off|reuse (default: off). Controls estate snapshot reuse.
+    let estate_cache = match option_value("--estate-cache", args) {
+        Some(s) => EstateCacheMode::from_str(s).map_err(|e| e)?,
+        None => EstateCacheMode::default(),
+    };
+    // --cache-dir <path>: override cache root (default: <out>/estate-cache).
+    let cache_dir_locomo = option_value("--cache-dir", args).map(PathBuf::from);
 
     eprintln!("[locomo] loading corpus from {corpus_path}");
     let corpus = load_locomo_corpus(Path::new(&corpus_path))
@@ -467,9 +492,16 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         label: label.clone(),
         out_dir: out_dir.clone(),
         encode_barrier,
+        estate_cache,
+        cache_dir: cache_dir_locomo,
     };
 
     let results = run_locomo_questions(&corpus, &run_config);
+    // Extract cache_hit_by_id (keyed by question_id) before consuming results.
+    let cache_hit_by_id_locomo: std::collections::HashMap<String, Option<bool>> = results
+        .iter()
+        .map(|r| (r.question_id.clone(), r.cache_hit))
+        .collect();
     let scores: Vec<_> = results.into_iter().map(score_locomo_question).collect();
 
     let run_id = {
@@ -487,6 +519,8 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         corpus.questions.len() + corpus.adversarial_count,
         corpus.adversarial_count,
         &scores,
+        &cache_hit_by_id_locomo,
+        estate_cache.as_str().to_string(),
     );
 
     // Print summary.
@@ -571,6 +605,13 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         Some(s) => EncodeBarrier::from_str(s).map_err(|e| e)?,
         None => EncodeBarrier::default(),
     };
+    // --estate-cache off|reuse (default: off). Controls estate snapshot reuse.
+    let estate_cache_lmeb = match option_value("--estate-cache", args) {
+        Some(s) => EstateCacheMode::from_str(s).map_err(|e| e)?,
+        None => EstateCacheMode::default(),
+    };
+    // --cache-dir <path>: override cache root (default: <out>/estate-cache).
+    let cache_dir_lmeb = option_value("--cache-dir", args).map(PathBuf::from);
 
     // ── Load corpus ───────────────────────────────────────────────────────────
     eprintln!("[lmeb] loading corpus from {data_dir}");
@@ -601,11 +642,18 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         label: label.clone(),
         out_dir: out_dir.clone(),
         encode_barrier,
+        estate_cache: estate_cache_lmeb,
+        cache_dir: cache_dir_lmeb,
     };
 
     // ── Run harness ───────────────────────────────────────────────────────────
     let results = run_lmeb_queries(&all_queries, &corpus, &run_config);
     let queries_loaded = all_queries.len();
+    // Extract cache_hit_by_id before consuming results.
+    let cache_hit_by_id_lmeb: std::collections::HashMap<String, Option<bool>> = results
+        .iter()
+        .map(|r| (r.query_id.clone(), r.cache_hit))
+        .collect();
     let scores: Vec<_> = results.into_iter().map(score_lmeb_query).collect();
 
     // ── Build run ID + label ──────────────────────────────────────────────────
@@ -625,6 +673,8 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         encode_barrier.as_str().to_string(),
         queries_loaded,
         &scores,
+        &cache_hit_by_id_lmeb,
+        estate_cache_lmeb.as_str().to_string(),
     );
 
     // ── Print summary ─────────────────────────────────────────────────────────

@@ -240,7 +240,8 @@ final class LoCoMoScorerTests: XCTestCase {
             guardDiagnostic: nil,
             turnsIngested: 2,
             writeMeanLatencySeconds: 0.01,
-            payloadText: nil
+            payloadText: nil,
+            cacheHit: nil
         )
         let score = scoreLoCoMoQuestion(result)
         XCTAssertEqual(score.questionID, "test-q-0")
@@ -266,7 +267,8 @@ final class LoCoMoScorerTests: XCTestCase {
             guardDiagnostic: "backend returned identical results for all queries",
             turnsIngested: 1,
             writeMeanLatencySeconds: 0.01,
-            payloadText: nil
+            payloadText: nil,
+            cacheHit: nil
         )
         let score = scoreLoCoMoQuestion(result)
         XCTAssertFalse(score.guardHealthy)
@@ -368,7 +370,9 @@ final class LoCoMoScorerTests: XCTestCase {
             seed: 42,
             outDir: nil,
             runLabel: "provenance-test",
-            encodeBarrier: .drain
+            encodeBarrier: .drain,
+            estateCache: .off,
+            cacheDir: nil
         )
         // Minimal corpus: no conversations, no questions (scores are provided directly).
         let corpus = LoCoMoCorpus(
@@ -377,7 +381,7 @@ final class LoCoMoScorerTests: XCTestCase {
             adversarialCount: 0
         )
 
-        let report = buildLoCoMoReport(config: config, corpus: corpus, scores: [score])
+        let report = buildLoCoMoReport(config: config, corpus: corpus, results: [], scores: [score])
 
         // 1. encode_barrier is present and correct.
         XCTAssertEqual(report.encodeBarrier, "drain",

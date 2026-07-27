@@ -327,8 +327,10 @@ struct LMEBReportProvenanceTests {
             runLabel: "prov-test",
             evidenceTypes: ["user_evidence"],
             queriesLoaded: 1,
+            results: [],
             scores: [score],
-            encodeBarrier: "drain"
+            encodeBarrier: "drain",
+            estateCache: "off"
         )
 
         // 1. encode_barrier is present and correct.
