@@ -15,6 +15,7 @@
 //! digest, and cursor.
 
 use crate::error::CorpusKitError;
+use std::collections::HashMap;
 use substrate_kernel::sha256;
 
 /// The canonical public content identity (Drawer ID in attached mode).
@@ -104,6 +105,24 @@ pub trait CorpusContentSource: Send + Sync {
     /// Resolve the CURRENT record for `id`, or None when the ID does not
     /// resolve to live content.
     fn record(&self, id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError>;
+
+    /// Batch-resolve CURRENT records for a set of IDs. The returned map
+    /// contains only IDs that resolve to live content; absent IDs are
+    /// omitted. Default implementation falls back to N serial `record`
+    /// calls; implementors backed by a SQL store should override with a
+    /// single WHERE…IN query.
+    fn records_for(
+        &self,
+        ids: &[&str],
+    ) -> Result<HashMap<String, CorpusContentRecord>, CorpusKitError> {
+        let mut result = HashMap::new();
+        for id in ids {
+            if let Some(record) = self.record(id)? {
+                result.insert(id.to_string(), record);
+            }
+        }
+        Ok(result)
+    }
 
     /// Enumerate content changes after `cursor` (None = from the start),
     /// at most `limit` entries, in stable feed order.

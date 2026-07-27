@@ -148,6 +148,27 @@ public actor CorpusDocumentStore: CorpusContentStore {
         return CorpusContentRecord(id: id, revision: revision, digest: digest, text: text)
     }
 
+    /// Optimized batch fetch using a single WHERE…IN query. Overrides the
+    /// protocol default (N serial reads) for the standalone store path.
+    public func records(for ids: [CorpusContentID]) async throws -> [CorpusContentID: CorpusContentRecord] {
+        guard !ids.isEmpty else { return [:] }
+        let rows = try await storage.rowStore.query(
+            table: "corpus_documents",
+            where: .in(Column(table: "corpus_documents", name: "content_id"),
+                       ids.map { .text($0) }),
+            orderBy: [], limit: nil, offset: nil)
+        var result: [CorpusContentID: CorpusContentRecord] = [:]
+        for row in rows {
+            guard case let .text(contentID)? = row["content_id"],
+                  case let .int(revision)? = row["revision"],
+                  case let .text(digest)? = row["digest"],
+                  case let .text(text)? = row["text"] else { continue }
+            result[contentID] = CorpusContentRecord(
+                id: contentID, revision: revision, digest: digest, text: text)
+        }
+        return result
+    }
+
     public func changes(
         since cursor: String?, limit: Int
     ) async throws -> CorpusContentChangeBatch {

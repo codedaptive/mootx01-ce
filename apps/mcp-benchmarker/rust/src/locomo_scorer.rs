@@ -23,9 +23,10 @@
 //! and `locomo_scorer_uuid_mapping_vectors`.
 
 use crate::longmemeval_scorer::{
-    lme_percentile, lme_ranked_sessions, lme_recall_all, lme_recall_any, lme_session_mrr,
-    LmeManifestEntry,
+    lme_parse_result_count, lme_percentile, lme_ranked_sessions, lme_recall_all, lme_recall_any,
+    lme_session_mrr, LmeManifestEntry,
 };
+use crate::longmemeval_token_efficiency::lme_estimate_tokens;
 use std::collections::{BTreeMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,6 +82,10 @@ pub struct LoCoMoQuestionResult {
     pub turns_ingested: usize,
     /// Mean write latency across all turns for this conversation's estate.
     pub write_mean_latency_seconds: f64,
+    /// Raw text blocks from the MCP search response, joined with "\n".
+    /// Used to compute tokens_per_result in the report builder.
+    /// None when no text blocks were present (guard-excluded, error, or empty estate).
+    pub payload_text: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,6 +145,9 @@ pub struct LoCoMoQuestionScore {
     pub write_mean_latency_seconds: f64,
     pub turns_ingested: usize,
     pub retrieved_uuid_count: usize,
+    /// Raw MCP payload text (text_blocks joined with "\n"). Carried through for
+    /// tokens_per_result computation in the report builder.
+    pub payload_text: Option<String>,
 }
 
 /// Scores one `LoCoMoQuestionResult`. Guard-excluded questions are flagged with
@@ -186,6 +194,7 @@ pub fn score_locomo_question(result: LoCoMoQuestionResult) -> LoCoMoQuestionScor
         write_mean_latency_seconds: result.write_mean_latency_seconds,
         turns_ingested: result.turns_ingested,
         retrieved_uuid_count,
+        payload_text: result.payload_text,
     }
 }
 
@@ -392,6 +401,27 @@ pub struct LoCoMoReportPerQuestion {
     pub ranked_dia_ids: Vec<String>,
     pub evidence_dia_ids: Vec<String>,
     pub retrieved_uuid_count: usize,
+    /// Estimated payload tokens divided by the retrieved result count.
+    /// Nil when the payload was absent or the result count was zero.
+    pub tokens_per_result: Option<f64>,
+}
+
+/// Token-efficiency and barrier provenance summary for a LoCoMo run.
+/// Aggregates token-efficiency state so every report JSON is self-documenting
+/// without cross-referencing external logs.
+///
+/// Twin of Swift `LoCoMoProvenanceSummary`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LoCoMoProvenanceSummary {
+    /// Number of questions for which the MCP response contained a non-empty payload.
+    pub questions_with_payload: usize,
+    /// Mean (payload tokens / retrieved UUID count) across questions where both
+    /// payload and at least one retrieved result were present. None when no questions
+    /// had payload text.
+    pub mean_tokens_per_result: Option<f64>,
+    /// Encode barrier mode used during ingest. Mirrors top-level encode_barrier
+    /// to keep provenance summary self-contained for log analysis.
+    pub encode_barrier: String,
 }
 
 /// The full LoCoMo run report.
@@ -412,6 +442,9 @@ pub struct LoCoMoReport {
     pub category_breakdown: Vec<LoCoMoReportCategoryEntry>,
     pub latency: LoCoMoReportLatency,
     pub per_question: Vec<LoCoMoReportPerQuestion>,
+    /// Token-efficiency and barrier provenance summary. None when no question had
+    /// payload text (e.g. estate was empty during a dry run).
+    pub provenance_summary: Option<LoCoMoProvenanceSummary>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -469,29 +502,59 @@ pub fn build_locomo_report(
         write_mean_seconds: latency.write_mean_seconds,
     };
 
+    // Compute per-question tokens_per_result and accumulate provenance data.
+    // Uses lme_parse_result_count (parses "found N memory(s)") and lme_estimate_tokens
+    // (byte-count/4) for consistency with the LME dual-arm computation.
+    let mut tokens_per_result_list: Vec<f64> = Vec::new();
+    let questions_with_payload = scores.iter().filter(|s| s.payload_text.is_some()).count();
+
     let per_question: Vec<LoCoMoReportPerQuestion> = scores
         .iter()
-        .map(|s| LoCoMoReportPerQuestion {
-            question_id:             s.question_id.clone(),
-            category_label:          s.category_label.clone(),
-            category:                s.category,
-            turns_ingested:          s.turns_ingested,
-            guard_healthy:           s.guard_healthy,
-            guard_diagnostic:        s.guard_diagnostic.clone(),
-            recall_any_at_1:         s.recall_any_at_1,
-            recall_any_at_5:         s.recall_any_at_5,
-            recall_any_at_10:        s.recall_any_at_10,
-            recall_all_at_1:         s.recall_all_at_1,
-            recall_all_at_5:         s.recall_all_at_5,
-            recall_all_at_10:        s.recall_all_at_10,
-            mrr:                     s.mrr,
-            query_latency_seconds:   s.query_latency_seconds,
-            write_mean_latency_seconds: s.write_mean_latency_seconds,
-            ranked_dia_ids:          s.ranked_dia_ids.clone(),
-            evidence_dia_ids:        s.evidence_dia_ids.clone(),
-            retrieved_uuid_count:    s.retrieved_uuid_count,
+        .map(|s| {
+            let tpr: Option<f64> = s.payload_text.as_deref().and_then(|text| {
+                let n = lme_parse_result_count(text)?;
+                if n == 0 { return None; }
+                Some(lme_estimate_tokens(text) as f64 / n as f64)
+            });
+            if let Some(v) = tpr { tokens_per_result_list.push(v); }
+            LoCoMoReportPerQuestion {
+                question_id:             s.question_id.clone(),
+                category_label:          s.category_label.clone(),
+                category:                s.category,
+                turns_ingested:          s.turns_ingested,
+                guard_healthy:           s.guard_healthy,
+                guard_diagnostic:        s.guard_diagnostic.clone(),
+                recall_any_at_1:         s.recall_any_at_1,
+                recall_any_at_5:         s.recall_any_at_5,
+                recall_any_at_10:        s.recall_any_at_10,
+                recall_all_at_1:         s.recall_all_at_1,
+                recall_all_at_5:         s.recall_all_at_5,
+                recall_all_at_10:        s.recall_all_at_10,
+                mrr:                     s.mrr,
+                query_latency_seconds:   s.query_latency_seconds,
+                write_mean_latency_seconds: s.write_mean_latency_seconds,
+                ranked_dia_ids:          s.ranked_dia_ids.clone(),
+                evidence_dia_ids:        s.evidence_dia_ids.clone(),
+                retrieved_uuid_count:    s.retrieved_uuid_count,
+                tokens_per_result:       tpr,
+            }
         })
         .collect();
+
+    let mean_tokens_per_result: Option<f64> = if tokens_per_result_list.is_empty() {
+        None
+    } else {
+        Some(tokens_per_result_list.iter().sum::<f64>() / tokens_per_result_list.len() as f64)
+    };
+    let provenance_summary = if questions_with_payload > 0 {
+        Some(LoCoMoProvenanceSummary {
+            questions_with_payload,
+            mean_tokens_per_result,
+            encode_barrier: encode_barrier.clone(),
+        })
+    } else {
+        None
+    };
 
     LoCoMoReport {
         run_id,
@@ -503,6 +566,7 @@ pub fn build_locomo_report(
         category_breakdown,
         latency: report_latency,
         per_question,
+        provenance_summary,
     }
 }
 
@@ -521,6 +585,110 @@ pub fn write_locomo_report(report: &LoCoMoReport, path: &std::path::Path) -> Res
         .map_err(|e| format!("sorted report encode failed: {e}"))?;
     std::fs::write(path, sorted_json.as_bytes())
         .map_err(|e| format!("report write failed: {e}"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — provenance summary and tokens_per_result fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Constructs a minimal `LoCoMoQuestionScore` for use in report-builder tests.
+    fn make_score(payload_text: Option<String>) -> LoCoMoQuestionScore {
+        LoCoMoQuestionScore {
+            question_id: "test-q1".to_string(),
+            category: 1,
+            category_label: "single_hop".to_string(),
+            guard_healthy: true,
+            guard_diagnostic: None,
+            recall_any_at_1: 1.0,
+            recall_any_at_5: 1.0,
+            recall_any_at_10: 1.0,
+            recall_all_at_1: 1.0,
+            recall_all_at_5: 1.0,
+            recall_all_at_10: 1.0,
+            mrr: 1.0,
+            ranked_dia_ids: vec!["D1:1".to_string()],
+            evidence_dia_ids: vec!["D1:1".to_string()],
+            query_latency_seconds: 0.1,
+            write_mean_latency_seconds: 0.05,
+            turns_ingested: 5,
+            retrieved_uuid_count: 3,
+            payload_text,
+        }
+    }
+
+    /// `build_locomo_report` populates `encode_barrier`, `tokens_per_result`, and
+    /// `provenance_summary` fields when a score has a payload_text with a recognized
+    /// "found N memory(s)" header.
+    ///
+    /// Twin of Swift `testBuildLoCoMoReportPopulatesProvenanceFields`.
+    #[test]
+    fn build_locomo_report_populates_provenance_fields() {
+        // Payload with "found 3 memory(s)" header — lme_parse_result_count returns Some(3).
+        let payload = "found 3 memory(s)\nblock one content\nblock two content\nblock three content";
+        let score = make_score(Some(payload.to_string()));
+        let scores = vec![score];
+
+        let report = build_locomo_report(
+            "test-run-id".to_string(),
+            "test-label".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+            "drain".to_string(),
+            1,     // questions_loaded
+            0,     // adversarial_excluded
+            &scores,
+        );
+
+        // Top-level encode_barrier must be "drain".
+        assert_eq!(report.encode_barrier, "drain", "encode_barrier field must equal run's barrier mode");
+
+        // Per-question tokens_per_result must be set and non-zero.
+        let q = &report.per_question[0];
+        assert!(
+            q.tokens_per_result.is_some(),
+            "tokens_per_result must be Some when payload had recognized 'found N' header"
+        );
+        assert!(
+            q.tokens_per_result.unwrap() > 0.0,
+            "tokens_per_result must be positive"
+        );
+
+        // provenance_summary must be populated.
+        let prov = report.provenance_summary.as_ref()
+            .expect("provenance_summary must be Some when at least one question had payload");
+        assert_eq!(prov.questions_with_payload, 1, "questions_with_payload must be 1");
+        assert!(prov.mean_tokens_per_result.is_some(), "mean_tokens_per_result must be Some");
+        assert_eq!(prov.encode_barrier, "drain", "provenance_summary.encode_barrier must match run barrier");
+    }
+
+    /// When no score has payload_text, `provenance_summary` must be None and every
+    /// `tokens_per_result` entry must be None.
+    #[test]
+    fn build_locomo_report_no_payload_provenance_is_none() {
+        let score = make_score(None);
+        let scores = vec![score];
+
+        let report = build_locomo_report(
+            "test-run-id".to_string(),
+            "test-label".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+            "drain".to_string(),
+            1, 0,
+            &scores,
+        );
+
+        assert!(
+            report.provenance_summary.is_none(),
+            "provenance_summary must be None when no score had payload"
+        );
+        assert!(
+            report.per_question[0].tokens_per_result.is_none(),
+            "tokens_per_result must be None when score had no payload"
+        );
+    }
 }
 
 /// Recursively sorts JSON object keys (matching JSONEncoder `.sortedKeys`).

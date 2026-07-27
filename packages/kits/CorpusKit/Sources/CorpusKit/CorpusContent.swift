@@ -116,6 +116,13 @@ public protocol CorpusContentSource: Sendable {
     /// job can never overwrite a newer revision.
     func record(for id: CorpusContentID) async throws -> CorpusContentRecord?
 
+    /// Batch-resolve CURRENT records for a set of IDs. Returned dictionary
+    /// contains only IDs that resolve to live content; absent IDs are
+    /// omitted (not nil-valued). Default implementation falls back to N
+    /// serial `record(for:)` calls; conformers may override with a single
+    /// WHERE…IN query for better performance.
+    func records(for ids: [CorpusContentID]) async throws -> [CorpusContentID: CorpusContentRecord]
+
     /// Enumerate content changes after `cursor` (nil = from the start), at
     /// most `limit` entries, in stable feed order.
     func changes(since cursor: String?, limit: Int) async throws -> CorpusContentChangeBatch
@@ -123,6 +130,20 @@ public protocol CorpusContentSource: Sendable {
     /// Every live content ID, in deterministic ascending ID order — the
     /// streaming order rebuilds use.
     func activeContentIDs() async throws -> [CorpusContentID]
+}
+
+public extension CorpusContentSource {
+    /// Default N-serial fallback. Implementations backed by a SQL store
+    /// should override with a single WHERE…IN query.
+    func records(for ids: [CorpusContentID]) async throws -> [CorpusContentID: CorpusContentRecord] {
+        var result: [CorpusContentID: CorpusContentRecord] = [:]
+        for id in ids {
+            if let record = try await record(for: id) {
+                result[id] = record
+            }
+        }
+        return result
+    }
 }
 
 /// The full canonical-content authority — the standalone-mode surface.

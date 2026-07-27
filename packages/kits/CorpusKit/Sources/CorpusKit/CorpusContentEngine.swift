@@ -890,6 +890,21 @@ public actor CorpusContentEngine {
         result.completions.reserveCapacity(jobs.count)
         var preparedUpserts: Set<String> = []
 
+        // Pre-scan Phase 1 upsert jobs to batch-fetch all source records in one
+        // WHERE…IN call instead of N serial record(for:) calls (Cause 4 fix).
+        // Over-fetching is harmless — stale/deduped jobs just leave entries unused.
+        var upsertContentIDs: [CorpusContentID] = []
+        var seenUpsertIDs = Set<CorpusContentID>()
+        for job in jobs {
+            if let payload = try? JSONDecoder().decode(ContentIndexJob.self, from: job.payload),
+               payload.kind == .upsert,
+               seenUpsertIDs.insert(payload.contentID).inserted
+            {
+                upsertContentIDs.append(payload.contentID)
+            }
+        }
+        let sourceRecords = try await source.records(for: upsertContentIDs)
+
         // Upsert records validated in Phase 1, queued for Phase 2 parallel embed.
         struct PendingEmbedWork: Sendable {
             let record: CorpusContentRecord
@@ -973,8 +988,9 @@ public actor CorpusContentEngine {
                     continue
                 }
 
-                // Resolve the current content record by ID.
-                guard let record = try? await source.record(for: payload.contentID) else {
+                // Resolve the current content record from the pre-fetched batch.
+                // A nil hit means the ID is no longer live in the source — stale job.
+                guard let record = sourceRecords[payload.contentID] else {
                     contentEngineLog.info("content job for \(payload.contentID, privacy: .public) rev \(payload.revision, privacy: .public) stale — ID gone")
                     result.completions.append((job.id, .done))
                     continue
@@ -1355,19 +1371,28 @@ public actor CorpusContentEngine {
             slotIndex: Int, termDigests: Set<String>, countsDocument: Bool
         )] = []
         if !countsUpdates.isEmpty {
+            // Deduplicate content IDs once before the slot loop so the batch
+            // query (one per slot) fetches exactly the set we need.
+            var seenIDs = Set<String>()
+            let uniqueContentIDs = countsUpdates.compactMap { update -> String? in
+                seenIDs.insert(update.contentID).inserted ? update.contentID : nil
+            }
             for index in slots.indices {
                 guard slots[index].countsAccumulator != nil else { continue }
                 let modelID = slots[index].provider.modelID
                 let modelVersion = slots[index].provider.modelVersion
+                // Batch-fetch all references for this slot in one WHERE…IN query
+                // instead of N individual referenceFor calls. Semantics identical:
+                // the resulting dictionary is nil-for-absent, matching the old path.
+                let existingRefs = try await countsStore.referencesFor(
+                    modelID: modelID, modelVersion: modelVersion,
+                    contentIDs: uniqueContentIDs)
                 var admittedIDs: Set<String> = []
                 for update in countsUpdates {
                     guard admittedIDs.insert(update.contentID).inserted else { continue }
                     let countsDocument: Bool
                     var termDigests: Set<String> = []
-                    if let existing = try await countsStore.referenceFor(
-                        modelID: modelID, modelVersion: modelVersion,
-                        contentID: update.contentID)
-                    {
+                    if let existing = existingRefs[update.contentID] {
                         if existing.digest == update.digest {
                             if existing.isSubsumed {
                                 consumedSubsumedReferences.append(

@@ -172,7 +172,8 @@ struct LMEBScorerAggregateTests {
             docsIngested: 5,
             retrievedDocCount: 3,
             rankedDocIDs: [],
-            relevantDocIDs: []
+            relevantDocIDs: [],
+            payloadText: nil
         )
     }
 
@@ -288,5 +289,70 @@ struct LMEBNDCGUnitTests {
         let relevant: Set<String> = ["doc_b", "doc_d"]
         let result = lmebNDCG(rankedDocIDs: ranked, relevantDocIDs: relevant, k: 10)
         #expect(result >= 0.0 && result <= 1.0)
+    }
+}
+
+// MARK: - Integration-shaped test: real builder path populates report fields
+
+@Suite("LMEBReport provenance fields — integration-shaped builder tests")
+struct LMEBReportProvenanceTests {
+
+    /// Exercises buildLMEBReport through the real code path with a synthetic query
+    /// score that carries payloadText. Asserts encode_barrier, per-query
+    /// tokens_per_result, and provenance_summary are all present in the output.
+    @Test("buildLMEBReport populates encode_barrier, tokens_per_result, provenance_summary")
+    func buildLMEBReportPopulatesProvenanceFields() {
+        // "found 2 memory(s)\n..." — lmeParseResultCount returns 2 for this payload.
+        let payload = "found 2 memory(s)\nsome retrieved document text here\nanother document snippet"
+        let score = LMEBQueryScore(
+            queryID: "prov-test-q1",
+            guardHealthy: true,
+            guardDiagnostic: nil,
+            nDCGAt10: 1.0,
+            mrr: 1.0,
+            recallAt1: 1.0,
+            recallAt5: 1.0,
+            recallAt10: 1.0,
+            apAt10: 1.0,
+            queryLatencySeconds: 0.1,
+            writeMeanLatencySeconds: 0.02,
+            docsIngested: 5,
+            retrievedDocCount: 2,
+            rankedDocIDs: ["doc-a", "doc-b"],
+            relevantDocIDs: ["doc-a"],
+            payloadText: payload
+        )
+
+        let report = buildLMEBReport(
+            runLabel: "prov-test",
+            evidenceTypes: ["user_evidence"],
+            queriesLoaded: 1,
+            scores: [score],
+            encodeBarrier: "drain"
+        )
+
+        // 1. encode_barrier is present and correct.
+        #expect(report.encodeBarrier == "drain",
+            "encode_barrier must match the encodeBarrier argument")
+
+        // 2. per_query entry has tokens_per_result set (payload had 2 results).
+        guard let q = report.perQuery.first else {
+            Issue.record("perQuery must not be empty")
+            return
+        }
+        #expect(q.tokensPerResult != nil,
+            "tokens_per_result must be non-nil when payload text was present")
+
+        // 3. provenance_summary is present and populated.
+        guard let prov = report.provenanceSummary else {
+            Issue.record("provenance_summary must be non-nil when at least one query had payload text")
+            return
+        }
+        #expect(prov.queriesWithPayload == 1,
+            "queries_with_payload must equal the count of scores with payload text")
+        #expect(prov.meanTokensPerResult != nil,
+            "mean_tokens_per_result must be non-nil when queries_with_payload > 0")
+        #expect(prov.encodeBarrier == "drain",
+            "encode_barrier in provenance_summary must mirror the top-level encode_barrier")
     }
 }

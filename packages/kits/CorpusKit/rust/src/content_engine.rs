@@ -35,7 +35,7 @@ use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -640,6 +640,17 @@ impl CorpusContentEngine {
             EncodeSpeed::Foreground => cores.max(1),
             EncodeSpeed::Background => (cores / 4).max(1),
         }
+    }
+
+    /// Batch-resolve current source records for the given IDs. Delegates to
+    /// the source's `records_for` (one WHERE…IN query); exposes the source
+    /// through a pub(crate) seam so the queue module does not need direct
+    /// field access.
+    pub(crate) fn source_records_for(
+        &self,
+        ids: &[&str],
+    ) -> CorpusKitResult<HashMap<String, CorpusContentRecord>> {
+        self.source.records_for(ids)
     }
 
     pub(crate) fn begin_deferred_vector_index(&self) -> CorpusKitResult<()> {
@@ -1438,6 +1449,7 @@ impl CorpusContentEngine {
         job: &ContentIndexJob,
         now_millis: i64,
         content_already_prepared: bool,
+        prefetched_record: Option<CorpusContentRecord>,
     ) -> CorpusKitResult<(Vec<CorpusIndexState>, Option<(String, i64, String, String)>)> {
         if self.counts_reload_required.load(Ordering::Acquire) {
             self.reload_counts_from_storage()?;
@@ -1454,7 +1466,13 @@ impl CorpusContentEngine {
                         job.content_id
                     )));
                 };
-                let Some(record) = self.source.record(&job.content_id)? else {
+                // Use the batch-prefetched record when provided; fall back to a
+                // single source read only when called without pre-fetch context.
+                let record_opt = match prefetched_record {
+                    Some(r) => Some(r),
+                    None => self.source.record(&job.content_id)?,
+                };
+                let Some(record) = record_opt else {
                     return Err(CorpusKitError::StaleRevision(format!(
                         "upsert for {} rev {}: the ID no longer resolves — the remove change will clear it",
                         job.content_id, job.revision
@@ -1530,6 +1548,19 @@ impl CorpusContentEngine {
             Vec::new();
         let mut consumed_subsumed_references: Vec<(String, String, String)> = Vec::new();
         if !counts_updates.is_empty() {
+            // Deduplicate content IDs once before the slot loop so the batch
+            // query (one per slot) fetches exactly the set needed.
+            let mut seen_ids = HashSet::new();
+            let unique_content_ids: Vec<&str> = counts_updates
+                .iter()
+                .filter_map(|(cid, _, _, _)| {
+                    if seen_ids.insert(cid.as_str()) {
+                        Some(cid.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             for (slot_index, slot) in self.slots.iter().enumerate() {
                 let (model_id, model_version) = {
                     let handle = slot.handle.lock().unwrap();
@@ -1542,17 +1573,21 @@ impl CorpusContentEngine {
                 if slot.counts.lock().unwrap().is_none() {
                     continue;
                 }
+                // Batch-fetch all references for this slot in one WHERE…IN query
+                // instead of N individual reference_for calls. Semantics identical:
+                // the HashMap returns None-for-absent, matching the old path.
+                let existing_refs = self.counts_store.references_for(
+                    &model_id,
+                    &model_version,
+                    &unique_content_ids,
+                )?;
                 let mut admitted_ids = HashSet::new();
                 for (content_id, revision, digest, text) in counts_updates {
                     if !admitted_ids.insert(content_id.clone()) {
                         continue;
                     }
                     let mut term_digests = BTreeSet::new();
-                    let counts_document = match self.counts_store.reference_for(
-                        &model_id,
-                        &model_version,
-                        content_id,
-                    )? {
+                    let counts_document = match existing_refs.get(content_id.as_str()) {
                         Some(existing) if existing.digest == *digest => {
                             if existing.is_subsumed {
                                 consumed_subsumed_references.push((
@@ -1564,7 +1599,7 @@ impl CorpusContentEngine {
                             continue;
                         }
                         Some(existing) => {
-                            term_digests.extend(existing.growth_term_digests);
+                            term_digests.extend(existing.growth_term_digests.iter().cloned());
                             false
                         }
                         None => self.index_state.state(content_id)?.is_none(),
