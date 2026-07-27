@@ -1144,6 +1144,86 @@ struct CorpusContentEngineTests {
             #expect(try await engine.indexedContentIDs().count == 12)
         }
     }
+
+    /// Structural equivalence: `drainContentQueueOnce` must use bounded parallel
+    /// embedding preparation (the fan-out restored by fix-fanout, Cause 1).
+    ///
+    /// Proof:
+    ///   1. Concurrency probe: peak concurrent embed workers > 1 on multi-core
+    ///      hardware, bounded by activeProcessorCount.
+    ///   2. Output equivalence: all enqueued content IDs are indexed
+    ///      (`indexedContentIDs` matches the enqueued set).
+    ///
+    /// The `ReindexConcurrencyProvider` sleeps 20ms per `embed` call — serial
+    /// execution of 12 docs takes ≥240ms; parallel takes ~20ms. The sleep makes
+    /// the concurrency window wide enough that the probe reliably observes
+    /// concurrent entry even under `nice -n 19` scheduling pressure.
+    @Test func queueDrainUsesBoundedParallelEmbeddingPreparation() async throws {
+        try await GlobalTestLock.shared.withLock {
+            // Build 12-document store — enough to exercise ≥ 2 concurrent
+            // workers on any multi-core machine.
+            //
+            // Use a per-test isolated subdirectory so the DrainLease file
+            // (encode.drain.lease) does not collide with concurrent suites
+            // that also use SQLite-backed estates in the shared temp directory.
+            let testDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("qdrain-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: testDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: testDir) }
+            let dbURL = testDir.appendingPathComponent("corpus.sqlite3")
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            var records: [CorpusContentRecord] = []
+            for index in 0..<12 {
+                let record = try await store.put(
+                    "queue drain parallel content \(index)",
+                    id: "qdrain-\(index)", now: now)
+                records.append(record)
+            }
+
+            // Instrument with the concurrency probe provider.
+            let probe = ReindexConcurrencyProbe()
+            let engine = try await CorpusContentEngine(
+                storage: storage,
+                configuration: try CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: store,
+                models: [.fdc(provider: ReindexConcurrencyProvider(probe: probe))])
+
+            // Mount queue, enqueue all 12 change references, then drain.
+            // All 12 jobs land in the queue before the drain worker starts,
+            // so drainIndexBatch receives them as one batch and fans them out.
+            try await engine.mountIngestQueue()
+            for record in records {
+                try await engine.enqueueChange(
+                    .upsert(id: record.id, revision: record.revision,
+                            digest: record.digest),
+                    cursor: nil, capturedAt: now)
+            }
+            try await engine.awaitIngestDrain()
+
+            // Proof 1: bounded concurrency.
+            let bound = max(1, ProcessInfo.processInfo.activeProcessorCount)
+            #expect(probe.peakValue() <= bound,
+                    "peak concurrent workers must not exceed activeProcessorCount")
+            if bound > 1 {
+                let peak = probe.peakValue()
+                #expect(peak > 1,
+                        "queue drain must use multiple concurrent embed workers (peakValue=\(peak), bound=\(bound))")
+            }
+
+            // Proof 2: output equivalence — all 12 IDs indexed by the parallel path.
+            let indexed = try await engine.indexedContentIDs()
+            #expect(Set(indexed) == Set(records.map(\.id)),
+                    "all 12 enqueued content IDs must appear in indexedContentIDs after drain")
+
+            await engine.dropIngestQueue()
+        }
+    }
 }
 
 // MARK: - Static attached-source stand-in

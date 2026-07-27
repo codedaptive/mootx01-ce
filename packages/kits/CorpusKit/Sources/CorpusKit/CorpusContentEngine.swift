@@ -34,11 +34,15 @@
 import EngramLib
 import Foundation
 import IntellectusLib
+import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
 import QueueKit
 import SubstrateTypes
 import VectorKit
+
+// Logger shared by the engine and its queue extension (CorpusContentEngineQueue.swift).
+private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
 
 // MARK: - Results
 
@@ -679,8 +683,106 @@ public actor CorpusContentEngine {
         }
         guard !records.isEmpty else { return 0 }
 
+        // Delegate the bounded parallel embed phase to the shared kernel,
+        // which also services the queue drain path.
+        let cap = max(1, parallelism ?? ProcessInfo.processInfo.activeProcessorCount)
+        let prepared = try await embedQueueRecords(records, slotScope: slotScope, cap: cap, now: now)
+
+        for item in prepared {
+            try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+        }
+        let vectorRows = prepared.flatMap(\.vectorRows)
+        if !vectorRows.isEmpty { try await vectorStore.addPayloads(vectorRows) }
+        try await coverageStore.markCovered(prepared.flatMap(\.covered), now: now)
+        for item in prepared {
+            try await indexState.advance(CorpusIndexState(
+                contentID: item.record.id,
+                revision: item.record.revision,
+                digest: item.record.digest,
+                indexVersion: Self.indexVersion,
+                appliedCursor: nil,
+                updatedAt: now))
+            if force {
+                // The former serial reindex path emitted this metric once per
+                // completed record. Preserve that observability while moving
+                // only the embedding preparation onto bounded workers.
+                Intellectus.report(.metric(
+                    name: "corpus.content.indexed", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+            }
+        }
+        return prepared.count
+    }
+
+    /// Immutable provider snapshot for one bounded parallel embed pass.
+    /// Internal so the queue extension (CorpusContentEngineQueue.swift) can
+    /// receive the return value of `embedQueueRecords`.
+    struct StructuralProvider: Sendable {
+        let provider: any EmbeddingProvider
+        let modelID: String
+        let modelVersion: String
+        let basisDigest: String
+        /// True for the default slot (index 0) and for all slots in standalone
+        /// mode — only these slots write the binary (Hamming) vector lane.
+        let writeBinary: Bool
+    }
+
+    /// Output of one bounded parallel embed worker — pure compute, no storage
+    /// writes. Internal so CorpusContentEngineQueue.swift can consume it.
+    struct PreparedStructuralRecord: Sendable {
+        let record: CorpusContentRecord
+        let tokens: [String]
+        let vectorRows: [VectorPayloadInput]
+        let covered: [(CorpusContentID, String, String)]
+    }
+
+    private func boundedConcurrentMap<Input: Sendable, Output: Sendable>(
+        _ inputs: [Input], cap: Int,
+        _ work: @escaping @Sendable (Input) async throws -> Output
+    ) async throws -> [Output] {
+        precondition(cap >= 1)
+        var results = [Output?](repeating: nil, count: inputs.count)
+        var start = 0
+        while start < inputs.count {
+            let end = min(start + cap, inputs.count)
+            try await withThrowingTaskGroup(of: (Int, Output).self) { group in
+                for index in start..<end {
+                    let input = inputs[index]
+                    group.addTask { (index, try await work(input)) }
+                }
+                for try await (index, output) in group { results[index] = output }
+            }
+            start = end
+        }
+        return results.map { $0! }
+    }
+
+    /// Embed `records` using bounded parallelism (≤ `cap` tasks active at once),
+    /// returning one `PreparedStructuralRecord` per input record in the SAME
+    /// ORDER as the input. No storage writes occur — this is pure compute: each
+    /// worker calls `embedPair` for every active provider slot and accumulates
+    /// keyword tokens.
+    ///
+    /// The provider snapshot is built once from the current actor state before
+    /// any tasks are spawned, so there is no actor re-entry during the parallel
+    /// phase. Callers are responsible for the subsequent serial storage writes
+    /// (BM25, vectorStore.addPayloads, coverageStore.markCovered).
+    ///
+    /// `slotScope` follows the same semantics as `indexWholeContentBatch`:
+    ///   - `.all`: embed across every active provider slot.
+    ///   - `.statelessOnly`: skip trainable slots (migration / backfill path).
+    func embedQueueRecords(
+        _ records: [CorpusContentRecord],
+        slotScope: SlotScope,
+        cap: Int,
+        now: Date
+    ) async throws -> [PreparedStructuralRecord] {
+        guard !records.isEmpty else { return [] }
+        // Build an immutable provider snapshot from current actor state once,
+        // so the parallel tasks never re-enter the actor for slot reads.
         let providers = slots.enumerated().compactMap { index, slot -> StructuralProvider? in
             if slotScope == .statelessOnly, slot.freshBasisBlob != nil { return nil }
+            // A trainable slot with no trained basis cannot embed yet.
             if slot.freshBasisBlob != nil, slot.basisDigest == Self.untrainedDigest { return nil }
             return StructuralProvider(
                 provider: slot.provider,
@@ -689,8 +791,17 @@ public actor CorpusContentEngine {
                 basisDigest: slot.basisDigest,
                 writeBinary: index == 0 || configuration.mode == .standalone)
         }
-        let cap = max(1, parallelism ?? ProcessInfo.processInfo.activeProcessorCount)
-        let prepared = try await boundedConcurrentMap(records, cap: cap) { record in
+        // No active providers: return skeleton records (BM25 will still run).
+        guard !providers.isEmpty else {
+            return records.map { record in
+                PreparedStructuralRecord(
+                    record: record,
+                    tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
+                    vectorRows: [],
+                    covered: [])
+            }
+        }
+        return try await boundedConcurrentMap(records, cap: cap) { record in
             var rows: [VectorPayloadInput] = []
             rows.reserveCapacity(providers.count * 2)
             var covered: [(CorpusContentID, String, String)] = []
@@ -719,67 +830,232 @@ public actor CorpusContentEngine {
                 vectorRows: rows,
                 covered: covered)
         }
+    }
 
-        for item in prepared {
-            try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+    // MARK: - Parallel queue drain kernel
+
+    /// Assembled output of `drainIndexBatch`: everything the queue extension
+    /// needs to call `commitQueueBatch` and `queue.reply`. Declared here (not
+    /// in the queue extension file) so it can access the engine's private stores.
+    struct DrainIndexBatchResult {
+        var completions: [(jobID: JobID, status: ObservationStatus)]
+        var checkpoints: [CorpusIndexState]
+        var countsUpdates: [(contentID: String, revision: Int64, digest: String, text: String)]
+        var encodedIDs: [String]
+        let batchNow: Date
+    }
+
+    /// The indexing kernel for `drainContentQueueOnce`. Takes the raw job array
+    /// from `queue.drain` and returns the assembled batch result; the queue
+    /// extension handles `commitQueueBatch` and `queue.reply` after this returns.
+    ///
+    /// Four-phase pipeline:
+    ///   Phase 0 — once-per-batch: countsReload guard, firstIngestTrainIfNeeded,
+    ///             registerClaims (Cause 1+2 fixes).
+    ///   Phase 1 — serial per-job: decode, validate, record fetch, idempotence
+    ///             check; remove jobs handled here entirely.
+    ///   Phase 2 — bounded parallel embed (≤ activeProcessorCount tasks):
+    ///             embedQueueRecords over pending upserts (Cause 1 fix).
+    ///   Phase 3 — serial storage writes: BM25, one vectorStore.addPayloads,
+    ///             one coverageStore.markCovered for the whole batch (Cause 5 fix).
+    ///
+    /// The contract is unchanged from the previous serial path: same indexed
+    /// outputs, same idempotence guarantees, same AT-LEAST-ONCE delivery, same
+    /// cursor-checkpoint semantics. Only the execution schedule differs.
+    func drainIndexBatch(_ jobs: [Job]) async throws -> DrainIndexBatchResult {
+        // Phase 0: once-per-batch housekeeping — hoisted out of the per-job loop.
+        // countsReloadRequired is set on a failed commitQueueBatch; heal before
+        // any new fold.
+        if countsReloadRequired {
+            try await reloadCountsFromStorage()
+            countsReloadRequired = false
         }
-        let vectorRows = prepared.flatMap(\.vectorRows)
-        if !vectorRows.isEmpty { try await vectorStore.addPayloads(vectorRows) }
-        try await coverageStore.markCovered(prepared.flatMap(\.covered), now: now)
-        for item in prepared {
-            try await indexState.advance(CorpusIndexState(
-                contentID: item.record.id,
-                revision: item.record.revision,
-                digest: item.record.digest,
-                indexVersion: Self.indexVersion,
-                appliedCursor: nil,
-                updatedAt: now))
-            if force {
-                // The former serial reindex path emitted this metric once per
-                // completed record. Preserve that observability while moving
-                // only the embedding preparation onto bounded workers.
-                Intellectus.report(.metric(
-                    name: "corpus.content.indexed", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+        // firstIngestTrainIfNeeded: trains an untrained trainable slot exactly
+        // once via the bounded streaming trainer; no-op when all slots are
+        // trained or stateless. Idempotent — calling once per batch is equivalent
+        // to calling once per job (eliminates N redundant no-ops).
+        let batchNow = Date()
+        try await firstIngestTrainIfNeeded(now: batchNow)
+        // registerClaims: idempotent — upserts claims only when absent; calling
+        // once per batch eliminates N×slots unconditional upserts (Cause 2 fix).
+        try await registerClaims(now: batchNow)
+
+        // Phase 1: serial per-job decode, record resolution, and idempotence gate.
+        // Source reads and the indexed-state store must be serialized on the actor.
+        var result = DrainIndexBatchResult(
+            completions: [], checkpoints: [], countsUpdates: [],
+            encodedIDs: [], batchNow: batchNow)
+        result.completions.reserveCapacity(jobs.count)
+        var preparedUpserts: Set<String> = []
+
+        // Upsert records validated in Phase 1, queued for Phase 2 parallel embed.
+        struct PendingEmbedWork: Sendable {
+            let record: CorpusContentRecord
+            let workNow: Date
+            let cursor: String?
+            let jobID: JobID
+            let upsertKey: String
+        }
+        var pendingWork: [PendingEmbedWork] = []
+
+        for job in jobs {
+            guard let payload = try? JSONDecoder().decode(
+                ContentIndexJob.self, from: job.payload)
+            else {
+                contentEngineLog.error("content job decode failed; replying blocked")
+                result.completions.append((job.id, .blocked))
+                continue
             }
-        }
-        return prepared.count
-    }
+            // The work instant: the job's submission HLC physical time (the capture
+            // instant) — deterministic, no Date() in the per-job path.
+            let workNow = Date(timeIntervalSince1970:
+                Double(job.submittedAt.physicalTime) / 1000.0)
 
-    private struct StructuralProvider: Sendable {
-        let provider: any EmbeddingProvider
-        let modelID: String
-        let modelVersion: String
-        let basisDigest: String
-        let writeBinary: Bool
-    }
-
-    private struct PreparedStructuralRecord: Sendable {
-        let record: CorpusContentRecord
-        let tokens: [String]
-        let vectorRows: [VectorPayloadInput]
-        let covered: [(CorpusContentID, String, String)]
-    }
-
-    private func boundedConcurrentMap<Input: Sendable, Output: Sendable>(
-        _ inputs: [Input], cap: Int,
-        _ work: @escaping @Sendable (Input) async throws -> Output
-    ) async throws -> [Output] {
-        precondition(cap >= 1)
-        var results = [Output?](repeating: nil, count: inputs.count)
-        var start = 0
-        while start < inputs.count {
-            let end = min(start + cap, inputs.count)
-            try await withThrowingTaskGroup(of: (Int, Output).self) { group in
-                for index in start..<end {
-                    let input = inputs[index]
-                    group.addTask { (index, try await work(input)) }
+            switch payload.kind {
+            case .remove:
+                // Remove: cancel any pending upsert for the same content (queue
+                // order preserved — a later remove supersedes an earlier upsert),
+                // then clear derived state serially on the actor.
+                for work in pendingWork where work.record.id == payload.contentID {
+                    result.completions.append((work.jobID, .done))
                 }
-                for try await (index, output) in group { results[index] = output }
+                pendingWork.removeAll { $0.record.id == payload.contentID }
+                result.checkpoints.removeAll { $0.contentID == payload.contentID }
+                result.countsUpdates.removeAll { $0.contentID == payload.contentID }
+                let upsertPrefix = "\(payload.contentID)\u{1F}"
+                preparedUpserts = preparedUpserts.filter { !$0.hasPrefix(upsertPrefix) }
+                do {
+                    try _ingestFailureHook?(payload.contentID)
+                    try await clearDerivedState(id: payload.contentID)
+                    if let cursor = payload.cursor {
+                        result.checkpoints.append(CorpusIndexState(
+                            contentID: Self.feedCursorRowID, revision: 0, digest: "",
+                            indexVersion: Self.indexVersion, appliedCursor: cursor,
+                            updatedAt: workNow))
+                    }
+                    result.completions.append((job.id, .done))
+                } catch {
+                    contentEngineLog.error("content remove failed for \(payload.contentID, privacy: .public): \(error, privacy: .public)")
+                    result.completions.append((job.id, .blocked))
+                }
+
+            case .upsert:
+                guard let digest = payload.digest else {
+                    result.completions.append((job.id, .blocked))
+                    continue
+                }
+                // Test seam: a non-nil hook simulates a transient failure. The
+                // parallel drain does not retry in-loop — AT-LEAST-ONCE delivery
+                // re-queues the job on the next drain pass.
+                do {
+                    try _ingestFailureHook?(payload.contentID)
+                } catch {
+                    contentEngineLog.error("content index hook failure for \(payload.contentID, privacy: .public): \(error, privacy: .public)")
+                    result.completions.append((job.id, .blocked))
+                    continue
+                }
+
+                // Within-batch deduplication: a (id, revision, digest) already
+                // prepared in this drain pass is a no-op.
+                let upsertKey =
+                    "\(payload.contentID)\u{1F}\(payload.revision)\u{1F}\(digest)"
+                if preparedUpserts.contains(upsertKey) {
+                    result.encodedIDs.append(payload.contentID)
+                    if let cursor = payload.cursor {
+                        result.checkpoints.append(CorpusIndexState(
+                            contentID: Self.feedCursorRowID, revision: 0, digest: "",
+                            indexVersion: Self.indexVersion, appliedCursor: cursor,
+                            updatedAt: workNow))
+                    }
+                    result.completions.append((job.id, .done))
+                    continue
+                }
+
+                // Resolve the current content record by ID.
+                guard let record = try? await source.record(for: payload.contentID) else {
+                    contentEngineLog.info("content job for \(payload.contentID, privacy: .public) rev \(payload.revision, privacy: .public) stale — ID gone")
+                    result.completions.append((job.id, .done))
+                    continue
+                }
+                guard record.revision == payload.revision, record.digest == digest else {
+                    contentEngineLog.info("content job for \(payload.contentID, privacy: .public) rev \(payload.revision, privacy: .public) stale — superseded")
+                    result.completions.append((job.id, .done))
+                    continue
+                }
+
+                // Durable idempotence: skip records whose checkpoint already covers
+                // this exact (revision, digest, indexVersion). The checkpoint is
+                // advanced LAST, so a complete checkpoint proves all derived rows
+                // are complete — replay is truly a no-op.
+                if let existing = try await indexState.state(for: record.id),
+                   existing.revision == record.revision,
+                   existing.digest == record.digest,
+                   existing.indexVersion == Self.indexVersion
+                {
+                    preparedUpserts.insert(upsertKey)
+                    result.encodedIDs.append(payload.contentID)
+                    if let cursor = payload.cursor {
+                        result.checkpoints.append(CorpusIndexState(
+                            contentID: Self.feedCursorRowID, revision: 0, digest: "",
+                            indexVersion: Self.indexVersion, appliedCursor: cursor,
+                            updatedAt: workNow))
+                    }
+                    result.completions.append((job.id, .done))
+                    continue
+                }
+
+                // Record passed all gates — enqueue for bounded parallel embedding.
+                pendingWork.append(PendingEmbedWork(
+                    record: record, workNow: workNow, cursor: payload.cursor,
+                    jobID: job.id, upsertKey: upsertKey))
             }
-            start = end
         }
-        return results.map { $0! }
+
+        // Phase 2: bounded parallel embed — pure compute, no storage writes.
+        // embedQueueRecords builds an immutable provider snapshot, then spawns
+        // up to activeProcessorCount tasks; results arrive in input order.
+        guard !pendingWork.isEmpty else { return result }
+        let cap = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let embedded = try await embedQueueRecords(
+            pendingWork.map(\.record), slotScope: .all, cap: cap, now: batchNow)
+
+        // Phase 3: serial storage writes for the embedded batch.
+        // BM25 — one index call per record.
+        for (work, item) in zip(pendingWork, embedded) {
+            try await invertedIndex.index(
+                itemID: item.record.id, tokens: item.tokens, now: work.workNow)
+        }
+        // Vector rows — ONE addPayloads call for the entire batch (Cause 5 fix).
+        let allVectorRows = embedded.flatMap(\.vectorRows)
+        if !allVectorRows.isEmpty {
+            try await vectorStore.addPayloads(allVectorRows)
+        }
+        // Coverage — ONE markCovered call for the entire batch (Cause 5 fix).
+        try await coverageStore.markCovered(embedded.flatMap(\.covered), now: batchNow)
+
+        // Assemble checkpoints and countsUpdates for the embedded records.
+        for (work, item) in zip(pendingWork, embedded) {
+            result.checkpoints.append(CorpusIndexState(
+                contentID: item.record.id, revision: item.record.revision,
+                digest: item.record.digest, indexVersion: Self.indexVersion,
+                appliedCursor: work.cursor, updatedAt: work.workNow))
+            if let cursor = work.cursor {
+                result.checkpoints.append(CorpusIndexState(
+                    contentID: Self.feedCursorRowID, revision: 0, digest: "",
+                    indexVersion: Self.indexVersion, appliedCursor: cursor,
+                    updatedAt: work.workNow))
+            }
+            result.countsUpdates.append((
+                contentID: item.record.id, revision: item.record.revision,
+                digest: item.record.digest, text: item.record.text))
+            preparedUpserts.insert(work.upsertKey)
+            result.encodedIDs.append(item.record.id)
+            result.completions.append((work.jobID, .done))
+            Intellectus.report(.metric(
+                name: "corpus.content.indexed", value: 1.0,
+                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+        }
+        return result
     }
 
     /// Test seam for the backfill crash-boundary suites: phase marker the
