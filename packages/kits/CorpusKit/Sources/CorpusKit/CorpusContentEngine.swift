@@ -890,6 +890,21 @@ public actor CorpusContentEngine {
         result.completions.reserveCapacity(jobs.count)
         var preparedUpserts: Set<String> = []
 
+        // Pre-scan Phase 1 upsert jobs to batch-fetch all source records in one
+        // WHERE…IN call instead of N serial record(for:) calls (Cause 4 fix).
+        // Over-fetching is harmless — stale/deduped jobs just leave entries unused.
+        var upsertContentIDs: [CorpusContentID] = []
+        var seenUpsertIDs = Set<CorpusContentID>()
+        for job in jobs {
+            if let payload = try? JSONDecoder().decode(ContentIndexJob.self, from: job.payload),
+               payload.kind == .upsert,
+               seenUpsertIDs.insert(payload.contentID).inserted
+            {
+                upsertContentIDs.append(payload.contentID)
+            }
+        }
+        let sourceRecords = try await source.records(for: upsertContentIDs)
+
         // Upsert records validated in Phase 1, queued for Phase 2 parallel embed.
         struct PendingEmbedWork: Sendable {
             let record: CorpusContentRecord
@@ -973,8 +988,9 @@ public actor CorpusContentEngine {
                     continue
                 }
 
-                // Resolve the current content record by ID.
-                guard let record = try? await source.record(for: payload.contentID) else {
+                // Resolve the current content record from the pre-fetched batch.
+                // A nil hit means the ID is no longer live in the source — stale job.
+                guard let record = sourceRecords[payload.contentID] else {
                     contentEngineLog.info("content job for \(payload.contentID, privacy: .public) rev \(payload.revision, privacy: .public) stale — ID gone")
                     result.completions.append((job.id, .done))
                     continue

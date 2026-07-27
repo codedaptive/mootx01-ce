@@ -279,6 +279,29 @@ impl CorpusContentEngine {
         let batch_now_millis = (drain_now() * 1000.0) as i64;
         self.batch_train_if_needed(batch_now_millis)?;
 
+        // Pre-scan upsert jobs and batch-fetch all source records in one WHERE…IN
+        // query instead of N serial source.record calls (Cause 4 fix). Over-
+        // fetching (stale/deduped jobs) is harmless — unused entries are ignored.
+        let mut seen_pre_ids = std::collections::HashSet::new();
+        let upsert_ids: Vec<String> = batch
+            .iter()
+            .filter_map(|job| {
+                let Ok(payload) = serde_json::from_slice::<ContentIndexJob>(&job.payload) else {
+                    return None;
+                };
+                if payload.kind == ContentIndexJobKind::Upsert
+                    && seen_pre_ids.insert(payload.content_id.clone())
+                {
+                    Some(payload.content_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Convert owned Strings to &str slices for the batch fetch.
+        let upsert_id_refs: Vec<&str> = upsert_ids.iter().map(|s| s.as_ref()).collect();
+        let source_records = self.source_records_for(&upsert_id_refs)?;
+
         let mut encoded_ids: Vec<String> = Vec::new();
         let mut completions: Vec<(JobId, ObservationStatus)> = Vec::with_capacity(batch.len());
         let mut counts_updates: Vec<(String, i64, String, String)> = Vec::new();
@@ -309,7 +332,8 @@ impl CorpusContentEngine {
                     .as_ref()
                     .map(|key| prepared_upserts.contains(key))
                     .unwrap_or(false);
-                match self.prepare_queue_job(&payload, work_now, content_already_prepared) {
+                let prefetched = source_records.get(payload.content_id.as_str()).cloned();
+                match self.prepare_queue_job(&payload, work_now, content_already_prepared, prefetched) {
                     Ok((job_checkpoints, job_counts_update)) => {
                         if payload.kind == ContentIndexJobKind::Upsert {
                             encoded_ids.push(payload.content_id.clone());
@@ -732,7 +756,7 @@ mod tests {
             Some("retry-cursor".to_string()),
         );
         let (first_checkpoints, first_counts) = engine
-            .prepare_queue_job(&job, 11, false)
+            .prepare_queue_job(&job, 11, false, None)
             .expect("prepare first attempt");
         let first_counts = vec![first_counts.expect("first counts update")];
 
@@ -751,7 +775,7 @@ mod tests {
             .expect("release writer lock");
 
         let (retry_checkpoints, retry_counts) = engine
-            .prepare_queue_job(&job, 12, false)
+            .prepare_queue_job(&job, 12, false, None)
             .expect("prepare retry");
         let retry_counts = vec![retry_counts.expect("retry counts update")];
         engine

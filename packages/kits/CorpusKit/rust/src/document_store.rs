@@ -16,7 +16,7 @@ use persistence_kit::{
     Column, ColumnDeclaration, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration,
     Storage, StoragePredicate, TableDeclaration, TypedValue,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 const CHANGE_KIND_UPSERT: i64 = 0;
@@ -167,6 +167,62 @@ impl CorpusContentSource for CorpusDocumentStore {
             digest: digest.clone(),
             text: text.clone(),
         }))
+    }
+
+    /// Optimized batch fetch using a single WHERE…IN query. Overrides the
+    /// trait default (N serial reads) for the standalone store path.
+    fn records_for(
+        &self,
+        ids: &[&str],
+    ) -> Result<HashMap<String, CorpusContentRecord>, CorpusKitError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let values: Vec<TypedValue> = ids
+            .iter()
+            .map(|id| TypedValue::Text(id.to_string()))
+            .collect();
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "corpus_documents",
+                Some(&StoragePredicate::In(
+                    Column::new("corpus_documents", "content_id"),
+                    values,
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        let mut result = HashMap::new();
+        for row in &rows {
+            let (
+                Some(TypedValue::Text(content_id)),
+                Some(TypedValue::Int(revision)),
+                Some(TypedValue::Text(digest)),
+                Some(TypedValue::Text(text)),
+            ) = (
+                row.get("content_id"),
+                row.get("revision"),
+                row.get("digest"),
+                row.get("text"),
+            )
+            else {
+                continue;
+            };
+            result.insert(
+                content_id.clone(),
+                CorpusContentRecord {
+                    id: content_id.clone(),
+                    revision: *revision,
+                    digest: digest.clone(),
+                    text: text.clone(),
+                },
+            );
+        }
+        Ok(result)
     }
 
     fn changes(

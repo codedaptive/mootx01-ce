@@ -35,7 +35,7 @@ use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -640,6 +640,17 @@ impl CorpusContentEngine {
             EncodeSpeed::Foreground => cores.max(1),
             EncodeSpeed::Background => (cores / 4).max(1),
         }
+    }
+
+    /// Batch-resolve current source records for the given IDs. Delegates to
+    /// the source's `records_for` (one WHERE…IN query); exposes the source
+    /// through a pub(crate) seam so the queue module does not need direct
+    /// field access.
+    pub(crate) fn source_records_for(
+        &self,
+        ids: &[&str],
+    ) -> CorpusKitResult<HashMap<String, CorpusContentRecord>> {
+        self.source.records_for(ids)
     }
 
     pub(crate) fn begin_deferred_vector_index(&self) -> CorpusKitResult<()> {
@@ -1438,6 +1449,7 @@ impl CorpusContentEngine {
         job: &ContentIndexJob,
         now_millis: i64,
         content_already_prepared: bool,
+        prefetched_record: Option<CorpusContentRecord>,
     ) -> CorpusKitResult<(Vec<CorpusIndexState>, Option<(String, i64, String, String)>)> {
         if self.counts_reload_required.load(Ordering::Acquire) {
             self.reload_counts_from_storage()?;
@@ -1454,7 +1466,13 @@ impl CorpusContentEngine {
                         job.content_id
                     )));
                 };
-                let Some(record) = self.source.record(&job.content_id)? else {
+                // Use the batch-prefetched record when provided; fall back to a
+                // single source read only when called without pre-fetch context.
+                let record_opt = match prefetched_record {
+                    Some(r) => Some(r),
+                    None => self.source.record(&job.content_id)?,
+                };
+                let Some(record) = record_opt else {
                     return Err(CorpusKitError::StaleRevision(format!(
                         "upsert for {} rev {}: the ID no longer resolves — the remove change will clear it",
                         job.content_id, job.revision
