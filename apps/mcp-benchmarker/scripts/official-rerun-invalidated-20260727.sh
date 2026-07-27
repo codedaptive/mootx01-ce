@@ -49,6 +49,25 @@
 #   1.0.x Rust impatient (LME):           37    = 37 min
 #   Total:                                        255 min
 #
+# Estate-cache: drain runs only (lme07 feature)
+#   All drain cells use --estate-cache reuse --cache-dir <results>/estate-cache.
+#   The cache key is (benchmark, variant, seed, barrier, mootx01_binary_fingerprint,
+#   unit_id). Because all 1.1.x drain runs share the same MOOT binary and SEED:
+#
+#     Run 1 (Swift drain): COLD miss — estate ingest runs normally, snapshot saved.
+#     Run 2 (Rust  drain): WARM hit  — estate restored from snapshot, ingest skipped.
+#
+#   Wall-clock for run 2 drops from ~37 min (LME) / ~7 min (LoCoMo) / ~4 min (LMEB)
+#   to under a minute per question. The estate-cache is populated per question/session
+#   so cache hits are measured and reported in the JSON as cacheHits / cacheMisses.
+#
+#   1.0.x drain runs: single Rust run per cell — always cold (save-only, no hit
+#   within this script). Estate-cache flag still present so future reruns can warm.
+#
+#   Impatient cells: NO --estate-cache flag — estate-cache must be off for impatient
+#   cells because they specifically test ingest throughput (the cache bypasses ingest
+#   entirely and would produce misleading latency measurements).
+#
 # Hint-line check (impatient cells):
 #   After each impatient run, the log is grepped for
 #   "[longmemeval] encode-barrier: impatient" (Swift) or
@@ -84,6 +103,7 @@ MOOT10X="$DIR10X/apps/mootx01/.build/release/mootx01"
 SWIFT10X="$DIR10X/apps/mcp-benchmarker/.build/release/mcp-benchmarker"
 RUST10X="$DIR10X/apps/mcp-benchmarker/rust/target/release/mcp-benchmarker-rs"
 RESULTS10X="$DIR10X/apps/mcp-benchmarker/results/20260727-invalidated-rerun"
+CACHE10X="$RESULTS10X/estate-cache"
 
 # ── 1.1.x paths ──────────────────────────────────────────────────────────────
 DIR11X=/Users/bob/devlop/mootx01-ce-develop_1.1.x
@@ -91,6 +111,7 @@ MOOT11X="$DIR11X/apps/mootx01/.build/release/mootx01"
 SWIFT11X="$DIR11X/apps/mcp-benchmarker/.build/release/mcp-benchmarker"
 RUST11X="$DIR11X/apps/mcp-benchmarker/rust/target/release/mcp-benchmarker-rs"
 RESULTS11X="$DIR11X/apps/mcp-benchmarker/results/20260727-invalidated-rerun"
+CACHE11X="$RESULTS11X/estate-cache"
 
 # ── Fixture paths ─────────────────────────────────────────────────────────────
 LME_DATA_DIR=/Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data
@@ -101,8 +122,8 @@ LOCOMO_JSON=/Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixture
 LMEB_DATA_DIR=/Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem
 
 # ── Setup ────────────────────────────────────────────────────────────────────
-mkdir -p "$RESULTS10X" "$RESULTS11X" \
-    || { echo "FATAL: could not create results dirs"; exit 1; }
+mkdir -p "$RESULTS10X" "$RESULTS11X" "$CACHE10X" "$CACHE11X" \
+    || { echo "FATAL: could not create results/cache dirs"; exit 1; }
 
 # Holes log lives alongside results in the 1.0.x results dir (canonical location).
 HOLES_LOG="$RESULTS10X/holes.log"
@@ -180,7 +201,7 @@ echo "[$(ts)] 1.1.x DRAIN GRID — 6 runs (LME+LoCoMo+LMEB × Swift+Rust)"
 echo "[$(ts)] ============================================================"
 echo ""
 
-# ── 1.1.x LME Swift drain r1 ─────────────────────────────────────────────────
+# ── 1.1.x LME Swift drain r1 (cold — miss+save) ──────────────────────────────
 run_leg "1.1.x-lme-swift-r1" \
     "$RESULTS11X/lme-swift-run1.log" \
     "$RESULTS11X/lme-report-${VARIANT}-seed${SEED}.json" \
@@ -191,9 +212,10 @@ run_leg "1.1.x-lme-swift-r1" \
         --mootx01-binary "$MOOT11X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE11X" \
         --out "$RESULTS11X"
 
-# ── 1.1.x LoCoMo Swift drain r1 ──────────────────────────────────────────────
+# ── 1.1.x LoCoMo Swift drain r1 (cold — miss+save) ───────────────────────────
 run_leg "1.1.x-locomo-swift-r1" \
     "$RESULTS11X/locomo-swift-run1.log" \
     "$RESULTS11X/locomo-report-seed${SEED}.json" \
@@ -203,9 +225,10 @@ run_leg "1.1.x-locomo-swift-r1" \
         --mootx01-binary "$MOOT11X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE11X" \
         --out "$RESULTS11X"
 
-# ── 1.1.x LMEB Swift drain r1 ────────────────────────────────────────────────
+# ── 1.1.x LMEB Swift drain r1 (cold — miss+save) ─────────────────────────────
 run_leg "1.1.x-lmeb-swift-r1" \
     "$RESULTS11X/lmeb-swift-run1.log" \
     "$RESULTS11X/lmeb-report-seed${SEED}.json" \
@@ -216,9 +239,10 @@ run_leg "1.1.x-lmeb-swift-r1" \
         --mootx01-binary "$MOOT11X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE11X" \
         --out "$RESULTS11X"
 
-# ── 1.1.x LME Rust drain r1 ──────────────────────────────────────────────────
+# ── 1.1.x LME Rust drain r1 (warm — cache hit from Swift r1) ─────────────────
 run_leg "1.1.x-lme-rust-r1" \
     "$RESULTS11X/lme-rust-run1.log" \
     "$RESULTS11X/lme-report-${VARIANT}-seed${SEED}.json" \
@@ -229,9 +253,10 @@ run_leg "1.1.x-lme-rust-r1" \
         --variant "$VARIANT" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE11X" \
         --out "$RESULTS11X"
 
-# ── 1.1.x LoCoMo Rust drain r1 ───────────────────────────────────────────────
+# ── 1.1.x LoCoMo Rust drain r1 (warm — cache hit from Swift r1) ──────────────
 run_leg "1.1.x-locomo-rust-r1" \
     "$RESULTS11X/locomo-rust-run1.log" \
     "$RESULTS11X/locomo-report-seed${SEED}.json" \
@@ -241,9 +266,10 @@ run_leg "1.1.x-locomo-rust-r1" \
         --mootx01-binary "$MOOT11X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE11X" \
         --out "$RESULTS11X"
 
-# ── 1.1.x LMEB Rust drain r1 ─────────────────────────────────────────────────
+# ── 1.1.x LMEB Rust drain r1 (warm — cache hit from Swift r1) ────────────────
 run_leg "1.1.x-lmeb-rust-r1" \
     "$RESULTS11X/lmeb-rust-run1.log" \
     "$RESULTS11X/lmeb-report-seed${SEED}.json" \
@@ -254,6 +280,7 @@ run_leg "1.1.x-lmeb-rust-r1" \
         --mootx01-binary "$MOOT11X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE11X" \
         --out "$RESULTS11X"
 
 # ============================================================================
@@ -308,7 +335,7 @@ echo "[$(ts)] 1.0.x RUST DRAIN GRID — 3 runs (Rust twin only)"
 echo "[$(ts)] ============================================================"
 echo ""
 
-# ── 1.0.x LME Rust drain r1 ──────────────────────────────────────────────────
+# ── 1.0.x LME Rust drain r1 (cold — miss+save) ───────────────────────────────
 run_leg "1.0.x-lme-rust-r1" \
     "$RESULTS10X/lme-rust-run1.log" \
     "$RESULTS10X/lme-report-${VARIANT}-seed${SEED}.json" \
@@ -319,9 +346,10 @@ run_leg "1.0.x-lme-rust-r1" \
         --variant "$VARIANT" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE10X" \
         --out "$RESULTS10X"
 
-# ── 1.0.x LoCoMo Rust drain r1 ───────────────────────────────────────────────
+# ── 1.0.x LoCoMo Rust drain r1 (cold — miss+save) ────────────────────────────
 run_leg "1.0.x-locomo-rust-r1" \
     "$RESULTS10X/locomo-rust-run1.log" \
     "$RESULTS10X/locomo-report-seed${SEED}.json" \
@@ -331,9 +359,10 @@ run_leg "1.0.x-locomo-rust-r1" \
         --mootx01-binary "$MOOT10X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE10X" \
         --out "$RESULTS10X"
 
-# ── 1.0.x LMEB Rust drain r1 ─────────────────────────────────────────────────
+# ── 1.0.x LMEB Rust drain r1 (cold — miss+save) ──────────────────────────────
 run_leg "1.0.x-lmeb-rust-r1" \
     "$RESULTS10X/lmeb-rust-run1.log" \
     "$RESULTS10X/lmeb-report-seed${SEED}.json" \
@@ -344,6 +373,7 @@ run_leg "1.0.x-lmeb-rust-r1" \
         --mootx01-binary "$MOOT10X" \
         --limit "$LIMIT" --seed "$SEED" \
         --encode-barrier drain \
+        --estate-cache reuse --cache-dir "$CACHE10X" \
         --out "$RESULTS10X"
 
 # ============================================================================
