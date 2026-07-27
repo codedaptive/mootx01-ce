@@ -12,6 +12,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
 import VectorKit
@@ -78,6 +79,9 @@ struct ContradictionHunterEndToEndTests {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "hunt-token-bag-v1", modelVersion: "1.0",
             projectionSeed: 0xC0FF_EE00, inference: tokenBag)
+        // Stamp the GLK 1.1 estate format, mirroring ServeCommand's GLKMigrationCatalog.prepare
+        // call between kit.open and kit.wireGLKSubstores in production. Fresh-estate fast path.
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
         // Shared-content 1.1: canonical wiring seam with the test's custom
         // token-bag provider — constructs the attached engine over the
         // LocusKit adapter and registers engine + shared VectorStore.
