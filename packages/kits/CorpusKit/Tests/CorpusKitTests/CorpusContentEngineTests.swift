@@ -1144,6 +1144,326 @@ struct CorpusContentEngineTests {
             #expect(try await engine.indexedContentIDs().count == 12)
         }
     }
+
+    /// Structural equivalence: `drainContentQueueOnce` must use bounded parallel
+    /// embedding preparation (the fan-out restored by fix-fanout, Cause 1).
+    ///
+    /// Proof:
+    ///   1. Concurrency probe: peak concurrent embed workers > 1 on multi-core
+    ///      hardware, bounded by activeProcessorCount.
+    ///   2. Output equivalence: all enqueued content IDs are indexed
+    ///      (`indexedContentIDs` matches the enqueued set).
+    ///
+    /// The `ReindexConcurrencyProvider` sleeps 20ms per `embed` call — serial
+    /// execution of 12 docs takes ≥240ms; parallel takes ~20ms. The sleep makes
+    /// the concurrency window wide enough that the probe reliably observes
+    /// concurrent entry even under `nice -n 19` scheduling pressure.
+    @Test func queueDrainUsesBoundedParallelEmbeddingPreparation() async throws {
+        try await GlobalTestLock.shared.withLock {
+            // Build 12-document store — enough to exercise ≥ 2 concurrent
+            // workers on any multi-core machine.
+            //
+            // Use a per-test isolated subdirectory so the DrainLease file
+            // (encode.drain.lease) does not collide with concurrent suites
+            // that also use SQLite-backed estates in the shared temp directory.
+            let testDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("qdrain-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: testDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: testDir) }
+            let dbURL = testDir.appendingPathComponent("corpus.sqlite3")
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            var records: [CorpusContentRecord] = []
+            for index in 0..<12 {
+                let record = try await store.put(
+                    "queue drain parallel content \(index)",
+                    id: "qdrain-\(index)", now: now)
+                records.append(record)
+            }
+
+            // Instrument with the concurrency probe provider.
+            let probe = ReindexConcurrencyProbe()
+            let engine = try await CorpusContentEngine(
+                storage: storage,
+                configuration: try CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: store,
+                models: [.fdc(provider: ReindexConcurrencyProvider(probe: probe))])
+
+            // Mount queue, enqueue all 12 change references, then drain.
+            // All 12 jobs land in the queue before the drain worker starts,
+            // so drainIndexBatch receives them as one batch and fans them out.
+            try await engine.mountIngestQueue()
+            for record in records {
+                try await engine.enqueueChange(
+                    .upsert(id: record.id, revision: record.revision,
+                            digest: record.digest),
+                    cursor: nil, capturedAt: now)
+            }
+            try await engine.awaitIngestDrain()
+
+            // Proof 1: bounded concurrency.
+            let bound = max(1, ProcessInfo.processInfo.activeProcessorCount)
+            #expect(probe.peakValue() <= bound,
+                    "peak concurrent workers must not exceed activeProcessorCount")
+            if bound > 1 {
+                let peak = probe.peakValue()
+                #expect(peak > 1,
+                        "queue drain must use multiple concurrent embed workers (peakValue=\(peak), bound=\(bound))")
+            }
+
+            // Proof 2: output equivalence — all 12 IDs indexed by the parallel path.
+            let indexed = try await engine.indexedContentIDs()
+            #expect(Set(indexed) == Set(records.map(\.id)),
+                    "all 12 enqueued content IDs must appear in indexedContentIDs after drain")
+
+            await engine.dropIngestQueue()
+        }
+    }
+
+    // MARK: - §12 Three-state basis — non-degeneracy under per-doc queue drain
+
+    /// 20 docs split evenly between cars and animals. Distinct vocabularies let
+    /// a well-trained LSA basis separate them; a rank-1 car-only basis would
+    /// leave all animal terms OOV.
+    private let lsaCarDocs: [String] = (1...10).map {
+        "car engine fuel road vehicle drive speed combustion power auto document \($0)"
+    }
+    private let lsaAnimalDocs: [String] = (1...10).map {
+        "dog cat bark fetch run animal pet fur forest wild document \($0)"
+    }
+
+    /// REGRESSION TEST — fails on code with degenerate-basis bug, passes after fix.
+    ///
+    /// Simulates the "impatient inline encoding" path (GLK 1.1.x): each document
+    /// is stored then immediately enqueued and drained before the next is stored.
+    ///
+    /// Without the three-state retrain fix:
+    ///   - Drain 1 trains on 1 car doc → rank-1 SVD with car-only vocabulary.
+    ///   - All subsequent docs fold onto this basis → degenerate.
+    ///   - "dog bark fetch animal" is all-OOV → floatNearest returns .unavailableNoVocabHit.
+    ///
+    /// With the fix, growth retrains fire at corpus doublings (2, 4, 8, 16 docs)
+    /// until the basis is stable at `perDocAutoRetrainStableChunkThreshold = 50`.
+    /// The retrain at doc 16 covers 10 car + 6 animal docs → vocabulary is present.
+    ///
+    /// This is the CorpusContentEngine equivalent of
+    /// BasisPersistenceTests.perDocIngestProducesNonDegenerateBasis.
+    @Test("per-doc queue drain of 20 docs produces a non-degenerate LSA basis (REGRESSION)")
+    func perDocQueueDrainProducesNonDegenerateBasis() async throws {
+        try await GlobalTestLock.shared.withLock {
+            // Unique subdirectory prevents DrainLease collision with other test suites
+            // that share the system temp directory.
+            let testDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("perDocBasis-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: testDir) }
+            let dbURL = testDir.appendingPathComponent("corpus.sqlite3")
+
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+            // corpus_documents table — attachedDeclaration intentionally excludes it.
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+
+            let engine = try await CorpusContentEngine(
+                storage: storage,
+                configuration: try CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: store,
+                models: [.lsa(provider: LsaProvider())])
+
+            try await engine.mountIngestQueue()
+
+            // Ingest 20 docs ONE AT A TIME (the impatient path). Without the
+            // growth-retrain fix, drain 1 trains on 1 car doc and the basis
+            // stays rank-1 for the remaining 19 drains.
+            let allDocs = lsaCarDocs + lsaAnimalDocs
+            for (i, doc) in allDocs.enumerated() {
+                let category = i < 10 ? "car" : "animal"
+                let record = try await store.put(
+                    doc,
+                    id: "\(category)-\(i)",
+                    now: now.addingTimeInterval(TimeInterval(i)))
+                try await engine.enqueueChange(
+                    .upsert(id: record.id, revision: record.revision,
+                            digest: record.digest),
+                    cursor: nil,
+                    capturedAt: now.addingTimeInterval(TimeInterval(i)))
+                // Drain this single doc before the next is stored — the impatient path.
+                // awaitIngestDrain blocks until the queue is empty and publishes the
+                // resident vector index, so subsequent queries are coherent.
+                try await engine.awaitIngestDrain(timeout: .seconds(60))
+            }
+
+            // After 20 per-doc drains the growth-retrain path must have trained on
+            // ≥16 docs (last doubling fires when corpus reaches 16). Animal vocabulary
+            // is present from doc 10 onward; a degenerate 1-doc basis would return
+            // .unavailableNoVocabHit.
+            let animalQuery = await engine.floatNearest(
+                query: "dog bark fetch animal", limit: 5)
+            guard case .hits(let animalHits) = animalQuery else {
+                Issue.record("""
+                    animal query returned a dark outcome (\(animalQuery)) — basis \
+                    is degenerate (animal vocabulary absent). Expected .hits from a \
+                    non-degenerate 20-doc LSA basis after growth-retrain fires.
+                    """)
+                await engine.dropIngestQueue()
+                return
+            }
+            let hasAnimalDoc = animalHits.prefix(5).contains {
+                $0.itemID.hasPrefix("animal-")
+            }
+            #expect(hasAnimalDoc,
+                    "animal query must retrieve an animal doc from the non-degenerate 20-doc basis")
+
+            await engine.dropIngestQueue()
+        }
+    }
+
+    // MARK: - §13 Three-state basis — reindex recovery (CorpusContentEngine)
+
+    /// REGRESSION TEST — CorpusContentEngine analogue of
+    /// BasisPersistenceTests.reindexRecoversDegenerateBasis.
+    ///
+    /// Flow:
+    ///   1. Batch-ingest 20 docs via queue → firstIngestTrainIfNeeded trains on
+    ///      the full corpus on the first drain pass → trainedChunkCount == 20.
+    ///   2. Overwrite the basis in BasisStore with a 1-doc-trained degenerate blob.
+    ///   3. Reopen CorpusContentEngine — resolveProvider loads the degenerate basis.
+    ///   4. Confirm degenerate state: animal query is OOV (dark outcome).
+    ///   5. Call engine.reindex(now:) — trainTrainableSlots(force: true) retrains
+    ///      on ALL active source content.
+    ///   6. Confirm recovery: trainedChunkCount == 20 and animal query returns hits.
+    @Test("CorpusContentEngine.reindex recovers a deliberately-degenerate LSA basis")
+    func contentEngineReindexRecoversDegenerateBasis() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let testDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("cceReindex-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: testDir) }
+            let dbURL = testDir.appendingPathComponent("corpus.sqlite3")
+            let lsaModelID = "lsa-v1"
+            let lsaModelVersion = "1.1.0"
+            let allDocs = lsaCarDocs + lsaAnimalDocs
+
+            // Phase 1: batch-ingest all 20 docs.
+            // All docs are stored before any drain fires, so firstIngestTrainIfNeeded
+            // sees 20 source content IDs on its first call → trains on the full corpus.
+            do {
+                let storage1 = try SQLiteStorage(configuration: EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+                try await storage1.migrate(to: CorpusDocumentStore.schemaDeclaration)
+                let store1 = CorpusDocumentStore(storage: storage1)
+                let engine1 = try await CorpusContentEngine(
+                    storage: storage1,
+                    configuration: try CorpusContentConfiguration(
+                        mode: .attached, indexUnit: .wholeContent),
+                    source: store1,
+                    models: [.lsa(provider: LsaProvider())])
+
+                var changes: [(change: CorpusContentChange, cursor: String?,
+                                capturedAt: Date)] = []
+                for (i, doc) in allDocs.enumerated() {
+                    let cat = i < 10 ? "car" : "animal"
+                    let record = try await store1.put(
+                        doc, id: "\(cat)-\(i)",
+                        now: now.addingTimeInterval(TimeInterval(i)))
+                    changes.append((
+                        change: .upsert(id: record.id, revision: record.revision,
+                                        digest: record.digest),
+                        cursor: nil,
+                        capturedAt: now.addingTimeInterval(TimeInterval(i))))
+                }
+                try await engine1.mountIngestQueue()
+                try await engine1.enqueueChangeBatch(changes)
+                try await engine1.awaitIngestDrain()
+                await engine1.dropIngestQueue()
+
+                let basisStore1 = BasisStore(storage: storage1)
+                let goodBasis = try await basisStore1.load(
+                    modelID: lsaModelID, modelVersion: lsaModelVersion)
+                #expect(goodBasis?.trainedChunkCount == allDocs.count,
+                        "batch ingest must train on the full 20-doc corpus")
+            }
+            // storage1, store1, engine1 go out of scope here — connections released.
+
+            // Phase 2: inject a degenerate (1-doc-trained) basis.
+            // The 1-doc blob has only car vocabulary; animal terms are OOV.
+            let degradedBlob: Data = {
+                let p = LsaProvider()
+                p.trainOnCorpus(texts: [allDocs[0]])    // car-only vocabulary
+                return p.serializeBasis()
+            }()
+            do {
+                let storage2 = try SQLiteStorage(configuration: EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+                let basisStore2 = BasisStore(storage: storage2)
+                try await basisStore2.upsert(PersistedBasis(
+                    modelID: lsaModelID, modelVersion: lsaModelVersion,
+                    basis: degradedBlob, trainedAt: now, trainedChunkCount: 1))
+            }
+
+            // Phase 3: reopen — resolveProvider loads the degenerate basis from BasisStore.
+            let storage3 = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+            let store3 = CorpusDocumentStore(storage: storage3)
+            let engine3 = try await CorpusContentEngine(
+                storage: storage3,
+                configuration: try CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: store3,
+                models: [.lsa(provider: LsaProvider())])
+
+            // Phase 4: confirm degenerate state. Animal terms OOV → dark outcome.
+            let animalBefore = await engine3.floatNearest(
+                query: "dog bark fetch animal", limit: 5)
+            let isDark: Bool
+            switch animalBefore {
+            case .unavailableNoVocabHit, .unavailableProviderOptOut,
+                 .unavailableNoFloatRows:
+                isDark = true
+            default:
+                isDark = false
+            }
+            #expect(isDark,
+                    "animal query must be dark before reindex — degenerate 1-doc basis has no animal vocabulary")
+
+            // Phase 5: reindex retrains on the full corpus.
+            try await engine3.reindex(now: now.addingTimeInterval(100))
+
+            // Phase 6: verify recovery — basis now covers all 20 docs.
+            let basisStore3 = BasisStore(storage: storage3)
+            let reindexedBasis = try await basisStore3.load(
+                modelID: lsaModelID, modelVersion: lsaModelVersion)
+            #expect(reindexedBasis?.trainedChunkCount == allDocs.count,
+                    "reindex must retrain on the full 20-doc corpus")
+
+            let animalAfter = await engine3.floatNearest(
+                query: "dog bark fetch animal", limit: 5)
+            guard case .hits(let animalHits) = animalAfter else {
+                Issue.record("""
+                    animal query still dark after reindex (\(animalAfter)). \
+                    reindex must restore full vocabulary so animal terms are \
+                    in-vocabulary and animal docs rank in results.
+                    """)
+                return
+            }
+            let hasAnimalDoc = animalHits.prefix(5).contains {
+                $0.itemID.hasPrefix("animal-")
+            }
+            #expect(hasAnimalDoc,
+                    "animal doc must rank in top-5 after reindex on the full 20-doc corpus")
+        }
+    }
 }
 
 // MARK: - Static attached-source stand-in

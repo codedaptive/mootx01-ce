@@ -211,88 +211,37 @@ public extension CorpusContentEngine {
         }
     }
 
-    /// Drain the encode stream once: claim available jobs, process each, fire
+    /// Drain the encode stream once, embedding all upsert jobs in bounded
+    /// parallel (≤ activeProcessorCount tasks concurrently) and firing
     /// `onEncoded` with the affected content IDs. Returns the claimed count.
+    ///
+    /// The pipeline is implemented by `drainIndexBatch(_:)` in
+    /// CorpusContentEngine.swift (which has access to the engine's private
+    /// stores). This wrapper owns only the queue interaction: drain, batch
+    /// commit, and reply.
     @discardableResult
     func drainContentQueueOnce() async throws -> Int {
         guard let queue = ingestQueue else { return 0 }
-        let batch = try await queue.drain(stream: Self.encodeStreamID)
-        guard !batch.isEmpty else { return 0 }
+        let claimed = try await queue.drain(stream: Self.encodeStreamID)
+        guard !claimed.isEmpty else { return 0 }
+        let jobs = claimed.map { $0.0 }
 
         // One resident-index rebuild per burst.
         try await beginDeferredVectorIndex()
 
-        var encodedIDs: [String] = []
-        var completions: [(jobID: JobID, status: ObservationStatus)] = []
-        var countsUpdates: [(
-            contentID: String, revision: Int64, digest: String, text: String
-        )] = []
-        var checkpoints: [CorpusIndexState] = []
-        var preparedUpserts: Set<String> = []
-        completions.reserveCapacity(batch.count)
-        for (job, _) in batch {
-            guard let payload = try? JSONDecoder().decode(ContentIndexJob.self, from: job.payload) else {
-                contentEngineLog.error("content job decode failed; replying blocked")
-                completions.append((job.id, .blocked))
-                continue
-            }
-            // The work instant: the job's submission HLC physical time (the
-            // capture instant) — deterministic, no Date() in the engine.
-            let workNow = Date(timeIntervalSince1970:
-                Double(job.submittedAt.physicalTime) / 1000.0)
-            var replied = false
-            for attempt in 1...Self.contentIngestMaxAttempts {
-                do {
-                    // Test seam: a non-nil hook simulates a transient failure
-                    // (nil in production — zero overhead).
-                    try _ingestFailureHook?(payload.contentID)
-                    let upsertKey = payload.digest.map {
-                        "\(payload.contentID)\u{1F}\(payload.revision)\u{1F}\($0)"
-                    }
-                    let prepared = upsertKey.map { preparedUpserts.contains($0) } ?? false
-                    let result = try await prepareQueueJob(
-                        payload, now: workNow, contentAlreadyPrepared: prepared)
-                    if payload.kind == .upsert {
-                        encodedIDs.append(payload.contentID)
-                    } else {
-                        // Preserve queue order inside the deferred checkpoint
-                        // set: a later remove cancels an earlier prepared upsert
-                        // for the same canonical content.
-                        checkpoints.removeAll { $0.contentID == payload.contentID }
-                        countsUpdates.removeAll { $0.contentID == payload.contentID }
-                        let prefix = "\(payload.contentID)\u{1F}"
-                        preparedUpserts = preparedUpserts.filter { !$0.hasPrefix(prefix) }
-                    }
-                    if let update = result.countsUpdate { countsUpdates.append(update) }
-                    checkpoints.append(contentsOf: result.checkpoints)
-                    if let upsertKey { preparedUpserts.insert(upsertKey) }
-                    completions.append((job.id, .done))
-                    replied = true
-                    break
-                } catch CorpusKitError.staleRevision {
-                    // Obsolete by design: the newer revision has its own job.
-                    // Done, not blocked — retry could never succeed.
-                    contentEngineLog.info(
-                        "content job for \(payload.contentID, privacy: .public) rev \(payload.revision, privacy: .public) is stale — dropped")
-                    completions.append((job.id, .done))
-                    replied = true
-                    break
-                } catch {
-                    contentEngineLog.error(
-                        "content index attempt \(attempt, privacy: .public)/\(Self.contentIngestMaxAttempts, privacy: .public) failed for \(payload.contentID, privacy: .public): \(error, privacy: .public)")
-                }
-            }
-            if !replied {
-                completions.append((job.id, .blocked))
-            }
-        }
+        // Delegate the indexing pipeline to the engine (which owns the private
+        // stores). Returns pre-assembled completions, checkpoints, countsUpdates,
+        // encodedIDs, and the batchNow used for the commit timestamp.
+        let result = try await drainIndexBatch(jobs)
 
         // Batch-boundary last write: maintained counts and the checkpoints
         // proving those folds commit atomically. It MUST precede terminal queue
         // completion so any failure leaves recoverable content references.
         do {
             try await commitQueueBatch(
-                checkpoints: checkpoints, countsUpdates: countsUpdates, now: Date())
+                checkpoints: result.checkpoints,
+                countsUpdates: result.countsUpdates,
+                now: result.batchNow)
         } catch {
             do { try await publishVectorIndex() }
             catch let publicationError {
@@ -303,7 +252,7 @@ public extension CorpusContentEngine {
             throw error
         }
         do {
-            _ = try await queue.reply(batch: completions)
+            _ = try await queue.reply(batch: result.completions)
         } catch {
             do { try await publishVectorIndex() }
             catch let publicationError {
@@ -313,9 +262,9 @@ public extension CorpusContentEngine {
             }
             throw error
         }
-        if !encodedIDs.isEmpty, let callback = onEncoded {
-            await callback(encodedIDs)
+        if !result.encodedIDs.isEmpty, let callback = onEncoded {
+            await callback(result.encodedIDs)
         }
-        return batch.count
+        return jobs.count
     }
 }
