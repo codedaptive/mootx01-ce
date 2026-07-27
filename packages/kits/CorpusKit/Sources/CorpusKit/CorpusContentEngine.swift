@@ -1355,19 +1355,28 @@ public actor CorpusContentEngine {
             slotIndex: Int, termDigests: Set<String>, countsDocument: Bool
         )] = []
         if !countsUpdates.isEmpty {
+            // Deduplicate content IDs once before the slot loop so the batch
+            // query (one per slot) fetches exactly the set we need.
+            var seenIDs = Set<String>()
+            let uniqueContentIDs = countsUpdates.compactMap { update -> String? in
+                seenIDs.insert(update.contentID).inserted ? update.contentID : nil
+            }
             for index in slots.indices {
                 guard slots[index].countsAccumulator != nil else { continue }
                 let modelID = slots[index].provider.modelID
                 let modelVersion = slots[index].provider.modelVersion
+                // Batch-fetch all references for this slot in one WHERE…IN query
+                // instead of N individual referenceFor calls. Semantics identical:
+                // the resulting dictionary is nil-for-absent, matching the old path.
+                let existingRefs = try await countsStore.referencesFor(
+                    modelID: modelID, modelVersion: modelVersion,
+                    contentIDs: uniqueContentIDs)
                 var admittedIDs: Set<String> = []
                 for update in countsUpdates {
                     guard admittedIDs.insert(update.contentID).inserted else { continue }
                     let countsDocument: Bool
                     var termDigests: Set<String> = []
-                    if let existing = try await countsStore.referenceFor(
-                        modelID: modelID, modelVersion: modelVersion,
-                        contentID: update.contentID)
-                    {
+                    if let existing = existingRefs[update.contentID] {
                         if existing.digest == update.digest {
                             if existing.isSubsumed {
                                 consumedSubsumedReferences.append(

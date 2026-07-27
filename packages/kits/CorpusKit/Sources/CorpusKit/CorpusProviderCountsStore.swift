@@ -318,6 +318,43 @@ public actor CorpusProviderCountsStore {
         return rows.first.flatMap(Self.decodeReference)
     }
 
+    /// Batch-fetch pending references for a set of canonical identities within
+    /// one provider generation. Issues a single `WHERE content_id IN (...)` query
+    /// rather than N individual `referenceFor` calls — the O(N) → O(1) I/O
+    /// reduction that `commitQueueBatch` needs for large drain passes.
+    ///
+    /// Returns a dictionary keyed by contentID. Missing entries (content IDs with
+    /// no existing reference) are absent from the dictionary, matching the
+    /// semantics of `referenceFor` returning `nil`.
+    ///
+    /// - Parameters:
+    ///   - modelID: Provider model identifier.
+    ///   - modelVersion: Provider model version.
+    ///   - contentIDs: The set of content IDs to fetch. Empty → empty dictionary.
+    public func referencesFor(
+        modelID: String, modelVersion: String, contentIDs: [String]
+    ) async throws -> [String: PersistedCountsReference] {
+        guard !contentIDs.isEmpty else { return [:] }
+        let rows = try await storage.rowStore.query(
+            table: "corpus_provider_count_references",
+            where: .and([
+                .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                    .text(modelVersion)),
+                .in(Column(table: "corpus_provider_count_references", name: "content_id"),
+                    contentIDs.map { .text($0) }),
+            ]),
+            orderBy: [], limit: nil, offset: nil)
+        var result: [String: PersistedCountsReference] = [:]
+        for row in rows {
+            if let ref = Self.decodeReference(row) {
+                result[ref.contentID] = ref
+            }
+        }
+        return result
+    }
+
     /// Persist the maintained-count anchors (document count + vocabulary) on
     /// the provider's counts row WITHOUT rewriting the base blob. Committed in
     /// the SAME transaction as the reference mutation they reflect, so the

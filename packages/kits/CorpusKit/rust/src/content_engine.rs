@@ -1530,6 +1530,19 @@ impl CorpusContentEngine {
             Vec::new();
         let mut consumed_subsumed_references: Vec<(String, String, String)> = Vec::new();
         if !counts_updates.is_empty() {
+            // Deduplicate content IDs once before the slot loop so the batch
+            // query (one per slot) fetches exactly the set needed.
+            let mut seen_ids = HashSet::new();
+            let unique_content_ids: Vec<&str> = counts_updates
+                .iter()
+                .filter_map(|(cid, _, _, _)| {
+                    if seen_ids.insert(cid.as_str()) {
+                        Some(cid.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             for (slot_index, slot) in self.slots.iter().enumerate() {
                 let (model_id, model_version) = {
                     let handle = slot.handle.lock().unwrap();
@@ -1542,17 +1555,21 @@ impl CorpusContentEngine {
                 if slot.counts.lock().unwrap().is_none() {
                     continue;
                 }
+                // Batch-fetch all references for this slot in one WHERE…IN query
+                // instead of N individual reference_for calls. Semantics identical:
+                // the HashMap returns None-for-absent, matching the old path.
+                let existing_refs = self.counts_store.references_for(
+                    &model_id,
+                    &model_version,
+                    &unique_content_ids,
+                )?;
                 let mut admitted_ids = HashSet::new();
                 for (content_id, revision, digest, text) in counts_updates {
                     if !admitted_ids.insert(content_id.clone()) {
                         continue;
                     }
                     let mut term_digests = BTreeSet::new();
-                    let counts_document = match self.counts_store.reference_for(
-                        &model_id,
-                        &model_version,
-                        content_id,
-                    )? {
+                    let counts_document = match existing_refs.get(content_id.as_str()) {
                         Some(existing) if existing.digest == *digest => {
                             if existing.is_subsumed {
                                 consumed_subsumed_references.push((
@@ -1564,7 +1581,7 @@ impl CorpusContentEngine {
                             continue;
                         }
                         Some(existing) => {
-                            term_digests.extend(existing.growth_term_digests);
+                            term_digests.extend(existing.growth_term_digests.iter().cloned());
                             false
                         }
                         None => self.index_state.state(content_id)?.is_none(),
