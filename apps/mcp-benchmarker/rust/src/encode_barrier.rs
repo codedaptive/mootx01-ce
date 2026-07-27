@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::ResultFormat;
 use crate::json_value::JsonValue;
-use crate::mcp_client::{MCPClient, ToolCaller};
+use crate::mcp_client::ToolCaller;
 use std::collections::BTreeMap;
 
 /// The encode-queue synchronization strategy for a benchmark run.
@@ -76,8 +76,13 @@ impl Default for EncodeBarrier {
 /// continues (honest failure, not a hard abort).
 ///
 /// Twin of Swift `waitForEncodeDrain(client:label:timeoutSeconds:)`.
-pub fn wait_for_encode_drain(
-    client: &mut MCPClient,
+///
+/// The `client` parameter accepts any `ToolCaller` implementation (including
+/// test stubs). Callers passing `&mut MCPClient` are unaffected — Rust infers
+/// the type parameter. The generic bound enables unit-testing the fatal-
+/// transport early-abort path without a live server.
+pub fn wait_for_encode_drain<C: ToolCaller>(
+    client: &mut C,
     label: &str,
     timeout_secs: f64,
 ) -> bool {
@@ -109,6 +114,24 @@ pub fn wait_for_encode_drain(
                     "[{label}] drain barrier: moot_drain_status error: {}",
                     e.description
                 );
+                // Detect fatal transport errors: broken pipe (write to dead
+                // stdin) or stream-closed (EOF from server that exited). Continuing
+                // to poll when the transport is dead spins until timeout producing
+                // the same error on every iteration; abort immediately with a
+                // clear diagnosis so the run fails fast rather than hanging for
+                // timeout_secs seconds before emitting a misleading
+                // "did not converge" warning.
+                let desc = e.description.to_lowercase();
+                if desc.contains("broken pipe")
+                    || desc.contains("stream closed")
+                    || desc.contains("not connected")
+                {
+                    eprintln!(
+                        "[{label}] drain barrier: FATAL — MCP transport died \
+                         (server exited). Aborting poll."
+                    );
+                    return false;
+                }
             }
         }
         thread::sleep(poll_interval);
@@ -125,6 +148,8 @@ pub fn wait_for_encode_drain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_client::MCPError;
+    use crate::mcp_result::MCPToolResult;
 
     #[test]
     fn from_str_round_trips() {
@@ -148,5 +173,105 @@ mod tests {
     #[test]
     fn default_is_drain() {
         assert_eq!(EncodeBarrier::default(), EncodeBarrier::Drain);
+    }
+
+    // MARK: - Fatal-transport early-abort tests
+
+    /// Stub ToolCaller that always returns the configured error or result.
+    struct StubCaller {
+        /// When Some(e), call_tool returns Err(e).
+        /// When None, call_tool returns Ok(idle status).
+        error: Option<MCPError>,
+        /// How many times call_tool was invoked.
+        call_count: usize,
+    }
+
+    impl StubCaller {
+        fn broken_pipe() -> Self {
+            StubCaller {
+                error: Some(MCPError { description: "stdio write failed: Broken pipe".into() }),
+                call_count: 0,
+            }
+        }
+        fn stream_closed() -> Self {
+            StubCaller {
+                error: Some(MCPError { description: "stdio stream closed by test-endpoint before a full message".into() }),
+                call_count: 0,
+            }
+        }
+        fn not_connected() -> Self {
+            StubCaller {
+                error: Some(MCPError { description: "stdio transport not connected for test-endpoint".into() }),
+                call_count: 0,
+            }
+        }
+        fn idle() -> Self {
+            StubCaller { error: None, call_count: 0 }
+        }
+        fn still_draining() -> Self {
+            // Returns a valid draining status to verify non-fatal errors keep polling.
+            StubCaller {
+                error: Some(MCPError { description: "rpc-level error: rate limited".into() }),
+                call_count: 0,
+            }
+        }
+    }
+
+    impl ToolCaller for StubCaller {
+        fn call_tool(
+            &mut self,
+            _name: &str,
+            _arguments: BTreeMap<String, JsonValue>,
+            _format: &ResultFormat,
+        ) -> Result<MCPToolResult, MCPError> {
+            self.call_count += 1;
+            match &self.error {
+                Some(e) => Err(MCPError { description: e.description.clone() }),
+                None => Ok(MCPToolResult {
+                    ordered_ids: vec![],
+                    items: vec![],
+                    write_assigned_id: None,
+                    text_blocks: vec!["drains: none".into()],
+                }),
+            }
+        }
+    }
+
+    /// A broken-pipe error triggers an immediate return (call_count == 1, not
+    /// retrying until timeout). Without the early-abort guard, the function
+    /// would spin until timeout_secs — which for a 0.001 s timeout would still
+    /// spin at least twice before the deadline.
+    #[test]
+    fn fatal_transport_broken_pipe_returns_immediately() {
+        let mut stub = StubCaller::broken_pipe();
+        // Use a non-zero timeout so we can verify only 1 call was made.
+        let result = wait_for_encode_drain(&mut stub, "test", 5.0);
+        assert!(!result, "fatal transport error must return false");
+        assert_eq!(stub.call_count, 1, "must abort after the first fatal error, not retry");
+    }
+
+    #[test]
+    fn fatal_transport_stream_closed_returns_immediately() {
+        let mut stub = StubCaller::stream_closed();
+        let result = wait_for_encode_drain(&mut stub, "test", 5.0);
+        assert!(!result, "fatal transport error must return false");
+        assert_eq!(stub.call_count, 1, "must abort after the first fatal error, not retry");
+    }
+
+    #[test]
+    fn fatal_transport_not_connected_returns_immediately() {
+        let mut stub = StubCaller::not_connected();
+        let result = wait_for_encode_drain(&mut stub, "test", 5.0);
+        assert!(!result, "fatal transport error must return false");
+        assert_eq!(stub.call_count, 1, "must abort after the first fatal error, not retry");
+    }
+
+    /// An idle status returns true immediately (non-fatal path still works).
+    #[test]
+    fn idle_status_returns_true() {
+        let mut stub = StubCaller::idle();
+        let result = wait_for_encode_drain(&mut stub, "test", 5.0);
+        assert!(result, "idle status must return true");
+        assert_eq!(stub.call_count, 1);
     }
 }
