@@ -268,6 +268,12 @@ impl JacobiSvd {
         unsafe impl Sync for MatPtr {}
         let wp = MatPtr(w.as_mut_ptr());
         let vp = MatPtr(v.as_mut_ptr());
+        // `div_ceil` guarantees chunk_len >= 1. `slice::chunks` then produces
+        // exactly ceil(pairs.len() / chunk_len) non-empty chunks and never an
+        // out-of-bounds slice — so the Swift trailing-worker range trap
+        // (lo > round.count when ci*per > round.count, fixed with `guard lo < hi`
+        // in JacobiSVD.swift) CANNOT occur here. The last chunk may be smaller
+        // than chunk_len; that is handled correctly by the stdlib.
         let chunk_len = pairs.len().div_ceil(workers.min(pairs.len()));
         std::thread::scope(|scope| {
             for chunk in pairs.chunks(chunk_len) {
