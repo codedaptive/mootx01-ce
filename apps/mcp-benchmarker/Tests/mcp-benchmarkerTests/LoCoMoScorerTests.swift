@@ -240,6 +240,7 @@ final class LoCoMoScorerTests: XCTestCase {
             guardDiagnostic: nil,
             turnsIngested: 2,
             writeMeanLatencySeconds: 0.01,
+            payloadText: nil,
             cacheHit: nil
         )
         let score = scoreLoCoMoQuestion(result)
@@ -266,6 +267,7 @@ final class LoCoMoScorerTests: XCTestCase {
             guardDiagnostic: "backend returned identical results for all queries",
             turnsIngested: 1,
             writeMeanLatencySeconds: 0.01,
+            payloadText: nil,
             cacheHit: nil
         )
         let score = scoreLoCoMoQuestion(result)
@@ -304,7 +306,8 @@ final class LoCoMoScorerTests: XCTestCase {
             queryLatencySeconds: 0.05,
             writeMeanLatencySeconds: 0.01,
             turnsIngested: 5,
-            retrievedUUIDCount: 3
+            retrievedUUIDCount: 3,
+            payloadText: nil
         )
     }
 
@@ -328,7 +331,80 @@ final class LoCoMoScorerTests: XCTestCase {
             queryLatencySeconds: queryLatency,
             writeMeanLatencySeconds: writeLatency,
             turnsIngested: 5,
-            retrievedUUIDCount: 3
+            retrievedUUIDCount: 3,
+            payloadText: nil
         )
+    }
+
+    // MARK: - Integration-shaped test: real builder path populates report fields
+
+    /// Exercises buildLoCoMoReport through the real code path with a synthetic
+    /// question score that carries payloadText. Asserts encode_barrier, per-question
+    /// tokens_per_result, and provenance_summary are all present in the output.
+    func testBuildLoCoMoReportPopulatesProvenanceFields() throws {
+        // "found 3 memory(s)\n..." — lmeParseResultCount returns 3 for this payload.
+        let payload = "found 3 memory(s)\nsome text block one\nsome text block two\nsome text block three"
+        let score = LoCoMoQuestionScore(
+            questionID: "prov-test-q1",
+            categoryLabel: "single_hop",
+            category: 1,
+            guardHealthy: true,
+            guardDiagnostic: nil,
+            recallAnyAt1: 1.0, recallAnyAt5: 1.0, recallAnyAt10: 1.0,
+            recallAllAt1: 1.0, recallAllAt5: 1.0, recallAllAt10: 1.0,
+            mrr: 1.0,
+            rankedDiaIDs: ["dia-1"],
+            evidenceDiaIDs: ["dia-1"],
+            queryLatencySeconds: 0.1,
+            writeMeanLatencySeconds: 0.02,
+            turnsIngested: 3,
+            retrievedUUIDCount: 3,
+            payloadText: payload
+        )
+
+        let config = LoCoMoRunConfig(
+            mootBinaryPath: "/unused",
+            datasetPath: URL(fileURLWithPath: "/unused"),
+            limit: nil,
+            offset: 0,
+            seed: 42,
+            outDir: nil,
+            runLabel: "provenance-test",
+            encodeBarrier: .drain,
+            estateCache: .off,
+            cacheDir: nil
+        )
+        // Minimal corpus: no conversations, no questions (scores are provided directly).
+        let corpus = LoCoMoCorpus(
+            conversations: [],
+            questions: [],
+            adversarialCount: 0
+        )
+
+        let report = buildLoCoMoReport(config: config, corpus: corpus, results: [], scores: [score])
+
+        // 1. encode_barrier is present and correct.
+        XCTAssertEqual(report.encodeBarrier, "drain",
+            "encode_barrier must match the run config's encodeBarrier")
+
+        // 2. per_question entry has tokens_per_result set (payload had 3 results).
+        guard let q = report.perQuestion.first else {
+            XCTFail("perQuestion must not be empty")
+            return
+        }
+        XCTAssertNotNil(q.tokensPerResult,
+            "tokens_per_result must be non-nil when payload text was present")
+
+        // 3. provenance_summary is present and populated.
+        guard let prov = report.provenanceSummary else {
+            XCTFail("provenance_summary must be non-nil when at least one question had payload text")
+            return
+        }
+        XCTAssertEqual(prov.questionsWithPayload, 1,
+            "questions_with_payload must equal the count of scores with payload text")
+        XCTAssertNotNil(prov.meanTokensPerResult,
+            "mean_tokens_per_result must be non-nil when questions_with_payload > 0")
+        XCTAssertEqual(prov.encodeBarrier, "drain",
+            "encode_barrier in provenance_summary must mirror the top-level encode_barrier")
     }
 }

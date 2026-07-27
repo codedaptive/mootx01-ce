@@ -93,6 +93,10 @@ struct LoCoMoQuestionResult: Sendable {
     let turnsIngested: Int
     /// Mean write latency across all turns for this conversation's estate.
     let writeMeanLatencySeconds: Double
+    /// Raw payload text (joined textBlocks) from the moot_memory_search response.
+    /// Used by the report builder to compute tokens_per_result and provenance_summary.
+    /// Nil when the MCP response carried no textBlocks.
+    let payloadText: String?
     /// Whether this question's estate was served from the snapshot cache.
     /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
     /// nil = --estate-cache off (cache not in use for this run).
@@ -381,6 +385,10 @@ func runLoCoMoQuestions(
             )
             let queryLatency = Date().timeIntervalSince(queryStart)
 
+            // Capture raw payload text for token-efficiency and provenance_summary.
+            let rawPayload = queryResult.textBlocks.isEmpty ? nil
+                : queryResult.textBlocks.joined(separator: "\n")
+
             allResults.append(LoCoMoQuestionResult(
                 questionID: question.questionID,
                 categoryLabel: question.categoryLabel,
@@ -393,6 +401,7 @@ func runLoCoMoQuestions(
                 guardDiagnostic: guardDiagnostic,
                 turnsIngested: manifest.count,
                 writeMeanLatencySeconds: writeMean,
+                payloadText: rawPayload,
                 cacheHit: convCacheHit
             ))
         }

@@ -71,6 +71,9 @@ struct LoCoMoQuestionScore: Sendable {
     let writeMeanLatencySeconds: Double
     let turnsIngested: Int
     let retrievedUUIDCount: Int
+    /// Raw payload text from the MCP response. Nil when no textBlocks were returned.
+    /// Carried from LoCoMoQuestionResult to give the report builder token-efficiency data.
+    let payloadText: String?
 }
 
 /// Scores one `LoCoMoQuestionResult`. Guard-excluded questions are flagged with
@@ -115,7 +118,8 @@ func scoreLoCoMoQuestion(_ result: LoCoMoQuestionResult) -> LoCoMoQuestionScore 
         queryLatencySeconds: result.queryLatencySeconds,
         writeMeanLatencySeconds: result.writeMeanLatencySeconds,
         turnsIngested: result.turnsIngested,
-        retrievedUUIDCount: result.retrievedUUIDs.count
+        retrievedUUIDCount: result.retrievedUUIDs.count,
+        payloadText: result.payloadText
     )
 }
 
@@ -313,6 +317,9 @@ struct LoCoMoReportPerQuestion: Codable, Sendable {
     let rankedDiaIDs: [String]
     let evidenceDiaIDs: [String]
     let retrievedUUIDCount: Int
+    /// Estimated tokens in the MCP payload divided by the retrieved result count.
+    /// Nil when the payload was absent or the result count was zero.
+    let tokensPerResult: Double?
     // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
     /// Whether this question's conversation estate was served from the snapshot cache.
     /// nil = --estate-cache off (caching not active for this run).
@@ -337,7 +344,29 @@ struct LoCoMoReportPerQuestion: Codable, Sendable {
         case rankedDiaIDs            = "ranked_dia_ids"
         case evidenceDiaIDs          = "evidence_dia_ids"
         case retrievedUUIDCount      = "retrieved_uuid_count"
+        case tokensPerResult         = "tokens_per_result"
         case cacheHit                = "cache_hit"
+    }
+}
+
+/// Provenance summary for a LoCoMo run. Aggregates token-efficiency and encode
+/// barrier state so every report JSON is self-documenting without cross-referencing
+/// external logs. Mirrors the `token_efficiency` block in LME reports.
+struct LoCoMoProvenanceSummary: Codable, Sendable {
+    /// Number of questions for which the MCP response contained a non-empty payload.
+    let questionsWithPayload: Int
+    /// Mean (payload tokens / retrieved UUID count) across questions where both
+    /// payload and at least one retrieved result were present. Nil when no questions
+    /// had payload text.
+    let meanTokensPerResult: Double?
+    /// Encode barrier mode used during ingest. Mirrors top-level encode_barrier
+    /// to keep provenance summary self-contained for log analysis.
+    let encodeBarrier: String
+
+    enum CodingKeys: String, CodingKey {
+        case questionsWithPayload = "questions_with_payload"
+        case meanTokensPerResult  = "mean_tokens_per_result"
+        case encodeBarrier        = "encode_barrier"
     }
 }
 
@@ -360,6 +389,9 @@ struct LoCoMoReport: Codable, Sendable {
     let perQuestion: [LoCoMoReportPerQuestion]
     /// Encode barrier mode used for ingest (drain / impatient / none). Additive key.
     let encodeBarrier: String
+    /// Token-efficiency and barrier provenance summary. Nil when no question had
+    /// payload text (e.g. estate was empty during a dry run).
+    let provenanceSummary: LoCoMoProvenanceSummary?
     // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
     /// The estate cache mode used for this run: "off" or "reuse".
     let estateCache: String
@@ -378,6 +410,7 @@ struct LoCoMoReport: Codable, Sendable {
         case latency
         case perQuestion       = "per_question"
         case encodeBarrier     = "encode_barrier"
+        case provenanceSummary = "provenance_summary"
         case estateCache       = "estate_cache"
         case cacheHits         = "cache_hits"
         case cacheMisses       = "cache_misses"
@@ -437,7 +470,17 @@ func buildLoCoMoReport(
         writeMeanSeconds: lat.writeMeanSeconds
     )
 
-    let perQuestion = scores.map { score in
+    // Compute per-question tokensPerResult: estimated payload tokens / retrieved count.
+    // Uses lmeEstimateTokens (byte-count/4) and lmeParseResultCount for consistency
+    // with LME's dual-arm computation. Nil when payload was absent or count was zero.
+    var tokensPerResultList: [Double] = []
+    let perQuestion = scores.map { score -> LoCoMoReportPerQuestion in
+        var tpr: Double? = nil
+        if let text = score.payloadText,
+           let n = lmeParseResultCount(text), n > 0 {
+            tpr = Double(lmeEstimateTokens(text)) / Double(n)
+            tokensPerResultList.append(tpr!)
+        }
         let raw = resultByID[score.questionID]
         return LoCoMoReportPerQuestion(
             questionID: score.questionID,
@@ -458,9 +501,20 @@ func buildLoCoMoReport(
             rankedDiaIDs: score.rankedDiaIDs,
             evidenceDiaIDs: score.evidenceDiaIDs,
             retrievedUUIDCount: score.retrievedUUIDCount,
+            tokensPerResult: tpr,
             cacheHit: raw?.cacheHit ?? nil
         )
     }
+
+    let questionsWithPayload = scores.filter { $0.payloadText != nil }.count
+    let meanTokensPerResult: Double? = tokensPerResultList.isEmpty ? nil
+        : tokensPerResultList.reduce(0, +) / Double(tokensPerResultList.count)
+    let provenanceSummary = questionsWithPayload > 0
+        ? LoCoMoProvenanceSummary(
+            questionsWithPayload: questionsWithPayload,
+            meanTokensPerResult: meanTokensPerResult,
+            encodeBarrier: config.encodeBarrier.rawValue)
+        : nil
 
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
@@ -480,6 +534,7 @@ func buildLoCoMoReport(
         latency: reportLatency,
         perQuestion: perQuestion,
         encodeBarrier: config.encodeBarrier.rawValue,
+        provenanceSummary: provenanceSummary,
         estateCache: config.estateCache.rawValue,
         cacheHits: cacheHits,
         cacheMisses: cacheMisses

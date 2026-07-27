@@ -319,6 +319,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                                 guard_diagnostic: Some(e.description.clone()),
                                 turns_ingested: 0,
                                 write_mean_latency_seconds: 0.0,
+                                payload_text: None,
                                 cache_hit: None,
                             });
                         }
@@ -346,6 +347,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                     guard_diagnostic: Some(e.description.clone()),
                     turns_ingested: 0,
                     write_mean_latency_seconds: 0.0,
+                    payload_text: None,
                     cache_hit: None,
                 });
             }
@@ -445,7 +447,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
 
         // ── Query each selected question ──────────────────────────────────────
         for q in conv_questions {
-            let (retrieved_uuids, query_latency) = if effective_guard_healthy {
+            let (retrieved_uuids, query_latency, payload_text) = if effective_guard_healthy {
                 let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
                 args.insert(
                     verb_map.query_arg.clone(),
@@ -456,14 +458,21 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                     args.insert(k.clone(), JsonValue::String(v.clone()));
                 }
                 let start = Instant::now();
-                let uuids = match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
-                    Ok(result) => result.ordered_ids,
+                let (uuids, raw_payload) = match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
+                    Ok(result) => {
+                        let payload = if result.text_blocks.is_empty() {
+                            None
+                        } else {
+                            Some(result.text_blocks.join("\n"))
+                        };
+                        (result.ordered_ids, payload)
+                    },
                     Err(e) => {
                         eprintln!(
                             "  [locomo] query error for {}: {}",
                             q.question_id, e.description
                         );
-                        vec![]
+                        (vec![], None)
                     }
                 };
                 let latency = start.elapsed().as_secs_f64();
@@ -471,9 +480,9 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                     "  q={} cat={} query_ms={:.0}",
                     q.question_id, q.category_label(), latency * 1000.0
                 );
-                (uuids, latency)
+                (uuids, latency, raw_payload)
             } else {
-                (vec![], 0.0)
+                (vec![], 0.0, None)
             };
 
             all_results.push(LoCoMoQuestionResult {
@@ -488,6 +497,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                 guard_diagnostic: guard_diagnostic.clone(),
                 turns_ingested: manifest.len(),
                 write_mean_latency_seconds: write_mean,
+                payload_text,
                 // All questions in the same conversation share the same cache_hit status:
                 // the cache key is per-conversation (not per-question).
                 cache_hit: conv_cache_hit,

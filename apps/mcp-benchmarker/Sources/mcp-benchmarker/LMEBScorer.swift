@@ -149,6 +149,9 @@ struct LMEBQueryScore: Sendable {
     let rankedDocIDs: [String]
     /// Ground-truth relevant doc IDs (for per_query JSON).
     let relevantDocIDs: [String]
+    /// Raw payload text from the MCP response. Nil when no textBlocks were returned.
+    /// Carried from LMEBQueryResult to give the report builder token-efficiency data.
+    let payloadText: String?
 }
 
 /// Scores one `LMEBQueryResult`. If the guard was not healthy, all retrieval
@@ -187,7 +190,8 @@ func scoreLMEBQuery(_ result: LMEBQueryResult) -> LMEBQueryScore {
         docsIngested: result.docsIngested,
         retrievedDocCount: result.retrievedDocIDs.count,
         rankedDocIDs: rankedDocIDs,
-        relevantDocIDs: Array(relevantSet).sorted()
+        relevantDocIDs: Array(relevantSet).sorted(),
+        payloadText: result.payloadText
     )
 }
 
@@ -331,6 +335,9 @@ struct LMEBReportPerQuery: Codable, Sendable {
     let rankedDocIDs: [String]
     let relevantDocIDs: [String]
     let retrievedDocCount: Int
+    /// Estimated tokens in the MCP payload divided by the retrieved result count.
+    /// Nil when the payload was absent or the result count was zero.
+    let tokensPerResult: Double?
     // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
     /// Whether this query's estate was served from the snapshot cache.
     /// nil = --estate-cache off (caching not active for this run).
@@ -352,7 +359,29 @@ struct LMEBReportPerQuery: Codable, Sendable {
         case rankedDocIDs        = "ranked_doc_ids"
         case relevantDocIDs      = "relevant_doc_ids"
         case retrievedDocCount   = "retrieved_doc_count"
+        case tokensPerResult     = "tokens_per_result"
         case cacheHit            = "cache_hit"
+    }
+}
+
+/// Provenance summary for an LMEB run. Aggregates token-efficiency and encode
+/// barrier state so every report JSON is self-documenting without cross-referencing
+/// external logs. Mirrors LoCoMoProvenanceSummary and the LME token_efficiency block.
+struct LMEBProvenanceSummary: Codable, Sendable {
+    /// Number of queries for which the MCP response contained a non-empty payload.
+    let queriesWithPayload: Int
+    /// Mean (payload tokens / retrieved doc count) across queries where both
+    /// payload and at least one retrieved result were present. Nil when no queries
+    /// had payload text.
+    let meanTokensPerResult: Double?
+    /// Encode barrier mode used during ingest. Mirrors top-level encode_barrier
+    /// to keep provenance summary self-contained for log analysis.
+    let encodeBarrier: String
+
+    enum CodingKeys: String, CodingKey {
+        case queriesWithPayload  = "queries_with_payload"
+        case meanTokensPerResult = "mean_tokens_per_result"
+        case encodeBarrier       = "encode_barrier"
     }
 }
 
@@ -371,6 +400,9 @@ struct LMEBReport: Codable, Sendable {
     let perQuery: [LMEBReportPerQuery]
     /// Encode barrier mode used for ingest (drain / impatient / none). Additive key.
     let encodeBarrier: String
+    /// Token-efficiency and barrier provenance summary. Nil when no query had
+    /// payload text (e.g. estate was empty during a dry run).
+    let provenanceSummary: LMEBProvenanceSummary?
     // MARK: Estate cache (additive — LME-07, BENCHMARKER_OPTIMIZER_CONTRACT.md)
     /// The estate cache mode used for this run: "off" or "reuse".
     let estateCache: String
@@ -380,16 +412,17 @@ struct LMEBReport: Codable, Sendable {
     let cacheMisses: Int
 
     enum CodingKeys: String, CodingKey {
-        case runID         = "run_id"
-        case runLabel      = "run_label"
-        case evidenceTypes = "evidence_types"
-        case generatedAt   = "generated_at"
-        case corpusStats   = "corpus_stats"
+        case runID             = "run_id"
+        case runLabel          = "run_label"
+        case evidenceTypes     = "evidence_types"
+        case generatedAt       = "generated_at"
+        case corpusStats       = "corpus_stats"
         case aggregate
         case latency
-        case perQuery      = "per_query"
-        case encodeBarrier = "encode_barrier"
-        case estateCache   = "estate_cache"
+        case perQuery          = "per_query"
+        case encodeBarrier     = "encode_barrier"
+        case provenanceSummary = "provenance_summary"
+        case estateCache       = "estate_cache"
         case cacheHits     = "cache_hits"
         case cacheMisses   = "cache_misses"
     }
@@ -438,7 +471,15 @@ func buildLMEBReport(
         writeMeanSeconds: latency.writeMeanSeconds
     )
 
-    let perQuery = scores.map { score in
+    // Compute per-query tokensPerResult: estimated payload tokens / retrieved count.
+    var tokensPerResultList: [Double] = []
+    let perQuery = scores.map { score -> LMEBReportPerQuery in
+        var tpr: Double? = nil
+        if let text = score.payloadText,
+           let n = lmeParseResultCount(text), n > 0 {
+            tpr = Double(lmeEstimateTokens(text)) / Double(n)
+            tokensPerResultList.append(tpr!)
+        }
         let raw = resultByID[score.queryID]
         return LMEBReportPerQuery(
             queryID: score.queryID,
@@ -456,9 +497,20 @@ func buildLMEBReport(
             rankedDocIDs: score.rankedDocIDs,
             relevantDocIDs: score.relevantDocIDs,
             retrievedDocCount: score.retrievedDocCount,
+            tokensPerResult: tpr,
             cacheHit: raw?.cacheHit ?? nil
         )
     }
+
+    let queriesWithPayload = scores.filter { $0.payloadText != nil }.count
+    let meanTokensPerResult: Double? = tokensPerResultList.isEmpty ? nil
+        : tokensPerResultList.reduce(0, +) / Double(tokensPerResultList.count)
+    let provenanceSummary = queriesWithPayload > 0
+        ? LMEBProvenanceSummary(
+            queriesWithPayload: queriesWithPayload,
+            meanTokensPerResult: meanTokensPerResult,
+            encodeBarrier: encodeBarrier)
+        : nil
 
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
@@ -478,6 +530,7 @@ func buildLMEBReport(
         latency: reportLatency,
         perQuery: perQuery,
         encodeBarrier: encodeBarrier,
+        provenanceSummary: provenanceSummary,
         estateCache: estateCache,
         cacheHits: cacheHits,
         cacheMisses: cacheMisses

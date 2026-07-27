@@ -349,24 +349,31 @@ fn run_one_lmeb_query(
 
     // ── Query via moot_memory_search ──────────────────────────────────────────
     let query_start = Instant::now();
-    let returned_uuids: Vec<String> = if guard_healthy {
+    let (returned_uuids, payload_text): (Vec<String>, Option<String>) = if guard_healthy {
         let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
         args.insert(
             verb_map.query_arg.clone(),
             JsonValue::String(query.text.clone()),
         );
         match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
-            Ok(result) => result.ordered_ids,
+            Ok(result) => {
+                let payload = if result.text_blocks.is_empty() {
+                    None
+                } else {
+                    Some(result.text_blocks.join("\n"))
+                };
+                (result.ordered_ids, payload)
+            },
             Err(e) => {
                 eprintln!(
                     "  [lmeb] query error for {}: {}",
                     query.id, e.description
                 );
-                vec![]
+                (vec![], None)
             }
         }
     } else {
-        vec![]
+        (vec![], None)
     };
     let query_latency_seconds = query_start.elapsed().as_secs_f64();
 
@@ -401,6 +408,7 @@ fn run_one_lmeb_query(
         guard_diagnostic,
         docs_ingested,
         write_mean_latency_seconds: write_mean_latency,
+        payload_text,
         cache_hit,
     })
 }
@@ -510,6 +518,7 @@ pub fn run_lmeb_queries(
                     guard_diagnostic: Some(e.description),
                     docs_ingested: 0,
                     write_mean_latency_seconds: 0.0,
+                    payload_text: None,
                     cache_hit: None,
                 });
             }

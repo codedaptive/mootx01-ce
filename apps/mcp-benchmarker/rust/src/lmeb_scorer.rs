@@ -22,6 +22,8 @@
 //! MAP@k = mean AP@k over guard-healthy queries
 //! ```
 
+use crate::longmemeval_scorer::lme_parse_result_count;
+use crate::longmemeval_token_efficiency::lme_estimate_tokens;
 use std::collections::{BTreeMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +169,10 @@ pub struct LmebQueryResult {
     pub guard_diagnostic: Option<String>,
     pub docs_ingested: usize,
     pub write_mean_latency_seconds: f64,
+    /// Raw text blocks from the MCP search response, joined with "\n".
+    /// Used to compute tokens_per_result in the report builder.
+    /// None when no text blocks were present (guard-excluded, error, or empty estate).
+    pub payload_text: Option<String>,
     /// Whether this query's estate was served from the snapshot cache.
     /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
     pub cache_hit: Option<bool>,
@@ -193,6 +199,9 @@ pub struct LmebQueryScore {
     pub retrieved_doc_count: usize,
     pub ranked_doc_ids: Vec<String>,
     pub relevant_doc_ids: Vec<String>,
+    /// Raw MCP payload text (text_blocks joined with "\n"). Carried through for
+    /// tokens_per_result computation in the report builder.
+    pub payload_text: Option<String>,
 }
 
 /// Scores one `LmebQueryResult`. Guard-excluded queries get zeroed metrics.
@@ -232,6 +241,7 @@ pub fn score_lmeb_query(result: LmebQueryResult) -> LmebQueryScore {
         retrieved_doc_count,
         ranked_doc_ids: result.retrieved_doc_ids,
         relevant_doc_ids: relevant_sorted,
+        payload_text: result.payload_text,
     }
 }
 
@@ -367,11 +377,30 @@ pub struct LmebReportPerQuery {
     pub ranked_doc_ids: Vec<String>,
     pub relevant_doc_ids: Vec<String>,
     pub retrieved_doc_count: usize,
+    /// Estimated payload tokens divided by the retrieved result count.
+    /// None when payload was absent or the result count was zero.
+    pub tokens_per_result: Option<f64>,
     /// Whether this query's estate was served from the snapshot cache.
     /// Some(true) = hit, Some(false) = miss, None = cache off.
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_hit: Option<bool>,
+}
+
+/// Token-efficiency and barrier provenance summary for an LMEB run.
+///
+/// Twin of Swift `LMEBProvenanceSummary`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LmebProvenanceSummary {
+    /// Number of queries for which the MCP response contained a non-empty payload.
+    pub queries_with_payload: usize,
+    /// Mean (payload tokens / retrieved doc count) across queries where both
+    /// payload and at least one retrieved result were present. None when no queries
+    /// had payload text.
+    pub mean_tokens_per_result: Option<f64>,
+    /// Encode barrier mode used during ingest. Mirrors top-level encode_barrier
+    /// to keep provenance summary self-contained for log analysis.
+    pub encode_barrier: String,
 }
 
 /// The full LMEB run report. Written after a `lmeb` subcommand run.
@@ -399,6 +428,9 @@ pub struct LmebReport {
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     pub cache_misses: usize,
     pub per_query: Vec<LmebReportPerQuery>,
+    /// Token-efficiency and barrier provenance summary. None when no query had
+    /// payload text (e.g. estate was empty during a dry run).
+    pub provenance_summary: Option<LmebProvenanceSummary>,
 }
 
 /// Assembles an `LmebReport` from scores and metadata.
@@ -446,28 +478,58 @@ pub fn build_lmeb_report(
         write_mean_seconds: latency.write_mean_seconds,
     };
 
+    // Compute per-query tokens_per_result and accumulate provenance data.
+    // Uses lme_parse_result_count (parses "found N memory(s)") and lme_estimate_tokens
+    // (byte-count/4) for consistency with the LME dual-arm computation.
+    let mut tokens_per_result_list: Vec<f64> = Vec::new();
+    let queries_with_payload = scores.iter().filter(|s| s.payload_text.is_some()).count();
+
     let per_query: Vec<LmebReportPerQuery> = scores
         .iter()
-        .map(|s| LmebReportPerQuery {
-            query_id:                s.query_id.clone(),
-            docs_ingested:           s.docs_ingested,
-            guard_healthy:           s.guard_healthy,
-            guard_diagnostic:        s.guard_diagnostic.clone(),
-            ndcg_at_10:              s.ndcg_at_10,
-            mrr:                     s.mrr,
-            recall_at_1:             s.recall_at_1,
-            recall_at_5:             s.recall_at_5,
-            recall_at_10:            s.recall_at_10,
-            ap_at_10:                s.ap_at_10,
-            query_latency_seconds:   s.query_latency_seconds,
-            write_mean_latency_seconds: s.write_mean_latency_seconds,
-            ranked_doc_ids:          s.ranked_doc_ids.clone(),
-            relevant_doc_ids:        s.relevant_doc_ids.clone(),
-            retrieved_doc_count:     s.retrieved_doc_count,
-            // Look up cache_hit from the raw results map (key = query_id).
-            cache_hit: cache_hit_by_id.get(&s.query_id).copied().flatten(),
+        .map(|s| {
+            let tpr: Option<f64> = s.payload_text.as_deref().and_then(|text| {
+                let n = lme_parse_result_count(text)?;
+                if n == 0 { return None; }
+                Some(lme_estimate_tokens(text) as f64 / n as f64)
+            });
+            if let Some(v) = tpr { tokens_per_result_list.push(v); }
+            LmebReportPerQuery {
+                query_id:                s.query_id.clone(),
+                docs_ingested:           s.docs_ingested,
+                guard_healthy:           s.guard_healthy,
+                guard_diagnostic:        s.guard_diagnostic.clone(),
+                ndcg_at_10:              s.ndcg_at_10,
+                mrr:                     s.mrr,
+                recall_at_1:             s.recall_at_1,
+                recall_at_5:             s.recall_at_5,
+                recall_at_10:            s.recall_at_10,
+                ap_at_10:                s.ap_at_10,
+                query_latency_seconds:   s.query_latency_seconds,
+                write_mean_latency_seconds: s.write_mean_latency_seconds,
+                ranked_doc_ids:          s.ranked_doc_ids.clone(),
+                relevant_doc_ids:        s.relevant_doc_ids.clone(),
+                retrieved_doc_count:     s.retrieved_doc_count,
+                tokens_per_result:       tpr,
+                // Look up cache_hit from the raw results map (key = query_id).
+                cache_hit:               cache_hit_by_id.get(&s.query_id).copied().flatten(),
+            }
         })
         .collect();
+
+    let mean_tokens_per_result: Option<f64> = if tokens_per_result_list.is_empty() {
+        None
+    } else {
+        Some(tokens_per_result_list.iter().sum::<f64>() / tokens_per_result_list.len() as f64)
+    };
+    let provenance_summary = if queries_with_payload > 0 {
+        Some(LmebProvenanceSummary {
+            queries_with_payload,
+            mean_tokens_per_result,
+            encode_barrier: encode_barrier.clone(),
+        })
+    } else {
+        None
+    };
 
     LmebReport {
         run_id,
@@ -482,6 +544,7 @@ pub fn build_lmeb_report(
         cache_hits,
         cache_misses,
         per_query,
+        provenance_summary,
     }
 }
 
@@ -498,6 +561,111 @@ pub fn write_lmeb_report(report: &LmebReport, path: &std::path::Path) -> Result<
         .map_err(|e| format!("sorted report encode failed: {e}"))?;
     std::fs::write(path, sorted_json.as_bytes())
         .map_err(|e| format!("report write failed: {e}"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — provenance summary and tokens_per_result fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Constructs a minimal `LmebQueryScore` for use in report-builder tests.
+    fn make_score(payload_text: Option<String>) -> LmebQueryScore {
+        let relevant: HashSet<String> = ["doc-A".to_string()].into_iter().collect();
+        LmebQueryScore {
+            query_id: "test-q1".to_string(),
+            guard_healthy: true,
+            guard_diagnostic: None,
+            ndcg_at_10: 1.0,
+            mrr: 1.0,
+            recall_at_1: 1.0,
+            recall_at_5: 1.0,
+            recall_at_10: 1.0,
+            ap_at_10: 1.0,
+            query_latency_seconds: 0.1,
+            write_mean_latency_seconds: 0.05,
+            docs_ingested: 3,
+            retrieved_doc_count: 2,
+            ranked_doc_ids: vec!["doc-A".to_string(), "doc-B".to_string()],
+            relevant_doc_ids: relevant.into_iter().collect(),
+            payload_text,
+        }
+    }
+
+    /// `build_lmeb_report` populates `encode_barrier`, `tokens_per_result`, and
+    /// `provenance_summary` fields when a score has a payload_text with a recognized
+    /// "found N memory(s)" header.
+    ///
+    /// Twin of Swift `testBuildLMEBReportPopulatesProvenanceFields`.
+    #[test]
+    fn build_lmeb_report_populates_provenance_fields() {
+        let payload = "found 2 memory(s)\nblock one content\nblock two content";
+        let score = make_score(Some(payload.to_string()));
+        let scores = vec![score];
+
+        let report = build_lmeb_report(
+            "test-run-id".to_string(),
+            "test-label".to_string(),
+            vec!["changing_evidence".to_string()],
+            "2026-01-01T00:00:00Z".to_string(),
+            "drain".to_string(),
+            1, // queries_loaded
+            &scores,
+            &std::collections::HashMap::new(),
+            "off".to_string(),
+        );
+
+        // Top-level encode_barrier must be "drain".
+        assert_eq!(report.encode_barrier, "drain", "encode_barrier must equal run barrier mode");
+
+        // Per-query tokens_per_result must be set and positive.
+        let q = &report.per_query[0];
+        assert!(
+            q.tokens_per_result.is_some(),
+            "tokens_per_result must be Some when payload had recognized 'found N' header"
+        );
+        assert!(
+            q.tokens_per_result.unwrap() > 0.0,
+            "tokens_per_result must be positive"
+        );
+
+        // provenance_summary must be populated.
+        let prov = report.provenance_summary.as_ref()
+            .expect("provenance_summary must be Some when at least one query had payload");
+        assert_eq!(prov.queries_with_payload, 1, "queries_with_payload must be 1");
+        assert!(prov.mean_tokens_per_result.is_some(), "mean_tokens_per_result must be Some");
+        assert_eq!(prov.encode_barrier, "drain", "provenance_summary.encode_barrier must match run barrier");
+    }
+
+    /// When no score has payload_text, `provenance_summary` must be None.
+    #[test]
+    fn build_lmeb_report_no_payload_provenance_is_none() {
+        let score = make_score(None);
+        let scores = vec![score];
+
+        let report = build_lmeb_report(
+            "test-run-id".to_string(),
+            "test-label".to_string(),
+            vec![],
+            "2026-01-01T00:00:00Z".to_string(),
+            "drain".to_string(),
+            1,
+            &scores,
+            &std::collections::HashMap::new(),
+            "off".to_string(),
+        );
+
+        assert!(
+            report.provenance_summary.is_none(),
+            "provenance_summary must be None when no score had payload"
+        );
+        assert!(
+            report.per_query[0].tokens_per_result.is_none(),
+            "tokens_per_result must be None when score had no payload"
+        );
+    }
 }
 
 /// Recursively sorts JSON object keys (matching JSONEncoder `.sortedKeys`).

@@ -72,6 +72,10 @@ struct LMEBQueryResult: Sendable {
     let docsIngested: Int
     /// Mean write latency (seconds) across all ingested docs.
     let writeMeanLatencySeconds: Double
+    /// Raw payload text (joined textBlocks) from the moot_memory_search response.
+    /// Used by the report builder to compute tokens_per_result and provenance_summary.
+    /// Nil when the MCP response carried no textBlocks.
+    let payloadText: String?
     /// Whether this query's estate was served from the snapshot cache.
     /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
     /// nil = --estate-cache off (cache not in use for this run).
@@ -340,6 +344,10 @@ func runLMEBQueries(
         let writeMean = writeTimes.isEmpty ? 0.0
             : writeTimes.reduce(0, +) / Double(writeTimes.count)
 
+        // Capture raw payload text for token-efficiency and provenance_summary.
+        let rawPayload = queryResult.textBlocks.isEmpty ? nil
+            : queryResult.textBlocks.joined(separator: "\n")
+
         results.append(LMEBQueryResult(
             queryID: query.id,
             queryLatencySeconds: queryLatency,
@@ -349,6 +357,7 @@ func runLMEBQueries(
             guardDiagnostic: guardDiagnostic,
             docsIngested: manifest.count,
             writeMeanLatencySeconds: writeMean,
+            payloadText: rawPayload,
             cacheHit: queryCacheHit
         ))
 
