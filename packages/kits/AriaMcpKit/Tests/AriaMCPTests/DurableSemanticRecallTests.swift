@@ -20,6 +20,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
 import VectorKit
@@ -47,6 +48,14 @@ struct DurableSemanticRecallTests {
         // place, kit.open re-issues a handle against the existing schema.
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        // Stamp the GLK 1.1 estate format, mirroring ServeCommand's GLKMigrationCatalog.prepare
+        // call between kit.open and kit.wireGLKSubstores in production. On a fresh estate this
+        // is a fast path: no legacy chunks table detected, .current stamped immediately.
+        // On a re-opened existing estate the stamp is already present and prepare returns
+        // immediately. Without this call, wireGLKSubstores throws "estate migration required
+        // before GLK 1.1 can open semantic substores".
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
 
         // Mirror AriaMCPMain's semantic-recall wiring: the shared
         // `wireGLKSubstores` seam — the single canonical post-open wiring path

@@ -28,6 +28,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
 import VectorKit
@@ -59,6 +60,9 @@ private func openInMemoryEstateWithSemanticRecall()
         configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+    // Stamp the GLK 1.1 estate format, mirroring ServeCommand's GLKMigrationCatalog.prepare
+    // call between kit.open and kit.wireGLKSubstores in production. Fresh-estate fast path.
+    _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
     // Shared-content 1.1: canonical wiring seam — attached engine over the
     // LocusKit adapter, engine + shared VectorStore registered.
     try await kit.wireGLKSubstores(for: handle, backingStorage: storage)

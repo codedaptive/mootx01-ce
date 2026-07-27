@@ -29,6 +29,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import NeuronKit
 import PersistenceKit
@@ -70,6 +71,9 @@ private func openAndWireEstate(
     ))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+    // Stamp the GLK 1.1 estate format, mirroring ServeCommand's GLKMigrationCatalog.prepare
+    // call between kit.open and kit.wireGLKSubstores in production. Fresh-estate fast path.
+    _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
     try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
     return (kit, handle, storage)
 }

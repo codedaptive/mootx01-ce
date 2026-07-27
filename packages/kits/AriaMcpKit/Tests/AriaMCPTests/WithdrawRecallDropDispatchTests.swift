@@ -22,6 +22,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
 import VectorKit
@@ -50,6 +51,9 @@ struct WithdrawRecallDropDispatchTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        // Stamp the GLK 1.1 estate format, mirroring ServeCommand's GLKMigrationCatalog.prepare
+        // call between kit.open and kit.wireGLKSubstores in production. Fresh-estate fast path.
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
         // Shared-content 1.1: the canonical wiring seam constructs the
         // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter
         // and registers engine + shared VectorStore (same path AriaMCPMain
