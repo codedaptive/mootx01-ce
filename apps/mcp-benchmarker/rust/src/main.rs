@@ -243,6 +243,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     if let Some(n) = limit {
         eprintln!("[lme] limit: {n}");
     }
+    eprintln!("[lme] encode-barrier: {}", encode_barrier.as_str());
 
     let run_config = LmeRunConfig {
         moot_binary: binary,
@@ -456,6 +457,7 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
     if offset > 0 {
         eprintln!("[locomo] offset: {offset}");
     }
+    eprintln!("[locomo] encode-barrier: {}", encode_barrier.as_str());
 
     let run_config = LoCoMoRunConfig {
         moot_binary: binary,
@@ -585,6 +587,7 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
     if let Some(n) = limit {
         eprintln!("[lmeb] limit: {n}  offset: {offset}");
     }
+    eprintln!("[lmeb] encode-barrier: {}", encode_barrier.as_str());
 
     // ── Build query list ──────────────────────────────────────────────────────
     let mut all_queries: Vec<_> = corpus.queries_by_id.values().cloned().collect();
