@@ -129,3 +129,62 @@ None.
 Baseline: 393 tests pass
 Expected post-implementation: ≥ 393 tests pass + new structural equivalence test
 ```
+
+---
+
+## Supplemental: JacobiSVD parallel-chunking crash (Kinsta diagnosis, 2026-07-27)
+
+**Baseline (SubstrateML):** 486 tests pass.  
+**Machine:** 18 CPU (Darwin 27.0.0) — `ProcessInfo.processInfo.activeProcessorCount = 18`.
+
+### Symbol 6: `JacobiSVD.decompose` parallel loop body — `JacobiSVD.swift` line ~214
+
+**Change class:** bug fix — add `guard lo < hi else { return }` guard before range construction  
+**Scope:** private (inside `decompose` static method body, not a named symbol)
+
+**Root cause:** `DispatchQueue.concurrentPerform(iterations: chunkCount) { ci in }` spawns
+`chunkCount = min(workers, round.count)` iterations. With ceiling-division chunk size
+`per = (round.count + chunkCount - 1) / chunkCount`, trailing iterations get
+`lo = ci * per > round.count`, so `hi = min(lo + per, round.count) < lo`. Swift's
+`lo..<hi` Range precondition requires lowerBound ≤ upperBound and traps when violated.
+Latent since 5edc7bb6 (parallel tournament SVD); exposed by batchTrainIfNeeded growth
+retrains (n ≥ 38 on an 18-core box triggers round.count > workers).
+
+#### Call sites (code)
+
+| File | Line | Source | Classification | Justification |
+|---|---|---|---|---|
+| `JacobiSVD.swift` | ~214 | code | MUST_UPDATE | The guarded line itself — the fix |
+| `JacobiSVDTests.swift` | new | additive | MUST_UPDATE | New regression test exercising the n=64 path |
+
+**Summary:** 1 MUST_UPDATE (guard added), 1 additive test.
+
+---
+
+### Symbol 7: `wait_for_encode_drain` — Rust `encode_barrier.rs`
+
+**Change class:** bug fix — detect fatal transport errors (broken pipe / stream closed) and abort early rather than retrying until timeout  
+**Scope:** `pub`
+
+#### Call sites
+
+| File | Line | Source | Classification | Justification |
+|---|---|---|---|---|
+| `encode_barrier.rs` | ~88 | code | MUST_UPDATE | Error arm — add fatal-transport detection |
+
+**Summary:** 1 MUST_UPDATE.
+
+---
+
+### Symbol 8: `waitForEncodeDrain` — Swift `EncodeBarrier.swift`
+
+**Change class:** bug fix — same fatal-transport early-abort as Symbol 7  
+**Scope:** `internal`
+
+#### Call sites
+
+| File | Line | Source | Classification | Justification |
+|---|---|---|---|---|
+| `EncodeBarrier.swift` | ~107 | code | MUST_UPDATE | catch block — add fatal-transport detection |
+
+**Summary:** 1 MUST_UPDATE.
