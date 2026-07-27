@@ -850,8 +850,8 @@ public actor CorpusContentEngine {
     /// extension handles `commitQueueBatch` and `queue.reply` after this returns.
     ///
     /// Four-phase pipeline:
-    ///   Phase 0 — once-per-batch: countsReload guard, firstIngestTrainIfNeeded,
-    ///             registerClaims (Cause 1+2 fixes).
+    ///   Phase 0 — once-per-batch: countsReload guard, batchTrainIfNeeded (three-
+    ///             state Kinsta-fix), registerClaims (Cause 1+2 fixes).
     ///   Phase 1 — serial per-job: decode, validate, record fetch, idempotence
     ///             check; remove jobs handled here entirely.
     ///   Phase 2 — bounded parallel embed (≤ activeProcessorCount tasks):
@@ -870,12 +870,14 @@ public actor CorpusContentEngine {
             try await reloadCountsFromStorage()
             countsReloadRequired = false
         }
-        // firstIngestTrainIfNeeded: trains an untrained trainable slot exactly
-        // once via the bounded streaming trainer; no-op when all slots are
-        // trained or stateless. Idempotent — calling once per batch is equivalent
-        // to calling once per job (eliminates N redundant no-ops).
+        // batchTrainIfNeeded: three-state auto-train (Kinsta-fix). Fires:
+        //   (1) first ingest — no persisted basis;
+        //   (2) growth retrain — young basis, corpus ≥ 2× trainedChunkCount;
+        //   (3) fold-in — stable basis, no retrain.
+        // Called once per batch (not per job); decisions are serialized here
+        // before the Phase 2 parallel embed fan-out.
         let batchNow = Date()
-        try await firstIngestTrainIfNeeded(now: batchNow)
+        try await batchTrainIfNeeded(now: batchNow)
         // registerClaims: idempotent — upserts claims only when absent; calling
         // once per batch eliminates N×slots unconditional upserts (Cause 2 fix).
         try await registerClaims(now: batchNow)
@@ -1784,9 +1786,28 @@ public actor CorpusContentEngine {
 
     // MARK: - Training
 
-    /// First-ingest auto-train (standalone UX): a trainable slot with no
-    /// persisted basis trains ONCE — via the BOUNDED streaming trainer,
-    /// never by materializing the corpus.
+    /// Minimum content-count threshold for a "stable" auto-trained basis.
+    ///
+    /// Below this count a 2× corpus growth triggers a growth retrain;
+    /// above it only explicit `reindex(now:)` retrains (the "stable" contract).
+    /// Produces at most log₂(50) ≈ 6 implicit retrains before the basis is
+    /// stable — exponential doubling, stopping at the threshold.
+    ///
+    /// Mirrors `Corpus.ingest`'s `perDocAutoRetrainStableChunkThreshold`
+    /// (fix-basis d7011ae2). The constant is public so tests can assert on it
+    /// without magic numbers.
+    public static let perDocAutoRetrainStableChunkThreshold = 50
+
+    /// First-ingest auto-train (standalone / per-document path): trains a
+    /// trainable slot that has no persisted basis — fires exactly once per
+    /// estate lifetime. Used by `prepareIndex` (direct `indexContent`,
+    /// `applyChange`, and `prepareQueueJob` callers).
+    ///
+    /// The growth-retrain check is intentionally ABSENT here. Per-document
+    /// callers do not have batch context; a growth retrain that fires on every
+    /// `indexContent` call would mutate the counts store in ways that break
+    /// idempotence contracts. Growth retrains belong to the batch drain path —
+    /// see `batchTrainIfNeeded`.
     private func firstIngestTrainIfNeeded(now: Date) async throws {
         let untrained = slots.indices.filter {
             slots[$0].freshBasisBlob != nil
@@ -1794,6 +1815,83 @@ public actor CorpusContentEngine {
         }
         guard !untrained.isEmpty else { return }
         _ = try await trainTrainableSlots(now: now)
+    }
+
+    /// Three-state auto-train (Kinsta-fix, batch drain path): prevents a
+    /// degenerate rank-1 basis from freezing during early corpus growth.
+    ///
+    /// Called from `drainIndexBatch` Phase 0 — ONCE per batch, before any
+    /// per-document embed work. Never called from per-document paths.
+    ///
+    /// Implicit train triggers (mirrors Corpus.ingest fix-basis d7011ae2):
+    ///   (1) First-ingest: no persisted basis → train from scratch on the full
+    ///       current corpus snapshot (all content IDs in `source`).
+    ///   (2) Growth retrain: basis is young (trainedChunkCount <
+    ///       `perDocAutoRetrainStableChunkThreshold`) AND corpus has grown to
+    ///       ≥ 2× trainedChunkCount → retrain from scratch on the full corpus.
+    ///       Prevents a 1-doc rank-1 LSA SVD from becoming the permanent basis.
+    ///       Retrains thin out exponentially and stop once the basis is stable.
+    ///   (3) Fold-in: basis is stable or hasn't grown 2× → no retrain; new
+    ///       records are projected onto the frozen basis.
+    ///
+    /// Active content is fetched lazily and cached across slots so multi-slot
+    /// corpora pay only one DB read per drain pass. Retrain decisions are serial;
+    /// the embed fan-out (Phase 2) runs on the post-retrain basis.
+    ///
+    /// `force: true` in `trainTrainableSlots` is required for case (2) because
+    /// a young-basis slot has basisDigest ≠ untrainedDigest (already trained once),
+    /// and the non-forced path would skip it. All trainable slots are retrained
+    /// together (same corpus snapshot) so the decision is uniform.
+    private func batchTrainIfNeeded(now: Date) async throws {
+        let stableThreshold = Self.perDocAutoRetrainStableChunkThreshold
+        // Indexed-doc count (CHECKPOINTED docs only), fetched lazily and
+        // shared across all trainable slots — one DB read per batch.
+        //
+        // IMPORTANT — indexed count, not source count: the growth ratio compares
+        // the basis (trained on trainedChunkCount INDEXED docs) against the ALREADY
+        // CHECKPOINTED doc count. Using source.activeContentIDs() would include docs
+        // queued but not yet indexed in the current drain batch. Those docs are about
+        // to be processed below. If they triggered a growth retrain, trainTrainableSlots
+        // would include them in the training corpus and create subsumed references for
+        // them, which commitQueueBatch would then delete instead of creating the normal
+        // non-subsumed delta references, corrupting the maintained counts.
+        var cachedIndexedCount: Int? = nil
+        var shouldRetrain = false
+
+        for slotIndex in slots.indices {
+            guard slots[slotIndex].freshBasisBlob != nil else { continue }
+            // No persisted basis: first ingest — always train.
+            if slots[slotIndex].basisDigest == Self.untrainedDigest {
+                shouldRetrain = true
+                break
+            }
+            // Persisted basis exists. Check if it is young enough to retrain.
+            let persisted = try await basisStore.load(
+                modelID: slots[slotIndex].provider.modelID,
+                modelVersion: slots[slotIndex].provider.modelVersion)
+            guard let basis = persisted,
+                  basis.trainedChunkCount < stableThreshold
+            else { continue } // Case (3): stable basis — fold-in only.
+            // Case (2): young basis — check 2× growth against INDEXED count.
+            let indexedCount: Int
+            if let cached = cachedIndexedCount {
+                indexedCount = cached
+            } else {
+                indexedCount = try await indexedContentIDs().count
+                cachedIndexedCount = indexedCount
+            }
+            if indexedCount >= basis.trainedChunkCount * 2 {
+                shouldRetrain = true
+                break
+            }
+            // Indexed corpus hasn't grown 2× yet — fold-in only.
+        }
+
+        guard shouldRetrain else { return }
+        // Retrain all trainable slots. force: true is required for cases (1)
+        // and (2) — for case (2) basisDigest ≠ untrainedDigest; the non-forced
+        // path skips already-trained slots.
+        _ = try await trainTrainableSlots(now: now, force: true)
     }
 
     /// Training page size: how many canonical records stream through the

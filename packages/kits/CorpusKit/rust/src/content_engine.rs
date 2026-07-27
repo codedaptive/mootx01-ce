@@ -2111,6 +2111,112 @@ impl CorpusContentEngine {
         Ok(())
     }
 
+    /// Minimum content-count threshold for a "stable" auto-trained basis.
+    ///
+    /// Below this count a 2× corpus growth triggers a growth retrain; above
+    /// it only an explicit `reindex` retrains (the "stable" contract). Mirrors
+    /// `Corpus::PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD` (fix-basis
+    /// d7011ae2) and Swift `CorpusContentEngine.perDocAutoRetrainStableChunkThreshold`.
+    pub const PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD: usize = 50;
+
+    /// Three-state auto-train for the batch drain path (Kinsta-fix): prevents
+    /// a degenerate rank-1 basis from freezing during early corpus growth.
+    ///
+    /// Called from `drain_content_with_queue` ONCE per batch, before per-document
+    /// work. NEVER called from per-document paths (`prepare_index_record`); doing
+    /// so would fire spurious growth retrains that break counts idempotence.
+    ///
+    /// States:
+    ///   (1) First-ingest: no persisted basis → train from scratch.
+    ///   (2) Growth retrain: young basis (trained_chunk_count <
+    ///       `PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD`) AND the INDEXED corpus
+    ///       has grown to ≥ 2× trained_chunk_count → retrain from scratch. Stops
+    ///       exponentially; at most ⌊log₂(50)⌋ ≈ 5 implicit retrains before stable.
+    ///   (3) Fold-in: stable basis or indexed corpus hasn't grown 2× → no retrain.
+    ///
+    /// IMPORTANT — indexed count, not source count: the growth ratio compares the
+    /// basis (trained on `trained_chunk_count` INDEXED docs) against the ALREADY
+    /// CHECKPOINTED doc count from `index_state`. Using `source.active_content_ids()`
+    /// would include docs queued but not yet indexed in the current batch. Those
+    /// docs are about to be indexed by the drain loop below. If they triggered a
+    /// growth retrain, `train_trainable_slots` would include them in the training
+    /// corpus and create subsumed references for them, which `commit_queue_batch`
+    /// would then delete instead of creating the normal non-subsumed delta references.
+    /// Using the indexed count prevents this double-counting. The same doc count
+    /// is fetched lazily and shared across all trainable slots (one DB read per
+    /// batch even with N trainable models).
+    ///
+    /// `train_trainable_slots` is called with `force: true` for cases (1) and (2)
+    /// — the non-forced path skips providers whose basis digest is already set.
+    pub(crate) fn batch_train_if_needed(&self, now_millis: i64) -> CorpusKitResult<()> {
+        let stable_threshold = Self::PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD;
+        let mut should_retrain = false;
+        // Indexed-doc count: CHECKPOINTED documents only. Source docs not yet
+        // indexed (queued but not checkpointed) are excluded on purpose — see
+        // the function doc-comment above.
+        let mut cached_indexed_count: Option<usize> = None;
+
+        for slot in &self.slots {
+            if slot.fresh_basis_blob.is_none() {
+                continue;
+            }
+            let digest = slot
+                .basis_digest
+                .lock()
+                .map_err(|_| {
+                    CorpusKitError::StoreUnavailable("basis digest mutex poisoned".into())
+                })?
+                .clone();
+            // Case (1): no persisted basis — first ingest.
+            if digest.is_empty() {
+                should_retrain = true;
+                break;
+            }
+            // Persisted basis exists — check if it is young enough to retrain.
+            let model_id = slot.model_id.clone();
+            let model_version = slot
+                .handle
+                .lock()
+                .map_err(|_| {
+                    CorpusKitError::StoreUnavailable("provider handle mutex poisoned".into())
+                })?
+                .provider()
+                .model_version()
+                .to_string();
+            let Some(basis) = self.basis_store.load(&model_id, &model_version)? else {
+                continue;
+            };
+            if basis.trained_chunk_count >= stable_threshold {
+                continue; // Case (3): stable basis — fold-in only.
+            }
+            // Case (2): young basis — check 2× growth against INDEXED count.
+            let indexed_count = if let Some(count) = cached_indexed_count {
+                count
+            } else {
+                let count = self
+                    .index_state
+                    .all_states()?
+                    .into_iter()
+                    .filter(|s| s.content_id != FEED_CURSOR_ROW_ID)
+                    .count();
+                cached_indexed_count = Some(count);
+                count
+            };
+            if indexed_count >= basis.trained_chunk_count * 2 {
+                should_retrain = true;
+                break;
+            }
+            // Indexed corpus hasn't grown 2× yet — fold-in only.
+        }
+
+        if should_retrain {
+            // force: true required for cases (1) and (2) — for case (2) the
+            // basis digest is non-empty; the non-forced path would skip it.
+            self.train_trainable_slots(now_millis, true)?;
+        }
+        Ok(())
+    }
+
     /// Training page size — bounds transient text memory to one page; the
     /// accumulator state is vocabulary-scale regardless, and the trained
     /// basis is byte-identical for every page size.

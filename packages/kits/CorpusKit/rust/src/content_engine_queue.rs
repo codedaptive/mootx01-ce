@@ -272,6 +272,13 @@ impl CorpusContentEngine {
         // One resident-index rebuild per burst.
         self.begin_deferred_vector_index()?;
 
+        // Three-state auto-train (Kinsta-fix): once per batch, before per-document
+        // work. Mirrors Swift `drainIndexBatch` Phase 0 `batchTrainIfNeeded`.
+        // Prevents a degenerate rank-1 basis from freezing when the queue drain
+        // fires per-document (impatient inline encoding path).
+        let batch_now_millis = (drain_now() * 1000.0) as i64;
+        self.batch_train_if_needed(batch_now_millis)?;
+
         let mut encoded_ids: Vec<String> = Vec::new();
         let mut completions: Vec<(JobId, ObservationStatus)> = Vec::with_capacity(batch.len());
         let mut counts_updates: Vec<(String, i64, String, String)> = Vec::new();
