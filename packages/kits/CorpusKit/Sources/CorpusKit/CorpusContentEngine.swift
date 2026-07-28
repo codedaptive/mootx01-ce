@@ -2684,6 +2684,29 @@ public actor CorpusContentEngine {
         await floatPerSignal(query: query, limit: limit, direction: .farthest)
     }
 
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
+    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
+    /// Discrimination is non-nil exactly when the outcome is `.hits` with ≥1 result.
+    ///
+    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
+    /// RecallDirector (GLK) consumes the signal to discount the dense contribution
+    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
+    /// for their own fusion decisions.
+    ///
+    /// See `FloatDiscriminationSignal` for the statistic definition and threshold guidance.
+    public func floatNearestPerSignalWithDiscrimination(
+        query: String, limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
+        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
+        return perSignal.map { entry in
+            (modelID: entry.modelID,
+             outcome: entry.outcome,
+             discrimination: Corpus.discriminationSignal(from: entry.outcome))
+        }
+    }
+
     /// Test-only: when non-nil, the next per-signal float call reports
     /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
     /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane

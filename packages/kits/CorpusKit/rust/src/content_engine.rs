@@ -18,7 +18,10 @@ use crate::basis_store::{BasisStore, PersistedBasis};
 use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
-use crate::corpus::{Corpus, EmbeddingModelConfig, EncodeSpeed, FloatLaneOutcome, ProviderSlot};
+use crate::corpus::{
+    discrimination_signal_from_outcome, Corpus, EmbeddingModelConfig, EncodeSpeed,
+    FloatDiscriminationSignal, FloatLaneOutcome, ProviderSlot,
+};
 use crate::corpus_provider_counts_store::{
     CorpusProviderCountsStore, PersistedCounts, PersistedCountsReference,
 };
@@ -785,6 +788,32 @@ impl CorpusContentEngine {
         limit: usize,
     ) -> Vec<(String, FloatLaneOutcome)> {
         self.float_per_signal(query, limit, false)
+    }
+
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Mirrors Swift `CorpusContentEngine.floatNearestPerSignalWithDiscrimination`.
+    /// Same semantics and return shape as `float_nearest_per_signal`, but each entry
+    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
+    /// Discrimination is `Some` exactly when the outcome is `Hits` with ≥1 result.
+    ///
+    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
+    /// The coordinator (GLK) consumes the signal to discount the dense contribution
+    /// when the lane self-reports degeneracy.
+    ///
+    /// See `FloatDiscriminationSignal` for the statistic definition.
+    pub fn float_nearest_per_signal_with_discrimination(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> {
+        self.float_nearest_per_signal(query, limit)
+            .into_iter()
+            .map(|(model_id, outcome)| {
+                let disc = discrimination_signal_from_outcome(&outcome);
+                (model_id, outcome, disc)
+            })
+            .collect()
     }
 
     /// Single-signal convenience: the DEFAULT slot's nearest outcome.

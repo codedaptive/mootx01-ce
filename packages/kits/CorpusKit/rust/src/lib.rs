@@ -79,6 +79,7 @@ pub use content_engine::passage_ranges;
 pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
 pub use corpus::EmbeddingModelConfig;
+pub use corpus::FloatDiscriminationSignal;
 pub use corpus::FloatLaneOutcome;
 pub use corpus::NamedInferenceFn;
 pub use document_store::CorpusDocumentStore;

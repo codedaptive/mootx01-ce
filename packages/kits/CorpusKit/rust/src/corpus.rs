@@ -119,6 +119,72 @@ pub enum FloatLaneOutcome {
     StoreError(String),
 }
 
+// MARK: - FloatDiscriminationSignal
+
+/// Per-query discrimination signal from the dense float lane.
+///
+/// Mirrors Swift `FloatDiscriminationSignal`. Measures how spread the top-K
+/// cosine similarity scores are, distinguishing a contrastive regime (clear
+/// semantic winner) from a saturated regime (all scores near-uniform, as
+/// observed with short chat turns dominated by stopword mass —
+/// pairwise document cosines 0.93–0.98 collapse query-to-document cosines
+/// to a similarly narrow band).
+///
+/// **Statistic:** `relative_spread = (max_sim − min_sim) / max(max_sim, 0.001)`
+/// - Saturated: spread ≈ 0.05 (no clear winner).
+/// - Contrastive: spread ≥ 0.15.
+/// - O(1) from the already-sorted `.Hits` list (first and last elements).
+/// - Degrades safely when `max_sim ≤ 0`: returns 0.0 (treat as saturated).
+///
+/// **Design boundary:** CorpusKit measures; GLK (coordinator) applies policy.
+/// No behaviour change inside CorpusKit — measurement only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatDiscriminationSignal {
+    /// Relative spread of top-K hit cosines: (max − min) / max (or 0 when max ≤ 0).
+    ///
+    /// 0.0 = perfectly saturated; 1.0 = maximally discriminating.
+    ///
+    /// Threshold guidance for GLK consumers (defined in coordinator.rs):
+    ///   < 0.10 → clearly saturated — strong discount.
+    ///   0.10–0.15 → transition band — partial discount.
+    ///   ≥ 0.15 → contrastive — no discount (discrimination_factor = 1.0).
+    pub relative_spread: f32,
+    /// Hit count K used to compute the spread (top-K hits, after limit truncation).
+    pub hit_count: usize,
+}
+
+/// Compute a `FloatDiscriminationSignal` from a `FloatLaneOutcome`.
+///
+/// Returns `Some` only for `Hits` with at least one result. The `relative_spread`
+/// `(max_sim − min_sim) / max(max_sim, 0.001)` is computed from the first and last
+/// elements of the already-sorted similarity list — O(1), zero extra I/O.
+///
+/// This function is `pub(crate)` so both `Corpus` and `CorpusContentEngine` use
+/// it without duplicating the measurement logic.
+pub(crate) fn discrimination_signal_from_outcome(
+    outcome: &FloatLaneOutcome,
+) -> Option<FloatDiscriminationSignal> {
+    if let FloatLaneOutcome::Hits(hits) = outcome {
+        if hits.is_empty() {
+            return None;
+        }
+        // `hits` is sorted nearest-first (highest cosine first).
+        let max_sim = hits[0].1;
+        let min_sim = hits[hits.len() - 1].1;
+        let spread = if max_sim > 0.001 {
+            (max_sim - min_sim) / max_sim
+        } else {
+            0.0
+        };
+        Some(FloatDiscriminationSignal {
+            relative_spread: spread.max(0.0),
+            hit_count: hits.len(),
+        })
+    } else {
+        None
+    }
+}
+
 // MARK: - EmbeddingModelConfig
 
 /// Host-supplied inference seam for the named model cases: FNV-1a
@@ -2971,6 +3037,36 @@ impl Corpus {
             results.push((slot.model_id.clone(), outcome));
         }
         results
+    }
+
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Mirrors Swift `Corpus.floatNearestPerSignalWithDiscrimination`. Same semantics
+    /// and return shape as `float_nearest_per_signal`, but each entry carries an
+    /// optional `FloatDiscriminationSignal` alongside the outcome. Discrimination is
+    /// `Some` exactly when the outcome is `Hits` with at least one result.
+    ///
+    /// **Measurement only:** no behaviour change inside `Corpus`.
+    /// The coordinator (GLK) consumes the signal to discount the dense contribution
+    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
+    /// for their own fusion decisions.
+    ///
+    /// See `FloatDiscriminationSignal` for the statistic definition.
+    pub fn float_nearest_per_signal_with_discrimination(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> {
+        // Delegate to the existing per-signal call, then compute discrimination from
+        // each `Hits` outcome's already-sorted similarity list. The existing function
+        // handles the forced-error seam and all dark-lane paths.
+        self.float_nearest_per_signal(query, limit)
+            .into_iter()
+            .map(|(model_id, outcome)| {
+                let disc = discrimination_signal_from_outcome(&outcome);
+                (model_id, outcome, disc)
+            })
+            .collect()
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane
