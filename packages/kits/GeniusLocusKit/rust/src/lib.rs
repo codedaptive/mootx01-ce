@@ -65,6 +65,9 @@ pub mod handle;
 // `composite_schema` declaration. Also adds `open_hydrating` to
 // `EstateCoordinator` via an impl block.
 pub mod hydration;
+// The SPEC_DISTILLATION_STORAGE §10.1 recall-hydration representation
+// selector (content/distilled/tokenized variants, computed at read).
+pub mod hydration_representation;
 // intake.rs — Dual-Path Intake (G7): WriteMode and mode-aware capture (D-A),
 // the capture→encode ORCHESTRATION. The encode queue + drain + worker pool +
 // retry + job payload now live in CorpusKit (corpus_ingest_queue.rs); GLK

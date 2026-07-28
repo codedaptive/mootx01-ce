@@ -3049,6 +3049,28 @@ impl EstateCoordinator {
                     })?;
                 }
                 if let Some(ref vs) = vector_store {
+                    // Distillation lane scrub (SPEC_DISTILLATION_STORAGE
+                    // §7.2/§8 + custodian walk 2026-07-28): the
+                    // distillation-features-v1 entry is keyed by the SOURCE
+                    // drawer id, so every expunged drawer may carry one.
+                    // UNCONDITIONAL on the corpus handle — the lane exists
+                    // independently of the semantic embedding lane, and an
+                    // orphaned structural fingerprint would leak a
+                    // content-derived signature past the destruction
+                    // contract. Runs BEFORE the corpus-model delete so the
+                    // lane is scrubbed even when the corpus-less branch
+                    // below fails the semantic-lane delete. Mirrors the
+                    // Swift VerbSurface.expunge ordering.
+                    vs.delete_all_vectors(
+                        row_id,
+                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                    )
+                    .map_err(|e| {
+                        VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
+                            row_id: row_id.to_string(),
+                            reason: format!("{:?}", e),
+                        })
+                    })?;
                     if let Some(ref c) = corpus {
                         // For .glk estates: the standalone VectorStore's resident
                         // array must also be invalidated (it shares the backing table

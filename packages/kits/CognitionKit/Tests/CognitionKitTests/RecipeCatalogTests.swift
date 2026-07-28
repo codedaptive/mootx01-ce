@@ -17,7 +17,7 @@ struct RecipeCatalogTests {
         // Every catalog descriptor registers (LENS_DISCOVERABILITY_DECISION v2.0):
         // the 2 foundational recipes plus the 16 reasoning lenses plus the 3
         // analytics lenses plus the 4 temporal/entropy lenses plus shaped_recall,
-        // recall_exploratory, and the 3 distillation-family recipes = 30 total.
+        // recall_exploratory, and the 2 distillation-family recipes = 29 total.
         // Catalog/descriptor parity is verified here; the Rust distillation entries
         // have catalog descriptors but not full Rust recipe bodies in the Rust kit.
         #expect(RecipeCatalog.names.sorted() == [
@@ -27,8 +27,8 @@ struct RecipeCatalogTests {
             "bias",
             "cohesion",
             "complexity",
-            "consolidate",
             "constellation",
+            "distill",
             "distilled_recall",
             "drift",
             "estate_divergence",
@@ -45,7 +45,6 @@ struct RecipeCatalogTests {
             "partial_cue_recall",
             "precedence",
             "recall_exploratory",
-            "recollect",
             "rhythm",
             "shaped_recall",
             "theme_weather",
@@ -96,8 +95,8 @@ struct RecipeCatalogTests {
     func catalogNamesMatchRustDeclarationOrder() {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
         // All 30 entries are registered in both Swift and Rust. The three
-        // distillation-family entries (consolidate, distilled_recall,
-        // recollect) carry descriptor metadata in Rust. Any reordering on either
+        // distillation-family entries (distill, distilled_recall) carry
+        // descriptor metadata in Rust. Any reordering on either
         // side, or a Swift recipe absent from this list, breaks this test —
         // that is its purpose.
         #expect(RecipeCatalog.names == [
@@ -128,9 +127,8 @@ struct RecipeCatalogTests {
             "complexity",
             "shaped_recall",
             "recall_exploratory",
-            "consolidate",
+            "distill",
             "distilled_recall",
-            "recollect",
         ])
     }
 

@@ -1,24 +1,23 @@
 // DistilledRecall.swift
 //
-// Dense-tier recall recipe: searches the distilled memory tier using
-// structural fingerprint Hamming NN, returns factoid prose + metadata.
-// Token budget ~10 per result. No embedding model inference.
+// Distilled-payload recall recipe — SPEC_DISTILLATION_STORAGE §10.3.
 //
-// run() sequence per DISTILLATION_ARIA_TOOLS.md §2.2:
-//   1. DistillationPipeline.queryFingerprint → Fingerprint256
-//   2. kit.findNearestDistilled → [VectorMatch]
-//   3. kit.hydrate → bodyMap [id: content]
-//   4. DistilledHeader.parse per match → DistilledMatch array
-//   5. classifyDistilledDiscrimination(scores) → DistilledDiscriminationLevel
+// `moot_recall_distilled` is EXACT-SEARCH GEOMETRY over originals +
+// distilled-representation hydration of the hits: the same recall
+// request `moot_memory_search` runs (unionBest, matrixAware fusion,
+// query text), with the §10.1 hydration selector pinned to `distilled`.
+// Ranking is therefore identical to exact search BY CONSTRUCTION; only
+// the payloads differ (smaller). Per-hit response metadata carries
+// `distilled_token_count` (§6 context budgeting) and the §10.2
+// served-from-content fallback marker.
 //
-// DiscriminationLevel is defined locally (DistilledDiscriminationLevel) because
-// the canonical RecallDiscrimination + DiscriminationLevel live in AriaMcpKit,
-// which is downstream of CognitionKit (topology inversion prevents import).
-// Migration to NeuronKit is a tracked follow-up.
+// The previous implementation — Hamming NN over the fingerprint lane
+// returning factoid drawers, DistilledHeader post-processing,
+// confidence-based injection depth — retired with the factoid tier
+// (§11.3, §10.3). The distillation-features-v1 lane remains populated
+// (§8) but is a Phase 2 consolidation substrate, not a recall route.
 //
-// Layer discipline B-1/B-2: one GLK findNearestDistilled + one hydrate call.
-// Read-only (B-6, I-6). Deterministic: no Date() calls; queryFingerprint is
-// a pure function of (query, extractor).
+// Layer discipline B-1/B-2: one GLK recall call. Read-only (B-6, I-6).
 
 import Foundation
 import GeniusLocusKit
@@ -28,11 +27,13 @@ import SubstrateML
 
 // MARK: - Output types
 
-/// How well the top distilled result separates from the rest of the ranked list.
+/// How well the top result separates from the rest of the ranked list.
 ///
-/// Mirrors AriaMcpKit.DiscriminationLevel case-for-case. Defined locally because
-/// AriaMcpKit is downstream of CognitionKit and cannot be imported here.
-/// Thresholds: HIGH_MARGIN = 0.25, LOW_MARGIN = 0.05, LOW_SPREAD = 0.15.
+/// Mirrors AriaMcpKit.DiscriminationLevel case-for-case. Defined locally
+/// because AriaMcpKit is downstream of CognitionKit and cannot be
+/// imported here. Thresholds: HIGH_MARGIN = 0.25, LOW_MARGIN = 0.05,
+/// LOW_SPREAD = 0.15. Computed over the SEARCH scores (the exact-search
+/// geometry's ranking signal — §10.3), not any distillation metadata.
 public enum DistilledDiscriminationLevel: Sendable, Equatable {
     /// Fewer than two results — nothing to compare.
     case single
@@ -44,99 +45,47 @@ public enum DistilledDiscriminationLevel: Sendable, Equatable {
     case low
 }
 
-/// One match from the distilled memory tier.
+/// One hit from distilled recall: an ORIGINAL drawer (exact-search
+/// geometry), hydrated with its distilled representation.
 public struct DistilledMatch: Sendable, Equatable, Codable {
-    /// Drawer UUID from the estate.
+    /// SOURCE drawer UUID from the estate (the item itself — there is no
+    /// factoid tier; `moot_memory_get` on this id returns the full body).
     public let id: String
-    /// Factoid prose — DIST header stripped.
-    public let prose: String
-    /// Confidence score conf(F*) ∈ [0, 1].
-    public let confidence: Float32
-    /// Number of source memories M that produced this factoid.
-    public let sourceCount: Int
-    /// Cluster SNR at distillation time.
-    public let snr: Float32
-    /// DeltaType string ("CONVERGENT" | "MONOTONE" | "STATIC") or nil for absent/non-delta.
-    public let deltaType: String?
-    /// True when confidence ∈ [0.4, 0.7) — signals mid-confidence factoid.
-    public let uncertain: Bool
-    /// How much provenance context to inject alongside the factoid prose.
-    /// conf >= 0.7 → .factoidOnly; [0.4, 0.7) → .factoidWithMeta; < 0.4 → .factoidWithProvenance.
-    public let injectionDepth: InjectionDepth
+    /// The hydrated payload: the row's `distilled` rendering, or the
+    /// verbatim content when the row is not yet distilled (§10.2).
+    public let text: String
+    /// §10.2 fallback marker: true when `text` is the verbatim content
+    /// because no representation exists yet. A response field, not state.
+    public let servedFromContent: Bool
+    /// `distilled_token_count` for context budgeting (§6). Nil on
+    /// fallback rows (no representation, no stored count).
+    public let tokenCount: Int64?
+    /// The exact-search fusion score that ranked this hit.
+    public let score: Double
+    /// The room node id of the source drawer (callers resolve display
+    /// names through the node tree exactly as `moot_memory_search` does).
+    public let parentNodeId: String
 
     public init(
         id: String,
-        prose: String,
-        confidence: Float32,
-        sourceCount: Int,
-        snr: Float32,
-        deltaType: String?,
-        uncertain: Bool,
-        injectionDepth: InjectionDepth
+        text: String,
+        servedFromContent: Bool,
+        tokenCount: Int64?,
+        score: Double,
+        parentNodeId: String
     ) {
         self.id = id
-        self.prose = prose
-        self.confidence = confidence
-        self.sourceCount = sourceCount
-        self.snr = snr
-        self.deltaType = deltaType
-        self.uncertain = uncertain
-        self.injectionDepth = injectionDepth
-    }
-}
-
-// MARK: - Codable for DistilledMatch
-
-// InjectionDepth (NeuronKit) is Sendable + Equatable but NOT Codable. This
-// extension provides a manual Codable bridge that encodes injectionDepth as
-// its raw String name so DistilledMatch satisfies the spec's Codable requirement.
-extension DistilledMatch {
-    private enum CodingKeys: String, CodingKey {
-        case id, prose, confidence, sourceCount, snr, deltaType, uncertain, injectionDepth
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        prose = try c.decode(String.self, forKey: .prose)
-        confidence = try c.decode(Float32.self, forKey: .confidence)
-        sourceCount = try c.decode(Int.self, forKey: .sourceCount)
-        snr = try c.decode(Float32.self, forKey: .snr)
-        deltaType = try c.decodeIfPresent(String.self, forKey: .deltaType)
-        uncertain = try c.decode(Bool.self, forKey: .uncertain)
-        switch try c.decode(String.self, forKey: .injectionDepth) {
-        case "factoidOnly": injectionDepth = .factoidOnly
-        case "factoidWithMeta": injectionDepth = .factoidWithMeta
-        default: injectionDepth = .factoidWithProvenance
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id)
-        try c.encode(prose, forKey: .prose)
-        try c.encode(confidence, forKey: .confidence)
-        try c.encode(sourceCount, forKey: .sourceCount)
-        try c.encode(snr, forKey: .snr)
-        try c.encodeIfPresent(deltaType, forKey: .deltaType)
-        try c.encode(uncertain, forKey: .uncertain)
-        let depthString: String
-        switch injectionDepth {
-        case .factoidOnly: depthString = "factoidOnly"
-        case .factoidWithMeta: depthString = "factoidWithMeta"
-        case .factoidWithProvenance: depthString = "factoidWithProvenance"
-        }
-        try c.encode(depthString, forKey: .injectionDepth)
+        self.text = text
+        self.servedFromContent = servedFromContent
+        self.tokenCount = tokenCount
+        self.score = score
+        self.parentNodeId = parentNodeId
     }
 }
 
 // MARK: - Recipe
 
-/// Dense-tier recall recipe. Searches the distillation-features-v1 VectorKit
-/// lane via Hamming NN — no embedding model inference, no full corpus scan.
-///
-/// Hydrates matched drawers, parses DIST headers, and returns factoid prose
-/// with a confidence-based discrimination signal.
+/// Distilled-payload recall: exact-search geometry, distilled hydration.
 ///
 /// RecipeCatalog registration is present.
 public struct DistilledRecall: Recipe {
@@ -144,29 +93,24 @@ public struct DistilledRecall: Recipe {
     // MARK: Input
 
     public struct Input: Sendable {
-        /// Query text — feature-extracted and fingerprinted at query time.
+        /// Query text — drives the same BM25 + vector + matrix fusion the
+        /// exact-search path runs.
         public let query: String
-        /// ARIA adjective filter applied during frame-aware hydration. The
-        /// distillation Hamming NN lane only produces candidate ids; normal
-        /// recall liveness, trust, and sensitivity defaults are enforced before
-        /// any factoid body is returned.
+        /// ARIA adjective filter applied by the recall frame. Normal
+        /// recall liveness, trust, and sensitivity defaults are enforced
+        /// by the substrate before any payload is returned.
         public let filter: LocusKit.Filter
-        /// Maximum factoids to return. Default 20.
+        /// Maximum hits to return. Default 20.
         public let limit: Int
-        /// Coarse candidate pool size. Included for future extensibility;
-        /// current implementation passes limit directly to findNearestDistilled.
-        public let pool: Int
 
         public init(
             query: String,
-            filter: LocusKit.Filter = .unconfirmed,
-            limit: Int = 20,
-            pool: Int? = nil
+            filter: LocusKit.Filter = .currentlyBelieve,
+            limit: Int = 20
         ) {
             self.query = query
             self.filter = filter
             self.limit = limit
-            self.pool = pool ?? max(limit * 5, 50)
         }
     }
 
@@ -185,13 +129,13 @@ public struct DistilledRecall: Recipe {
     // MARK: Recipe identity
 
     public let name = "distilled_recall"
-    public let version = "1.0.0"
+    public let version = "2.0.0"
     public let description =
-        "Dense recall: search the distilled memory tier and return factoid " +
-        "prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint " +
-        "Hamming NN — no embedding model inference, no full corpus scan."
+        "Distilled recall: exact-search geometry over originals with the "
+        + "hydration selector pinned to `distilled` — identical ranking to "
+        + "exact search, smaller payloads, per-hit token counts."
 
-    // No NeuronKit reasoning calls — fingerprint hash and header parse only.
+    // One recall call; no reasoning capabilities required.
     public let requiredCapabilities: [NeuronKitCapability] = []
 
     public init() {}
@@ -203,64 +147,49 @@ public struct DistilledRecall: Recipe {
         estate: EstateHandle,
         kit: GeniusLocusKit
     ) async throws -> Output {
-        // 1. Feature-extract the query into a structural fingerprint.
-        //    defaultExtractor is the capitalization-heuristic stub (test-safe).
-        //    Production callers supply the EideticLib HMM tagger via the
-        //    distillation lens when a richer extractor lands.
-        let queryFP = DistillationPipeline.queryFingerprint(
-            query: input.query,
-            extractFeatures: DistillationPipeline.defaultExtractor)
+        // The exact-search request shape (`moot_memory_search`): unionBest
+        // mode, matrixAware fusion, full hydration. The selector affects
+        // only payloads, never matching or ranking (§9/§10.1).
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [input.filter],
+                hydrationLevel: .full,
+                limit: input.limit),
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: input.limit,
+            fallback: .allowDegraded,
+            queryText: input.query
+            // origin stays internal (B-10a): only the ARIA boundary marks
+            // requests external; the recipe layer never does (the
+            // PreciseRecall/ShapedRecall precedent).
+        )
+        let result = try await kit.recall(estate, request)
 
-        // 2. Hamming NN over the "distillation-features-v1" lane only.
-        //    No full corpus scan; no embedding model call.
-        let matches = try await kit.findNearestDistilled(
-            estate, engram: queryFP, limit: input.limit)
-
-        // Empty result is valid — return early with no crash.
-        guard !matches.isEmpty else {
-            return Output(matches: [], discrimination: .single)
+        // Hydrate each hit through the §10.1 selector pinned to .distilled.
+        var matches: [DistilledMatch] = []
+        for hit in result.hits {
+            guard let drawer = hit.drawer else { continue }
+            let hydrated = HydrationRepresentation.distilled.resolve(for: drawer)
+            matches.append(DistilledMatch(
+                id: drawer.id,
+                text: hydrated.text,
+                servedFromContent: hydrated.servedFromContent,
+                tokenCount: hydrated.servedFromContent ? nil : drawer.distilledTokenCount,
+                score: Double(hit.score.final),
+                parentNodeId: drawer.parentNodeId))
         }
 
-        // 3. Hydrate matched drawers in one frame-aware round-trip. This
-        //    applies the same liveness/trust/sensitivity defaults as normal
-        //    recall and excludes tombstoned rows before DIST content is parsed.
-        let frame = RecallFrame(
-            filterChain: [input.filter], hydrationLevel: .full, limit: input.limit)
-        let bodies = try await kit.hydrate(
-            estate, ids: matches.map(\.itemID), matchingFrame: frame, hydrationLevel: .full)
-        let bodyMap = Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0.content) })
-
-        // 4. Parse DIST header per match, build DistilledMatch array.
-        //    Drawers absent from bodyMap or lacking a DIST header are silently
-        //    skipped — they are not valid distilled factoids.
-        var distilledMatches: [DistilledMatch] = []
-        for match in matches {
-            guard let body = bodyMap[match.itemID],
-                  let header = DistilledHeader.parse(body) else { continue }
-            let depth: InjectionDepth = header.confidence >= 0.7 ? .factoidOnly
-                : header.confidence >= 0.4 ? .factoidWithMeta : .factoidWithProvenance
-            distilledMatches.append(DistilledMatch(
-                id: match.itemID,
-                prose: header.prose,
-                confidence: header.confidence,
-                sourceCount: header.sourceCount,
-                snr: header.snr,
-                deltaType: header.deltaType?.rawValue,
-                uncertain: header.uncertain,
-                injectionDepth: depth))
-        }
-
-        // 5. Discrimination over confidence scores.
+        // Discrimination over the exact-search scores (§10.3 ranking signal).
         return Output(
-            matches: distilledMatches,
-            discrimination: classifyDistilledDiscrimination(
-                distilledMatches.map { Double($0.confidence) }))
+            matches: matches,
+            discrimination: classifyDistilledDiscrimination(matches.map { $0.score }))
     }
 }
 
 // MARK: - Discrimination classifier
 
-/// Classify how well confidence scores separate the top distilled match from the rest.
+/// Classify how well the search scores separate the top match from the rest.
 ///
 /// Thresholds mirror AriaMcpKit.RecallDiscrimination:
 ///   HIGH_MARGIN = 0.25 — topGap at which rank-1 is clearly the best match.
