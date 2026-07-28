@@ -18,6 +18,7 @@
 
 use mcp_benchmarker_rs::config::BenchmarkerConfig;
 use mcp_benchmarker_rs::encode_barrier::EncodeBarrier;
+use mcp_benchmarker_rs::longmemeval_runner::ExactRecallStrategy;
 use mcp_benchmarker_rs::estate_cache::EstateCacheMode;
 use mcp_benchmarker_rs::lmeb_corpus::load_lmeb_corpus;
 use mcp_benchmarker_rs::lmeb_runner::{run_lmeb_queries, LmebRunConfig};
@@ -266,6 +267,12 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     if let Some(n) = limit {
         eprintln!("[lme] limit: {n}");
     }
+    let exact_strategy = match option_value("--exact-strategy", args) {
+        Some(v) => ExactRecallStrategy::parse(v).ok_or_else(||
+            format!("--exact-strategy must be auto|search|relevance|precise; got '{v}'"))?,
+        None => ExactRecallStrategy::Auto,
+    };
+    eprintln!("[lme] exact-strategy: {}", exact_strategy.as_str());
     eprintln!("[lme] encode-barrier: {}", encode_barrier.as_str());
 
     let run_config = LmeRunConfig {
@@ -279,6 +286,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         judge_cmd: judge_cmd.clone(),
         encode_barrier,
         estate_cache,
+        exact_strategy,
         cache_dir,
         scratch_posture,
     };

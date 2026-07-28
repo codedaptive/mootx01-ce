@@ -788,6 +788,15 @@ func runLongMemEval(_ args: [String]) async throws {
         throw MCPError(description:
             "--encode-barrier must be 'drain', 'impatient', or 'none'; got '\(encodeBarrierStr)'")
     }
+    // --exact-strategy auto|search|relevance|precise (default: auto). How the
+    // exact arm drives the recall surface; auto follows the program's documented
+    // client protocol (relevance ordering + precise escalation on low
+    // discrimination). See ExactRecallStrategy in LongMemEvalRunner.swift.
+    let exactStrategyStr = optionValue("--exact-strategy", in: args) ?? "auto"
+    guard let lmeExactStrategy = ExactRecallStrategy(rawValue: exactStrategyStr) else {
+        throw MCPError(description:
+            "--exact-strategy must be 'auto', 'search', 'relevance', or 'precise'; got '\(exactStrategyStr)'")
+    }
     // --arm exact|dense|both (default: both). Controls which recall paths are exercised.
     //   exact: moot_memory_search only (LME-01 baseline path)
     //   dense: moot_recall_distilled only (requires moot_consolidate after ingest)
@@ -864,8 +873,10 @@ func runLongMemEval(_ args: [String]) async throws {
         encodeBarrier: lmeEncodeBarrier,
         estateCache: lmeEstateCache,
         cacheDir: lmeCacheDir,
-        scratchPosture: lmeScratchPosture
+        scratchPosture: lmeScratchPosture,
+        exactStrategy: lmeExactStrategy
     )
+    FileHandle.standardOutput.write(Data("[longmemeval] exact-strategy: \(lmeExactStrategy.rawValue)\n".utf8))
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
 
