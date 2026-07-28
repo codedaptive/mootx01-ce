@@ -342,6 +342,11 @@ struct LMEBReportPerQuery: Codable, Sendable {
     /// Whether this query's estate was served from the snapshot cache.
     /// nil = --estate-cache off (caching not active for this run).
     let cacheHit: Bool?
+    // MARK: Drain-barrier lane evidence (additive — FIX-HARNESS-20260727)
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). nil = barrier did not run for this query.
+    let drainLaneObserved: Bool?
 
     enum CodingKeys: String, CodingKey {
         case queryID             = "query_id"
@@ -361,6 +366,7 @@ struct LMEBReportPerQuery: Codable, Sendable {
         case retrievedDocCount   = "retrieved_doc_count"
         case tokensPerResult     = "tokens_per_result"
         case cacheHit            = "cache_hit"
+        case drainLaneObserved   = "drain_lane_observed"
     }
 }
 
@@ -410,6 +416,10 @@ struct LMEBReport: Codable, Sendable {
     let cacheHits: Int
     /// Total number of queries that triggered a fresh ingest + snapshot save.
     let cacheMisses: Int
+    // MARK: Estate encryption posture (additive — FIX-HARNESS-20260727)
+    /// At-rest posture of the run's scratch estates: "plaintext-optout"
+    /// (default) or "encrypted-default" (--no-plaintext-scratch).
+    let estateEncryption: String
 
     enum CodingKeys: String, CodingKey {
         case runID             = "run_id"
@@ -425,6 +435,7 @@ struct LMEBReport: Codable, Sendable {
         case estateCache       = "estate_cache"
         case cacheHits     = "cache_hits"
         case cacheMisses   = "cache_misses"
+        case estateEncryption = "estate_encryption"
     }
 }
 
@@ -438,7 +449,8 @@ func buildLMEBReport(
     results: [LMEBQueryResult],
     scores: [LMEBQueryScore],
     encodeBarrier: String,
-    estateCache: String
+    estateCache: String,
+    estateEncryption: String
 ) -> LMEBReport {
     // Build a queryID → raw result lookup for cacheHit propagation.
     let resultByID = Dictionary(
@@ -498,7 +510,8 @@ func buildLMEBReport(
             relevantDocIDs: score.relevantDocIDs,
             retrievedDocCount: score.retrievedDocCount,
             tokensPerResult: tpr,
-            cacheHit: raw?.cacheHit ?? nil
+            cacheHit: raw?.cacheHit ?? nil,
+            drainLaneObserved: raw?.drainLaneObserved ?? nil
         )
     }
 
@@ -533,7 +546,8 @@ func buildLMEBReport(
         provenanceSummary: provenanceSummary,
         estateCache: estateCache,
         cacheHits: cacheHits,
-        cacheMisses: cacheMisses
+        cacheMisses: cacheMisses,
+        estateEncryption: estateEncryption
     )
 }
 

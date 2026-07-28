@@ -29,6 +29,7 @@
 //! ```
 
 use crate::encode_barrier::EncodeBarrier;
+use crate::scratch_posture::{scratch_has_opt_out_marker, ScratchEstatePosture};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -131,18 +132,22 @@ pub fn moot_binary_fingerprint(binary_path: &str) -> String {
 /// Cache hierarchy:
 /// ```text
 /// <cacheDir>/
-///   <benchmark>[-<variant>]-seed<seed>-barrier_<mode>-bin_<fingerprint>/
+///   <benchmark>[-<variant>]-seed<seed>-barrier_<mode>-bin_<fingerprint>-estate_<posture>/
 ///     <safe-unit-id>/
 ///       estate/        <- MOOTX01_DATA_DIR snapshot
 ///       manifest.json  <- serialized manifest entries
 /// ```
 ///
 /// - `variant`: LME variant ("s", "m", "oracle"). Empty string for locomo/lmeb.
+/// - `posture`: At-rest posture of the scratch estate. In the key because a
+///   plaintext estate and an encrypted estate are different bytes on disk —
+///   a snapshot of one must never be restored for a run expecting the other.
 /// - `unit_id`: The question_id / conversation sampleID / query_id. Sanitized
 ///   for filesystem safety (illegal characters replaced with underscores,
 ///   truncated to 200 chars).
 ///
 /// Twin of Swift `estateCacheEntryURL(...)`.
+#[allow(clippy::too_many_arguments)]
 pub fn estate_cache_entry_path(
     cache_dir: &Path,
     benchmark: &str,
@@ -150,6 +155,7 @@ pub fn estate_cache_entry_path(
     seed: u64,
     encode_barrier: EncodeBarrier,
     binary_fingerprint: &str,
+    posture: ScratchEstatePosture,
     unit_id: &str,
 ) -> PathBuf {
     // Run-config key: a single directory name encoding all parameters that
@@ -160,8 +166,9 @@ pub fn estate_cache_entry_path(
         format!("-{variant}")
     };
     let run_key = format!(
-        "{benchmark}{variant_suffix}-seed{seed}-barrier_{}-bin_{binary_fingerprint}",
-        encode_barrier.as_str()
+        "{benchmark}{variant_suffix}-seed{seed}-barrier_{}-bin_{binary_fingerprint}-estate_{}",
+        encode_barrier.as_str(),
+        posture.as_str()
     );
 
     // Sanitize unit ID: only alphanumerics, dash, dot, underscore are safe on
@@ -336,15 +343,24 @@ pub fn save_estate_cache_entry<M: Serialize>(
 /// contaminate subsequent cache reads regardless of mootx01's writes to the estate.
 ///
 /// - `cache_entry`: Cache entry path from `estate_cache_entry_path(...)`.
+/// - `expected_posture`: The run's scratch-estate posture. The snapshot copied
+///   the whole data dir, so a plaintext snapshot carries the `no-encrypt`
+///   marker and an encrypted one does not. After restore, the marker's
+///   presence must MATCH the expected posture; a mismatch means the cache
+///   entry does not belong to this run's key (should be impossible now that
+///   posture is a key component) and is treated as a miss with a warning —
+///   never as a silently wrong-posture estate.
 /// - `scratch_dir_factory`: A `FnOnce` that creates the empty scratch directory.
 ///   The factory produces the empty dir; this function removes it and replaces
-///   its path with the cached estate copy. The resulting path retains the correct
-///   prefix for guarded teardown.
+///   its path with the cached estate copy (the posture marker therefore comes
+///   FROM the snapshot, not from the factory). The resulting path retains the
+///   correct prefix for guarded teardown.
 /// - Returns `Some((scratch_dir, manifest))` on cache hit, `None` on miss or error.
 ///
-/// Twin of Swift `restoreEstateCacheEntry(from:scratchDirFactory:)`.
+/// Twin of Swift `restoreEstateCacheEntry(from:expectedPosture:scratchDirFactory:)`.
 pub fn restore_estate_cache_entry<M: DeserializeOwned>(
     cache_entry: &Path,
+    expected_posture: ScratchEstatePosture,
     scratch_dir_factory: impl FnOnce() -> Result<PathBuf, String>,
 ) -> Option<(PathBuf, Vec<M>)> {
     let estate_source = cache_entry.join("estate");
@@ -365,6 +381,19 @@ pub fn restore_estate_cache_entry<M: DeserializeOwned>(
         })?;
         // Copy the cached estate into the scratch path (cache original untouched).
         copy_dir_all(&estate_source, &scratch)?;
+        // Posture assert: the restored data dir's marker presence must match
+        // the posture this run expects. The marker travels with the snapshot;
+        // a mismatch is a foreign or corrupted cache entry.
+        let marker_present = scratch_has_opt_out_marker(&scratch);
+        let marker_expected = expected_posture == ScratchEstatePosture::PlaintextOptOut;
+        if marker_present != marker_expected {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return Err(format!(
+                "posture mismatch — expected {}, marker {}. Treating as cache miss.",
+                expected_posture.as_str(),
+                if marker_present { "present" } else { "absent" }
+            ));
+        }
         // Decode the manifest.
         let manifest_data = std::fs::read_to_string(&manifest_path)
             .map_err(|e| format!("manifest read failed: {e}"))?;
@@ -432,10 +461,12 @@ mod tests {
     fn cache_entry_path_no_variant() {
         let base = Path::new("/tmp/ec-test-cache");
         let p = estate_cache_entry_path(
-            base, "lme", "", 42, EncodeBarrier::Drain, "abc_def", "question_001",
+            base, "lme", "", 42, EncodeBarrier::Drain, "abc_def",
+            ScratchEstatePosture::PlaintextOptOut, "question_001",
         );
         let s = p.to_string_lossy();
-        assert!(s.contains("lme-seed42-barrier_drain-bin_abc_def"), "run key not found in {s}");
+        assert!(s.contains("lme-seed42-barrier_drain-bin_abc_def-estate_plaintext-optout"),
+            "run key not found in {s}");
         assert!(s.ends_with("question_001"), "unit id not at end of {s}");
     }
 
@@ -443,16 +474,19 @@ mod tests {
     fn cache_entry_path_with_variant() {
         let base = Path::new("/tmp/ec-test-cache");
         let p = estate_cache_entry_path(
-            base, "lme", "s", 0, EncodeBarrier::Impatient, "fp123", "q1",
+            base, "lme", "s", 0, EncodeBarrier::Impatient, "fp123",
+            ScratchEstatePosture::PlaintextOptOut, "q1",
         );
-        assert!(p.to_string_lossy().contains("lme-s-seed0-barrier_impatient-bin_fp123"));
+        assert!(p.to_string_lossy()
+            .contains("lme-s-seed0-barrier_impatient-bin_fp123-estate_plaintext-optout"));
     }
 
     #[test]
     fn cache_entry_path_sanitizes_unit_id() {
         let base = Path::new("/tmp/ec-test-cache");
         let p = estate_cache_entry_path(
-            base, "lmeb", "", 1, EncodeBarrier::None, "fp", "query/with/slashes and spaces",
+            base, "lmeb", "", 1, EncodeBarrier::None, "fp",
+            ScratchEstatePosture::PlaintextOptOut, "query/with/slashes and spaces",
         );
         let last = p.file_name().unwrap().to_string_lossy();
         assert!(!last.contains('/'), "slash not sanitized in {last}");
@@ -462,16 +496,20 @@ mod tests {
     #[test]
     fn different_fingerprint_produces_different_key() {
         let base = Path::new("/tmp/ec-test-cache");
-        let p1 = estate_cache_entry_path(base, "lme", "", 1, EncodeBarrier::Drain, "fp1", "q1");
-        let p2 = estate_cache_entry_path(base, "lme", "", 1, EncodeBarrier::Drain, "fp2", "q1");
+        let p1 = estate_cache_entry_path(base, "lme", "", 1, EncodeBarrier::Drain, "fp1",
+            ScratchEstatePosture::PlaintextOptOut, "q1");
+        let p2 = estate_cache_entry_path(base, "lme", "", 1, EncodeBarrier::Drain, "fp2",
+            ScratchEstatePosture::PlaintextOptOut, "q1");
         assert_ne!(p1, p2, "fingerprints fp1 and fp2 must produce different paths");
     }
 
     #[test]
     fn different_seed_produces_different_key() {
         let base = Path::new("/tmp/ec-test-cache");
-        let p1 = estate_cache_entry_path(base, "lme", "", 1, EncodeBarrier::Drain, "fp", "q1");
-        let p2 = estate_cache_entry_path(base, "lme", "", 2, EncodeBarrier::Drain, "fp", "q1");
+        let p1 = estate_cache_entry_path(base, "lme", "", 1, EncodeBarrier::Drain, "fp",
+            ScratchEstatePosture::PlaintextOptOut, "q1");
+        let p2 = estate_cache_entry_path(base, "lme", "", 2, EncodeBarrier::Drain, "fp",
+            ScratchEstatePosture::PlaintextOptOut, "q1");
         assert_ne!(p1, p2);
     }
 
@@ -543,7 +581,7 @@ mod tests {
         // Restore.
         let scratch_clone = scratch.clone();
         let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
-            restore_estate_cache_entry(&cache_dir, move || {
+            restore_estate_cache_entry(&cache_dir, ScratchEstatePosture::EncryptedDefault, move || {
                 std::fs::create_dir_all(&scratch_clone).unwrap();
                 Ok(scratch_clone)
             });
@@ -569,7 +607,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&missing);
 
         let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
-            restore_estate_cache_entry(&missing, || {
+            restore_estate_cache_entry(&missing, ScratchEstatePosture::PlaintextOptOut, || {
                 Ok(PathBuf::from("/tmp/ec-factory-never-called"))
             });
         assert!(result.is_none(), "expected None on cache miss");
@@ -593,7 +631,7 @@ mod tests {
 
         let scratch_clone = scratch.clone();
         let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
-            restore_estate_cache_entry(&cache_dir, move || {
+            restore_estate_cache_entry(&cache_dir, ScratchEstatePosture::EncryptedDefault, move || {
                 std::fs::create_dir_all(&scratch_clone).unwrap();
                 Ok(scratch_clone)
             });
@@ -631,7 +669,7 @@ mod tests {
 
         let scratch_clone = scratch.clone();
         let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
-            restore_estate_cache_entry(&cache_dir, move || {
+            restore_estate_cache_entry(&cache_dir, ScratchEstatePosture::EncryptedDefault, move || {
                 std::fs::create_dir_all(&scratch_clone).unwrap();
                 Ok(scratch_clone)
             });
@@ -646,5 +684,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&cache_dir);
         let _ = std::fs::remove_dir_all(&restored);
+    }
+
+    // ── Posture in cache key + restore assert (FIX-HARNESS-20260727) ─────────
+
+    #[test]
+    fn posture_partitions_cache_key() {
+        let base = Path::new("/tmp/ec-posture-key");
+        let plain = estate_cache_entry_path(base, "lme", "s", 1, EncodeBarrier::Drain, "fp",
+            ScratchEstatePosture::PlaintextOptOut, "q1");
+        let enc = estate_cache_entry_path(base, "lme", "s", 1, EncodeBarrier::Drain, "fp",
+            ScratchEstatePosture::EncryptedDefault, "q1");
+        assert_ne!(plain, enc,
+            "plaintext and encrypted estates are different bytes; keys must differ");
+    }
+
+    #[test]
+    fn restore_preserves_plaintext_marker() {
+        use crate::scratch_posture::{apply_scratch_posture, scratch_has_opt_out_marker};
+        let src       = PathBuf::from("/tmp/ec-posture-src");
+        let cache_dir = PathBuf::from("/tmp/ec-posture-entry");
+        let scratch   = PathBuf::from("/tmp/ec-posture-scratch");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        // Snapshot a scratch dir that carries the marker, as a real plaintext
+        // scratch estate would.
+        std::fs::create_dir_all(&src).unwrap();
+        apply_scratch_posture(ScratchEstatePosture::PlaintextOptOut, &src).unwrap();
+        std::fs::write(src.join("estate.db"), b"data").unwrap();
+        let em: Vec<HashMap<String, String>> = vec![];
+        save_estate_cache_entry(&src, &em, &cache_dir);
+
+        let scratch_clone = scratch.clone();
+        let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
+            restore_estate_cache_entry(&cache_dir, ScratchEstatePosture::PlaintextOptOut, move || {
+                std::fs::create_dir_all(&scratch_clone).unwrap();
+                Ok(scratch_clone)
+            });
+        let (restored, _) = result.expect("hit expected");
+        assert!(scratch_has_opt_out_marker(&restored),
+            "the no-encrypt marker must travel with the snapshot and be present after restore");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let _ = std::fs::remove_dir_all(&restored);
+    }
+
+    #[test]
+    fn posture_mismatch_marker_absent_is_miss() {
+        // Snapshot WITHOUT a marker; run expects plaintext → miss, never a
+        // silently encrypted estate.
+        let src       = PathBuf::from("/tmp/ec-mismatch-a-src");
+        let cache_dir = PathBuf::from("/tmp/ec-mismatch-a-entry");
+        let scratch   = PathBuf::from("/tmp/ec-mismatch-a-scratch");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("estate.db"), b"data").unwrap();
+        let em: Vec<HashMap<String, String>> = vec![];
+        save_estate_cache_entry(&src, &em, &cache_dir);
+
+        let scratch_clone = scratch.clone();
+        let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
+            restore_estate_cache_entry(&cache_dir, ScratchEstatePosture::PlaintextOptOut, move || {
+                std::fs::create_dir_all(&scratch_clone).unwrap();
+                Ok(scratch_clone)
+            });
+        assert!(result.is_none(), "posture mismatch must be treated as a miss");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn posture_mismatch_marker_present_is_miss() {
+        use crate::scratch_posture::apply_scratch_posture;
+        // Snapshot WITH a marker; run expects encrypted → miss.
+        let src       = PathBuf::from("/tmp/ec-mismatch-b-src");
+        let cache_dir = PathBuf::from("/tmp/ec-mismatch-b-entry");
+        let scratch   = PathBuf::from("/tmp/ec-mismatch-b-scratch");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        std::fs::create_dir_all(&src).unwrap();
+        apply_scratch_posture(ScratchEstatePosture::PlaintextOptOut, &src).unwrap();
+        std::fs::write(src.join("estate.db"), b"data").unwrap();
+        let em: Vec<HashMap<String, String>> = vec![];
+        save_estate_cache_entry(&src, &em, &cache_dir);
+
+        let scratch_clone = scratch.clone();
+        let result: Option<(PathBuf, Vec<HashMap<String, String>>)> =
+            restore_estate_cache_entry(&cache_dir, ScratchEstatePosture::EncryptedDefault, move || {
+                std::fs::create_dir_all(&scratch_clone).unwrap();
+                Ok(scratch_clone)
+            });
+        assert!(result.is_none(), "posture mismatch must be treated as a miss");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

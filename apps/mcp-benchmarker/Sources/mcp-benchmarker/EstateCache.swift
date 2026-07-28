@@ -91,7 +91,7 @@ func mootBinaryFingerprint(_ binaryPath: String) -> String {
 /// Cache hierarchy:
 /// ```
 /// <cacheDir>/
-///   <benchmark>[-<variant>]-seed<seed>-barrier_<mode>-bin_<fingerprint>/
+///   <benchmark>[-<variant>]-seed<seed>-barrier_<mode>-bin_<fingerprint>-estate_<posture>/
 ///     <safe-unit-id>/
 ///       estate/        ← MOOTX01_DATA_DIR snapshot
 ///       manifest.json  ← serialized manifest entries
@@ -104,6 +104,9 @@ func mootBinaryFingerprint(_ binaryPath: String) -> String {
 ///   - seed: Question shuffle seed.
 ///   - encodeBarrier: The barrier mode used during ingest.
 ///   - binaryFingerprint: From `mootBinaryFingerprint(_:)`.
+///   - posture: At-rest posture of the scratch estate. In the key because a
+///     plaintext estate and an encrypted estate are different bytes on disk —
+///     a snapshot of one must never be restored for a run expecting the other.
 ///   - unitID: The question_id / conversation sampleID / query_id.
 func estateCacheEntryURL(
     cacheDir: URL,
@@ -112,12 +115,13 @@ func estateCacheEntryURL(
     seed: UInt64,
     encodeBarrier: EncodeBarrier,
     binaryFingerprint: String,
+    posture: ScratchEstatePosture,
     unitID: String
 ) -> URL {
     // Run-config key: a single directory name encoding all parameters that
     // affect estate content. Each component is separated by a dash for readability.
     let variantSuffix = variant.isEmpty ? "" : "-\(variant)"
-    let runKey = "\(benchmark)\(variantSuffix)-seed\(seed)-barrier_\(encodeBarrier.rawValue)-bin_\(binaryFingerprint)"
+    let runKey = "\(benchmark)\(variantSuffix)-seed\(seed)-barrier_\(encodeBarrier.rawValue)-bin_\(binaryFingerprint)-estate_\(posture.rawValue)"
 
     // Sanitize the unit ID for safe filesystem use: replace characters that are
     // illegal on macOS (and on most POSIX filesystems) with underscores.
@@ -217,14 +221,23 @@ func saveEstateCacheEntry<M: Codable & Sendable>(
 ///
 /// - Parameters:
 ///   - cacheEntry: Cache entry URL from `estateCacheEntryURL(...)`.
+///   - expectedPosture: The run's scratch-estate posture. The snapshot copied
+///     the whole data dir, so a plaintext snapshot carries the `no-encrypt`
+///     marker and an encrypted one does not. After restore, the marker's
+///     presence must MATCH the expected posture; a mismatch means the cache
+///     entry does not belong to this run's key (should be impossible now that
+///     posture is a key component) and is treated as a miss with a warning —
+///     never as a silently wrong-posture estate.
 ///   - scratchDirFactory: A throwing closure that creates the empty scratch
-///     directory (e.g. `lmeScratchDir`, `loCoMoScratchDir`, `lmebScratchDir`).
-///     The factory produces the empty dir; the function replaces its contents
-///     with the cache snapshot. The resulting dir keeps the correct prefix for
+///     directory (e.g. `{ try lmeScratchDir(posture: p) }`). The factory
+///     produces the empty dir; the function replaces its contents with the
+///     cache snapshot (the posture marker therefore comes FROM the snapshot,
+///     not from the factory). The resulting dir keeps the correct prefix for
 ///     guarded teardown.
 /// - Returns: `(scratchDir, manifest)` on cache hit, nil on miss or error.
 func restoreEstateCacheEntry<M: Codable>(
     from cacheEntry: URL,
+    expectedPosture: ScratchEstatePosture,
     scratchDirFactory: () throws -> URL
 ) -> (URL, [M])? {
     let fm = FileManager.default
@@ -242,6 +255,19 @@ func restoreEstateCacheEntry<M: Codable>(
         try fm.removeItem(at: scratch)
         // Copy the cached estate into the scratch path.
         try fm.copyItem(at: estateSource, to: scratch)
+        // Posture assert: the restored data dir's marker presence must match
+        // the posture this run expects. The marker travels with the snapshot;
+        // a mismatch is a foreign or corrupted cache entry.
+        let markerPresent = scratchHasOptOutMarker(in: scratch)
+        let markerExpected = (expectedPosture == .plaintextOptOut)
+        guard markerPresent == markerExpected else {
+            FileHandle.standardError.write(Data(
+                ("[cache] restore WARNING: posture mismatch for \(cacheEntry.path) — "
+                + "expected \(expectedPosture.rawValue), marker "
+                + "\(markerPresent ? "present" : "absent"). Treating as cache miss.\n").utf8))
+            try? fm.removeItem(at: scratch)
+            return nil
+        }
         // Decode the manifest.
         let manifestData = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode([M].self, from: manifestData)

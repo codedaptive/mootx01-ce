@@ -211,7 +211,8 @@ struct LMEScorerInfrastructureTests {
             exactRecallProvenance: "recall_provenance: dense_lane:active degraded_stages:none",
             denseDiscrimination: nil,
             denseRecallProvenance: nil,
-            cacheHit: nil
+            cacheHit: nil,
+            drainLaneObserved: nil
         )
         let tokenEfficiency = LMEReportTokenEfficiency(
             exactArmMeanTokens: 1200.0, denseArmMeanTokens: 300.0,
@@ -238,7 +239,8 @@ struct LMEScorerInfrastructureTests {
             laneHealth: laneHealth,
             estateCache: "off",
             cacheHits: 0,
-            cacheMisses: 0
+            cacheMisses: 0,
+            estateEncryption: "plaintext-optout"
         )
 
         let encoder = JSONEncoder()
@@ -261,6 +263,11 @@ struct LMEScorerInfrastructureTests {
         #expect(aggJSON["recall_all_at_1"] != nil, "key 'recall_all_at_1' must be present")
         // Verify the LME-03 additive token_efficiency key is present (and has correct sub-keys).
         #expect(rawJSON["token_efficiency"] != nil, "additive key 'token_efficiency' must be present")
+        // FIX-HARNESS-20260727 additive keys.
+        #expect(rawJSON["estate_encryption"] as? String == "plaintext-optout",
+                "additive key 'estate_encryption' must be present with the posture rawValue")
+        #expect(decoded.perQuestion.first?.drainLaneObserved == nil,
+                "drain_lane_observed must round-trip as nil when the barrier did not run")
         let teJSON = try #require(rawJSON["token_efficiency"] as? [String: Any])
         #expect(teJSON["exact_arm_mean_tokens"] != nil, "key 'exact_arm_mean_tokens' must be present")
         #expect(teJSON["dense_arm_mean_tokens"] != nil, "key 'dense_arm_mean_tokens' must be present")
@@ -312,7 +319,8 @@ struct LMEScorerInfrastructureTests {
             exactJudgeCorrect: nil,
             denseJudgeAnswer: nil,
             denseJudgeCorrect: nil,
-            cacheHit: nil
+            cacheHit: nil,
+            drainLaneObserved: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == false)
@@ -350,7 +358,8 @@ struct LMEScorerInfrastructureTests {
             exactJudgeCorrect: nil,
             denseJudgeAnswer: nil,
             denseJudgeCorrect: nil,
-            cacheHit: nil
+            cacheHit: nil,
+            drainLaneObserved: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == true)

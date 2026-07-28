@@ -98,6 +98,9 @@ func usageText() -> String {
         --seed S                 seed for deterministic question order (default 20260725)
         --shared-estate          use one estate for all questions (methodology-affecting)
         --out <dir>              write results to <dir> (default: current directory)
+        --no-plaintext-scratch   create scratch estates ENCRYPTED (keychain-backed).
+                                 Default writes mootx01's no-encrypt marker so scratch
+                                 estates are plaintext and never touch the keychain.
 
       locomo: provision per-conversation scratch mootx01 estates, ingest LoCoMo
         conversation turns, and measure turn-level recall quality with per-category
@@ -109,6 +112,11 @@ func usageText() -> String {
         --offset K               skip the first K questions (default 0)
         --seed S                 seed for deterministic question order (default 20260725)
         --out <dir>              write results to <dir> (default: current directory)
+        --no-plaintext-scratch   create scratch estates ENCRYPTED (keychain-backed).
+                                 Default writes mootx01's no-encrypt marker so scratch
+                                 estates are plaintext and never touch the keychain.
+
+      lmeb also accepts --no-plaintext-scratch with the same semantics.
 
     """
 }
@@ -817,6 +825,13 @@ func runLongMemEval(_ args: [String]) async throws {
     }
     // --cache-dir: override the default estate cache root (<out>/estate-cache).
     let lmeCacheDir = optionValue("--cache-dir", in: args).map { URL(fileURLWithPath: $0) }
+    // --no-plaintext-scratch: opt out of the plaintext-scratch default and let
+    // mootx01 create the scratch estates ENCRYPTED (keychain-backed). Default
+    // (flag absent) writes the no-encrypt marker so scratch estates are
+    // plaintext and never touch the keychain. Use the flag only to benchmark
+    // encrypted-estate overhead deliberately.
+    let lmeScratchPosture: ScratchEstatePosture =
+        flagPresent("--no-plaintext-scratch", in: args) ? .encryptedDefault : .plaintextOptOut
 
     // Warn on shared-estate: methodology-affecting (haystack contamination).
     if sharedEstate {
@@ -848,7 +863,8 @@ func runLongMemEval(_ args: [String]) async throws {
         judgeCmd: judgeCmd,
         encodeBarrier: lmeEncodeBarrier,
         estateCache: lmeEstateCache,
-        cacheDir: lmeCacheDir
+        cacheDir: lmeCacheDir,
+        scratchPosture: lmeScratchPosture
     )
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
@@ -1024,6 +1040,9 @@ func runLoCoMo(_ args: [String]) async throws {
             "--estate-cache must be 'off' or 'reuse'; got '\(loCoMoEstateCacheStr)'")
     }
     let loCoMoCacheDir = optionValue("--cache-dir", in: args).map { URL(fileURLWithPath: $0) }
+    // --no-plaintext-scratch: see the longmemeval parser — same semantics.
+    let loCoMoScratchPosture: ScratchEstatePosture =
+        flagPresent("--no-plaintext-scratch", in: args) ? .encryptedDefault : .plaintextOptOut
 
     FileHandle.standardOutput.write(Data(
         "[locomo] loading corpus from \(datasetPath.path)\n".utf8))
@@ -1045,7 +1064,8 @@ func runLoCoMo(_ args: [String]) async throws {
         runLabel: "locomo-seed\(seed)",
         encodeBarrier: loCoMoEncodeBarrier,
         estateCache: loCoMoEstateCache,
-        cacheDir: loCoMoCacheDir
+        cacheDir: loCoMoCacheDir,
+        scratchPosture: loCoMoScratchPosture
     )
 
     let results = try await runLoCoMoQuestions(
@@ -1178,6 +1198,9 @@ func runLMEB(_ args: [String]) async throws {
             "--estate-cache must be 'off' or 'reuse'; got '\(lmebEstateCacheStr)'")
     }
     let lmebCacheDir = optionValue("--cache-dir", in: args).map { URL(fileURLWithPath: $0) }
+    // --no-plaintext-scratch: see the longmemeval parser — same semantics.
+    let lmebScratchPosture: ScratchEstatePosture =
+        flagPresent("--no-plaintext-scratch", in: args) ? .encryptedDefault : .plaintextOptOut
 
     let loadMsg = "[lmeb] loading corpus from \(dataDir.path) "
         + "(evidence types: \(evidenceTypes.joined(separator: ", ")))\n"
@@ -1201,7 +1224,8 @@ func runLMEB(_ args: [String]) async throws {
         runLabel: runLabel,
         encodeBarrier: lmebEncodeBarrier,
         estateCache: lmebEstateCache,
-        cacheDir: lmebCacheDir
+        cacheDir: lmebCacheDir,
+        scratchPosture: lmebScratchPosture
     )
 
     // Sort queries by ID for deterministic shuffle baseline.
@@ -1220,7 +1244,8 @@ func runLMEB(_ args: [String]) async throws {
         results: results,
         scores: scores,
         encodeBarrier: runConfig.encodeBarrier.rawValue,
-        estateCache: runConfig.estateCache.rawValue
+        estateCache: runConfig.estateCache.rawValue,
+        estateEncryption: runConfig.scratchPosture.rawValue
     )
     let reportFilename = "lmeb-report-seed\(seed).json"
     let reportURL = (outDir ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))

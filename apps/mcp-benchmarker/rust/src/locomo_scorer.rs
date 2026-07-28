@@ -89,6 +89,11 @@ pub struct LoCoMoQuestionResult {
     /// Whether this question's estate was served from the snapshot cache.
     /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
     pub cache_hit: Option<bool>,
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). None = barrier did not run for this conversation.
+    /// Additive — FIX-HARNESS-20260727.
+    pub drain_lane_observed: Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +417,12 @@ pub struct LoCoMoReportPerQuestion {
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_hit: Option<bool>,
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). None = barrier did not run for this conversation.
+    /// Additive — FIX-HARNESS-20260727.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_lane_observed: Option<bool>,
 }
 
 /// Token-efficiency and barrier provenance summary for a LoCoMo run.
@@ -458,6 +469,10 @@ pub struct LoCoMoReport {
     /// Number of questions that triggered a new snapshot (cache miss).
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     pub cache_misses: usize,
+    /// At-rest posture of the run's scratch estates: "plaintext-optout"
+    /// (default) or "encrypted-default" (--no-plaintext-scratch).
+    /// Additive — FIX-HARNESS-20260727.
+    pub estate_encryption: String,
     pub per_question: Vec<LoCoMoReportPerQuestion>,
     /// Token-efficiency and barrier provenance summary. None when no question had
     /// payload text (e.g. estate was empty during a dry run).
@@ -484,7 +499,9 @@ pub fn build_locomo_report(
     adversarial_excluded: usize,
     scores: &[LoCoMoQuestionScore],
     cache_hit_by_id: &std::collections::HashMap<String, Option<bool>>,
+    drain_lane_by_id: &std::collections::HashMap<String, Option<bool>>,
     estate_cache: String,
+    estate_encryption: String,
 ) -> LoCoMoReport {
     let (aggregate, categories, latency) = aggregate_locomo_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
@@ -564,6 +581,7 @@ pub fn build_locomo_report(
                 tokens_per_result:       tpr,
                 // Look up cache_hit from the raw results map (key = question_id).
                 cache_hit:               cache_hit_by_id.get(&s.question_id).copied().flatten(),
+                drain_lane_observed:     drain_lane_by_id.get(&s.question_id).copied().flatten(),
             }
         })
         .collect();
@@ -593,6 +611,7 @@ pub fn build_locomo_report(
         category_breakdown,
         latency: report_latency,
         estate_cache,
+        estate_encryption,
         cache_hits,
         cache_misses,
         per_question,
@@ -671,7 +690,9 @@ mod tests {
             0,     // adversarial_excluded
             &scores,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             "off".to_string(),
+            "plaintext-optout".to_string(),
         );
 
         // Top-level encode_barrier must be "drain".
@@ -711,7 +732,9 @@ mod tests {
             1, 0,
             &scores,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             "off".to_string(),
+            "plaintext-optout".to_string(),
         );
 
         assert!(

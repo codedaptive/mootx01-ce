@@ -324,6 +324,11 @@ struct LoCoMoReportPerQuestion: Codable, Sendable {
     /// Whether this question's conversation estate was served from the snapshot cache.
     /// nil = --estate-cache off (caching not active for this run).
     let cacheHit: Bool?
+    // MARK: Drain-barrier lane evidence (additive — FIX-HARNESS-20260727)
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). nil = barrier did not run for this conversation.
+    let drainLaneObserved: Bool?
 
     enum CodingKeys: String, CodingKey {
         case questionID              = "question_id"
@@ -346,6 +351,7 @@ struct LoCoMoReportPerQuestion: Codable, Sendable {
         case retrievedUUIDCount      = "retrieved_uuid_count"
         case tokensPerResult         = "tokens_per_result"
         case cacheHit                = "cache_hit"
+        case drainLaneObserved       = "drain_lane_observed"
     }
 }
 
@@ -399,6 +405,10 @@ struct LoCoMoReport: Codable, Sendable {
     let cacheHits: Int
     /// Total number of conversations that triggered a fresh ingest + snapshot save.
     let cacheMisses: Int
+    // MARK: Estate encryption posture (additive — FIX-HARNESS-20260727)
+    /// At-rest posture of the run's scratch estates: "plaintext-optout"
+    /// (default) or "encrypted-default" (--no-plaintext-scratch).
+    let estateEncryption: String
 
     enum CodingKeys: String, CodingKey {
         case runID             = "run_id"
@@ -414,6 +424,7 @@ struct LoCoMoReport: Codable, Sendable {
         case estateCache       = "estate_cache"
         case cacheHits         = "cache_hits"
         case cacheMisses       = "cache_misses"
+        case estateEncryption  = "estate_encryption"
     }
 }
 
@@ -502,7 +513,8 @@ func buildLoCoMoReport(
             evidenceDiaIDs: score.evidenceDiaIDs,
             retrievedUUIDCount: score.retrievedUUIDCount,
             tokensPerResult: tpr,
-            cacheHit: raw?.cacheHit ?? nil
+            cacheHit: raw?.cacheHit ?? nil,
+            drainLaneObserved: raw?.drainLaneObserved ?? nil
         )
     }
 
@@ -537,7 +549,8 @@ func buildLoCoMoReport(
         provenanceSummary: provenanceSummary,
         estateCache: config.estateCache.rawValue,
         cacheHits: cacheHits,
-        cacheMisses: cacheMisses
+        cacheMisses: cacheMisses,
+        estateEncryption: config.scratchPosture.rawValue
     )
 }
 

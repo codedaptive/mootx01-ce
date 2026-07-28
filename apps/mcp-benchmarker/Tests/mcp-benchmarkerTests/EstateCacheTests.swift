@@ -30,10 +30,11 @@ struct EstateCacheEntryURLTests {
             seed: 42,
             encodeBarrier: .drain,
             binaryFingerprint: "aabbcc_1234",
+            posture: .plaintextOptOut,
             unitID: "query-001"
         )
         let runKey = entry.deletingLastPathComponent().lastPathComponent
-        #expect(runKey == "lmeb-seed42-barrier_drain-bin_aabbcc_1234")
+        #expect(runKey == "lmeb-seed42-barrier_drain-bin_aabbcc_1234-estate_plaintext-optout")
         #expect(entry.lastPathComponent == "query-001")
     }
 
@@ -46,10 +47,11 @@ struct EstateCacheEntryURLTests {
             seed: 99,
             encodeBarrier: .impatient,
             binaryFingerprint: "ff00_800",
+            posture: .plaintextOptOut,
             unitID: "q-99"
         )
         let runKey = entry.deletingLastPathComponent().lastPathComponent
-        #expect(runKey == "lme-s-seed99-barrier_impatient-bin_ff00_800")
+        #expect(runKey == "lme-s-seed99-barrier_impatient-bin_ff00_800-estate_plaintext-optout")
         #expect(entry.lastPathComponent == "q-99")
     }
 
@@ -62,6 +64,7 @@ struct EstateCacheEntryURLTests {
             seed: 1,
             encodeBarrier: .none,
             binaryFingerprint: "abc_def",
+            posture: .plaintextOptOut,
             unitID: "conv/with:special?chars"
         )
         let safeID = entry.lastPathComponent
@@ -74,11 +77,11 @@ struct EstateCacheEntryURLTests {
     func differentFingerprintsDifferentKeys() {
         let entry1 = estateCacheEntryURL(
             cacheDir: baseDir, benchmark: "lme", variant: "", seed: 0,
-            encodeBarrier: .drain, binaryFingerprint: "aaa_111", unitID: "q1"
+            encodeBarrier: .drain, binaryFingerprint: "aaa_111", posture: .plaintextOptOut, unitID: "q1"
         )
         let entry2 = estateCacheEntryURL(
             cacheDir: baseDir, benchmark: "lme", variant: "", seed: 0,
-            encodeBarrier: .drain, binaryFingerprint: "bbb_222", unitID: "q1"
+            encodeBarrier: .drain, binaryFingerprint: "bbb_222", posture: .plaintextOptOut, unitID: "q1"
         )
         #expect(entry1 != entry2)
     }
@@ -87,11 +90,11 @@ struct EstateCacheEntryURLTests {
     func differentSeedsDifferentKeys() {
         let entry1 = estateCacheEntryURL(
             cacheDir: baseDir, benchmark: "lme", variant: "", seed: 10,
-            encodeBarrier: .drain, binaryFingerprint: "fp_x", unitID: "q1"
+            encodeBarrier: .drain, binaryFingerprint: "fp_x", posture: .plaintextOptOut, unitID: "q1"
         )
         let entry2 = estateCacheEntryURL(
             cacheDir: baseDir, benchmark: "lme", variant: "", seed: 20,
-            encodeBarrier: .drain, binaryFingerprint: "fp_x", unitID: "q1"
+            encodeBarrier: .drain, binaryFingerprint: "fp_x", posture: .plaintextOptOut, unitID: "q1"
         )
         #expect(entry1 != entry2)
     }
@@ -194,7 +197,8 @@ struct EstateCacheRoundTripTests {
         let restoreTarget = try tmpDir(prefix: "lme07-restore-target")
         defer { try? FileManager.default.removeItem(at: restoreTarget) }
 
-        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(from: cacheEntry) {
+        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: cacheEntry, expectedPosture: .encryptedDefault) {
             restoreTarget
         }
 
@@ -210,7 +214,8 @@ struct EstateCacheRoundTripTests {
     @Test("restore returns nil on miss (entry absent)")
     func restoreReturnsNilOnMiss() {
         let missingEntry = URL(fileURLWithPath: "/tmp/lme07-no-such-entry-\(UUID().uuidString)")
-        let result: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(from: missingEntry) {
+        let result: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: missingEntry, expectedPosture: .plaintextOptOut) {
             URL(fileURLWithPath: "/tmp/should-not-be-created")
         }
         #expect(result == nil)
@@ -225,7 +230,8 @@ struct EstateCacheRoundTripTests {
             at: partialEntry.appendingPathComponent("estate"),
             withIntermediateDirectories: true
         )
-        let result: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(from: partialEntry) {
+        let result: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: partialEntry, expectedPosture: .plaintextOptOut) {
             URL(fileURLWithPath: "/tmp/should-not-be-created")
         }
         #expect(result == nil)
@@ -249,7 +255,8 @@ struct EstateCacheRoundTripTests {
         let restoreTarget = try tmpDir(prefix: "lme07-isolation-restore")
         defer { try? FileManager.default.removeItem(at: restoreTarget) }
 
-        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(from: cacheEntry) {
+        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: cacheEntry, expectedPosture: .encryptedDefault) {
             restoreTarget
         }
         let (restoredScratch, _) = try #require(restored)
@@ -263,5 +270,104 @@ struct EstateCacheRoundTripTests {
         let cacheContent = try String(contentsOf: cacheOriginal, encoding: .utf8)
         #expect(cacheContent == "original-content",
                 "cache entry must not be modified by query-run mutations")
+    }
+}
+
+// MARK: - Posture in cache key + restore assert (FIX-HARNESS-20260727)
+
+@Suite("EstateCachePosture")
+struct EstateCachePostureTests {
+
+    private func tmpDir(prefix: String) throws -> URL {
+        let dir = URL(fileURLWithPath: "/tmp/\(prefix)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("Different postures produce different run keys")
+    func posturePartitionsCacheKey() {
+        let base = URL(fileURLWithPath: "/tmp/posture-key-test")
+        let plain = estateCacheEntryURL(
+            cacheDir: base, benchmark: "lme", variant: "s", seed: 1,
+            encodeBarrier: .drain, binaryFingerprint: "fp",
+            posture: .plaintextOptOut, unitID: "q1")
+        let enc = estateCacheEntryURL(
+            cacheDir: base, benchmark: "lme", variant: "s", seed: 1,
+            encodeBarrier: .drain, binaryFingerprint: "fp",
+            posture: .encryptedDefault, unitID: "q1")
+        #expect(plain != enc,
+                "plaintext and encrypted estates are different bytes; keys must differ")
+    }
+
+    @Test("Restore preserves the plaintext marker (marker travels with the snapshot)")
+    func restorePreservesPlaintextPosture() throws {
+        let cacheRoot = try tmpDir(prefix: "posture-cache")
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+
+        // Snapshot a scratch dir that carries the marker (as a real plaintext
+        // scratch estate would).
+        let fakeScratch = try tmpDir(prefix: "posture-scratch")
+        defer { try? FileManager.default.removeItem(at: fakeScratch) }
+        try applyScratchPosture(.plaintextOptOut, to: fakeScratch)
+
+        let manifest = [TestManifestEntry(uuid: "u1", label: "l1")]
+        let cacheEntry = cacheRoot.appendingPathComponent("run/unit")
+        saveEstateCacheEntry(estateScratchDir: fakeScratch, manifest: manifest, to: cacheEntry)
+
+        let restoreTarget = try tmpDir(prefix: "posture-restore")
+        defer { try? FileManager.default.removeItem(at: restoreTarget) }
+        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: cacheEntry, expectedPosture: .plaintextOptOut) {
+            restoreTarget
+        }
+        let (restoredScratch, _) = try #require(restored, "expected a cache hit")
+        #expect(scratchHasOptOutMarker(in: restoredScratch),
+                "the no-encrypt marker must travel with the snapshot and be present after restore")
+    }
+
+    @Test("Posture mismatch on restore is treated as a miss (marker absent, plaintext expected)")
+    func mismatchMarkerAbsentIsMiss() throws {
+        let cacheRoot = try tmpDir(prefix: "posture-mismatch-a")
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+
+        // Snapshot WITHOUT a marker (an encrypted-posture estate).
+        let fakeScratch = try tmpDir(prefix: "posture-mismatch-scratch-a")
+        defer { try? FileManager.default.removeItem(at: fakeScratch) }
+
+        let manifest = [TestManifestEntry(uuid: "u1", label: "l1")]
+        let cacheEntry = cacheRoot.appendingPathComponent("run/unit")
+        saveEstateCacheEntry(estateScratchDir: fakeScratch, manifest: manifest, to: cacheEntry)
+
+        let restoreTarget = try tmpDir(prefix: "posture-mismatch-restore-a")
+        defer { try? FileManager.default.removeItem(at: restoreTarget) }
+        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: cacheEntry, expectedPosture: .plaintextOptOut) {
+            restoreTarget
+        }
+        #expect(restored == nil,
+                "restoring a marker-less snapshot for a plaintext run must be a miss, never a silently encrypted estate")
+    }
+
+    @Test("Posture mismatch on restore is treated as a miss (marker present, encrypted expected)")
+    func mismatchMarkerPresentIsMiss() throws {
+        let cacheRoot = try tmpDir(prefix: "posture-mismatch-b")
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+
+        let fakeScratch = try tmpDir(prefix: "posture-mismatch-scratch-b")
+        defer { try? FileManager.default.removeItem(at: fakeScratch) }
+        try applyScratchPosture(.plaintextOptOut, to: fakeScratch)
+
+        let manifest = [TestManifestEntry(uuid: "u1", label: "l1")]
+        let cacheEntry = cacheRoot.appendingPathComponent("run/unit")
+        saveEstateCacheEntry(estateScratchDir: fakeScratch, manifest: manifest, to: cacheEntry)
+
+        let restoreTarget = try tmpDir(prefix: "posture-mismatch-restore-b")
+        defer { try? FileManager.default.removeItem(at: restoreTarget) }
+        let restored: (URL, [TestManifestEntry])? = restoreEstateCacheEntry(
+            from: cacheEntry, expectedPosture: .encryptedDefault) {
+            restoreTarget
+        }
+        #expect(restored == nil,
+                "restoring a plaintext snapshot for an encrypted run must be a miss")
     }
 }

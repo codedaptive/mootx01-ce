@@ -241,7 +241,8 @@ final class LoCoMoScorerTests: XCTestCase {
             turnsIngested: 2,
             writeMeanLatencySeconds: 0.01,
             payloadText: nil,
-            cacheHit: nil
+            cacheHit: nil,
+            drainLaneObserved: nil
         )
         let score = scoreLoCoMoQuestion(result)
         XCTAssertEqual(score.questionID, "test-q-0")
@@ -268,7 +269,8 @@ final class LoCoMoScorerTests: XCTestCase {
             turnsIngested: 1,
             writeMeanLatencySeconds: 0.01,
             payloadText: nil,
-            cacheHit: nil
+            cacheHit: nil,
+            drainLaneObserved: nil
         )
         let score = scoreLoCoMoQuestion(result)
         XCTAssertFalse(score.guardHealthy)
@@ -372,7 +374,8 @@ final class LoCoMoScorerTests: XCTestCase {
             runLabel: "provenance-test",
             encodeBarrier: .drain,
             estateCache: .off,
-            cacheDir: nil
+            cacheDir: nil,
+            scratchPosture: .plaintextOptOut
         )
         // Minimal corpus: no conversations, no questions (scores are provided directly).
         let corpus = LoCoMoCorpus(
