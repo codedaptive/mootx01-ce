@@ -199,6 +199,27 @@ struct LMERunConfig: Sendable {
     /// --no-plaintext-scratch selects encryptedDefault. Recorded in the report
     /// JSON as "estate_encryption".
     let scratchPosture: ScratchEstatePosture
+    /// Exact-arm retrieval strategy (--exact-strategy). Follows the program's
+    /// documented client protocol; see the strategy comment at the query site.
+    let exactStrategy: ExactRecallStrategy
+}
+
+/// How the exact arm drives the estate's recall surface.
+/// The program's tool descriptions are the client contract:
+/// - .search    — bare moot_memory_search (LEGACY harness behavior; the tool
+///                self-describes as broad/time-ordered retrieval).
+/// - .relevance — moot_memory_search with ordering:byRelevanceDesc (the
+///                documented setting "for relevance-ranked results").
+/// - .precise   — moot_recall_precise (the documented precision-retrieval mode).
+/// - .auto      — DEFAULT: relevance-ordered search, escalating to
+///                moot_recall_precise when the response reports
+///                "discrimination: low" — exactly the escalation the tool
+///                descriptions instruct clients to perform.
+enum ExactRecallStrategy: String, Sendable, Codable {
+    case search
+    case relevance
+    case precise
+    case auto
 }
 
 // MARK: - Scratch estate management
@@ -503,20 +524,56 @@ func runLMEQuestions(
         var exactQueryLatency: Double? = nil
         var retrievedUUIDs: [String] = []
         if config.arm == .exact || config.arm == .both {
+            // Exact-arm strategy follows the PROGRAM'S OWN client protocol
+            // (the tool descriptions are the client contract):
+            //   - moot_memory_search self-describes as "best for broad or
+            //     time-ordered retrieval; use ordering:byRelevanceDesc for
+            //     relevance-ranked results" — so relevance ordering is the
+            //     correct default for a recall benchmark, not the bare call.
+            //   - every response carries a discrimination signal; the docs say
+            //     low discrimination on small estates is expected and clients
+            //     should "prefer moot_recall_precise for precision retrieval".
+            // .auto implements exactly that documented escalation. .search
+            // preserves the old bare call for comparison runs.
+            let queryStart = Date()
             var queryArgs: [String: JSONValue] = [
                 lmeMootVerbMap.queryArg: .string(question.question),
             ]
             for (k, v) in lmeMootVerbMap.constantArgs { queryArgs[k] = .string(v) }
-            let queryStart = Date()
-            let queryResult = try await client.callTool(
-                lmeMootVerbMap.query,
-                arguments: queryArgs,
-                format: lmeMootVerbMap.resultFormat
-            )
+            if config.exactStrategy == .relevance || config.exactStrategy == .auto {
+                queryArgs["ordering"] = .string("byRelevanceDesc")
+            }
+            if config.exactStrategy == .precise {
+                let preciseResult = try await client.callTool(
+                    "moot_recall_precise",
+                    arguments: [lmeMootVerbMap.queryArg: .string(question.question)],
+                    format: lmeMootVerbMap.resultFormat
+                )
+                retrievedUUIDs = preciseResult.orderedIDs
+                exactPayloadText = preciseResult.textBlocks.joined(separator: "\n")
+            } else {
+                let queryResult = try await client.callTool(
+                    lmeMootVerbMap.query,
+                    arguments: queryArgs,
+                    format: lmeMootVerbMap.resultFormat
+                )
+                retrievedUUIDs = queryResult.orderedIDs
+                exactPayloadText = queryResult.textBlocks.joined(separator: "\n")
+                // Documented escalation: low discrimination → recall_precise.
+                if config.exactStrategy == .auto,
+                   exactPayloadText?.contains("discrimination: low") == true {
+                    let preciseResult = try await client.callTool(
+                        "moot_recall_precise",
+                        arguments: [lmeMootVerbMap.queryArg: .string(question.question)],
+                        format: lmeMootVerbMap.resultFormat
+                    )
+                    if !preciseResult.orderedIDs.isEmpty {
+                        retrievedUUIDs = preciseResult.orderedIDs
+                        exactPayloadText = preciseResult.textBlocks.joined(separator: "\n")
+                    }
+                }
+            }
             exactQueryLatency = Date().timeIntervalSince(queryStart)
-            retrievedUUIDs = queryResult.orderedIDs
-            // Capture raw payload text (joined textBlocks) for Part 2 token counting.
-            exactPayloadText = queryResult.textBlocks.joined(separator: "\n")
         }
 
         // Dense arm: build distilled factoids via moot_consolidate, then query

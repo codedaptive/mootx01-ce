@@ -52,6 +52,39 @@ pub enum LmeArm {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Configuration for one LME run.  Constructed by main.rs from CLI flags.
+
+/// How the exact arm drives the recall surface. Twin of Swift
+/// `ExactRecallStrategy`. `Auto` (default) follows the program's documented
+/// client protocol: relevance-ordered search, escalating to
+/// moot_recall_precise when the response reports "discrimination: low".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactRecallStrategy {
+    Search,
+    Relevance,
+    Precise,
+    Auto,
+}
+
+impl ExactRecallStrategy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "search" => Some(Self::Search),
+            "relevance" => Some(Self::Relevance),
+            "precise" => Some(Self::Precise),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Relevance => "relevance",
+            Self::Precise => "precise",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 pub struct LmeRunConfig {
     pub moot_binary: String,
     pub variant: String,
@@ -73,6 +106,8 @@ pub struct LmeRunConfig {
     pub encode_barrier: EncodeBarrier,
     /// Estate snapshot reuse mode. Default EstateCacheMode::Off.
     pub estate_cache: EstateCacheMode,
+    /// Exact-arm retrieval strategy (--exact-strategy). See ExactRecallStrategy.
+    pub exact_strategy: ExactRecallStrategy,
     /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
     pub cache_dir: Option<PathBuf>,
     /// At-rest posture for scratch estates. Default PlaintextOptOut: writes
@@ -386,6 +421,7 @@ pub fn run_one_question(
     encode_barrier: EncodeBarrier,
     cache_entry: Option<&Path>,
     scratch_posture: ScratchEstatePosture,
+    strategy: ExactRecallStrategy,
 ) -> Result<LmeQuestionResult, MCPError> {
     // ── Cache restore attempt (when cache mode is Reuse) ──────────────────────
     // Try to restore a previously-snapshotted estate for this question. On hit,
@@ -514,17 +550,48 @@ pub fn run_one_question(
             );
             // No constant_args for moot_memory_search in LME mode (location is already
             // set on the ingest constant_args, not the query).
-            match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
-                Ok(result) => {
-                    retrieved_uuids = result.ordered_ids;
-                    // Capture raw payload text for token counting in the scorer.
-                    exact_payload_text = Some(result.text_blocks.join("\n"));
+            // Strategy per the program's documented client protocol (twin of the
+            // Swift strategy comment): relevance ordering by default, escalate to
+            // moot_recall_precise on "discrimination: low", or call precise directly.
+            if strategy == ExactRecallStrategy::Relevance || strategy == ExactRecallStrategy::Auto {
+                args.insert("ordering".to_string(), JsonValue::String("byRelevanceDesc".to_string()));
+            }
+            if strategy == ExactRecallStrategy::Precise {
+                let mut pargs: BTreeMap<String, JsonValue> = BTreeMap::new();
+                pargs.insert(verb_map.query_arg.clone(), JsonValue::String(question_text.to_string()));
+                match client.call_tool("moot_recall_precise", pargs, &verb_map.result_format) {
+                    Ok(result) => {
+                        retrieved_uuids = result.ordered_ids;
+                        exact_payload_text = Some(result.text_blocks.join("\n"));
+                    }
+                    Err(e) => eprintln!("  [lme] precise query error for {question_id}: {}", e.description),
                 }
-                Err(e) => {
-                    eprintln!(
-                        "  [lme] exact query error for {question_id}: {}",
-                        e.description
-                    );
+            } else {
+                match client.call_tool(&verb_map.query, args, &verb_map.result_format) {
+                    Ok(result) => {
+                        retrieved_uuids = result.ordered_ids;
+                        // Capture raw payload text for token counting in the scorer.
+                        exact_payload_text = Some(result.text_blocks.join("\n"));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  [lme] exact query error for {question_id}: {}",
+                            e.description
+                        );
+                    }
+                }
+                // Documented escalation: low discrimination -> recall_precise.
+                if strategy == ExactRecallStrategy::Auto
+                    && exact_payload_text.as_deref().map_or(false, |t| t.contains("discrimination: low"))
+                {
+                    let mut pargs: BTreeMap<String, JsonValue> = BTreeMap::new();
+                    pargs.insert(verb_map.query_arg.clone(), JsonValue::String(question_text.to_string()));
+                    if let Ok(result) = client.call_tool("moot_recall_precise", pargs, &verb_map.result_format) {
+                        if !result.ordered_ids.is_empty() {
+                            retrieved_uuids = result.ordered_ids;
+                            exact_payload_text = Some(result.text_blocks.join("\n"));
+                        }
+                    }
                 }
             }
         }
@@ -723,6 +790,7 @@ pub fn run_lme_questions(
             config.encode_barrier,
             cache_entry_opt.as_deref(),
             config.scratch_posture,
+            config.exact_strategy,
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
