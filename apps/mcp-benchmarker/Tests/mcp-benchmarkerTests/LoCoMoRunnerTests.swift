@@ -4,7 +4,7 @@ import XCTest
 // LoCoMoRunnerTests.swift — Unit tests for the LoCoMo runner infrastructure.
 //
 // Tests cover:
-//   - loCoMoScratchDir(): creates a dir under /tmp/locomo-bench-
+//   - loCoMoScratchDir(posture:): creates a dir under /tmp/locomo-bench-
 //   - loCoMoGuardedTeardown(): refuses wrong prefix; removes valid dirs
 //   - verbMap: correct write/query verbs, constant args, resultFormat
 //
@@ -42,7 +42,7 @@ final class LoCoMoRunnerTests: XCTestCase {
             try? loCoMoGuardedTeardown(b)
         }
         XCTAssertNotEqual(a.path, b.path,
-                          "two loCoMoScratchDir() calls must produce unique paths")
+                          "two loCoMoScratchDir(posture:) calls must produce unique paths")
     }
 
     func testGuardedTeardownRemovesDir() throws {

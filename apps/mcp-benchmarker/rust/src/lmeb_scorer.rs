@@ -394,6 +394,7 @@ pub struct LmebReportPerQuery {
     /// before accepting idle. false = converged via the no-lanes grace window
     /// (ambiguous evidence). None = barrier did not run for this query.
     /// Additive — FIX-HARNESS-20260727.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub drain_lane_observed: Option<bool>,
 }
 

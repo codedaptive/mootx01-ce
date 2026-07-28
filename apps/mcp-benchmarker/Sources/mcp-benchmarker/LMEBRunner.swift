@@ -17,7 +17,7 @@ import Foundation
 //     no session/turn structure.
 //
 // Safety guarantees:
-//   - lmebScratchDir() names the dir with /tmp/lmeb-bench- so the teardown
+//   - lmebScratchDir(posture:) names the dir with /tmp/lmeb-bench- so the teardown
 //     guard can distinguish LMEB scratch dirs from arbitrary /tmp directories.
 //   - lmebGuardedTeardown() refuses any path without the /tmp/lmeb-bench- prefix.
 //   - The built EndpointConfig always carries MOOTX01_DATA_DIR=/tmp/lmeb-bench-...
@@ -156,7 +156,7 @@ func lmebGuardedTeardown(_ url: URL) throws {
         throw MCPError(description:
             "SAFETY: lmebGuardedTeardown refused to delete '\(path)' — "
             + "path must have the /tmp/lmeb-bench- prefix. "
-            + "Only directories created by lmebScratchDir() may be torn down by this guard.")
+            + "Only directories created by lmebScratchDir(posture:) may be torn down by this guard.")
     }
     do {
         try FileManager.default.removeItem(at: url)

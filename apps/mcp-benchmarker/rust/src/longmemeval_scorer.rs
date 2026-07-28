@@ -507,6 +507,7 @@ pub struct LmeReportPerQuestion {
     /// before accepting idle. false = converged via the no-lanes grace window
     /// (ambiguous evidence). None = barrier did not run for this unit.
     /// Additive — FIX-HARNESS-20260727.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub drain_lane_observed: Option<bool>,
 }
 
@@ -614,8 +615,12 @@ pub fn build_lme_report(
     payload_entries: &[LmePayloadEntry],
     cache_hit_by_id: &HashMap<String, Option<bool>>,
     drain_lane_by_id: &HashMap<String, Option<bool>>,
-    estate_encryption: String,
+    // Parameter order matches the call site in main.rs and the sibling
+    // builders (build_locomo_report / build_lmeb_report): estate_cache FIRST.
+    // Both params are String — a transposition compiles clean and silently
+    // swaps the two report keys (Adams CRITICAL, FIX-HARNESS-20260727).
     estate_cache: String,
+    estate_encryption: String,
 ) -> LmeReport {
     let (aggregate, latency) = aggregate_lme_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
@@ -1050,5 +1055,38 @@ mod tests {
             "tpr_ratio should be > 2.0, got {tpr_ratio:.4}");
         assert!(tpr_ratio < 4.0,
             "tpr_ratio should be < 4.0, got {tpr_ratio:.4}");
+    }
+}
+
+#[cfg(test)]
+mod report_provenance_tests {
+    use super::*;
+
+    /// Regression for the Adams CRITICAL (FIX-HARNESS-20260727): the two
+    /// String params of `build_lme_report` were transposed at the boundary —
+    /// compiles clean, swaps the `estate_cache` / `estate_encryption` report
+    /// keys. Distinct sentinel values assert each key carries its own value.
+    #[test]
+    fn build_lme_report_keys_not_transposed() {
+        let corpus = LmeCorpus { questions: Vec::new(), abstention_count: 0 };
+        let report = build_lme_report(
+            "run-id".to_string(),
+            "label".to_string(),
+            "s".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+            "drain".to_string(),
+            0,
+            0,
+            &[],
+            &corpus,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            "CACHE-SENTINEL".to_string(),
+            "ENCRYPTION-SENTINEL".to_string(),
+        );
+        assert_eq!(report.estate_cache, "CACHE-SENTINEL");
+        assert_eq!(report.estate_encryption, "ENCRYPTION-SENTINEL");
+        assert_eq!(report.encode_barrier, "drain");
     }
 }

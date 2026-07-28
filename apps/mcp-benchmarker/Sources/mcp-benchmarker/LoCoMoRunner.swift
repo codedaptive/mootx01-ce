@@ -15,7 +15,7 @@ import Foundation
 // O(1,542), with full turn isolation between conversations.
 //
 // Safety guarantees (parallel to LME):
-//   - loCoMoScratchDir() uses the /tmp/locomo-bench- prefix.
+//   - loCoMoScratchDir(posture:) uses the /tmp/locomo-bench- prefix.
 //   - loCoMoGuardedTeardown() refuses any path without that prefix.
 //   - The EndpointConfig carries MOOTX01_DATA_DIR=/tmp/locomo-bench-... so
 //     assertScratchBackend independently verifies the scratch constraint.
@@ -181,7 +181,7 @@ func loCoMoGuardedTeardown(_ url: URL) throws {
         throw MCPError(description:
             "SAFETY: loCoMoGuardedTeardown refused to delete '\(path)' — "
             + "path must have the /tmp/locomo-bench- prefix. "
-            + "Only directories created by loCoMoScratchDir() may be torn down by this guard.")
+            + "Only directories created by loCoMoScratchDir(posture:) may be torn down by this guard.")
     }
     do {
         try FileManager.default.removeItem(at: url)

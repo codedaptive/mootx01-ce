@@ -5,7 +5,7 @@ import Foundation
 // LongMemEvalRunnerTests — pure unit tests for the LME runner infrastructure.
 //
 // These tests cover the non-live parts of LongMemEvalRunner.swift:
-//   - lmeScratchDir() creates a directory with the /tmp/lme-bench- prefix
+//   - lmeScratchDir(posture:) creates a directory with the /tmp/lme-bench- prefix
 //   - lmeGuardedTeardown() accepts /tmp/lme-bench- paths and deletes them
 //   - lmeGuardedTeardown() REFUSES paths without the /tmp/lme-bench- prefix
 //   - lmeEndpointConfig() builds a valid EndpointConfig that passes assertScratchBackend

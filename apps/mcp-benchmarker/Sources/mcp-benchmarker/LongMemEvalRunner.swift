@@ -8,7 +8,7 @@ import Foundation
 // queries via live MCP query, records the manifest, and tears down the estate.
 //
 // Safety guarantees:
-//   - lmeScratchDir() names the dir with /tmp/lme-bench- so the teardown guard
+//   - lmeScratchDir(posture:) names the dir with /tmp/lme-bench- so the teardown guard
 //     can distinguish LME scratch dirs from arbitrary /tmp directories.
 //   - lmeGuardedTeardown() refuses any path that does not carry the
 //     /tmp/lme-bench- prefix; a non-scratch path cannot be passed by mistake.
@@ -245,7 +245,7 @@ func lmeGuardedTeardown(_ url: URL) throws {
         throw MCPError(description:
             "SAFETY: lmeGuardedTeardown refused to delete '\(path)' — "
             + "path must have the /tmp/lme-bench- prefix. "
-            + "Only directories created by lmeScratchDir() may be torn down by this guard.")
+            + "Only directories created by lmeScratchDir(posture:) may be torn down by this guard.")
     }
     do {
         try FileManager.default.removeItem(at: url)
@@ -266,7 +266,7 @@ func lmeGuardedTeardown(_ url: URL) throws {
 ///   2. Tells the MCPClient how to launch the server (stdio transport).
 ///
 /// - Parameters:
-///   - scratchDir: A directory created by `lmeScratchDir()`.
+///   - scratchDir: A directory created by `lmeScratchDir(posture:)`.
 ///   - mootBinaryPath: Path to the mootx01 binary.
 /// - Returns: A validated EndpointConfig for this estate.
 /// - Throws: `MCPError` via assertScratchBackend when the config does not meet
