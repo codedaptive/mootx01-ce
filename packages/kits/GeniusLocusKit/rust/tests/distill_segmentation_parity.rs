@@ -81,22 +81,23 @@ fn eidetic_segmenter_counts_at_least_three_on_probe_text() {
     );
 }
 
-// MARK: - T2: distill_items_sweep produces ≥1 factoid for eligible content
+// MARK: - T2: distill_items_sweep distills ≥1 item for eligible content
 
 /// `distill_items_sweep` must distill ≥1 item (write its representation
 /// columns) when a drawer contains content with ≥3 sentences AND recurring
 /// named entities detectable by the default capitalization extractor.
 ///
-/// The live parity failure (Swift=1, Rust=0) was driven by the segmentation
-/// bug plus the HMM-vs-default extractor gap; this test isolates the sweep
-/// end-to-end with content the default extractor CAN handle — "Swift" and
-/// "Rust" are capitalized non-initial words that recur across sentences.
+/// The historical live parity failure (Swift=1, Rust=0) was driven by the
+/// segmentation bug; this test isolates the sweep end-to-end (column writes
+/// on the source row, SPEC_DISTILLATION_STORAGE §7.2) with content the
+/// default extractor CAN handle — "Swift" and "Rust" are capitalized
+/// non-initial words that recur across sentences.
 ///
 /// Content is crafted so that "Swift" and "Rust" each appear in ≥2 of the
 /// 3+ segments, clearing the structural-recurrence threshold and causing the
 /// pipeline to emit a non-zero feature fingerprint.
 #[test]
-fn distill_items_sweep_produces_factoid_for_eligible_content() {
+fn distill_items_sweep_distills_item_for_eligible_content() {
     let (coord, h) = open_one();
 
     // Content with ≥3 sentences and recurring named entities "Swift" and "Rust"

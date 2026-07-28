@@ -89,14 +89,14 @@ prose, zero inline metadata) + removal (`DistilledHeader` and all consumers)
 | packages/libs/SubstrateML/rust/src/distillation_pipeline.rs | codegraph | MUST_UPDATE | twin |
 | packages/libs/SubstrateML/Sources/SubstrateML/TypedDecayWeighting.swift | rg ("[DIST|") | MUST_UPDATE | comment references header format — comment fidelity |
 | packages/libs/SubstrateML/Tests/SubstrateMLTests/DistillationPipelineTests.swift | rg | MUST_UPDATE | header-format tests replaced by rendering tests |
-| packages/libs/SubstrateML/Tests/SubstrateMLTests/DistillationConformanceTests.swift + rust/tests/distillation_conformance.rs (+ vector files) | rg | MUST_UPDATE | golden vectors regenerate for the new rendering (§13.9) |
+| packages/libs/SubstrateML/Tests/SubstrateMLTests/DistillationConformanceTests.swift + rust/tests/distillation_conformance.rs | rg | INTENTIONALLY_LEFT | Reclassified post-implementation (Adams-verified): these suites pin the MATH stages (DeltaFeatureExtractor, decay weighting, SNR, confidence, fingerprints) — none of which changed. The Stage 5 rendering is covered by NEW §13.9 vectors (TokenCompactionConformanceTests / token_compaction_conformance.rs + the lens rendering vectors); both legacy suites pass unmodified against the new pipeline. |
 | packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Distillation.swift | rg | MUST_UPDATE | lens surfaces drawerContent; rename ripples; injection-depth metadata stays generation-time-only (§5.2) |
 | packages/kits/NeuronKit/rust/src/distillation.rs (+ lib.rs re-export) | rg | MUST_UPDATE | twin |
 | packages/kits/NeuronKit/Tests/…/DistillationLensTests.swift, DistillationLensConformanceTests.swift, rust/tests/distillation_lens_conformance.rs | rg | MUST_UPDATE | field/format assertions |
 | packages/kits/AriaMcpKit/Sources/AriaMCP/ToolDispatch.swift | rg | MUST_UPDATE | runMemorySearch `_distilled` preview branch + `injectionDepthFormatted` + `distilledProseCap` retire (§11.3) |
 | packages/kits/AriaMcpKit/Tests/AriaMCPTests/InjectionDepthFormattingTests.swift | codegraph | MUST_UPDATE | deleted with the formatter |
 | packages/kits/AriaMcpKit/rust/src/tool_list.rs + recipe_tools.rs (format prose) | rg | MUST_UPDATE | descriptions reference header/factoids |
-| docs/validation/substrate_math_performance/test-harness/check-lockstep.py | rg | MUST_UPDATE (verify) | if it checks drawer_content/header vectors, regenerate; else reclassify with justification |
+| docs/validation/substrate_math_performance/test-harness/check-lockstep.py | rg | INTENTIONALLY_LEFT | Reclassified post-implementation (Adams-verified): the lockstep harness audits TYPE parity of the math-stage primitives, not the rendering string — unaffected by the drawerContent→distilledText rename and header retirement. |
 | apps/mcp-benchmarker/results/*.md, docs/status/FAB5_*.md | rg | INTENTIONALLY_LEFT | frozen historical result/status records |
 
 ## Symbol 3: `GeniusLocusKit.distillItem` / `distillItemsSweep` / `captureFactoid` (§7, §11.1–.5)

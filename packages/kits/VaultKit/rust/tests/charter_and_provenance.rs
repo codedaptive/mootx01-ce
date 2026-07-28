@@ -263,7 +263,7 @@ fn export_includes_hint_drawers_as_normal_entries() {
 ///
 /// Mirrors Swift `VaultBridgeTests.distilledFromProvenanceRoundTrips`.
 #[test]
-fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
+fn distilled_from_export_clean_body_and_no_tunnel_reconstruction_on_import() {
     // --- Source estate: plain open (no provision; hint seeding not needed). ---
     let (coord1, handle1) = open_simple("distilled-source");
 

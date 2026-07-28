@@ -1567,25 +1567,24 @@ struct VaultBridgeTests {
                 "hint-import: \(expectedWingCount) hint drawers must appear in recall; got \(hintRecalled.count)")
     }
 
-    // MARK: - Bug N: _distilled_from provenance as tunnel not body text
+    // MARK: - _distilled_from export hygiene + no-reconstruction on import
 
-    /// A factoid with a `_distilled_from` provenance tunnel must round-trip
+    /// A pre-existing `_distilled_from` provenance tunnel (only possible on
+    /// an estate created before the factoid-tier retirement) must round-trip
     /// export → import such that:
     ///   1. The exported vault note body does NOT contain the literal text
-    ///      `_distilled_from` (the provenance link must not be injected into content).
-    ///   2. After import, the factoid drawer content is clean — no markdown link text.
-    ///   3. The `_distilled_from` tunnel exists in the re-imported estate (the
-    ///      provenance graph edge survives as a real tunnel, not lost).
-    ///
-    /// Root cause: `_distilled_from` tunnels (label == "_distilled_from",
-    /// kind == .references) were previously included in `note.links`. The
-    /// Obsidian adapter rendered them as markdown links appended to the body,
-    /// corrupting the factoid's content on re-import.
-    ///
-    /// Fix (Bug N): `DrawerMapping.noteIR` separates `_distilled_from` tunnels
-    /// into a dedicated frontmatter key (`distilled_from_sources`). The import
-    /// path reads that key and reconstructs the tunnels without touching content.
-    @Test("Bug N: _distilled_from provenance tunnel round-trips as tunnel metadata, not body text")
+    ///      `_distilled_from` (the Bug N body-hygiene contract: provenance
+    ///      edges are serialized as the `distilled_from_sources` frontmatter
+    ///      key, never injected into content).
+    ///   2. After import, the drawer content is clean — no markdown link text.
+    ///   3. NO `_distilled_from` tunnel is reconstructed on import
+    ///      (SPEC_DISTILLATION_STORAGE §11.2/§13.2): the factoid tier is
+    ///      retired on 1.1.x and no new-write path may create these tunnels.
+    ///      The `distilled_from_sources` key in an old export is IGNORED —
+    ///      the provenance semantic now rides the fingerprint-lane key and
+    ///      the on-row representation columns, and representations
+    ///      regenerate from content on sweep (§2).
+    @Test("_distilled_from: export keeps body clean; import IGNORES distilled_from_sources and creates NO tunnels")
     func distilledFromProvenanceRoundTrips() async throws {
         let (kit, handle) = try await openEstate()
         let vault = makeTempVault()
