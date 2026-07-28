@@ -1316,11 +1316,14 @@ public actor DrawerStore {
             // Materialized projection: write the merged adjective
             // snapshot, zero the content blob, stamp tombstonedAt. The
             // distilled representation is content-derived text — the scrub
-            // clears it in the same statement (destruction contract).
+            // clears it (and the has_current_representation bit) in the
+            // same statement (destruction contract, cookbook §2.4.1).
+            let clearedOp = priorOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
             _ = try await txn.rowStore.update(
                 table: "drawers",
                 values: Self.withClearedRepresentation([
                     "adjectiveBitmap": .bitmap(event.afterBitmaps.adjective),
+                    "operationalBitmap": .bitmap(clearedOp),
                     "content": .text(""),
                     "tombstonedAt": .timestamp(now),
                 ]),
@@ -1352,10 +1355,16 @@ public actor DrawerStore {
 
                 if sibState == Int64(State.tombstoned.rawValue) {
                     // Already tombstoned — just ensure content is empty
-                    // (and the content-derived representation with it).
+                    // (and the content-derived representation and the
+                    // has_current_representation bit with it).
+                    let sibOpBitmap = Self.int64(sibRow["operationalBitmap"])
+                    let sibClearedOp = sibOpBitmap & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
                     _ = try await txn.rowStore.update(
                         table: "drawers",
-                        values: Self.withClearedRepresentation(["content": .text("")]),
+                        values: Self.withClearedRepresentation([
+                            "content": .text(""),
+                            "operationalBitmap": .bitmap(sibClearedOp),
+                        ]),
                         where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                     )
                     try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
@@ -1393,12 +1402,16 @@ public actor DrawerStore {
                     )
                     if case .success(let sibEvent) = sibResult {
                         // Gate accepted: update state bitmap, zero content, stamp.
+                        // has_current_representation (bit 19) cleared alongside
+                        // the four distillation columns (cookbook §2.4.1).
                         let sibEventWithReason = sibEvent.withReason(
                             "lineage expunge cascade from \(drawerId)")
+                        let sibClearedOp = sibOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
                         _ = try await txn.rowStore.update(
                             table: "drawers",
                             values: Self.withClearedRepresentation([
                                 "adjectiveBitmap": .bitmap(sibEventWithReason.afterBitmaps.adjective),
+                                "operationalBitmap": .bitmap(sibClearedOp),
                                 "content": .text(""),
                                 "tombstonedAt": .timestamp(now),
                             ]),
@@ -1415,10 +1428,15 @@ public actor DrawerStore {
                         // cannot transition, the verbatim content MUST be zeroed.
                         // Leaving content intact when the gate fails is a destruction-
                         // contract violation (secfix/ws2-coredelete). The scrub covers
-                        // the content-derived distilled representation too.
+                        // the content-derived distilled representation and the
+                        // has_current_representation bit (cookbook §2.4.1).
+                        let sibClearedOpRej = sibOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
                         _ = try await txn.rowStore.update(
                             table: "drawers",
-                            values: Self.withClearedRepresentation(["content": .text("")]),
+                            values: Self.withClearedRepresentation([
+                                "content": .text(""),
+                                "operationalBitmap": .bitmap(sibClearedOpRej),
+                            ]),
                             where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                         )
                         try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
@@ -4225,11 +4243,33 @@ public actor DrawerStore {
         // Content changed in place → the distilled representation (a view
         // of the OLD content) is stale. NULL-on-edit in the same statement
         // is the §7.3 regeneration trigger — no staleness flag, no Bool.
-        try await storage.rowStore.update(
-            table: "drawers",
-            values: Self.withClearedRepresentation(["content": .text(content)]),
-            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
-        )
+        //
+        // Wrapped in a serializable transaction to read the current
+        // operationalBitmap before writing, so the has_current_representation
+        // bit (cookbook §2.4.1) can be cleared in the same statement as
+        // the four distillation columns (§4 invariant: bit and columns
+        // travel together). Pre-read cost is acceptable — dataset-content
+        // writes are rare (signature computation only).
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
+            )
+            // If the row is absent the subsequent UPDATE returns 0 (the
+            // same contract as the un-wrapped call). Compute the cleared
+            // bitmap using the prior value, or 0 if the row is not found.
+            let currentOp = rows.first.map { Self.int64($0["operationalBitmap"]) } ?? 0
+            let clearedOp = currentOp & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            return try await txn.rowStore.update(
+                table: "drawers",
+                values: Self.withClearedRepresentation([
+                    "content": .text(content),
+                    "operationalBitmap": .bitmap(clearedOp),
+                ]),
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+        }
     }
 
     // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
@@ -4288,22 +4328,40 @@ public actor DrawerStore {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(distilled, label: "distilled")
         try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
-        return try await storage.rowStore.update(
-            table: "drawers",
-            values: [
-                "distilled": .text(distilled),
-                "distilled_pipeline_version": .text(pipelineVersion),
-                "distilled_token_count": .int(tokenCount),
-                "distilled_at": .timestamp(generatedAt),
-            ],
-            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
-        )
+        // Read-modify-write within a serializable transaction so the
+        // has_current_representation bit (cookbook §2.4.1) is set in the
+        // SAME UPDATE as the four distillation columns (§4 invariant: bit
+        // and columns travel together; skew is structurally impossible).
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
+            )
+            // Row not found → zero rows updated (mirrors the prior single-
+            // UPDATE contract; the caller checks for 0 and skips downstream
+            // writes).
+            guard let row = rows.first else { return 0 }
+            let currentOp = Self.int64(row["operationalBitmap"])
+            let setOp = currentOp | DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            return try await txn.rowStore.update(
+                table: "drawers",
+                values: [
+                    "distilled": .text(distilled),
+                    "distilled_pipeline_version": .text(pipelineVersion),
+                    "distilled_token_count": .int(tokenCount),
+                    "distilled_at": .timestamp(generatedAt),
+                    "operationalBitmap": .bitmap(setOp),
+                ],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+        }
     }
 
     /// Count of active drawers still awaiting distillation — the §7.1
     /// eligibility predicate as an aggregate: not tombstoned, non-empty
-    /// content, and `distilled` NULL or produced under a different pipeline
-    /// contract. This is the drain-accounting observable
+    /// content, and representation absent (bit 19 clear) OR produced under
+    /// a different pipeline contract. This is the drain-accounting observable
     /// (SPEC_DISTILLATION_STORAGE §7.1 / FINDING_11X_MAINTENANCE_WALK
     /// constraint 6): `drainStatuses` reports it as the distillation
     /// drain's `pending`, so "fully drained" cannot read true while any
@@ -4311,6 +4369,12 @@ public actor DrawerStore {
     /// not a queue-depth proxy. Empty-content active rows (gate-rejected
     /// erasure scrubs) are excluded: they carry nothing to distill.
     /// Projected to `id` only, so no text column is materialized.
+    ///
+    /// The `bitmaskNone` predicate replaces the previous `isNull(distilled)`
+    /// test — both are correct (§4 invariant: bit and columns are always in
+    /// agreement), but the bitmap predicate is index-friendly and eliminates
+    /// the per-row NULL scan on the text column.
+    ///
     /// Mirrors Rust `count_undistilled`.
     public func countUndistilled(pipelineVersion: String) async throws -> Int {
         let rows = try await storage.rowStore.query(
@@ -4319,7 +4383,14 @@ public actor DrawerStore {
                 .isNull(Column(table: "drawers", name: "tombstonedAt")),
                 .neq(Column(table: "drawers", name: "content"), .text("")),
                 .or([
-                    .isNull(Column(table: "drawers", name: "distilled")),
+                    // Bit 19 (has_current_representation) clear → no
+                    // representation yet. Cookbook §2.4.1: the bit is the
+                    // authoritative presence indicator; faster than IS NULL
+                    // on the text column.
+                    .bitmaskNone(
+                        Column(table: "drawers", name: "operationalBitmap"),
+                        mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                    ),
                     .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
                          .text(pipelineVersion)),
                 ]),

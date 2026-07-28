@@ -199,9 +199,15 @@ public extension GeniusLocusKit {
             for drawer in page {
                 if let cap = limit, produced >= cap { break pages }
                 guard !drawer.content.isEmpty else { continue }
-                // Eligibility (§7.1): never distilled, or distilled under a
-                // different (older/newer) pipeline contract.
-                guard drawer.distilled == nil
+                // Eligibility (§7.1): bit 19 (has_current_representation)
+                // clear means the row has no representation yet; OR the
+                // representation was produced under a different pipeline
+                // contract (cookbook §2.4.1 / SPEC §7.1). The bitmap test
+                // replaces the previous `distilled == nil` column-presence
+                // check — both are correct (§4 invariant), but the bit is
+                // the authoritative indicator and avoids materializing the
+                // text column for the eligibility read.
+                guard !drawer.hasCurrentRepresentation
                     || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
                 else { continue }
                 if try await distillItem(

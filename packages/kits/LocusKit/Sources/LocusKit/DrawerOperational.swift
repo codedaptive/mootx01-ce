@@ -33,7 +33,7 @@ import SubstrateLib
 /// ```
 /// bits 0–5    capture_channel        (contiguous, 6 cases at raw 0…5)
 /// bits 6–11   content_kind           (contiguous, 8 cases at raw 0…7)
-/// bits 12–23  feature_flags          (bitset, 7 named bits 12…18)
+/// bits 12–23  feature_flags          (bitset, 8 named bits 12…19)
 /// bit  24     state_extension flag
 /// bit  25     lineage_clustering flag (NEW in v0.6)
 /// bits 26–63  reserved
@@ -90,11 +90,13 @@ public enum ContentKind: Int, Sendable, Codable {
 
 /// Feature flags — non-exclusive set of properties a drawer may carry.
 /// Lives in bits 12–23 of `Drawer.operationalBitmap` (12-bit bitset;
-/// 7 named bits 12…18, bits 19–23 reserved). Per cookbook §2.4.
+/// 8 named bits 12…19, bits 20–23 reserved). Per cookbook §2.4.
 ///
 /// F12 cascade (2026-05-27): field shifted from v0.35 bits 8–15 to
 /// v0.6 bits 12–23. NEW flags: `isKeystone` (bit 17, cookbook §7.2),
-/// `isLockedZone` (bit 18).
+/// `isLockedZone` (bit 18). 2026-07-28: `hasCurrentRepresentation`
+/// (bit 19, cookbook §2.4.1) assigned — first of the formerly reserved
+/// bits 19–23.
 ///
 /// Bitset encoding (one bit per value), so this is an `OptionSet`
 /// rather than an enum. `rawValue` is `Int64` so members compose
@@ -131,6 +133,26 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// Privacy-aware bucket; the drawer's contents are gated by an
     /// additional zone-policy check at recall time.
     public static let isLockedZone = DrawerFeatureFlags(rawValue: 1 << 18)
+
+    /// Bit 19 — drawer carries a current distilled representation per
+    /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
+    ///
+    /// Set iff all four distillation columns (`distilled`,
+    /// `distilled_pipeline_version`, `distilled_token_count`,
+    /// `distilled_at`) are populated. Clear when those columns are NULL.
+    ///
+    /// The §4 invariant ("NULL together or populated together") makes this
+    /// bit skew-impossible: it travels in the SAME SQL UPDATE statement as
+    /// the four columns — set by `setDistilledRepresentation`, cleared by
+    /// every `withClearedRepresentation` call site (content-edit §7.3,
+    /// expunge scrub, gate-reject scrub, dataset-content patch).
+    ///
+    /// Design tenet: open bitmap space means new features enter WITHOUT
+    /// migration overhead. 1.0.x rows migrated to 1.1.x carry the bit
+    /// clear (all-NULL columns) — no schema change, no backfill required.
+    ///
+    /// Wire value: 1 << 19 = 524288 (0x80000).
+    public static let hasCurrentRepresentation = DrawerFeatureFlags(rawValue: 1 << 19)
 }
 
 // MARK: - Drawer accessors
@@ -172,6 +194,24 @@ public extension Drawer {
     /// intermediate `featureFlags` reference.
     func hasFeatureFlag(_ flag: DrawerFeatureFlags) -> Bool {
         featureFlags.contains(flag)
+    }
+
+    /// True when bit 19 of `operationalBitmap` is set, indicating that
+    /// all four distillation columns are populated (cookbook §2.4.1).
+    ///
+    /// Consumers use this instead of `distilled == nil` for eligibility
+    /// checks — it is a direct bitmap read, not a column-presence test.
+    /// `distillItemsSweep` and `wireCorpusRoomRollup` use this accessor
+    /// as the primary eligibility gate; `countUndistilled` uses the
+    /// corresponding `bitmaskNone` predicate on the database side.
+    ///
+    /// The bit and the four columns are always in agreement by
+    /// construction: they travel in the same SQL UPDATE statement
+    /// (`setDistilledRepresentation` sets both; every content-clearing
+    /// path clears both simultaneously).
+    var hasCurrentRepresentation: Bool {
+        // Cookbook §2.4.1: has_current_representation at bit 19.
+        featureFlags.contains(.hasCurrentRepresentation)
     }
 
     /// True when bit 24 of `operationalBitmap` is set, indicating the

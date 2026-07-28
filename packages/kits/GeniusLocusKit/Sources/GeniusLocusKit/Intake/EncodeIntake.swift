@@ -635,7 +635,11 @@ public extension GeniusLocusKit {
             for drawerID in drawerIDs {
                 guard let drawer = try? await estate.getDrawers(ids: [drawerID]).first,
                       !drawer.content.isEmpty,
-                      drawer.distilled == nil
+                      // Bit 19 (has_current_representation) clear means no
+                      // current representation — eligible for distillation.
+                      // Replaces the previous `distilled == nil` column-presence
+                      // check (cookbook §2.4.1 / SPEC §7.1).
+                      !drawer.hasCurrentRepresentation
                         || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
                 else { continue }
                 _ = try? await self.distillItem(
