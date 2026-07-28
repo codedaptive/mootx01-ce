@@ -80,9 +80,15 @@ Chronologically, each was found, fixed, and the gap persisted:
    (fix-harness).
 5. Keychain prompts inflating wall-clocks → plaintext scratch estates
    (fix-harness); throughput numbers re-measured clean.
-6. **moot_consolidate contaminating the exact arm** — consolidation subsumes
-   source drawers out of default search (probe: answer at rank 2
-   pre-consolidate, absent from top-20 after; 330 factoids from 550 turns).
+6. **moot_consolidate contaminating the exact arm** — after a consolidation
+   sweep (330 factoids from 550 turns) the answer drawer drops from rank 2 to
+   absent-from-top-20 on 1.1.x, while 1.0.x is unaffected (rank 1→2).
+   Mechanism correction (2026-07-28, probe-verified): sources are NOT
+   superseded by factoids (the factoid's lineageID never matches the source's
+   lineage column; the cascade fires only between successive factoids of the
+   same source). The 1.1.x effect comes from the feed-tailing engine
+   indexing the 330 factoids — index-statistics/ranking perturbation, exact
+   mechanism under investigation and mooted by Wave 1 (no factoid drawers).
    The runner consolidated before the exact query with arm=both default;
    fixed to exact-first ordering. This was the largest single distortion.
 7. Undocumented-protocol querying — bare moot_memory_search is documented as
