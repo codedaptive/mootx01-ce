@@ -494,21 +494,13 @@ pub fn run_one_question(
         Some(guard_verdict.diagnostic().to_string())
     };
 
-    // ── Dense arm: consolidate before querying ────────────────────────────────
-    // moot_consolidate builds distilled factoids from the ingested memories.
-    // Must run after ingest and before moot_recall_distilled.
-    if arm == &LmeArm::Dense || arm == &LmeArm::Both {
-        let consolidate_args: BTreeMap<String, JsonValue> = BTreeMap::new();
-        if let Err(e) = client.call_tool("moot_consolidate", consolidate_args, &verb_map.result_format) {
-            eprintln!(
-                "  [lme] consolidate warning for {question_id}: {}",
-                e.description
-            );
-            // Non-fatal: dense arm query may return empty results, but we continue.
-        }
-    }
-
     // ── Exact arm: moot_memory_search ─────────────────────────────────────────
+    // ORDER IS LOAD-BEARING: the exact-arm query MUST run before any
+    // moot_consolidate. Consolidation subsumes source drawers into distilled
+    // factoids, after which the originals no longer surface in default search
+    // (proven 2026-07-27: LME q1 answer rank 2 pre-consolidate, absent from
+    // top-20 post-consolidate). Consolidating first contaminated the exact-arm
+    // measurement on two full grids. Twin of the Swift ordering note.
     let mut exact_payload_text: Option<String> = None;
     let mut exact_query_latency: Option<f64> = None;
     let mut retrieved_uuids: Vec<String> = Vec::new();
@@ -539,10 +531,20 @@ pub fn run_one_question(
         exact_query_latency = Some(query_start.elapsed().as_secs_f64());
     }
 
-    // ── Dense arm: moot_recall_distilled ──────────────────────────────────────
+    // ── Dense arm: consolidate, then moot_recall_distilled ───────────────────
+    // Runs strictly AFTER the exact arm (see ordering note above) because
+    // consolidation mutates what default search returns.
     let mut dense_payload_text: Option<String> = None;
     let mut dense_query_latency: Option<f64> = None;
     if arm == &LmeArm::Dense || arm == &LmeArm::Both {
+        let consolidate_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+        if let Err(e) = client.call_tool("moot_consolidate", consolidate_args, &verb_map.result_format) {
+            eprintln!(
+                "  [lme] consolidate warning for {question_id}: {}",
+                e.description
+            );
+            // Non-fatal: dense arm query may return empty results, but we continue.
+        }
         let dense_verb_map = lme_dense_verb_map();
         let dense_start = Instant::now();
         let mut dense_args: BTreeMap<String, JsonValue> = BTreeMap::new();
