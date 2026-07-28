@@ -38,6 +38,7 @@ use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use engram_lib::Engram;
 use substrate_types::merkle_root::MerkleRoot;
 use intellectus_lib::{report, StatSample};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use substrate_ml::float_simhash;
 use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
@@ -3067,6 +3068,108 @@ impl Corpus {
                 (model_id, outcome, disc)
             })
             .collect()
+    }
+
+    /// Compute sub-span max-cosine scores for a bounded source ID set.
+    ///
+    /// Rust twin of Swift `Corpus.scoreSubSpans(query:sourceIDs:)`. Uses the
+    /// chunk-based path: for each source ID, fetches all chunks from
+    /// `bundle_store`, concatenates their text in `start_offset` order, then
+    /// delegates sub-span scoring to `sub_span_scoring::score` via a temporary
+    /// in-memory `CorpusContentSource`-like computation.
+    ///
+    /// This is the older chunk-based Corpus path. The `CorpusContentEngine`
+    /// path (`score_sub_spans` on the engine) is preferred for GLK usage and
+    /// gets `effective_dense_text` (dual-text capability). The Corpus path
+    /// uses raw chunk text.
+    ///
+    /// Candidates absent from the bundle store, providers that return Err on
+    /// `embed_float`, and sources with no alphanumeric tokens are not included
+    /// in the returned map.
+    ///
+    /// Mission: MISSION_11X_RECALL_GAP_01 Item 1 — transient sub-span scoring.
+    pub fn score_sub_spans(
+        &self,
+        query: &str,
+        source_ids: &[&str],
+    ) -> HashMap<String, f32> {
+        if query.is_empty() || source_ids.is_empty() {
+            return HashMap::new();
+        }
+
+        // Embed the query once. If the provider has no float lane, return empty.
+        let default_slot = self.default_slot();
+        let guard = match default_slot.handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let query_vec = match guard.provider().embed_float(query) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return HashMap::new(),
+        };
+
+        let mut out: HashMap<String, f32> = HashMap::with_capacity(source_ids.len());
+        for &source_id in source_ids {
+            // Fetch chunks, sort by start_offset (the natural ingest order).
+            let mut chunks = match self.bundle_store.chunks_for_source(source_id, None) {
+                Ok(cs) => cs,
+                Err(_) => continue,
+            };
+            if chunks.is_empty() {
+                continue;
+            }
+            chunks.sort_by_key(|c| c.start_offset);
+
+            // Concatenate chunk texts. Each chunk already contributes its own
+            // text boundary; separate with a single space so sub-spans don't
+            // run across chunk junctions unexpectedly. The Swift twin uses
+            // the same concatenation-in-offset-order approach.
+            let combined: String = chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if combined.is_empty() {
+                continue;
+            }
+
+            let ranges = crate::sub_span_scoring::sub_span_ranges(
+                &combined,
+                crate::sub_span_scoring::DEFAULT_WINDOW_TOKENS,
+                crate::sub_span_scoring::DEFAULT_OVERLAP_TOKENS,
+            );
+            if ranges.is_empty() {
+                continue;
+            }
+
+            let combined_bytes = combined.as_bytes();
+            let mut max_norm: f32 = 0.0;
+            for (span_start, span_length) in &ranges {
+                let lo = *span_start;
+                let hi = lo + span_length;
+                if hi > combined_bytes.len() {
+                    continue;
+                }
+                let span_text = match std::str::from_utf8(&combined_bytes[lo..hi]) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let span_vec = match guard.provider().embed_float(span_text) {
+                    Ok(v) if !v.is_empty() => v,
+                    _ => continue,
+                };
+                let cosine = crate::sub_span_scoring::cosine_similarity(&query_vec, &span_vec);
+                let norm = f32::max(0.0, f32::min(1.0, (cosine + 1.0) / 2.0));
+                if norm > max_norm {
+                    max_norm = norm;
+                }
+            }
+            if max_norm > 0.0 {
+                out.insert(source_id.to_string(), max_norm);
+            }
+        }
+        out
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane

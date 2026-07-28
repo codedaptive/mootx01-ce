@@ -52,6 +52,7 @@ pub mod provider_configuration_store;
 pub mod provider_coverage_store;
 pub mod removed_source_store;
 pub mod schema_profile;
+pub mod sub_span_scoring;
 pub mod sync_manifest;
 pub mod tokenizer;
 // Mission 6a-ii-α: the trainable-basis type-erasure seam. Declared here in
@@ -99,6 +100,13 @@ pub use engine::{
 pub use engine::{fuse, fuse_scored};
 pub use error::*;
 pub use hybrid_recall::*;
+// Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1).
+// Re-export the scoring primitives so SDK consumers can call them directly
+// without reaching into the module path.
+pub use sub_span_scoring::{
+    cosine_similarity, score as score_sub_spans_raw, sub_span_ranges, DEFAULT_OVERLAP_TOKENS,
+    DEFAULT_WINDOW_TOKENS,
+};
 pub use sync_manifest::*;
 pub use tokenizer::*;
 pub use trainable_embedding_basis::TrainableEmbeddingBasis;
