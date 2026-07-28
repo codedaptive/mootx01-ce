@@ -2805,6 +2805,95 @@ public actor Corpus {
         }
     }
 
+    // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
+
+    /// Score a bounded candidate set at sub-span granularity (transient).
+    ///
+    /// For each source ID in `sourceIDs`, retrieves the ingested chunk text
+    /// via `BundleStore.chunksForSource`, concatenates chunks into a single
+    /// text body, segments it into token-window sub-spans (alphanumeric-run
+    /// rule, cross-port identical), and returns the max-cosine ∈ [0,1] across
+    /// all sub-spans for each source.
+    ///
+    /// Uses the DEFAULT slot's provider. Sub-span vectors are computed on the
+    /// fly and DISCARDED — zero persistence.
+    ///
+    /// For the `CorpusContentEngine` surface (GLK's path), use
+    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)` which resolves
+    /// `effectiveDenseText` via the canonical `CorpusContentSource` protocol
+    /// (supports both standalone and attached modes, including the dual-text
+    /// dense-composition capability from Stream A).
+    ///
+    /// - Parameters:
+    ///   - query: The query text.
+    ///   - sourceIDs: Bounded candidate source IDs (typically ~40).
+    /// - Returns: Max-cosine ∈ [0,1] per source ID. Missing keys → 0.0.
+    public func scoreSubSpans(
+        query: String,
+        sourceIDs: [String]
+    ) async -> [String: Float] {
+        guard !query.isEmpty, !sourceIDs.isEmpty else { return [:] }
+
+        // Embed the query once via the default provider.
+        let queryVec: [Float]
+        do {
+            let result = try await defaultProvider.embedFloat(query)
+            guard !result.isEmpty else { return [:] }
+            queryVec = result
+        } catch {
+            return [:]
+        }
+
+        var out: [String: Float] = [:]
+        out.reserveCapacity(sourceIDs.count)
+        for sourceID in sourceIDs {
+            // Retrieve all chunks for this source and concatenate into one body.
+            let chunks: [Chunk]
+            do {
+                chunks = try await bundleStore.chunksForSource(sourceID)
+            } catch {
+                continue
+            }
+            guard !chunks.isEmpty else { continue }
+            // Concatenate chunk text in chunk order (start-offset ascending).
+            // The full concatenated text is the scoring surface, mirroring what
+            // the ingest path stored.
+            let body = chunks
+                .sorted { $0.startOffset < $1.startOffset }
+                .map(\.text)
+                .joined(separator: " ")
+            guard !body.isEmpty else { continue }
+
+            let ranges = SubSpanScoring.subSpanRanges(
+                text: body,
+                windowTokens: SubSpanScoring.defaultWindowTokens,
+                overlapTokens: SubSpanScoring.defaultOverlapTokens)
+            guard !ranges.isEmpty else { continue }
+
+            var maxNorm: Float = 0.0
+            let utf8 = body.utf8
+            for (spanStart, spanLength) in ranges {
+                guard spanStart >= 0, spanStart + spanLength <= utf8.count else { continue }
+                let lo = utf8.index(utf8.startIndex, offsetBy: spanStart)
+                let hi = utf8.index(lo, offsetBy: spanLength)
+                guard let spanText = String(utf8[lo..<hi]) else { continue }
+                let spanVec: [Float]
+                do {
+                    let result = try await defaultProvider.embedFloat(spanText)
+                    guard !result.isEmpty else { continue }
+                    spanVec = result
+                } catch {
+                    continue
+                }
+                let cosine = SubSpanScoring.cosineSimilarity(queryVec, spanVec)
+                let norm = max(0, min(1, (cosine + 1) / 2))
+                if norm > maxNorm { maxNorm = norm }
+            }
+            if maxNorm > 0 { out[sourceID] = maxNorm }
+        }
+        return out
+    }
+
     /// Whether this corpus's DEFAULT signal supports the dense float lane
     /// (Lane D). True when `embedFloat` returns a vector rather than throwing
     /// the opt-out error. Probes with a single non-empty token so the answer
