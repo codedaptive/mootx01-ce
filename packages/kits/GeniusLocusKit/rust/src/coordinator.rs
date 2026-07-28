@@ -2578,9 +2578,12 @@ impl EstateCoordinator {
             if drawer.content.is_empty() {
                 continue;
             }
-            // Eligibility (§7.1): never distilled, or distilled under a
-            // different (older/newer) pipeline contract.
-            if drawer.distilled.is_some()
+            // Eligibility (§7.1): bit 19 (has_current_representation) set
+            // AND pipeline version matches → already distilled, skip. The
+            // bitmap test replaces the previous `distilled.is_some()` column-
+            // presence check (cookbook §2.4.1 / SPEC §7.1). Both are correct
+            // by the §4 invariant, but the bit is the authoritative indicator.
+            if drawer.has_current_representation()
                 && drawer.distilled_pipeline_version.as_deref()
                     == Some(token_compaction::DISTILLATION_PIPELINE_VERSION)
             {

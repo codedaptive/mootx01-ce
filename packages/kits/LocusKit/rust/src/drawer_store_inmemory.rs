@@ -62,6 +62,7 @@ use crate::adjectives::State;
 use crate::diary_entry::DiaryEntry;
 use crate::drawer::Drawer;
 use crate::drawer_fingerprint::EstateFingerprintFamilies;
+use crate::drawer_operational::DrawerFeatureFlags;
 use persistence_kit::inmemory::InMemoryStorage;
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::RowState;
@@ -2016,17 +2017,25 @@ impl DrawerStore for DrawerStoreCore {
         .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {}", v)))?;
 
         // Materialized projection: write the merged adjective snapshot,
-        // zero the content blob, stamp tombstonedAt.
+        // zero the content blob, stamp tombstonedAt. The distilled
+        // representation is content-derived text — the scrub clears it
+        // (and the has_current_representation bit) in the same statement
+        // (destruction contract, SPEC §2; cookbook §2.4.1).
         let row_store = self.storage.row_store();
+        let cleared_op =
+            prior_operational & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
         let mut update_vals = BTreeMap::new();
         update_vals.insert(
             "adjectiveBitmap".to_string(),
             TypedValue::Bitmap(event.after_bitmaps.0),
         );
+        update_vals.insert(
+            "operationalBitmap".to_string(),
+            TypedValue::Bitmap(cleared_op),
+        );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
-        // The distilled representation is content-derived text — the scrub
-        // clears it in the same statement (destruction contract, SPEC §2).
+        // The distilled representation columns (four NULLs).
         insert_cleared_representation(&mut update_vals);
         // Fold the recomputed content_fingerprint into the SAME update
         // (LocusKitSchema v9) rather than a separate write. Refreshed
@@ -2075,9 +2084,19 @@ impl DrawerStore for DrawerStoreCore {
 
             if sib_state == State::Tombstoned.raw_value() {
                 // Already tombstoned — just ensure content is empty (and
-                // the content-derived representation with it).
+                // the content-derived representation and the
+                // has_current_representation bit with it, cookbook §2.4.1).
+                let sib_op = self
+                    .read_drawer_bitmap(sibling_id, "operationalBitmap")
+                    .unwrap_or(0);
+                let sib_cleared_op =
+                    sib_op & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
                 let mut vals = BTreeMap::new();
                 vals.insert("content".to_string(), TypedValue::Text(String::new()));
+                vals.insert(
+                    "operationalBitmap".to_string(),
+                    TypedValue::Bitmap(sib_cleared_op),
+                );
                 insert_cleared_representation(&mut vals);
                 // Best-effort, matching this branch's existing tolerance
                 // for a concurrently-removed sibling row: if the refresh
@@ -2137,14 +2156,22 @@ impl DrawerStore for DrawerStoreCore {
                 );
 
                 if let Ok(sib_event) = sib_result {
+                    // has_current_representation (bit 19) cleared alongside
+                    // the four distillation columns (cookbook §2.4.1).
+                    let sib_cleared_op =
+                        sib_operational & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
                     let mut vals = BTreeMap::new();
                     vals.insert(
                         "adjectiveBitmap".to_string(),
                         TypedValue::Bitmap(sib_event.after_bitmaps.0),
                     );
+                    vals.insert(
+                        "operationalBitmap".to_string(),
+                        TypedValue::Bitmap(sib_cleared_op),
+                    );
                     vals.insert("content".to_string(), TypedValue::Text(String::new()));
                     vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
-                    // Scrub covers the content-derived representation too.
+                    // Scrub covers the content-derived representation columns too.
                     insert_cleared_representation(&mut vals);
                     // Best-effort, matching this branch's existing
                     // tolerance for a concurrently-removed sibling row.
@@ -2317,10 +2344,16 @@ impl DrawerStore for DrawerStoreCore {
 
     /// Write the distilled representation of one drawer — all four columns
     /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
-    /// together or populated together). Direct column write: no audit
+    /// together or populated together). Also sets bit 19
+    /// (`HAS_CURRENT_REPRESENTATION`) in `operational_bitmap` in the same
+    /// UPDATE so the bit and the four columns are always in agreement
+    /// (cookbook §2.4.1). Read-then-update in the same synchronous call:
+    /// the in-memory and SQLite backends serialize via their own locking,
+    /// so TOCTOU is not a concern here. Direct column write: no audit
     /// event, no supersession cascade, no lifecycle/lineage field, no
-    /// content digest/revision bump (§9 search isolation). Mirrors Swift
-    /// `DrawerStore.setDistilledRepresentation`.
+    /// content digest/revision bump (§9 search isolation).
+    ///
+    /// Mirrors Swift `DrawerStore.setDistilledRepresentation`.
     fn set_distilled_representation(
         &self,
         drawer_id: &str,
@@ -2345,6 +2378,21 @@ impl DrawerStore for DrawerStoreCore {
             ));
         }
         let row_store = self.storage.row_store();
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        // Read the current operationalBitmap to set bit 19 (HAS_CURRENT_REPRESENTATION)
+        // in the same UPDATE as the four distillation columns (§4 invariant).
+        // Row not found → return 0 (mirrors Swift's guard let row = rows.first else { return 0 }).
+        let rows = row_store
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let current_op = match rows.first() {
+            Some(row) => i64_value_of(row.get("operationalBitmap")),
+            None => return Ok(0),
+        };
+        let set_op = current_op | DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
         let mut values = BTreeMap::new();
         values.insert(
             "distilled".to_string(),
@@ -2362,21 +2410,23 @@ impl DrawerStore for DrawerStoreCore {
             "distilled_at".to_string(),
             TypedValue::Timestamp(generated_at),
         );
+        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(set_op));
         row_store
-            .update(
-                T_DRAWERS,
-                values,
-                &StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(drawer_id.to_string()),
-                ),
-            )
+            .update(T_DRAWERS, values, &id_pred)
             .map_err(map_storage_err)
     }
 
     /// Count of active drawers still awaiting distillation (§7.1
-    /// eligibility predicate). Projected to `id` only — no text column is
-    /// materialized. Mirrors Swift `DrawerStore.countUndistilled`.
+    /// eligibility predicate): not tombstoned, non-empty content, and
+    /// representation absent (bit 19 clear) OR produced under a different
+    /// pipeline contract. Projected to `id` only — no text column materialized.
+    ///
+    /// The `BitmaskNone` predicate replaces the previous `IsNull(distilled)`
+    /// test — both are correct (§4 invariant), but the bitmap predicate is
+    /// index-friendly and avoids per-row NULL scans on the text column
+    /// (cookbook §2.4.1).
+    ///
+    /// Mirrors Swift `DrawerStore.countUndistilled`.
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         let row_store = self.storage.row_store();
         let predicate = StoragePredicate::And(vec![
@@ -2386,7 +2436,13 @@ impl DrawerStore for DrawerStoreCore {
                 TypedValue::Text(String::new()),
             ),
             StoragePredicate::Or(vec![
-                StoragePredicate::IsNull(Column::new(T_DRAWERS, "distilled")),
+                // Bit 19 (HAS_CURRENT_REPRESENTATION) clear → no current
+                // representation. Cookbook §2.4.1: authoritative indicator;
+                // faster than IS NULL on the distilled text column.
+                StoragePredicate::BitmaskNone {
+                    column: Column::new(T_DRAWERS, "operationalBitmap"),
+                    mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
+                },
                 StoragePredicate::Neq(
                     Column::new(T_DRAWERS, "distilled_pipeline_version"),
                     TypedValue::Text(pipeline_version.to_string()),

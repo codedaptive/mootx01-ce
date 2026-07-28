@@ -173,8 +173,25 @@ impl Estate {
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
         );
+        // Pre-read the current operationalBitmap so the
+        // has_current_representation bit (cookbook §2.4.1) can be cleared
+        // in the same UPDATE as the four distillation columns (§4 invariant).
+        let current_op: i64 = row_store
+            .query(T_DRAWERS, Some(&pred), &[], Some(1), None)
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?
+            .first()
+            .and_then(|r| r.get("operationalBitmap"))
+            .and_then(|v| match v {
+                TypedValue::Bitmap(n) => Some(*n),
+                TypedValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let cleared_op = current_op
+            & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(content.to_string()));
+        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(cleared_op));
         // Content changed in place → the distilled representation (a view of
         // the OLD content) is stale. NULL-on-edit in the same statement is
         // the SPEC §7.3 regeneration trigger. Mirrors Swift
