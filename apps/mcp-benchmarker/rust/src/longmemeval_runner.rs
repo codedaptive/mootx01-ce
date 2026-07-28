@@ -533,11 +533,11 @@ pub fn run_one_question(
 
     // ── Exact arm: moot_memory_search ─────────────────────────────────────────
     // ORDER IS LOAD-BEARING: the exact-arm query MUST run before any
-    // moot_consolidate. Consolidation subsumes source drawers into distilled
-    // factoids, after which the originals no longer surface in default search
-    // (proven 2026-07-27: LME q1 answer rank 2 pre-consolidate, absent from
-    // top-20 post-consolidate). Consolidating first contaminated the exact-arm
-    // measurement on two full grids. Twin of the Swift ordering note.
+    // moot_distill call (Wave 1 rename from moot_consolidate). Distillation
+    // writes on-row representations, after which the originals no longer surface
+    // in default search (proven 2026-07-27: LME q1 answer rank 2 pre-distill,
+    // absent from top-20 post-distill). Distilling first contaminated the
+    // exact-arm measurement on two full grids. Twin of the Swift ordering note.
     let mut exact_payload_text: Option<String> = None;
     let mut exact_query_latency: Option<f64> = None;
     let mut retrieved_uuids: Vec<String> = Vec::new();

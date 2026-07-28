@@ -55,7 +55,7 @@ let lmeMootVerbMap = EndpointConfig.VerbMap(
 /// Dense recall VerbMap for the token-efficiency benchmark.
 /// Uses `moot_recall_distilled`, which:
 ///   - Returns ~10-token distilled factoid prose per hit (capped at ~300 chars)
-///   - Requires `moot_consolidate` to be called BEFORE the first dense query
+///   - Requires `moot_distill` to be called BEFORE the first dense query (Wave 1 rename)
 ///   - Does NOT use a location constant arg (queries the estate-default wing)
 ///
 /// write:         moot_file_memory  (same ingest tool as lmeMootVerbMap)
@@ -514,12 +514,12 @@ func runLMEQuestions(
 
         // Exact arm query: moot_memory_search.
         // ORDER IS LOAD-BEARING: the exact-arm query MUST run before any
-        // moot_consolidate. Consolidation is not read-only — it subsumes source
-        // drawers into distilled factoids, after which the originals no longer
-        // surface in default search (proven 2026-07-27: LME q1 answer at rank 2
-        // pre-consolidate, absent from top-20 post-consolidate, 330 factoids).
-        // Consolidating first contaminates the exact-arm measurement; it
-        // depressed 1.1.x any@5 from ~0.85-shape to ~0.6 across two full grids.
+        // moot_distill call (Wave 1 rename from moot_consolidate). Distillation
+        // is not read-only — it writes on-row distilled representations, after
+        // which the originals no longer surface in default search (proven
+        // 2026-07-27: LME q1 answer at rank 2 pre-distill, absent from top-20
+        // post-distill, 330 rows). Distilling first contaminates the exact-arm
+        // measurement; it depressed 1.1.x any@5 from ~0.85-shape to ~0.6.
         var exactPayloadText: String? = nil
         var exactQueryLatency: Double? = nil
         var retrievedUUIDs: [String] = []
