@@ -193,7 +193,7 @@ struct V1ConformanceTests {
         // Prior 66 = interface + federation + recipe + lens + vault + maintenance:
         //   20th interface = moot_memory_get (Tier 1, fetch-drawer-by-ID).
         //   23rd lens = moot_lens_node_motion (diffusion node-layer lens).
-        //   11th recipe = moot_recollect (DA1 distillation).
+        //   11th recipe = moot_hunt_contradictions (Wave 1: moot_recollect removed).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
         #expect(tools.count == 74, "tools/list must return exactly 74 tools; got \(tools.count)")
     }

@@ -891,16 +891,22 @@ fn distill_tool() -> serde_json::Value {
 /// (SPEC §10.3): the exact-search recall path with the hydration selector
 /// pinned to `distilled`. Identical ranking to moot_memory_search; smaller
 /// payloads; per-hit token counts.
+/// Distilled-payload recall descriptor.
+///
+/// ACK-GATED: Wave 1 changed the contract (v2 semantics — exact-search geometry
+/// + distilled hydration, not a separate distilled tier). Calls without
+/// ack: "recall_distilled/v2" return a CONTRACT CHANGE NOTICE and do not execute.
 fn recall_distilled_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_distilled",
-        "description": "Distilled recall: normal search over originals, hydrated with each hit's DISTILLED representation (token-economical prose) instead of the full content — identical ranking to moot_memory_search, smaller payloads, per-hit token counts for context budgeting. Hits are the source memories themselves; call moot_memory_get with a returned id for the full verbatim body. Rows not yet distilled fall back to full content and are marked served_from_content (run moot_distill to populate them).",
+        "description": "Distilled recall (v2): normal search over originals, hydrated with each hit's DISTILLED representation (token-economical prose) instead of the full content — identical ranking to moot_memory_search, smaller payloads, per-hit token counts for context budgeting. Hits are the source memories themselves; call moot_memory_get with a returned id for the full verbatim body. Rows not yet distilled fall back to full content and are marked served_from_content (run moot_distill to populate them). CONTRACT CHANGE (Wave 1): v2 no longer queries a separate distilled tier; pass ack: \"recall_distilled/v2\" to confirm you want the new behavior.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "query": string_schema("The search query text — drives BM25 + vector recall."),
-                "limit": integer_schema("Max hits to return (default 20)."),
+                "query": string_schema("The search query text — drives BM25 + vector recall (same geometry as moot_memory_search)."),
+                "limit": integer_schema("Max results to return (default 20)."),
                 "filter": filter_schema(),
-                "echo_query": boolean_schema("Optional. When true, appends the query text to the response header. Default false — the AI already knows what it queried. Omit to use the default; null is invalid.")
+                "echo_query": boolean_schema("Optional. When true, appends the query text to the response header. Default false. Omit to use the default; null is invalid."),
+                "ack": string_schema("Contract-change acknowledgment token. This tool's behavior changed in Wave 1 (v2 semantics). Pass ack: \"recall_distilled/v2\" to confirm you want v2 behavior (normal exact-search geometry + distilled hydration). Without this token the call returns a CONTRACT CHANGE NOTICE and does not execute.")
             }),
             json!(["query"])
         )))

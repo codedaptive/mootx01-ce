@@ -114,12 +114,51 @@ const DISTILL: &str = "moot_distill";
 const CONSOLIDATE: &str = "moot_consolidate";
 /// Distilled-payload recall (§10.3): exact-search geometry + distilled
 /// hydration — mirrors Swift `RecipeTools.recallDistilledToolName`.
+/// ACK-GATED: requires ack: "recall_distilled/v2" (Wave 1 contract change).
 const RECALL_DISTILLED: &str = "moot_recall_distilled";
+/// Notice-only stub for the removed moot_recollect tool — mirrors Swift
+/// `RecipeTools.recollectToolName`. Not listed in tools/list; routed to
+/// dispatch so callers receive the removal notice.
+const RECOLLECT: &str = "moot_recollect";
 /// On-demand contradiction-hunt sweep — mirrors Swift
 /// `RecipeTools.huntContradictionsToolName`.
 const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 
-/// True when `name` is one of the recipe tools.
+// ---------------------------------------------------------------------------
+// Contract-change notice texts — byte-identical to Swift notice constants.
+// Both twins must produce the exact same wire text for any given notice so
+// callers cannot observe which server port handled the request.
+// ---------------------------------------------------------------------------
+
+/// Notice returned when moot_consolidate is called without ack: "moot_distill/p1".
+/// Byte-identical to Swift `RecipeTools.consolidateContractNotice`.
+const CONSOLIDATE_CONTRACT_NOTICE: &str = concat!(
+    "CONTRACT CHANGE NOTICE: you called moot_consolidate. Its behavior changed: ",
+    "renamed to moot_distill; now writes on-row distilled representations; ",
+    "factoid drawers and the distilled tier no longer exist. ",
+    r#"If the new behavior is what you want, reissue with ack: "moot_distill/p1"."#,
+);
+
+/// Notice returned when moot_recall_distilled is called without ack: "recall_distilled/v2".
+/// Byte-identical to Swift `RecipeTools.recallDistilledContractNotice`.
+const RECALL_DISTILLED_CONTRACT_NOTICE: &str = concat!(
+    "CONTRACT CHANGE NOTICE: you called moot_recall_distilled. Its behavior changed: ",
+    "v2 returns normal exact-search results hydrated with distilled representations; ",
+    "it no longer queries a separate distilled tier; run moot_distill first if rows are undistilled. ",
+    r#"If the new behavior is what you want, reissue with ack: "recall_distilled/v2"."#,
+);
+
+/// Notice returned for every call to the removed moot_recollect tool.
+/// Byte-identical to Swift `RecipeTools.recollectRemovedNotice`.
+const RECOLLECT_REMOVED_NOTICE: &str = concat!(
+    "moot_recollect was removed: its substrate (factoid drawers) was retired; ",
+    "recall hits now ARE source drawers; ",
+    "use moot_memory_search or moot_recall_distilled.",
+);
+
+/// True when `name` is one of the recipe tools (including dispatch-only stubs).
+/// `RECOLLECT` is in this set as a notice-only stub: it must reach dispatch so
+/// callers receive the removal notice; it is NOT listed in tools/list.
 pub fn is_recipe_tool(name: &str) -> bool {
     matches!(
         name,
@@ -134,6 +173,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | DISTILL
             | CONSOLIDATE
             | RECALL_DISTILLED
+            | RECOLLECT
             | HUNT_CONTRADICTIONS
     )
 }
@@ -144,6 +184,30 @@ pub fn dispatch(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    // ACK gates and notice-only stubs — fire before any registry/estate access.
+    // Mirrors the guard block in Swift RecipeTools.dispatch() that precedes
+    // the resolveHandle() call, ensuring zero side effects on missing/wrong ack.
+
+    // moot_recollect — notice-only stub. The tool was removed in Wave 1;
+    // its substrate (factoid drawers) was retired. Never executes.
+    if name == RECOLLECT {
+        return Ok(text_result(RECOLLECT_REMOVED_NOTICE));
+    }
+
+    // moot_consolidate — ACK-gated alias. Renamed to moot_distill in Wave 1.
+    // Callers must pass ack: "moot_distill/p1" to confirm new behavior.
+    if name == CONSOLIDATE && args.get("ack").and_then(|v| v.as_str()) != Some("moot_distill/p1") {
+        return Ok(text_result(CONSOLIDATE_CONTRACT_NOTICE));
+    }
+
+    // moot_recall_distilled — ACK-gated (v2 contract). Normal exact-search
+    // geometry + distilled hydration; no separate distilled tier.
+    if name == RECALL_DISTILLED
+        && args.get("ack").and_then(|v| v.as_str()) != Some("recall_distilled/v2")
+    {
+        return Ok(text_result(RECALL_DISTILLED_CONTRACT_NOTICE));
+    }
+
     match name {
         LIST_LENSES => Ok(run_list_recipes()),
         LIST_RECIPES_CATALOG => Ok(run_list_recipes_catalog()),
@@ -153,8 +217,11 @@ pub fn dispatch(
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
-        // moot_consolidate is the SPEC §3 compatibility alias — identical handler.
+        // moot_consolidate reaches here only when ack: "moot_distill/p1" was
+        // present (ACK gate above). Runs the same handler as moot_distill.
         DISTILL | CONSOLIDATE => run_distill_tool(args, registry),
+        // moot_recall_distilled reaches here only when ack: "recall_distilled/v2"
+        // was present (ACK gate above).
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
         HUNT_CONTRADICTIONS => run_hunt_contradictions_tool(args, registry),
         _ => Err(JSONRPCError::new(
