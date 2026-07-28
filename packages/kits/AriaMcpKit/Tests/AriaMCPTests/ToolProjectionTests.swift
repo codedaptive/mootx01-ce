@@ -69,8 +69,8 @@ struct ToolProjectionTests {
         // moot_review_tunnel) + 3 dataset tools (MX-TAB-7: moot_file_dataset,
         // moot_dataset_query, moot_dataset_stats) + 4 packet tools (FAB5-I2:
         // moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) = 75.
-        #expect(ToolProjection.tools(environment: [:]).count == 75,
-                "tools() must return exactly 75 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        #expect(ToolProjection.tools(environment: [:]).count == 74,
+                "tools() must return exactly 74 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.

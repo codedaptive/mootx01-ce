@@ -168,7 +168,7 @@ struct V1ConformanceTests {
     /// moot_dataset_query, moot_dataset_stats).
     /// 71 → 75: +4 packet tools (FAB5-I2: moot_file_packet, moot_packet_get,
     /// moot_packet_list, moot_packet_lineage).
-    @Test func v1ToolsListReturns75Tools() async throws {
+    @Test func v1ToolsListReturns74Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -195,7 +195,7 @@ struct V1ConformanceTests {
         //   23rd lens = moot_lens_node_motion (diffusion node-layer lens).
         //   11th recipe = moot_recollect (DA1 distillation).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
-        #expect(tools.count == 75, "tools/list must return exactly 75 tools; got \(tools.count)")
+        #expect(tools.count == 74, "tools/list must return exactly 74 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

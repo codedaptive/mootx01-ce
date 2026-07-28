@@ -106,23 +106,18 @@ const RECALL_PRECISE: &str = "moot_recall_precise";
 const RECALL_SHAPED: &str = "moot_recall_shaped";
 /// On-demand dream tool — mirrors Swift `RecipeTools.dreamToolName`.
 const DREAM: &str = "moot_dream";
-/// Intra-item distillation sweep — mirrors Swift `RecipeTools.consolidateToolName`.
+/// Per-item distillation sweep (SPEC_DISTILLATION_STORAGE §3) — mirrors
+/// Swift `RecipeTools.distillToolName`.
+const DISTILL: &str = "moot_distill";
+/// Compatibility alias for moot_distill (SPEC §3): identical handler; NOT
+/// listed in tools/list. Mirrors Swift `RecipeTools.consolidateToolName`.
 const CONSOLIDATE: &str = "moot_consolidate";
-/// Distilled recall via Hamming NN — mirrors Swift `RecipeTools.recallDistilledToolName`.
+/// Distilled-payload recall (§10.3): exact-search geometry + distilled
+/// hydration — mirrors Swift `RecipeTools.recallDistilledToolName`.
 const RECALL_DISTILLED: &str = "moot_recall_distilled";
-/// Fan-out from a distilled factoid to its source drawers — mirrors Swift
-/// `RecipeTools.recollectToolName`.
-const RECOLLECT: &str = "moot_recollect";
 /// On-demand contradiction-hunt sweep — mirrors Swift
 /// `RecipeTools.huntContradictionsToolName`.
 const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
-
-/// Preview cap for distilled prose output. Distilled factoids are compressed
-/// by definition, but `m.prose` can still be arbitrarily long. Cap at 300 chars
-/// to prevent a single high-confidence factoid from overwhelming the LLM context.
-/// Normal drawers use 120 chars (see `run_memory_search`). 300 is generous.
-/// Parity: mirrors `distilledProseCap` in Swift `ToolDispatch.swift`.
-const DISTILLED_PROSE_PREVIEW_CAP: usize = 300;
 
 /// True when `name` is one of the recipe tools.
 pub fn is_recipe_tool(name: &str) -> bool {
@@ -136,9 +131,9 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RECALL_PRECISE
             | RECALL_SHAPED
             | DREAM
+            | DISTILL
             | CONSOLIDATE
             | RECALL_DISTILLED
-            | RECOLLECT
             | HUNT_CONTRADICTIONS
     )
 }
@@ -158,9 +153,9 @@ pub fn dispatch(
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
-        CONSOLIDATE => run_consolidate_tool(args, registry),
+        // moot_consolidate is the SPEC §3 compatibility alias — identical handler.
+        DISTILL | CONSOLIDATE => run_distill_tool(args, registry),
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
-        RECOLLECT => run_recollect_tool(args, registry),
         HUNT_CONTRADICTIONS => run_hunt_contradictions_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
@@ -1089,17 +1084,18 @@ fn parse_uuid_array(
 // moot_consolidate
 // ---------------------------------------------------------------------------
 
-/// Run one intra-item distillation sweep via the CognitionKit `run_consolidate`
-/// recipe body.
+/// Run one per-item distillation sweep via the CognitionKit `run_distill`
+/// recipe body (SPEC_DISTILLATION_STORAGE §3/§7.1). Handles both
+/// `moot_distill` and its `moot_consolidate` compatibility alias.
 ///
-/// Mirrors Swift `RecipeTools.runConsolidate`. Routes through the CognitionKit
-/// library recipe surface (`cognition_kit::run_consolidate`) rather than calling
-/// `EstateCoordinator::distill_items_sweep` directly — parity with the Swift handler
-/// which calls `Consolidate.run(input:estate:kit:)` rather than the GLK verb directly.
+/// Mirrors Swift `RecipeTools.runDistill`. Routes through the CognitionKit
+/// library recipe surface (`cognition_kit::run_distill`) rather than calling
+/// `EstateCoordinator::distill_items_sweep` directly — parity with the Swift
+/// handler which calls `Distill.run(input:estate:kit:)`.
 ///
 /// Returns text in the same format as the Swift handler:
-///   "moot_consolidate: sweep complete\nfactoidsProduced: N"
-fn run_consolidate_tool(
+///   "moot_distill: sweep complete\nitemsDistilled: N"
+fn run_distill_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
@@ -1107,21 +1103,21 @@ fn run_consolidate_tool(
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
     // Route through the CognitionKit library recipe — parity with Swift's
-    // `Consolidate.run(input:estate:kit:)` call chain.
-    let input = cognition_kit::ConsolidateInput::default();
-    let out = cognition_kit::run_consolidate(&input, &coord, &estate.handle, now)
+    // `Distill.run(input:estate:kit:)` call chain.
+    let input = cognition_kit::DistillInput::default();
+    let out = cognition_kit::run_distill(&input, &coord, &estate.handle, now)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
                 format!(
-                    "moot_consolidate: sweep failed: {}",
+                    "moot_distill: sweep failed: {}",
                     crate::interface_tools::describe_verb_dispatch_error(&e)
                 ),
             )
         })?;
     Ok(text_result(&format!(
-        "moot_consolidate: sweep complete\nfactoidsProduced: {}",
-        out.factoids_produced
+        "moot_distill: sweep complete\nitemsDistilled: {}",
+        out.items_distilled
     )))
 }
 
@@ -1129,14 +1125,19 @@ fn run_consolidate_tool(
 // moot_recall_distilled
 // ---------------------------------------------------------------------------
 
-/// Recall distilled factoids for `query` via Hamming NN on the
-/// `distillation-features-v1` VectorKit lane.
+/// Distilled-payload recall (SPEC_DISTILLATION_STORAGE §10.3): the
+/// exact-search recall path with the hydration selector pinned to
+/// `distilled`.
 ///
 /// Mirrors Swift `RecipeTools.runRecallDistilled`. Routes through the
-/// CognitionKit `run_distilled_recall` library recipe, which produces the
-/// query fingerprint, calls `find_nearest_distilled`, parses DIST headers, and
-/// classifies discrimination using confidence-score thresholds (parity with
-/// Swift DistilledRecall.run). Returns structured text for the MCP caller.
+/// CognitionKit `run_distilled_recall` library recipe (exact-search
+/// geometry + §10.1 hydration). Output format matches the Swift handler:
+///   found N memory(s) [distilled]
+///   {id}  [{room}]  {distilled text or content fallback}
+///       tokens: N | source: distilled
+///       tokens: — | source: content (not yet distilled)
+///   discrimination: {level} — {description}
+///   [hint when any fallback rows were served]
 fn run_recall_distilled_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -1146,21 +1147,13 @@ fn run_recall_distilled_tool(
     // Clamp to [1, 500]: same DoS gate as moot_memory_search and the other recall
     // tools. Parity: Swift runRecallDistilled uses ToolDispatcher.clampLimit.
     let limit = crate::dispatch::clamp_limit(
-        optional_integer(args, "limit")?, "limit", 10, crate::dispatch::LIMIT_HARD_CEILING
+        optional_integer(args, "limit")?, "limit", 20, crate::dispatch::LIMIT_HARD_CEILING
     )?;
     // Decode the caller's ARIA adjective filter — parity with Swift's
-    // `decodeSingleFilter(args["filter"])` in runRecallDistilled. The filter
-    // composes into the RecallFrame alongside the sensitivity ceiling enforced
-    // by insert_defaults; it can only be MORE restrictive, never less.
+    // `decodeSingleFilter(args["filter"])`.
     let filter = decode_precise_filter(args)?;
-    // wall_now() supplies the deterministic clock token required by the
-    // BitmapEvaluator inside coord.recall(). Parity: Swift awaits the async
-    // kit call which resolves now internally; Rust receives it as a parameter.
     let now = crate::dispatch::wall_now();
-    // echo_query: opt-in flag — when true, appends the query text to the
-    // response header ("found N distilled factoid(s) for: {query}"). Default
-    // false — the AI client already knows what it queried; echoing it adds
-    // ~120+ chars of pure token tax on every dense recall call.
+    // echo_query: opt-in header echo — default false (token economy).
     // Parity: Swift runRecallDistilled uses the same flag.
     let echo_query = optional_bool(args, "echo_query")?.unwrap_or(false);
 
@@ -1180,48 +1173,38 @@ fn run_recall_distilled_tool(
             )
         })?;
 
-    if out.matches.is_empty() {
-        let header = if echo_query {
-            format!("found 0 distilled factoid(s) for: {query}")
-        } else {
-            "found 0 distilled factoid(s)".to_owned()
-        };
-        return Ok(text_result(&format!(
-            "{header}\ndiscrimination: not_found"
-        )));
-    }
+    // Resolve room display names via the node tree, matching
+    // run_memory_search's resolution path.
+    let node_ids: Vec<String> = out.matches.iter().map(|m| m.parent_node_id.clone()).collect();
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &node_ids);
 
-    let first_line = if echo_query {
-        format!("found {} distilled factoid(s) for: {}", out.matches.len(), query)
+    let header = if echo_query {
+        format!("found {} memory(s) [distilled] for: {}", out.matches.len(), query)
     } else {
-        format!("found {} distilled factoid(s)", out.matches.len())
+        format!("found {} memory(s) [distilled]", out.matches.len())
     };
-    let mut lines = vec![first_line];
-    for (idx, m) in out.matches.iter().enumerate() {
-        lines.push(String::new());
-        lines.push(format!("[{}] drawer_id: {}", idx + 1, m.id));
-        // Preview cap: distilled prose can be arbitrarily long; cap at 300 chars to
-        // prevent context-window overflow. Parity: Swift distilledProseCap = 300.
-        let prose: String = m.prose.chars().take(DISTILLED_PROSE_PREVIEW_CAP).collect();
-        lines.push(format!("    {prose}"));
-        // Build metadata line — snr and delta are shown when present.
-        let mut meta = format!(
-            "    confidence: {:.2} | sources: {} | snr: {:.1}",
-            m.confidence, m.source_count, m.snr,
-        );
-        if let Some(ref dt) = m.delta_type {
-            meta.push_str(&format!(" | delta: {dt}"));
+    let mut lines = vec![header];
+    let mut any_fallback = false;
+    for m in out.matches.iter().take(50) {
+        let room = node_names
+            .get(&m.parent_node_id)
+            .map(|(_, room)| room.clone())
+            .unwrap_or_else(|| {
+                if m.parent_node_id.is_empty() { "?".to_string() } else { m.parent_node_id.clone() }
+            });
+        lines.push(format!("{}  [{}]  {}", m.id, room, m.text));
+        // Per-hit metadata: token count (§6 budgeting) and the §10.2
+        // served-from marker so clients can distinguish "distilled
+        // representation" from "fallback".
+        if m.served_from_content {
+            any_fallback = true;
+            lines.push("    tokens: — | source: content (not yet distilled)".to_string());
+        } else {
+            let tokens = m.token_count.map(|t| t.to_string()).unwrap_or_else(|| "—".to_string());
+            lines.push(format!("    tokens: {tokens} | source: distilled"));
         }
-        if m.uncertain {
-            meta.push_str(" [uncertain]");
-        }
-        lines.push(meta);
     }
-
-    lines.push(String::new());
-    // Discrimination signal from confidence-score thresholds (parity with Swift
-    // DistilledRecall.classifyDistilledDiscrimination):
-    //   HIGH_MARGIN=0.25, LOW_MARGIN=0.05, LOW_SPREAD=0.15.
+    // Discrimination signal mirrors moot_memory_search phrasing.
     let discrimination_line = match out.discrimination {
         cognition_kit::DistilledDiscriminationLevel::Single =>
             "discrimination: single — only one result.",
@@ -1233,76 +1216,16 @@ fn run_recall_distilled_tool(
             "discrimination: low — results are effectively unranked.",
     };
     lines.push(discrimination_line.to_owned());
-
-    Ok(text_result(&lines.join("\n")))
-}
-
-// ---------------------------------------------------------------------------
-// moot_recollect
-// ---------------------------------------------------------------------------
-
-/// Fan-out from a distilled factoid drawer to its source drawers.
-///
-/// Mirrors Swift `RecipeTools.runRecollect`. Routes through the CognitionKit
-/// `run_recollect` library recipe, which reads the factoid, validates the
-/// DIST header, follows `_distilled_from` tunnels, and returns source content.
-/// Maps `RecollectError` variants to structured ARIA tool result text.
-fn run_recollect_tool(
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve_direct(args)?;
-    let drawer_id = require_string(args, "drawer_id")?;
-    // wall_now() supplies the deterministic clock token required by the
-    // BitmapEvaluator inside coord.recall(). The sensitivity ceiling gate
-    // (secfix/punt-g2 part 2) requires now to evaluate liveness/state on
-    // each candidate drawer.
-    let now = crate::dispatch::wall_now();
-
-    let coord = estate.coord.lock().unwrap();
-    let input = cognition_kit::RecollectInput::new(drawer_id);
-    let out = match cognition_kit::run_recollect(&input, &coord, &estate.handle, now) {
-        Ok(o) => o,
-        Err(cognition_kit::RecollectError::FactoidNotFound { id }) => {
-            return Ok(error_result(&format!("recollect: drawer not found: {id}")));
-        }
-        Err(cognition_kit::RecollectError::NotADistilledDrawer { id }) => {
-            return Ok(error_result(&format!("recollect: drawer is not a distilled factoid: {id}")));
-        }
-        Err(cognition_kit::RecollectError::NoSourceTunnels { id }) => {
-            // Factoid valid but no tunnels — return structured error, not panic.
-            // Matches Swift's `throw RecollectError.noSourceTunnels(id:)` propagation.
-            return Ok(error_result(&format!("recollect: no _distilled_from tunnels for factoid: {id}")));
-        }
-        Err(cognition_kit::RecollectError::VerbDispatch(msg)) => {
-            return Err(JSONRPCError::new(
-                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
-                format!("recollect: verb dispatch failed: {msg}"),
-            ));
-        }
-    };
-
-    let mut lines = vec![
-        format!("expand: {}", out.factoid_id),
-        format!("factoid: {}", out.prose),
-    ];
-    // Build metadata line — delta is optional.
-    let mut meta = format!("confidence: {:.2} | sources: {}", out.confidence, out.source_count);
-    if let Some(ref dt) = out.delta_type {
-        meta.push_str(&format!(" | delta: {dt}"));
+    if any_fallback {
+        // SPEC §10.3 fallback notice: results still return, served from
+        // content, with a hint to populate the representations.
+        lines.push(
+            "hint: some results are not yet distilled and were served from full \
+             content. Run moot_distill to populate distilled representations."
+                .to_string(),
+        );
     }
-    lines.push(meta);
 
-    if out.sources.is_empty() {
-        lines.push(String::new());
-        lines.push("sources: none found".to_string());
-    } else {
-        for (n, src) in out.sources.iter().enumerate() {
-            lines.push(String::new());
-            lines.push(format!("source [{}] — room: {} | id: {}", n + 1, src.room, src.id));
-            lines.push(src.content.clone());
-        }
-    }
     Ok(text_result(&lines.join("\n")))
 }
 
