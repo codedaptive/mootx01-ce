@@ -2374,6 +2374,31 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    /// Count of active drawers still awaiting distillation (§7.1
+    /// eligibility predicate). Projected to `id` only — no text column is
+    /// materialized. Mirrors Swift `DrawerStore.countUndistilled`.
+    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::Or(vec![
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "distilled")),
+                StoragePredicate::Neq(
+                    Column::new(T_DRAWERS, "distilled_pipeline_version"),
+                    TypedValue::Text(pipeline_version.to_string()),
+                ),
+            ]),
+        ]);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
+    }
+
     /// Zero the `content` column for every row in the `drawers` table.
     /// Used by `GLKCoordinator::destroy` to erase all drawer content blobs
     /// from LocusKit's SQLite storage as part of the estate destruction
@@ -4614,6 +4639,9 @@ impl DrawerStore for InMemoryDrawerStore {
             token_count,
             generated_at,
         )
+    }
+    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.inner.count_undistilled(pipeline_version)
     }
     fn seal_expunge_audit(
         &self,

@@ -4,17 +4,31 @@
 // GeniusLocusKit accessor that assembles the status of every drain the estate
 // currently runs.
 //
-// Today the substrate runs exactly ONE drain: the corpus encode/ingest drain
-// (CorpusKit's CorpusIngestQueue worker, which encodes captured/imported text
-// into the BM25 + vector lanes asynchronously). `drainStatuses(_:)` returns a
-// LIST so that when additional long-running drains are added later, each
-// appends its own entry and the report surfaces all of them with no wire
-// reshape. There is no speculative drain machinery here — the list is built
-// from the drains that actually exist, which today is one.
+// The substrate reports TWO drains:
+//
+//   1. "corpus_encode" — CorpusKit's encode drain (BM25 + vector lanes).
+//      Since the drain-stage distillation rider (SPEC_DISTILLATION_STORAGE
+//      §7.1), each encode job also distills its drawers BEFORE the job is
+//      replied, so this stream's frontiers cover capture-path distillation.
+//   2. "distillation" — the §7.1 accounting surface: `pending` is the
+//      count of active drawers whose representation is NULL or was
+//      produced under a stale pipeline contract (the sweep-eligibility
+//      predicate measured off the rows themselves — stronger than a
+//      queue-depth proxy, and it also covers lazy regeneration after a
+//      pipeline-version bump or an in-place content patch). `inFlight` is
+//      always 0: eligible rows are either awaiting the hourly
+//      distillation signal / a `moot_distill` sweep, or riding an encode
+//      job already counted by "corpus_encode". "Fully drained" therefore
+//      cannot read true while any row still owes a representation
+//      (FINDING_11X_MAINTENANCE_WALK constraint 6).
+//
+// `drainStatuses(_:)` returns a LIST so future drains append entries with
+// no wire reshape.
 
 import CorpusKit
 import Foundation
 import LocusKit
+import SubstrateML
 
 /// The composition-layer encode-speed knob so consumers that import only
 /// GeniusLocusKit (VaultKit's PalaceBridge, AriaMcpKit) can name the type and
@@ -84,7 +98,6 @@ extension GeniusLocusKit {
 
         // Drain 1 of N: the corpus encode/ingest drain. Present only when a
         // Corpus is registered for this estate (a provisioned/wired GLK estate).
-        // Future drains append their own entries below this one.
         if let corpus = corpusKits[handle] {
             let depth = try await corpus.ingestQueueDepth()
             let encodedChunks = try await corpus.count()
@@ -95,6 +108,22 @@ extension GeniusLocusKit {
                 detail: "encoded_chunks: \(encodedChunks)"
             ))
         }
+
+        // Drain 2 of N: distillation accounting (SPEC §7.1). Present on
+        // every estate — distillation is a row-level obligation, not a
+        // corpus feature. `pending` is the eligibility-predicate count;
+        // rows in the encode queue are also counted here until their
+        // drain-stage distillation lands (a truthful double-count for the
+        // boolean "is anything still draining?" barrier).
+        let estate = try estate(for: handle)
+        let undistilled = try await estate.countUndistilled(
+            pipelineVersion: DistillationPipelineVersion.current)
+        statuses.append(DrainStatus(
+            name: "distillation",
+            pending: undistilled,
+            inFlight: 0,
+            detail: "pipeline: \(DistillationPipelineVersion.current)"
+        ))
 
         return statuses
     }

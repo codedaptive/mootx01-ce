@@ -381,6 +381,9 @@ impl DrawerStore for SqliteDrawerStore {
             generated_at,
         )
     }
+    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.0.count_undistilled(pipeline_version)
+    }
     fn seal_expunge_audit(
         &self,
         event: &substrate_lib::verbs::AuditEvent,

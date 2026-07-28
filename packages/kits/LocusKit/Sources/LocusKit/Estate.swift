@@ -464,6 +464,14 @@ public actor Estate {
             at: generatedAt)
     }
 
+    /// Count of active drawers still awaiting distillation (the §7.1
+    /// eligibility predicate as an aggregate). Estate-level pass-through
+    /// over `DrawerStore.countUndistilled` — the distillation
+    /// drain-accounting observable GLK's `drainStatuses` reports.
+    public func countUndistilled(pipelineVersion: String) async throws -> Int {
+        try await store.countUndistilled(pipelineVersion: pipelineVersion)
+    }
+
     // MARK: - Drawer enumeration
 
     /// Enumerate every drawer in the estate. Used by cross-row

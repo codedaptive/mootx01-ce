@@ -195,4 +195,32 @@ struct DistillationDrainStageTests {
         let postRows = try await estate.allDrawers()
         #expect(postRows.allSatisfy { $0.distilled != nil && $0.distilledTokenCount != nil })
     }
+
+    // MARK: - §7.1 drain accounting (moot_drain_status surface)
+
+    @Test("drainStatuses reports distillation pending and reaches idle only when fully distilled")
+    func drainStatusesIncludesDistillation() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        // Impatient captures: searchable but undistilled (no queue job, no
+        // onEncoded) — the pre-sweep state the accounting must expose.
+        for body in ["First fact stands alone here.", "Second fact stands alone here."] {
+            _ = try await kit.capture(handle, captureFrame(body), mode: .impatient)
+        }
+
+        let before = try await kit.drainStatuses(handle)
+        let distillBefore = try #require(before.first { $0.name == "distillation" },
+            "the distillation drain must be reported on every estate")
+        #expect(distillBefore.pending >= 2,
+            "undistilled rows must count as pending — fully-drained must not false-positive")
+        #expect(distillBefore.isDraining)
+
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn,
+            now: Date(timeIntervalSince1970: 1_750_000_000), limit: nil)
+
+        let after = try await kit.drainStatuses(handle)
+        let distillAfter = try #require(after.first { $0.name == "distillation" })
+        #expect(distillAfter.pending == 0, "a swept estate reads fully distilled")
+        #expect(!distillAfter.isDraining)
+    }
 }

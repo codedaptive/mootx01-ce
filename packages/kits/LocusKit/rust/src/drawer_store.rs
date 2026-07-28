@@ -645,6 +645,17 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Count of active drawers still awaiting distillation — the §7.1
+    /// eligibility predicate as an aggregate (not tombstoned, non-empty
+    /// content, `distilled` NULL or stale pipeline version). The
+    /// distillation drain-accounting observable reported by the GLK
+    /// coordinator's `drain_statuses`. Mirrors Swift `countUndistilled`.
+    fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_undistilled not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Append a previously-produced expunge audit event to the audit log.
     ///
     /// Called by the GLK orchestration path after step 2 (cross-kit vector
@@ -1930,6 +1941,9 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
             token_count,
             generated_at,
         )
+    }
+    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().count_undistilled(pipeline_version)
     }
     fn seal_expunge_audit(
         &self,

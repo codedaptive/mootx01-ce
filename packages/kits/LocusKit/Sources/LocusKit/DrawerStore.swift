@@ -4300,6 +4300,35 @@ public actor DrawerStore {
         )
     }
 
+    /// Count of active drawers still awaiting distillation — the §7.1
+    /// eligibility predicate as an aggregate: not tombstoned, non-empty
+    /// content, and `distilled` NULL or produced under a different pipeline
+    /// contract. This is the drain-accounting observable
+    /// (SPEC_DISTILLATION_STORAGE §7.1 / FINDING_11X_MAINTENANCE_WALK
+    /// constraint 6): `drainStatuses` reports it as the distillation
+    /// drain's `pending`, so "fully drained" cannot read true while any
+    /// row still owes a representation — measured off the rows themselves,
+    /// not a queue-depth proxy. Empty-content active rows (gate-rejected
+    /// erasure scrubs) are excluded: they carry nothing to distill.
+    /// Projected to `id` only, so no text column is materialized.
+    /// Mirrors Rust `count_undistilled`.
+    public func countUndistilled(pipelineVersion: String) async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .neq(Column(table: "drawers", name: "content"), .text("")),
+                .or([
+                    .isNull(Column(table: "drawers", name: "distilled")),
+                    .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
+                         .text(pipelineVersion)),
+                ]),
+            ]),
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        return rows.count
+    }
+
     // MARK: - Validation
 
     private static func validateNonEmpty(_ value: String, label: String) throws {

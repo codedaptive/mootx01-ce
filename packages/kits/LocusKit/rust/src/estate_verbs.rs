@@ -1362,6 +1362,14 @@ impl Estate {
         )
     }
 
+    /// Count of active drawers still awaiting distillation (§7.1
+    /// eligibility predicate as an aggregate). Estate-level pass-through
+    /// over `DrawerStore::count_undistilled` — the distillation
+    /// drain-accounting observable. Mirrors Swift `Estate.countUndistilled`.
+    pub fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.store.count_undistilled(pipeline_version)
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is

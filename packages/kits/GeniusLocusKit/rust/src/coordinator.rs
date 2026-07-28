@@ -85,7 +85,7 @@ use locus_kit::recall_trace_item::RecallTraceItem;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::RecallFrame;
-use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame, TunnelCaptureFrame};
+use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame};
 // GLK-level LearnFrame — the public verb boundary type that callers supply.
 // Mapped to LocusLearnFrame at the dispatch boundary (same pattern as
 // ProposeFrame → LocusProposeFrame). Imported here for the `learn` method
@@ -1675,6 +1675,31 @@ impl EstateCoordinator {
                 detail: Some(format!("encoded_chunks: {encoded_chunks}")),
             });
         }
+
+        // Drain 2 of N: distillation accounting (SPEC_DISTILLATION_STORAGE
+        // §7.1). Present on every estate — distillation is a row-level
+        // obligation, not a corpus feature. `pending` is the §7.1
+        // eligibility-predicate count measured off the rows themselves
+        // (stronger than a queue-depth proxy; also covers lazy
+        // regeneration after a pipeline-version bump). "Fully drained"
+        // therefore cannot read true while any row still owes a
+        // representation (FINDING_11X_MAINTENANCE_WALK constraint 6).
+        // Mirrors the Swift drainStatuses entry.
+        let estate = self.estate_for(handle)?;
+        let undistilled = estate
+            .count_undistilled(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("count_undistilled: {e:?}"),
+            })?;
+        statuses.push(DrainStatus {
+            name: "distillation".to_string(),
+            pending: undistilled,
+            in_flight: 0,
+            detail: Some(format!(
+                "pipeline: {}",
+                substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION
+            )),
+        });
 
         Ok(statuses)
     }

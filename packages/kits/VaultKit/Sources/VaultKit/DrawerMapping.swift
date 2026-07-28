@@ -711,26 +711,11 @@ public struct DrawerMapping: Sendable {
         let drawerWing = drawerNodeNames[drawer.parentNodeId]?.wing ?? ""
         let drawerRoom = drawerNodeNames[drawer.parentNodeId]?.room ?? ""
         var tunnelsCreated = 0
-        if let sourcesStr = note.frontmatter["distilled_from_sources"], !sourcesStr.isEmpty {
-            for source in sourcesStr.split(separator: ";").map(String.init) {
-                let parts = source.split(separator: "/", maxSplits: 1).map(String.init)
-                guard parts.count == 2 else { continue }
-                let targetWing = parts[0]; let targetRoom = parts[1]
-                let signature = Self.tunnelSignature(
-                    sourceWing: drawerWing, sourceRoom: drawerRoom,
-                    targetRoom: targetRoom, label: "_distilled_from", kind: .references)
-                guard !existingTunnelSignatures.contains(signature) else { continue }
-                let tunnelFrame = TunnelCaptureFrame(
-                    sourceWing: drawerWing, sourceRoom: drawerRoom,
-                    targetWing: targetWing, targetRoom: targetRoom,
-                    label: "_distilled_from", addedBy: frame.addedBy,
-                    sourceDrawerId: drawer.id, targetDrawerId: nil,
-                    kind: .references, originClass: .imported)
-                _ = try await estate.capture(tunnelFrame)
-                existingTunnelSignatures.insert(signature)
-                tunnelsCreated += 1
-            }
-        }
+        // `_distilled_from` reconstruction retired (SPEC_DISTILLATION_STORAGE
+        // §11.2/§13.2): the factoid tier no longer exists on 1.1.x and NO
+        // new-write path may create `_distilled_from` tunnels. A
+        // `distilled_from_sources` frontmatter key in an old export is
+        // ignored; representations regenerate from content on sweep (§2).
         for link in note.links {
             let targetRoom = link.target.isEmpty ? "unresolved" : link.target
             let signature = Self.tunnelSignature(
@@ -974,45 +959,11 @@ public struct DrawerMapping: Sendable {
         let drawerRoom = drawerNodeNames[drawer.parentNodeId]?.room ?? ""
         var tunnelsCreated = 0
 
-        // Bug N fix — reconstruct _distilled_from provenance tunnels from frontmatter.
-        // On export these tunnels were excluded from `note.links` (which rides into body
-        // text) and encoded as "targetWing/targetRoom" pairs in the `distilled_from_sources`
-        // frontmatter key (semicolon-separated). Reconstruct each pair as a real
-        // TunnelCaptureFrame so the provenance graph survives the round-trip without
-        // injecting any text into the drawer's content field.
-        if let sourcesStr = note.frontmatter["distilled_from_sources"], !sourcesStr.isEmpty {
-            for source in sourcesStr.split(separator: ";").map(String.init) {
-                // Each entry is "targetWing/targetRoom"; split on the first "/" only
-                // so room paths containing "/" survive intact.
-                let parts = source.split(separator: "/", maxSplits: 1).map(String.init)
-                guard parts.count == 2 else { continue }
-                let targetWing = parts[0]
-                let targetRoom = parts[1]
-                let signature = Self.tunnelSignature(
-                    sourceWing: drawerWing,
-                    sourceRoom: drawerRoom,
-                    targetRoom: targetRoom,
-                    label: "_distilled_from",
-                    kind: .references
-                )
-                guard !existingTunnelSignatures.contains(signature) else { continue }
-                let tunnelFrame = TunnelCaptureFrame(
-                    sourceWing: drawerWing,
-                    sourceRoom: drawerRoom,
-                    targetWing: targetWing,
-                    targetRoom: targetRoom,
-                    label: "_distilled_from",
-                    addedBy: frame.addedBy,
-                    sourceDrawerId: drawer.id,
-                    targetDrawerId: nil,
-                    kind: .references,
-                    originClass: .imported
-                )
-                _ = try await estate.capture(tunnelFrame)
-                existingTunnelSignatures.insert(signature)
-                tunnelsCreated += 1
-            }
-        }
+        // `_distilled_from` reconstruction retired (SPEC_DISTILLATION_STORAGE
+        // §11.2/§13.2): the factoid tier no longer exists on 1.1.x and NO
+        // new-write path may create `_distilled_from` tunnels. A
+        // `distilled_from_sources` frontmatter key in an old export is
+        // ignored; representations regenerate from content on sweep (§2).
 
         // Create tunnels for each wikilink, skipping any whose stable
         // endpoint+label signature already exists (re-import dedup; the
