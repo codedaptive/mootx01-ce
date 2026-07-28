@@ -7,7 +7,7 @@
 // agent reads what recipes exist and triggers them, and the human-in-the-
 // loop confirms the migration promotion.
 //
-// Eleven recipe tools ship here:
+// Ten listed recipe tools ship here; two are dispatch-only (alias/stub):
 //   - moot_list_lenses           → ProjectedTool descriptor enumeration
 //                                   (LensTools + Tier 6 RecipeTools — read)
 //   - moot_list_recipes          → RecipeCatalog descriptor enumeration
@@ -19,8 +19,11 @@
 //                                   promotion — B-3)
 //   - moot_confirm_migration     → MigrationBenchmark.confirmPromotion
 //                                   by branch id (the human-gated write)
-//   - moot_dream, moot_consolidate, moot_recall_distilled, moot_recollect
-//                                 → distillation-family and Brain-layer tools
+//   - moot_dream, moot_distill, moot_recall_distilled
+//                                 → Brain-layer and distillation tools
+//   - moot_consolidate           → dispatch alias for moot_distill;
+//                                   ACK-gated (contract change); not listed
+//   - moot_recollect             → notice-only stub; tool removed; not listed
 //
 // The 23 lens tools (16 reasoning/federated, 4 temporal/information-theoretic,
 // 3 analytics: moot_lens_associations, moot_lens_concepts, moot_lens_apriori)
@@ -76,15 +79,36 @@ enum RecipeTools {
     /// to the Distill recipe → GeniusLocusKit.distillItemsSweep.
     static let distillToolName = "moot_distill"
     /// Compatibility alias for `moot_distill` (SPEC §3): resolves to the
-    /// identical handler; NOT listed in tools/list (moot_distill is the
-    /// primary name). The alias's removal rides Phase 2, when the multi-item
-    /// consolidation feature claims the `consolidate` name for its own tool.
+    /// identical handler after ACK validation; NOT listed in tools/list
+    /// (moot_distill is the primary name). ACK token: "moot_distill/p1".
     static let consolidateToolName = "moot_consolidate"
     /// Distilled-payload recall (SPEC §10.3): exact-search geometry over
     /// originals with the hydration selector pinned to `distilled` —
     /// identical ranking to exact search, smaller payloads, per-hit token
-    /// counts.
+    /// counts. ACK-gated (contract changed in Wave 1); token: "recall_distilled/v2".
     static let recallDistilledToolName = "moot_recall_distilled"
+    /// Removed tool: its substrate (factoid drawers) was retired with the
+    /// factoid tier. Reinstated as a dispatch-only notice stub so stale
+    /// clients receive a clear explanation rather than a methodNotFound error.
+    /// Never listed in tools/list; never executes regardless of arguments.
+    static let recollectToolName = "moot_recollect"
+
+    // MARK: - Contract-change notice texts
+    //
+    // These strings are wire text: they must be byte-identical between Swift
+    // and Rust (see packages/kits/AriaMcpKit/rust/src/recipe_tools.rs).
+
+    /// Notice returned when moot_consolidate is called without the correct ack
+    /// token. Instructs the caller to reissue with ack: "moot_distill/p1".
+    static let consolidateContractNotice = #"CONTRACT CHANGE NOTICE: you called moot_consolidate. Its behavior changed: renamed to moot_distill; now writes on-row distilled representations; factoid drawers and the distilled tier no longer exist. If the new behavior is what you want, reissue with ack: "moot_distill/p1"."#
+
+    /// Notice returned when moot_recall_distilled is called without the correct
+    /// ack token. Instructs the caller to reissue with ack: "recall_distilled/v2".
+    static let recallDistilledContractNotice = #"CONTRACT CHANGE NOTICE: you called moot_recall_distilled. Its behavior changed: v2 returns normal exact-search results hydrated with distilled representations; it no longer queries a separate distilled tier; run moot_distill first if rows are undistilled. If the new behavior is what you want, reissue with ack: "recall_distilled/v2"."#
+
+    /// Notice returned for every call to the removed moot_recollect tool.
+    /// Returned regardless of any argument the caller supplies.
+    static let recollectRemovedNotice = "moot_recollect was removed: its substrate (factoid drawers) was retired; recall hits now ARE source drawers; use moot_memory_search or moot_recall_distilled."
     /// On-demand contradiction hunt: one bounded sweep of the content-driven
     /// contradiction detector (BM25 lexical candidates + ConflictCue screen). Strong
     /// findings persist as proposed contradicts tunnels; borderline pairs are
@@ -92,6 +116,9 @@ enum RecipeTools {
     static let huntContradictionsToolName = "moot_hunt_contradictions"
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
+    ///
+    /// Includes `moot_consolidate` (ACK-gated alias), `moot_recollect`
+    /// (notice-only stub — never executes), and the ten listed recipe tools.
     static func isRecipeTool(_ name: String) -> Bool {
         name == listRecipesToolName
             || name == listRecipesCatalogToolName
@@ -104,6 +131,7 @@ enum RecipeTools {
             || name == distillToolName
             || name == consolidateToolName
             || name == recallDistilledToolName
+            || name == recollectToolName
             || name == huntContradictionsToolName
     }
 
@@ -377,34 +405,45 @@ enum RecipeTools {
     /// with the hydration selector pinned to `distilled`. Ranking is
     /// identical to moot_memory_search by construction; only payloads
     /// differ (smaller), with per-hit token counts for context budgeting.
+    ///
+    /// ACK-GATED: this tool's contract changed in Wave 1 (v2 semantics — exact-
+    /// search geometry + distilled hydration, not a separate distilled tier).
+    /// Calls without ack: "recall_distilled/v2" return a CONTRACT CHANGE NOTICE
+    /// and do not execute. Pass ack: "recall_distilled/v2" to proceed.
     private static func recallDistilledTool() -> ProjectedTool {
         ProjectedTool(
             name: recallDistilledToolName,
-            description: "Distilled recall: normal search over originals, hydrated with "
+            description: "Distilled recall (v2): normal search over originals, hydrated with "
                 + "each hit's DISTILLED representation (token-economical prose) instead of "
                 + "the full content — identical ranking to moot_memory_search, smaller "
                 + "payloads, per-hit token counts for context budgeting. Hits are the "
                 + "source memories themselves; call moot_memory_get with a returned id for "
                 + "the full verbatim body. Rows not yet distilled fall back to full "
                 + "content and are marked served_from_content (run moot_distill to "
-                + "populate them).",
+                + "populate them). CONTRACT CHANGE (Wave 1): v2 no longer queries a "
+                + "separate distilled tier; pass ack: \"recall_distilled/v2\" to confirm "
+                + "you want the new behavior.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema(
-                        "Query text — feature-extracted and fingerprinted for Hamming NN "
-                            + "against the distillation-features-v1 lane. No embedding inference."),
+                        "Query text — drives BM25 + vector recall (same geometry as moot_memory_search)."),
                     "limit": integerSchema(
-                        "Max factoids to return. Default 20. Omit to use the default; "
+                        "Max results to return. Default 20. Omit to use the default; "
                             + "null is invalid."),
                     "filter": stringSchema(
                         "Filter kind: unconfirmed, userConfirmed, exportable, contained, "
                             + "currentlyBelieve. Omit for ordinary recall across any confirmation "
                             + "state. null is invalid."),
                     "echo_query": ToolProjection.booleanSchema(
-                        "Optional. When true, appends the query text to the response header "
-                            + "(e.g. 'found N distilled factoid(s) for: {query}'). "
+                        "Optional. When true, appends the query text to the response header. "
                             + "Default false — the AI already knows what it queried. "
                             + "Omit to use the default; null is invalid."),
+                    "ack": stringSchema(
+                        "Contract-change acknowledgment token. This tool's behavior changed "
+                            + "in Wave 1 (v2 semantics). Pass ack: \"recall_distilled/v2\" to "
+                            + "confirm you want v2 behavior (normal exact-search geometry + "
+                            + "distilled hydration). Without this token the call returns a "
+                            + "CONTRACT CHANGE NOTICE and does not execute."),
                     "estateID": stringSchema(
                         "Optional UUID of the open estate to target. Omit for the default estate; "
                             + "null is invalid."),
@@ -436,6 +475,34 @@ enum RecipeTools {
         if name == listRecipesCatalogToolName {
             return runListRecipesCatalog()
         }
+
+        // MARK: ACK gates and notice-only stubs
+        // These checks must come BEFORE resolveHandle() to guarantee zero
+        // side effects when a caller hits a contract-change notice.
+
+        // moot_recollect — notice-only stub. The tool was removed in Wave 1;
+        // its substrate (factoid drawers) was retired. Never executes regardless
+        // of what parameters are passed.
+        if name == recollectToolName {
+            return ToolDispatcher.textResult(recollectRemovedNotice)
+        }
+
+        // moot_consolidate — ACK-gated alias. Renamed to moot_distill in Wave 1;
+        // factoid drawers and the distilled tier no longer exist. Callers must
+        // pass ack: "moot_distill/p1" to confirm they want the new behavior.
+        if name == consolidateToolName,
+           args["ack"]?.stringValue != "moot_distill/p1" {
+            return ToolDispatcher.textResult(consolidateContractNotice)
+        }
+
+        // moot_recall_distilled — ACK-gated (v2 contract). Now performs normal
+        // exact-search geometry + distilled hydration; no longer queries a
+        // separate distilled tier. Callers must pass ack: "recall_distilled/v2".
+        if name == recallDistilledToolName,
+           args["ack"]?.stringValue != "recall_distilled/v2" {
+            return ToolDispatcher.textResult(recallDistilledContractNotice)
+        }
+
         let handle = try resolveHandle(args)
         switch name {
         case groundedSynthesisToolName:
@@ -451,10 +518,11 @@ enum RecipeTools {
         case dreamToolName:
             return try await runDream(args, kit: kit, handle: handle)
         case distillToolName, consolidateToolName:
-            // moot_consolidate is the SPEC §3 compatibility alias — identical
-            // handler, identical results.
+            // moot_consolidate reaches here only when ack: "moot_distill/p1"
+            // was present (ACK gate above). Runs the same handler as moot_distill.
             return try await runDistill(args, kit: kit, handle: handle)
         case recallDistilledToolName:
+            // Reaches here only when ack: "recall_distilled/v2" was present.
             return try await runRecallDistilled(args, kit: kit, handle: handle)
         case huntContradictionsToolName:
             return try await runHuntContradictions(args, kit: kit, handle: handle)
