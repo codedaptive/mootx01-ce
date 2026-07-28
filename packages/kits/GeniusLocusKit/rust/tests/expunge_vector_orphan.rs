@@ -19,6 +19,10 @@
 //   E7 — validation failure: no mutation, no audit (validation-first preserved).
 //   E8 — double-failure: step-2 fails AND orphan-seal fails; returned error carries
 //        both failure reasons; the coordinator does NOT swallow the seal error.
+//   E9 — undistilled drawer expunge is a no-op for the distillation lane
+//        (parity with Swift E9: expungeOfUndistilledDrawerSucceeds).
+//   E10 — lineage cascade scrubs every member's lane entry (parity with Swift E10:
+//         expungeScrubsLaneEntriesAcrossLineage).
 
 use std::sync::Arc;
 
@@ -34,6 +38,7 @@ use locus_kit::{
     frames::CaptureFrame,
 };
 use persistence_kit::{inmemory::InMemoryStorage, BackendConfiguration, EstateConfiguration, Storage};
+use substrate_ml::distillation_pipeline::DistillationPipeline;
 use vectorkit::VectorStore;
 
 // CaptureChannel lives in drawer_operational in the Rust port.
@@ -564,4 +569,140 @@ fn e8_double_failure_seal_error_folded_into_returned_error() {
             other
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// E9: undistilled drawer expunge is a no-op for the lane (parity with Swift E9)
+// ---------------------------------------------------------------------------
+
+/// `delete_all_vectors` on an absent key is a no-op. An undistilled drawer
+/// has no distillation-features-v1 lane entry; expunge must complete cleanly.
+/// Parity of Swift `expungeOfUndistilledDrawerSucceeds`.
+#[test]
+fn e9_expunge_of_undistilled_drawer_is_no_op_for_lane() {
+    let (mut coord, h) = open_one();
+
+    // Capture a drawer without running the distillation sweep — no lane entry.
+    let drawer = coord
+        .capture(&h, cap_frame("plain undistilled polonium note"), NOW)
+        .expect("capture");
+
+    // Wire corpus + VectorStore so the full cross-kit step executes.
+    // Content is not ingested into the corpus — remove_content is a no-op.
+    let corpus = make_corpus();
+    let vs = make_vector_store();
+    coord.register_corpus(&h, corpus);
+    coord.register_vector_store(&h, vs);
+
+    // Expunge must succeed — delete_all_vectors on an absent entry is a no-op.
+    coord
+        .expunge(
+            &h,
+            &drawer.id,
+            "undistilled lane no-op test",
+            true,
+            NOW + 100,
+        )
+        .expect("expunge of undistilled drawer must succeed");
+
+    // Drawer must be tombstoned.
+    let estate = coord.estate_for(&h).expect("estate must be open");
+    let row = estate
+        .drawer_by_id(&drawer.id)
+        .unwrap()
+        .expect("row must still exist after tombstone");
+    assert!(
+        row.tombstoned_at.is_some(),
+        "expunge must tombstone the drawer even when no lane entry exists"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E10: lineage cascade scrubs every member's lane entry (parity with Swift E10)
+// ---------------------------------------------------------------------------
+
+/// Expunge fans out over the entire lineage; each member's own
+/// distillation-features-v1 lane entry (keyed by its id) must be deleted.
+/// Parity of Swift `expungeScrubsLaneEntriesAcrossLineage`.
+///
+/// Uses three-sentence content so the matrix distillation path runs and
+/// produces a non-zero fingerprint (entity "Rhenium" is mid-text, not first
+/// word, so the default extractor captures it).
+#[test]
+fn e10_expunge_scrubs_lane_entries_across_lineage() {
+    let (mut coord, h) = open_one();
+
+    // v1 then v2 in the same lineage (v2 supersedes v1).
+    let v1 = coord
+        .capture(
+            &h,
+            cap_frame(
+                "Batch one used Rhenium wire. Tests on Rhenium passed. Labs shipped Rhenium first.",
+            ),
+            NOW,
+        )
+        .expect("capture v1");
+
+    let mut v2_frame = cap_frame(
+        "Batch two used Rhenium wire. Retests on Rhenium passed. Labs shipped Rhenium again.",
+    );
+    // Same lineage — adding v2 causes the cascade to supersede v1.
+    v2_frame.lineage_id = Some(v1.lineage_id);
+    let v2 = coord
+        .capture(&h, v2_frame, NOW + 100)
+        .expect("capture v2");
+
+    // Wire corpus + VectorStore before the distillation sweep.
+    // Corpus is registered to satisfy the coordinator's fan-out (it calls
+    // corpus.remove_content for each lineage member); content is not
+    // ingested — those remove_content calls are no-ops.
+    let corpus = make_corpus();
+    let vs = make_vector_store();
+    let vs_ref = vs.clone(); // retained for post-expunge queries
+    coord.register_corpus(&h, corpus);
+    coord.register_vector_store(&h, vs);
+
+    // Distill both v1 (Superseded) and v2 (Active) via the sweep. The sweep
+    // processes all non-tombstoned drawers, so Superseded v1 is included.
+    let distilled = coord
+        .distill_items_sweep(&h, NOW + 200, None)
+        .expect("distill_items_sweep");
+    assert!(
+        distilled >= 2,
+        "sweep must produce at least 2 distilled items (v1 and v2); got {distilled}"
+    );
+
+    // Confirm both lane entries exist before expunge.
+    let distill_lane = genius_locus_kit::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+    let probe =
+        DistillationPipeline::query_fingerprint(&v1.content, DistillationPipeline::default_extractor);
+    let before = vs_ref
+        .find_nearest(&probe, distill_lane, 10)
+        .expect("find_nearest before expunge");
+    assert!(
+        before.iter().any(|m| m.item_id == v1.id),
+        "v1 lane entry must exist before expunge (fingerprint must be non-zero)"
+    );
+    assert!(
+        before.iter().any(|m| m.item_id == v2.id),
+        "v2 lane entry must exist before expunge (fingerprint must be non-zero)"
+    );
+
+    // Expunge the head (v2). The lineage fan-out scrubs both lane entries.
+    coord
+        .expunge(&h, &v2.id, "lineage lane scrub test", true, NOW + 300)
+        .expect("expunge");
+
+    // Both lane entries must be gone.
+    let after = vs_ref
+        .find_nearest(&probe, distill_lane, 10)
+        .expect("find_nearest after expunge");
+    assert!(
+        !after.iter().any(|m| m.item_id == v1.id),
+        "v1 predecessor lane entry must be scrubbed by the lineage cascade"
+    );
+    assert!(
+        !after.iter().any(|m| m.item_id == v2.id),
+        "v2 head lane entry must be scrubbed"
+    );
 }
