@@ -531,19 +531,25 @@ public actor DrawerStore {
         try await getDrawers(ids: ids, hydrationLevel: .full)
     }
 
-    /// Every `drawers` column EXCEPT `content` — the no-blob structured
-    /// projection. A `.structured`/`.bitmapOnly` load selects exactly these
-    /// columns, so the content blob is never read out of storage. The set is
-    /// the column list `drawerValues(_:)` writes minus `"content"`; a column
-    /// added to the schema must be added here too or it reads as absent at
-    /// `.structured`. `drawerFromRow` decodes an absent `content` to "" via
-    /// `string(_:)`, so a structured drawer carries an empty body by design.
+    /// Every `drawers` column EXCEPT the text-bearing pair `content` and
+    /// `distilled` — the no-blob structured projection. A
+    /// `.structured`/`.bitmapOnly` load selects exactly these columns, so
+    /// neither text column is ever read out of storage. The set is the
+    /// column list `drawerValues(_:)` writes minus `"content"`/`"distilled"`;
+    /// a column added to the schema must be added here too or it reads as
+    /// absent at `.structured`. `drawerFromRow` decodes an absent `content`
+    /// to "" via `string(_:)` and an absent `distilled` to nil, so a
+    /// structured drawer carries an empty body by design. The small distilled
+    /// metadata columns (pipeline version, token count, generated-at) DO ride
+    /// the structured projection — they are the context-budgeting signal
+    /// (SPEC_DISTILLATION_STORAGE §6) and cost a few bytes per row.
     private static let structuredDrawerColumns: [String] = [
         "id", "parent_node_id", "sourceFile", "chunkIndex", "addedBy",
         "filedAt", "eventTime", "embeddingModelID", "tombstonedAt",
         "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
-        "wikidataQidsSecondary"
+        "wikidataQidsSecondary",
+        "distilled_pipeline_version", "distilled_token_count", "distilled_at"
     ]
 
     /// Batch by-id load at a chosen hydration level — the dense-first candidate
@@ -1308,14 +1314,16 @@ public actor DrawerStore {
             _ = commitmentKeyVersion
 
             // Materialized projection: write the merged adjective
-            // snapshot, zero the content blob, stamp tombstonedAt.
+            // snapshot, zero the content blob, stamp tombstonedAt. The
+            // distilled representation is content-derived text — the scrub
+            // clears it in the same statement (destruction contract).
             _ = try await txn.rowStore.update(
                 table: "drawers",
-                values: [
+                values: Self.withClearedRepresentation([
                     "adjectiveBitmap": .bitmap(event.afterBitmaps.adjective),
                     "content": .text(""),
                     "tombstonedAt": .timestamp(now),
-                ],
+                ]),
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
             try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
@@ -1343,10 +1351,11 @@ public actor DrawerStore {
                 let sibState = BitField.extractField(sibBitmap, shift: 0, width: 6)
 
                 if sibState == Int64(State.tombstoned.rawValue) {
-                    // Already tombstoned — just ensure content is empty.
+                    // Already tombstoned — just ensure content is empty
+                    // (and the content-derived representation with it).
                     _ = try await txn.rowStore.update(
                         table: "drawers",
-                        values: ["content": .text("")],
+                        values: Self.withClearedRepresentation(["content": .text("")]),
                         where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                     )
                     try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
@@ -1388,11 +1397,11 @@ public actor DrawerStore {
                             "lineage expunge cascade from \(drawerId)")
                         _ = try await txn.rowStore.update(
                             table: "drawers",
-                            values: [
+                            values: Self.withClearedRepresentation([
                                 "adjectiveBitmap": .bitmap(sibEventWithReason.afterBitmaps.adjective),
                                 "content": .text(""),
                                 "tombstonedAt": .timestamp(now),
-                            ],
+                            ]),
                             where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                         )
                         try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
@@ -1405,10 +1414,11 @@ public actor DrawerStore {
                         // and independent of the state machine: even when the state
                         // cannot transition, the verbatim content MUST be zeroed.
                         // Leaving content intact when the gate fails is a destruction-
-                        // contract violation (secfix/ws2-coredelete).
+                        // contract violation (secfix/ws2-coredelete). The scrub covers
+                        // the content-derived distilled representation too.
                         _ = try await txn.rowStore.update(
                             table: "drawers",
-                            values: ["content": .text("")],
+                            values: Self.withClearedRepresentation(["content": .text("")]),
                             where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                         )
                         try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
@@ -3490,7 +3500,15 @@ public actor DrawerStore {
             "udcFacets": d.udcFacets.map { TypedValue.text($0) } ?? .null,
             "wikidataQID": d.wikidataQID.map { TypedValue.text($0) } ?? .null,
             "wikidataQidsSecondary": d.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
-            "content_fingerprint": .blob(Data(fingerprint.toBytes()))
+            "content_fingerprint": .blob(Data(fingerprint.toBytes())),
+            // Distilled representation (SPEC §4): fresh captures carry nil
+            // in all four fields — population happens post-insert via
+            // setDistilledRepresentation (drain-stage or sweep), never on
+            // the capture path.
+            "distilled": d.distilled.map { TypedValue.text($0) } ?? .null,
+            "distilled_pipeline_version": d.distilledPipelineVersion.map { TypedValue.text($0) } ?? .null,
+            "distilled_token_count": d.distilledTokenCount.map { TypedValue.int($0) } ?? .null,
+            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null
         ]
     }
 
@@ -3699,7 +3717,14 @@ public actor DrawerStore {
             udcCode: string(row["udcCode"]),
             udcFacets: optString(row["udcFacets"]),
             wikidataQID: optString(row["wikidataQID"]),
-            wikidataQidsSecondary: optString(row["wikidataQidsSecondary"])
+            wikidataQidsSecondary: optString(row["wikidataQidsSecondary"]),
+            // Distilled representation (SPEC §4). Absent at `.structured`
+            // hydration (the text column is projected away like `content`);
+            // NULL on any row not yet swept. Both decode to nil.
+            distilled: optString(row["distilled"]),
+            distilledPipelineVersion: optString(row["distilled_pipeline_version"]),
+            distilledTokenCount: optInt64(row["distilled_token_count"]),
+            distilledAt: optDate(row["distilled_at"])
         )
     }
 
@@ -3929,6 +3954,13 @@ public actor DrawerStore {
     private static func optInt(_ v: TypedValue?) -> Int? {
         switch v {
         case .int(let i), .bitmap(let i): return Int(i)
+        default: return nil
+        }
+    }
+
+    private static func optInt64(_ v: TypedValue?) -> Int64? {
+        switch v {
+        case .int(let i), .bitmap(let i): return i
         default: return nil
         }
     }
@@ -4190,9 +4222,80 @@ public actor DrawerStore {
         drawerId: String,
         content: String
     ) async throws -> Int {
+        // Content changed in place → the distilled representation (a view
+        // of the OLD content) is stale. NULL-on-edit in the same statement
+        // is the §7.3 regeneration trigger — no staleness flag, no Bool.
         try await storage.rowStore.update(
             table: "drawers",
-            values: ["content": .text(content)],
+            values: Self.withClearedRepresentation(["content": .text(content)]),
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+    }
+
+    // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
+
+    /// The four representation columns, all NULL — merged into every UPDATE
+    /// whose values touch `content`, so a representation can never outlive
+    /// the content it renders (the §7.3 NULL-on-edit regeneration trigger
+    /// and the erasure scrub: distilled text is content-derived, so zeroing
+    /// content must scrub it in the same statement).
+    private static let clearedRepresentationValues: [String: TypedValue] = [
+        "distilled": .null,
+        "distilled_pipeline_version": .null,
+        "distilled_token_count": .null,
+        "distilled_at": .null,
+    ]
+
+    /// Merge the representation-clearing NULLs into a content-writing
+    /// UPDATE's value map. Caller values win on key collision by
+    /// construction (no caller writes representation columns and content
+    /// in one statement — `setDistilledRepresentation` never carries
+    /// `content`).
+    private static func withClearedRepresentation(
+        _ values: [String: TypedValue]
+    ) -> [String: TypedValue] {
+        values.merging(clearedRepresentationValues) { caller, _ in caller }
+    }
+
+    /// Write the distilled representation of one drawer — all four columns
+    /// in ONE atomic UPDATE (SPEC §4 invariant: NULL together or populated
+    /// together).
+    ///
+    /// A representation is a deterministic, regenerable function of
+    /// (content, pipeline version) — a view, not a belief-state change —
+    /// so, like `updateDatasetContent`, this is a direct column write: no
+    /// audit event, no supersession cascade, no lifecycle or lineage field
+    /// touched, and no content digest/revision bump (search isolation §9:
+    /// a representation-only write emits no index job).
+    ///
+    /// Mirrors Rust `set_distilled_representation` (twin parity).
+    ///
+    /// - Parameters:
+    ///   - drawerId: The drawer row id (`Drawer.id`) of the SOURCE drawer.
+    ///   - distilled: The distilled rendering (SPEC §5 format).
+    ///   - pipelineVersion: Format+pipeline contract identifier ("p1").
+    ///   - tokenCount: Approximate token count of `distilled` (SPEC §6).
+    ///   - at: Generation instant (deterministic clock — passed in, never
+    ///     read here).
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    public func setDistilledRepresentation(
+        drawerId: String,
+        distilled: String,
+        pipelineVersion: String,
+        tokenCount: Int64,
+        at generatedAt: Date
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(distilled, label: "distilled")
+        try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
+        return try await storage.rowStore.update(
+            table: "drawers",
+            values: [
+                "distilled": .text(distilled),
+                "distilled_pipeline_version": .text(pipelineVersion),
+                "distilled_token_count": .int(tokenCount),
+                "distilled_at": .timestamp(generatedAt),
+            ],
             where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
         )
     }

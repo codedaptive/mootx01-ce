@@ -248,7 +248,26 @@ public enum LocusKitSchema {
             // DrawerStore's refresh helper; DrawerStore always populates
             // it and treats a NULL/malformed value at read time as a
             // fail-loud LocusKitError, not a silent fallback.
-            .blob("content_fingerprint", nullable: true)
+            .blob("content_fingerprint", nullable: true),
+            // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
+            // A dense parallel rendering of `content` — a VIEW of this
+            // row, not an item — plus its pipeline contract identifier,
+            // approximate token count, and generation instant. The four
+            // columns are NULL together or populated together (one atomic
+            // UPDATE via DrawerStore.setDistilledRepresentation); every
+            // write that touches `content` NULLs all four in the same
+            // statement (§7.3 regeneration trigger + erasure scrub).
+            // NULL `distilled` is the sweep-eligibility predicate.
+            // Landed in the v1 declaration with no migration ladder per
+            // this file's design note — the 1.1.x schema is fluid (no
+            // estate data has shipped); the frozen-1.0.x migration is a
+            // separate later mission (SPEC Appendix A). Excluded from the
+            // content digest/revision that feed the index pipeline (§9).
+            .text("distilled", nullable: true),
+            .text("distilled_pipeline_version", nullable: true),
+            .int("distilled_token_count", nullable: true),
+            // TEXT ISO8601 per the fleet date rule (timestamp column type).
+            .timestamp("distilled_at", nullable: true)
         ],
         primaryKey: ["id"],
         generatedColumns: [

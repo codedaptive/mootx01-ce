@@ -223,6 +223,26 @@ fn drawers_table() -> TableDeclaration {
             // value at read time as a fail-loud LocusKitError, not a
             // silent fallback.
             ColumnDeclaration::blob("content_fingerprint").nullable(),
+            // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
+            // A dense parallel rendering of `content` — a VIEW of this
+            // row, not an item — plus its pipeline contract identifier,
+            // approximate token count, and generation instant. The four
+            // columns are NULL together or populated together (one
+            // atomic UPDATE via `set_distilled_representation`); every
+            // write that touches `content` NULLs all four in the same
+            // statement (§7.3 regeneration trigger + erasure scrub).
+            // NULL `distilled` is the sweep-eligibility predicate.
+            // Landed in the v1 declaration with no migration ladder —
+            // the 1.1.x schema is fluid (no estate data shipped); the
+            // frozen-1.0.x migration is a separate later mission (SPEC
+            // Appendix A). Excluded from the content digest/revision
+            // that feed the index pipeline (§9). Mirrors the Swift
+            // drawersTable declaration.
+            ColumnDeclaration::text("distilled").nullable(),
+            ColumnDeclaration::text("distilled_pipeline_version").nullable(),
+            ColumnDeclaration::int("distilled_token_count").nullable(),
+            // TEXT ISO8601 per the fleet date rule (timestamp column type).
+            ColumnDeclaration::timestamp("distilled_at").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -1275,6 +1295,10 @@ mod tests {
                 "keyID",
                 "content_hash",
                 "content_fingerprint",
+                "distilled",
+                "distilled_pipeline_version",
+                "distilled_token_count",
+                "distilled_at",
             ]
         );
     }

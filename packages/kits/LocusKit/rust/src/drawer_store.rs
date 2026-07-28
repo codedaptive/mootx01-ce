@@ -618,6 +618,33 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Write the distilled representation of one drawer — all four columns
+    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
+    /// together or populated together).
+    ///
+    /// A representation is a deterministic, regenerable function of
+    /// (content, pipeline version) — a view, not a belief-state change —
+    /// so this is a direct column write: no audit event, no supersession
+    /// cascade, no lifecycle or lineage field touched, and no content
+    /// digest/revision bump (search isolation §9: a representation-only
+    /// write emits no index job). `generated_at` is epoch millis
+    /// (deterministic clock — passed in, never read here).
+    ///
+    /// Returns the count of rows updated (0 = drawer not found;
+    /// 1 = success). Mirrors Swift `DrawerStore.setDistilledRepresentation`.
+    fn set_distilled_representation(
+        &self,
+        _drawer_id: &str,
+        _distilled: &str,
+        _pipeline_version: &str,
+        _token_count: i64,
+        _generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_distilled_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Append a previously-produced expunge audit event to the audit log.
     ///
     /// Called by the GLK orchestration path after step 2 (cross-kit vector
@@ -1887,6 +1914,22 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         seal_audit: bool,
     ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+    }
+    fn set_distilled_representation(
+        &self,
+        drawer_id: &str,
+        distilled: &str,
+        pipeline_version: &str,
+        token_count: i64,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.as_ref().set_distilled_representation(
+            drawer_id,
+            distilled,
+            pipeline_version,
+            token_count,
+            generated_at,
+        )
     }
     fn seal_expunge_audit(
         &self,

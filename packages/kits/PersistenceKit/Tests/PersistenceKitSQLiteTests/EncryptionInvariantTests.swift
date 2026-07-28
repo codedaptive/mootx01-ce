@@ -121,26 +121,35 @@ struct EncryptionInvariantTests {
         await storage.close()
     }
 
-    /// E-1 (update path): a content update on an encrypting estate must throw for the same
-    /// reason as upsert — updateRows does not run the encryption seam, so a
-    /// .text content update would persist plaintext with a null keyID.
-    @Test func contentUpdateOnEncryptingEstateThrows() async throws {
-        let storage = try makeStorage(EstateEncryptionConfig(.rowEncryption), at: freshDBURL())
+    /// E-1 (update path): a content update on an encrypting estate runs the
+    /// encryption seam (wired in the W1_DISTILL wave, when UPDATE became a
+    /// protected-text write path for the distilled-representation columns),
+    /// so the write is sealed + keyID-stamped rather than refused. The
+    /// invariant's INTENT — plaintext protected text never persists on an
+    /// encrypting estate — is now satisfied by encryption, and the guard
+    /// remains the safety net for any write path that bypasses the seam.
+    @Test func contentUpdateOnEncryptingEstateEncrypts() async throws {
+        let encryption = EstateEncryptionConfig(.rowEncryption)
+        let storage = try makeStorage(encryption, at: freshDBURL())
         try await storage.open(schema: makeSchema())
 
-        do {
-            _ = try await storage.rowStore.update(
-                table: "drawers",
-                values: ["content": .text("plaintext secret")],
-                where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
-            )
-            Issue.record("expected the content/keyID invariant guard to throw on an unencrypted content update to an encrypting estate")
-        } catch let error as StorageError {
-            guard case .constraintViolation = error else {
-                Issue.record("expected StorageError.constraintViolation, got \(error)")
-                return
-            }
-        }
+        _ = try await storage.rowStore.insert(
+            table: "drawers",
+            values: ["id": .text("d1"), "content": .text("original")]
+        )
+        let updated = try await storage.rowStore.update(
+            table: "drawers",
+            values: ["content": .text("updated secret")],
+            where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
+        )
+        #expect(updated == 1)
+        // Read through the decrypt seam: text again, keyID stamped.
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
+        )
+        #expect(rows.first?["content"] == .text("updated secret"))
+        #expect(rows.first?["keyID"] == .text(encryption.keyIdentifier!))
         await storage.close()
     }
 

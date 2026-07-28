@@ -314,6 +314,22 @@ impl DrawerStore for PostgresDrawerStore {
     ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
+    fn set_distilled_representation(
+        &self,
+        drawer_id: &str,
+        distilled: &str,
+        pipeline_version: &str,
+        token_count: i64,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.0.set_distilled_representation(
+            drawer_id,
+            distilled,
+            pipeline_version,
+            token_count,
+            generated_at,
+        )
+    }
     fn seal_expunge_audit(
         &self,
         event: &substrate_lib::verbs::AuditEvent,

@@ -133,10 +133,16 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         // name and all value-map column names before interpolating into the UPDATE.
         try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
-        // update does not run the encryption seam, so a content update on an
-        // encrypting estate would write plaintext with a null keyID. Guard it
-        // like the other write paths; all current callers update only
-        // bitmap/timestamp columns, so this is a no-op for them.
+        // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
+        // path since the distilled-representation columns landed (a
+        // distillation write is an UPDATE carrying "distilled" text —
+        // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals non-empty
+        // protected text and stamps keyID; it is a no-op for the
+        // bitmap/timestamp updates and for the expunge scrub (empty text is
+        // exempt). Mirrors the SQLite backend's updateRows wiring.
+        let values = try encryptedForWrite(values, config: backend.encryptionConfig)
+        // Structural content/keyID invariant (FUP-D): after the seam, a
+        // protected-text update on an encrypting estate must carry a keyID.
         try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         var bindings: [TypedValue] = []

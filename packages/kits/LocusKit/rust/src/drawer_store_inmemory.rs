@@ -150,6 +150,14 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "wikidataQID",
     "wikidataQidsSecondary",
     "ext",
+    // Distilled representation metadata (SPEC_DISTILLATION_STORAGE §6)
+    // rides the structured projection — the context-budgeting signal at
+    // a few bytes per row. The `distilled` TEXT column itself is
+    // projected away like `content` (both text columns stay no-blob);
+    // `drawer_from_row` decodes its absence to None.
+    "distilled_pipeline_version",
+    "distilled_token_count",
+    "distilled_at",
 ];
 
 // ---------------------------------------------------------------------------
@@ -2017,6 +2025,9 @@ impl DrawerStore for DrawerStoreCore {
         );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
+        // The distilled representation is content-derived text — the scrub
+        // clears it in the same statement (destruction contract, SPEC §2).
+        insert_cleared_representation(&mut update_vals);
         // Fold the recomputed content_fingerprint into the SAME update
         // (LocusKitSchema v9) rather than a separate write. Refreshed
         // unconditionally even though this row becomes tombstoned (and so
@@ -2063,9 +2074,11 @@ impl DrawerStore for DrawerStoreCore {
             let sib_state = bit_field::extract_field(sib_bitmap, 0, 6);
 
             if sib_state == State::Tombstoned.raw_value() {
-                // Already tombstoned — just ensure content is empty.
+                // Already tombstoned — just ensure content is empty (and
+                // the content-derived representation with it).
                 let mut vals = BTreeMap::new();
                 vals.insert("content".to_string(), TypedValue::Text(String::new()));
+                insert_cleared_representation(&mut vals);
                 // Best-effort, matching this branch's existing tolerance
                 // for a concurrently-removed sibling row: if the refresh
                 // read fails, still scrub content, just without an
@@ -2131,6 +2144,8 @@ impl DrawerStore for DrawerStoreCore {
                     );
                     vals.insert("content".to_string(), TypedValue::Text(String::new()));
                     vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
+                    // Scrub covers the content-derived representation too.
+                    insert_cleared_representation(&mut vals);
                     // Best-effort, matching this branch's existing
                     // tolerance for a concurrently-removed sibling row.
                     if let Ok(fingerprint_value) = self.recomputed_fingerprint(sibling_id, |d| {
@@ -2300,6 +2315,65 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    /// Write the distilled representation of one drawer — all four columns
+    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
+    /// together or populated together). Direct column write: no audit
+    /// event, no supersession cascade, no lifecycle/lineage field, no
+    /// content digest/revision bump (§9 search isolation). Mirrors Swift
+    /// `DrawerStore.setDistilledRepresentation`.
+    fn set_distilled_representation(
+        &self,
+        drawer_id: &str,
+        distilled: &str,
+        pipeline_version: &str,
+        token_count: i64,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "drawerId must not be empty".to_string(),
+            ));
+        }
+        if distilled.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "distilled must not be empty".to_string(),
+            ));
+        }
+        if pipeline_version.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "pipelineVersion must not be empty".to_string(),
+            ));
+        }
+        let row_store = self.storage.row_store();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "distilled".to_string(),
+            TypedValue::Text(distilled.to_string()),
+        );
+        values.insert(
+            "distilled_pipeline_version".to_string(),
+            TypedValue::Text(pipeline_version.to_string()),
+        );
+        values.insert(
+            "distilled_token_count".to_string(),
+            TypedValue::Int(token_count),
+        );
+        values.insert(
+            "distilled_at".to_string(),
+            TypedValue::Timestamp(generated_at),
+        );
+        row_store
+            .update(
+                T_DRAWERS,
+                values,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(drawer_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)
+    }
+
     /// Zero the `content` column for every row in the `drawers` table.
     /// Used by `GLKCoordinator::destroy` to erase all drawer content blobs
     /// from LocusKit's SQLite storage as part of the estate destruction
@@ -2325,6 +2399,9 @@ impl DrawerStore for DrawerStoreCore {
         let row_store = self.storage.row_store();
         let mut values = std::collections::BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(String::new()));
+        // Wipe covers the content-derived distilled representation too —
+        // derived text must not outlive the content it renders (SPEC §2).
+        insert_cleared_representation(&mut values);
         row_store
             .update(T_DRAWERS, values, &StoragePredicate::IsTrue)
             .map_err(map_storage_err)?;
@@ -4522,6 +4599,22 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
+    fn set_distilled_representation(
+        &self,
+        drawer_id: &str,
+        distilled: &str,
+        pipeline_version: &str,
+        token_count: i64,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.inner.set_distilled_representation(
+            drawer_id,
+            distilled,
+            pipeline_version,
+            token_count,
+            generated_at,
+        )
+    }
     fn seal_expunge_audit(
         &self,
         event: &substrate_lib::verbs::AuditEvent,
@@ -4887,6 +4980,27 @@ impl DrawerStore for InMemoryDrawerStore {
 /// populate the column (CRITICAL fix — this column replaces the old
 /// recompute-on-every-read path in `fingerprints_captured_in`/
 /// `fingerprint_bit_series`).
+/// Merge the four representation-clearing NULLs into a content-writing
+/// UPDATE's value map (SPEC_DISTILLATION_STORAGE §4/§7.3): every write
+/// that touches `content` NULLs the distilled representation in the same
+/// statement, so a representation can never outlive the content it
+/// renders (the regeneration trigger and the erasure scrub). Existing
+/// caller values win on key collision by construction — no caller writes
+/// representation columns and content in one statement. Mirrors Swift
+/// `DrawerStore.withClearedRepresentation`.
+pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedValue>) {
+    for column in [
+        "distilled",
+        "distilled_pipeline_version",
+        "distilled_token_count",
+        "distilled_at",
+    ] {
+        values
+            .entry(column.to_string())
+            .or_insert(TypedValue::Null);
+    }
+}
+
 fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, TypedValue> {
     let mut m = BTreeMap::new();
     m.insert("id".to_string(), TypedValue::Text(d.id.clone()));
@@ -4972,6 +5086,36 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
     m.insert(
         "content_fingerprint".to_string(),
         TypedValue::Blob(fingerprint.wire_bytes().to_vec()),
+    );
+    // Distilled representation (SPEC §4): fresh captures carry None in all
+    // four fields — population happens post-insert via
+    // set_distilled_representation (drain-stage or sweep), never on the
+    // capture path. Mirrors Swift drawerValues.
+    m.insert(
+        "distilled".to_string(),
+        d.distilled
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "distilled_pipeline_version".to_string(),
+        d.distilled_pipeline_version
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "distilled_token_count".to_string(),
+        d.distilled_token_count
+            .map(TypedValue::Int)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "distilled_at".to_string(),
+        d.distilled_at
+            .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
     );
     m
 }
@@ -5397,6 +5541,13 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         udc_facets: opt_string_value_of(row.get("udcFacets")),
         wikidata_qid: opt_string_value_of(row.get("wikidataQID")),
         wikidata_qids_secondary: opt_string_value_of(row.get("wikidataQidsSecondary")),
+        // Distilled representation (SPEC §4). Absent at the structured
+        // projection (the text column is projected away like `content`);
+        // NULL on any row not yet swept. Both decode to None.
+        distilled: opt_string_value_of(row.get("distilled")),
+        distilled_pipeline_version: opt_string_value_of(row.get("distilled_pipeline_version")),
+        distilled_token_count: opt_int_value_of(row.get("distilled_token_count")),
+        distilled_at: opt_int_value_of(row.get("distilled_at")),
     })
 }
 
@@ -7506,6 +7657,132 @@ mod tests {
             0,
             "dreaming_recalc_required (bit 26) must be set on tombstone via expunge"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
+    // Mirrors Swift DistilledRepresentationTests case-for-case
+    // (twin-parity gate).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fresh_row_reads_none_representation() {
+        let store = open_store();
+        let d = sample_drawer("dr1", "w", "k", "some content");
+        store.add_drawer(&d, NOW).unwrap();
+        let loaded = store.get_drawer(&d.id).unwrap().unwrap();
+        assert!(loaded.distilled.is_none());
+        assert!(loaded.distilled_pipeline_version.is_none());
+        assert!(loaded.distilled_token_count.is_none());
+        assert!(loaded.distilled_at.is_none());
+    }
+
+    #[test]
+    fn set_distilled_representation_populates_all_four_atomically() {
+        let store = open_store();
+        let d = sample_drawer("dr2", "w", "k", "meeting moved thursday");
+        store.add_drawer(&d, NOW).unwrap();
+        let updated = store
+            .set_distilled_representation(&d.id, "Meeting moved Thursday.", "p1", 4, NOW + 200)
+            .unwrap();
+        assert_eq!(updated, 1);
+        let loaded = store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(loaded.distilled.as_deref(), Some("Meeting moved Thursday."));
+        assert_eq!(loaded.distilled_pipeline_version.as_deref(), Some("p1"));
+        assert_eq!(loaded.distilled_token_count, Some(4));
+        assert_eq!(loaded.distilled_at, Some(NOW + 200));
+        // Content and lifecycle untouched by a representation write.
+        assert_eq!(loaded.content, "meeting moved thursday");
+        assert!(loaded.tombstoned_at.is_none());
+    }
+
+    #[test]
+    fn set_distilled_representation_replaces_prior() {
+        let store = open_store();
+        let d = sample_drawer("dr3", "w", "k", "content");
+        store.add_drawer(&d, NOW).unwrap();
+        store
+            .set_distilled_representation(&d.id, "first", "p1", 1, NOW + 200)
+            .unwrap();
+        store
+            .set_distilled_representation(&d.id, "second rendering", "p1", 2, NOW + 300)
+            .unwrap();
+        let loaded = store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(loaded.distilled.as_deref(), Some("second rendering"));
+        assert_eq!(loaded.distilled_token_count, Some(2));
+        assert_eq!(loaded.distilled_at, Some(NOW + 300));
+    }
+
+    #[test]
+    fn set_distilled_representation_unknown_id_updates_zero_rows() {
+        let store = open_store();
+        let updated = store
+            .set_distilled_representation(
+                "99999999-9999-4999-8999-999999999999",
+                "x",
+                "p1",
+                1,
+                NOW + 200,
+            )
+            .unwrap();
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn expunge_clears_representation_with_content() {
+        let store = open_store();
+        let d = sample_drawer("dr4", "w", "k", "derivable content");
+        store.add_drawer(&d, NOW).unwrap();
+        store
+            .set_distilled_representation(&d.id, "derived text", "p1", 2, NOW + 200)
+            .unwrap();
+        store
+            .expunge_gated(&d.id, "alice", Some("erasure covers representation"), NOW + 500, true)
+            .unwrap();
+        let after = store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(after.content, "");
+        // The representation is content-derived text: it must not outlive
+        // the erased content (SPEC §2 destruction contract).
+        assert!(after.distilled.is_none());
+        assert!(after.distilled_pipeline_version.is_none());
+        assert!(after.distilled_token_count.is_none());
+        assert!(after.distilled_at.is_none());
+    }
+
+    #[test]
+    fn dataset_content_patch_clears_representation() {
+        let store = open_store();
+        let d = sample_drawer("dr5", "w", "k", "{\"orig\":true}");
+        store.add_drawer(&d, NOW).unwrap();
+        store
+            .set_distilled_representation(&d.id, "stale rendering", "p1", 2, NOW + 200)
+            .unwrap();
+        // patch_dataset_handle_content routes through Estate; exercise the
+        // same NULL-on-edit write shape directly at the row-store layer via
+        // the shared helper, then assert the row reads back cleared.
+        let row_store = store.storage().row_store();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "content".to_string(),
+            TypedValue::Text("{\"patched\":true}".to_string()),
+        );
+        insert_cleared_representation(&mut values);
+        row_store
+            .update(
+                T_DRAWERS,
+                values,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(d.id.clone()),
+                ),
+            )
+            .unwrap();
+        let after = store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(after.content, "{\"patched\":true}");
+        assert!(after.distilled.is_none());
+        assert!(after.distilled_pipeline_version.is_none());
+        assert!(after.distilled_token_count.is_none());
+        assert!(after.distilled_at.is_none());
     }
 
     #[test]
