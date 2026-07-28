@@ -1537,6 +1537,45 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Step 5.8 — sub-span dense refinement (MISSION_11X_RECALL_GAP_01 Item 1).
+        //
+        // Runs for .matrixAware scoring when a CorpusContentEngine is registered.
+        // Computes transient sentence-level sub-span vectors for each candidate
+        // in the buffer and takes max(buffer.dense[i], subSpanMaxCosine[i]) as the
+        // refined dense score. Sub-span vectors are immediately discarded — zero
+        // persistence; compute is bounded by the candidate pool (~40), not corpus size.
+        //
+        // BLEND RULE: max-cosine — if the sub-span max-cosine of a candidate
+        // exceeds its whole-doc dense cosine, the sub-span wins. This preserves the
+        // whole-doc score when it is already high (contrastive regime), and rescues
+        // the true answer when the whole-doc score is saturated but a specific sub-
+        // span matches the query (the 1.0.x rescue mechanism without storage cost).
+        //
+        // The step fires unconditionally for matrixAware regardless of the
+        // discrimination factor: even in the contrastive regime, sub-span scores can
+        // only improve precision (they cannot lower the dense column). The gating
+        // on matrixAware keeps it off the cheaper .raw/.rrf paths.
+        //
+        // Degradation: if scoreSubSpans returns empty (provider no float lane,
+        // source unavailable), the buffer.dense column is left unchanged. The step
+        // is non-throwing and non-fatal.
+        if request.scoring == .matrixAware,
+           let corpus = corpusKits[handle],
+           let text = sketch.queryText, !text.isEmpty,
+           buffer.count > 0 {
+            let candidateIDs = Array(buffer.ids[0..<buffer.count])
+            let subSpanScores = await corpus.scoreSubSpans(
+                query: text, candidateIDs: candidateIDs)
+            if !subSpanScores.isEmpty {
+                for i in 0..<buffer.count {
+                    if let subSpan = subSpanScores[buffer.ids[i]] {
+                        // max-cosine blend: sub-span only improves the dense column.
+                        buffer.dense[i] = max(buffer.dense[i], subSpan)
+                    }
+                }
+            }
+        }
+
         // Step 6 — normalise score columns to [0, 1].
         buffer.normalizeFinals()
 
