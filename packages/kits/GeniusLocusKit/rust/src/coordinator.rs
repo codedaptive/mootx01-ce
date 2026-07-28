@@ -3283,7 +3283,12 @@ impl EstateCoordinator {
     ///      re-attempts remediation.
     ///
     /// For each tombstoned row without a "tombstone" or "expungeOrphan" audit:
-    ///   - Re-attempt the cross-kit vector+corpus delete.
+    ///   - Re-attempt the cross-kit vector+corpus delete. This includes:
+    ///       * corpus.remove_content — scrubs BM25 + semantic-embedding index
+    ///       * VectorStore.delete_all_vectors(distillation-features-v1) — scrubs
+    ///         the structural fingerprint lane (unconditional on corpus presence)
+    ///       * VectorStore.delete_all_vectors(corpus model id) — scrubs the
+    ///         semantic embedding lane (requires corpus for model id)
     ///   - On success: seal a "tombstone" success audit (`seal_expunge_audit`).
     ///   - On failure: seal an "expungeOrphan" audit (`seal_expunge_orphan_audit`).
     ///
@@ -3339,8 +3344,16 @@ impl EstateCoordinator {
 
             // Re-attempt the cross-kit vector+corpus delete (step 2 of the
             // original §B-2a expunge). Same logic as the normal expunge step 2:
-            // corpus.expunge scrubs chunk text + clears BM25+vector index entries;
-            // VectorStore.delete_all_vectors clears the resident in-memory bitmap.
+            // corpus.remove_content scrubs chunk text + clears BM25+vector
+            // index entries; VectorStore.delete_all_vectors clears the resident
+            // in-memory bitmap for each lane.
+            //
+            // The distillation-features-v1 lane is scrubbed FIRST, UNCONDITIONAL
+            // on the corpus handle — the structural fingerprint lane is independent
+            // of the semantic embedding lane, and an orphaned fingerprint leaks a
+            // content-derived signature past the destruction contract
+            // (SPEC_DISTILLATION_STORAGE §7.2/§8; Wave-1 parity fix, addendum).
+            // Mirrors the ordering in the main expunge path (coordinator.rs step 2).
             //
             // When neither corpus nor vectorStore is registered (locusOnly estate),
             // no cross-kit cleanup is needed — the audit gap is closed below
@@ -3359,6 +3372,22 @@ impl EstateCoordinator {
                         .map_err(|e| format!("corpus.remove_content failed: {:?}", e))?;
                 }
                 if let Some(ref vs) = vector_store {
+                    // Distillation lane scrub: the distillation-features-v1 entry
+                    // is keyed by the SOURCE drawer id. Unconditional on corpus —
+                    // the lane exists independently of the semantic embedding lane.
+                    // Runs before the corpus-model delete so the fingerprint lane
+                    // is scrubbed even when the corpus-less branch below would
+                    // fail the semantic-lane delete.
+                    vs.delete_all_vectors(
+                        row_id,
+                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "VectorStore.delete_all_vectors(distillation-features-v1) failed: {:?}",
+                            e
+                        )
+                    })?;
                     if let Some(ref c) = corpus {
                         let model_id = c.model_id();
                         vs.delete_all_vectors(row_id, &model_id)
