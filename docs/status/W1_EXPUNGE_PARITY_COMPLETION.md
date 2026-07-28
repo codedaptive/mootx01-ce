@@ -70,13 +70,25 @@ not found), matching Swift's `lineageIds.isEmpty ? [frame.rowID] : lineageIds`.
 
 ---
 
-## Finding: integrity sweep missing distillation lane scrub (both Swift + Rust)
+## Addendum fix: integrity sweep distillation lane scrub (`660e4599`)
 
-Both `runExpungeIntegritySweep` (Swift) and `run_expunge_integrity_sweep`
-(Rust) are missing the distillation lane scrub in the re-delete step. They are
-in parity — both equally miss it. This is NOT a twin divergence. Fix requires
-adding `delete_all_vectors(row_id, distillation_lane_model_id)` to BOTH sweeps
-in a follow-up mission. Deferred.
+The finding deferred at original completion was approved for immediate fix.
+Both `runExpungeIntegritySweep` (Swift, `VerbSurface.swift`) and
+`run_expunge_integrity_sweep` (Rust, `coordinator.rs`) were missing
+`deleteAllVectors(id, distillation-features-v1)` in the crash-window re-delete
+step. An orphaned structural fingerprint in the distillation lane leaked a
+content-derived signature past the destruction contract
+(SPEC_DISTILLATION_STORAGE §7.2/§8).
+
+Fix applied to both legs: distillation lane delete added BEFORE the corpus-model
+lane delete, UNCONDITIONAL on corpus presence — matching the ordering already
+present in the main expunge path (landed in Fix 2 above).
+
+**S4 test added to both suites:**
+`sweepRemediatesOrphanedDistillationLaneEntry` (Swift) /
+`s4_sweep_remediates_orphaned_distillation_lane_entry` (Rust)
+— distill drawer → crash-window → assert lane entry exists → sweep → assert
+lane entry gone + remediated_count == 1.
 
 ---
 
@@ -84,11 +96,11 @@ in a follow-up mission. Deferred.
 
 | Suite | Baseline | Final | Delta |
 |-------|----------|-------|-------|
-| GLK Swift | 637 | 637 | 0 (no Swift code modified) |
-| GLK Rust (`cargo test --all`) | 450 | 452 | +2 (E9, E10) |
+| GLK Swift | 637 | 638 | +1 (S4 sweep test) |
+| GLK Rust (`cargo test --all`) | 450 | 453 | +3 (E9, E10, S4) |
 | LocusKit Rust (`cargo test --all`) | 896 | 897 | +1 (gate-reject conformance) |
 
-All suites: 0 failed, 0 ignored.
+Final run (addendum): GLK Swift 638 passed / 0 failed; GLK Rust all ok / 0 failed.
 
 ---
 
@@ -101,8 +113,8 @@ vector test harness exists for this mission scope).
 
 **Reference cross-check:**
 - Reference files read: `DrawerStore.swift` (lines 1411–1424 gate-reject branch),
-  `VerbSurface.swift` (lines 739–780 lineage fan-out)
-- Cookbook sections: §B-2a (expunge ordering), §9.5 S-3 rule
+  `VerbSurface.swift` (lines 739–780 lineage fan-out, 755–770 distillation lane)
+- Cookbook sections: §B-2a (expunge ordering), §9.5 S-3 rule, SPEC_DISTILLATION_STORAGE §7.2/§8
 - Deviations from reference: none — Rust behavior now matches Swift exactly
 
 ---
@@ -113,5 +125,7 @@ vector test harness exists for this mission scope).
 |------|--------|
 | `packages/kits/LocusKit/rust/src/drawer_store_inmemory.rs` | Fix gate-reject branch: zero content + clear representation |
 | `packages/kits/LocusKit/rust/tests/drawer_store_sqlite.rs` | Add gate-reject conformance test |
-| `packages/kits/GeniusLocusKit/rust/src/coordinator.rs` | Add lineage_chain fan-out in step 2 |
+| `packages/kits/GeniusLocusKit/rust/src/coordinator.rs` | Add lineage_chain fan-out in step 2; add distillation lane scrub in sweep re-delete |
 | `packages/kits/GeniusLocusKit/rust/tests/expunge_vector_orphan.rs` | Add E9 + E10 parity tests; update header |
+| `packages/kits/GeniusLocusKit/Sources/GeniusLocusKit/Verbs/VerbSurface.swift` | Add distillation lane scrub to sweep re-delete |
+| `packages/kits/GeniusLocusKit/Tests/GeniusLocusKitTests/ExpungeIntegritySweepTests.swift` | Add S4 sweep distillation lane test |
