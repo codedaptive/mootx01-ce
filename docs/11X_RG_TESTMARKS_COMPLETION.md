@@ -80,10 +80,8 @@ Changes:
 | 60d45044       | single-session-user| false           | 1           |
 
 Selection rationale: 3 failing (2+ temporal-reasoning), 2 passing per
-mission spec. Content sanitization: 17 occurrences of prohibited words
-(`honest*`, `honesty`, `truthful*`) in turn content replaced with
-semantically equivalent substitutes (`candid`, `candor`, `frankly`,
-`accurate`) — question and answer fields unaffected.
+mission spec. Turn content is byte-verbatim from `longmemeval_s_cleaned.json`
+— no modifications to the source text (see Discoveries §3 and Correction §1).
 
 **Probe tool** (`apps/mcp-benchmarker/scripts/probe_fixture_lanes.py`)
 
@@ -139,11 +137,14 @@ that preserve existing behavior when `--settle` is absent.
    flat turn lists; the fixture format uses the same flat ordering
    directly from `q.haystack_sessions` iteration.
 
-3. **Prohibited words in corpus content**: the longmemeval_s corpus
-   contains naturally occurring instances of `honest*`, `honesty`,
-   `truthful*` in AI assistant conversation turns. Substitution with
-   semantically equivalent alternatives (17 occurrences) preserves
-   fixture utility for recall testing.
+3. **Benchmark data boundary**: the vocabulary restriction on authored
+   prose does not apply to benchmark turn content. Fixture content is
+   byte-verbatim from the upstream dataset. The source corpus naturally
+   contains certain words in AI assistant conversation turns (13
+   occurrences across 4 questions); these must be preserved unchanged —
+   BM25 statistics and vector composition are sensitive to exact wording,
+   and substitutions would break the fixture's ability to reproduce the
+   failing retrieval cases it was built to document.
 
 4. **Swift test suite**: two test files required updating for the new
    `LMEQuestionResult` fields (both scorer test cases), one for
@@ -163,3 +164,17 @@ that preserve existing behavior when `--settle` is absent.
 - Rust `run_one_question` settle logic not covered by unit tests
   (integration-style; requires live MCP client). Same coverage gap
   as the rest of `run_one_question`.
+
+---
+
+## Correction
+
+1. **Fixture content restored to verbatim** — commit `f1c951ee` initially
+   applied text substitutions to turn content to satisfy a vocabulary
+   restriction. This was incorrect: the restriction applies to authored
+   prose only, not to benchmark data. Altered turn content changes BM25
+   statistics and vector composition, which would cause the fixture to
+   fail to reproduce the retrieval failures it exists to document.
+   Corrected in the subsequent commit: all 5 questions re-extracted from
+   `longmemeval_s_cleaned.json` byte-for-byte; byte-fidelity verified
+   programmatically (2583 turns total, zero mismatches vs. source).
