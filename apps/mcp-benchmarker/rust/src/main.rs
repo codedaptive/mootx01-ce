@@ -35,6 +35,7 @@ use mcp_benchmarker_rs::longmemeval_scorer::{
     build_lme_report, score_lme_question, write_lme_report, LmePayloadEntry,
 };
 use mcp_benchmarker_rs::mcp_client::MCPClient;
+use mcp_benchmarker_rs::scratch_posture::ScratchEstatePosture;
 use mcp_benchmarker_rs::transfer::TransferEngine;
 use mcp_benchmarker_rs::transfer_manifest::Manifest;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,11 @@ fn usage() -> &'static str {
      \x20\x20                               [--seed N] [--limit N] [--offset N] [--out <dir>]\n\
      \x20\x20mcp-benchmarker-rs locomo      --corpus <path.json> [--binary <path>]\n\
      \x20\x20                               [--seed N] [--limit N] [--offset N]\n\
-     \x20\x20                               [--out <dir>] [--label <label>]\n"
+     \x20\x20                               [--out <dir>] [--label <label>]\n\
+     \n\
+     \x20\x20longmemeval/locomo/lmeb accept --no-plaintext-scratch to create scratch\n\
+     \x20\x20estates ENCRYPTED (keychain-backed). Default writes mootx01's no-encrypt\n\
+     \x20\x20marker so scratch estates are plaintext and never touch the keychain.\n"
 }
 
 /// Returns the value following `--name`, or None if absent / no value. Mirrors
@@ -238,6 +243,16 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     };
     // --cache-dir <path>: override cache root (default: <out>/estate-cache).
     let cache_dir = option_value("--cache-dir", args).map(PathBuf::from);
+    // --no-plaintext-scratch: opt out of the plaintext-scratch default and let
+    // mootx01 create the scratch estates ENCRYPTED (keychain-backed). Default
+    // (flag absent) writes the no-encrypt marker so scratch estates are
+    // plaintext and never touch the keychain. Use only to benchmark
+    // encrypted-estate overhead deliberately.
+    let scratch_posture = if flag_present("--no-plaintext-scratch", args) {
+        ScratchEstatePosture::EncryptedDefault
+    } else {
+        ScratchEstatePosture::PlaintextOptOut
+    };
 
     eprintln!("[lme] loading corpus from {corpus_path}");
     let corpus = load_corpus(Path::new(&corpus_path))
@@ -265,6 +280,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         encode_barrier,
         estate_cache,
         cache_dir,
+        scratch_posture,
     };
 
     // Keep results alongside scores so the transcript writer can read judge fields,
@@ -307,6 +323,11 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         .iter()
         .map(|r| (r.question_id.clone(), r.cache_hit))
         .collect();
+    // Same extraction for the drain-barrier lane evidence (FIX-HARNESS-20260727).
+    let drain_lane_by_id: std::collections::HashMap<String, Option<bool>> = results
+        .iter()
+        .map(|r| (r.question_id.clone(), r.drain_lane_observed))
+        .collect();
 
     let scores: Vec<_> = results.into_iter().map(score_lme_question).collect();
 
@@ -331,7 +352,9 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         &corpus,
         &payload_entries,
         &cache_hit_by_id,
+        &drain_lane_by_id,
         estate_cache.as_str().to_string(),
+        scratch_posture.as_str().to_string(),
     );
 
     // Print summary.
@@ -465,6 +488,16 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
     };
     // --cache-dir <path>: override cache root (default: <out>/estate-cache).
     let cache_dir_locomo = option_value("--cache-dir", args).map(PathBuf::from);
+    // --no-plaintext-scratch: opt out of the plaintext-scratch default and let
+    // mootx01 create the scratch estates ENCRYPTED (keychain-backed). Default
+    // (flag absent) writes the no-encrypt marker so scratch estates are
+    // plaintext and never touch the keychain. Use only to benchmark
+    // encrypted-estate overhead deliberately.
+    let scratch_posture = if flag_present("--no-plaintext-scratch", args) {
+        ScratchEstatePosture::EncryptedDefault
+    } else {
+        ScratchEstatePosture::PlaintextOptOut
+    };
 
     eprintln!("[locomo] loading corpus from {corpus_path}");
     let corpus = load_locomo_corpus(Path::new(&corpus_path))
@@ -494,6 +527,7 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         encode_barrier,
         estate_cache,
         cache_dir: cache_dir_locomo,
+        scratch_posture,
     };
 
     let results = run_locomo_questions(&corpus, &run_config);
@@ -501,6 +535,10 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
     let cache_hit_by_id_locomo: std::collections::HashMap<String, Option<bool>> = results
         .iter()
         .map(|r| (r.question_id.clone(), r.cache_hit))
+        .collect();
+    let drain_lane_by_id_locomo: std::collections::HashMap<String, Option<bool>> = results
+        .iter()
+        .map(|r| (r.question_id.clone(), r.drain_lane_observed))
         .collect();
     let scores: Vec<_> = results.into_iter().map(score_locomo_question).collect();
 
@@ -520,7 +558,9 @@ fn run_locomo(args: &[String]) -> Result<(), String> {
         corpus.adversarial_count,
         &scores,
         &cache_hit_by_id_locomo,
+        &drain_lane_by_id_locomo,
         estate_cache.as_str().to_string(),
+        scratch_posture.as_str().to_string(),
     );
 
     // Print summary.
@@ -612,6 +652,16 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
     };
     // --cache-dir <path>: override cache root (default: <out>/estate-cache).
     let cache_dir_lmeb = option_value("--cache-dir", args).map(PathBuf::from);
+    // --no-plaintext-scratch: opt out of the plaintext-scratch default and let
+    // mootx01 create the scratch estates ENCRYPTED (keychain-backed). Default
+    // (flag absent) writes the no-encrypt marker so scratch estates are
+    // plaintext and never touch the keychain. Use only to benchmark
+    // encrypted-estate overhead deliberately.
+    let scratch_posture = if flag_present("--no-plaintext-scratch", args) {
+        ScratchEstatePosture::EncryptedDefault
+    } else {
+        ScratchEstatePosture::PlaintextOptOut
+    };
 
     // ── Load corpus ───────────────────────────────────────────────────────────
     eprintln!("[lmeb] loading corpus from {data_dir}");
@@ -644,6 +694,7 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         encode_barrier,
         estate_cache: estate_cache_lmeb,
         cache_dir: cache_dir_lmeb,
+        scratch_posture,
     };
 
     // ── Run harness ───────────────────────────────────────────────────────────
@@ -653,6 +704,10 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
     let cache_hit_by_id_lmeb: std::collections::HashMap<String, Option<bool>> = results
         .iter()
         .map(|r| (r.query_id.clone(), r.cache_hit))
+        .collect();
+    let drain_lane_by_id_lmeb: std::collections::HashMap<String, Option<bool>> = results
+        .iter()
+        .map(|r| (r.query_id.clone(), r.drain_lane_observed))
         .collect();
     let scores: Vec<_> = results.into_iter().map(score_lmeb_query).collect();
 
@@ -674,7 +729,9 @@ fn run_lmeb(args: &[String]) -> Result<(), String> {
         queries_loaded,
         &scores,
         &cache_hit_by_id_lmeb,
+        &drain_lane_by_id_lmeb,
         estate_cache_lmeb.as_str().to_string(),
+        scratch_posture.as_str().to_string(),
     );
 
     // ── Print summary ─────────────────────────────────────────────────────────

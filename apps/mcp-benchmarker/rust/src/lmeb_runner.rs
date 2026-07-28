@@ -31,6 +31,7 @@
 use crate::config::{EndpointConfig, EndpointRole, ResultFormat, Transport, VerbMap};
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
+use crate::scratch_posture::{apply_scratch_posture, ScratchEstatePosture};
 use crate::estate_cache::{
     default_cache_dir, estate_cache_entry_path, moot_binary_fingerprint,
     restore_estate_cache_entry, save_estate_cache_entry, EstateCacheMode,
@@ -62,6 +63,10 @@ pub struct LmebRunConfig {
     pub estate_cache: EstateCacheMode,
     /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
     pub cache_dir: Option<PathBuf>,
+    /// At-rest posture for scratch estates. Default PlaintextOptOut (writes
+    /// mootx01's `no-encrypt` marker; no keychain contact). Recorded in the
+    /// report JSON as "estate_encryption".
+    pub scratch_posture: ScratchEstatePosture,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,14 +119,24 @@ pub fn lmeb_verb_map() -> VerbMap {
 ///
 /// The deterministic naming ensures each query has a unique path even across
 /// retries, and the `/tmp/lmeb-bench-` prefix enables guarded teardown.
-/// Twin of Swift `lmebScratchDir()` (UUID suffix variant; here seed+index for
-/// determinism matching `lme_scratch_dir`).
-pub fn lmeb_scratch_dir(seed: u64, query_index: usize) -> Result<PathBuf, MCPError> {
+/// Twin of Swift `lmebScratchDir(posture:)` (UUID suffix variant; here
+/// seed+index for determinism matching `lme_scratch_dir`).
+///
+/// `posture` decides the at-rest encryption of the estate this dir will hold:
+/// PlaintextOptOut writes mootx01's `no-encrypt` marker BEFORE any serve
+/// launch (see scratch_posture.rs). No default on purpose: every call site
+/// decides posture explicitly.
+pub fn lmeb_scratch_dir(
+    seed: u64,
+    query_index: usize,
+    posture: ScratchEstatePosture,
+) -> Result<PathBuf, MCPError> {
     let name = format!("lmeb-bench-{seed:016x}-{query_index:08x}");
     let path = PathBuf::from("/tmp").join(&name);
     std::fs::create_dir_all(&path).map_err(|e| MCPError {
         description: format!("lmeb_scratch_dir: failed to create {}: {e}", path.display()),
     })?;
+    apply_scratch_posture(posture, &path)?;
     Ok(path)
 }
 
@@ -238,14 +253,16 @@ fn run_one_lmeb_query(
     query_index: usize,
     encode_barrier: EncodeBarrier,
     cache_entry: Option<&Path>,
+    scratch_posture: ScratchEstatePosture,
 ) -> Result<LmebQueryResult, MCPError> {
     // ── Cache restore attempt (when cache mode is Reuse) ──────────────────────
     // Try to restore a previously-snapshotted estate for this query. On hit,
     // skip ingest and drain entirely. On miss, fall through to normal ingest.
     let cache_restore: Option<(PathBuf, Vec<LmebManifestEntry>)> =
         cache_entry.and_then(|entry| {
-            restore_estate_cache_entry(entry, || {
-                lmeb_scratch_dir(seed, query_index).map_err(|e| e.description.clone())
+            restore_estate_cache_entry(entry, scratch_posture, || {
+                lmeb_scratch_dir(seed, query_index, scratch_posture)
+                    .map_err(|e| e.description.clone())
             })
         });
 
@@ -258,7 +275,7 @@ fn run_one_lmeb_query(
             (s, map, true, Some(true))
         } else {
             let is_cache_miss = cache_entry.is_some();
-            let s = lmeb_scratch_dir(seed, query_index)?;
+            let s = lmeb_scratch_dir(seed, query_index, scratch_posture)?;
             (s, HashMap::new(), false, if is_cache_miss { Some(false) } else { None })
         };
 
@@ -318,8 +335,11 @@ fn run_one_lmeb_query(
     // ── Drain barrier (EncodeBarrier::Drain mode; skipped on cache hit) ───────
     // Wait for background encoding to drain before issuing any recall query.
     // On a cache hit the estate is already committed — no drain needed.
+    // Lane evidence for the report: None when the barrier did not run.
+    let mut drain_lane_observed: Option<bool> = None;
     if !skip_ingest && encode_barrier == EncodeBarrier::Drain {
-        wait_for_encode_drain(&mut client, &format!("lmeb {}", query.id), 300.0);
+        let outcome = wait_for_encode_drain(&mut client, &format!("lmeb {}", query.id), 300.0);
+        drain_lane_observed = Some(outcome.lane_observed);
     }
 
     // ── Snapshot to cache (on cache miss, after drain) ────────────────────────
@@ -410,6 +430,7 @@ fn run_one_lmeb_query(
         write_mean_latency_seconds: write_mean_latency,
         payload_text,
         cache_hit,
+        drain_lane_observed,
     })
 }
 
@@ -479,6 +500,7 @@ pub fn run_lmeb_queries(
                 config.seed,
                 config.encode_barrier,
                 &binary_fingerprint,
+                config.scratch_posture,
                 &query.id,
             ))
         } else {
@@ -495,6 +517,7 @@ pub fn run_lmeb_queries(
             *query_index,
             config.encode_barrier,
             cache_entry_opt.as_deref(),
+            config.scratch_posture,
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
@@ -520,6 +543,7 @@ pub fn run_lmeb_queries(
                     write_mean_latency_seconds: 0.0,
                     payload_text: None,
                     cache_hit: None,
+                    drain_lane_observed: None,
                 });
             }
         }

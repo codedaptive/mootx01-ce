@@ -8,7 +8,7 @@ import Foundation
 // queries via live MCP query, records the manifest, and tears down the estate.
 //
 // Safety guarantees:
-//   - lmeScratchDir() names the dir with /tmp/lme-bench- so the teardown guard
+//   - lmeScratchDir(posture:) names the dir with /tmp/lme-bench- so the teardown guard
 //     can distinguish LME scratch dirs from arbitrary /tmp directories.
 //   - lmeGuardedTeardown() refuses any path that does not carry the
 //     /tmp/lme-bench- prefix; a non-scratch path cannot be passed by mistake.
@@ -144,6 +144,13 @@ struct LMEQuestionResult: Sendable {
     /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
     /// nil = --estate-cache off (cache not in use for this run).
     let cacheHit: Bool?
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// (Shape B response) before accepting idle. false = the barrier converged
+    /// via the no-lanes grace window without ever seeing the lane — ambiguous
+    /// evidence (tiny corpus finished early, or lane never wired). nil = the
+    /// drain barrier did not run for this question (barrier != drain, or the
+    /// estate was restored from cache and ingest was skipped).
+    let drainLaneObserved: Bool?
 }
 
 // MARK: - Run config
@@ -186,6 +193,12 @@ struct LMERunConfig: Sendable {
     /// Root directory for estate snapshots (--cache-dir). nil = <outDir>/estate-cache
     /// (or <cwd>/estate-cache when outDir is also nil).
     let cacheDir: URL?
+    /// At-rest posture for scratch estates. Default plaintextOptOut: the runner
+    /// writes mootx01's `no-encrypt` marker into each scratch data dir before
+    /// serve launch so the estate is created plaintext (no keychain contact).
+    /// --no-plaintext-scratch selects encryptedDefault. Recorded in the report
+    /// JSON as "estate_encryption".
+    let scratchPosture: ScratchEstatePosture
 }
 
 // MARK: - Scratch estate management
@@ -196,9 +209,13 @@ struct LMERunConfig: Sendable {
 /// The UUID suffix guarantees uniqueness across concurrent runs without needing
 /// mkdtemp(3) or a subprocess call.
 ///
+/// - Parameter posture: At-rest posture for the estate this dir will hold.
+///   `plaintextOptOut` writes mootx01's `no-encrypt` marker into the dir
+///   BEFORE any serve launch (see ScratchPosture.swift). No default value on
+///   purpose: every call site decides posture explicitly.
 /// - Returns: The URL of the created directory.
-/// - Throws: `MCPError` when directory creation fails.
-func lmeScratchDir() throws -> URL {
+/// - Throws: `MCPError` when directory or marker creation fails.
+func lmeScratchDir(posture: ScratchEstatePosture) throws -> URL {
     // Build a unique path with the /tmp/lme-bench- prefix.
     // The 8-character UUID prefix gives 32-bit entropy (4B combinations) —
     // more than sufficient for sequential benchmark runs on one machine.
@@ -207,10 +224,11 @@ func lmeScratchDir() throws -> URL {
     let url = URL(fileURLWithPath: path)
     do {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
     } catch {
         throw MCPError(description: "lmeScratchDir: could not create \(path): \(error)")
     }
+    try applyScratchPosture(posture, to: url)
+    return url
 }
 
 /// Deletes a scratch directory created by `lmeScratchDir`. Refuses any path
@@ -227,7 +245,7 @@ func lmeGuardedTeardown(_ url: URL) throws {
         throw MCPError(description:
             "SAFETY: lmeGuardedTeardown refused to delete '\(path)' — "
             + "path must have the /tmp/lme-bench- prefix. "
-            + "Only directories created by lmeScratchDir() may be torn down by this guard.")
+            + "Only directories created by lmeScratchDir(posture:) may be torn down by this guard.")
     }
     do {
         try FileManager.default.removeItem(at: url)
@@ -248,7 +266,7 @@ func lmeGuardedTeardown(_ url: URL) throws {
 ///   2. Tells the MCPClient how to launch the server (stdio transport).
 ///
 /// - Parameters:
-///   - scratchDir: A directory created by `lmeScratchDir()`.
+///   - scratchDir: A directory created by `lmeScratchDir(posture:)`.
 ///   - mootBinaryPath: Path to the mootx01 binary.
 /// - Returns: A validated EndpointConfig for this estate.
 /// - Throws: `MCPError` via assertScratchBackend when the config does not meet
@@ -309,7 +327,7 @@ func runLMEQuestions(
     var sharedScratch: URL?
     var sharedClient: MCPClient?
     if !config.freshPerQuestion {
-        let scratch = try lmeScratchDir()
+        let scratch = try lmeScratchDir(posture: config.scratchPosture)
         sharedScratch = scratch
         let endpoint = try lmeEndpointConfig(scratchDir: scratch, mootBinaryPath: config.mootBinaryPath)
         let client = MCPClient(endpoint: endpoint)
@@ -349,22 +367,27 @@ func runLMEQuestions(
                     seed: config.seed,
                     encodeBarrier: config.encodeBarrier,
                     binaryFingerprint: binaryFingerprint,
+                    posture: config.scratchPosture,
                     unitID: question.questionID
                 )
                 if let (restored, hit): (URL, [LMEManifestEntry]) =
-                    restoreEstateCacheEntry(from: cacheEntry, scratchDirFactory: lmeScratchDir) {
-                    // Cache hit: restored scratch dir contains the post-ingest estate.
+                    restoreEstateCacheEntry(
+                        from: cacheEntry,
+                        expectedPosture: config.scratchPosture,
+                        scratchDirFactory: { try lmeScratchDir(posture: config.scratchPosture) }) {
+                    // Cache hit: restored scratch dir contains the post-ingest estate
+                    // (including the posture marker, which travels with the snapshot).
                     freshScratch = restored
                     manifest = hit  // pre-populate manifest from snapshot
                     questionCacheHit = true
                 } else {
                     // Cache miss: fresh estate; snapshot to cache after ingest + drain.
-                    freshScratch = try lmeScratchDir()
+                    freshScratch = try lmeScratchDir(posture: config.scratchPosture)
                     questionCacheHit = false
                     cacheEntryForSnapshot = cacheEntry
                 }
             } else {
-                freshScratch = try lmeScratchDir()
+                freshScratch = try lmeScratchDir(posture: config.scratchPosture)
             }
 
             let endpoint = try lmeEndpointConfig(scratchDir: freshScratch,
@@ -388,6 +411,9 @@ func runLMEQuestions(
         // Ingest haystack sessions: write each turn via live moot_file_memory.
         // Skipped on cache hit (manifest and estate already restored from snapshot).
         let skipIngest = (questionCacheHit == true)
+        // Drain-barrier lane evidence for this question. nil when the barrier
+        // did not run (barrier != drain, or ingest skipped on cache hit).
+        var drainLaneObserved: Bool? = nil
         if !skipIngest {
         for (sessionIndex, session) in question.haystackSessions.enumerated() {
             let sessionID = question.haystackSessionIDs[sessionIndex]
@@ -435,10 +461,11 @@ func runLMEQuestions(
         // query. This serializes ingest → encode → query without per-write latency.
         // The drain poll is a no-op for impatient and none modes.
         if config.encodeBarrier == .drain {
-            let _ = await waitForEncodeDrain(
+            let outcome = await waitForEncodeDrain(
                 client: client,
                 label: "lme \(question.questionID)"
             )
+            drainLaneObserved = outcome.laneObserved
         }
         } // end if !skipIngest
 
@@ -568,7 +595,8 @@ func runLMEQuestions(
             exactJudgeCorrect: exactJudgeCorrect,
             denseJudgeAnswer: denseJudgeAnswer,
             denseJudgeCorrect: denseJudgeCorrect,
-            cacheHit: questionCacheHit
+            cacheHit: questionCacheHit,
+            drainLaneObserved: drainLaneObserved
         ))
     }
 

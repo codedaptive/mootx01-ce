@@ -17,6 +17,7 @@ use crate::config::{EndpointConfig, EndpointRole, Transport, VerbMap};
 use crate::config::ResultFormat;
 use crate::degeneracy_guard::DegeneracyGuard;
 use crate::encode_barrier::{EncodeBarrier, wait_for_encode_drain};
+use crate::scratch_posture::{apply_scratch_posture, ScratchEstatePosture};
 use crate::estate_cache::{
     default_cache_dir, estate_cache_entry_path, moot_binary_fingerprint,
     restore_estate_cache_entry, save_estate_cache_entry, EstateCacheMode,
@@ -74,6 +75,11 @@ pub struct LmeRunConfig {
     pub estate_cache: EstateCacheMode,
     /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
     pub cache_dir: Option<PathBuf>,
+    /// At-rest posture for scratch estates. Default PlaintextOptOut: writes
+    /// mootx01's `no-encrypt` marker into each scratch data dir before serve
+    /// launch (no keychain contact). --no-plaintext-scratch selects
+    /// EncryptedDefault. Recorded in the report JSON as "estate_encryption".
+    pub scratch_posture: ScratchEstatePosture,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,12 +184,22 @@ pub fn lme_dense_verb_map() -> VerbMap {
 ///
 /// The deterministic naming ensures each question has a unique path even across
 /// retries, and the fixed prefix enables guarded teardown.
-pub fn lme_scratch_dir(seed: u64, question_index: usize) -> Result<PathBuf, MCPError> {
+///
+/// `posture` decides the at-rest encryption of the estate this dir will hold:
+/// PlaintextOptOut (default methodology) writes mootx01's `no-encrypt` marker
+/// BEFORE any serve launch (see scratch_posture.rs). No default value on
+/// purpose: every call site decides posture explicitly.
+pub fn lme_scratch_dir(
+    seed: u64,
+    question_index: usize,
+    posture: ScratchEstatePosture,
+) -> Result<PathBuf, MCPError> {
     let name = format!("lme-bench-{seed:016x}-{question_index:08x}");
     let path = PathBuf::from("/tmp").join(&name);
     std::fs::create_dir_all(&path).map_err(|e| MCPError {
         description: format!("failed to create scratch dir {}: {e}", path.display()),
     })?;
+    apply_scratch_posture(posture, &path)?;
     Ok(path)
 }
 
@@ -369,14 +385,17 @@ pub fn run_one_question(
     judge_cmd: Option<&str>,
     encode_barrier: EncodeBarrier,
     cache_entry: Option<&Path>,
+    scratch_posture: ScratchEstatePosture,
 ) -> Result<LmeQuestionResult, MCPError> {
     // ── Cache restore attempt (when cache mode is Reuse) ──────────────────────
     // Try to restore a previously-snapshotted estate for this question. On hit,
     // skip ingest and drain entirely. On miss, fall through to normal ingest.
+    // The posture marker travels with the snapshot; restore asserts it matches.
     let cache_restore: Option<(PathBuf, Vec<LmeManifestEntry>)> =
         cache_entry.and_then(|entry| {
-            restore_estate_cache_entry(entry, || {
-                lme_scratch_dir(seed, question_index).map_err(|e| e.description.clone())
+            restore_estate_cache_entry(entry, scratch_posture, || {
+                lme_scratch_dir(seed, question_index, scratch_posture)
+                    .map_err(|e| e.description.clone())
             })
         });
 
@@ -385,7 +404,7 @@ pub fn run_one_question(
             (s, m, true, Some(true))
         } else {
             let is_cache_miss = cache_entry.is_some();
-            let s = lme_scratch_dir(seed, question_index)?;
+            let s = lme_scratch_dir(seed, question_index, scratch_posture)?;
             (s, Vec::new(), false, if is_cache_miss { Some(false) } else { None })
         };
 
@@ -448,8 +467,11 @@ pub fn run_one_question(
     // issuing any recall query. Prevents background-encoding races that produce
     // artificially low recall scores. On a cache hit the estate is already
     // committed — no drain needed.
+    // Lane evidence for the report: None when the barrier did not run.
+    let mut drain_lane_observed: Option<bool> = None;
     if !skip_ingest && encode_barrier == EncodeBarrier::Drain {
-        wait_for_encode_drain(&mut client, &format!("lme {}", question_id), 300.0);
+        let outcome = wait_for_encode_drain(&mut client, &format!("lme {}", question_id), 300.0);
+        drain_lane_observed = Some(outcome.lane_observed);
     }
 
     // ── Snapshot to cache (on cache miss, after drain) ────────────────────────
@@ -616,6 +638,7 @@ pub fn run_one_question(
         dense_judge_answer,
         dense_judge_correct,
         cache_hit,
+        drain_lane_observed,
     })
 }
 
@@ -675,6 +698,7 @@ pub fn run_lme_questions(
                 config.seed,
                 config.encode_barrier,
                 &binary_fingerprint,
+                config.scratch_posture,
                 &q.question_id,
             ))
         } else {
@@ -696,6 +720,7 @@ pub fn run_lme_questions(
             config.judge_cmd.as_deref(),
             config.encode_barrier,
             cache_entry_opt.as_deref(),
+            config.scratch_posture,
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
@@ -730,6 +755,7 @@ pub fn run_lme_questions(
                     dense_judge_answer: None,
                     dense_judge_correct: None,
                     cache_hit: None,
+                    drain_lane_observed: None,
                 });
             }
         }
