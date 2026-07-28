@@ -37,6 +37,28 @@ pub fn content_digest_bytes(bytes: &[u8]) -> String {
 }
 
 /// One canonical content row as the engine consumes it.
+///
+/// # Two-text design — dual-text indexing capability
+///
+/// A content provider may optionally supply a `dense_composition_text` per
+/// content ID that is distinct from the verbatim lexical `text`:
+///
+///   - `text`                    — The verbatim canonical text. Used for
+///                                 BM25/lexical indexing (keyword tokenisation)
+///                                 and as the returned/ranked payload. Never
+///                                 changes for a given (id, revision, digest).
+///   - `dense_composition_text`  — Optional text used to compose the dense
+///                                 float vector lane. `None` means "use `text`"
+///                                 — the default, so existing consumers see zero
+///                                 behavior change. When `Some`, the dense lane
+///                                 vectors are composed from this text while
+///                                 BM25 continues to index `text` unchanged.
+///
+/// Recomposability rule: any vector produced by the engine must be exactly
+/// recomposable from persisted/reachable canonical text. In standalone mode
+/// `dense_composition_text` is stored in `corpus_documents.dense_text` (NULL
+/// when `None`). In attached mode the source adapter supplies it at
+/// record-resolution time from the distillate store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusContentRecord {
     pub id: CorpusContentId,
@@ -45,9 +67,22 @@ pub struct CorpusContentRecord {
     pub revision: i64,
     /// `content_digest(text)` — the change-detection anchor.
     pub digest: String,
-    /// The verbatim canonical text, resolved BY ID at work time. Never
+    /// The verbatim canonical text, resolved BY ID at work time. Used for
+    /// BM25 keyword tokenisation and as the returned ranked payload. Never
     /// rides a queue payload or change feed.
     pub text: String,
+    /// Optional dense-composition text for the float vector lane. `None`
+    /// means use `text` for both BM25 and dense embedding — the default
+    /// for all consumers that do not supply a separate dense representation.
+    pub dense_composition_text: Option<String>,
+}
+
+impl CorpusContentRecord {
+    /// The text the engine uses when composing the dense float lane vector.
+    /// Returns `dense_composition_text` when set, falls back to `text`.
+    pub fn effective_dense_text(&self) -> &str {
+        self.dense_composition_text.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// One entry of the content change feed. Identity/revision/digest ONLY —
