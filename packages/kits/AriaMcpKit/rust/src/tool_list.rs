@@ -883,7 +883,8 @@ fn recall_distilled_tool() -> serde_json::Value {
             json!({
                 "query": string_schema("Natural-language query to recall distilled factoids for."),
                 "limit": integer_schema("Max factoids to return (default 10)."),
-                "filter": filter_schema()
+                "filter": filter_schema(),
+                "echo_query": boolean_schema("Optional. When true, appends the query text to the response header (e.g. 'found N distilled factoid(s) for: {query}'). Default false — the AI already knows what it queried. Omit to use the default; null is invalid.")
             }),
             json!(["query"])
         )))
@@ -1403,4 +1404,43 @@ fn estate_id_schema() -> serde_json::Value {
 
 fn teachme_schema() -> serde_json::Value {
     boolean_schema("Set true to receive a usage guide for this tool without touching the estate.")
+}
+
+// ---------------------------------------------------------------------------
+// Accepted-argument-key extraction (Part A — unknown-arg hint)
+// ---------------------------------------------------------------------------
+
+/// Return the set of argument keys declared in a tool's inputSchema, given
+/// vault and memory-tool flags. Returns `None` when the tool name is unknown
+/// (dispatch will handle it with a methodNotFound error before the hint runs).
+///
+/// Keys are extracted from the live tool schema (post-`with_estate_id` /
+/// `with_teachme` wrappers), so `estateID` and `teachme` are always included
+/// when the tool carries them. Vault tools only appear in the list when
+/// `vault_on` is true, matching the dispatch gate.
+///
+/// Mirrors Swift `ToolProjection.acceptedArgKeys(for:)`.
+pub fn accepted_arg_keys_with_flags(
+    name: &str,
+    vault_on: bool,
+    memory_on: bool,
+) -> Option<std::collections::HashSet<String>> {
+    let tools_list = build_tool_list_with_flags(vault_on, memory_on);
+    let tools_array = match &tools_list {
+        serde_json::Value::Array(arr) => arr,
+        _ => return None,
+    };
+    let tool = tools_array.iter().find(|t| t["name"].as_str() == Some(name))?;
+    let properties = tool["inputSchema"]["properties"].as_object()?;
+    Some(properties.keys().cloned().collect())
+}
+
+/// Return the set of argument keys for a tool using the current process
+/// environment (same env-var logic as `build_tool_list`). Returns `None`
+/// when the tool name is unknown.
+///
+/// Convenience wrapper over `accepted_arg_keys_with_flags` for the dispatch
+/// hot-path — mirrors Swift `ToolProjection.acceptedArgKeys(for:)`.
+pub fn accepted_arg_keys(name: &str) -> Option<std::collections::HashSet<String>> {
+    accepted_arg_keys_with_flags(name, vault_enabled(), memory_enabled())
 }

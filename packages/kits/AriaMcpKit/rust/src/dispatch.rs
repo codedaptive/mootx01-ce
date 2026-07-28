@@ -174,7 +174,11 @@ fn dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, sensitivity_ledger,
         vault_on, build_serial, version_skew, update_advisory, monitoring_control,
     );
+    // Apply unrecognized-arg hint after surface_dispatch_failure so error
+    // results (isError:true) also get the stderr log but not the appended
+    // hint text — matching Swift ToolDispatcher.appendUnknownArgsHint.
     surface_dispatch_failure(name, routed)
+        .map(|result| inject_unknown_args_hint(name, args, result))
 }
 
 /// Convert a runner's `TOOL_DISPATCH_FAILURE` into a tool result with
@@ -509,6 +513,47 @@ fn inject_hint(
             let _ = text_field; // drop immutable borrow so the mutable assignment below compiles
             result["content"][0]["text"] = serde_json::Value::String(new_text);
         }
+    }
+    result
+}
+
+/// Append a hint line when the caller sent argument keys not declared in the
+/// tool's inputSchema. Never modifies error results (`isError: true`). Also
+/// logs unrecognized keys to stderr for daemon log visibility.
+///
+/// Accepted keys are extracted from `crate::tool_list::accepted_arg_keys`,
+/// which reads the live tool schema (post-`with_estate_id`/`with_teachme`
+/// wrappers). Returns `None` for unknown tool names — no check runs.
+///
+/// Mirrors Swift `ToolDispatcher.appendUnknownArgsHint`.
+fn inject_unknown_args_hint(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    mut result: serde_json::Value,
+) -> serde_json::Value {
+    let Some(accepted) = crate::tool_list::accepted_arg_keys(name) else {
+        return result;
+    };
+    let unknown: Vec<String> = {
+        let mut v: Vec<String> = args.keys()
+            .filter(|k| !accepted.contains(*k))
+            .cloned()
+            .collect();
+        v.sort();
+        v
+    };
+    if unknown.is_empty() {
+        return result;
+    }
+    let sorted_names = unknown.join(", ");
+    eprintln!("aria-mcp: {name}: unrecognized argument(s) ignored: {sorted_names}");
+    // Append hint to non-error results only.
+    if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+        return result;
+    }
+    if let Some(text) = result["content"][0]["text"].as_str() {
+        let new_text = format!("{text}\nhint: unrecognized argument(s) ignored: {sorted_names}");
+        result["content"][0]["text"] = serde_json::Value::String(new_text);
     }
     result
 }

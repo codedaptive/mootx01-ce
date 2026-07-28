@@ -136,6 +136,16 @@ public extension GeniusLocusKit {
         let drawer = try await capture(handle, classifiedFrame)
 
         // 2. Encode per mode — only when a Corpus is registered for the estate.
+        //
+        // 1.0.x CORPUS BOUNDARY: the chunked corpus index receives content ONLY
+        // through this intake (the enqueueIngest / inline-ingest calls below).
+        // Drawers captured directly via estate.capture — e.g. the distillation
+        // factoids filed by DistillationCycle.captureFactoid — are not
+        // corpus-indexed, and drawer supersessions do not propagate to the
+        // index. The index is deliberately change-blind on this line; corpus
+        // search reflects what passed through this intake, not the drawer
+        // store's current lineage state. See the lineage-semantics comment in
+        // DistillationCycle.captureFactoid for the full picture.
         guard let corpus = corpusKits[handle] else {
             // No semantic lane to feed (e.g. .locusOnly). The drawer row is
             // stored; nothing to ingest. Both modes degrade to row-only.

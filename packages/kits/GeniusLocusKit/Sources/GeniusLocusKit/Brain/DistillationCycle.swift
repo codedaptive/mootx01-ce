@@ -240,6 +240,38 @@ private extension GeniusLocusKit {
         // lands — use the same constant rather than re-deriving from the manifest.
         let factoidWing = LocusKit.defaultWingName  // "Agentic Memory" — wing organization
 
+        // 1.0.x LINEAGE SEMANTICS (verified empirically 2026-07-28; retained
+        // intentionally on this line — see the redesign note below).
+        //
+        // The factoid is captured with lineageID = the source's UUID (intra-item
+        // path: clusterID is the source drawer's id; cluster path: the cluster
+        // UUID). Two consequences, both load-bearing:
+        //
+        //   1. The SOURCE drawer is NOT superseded. Every normally-captured
+        //      drawer is its own lineage — its lineageID column is a fresh
+        //      UUID distinct from its id (EstateVerbs.capture stamps
+        //      `frame.lineageID ?? UUID()`), so the factoid's lineageID never
+        //      matches the source's lineage and DrawerStore's supersession
+        //      cascade does not fire against it. Sources stay active in the
+        //      drawer store after distillation.
+        //   2. Re-distilling the SAME source DOES fire the cascade — against
+        //      the PRIOR FACTOID, which shares this lineageID. The old factoid
+        //      flips active → superseded and a supersedes tunnel is filed.
+        //      That is the idempotency mechanism distillItemsSweep relies on,
+        //      and drawer-store-direct surfaces (recall, lineage chains,
+        //      audit) observe those factoid supersessions.
+        //
+        // The primary search path is unaffected by any of this: the chunked
+        // corpus index is change-blind on 1.0.x. Factoids are captured via
+        // estate.capture directly, bypassing the corpus intake (see
+        // EncodeIntake.swift), so they are never corpus-indexed, and drawer
+        // supersessions never propagate to the index — original content keeps
+        // surfacing in corpus search regardless of drawer-store state. This
+        // equilibrium is retained intentionally on 1.0.x: rerouting factoids
+        // through the intake or propagating supersessions here would disturb
+        // the working chunked-search behavior this line is measured and frozen
+        // on. The distillation storage redesign on the 1.1 line replaces this
+        // mechanism entirely (parallel on-item storage, no supersession).
         let lineageID = UUID(uuidString: clusterID) ?? UUID()
 
         // Sensitivity floor: a factoid must not be captured at a lower

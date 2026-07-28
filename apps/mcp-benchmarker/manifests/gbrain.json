@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "product": {
+    "id": "gbrain",
+    "displayName": "gBrain",
+    "version": "current",
+    "homepage": "https://github.com/garrytan/gbrain",
+    "provenance": "authored-from-public-docs",
+    "provenanceNote": "DRAFT. Derived from the github.com/garrytan/gbrain README (TypeScript; PGLite/Postgres+pgvector). Documented verbs: capture (write), search (raw retrieve), think (synthesized answer), import, sync — README states '30+ tools over MCP' but does not enumerate exact MCP tool names or argument keys. The tool names below mirror the CLI verbs and the args/result keys are INFERRED — verify against the live MCP tool schema before publishing any number. Retrieval: hybrid vector (pgvector HNSW) + BM25 + reciprocal-rank fusion, plus a self-wiring knowledge graph (typed edges extracted WITHOUT LLM calls) auto-built on every write."
+  },
+  "transport": { "stdio": { "command": "gbrain mcp" } },
+  "role": "both",
+  "calls": {
+    "write": {
+      "tool": "capture",
+      "args": { "content": "text" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "text" },
+      "technique": ["embedding"]
+    },
+    "query": {
+      "tool": "search",
+      "args": { "query": "query" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "text" },
+      "technique": ["bm25", "vector_hnsw", "rrf"]
+    },
+    "think": {
+      "tool": "think",
+      "args": { "query": "query" },
+      "constantArgs": {},
+      "result": { "kind": "jsonObjects", "idKey": "id", "contentKey": "text" },
+      "technique": ["graph_traversal", "rrf"],
+      "unmatched": true
+    }
+  }
+}

@@ -120,8 +120,15 @@ apps/moot-agent-skills/**/__pycache__/
 
 # Internal work products — never ship in CE (leak remediation 2026-07-20)
 docs/findings/
-docs/blast_radius/
+# docs/blast_radius/ is unignored: BRRs must commit normally (they are Adams's
+# gate; force-adding them on every mission is friction that breaks the protocol).
+# BRRs contain no user data and are already on the stream branch — not shipped.
 docs/analysis/blast_radius/
 docs/missions/
 docs/agentic_output/
 docs/analysis/
+
+# Benchmark estate caches — multi-GB binary estate snapshots produced by
+# mcp-benchmarker runs for reuse across cells. Never committed; regenerable
+# from the run scripts (1.0.x finalization, 2026-07-28).
+apps/mcp-benchmarker/results/**/estate-cache/

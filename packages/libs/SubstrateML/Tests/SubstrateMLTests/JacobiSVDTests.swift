@@ -207,6 +207,92 @@ struct JacobiSVDTests {
     }
 
 
+    // MARK: - Parallel chunking crash regression (n=64)
+
+    /// Regression test for the parallel-chunking range trap introduced in
+    /// commit 5edc7bb6 and exposed by batchTrainIfNeeded growth retrains.
+    ///
+    /// Root cause: `DispatchQueue.concurrentPerform(iterations: chunkCount)` spawns
+    /// `chunkCount = min(workers, round.count)` iterations; with ceiling-division
+    /// chunk size `per`, trailing iterations get `lo = ci*per > round.count`, making
+    /// `hi = min(lo+per, round.count) < lo`. Swift's `lo..<hi` Range precondition
+    /// traps when lowerBound > upperBound.
+    ///
+    /// For n=64, tournament rounds have 32 pairs each. On an 18-core machine:
+    ///   chunkCount = min(18, 32) = 18
+    ///   per = ceiling(32 / 18) = 2
+    ///   ci=17: lo = 34, hi = min(36, 32) = 32  →  lo > hi  →  TRAP (pre-guard)
+    ///
+    /// The fix (`guard lo < hi else { return }`) makes trailing workers no-op
+    /// instead of trapping. This test verifies: decompose completes and the result
+    /// satisfies structural SVD properties plus full-rank reconstruction fidelity.
+    @Test("parallel chunking: n=64 completes and satisfies SVD identity")
+    func parallelChunkingN64CompletesAndSatisfiesSVDIdentity() {
+        // Deterministic 128×64 pseudo-random matrix using the same LCG as
+        // the Rust twin's `parallel_rounds_bit_identical_to_serial` test.
+        // Entries are in [-1, 1]. Cross-port bit-identity is not asserted here —
+        // this test gates correctness and crash-freedom, not conformance.
+        var state: UInt64 = 0x243F6A8885A308D3
+        let m = 128
+        let n = 64
+        var A = [[Float]](repeating: [Float](repeating: 0, count: n), count: m)
+        for i in 0..<m {
+            for j in 0..<n {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                // Same extraction as Rust: (state >> 33) / 2^31 - 1.0
+                A[i][j] = Float(state >> 33) / Float(UInt64(1) << 31) - 1.0
+            }
+        }
+
+        // Full-rank decompose — crashes pre-guard on an 18-core machine, no-crash
+        // post-guard. rank=n means zero truncation, so SVD identity holds to
+        // Float32 working precision after 30 sweeps.
+        let result = JacobiSVD.decompose(A: A, rank: n, sweeps: 30)
+
+        // Structural checks.
+        #expect(result.rank == n, "rank must equal requested n=\(n)")
+        #expect(result.singularValues.count == n)
+        for sv in result.singularValues {
+            #expect(sv >= 0, "singular value must be non-negative, got \(sv)")
+        }
+        for i in 1..<result.singularValues.count {
+            #expect(result.singularValues[i - 1] >= result.singularValues[i],
+                    "singular values must be non-increasing at index \(i)")
+        }
+
+        // U columns must be unit vectors (within Float32 tolerance).
+        let unitTol: Float = 1e-4
+        for col in 0..<n {
+            var norm2: Float = 0
+            for row in 0..<m { let v = result.U[row][col]; norm2 += v * v }
+            #expect(abs(norm2.squareRoot() - 1) < unitTol,
+                    "U column \(col) norm deviation \(abs(norm2.squareRoot() - 1)) >= \(unitTol)")
+        }
+
+        // Vt rows must be unit vectors.
+        for row in 0..<n {
+            let norm2 = result.Vt[row].reduce(Float(0)) { $0 + $1 * $1 }
+            #expect(abs(norm2.squareRoot() - 1) < unitTol,
+                    "Vt row \(row) norm deviation \(abs(norm2.squareRoot() - 1)) >= \(unitTol)")
+        }
+
+        // Reconstruction fidelity: max element-wise |A - U diag(Σ) Vt| < tol.
+        // Full rank (k=n=64) means no truncation; error is Float32 arithmetic
+        // noise from 30-sweep convergence on a 128×64 random matrix. Tolerance
+        // 0.05 is deliberately generous to keep this test machine-independent.
+        let reconTol: Float = 0.05
+        for i in 0..<m {
+            for j in 0..<n {
+                var approx: Float = 0
+                for r in 0..<n {
+                    approx += result.U[i][r] * result.singularValues[r] * result.Vt[r][j]
+                }
+                #expect(abs(approx - A[i][j]) < reconTol,
+                        "A[\(i)][\(j)] reconstruction error \(abs(approx - A[i][j])) > \(reconTol)")
+            }
+        }
+    }
+
     // MARK: - Tournament schedule (the parallel-Jacobi contract)
 
     /// Every unordered pair appears exactly once per cycle, and pairs within a
