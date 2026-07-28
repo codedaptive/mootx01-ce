@@ -81,5 +81,6 @@ pub mod manifest;
 pub mod mcp_client;
 pub mod mcp_result;
 pub mod proxy;
+pub mod scratch_posture;
 pub mod transfer;
 pub mod transfer_manifest;

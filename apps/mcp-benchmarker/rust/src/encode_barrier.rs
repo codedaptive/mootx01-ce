@@ -70,14 +70,29 @@ impl Default for EncodeBarrier {
 /// the word "draining". Any response that does not match a known shape is a
 /// fatal protocol error; the benchmark must abort rather than silently proceed
 /// with under-encoded data.
+/// `Idle` and `NoLanes` are deliberately DISTINCT variants. The corpus_encode
+/// lane appears in drain status only once the Corpus is wired for the estate
+/// (GeniusLocusKit `drainStatuses`: present iff `corpusKits[handle]` exists),
+/// and it never deregisters afterwards. On a FRESH estate the first poll can
+/// therefore beat lane wiring: "drains: none" is truthfully parseable but is
+/// NOT evidence that encoding finished — it may mean encoding hasn't STARTED.
+/// The barrier's state machine (`DrainBarrierState`) treats `Idle` (lane
+/// listed, all counts zero) as proof and `NoLanes` as ambiguity that needs a
+/// grace window.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DrainParseResult {
-    /// All registered drains are idle (pending == 0, in_flight == 0), or no
-    /// corpus is registered ("drains: none"). Safe to issue recall queries.
+    /// Shape B with every listed lane at state "idle", pending == 0,
+    /// in_flight == 0. The lane is registered AND reports no work — positive
+    /// evidence that encoding completed. Safe to issue recall queries.
     Idle,
     /// At least one drain has pending or in-flight work, or explicitly reports
     /// the state word "draining". Keep polling.
     Draining,
+    /// Shape A — `"drains: none"`: no lane registered (yet). Ambiguous on a
+    /// fresh estate: either the corpus lane has not wired yet (encoding still
+    /// ahead of us) or this estate genuinely runs no drains. NOT proof of
+    /// completion by itself.
+    NoLanes,
     /// The response did not match any recognised shape. The caller must abort
     /// the run — proceeding silently would produce invalid recall results.
     Unparseable,
@@ -103,15 +118,17 @@ pub enum DrainParseResult {
 ///   - its `in_flight` count is non-zero.
 ///
 /// Returns `Idle` only when ALL drains explicitly report `state == "idle"` with
-/// both counts at zero. Returns `Unparseable` for anything else.
+/// both counts at zero. Returns `NoLanes` for Shape A. Returns `Unparseable`
+/// for anything else.
 ///
 /// `pub` so unit tests in this module can call it directly.
 pub fn parse_drain_response(text: &str) -> DrainParseResult {
     let trimmed = text.trim();
 
-    // Shape A: "drains: none" — no corpus registered; treat as idle.
+    // Shape A: "drains: none" — no lane registered. NOT idle-equivalent on a
+    // fresh estate; the state machine decides what to do with it.
     if trimmed == "drains: none" {
-        return DrainParseResult::Idle;
+        return DrainParseResult::NoLanes;
     }
 
     // Shape B: multi-line beginning with "drains: N" (N >= 1).
@@ -209,16 +226,154 @@ fn parse_int_field(prefix: &str, s: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+// MARK: - Barrier state machine
+
+/// What the drain barrier concluded, returned to the runner and recorded in
+/// the report JSON as the per-unit `drain_lane_observed` key.
+///
+/// Twin of Swift `DrainBarrierOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainBarrierOutcome {
+    /// True when the barrier accepted an idle state (via lane evidence or the
+    /// no-lanes grace window) within the timeout. False on timeout or fatal
+    /// transport death.
+    pub converged: bool,
+    /// True when at least one poll returned Shape B (the corpus lane was
+    /// registered — draining or idle). False means the barrier only ever saw
+    /// "drains: none": ambiguous evidence, documented honestly in the report.
+    pub lane_observed: bool,
+}
+
+/// Grace-window policy for accepting `"drains: none"` as idle.
+///
+/// The corpus lane registers when the Corpus is wired for the estate and never
+/// deregisters. On a fresh estate the first poll can precede wiring, so a
+/// single no-lanes response proves nothing. Requiring BOTH a minimum number of
+/// consecutive no-lanes polls AND a minimum elapsed time bounds the two
+/// failure modes independently. A tiny corpus that legitimately finished (or
+/// an estate that genuinely runs no drains) still converges — ~2 s later,
+/// with `lane_observed == false` recorded so the ambiguity is visible.
+///
+/// Twin of Swift `DrainBarrierGrace`.
+#[derive(Debug, Clone, Copy)]
+pub struct DrainBarrierGrace {
+    /// Minimum consecutive `NoLanes` polls (uninterrupted by any other
+    /// response or RPC error) before no-lanes may be accepted as idle.
+    pub min_consecutive_no_lanes: u32,
+    /// Minimum seconds since the barrier started before no-lanes may be
+    /// accepted as idle.
+    pub min_seconds: f64,
+}
+
+impl Default for DrainBarrierGrace {
+    fn default() -> Self {
+        DrainBarrierGrace { min_consecutive_no_lanes: 4, min_seconds: 2.0 }
+    }
+}
+
+/// The barrier's next action after observing one parsed poll response.
+/// Twin of Swift `DrainBarrierDecision`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DrainBarrierDecision {
+    /// Accept: encoding is complete (or accepted via grace). Stop polling.
+    Converged { lane_observed: bool },
+    /// Not enough evidence yet — poll again.
+    KeepPolling,
+    /// Protocol error — the caller must abort the benchmark (exit 1).
+    AbortUnparseable,
+}
+
+/// Pure state machine for the drain barrier's evidence tracking. Extracted
+/// from the poll loop so the sequencing rules are unit-testable without an
+/// MCP client:
+///
+///   Idle        → converged immediately (lane listed and empty — proof).
+///   Draining    → lane observed; keep polling.
+///   NoLanes     → before any lane sighting: accept only after the grace
+///                 window; after a lane sighting: the lane vanishing is
+///                 anomalous — keep polling until timeout rather than trust it.
+///   Unparseable → abort.
+///
+/// RPC errors are reported via `note_error()`: they reset the consecutive
+/// no-lanes counter because the evidence stream was interrupted.
+///
+/// Twin of Swift `DrainBarrierState`.
+pub struct DrainBarrierState {
+    lane_observed: bool,
+    consecutive_no_lanes: u32,
+    start: Instant,
+    grace: DrainBarrierGrace,
+}
+
+impl DrainBarrierState {
+    pub fn new(start: Instant, grace: DrainBarrierGrace) -> Self {
+        DrainBarrierState { lane_observed: false, consecutive_no_lanes: 0, start, grace }
+    }
+
+    /// True when at least one poll has shown the lane registered.
+    pub fn lane_observed(&self) -> bool {
+        self.lane_observed
+    }
+
+    /// Feed one parsed poll response; returns what the barrier should do next.
+    /// `now` is injectable for tests (pass `Instant::now()` in production).
+    pub fn observe(&mut self, parse: DrainParseResult, now: Instant) -> DrainBarrierDecision {
+        match parse {
+            DrainParseResult::Draining => {
+                self.lane_observed = true;
+                self.consecutive_no_lanes = 0;
+                DrainBarrierDecision::KeepPolling
+            }
+            DrainParseResult::Idle => {
+                // Lane listed with zero counts — positive completion evidence.
+                self.lane_observed = true;
+                DrainBarrierDecision::Converged { lane_observed: true }
+            }
+            DrainParseResult::NoLanes => {
+                if self.lane_observed {
+                    // The lane never deregisters in the product; seeing
+                    // no-lanes AFTER a lane sighting is anomalous. Do not
+                    // trust it — keep polling; the timeout bounds the worst case.
+                    return DrainBarrierDecision::KeepPolling;
+                }
+                self.consecutive_no_lanes += 1;
+                let elapsed = now.duration_since(self.start).as_secs_f64();
+                if self.consecutive_no_lanes >= self.grace.min_consecutive_no_lanes
+                    && elapsed >= self.grace.min_seconds
+                {
+                    DrainBarrierDecision::Converged { lane_observed: false }
+                } else {
+                    DrainBarrierDecision::KeepPolling
+                }
+            }
+            DrainParseResult::Unparseable => DrainBarrierDecision::AbortUnparseable,
+        }
+    }
+
+    /// Note an RPC error between polls: the consecutive no-lanes evidence
+    /// chain is broken, so the counter restarts.
+    pub fn note_error(&mut self) {
+        self.consecutive_no_lanes = 0;
+    }
+}
+
 // MARK: - Drain barrier
 
-/// Polls `moot_drain_status` after ingest completes, waiting until all drains
-/// report "idle" before the caller issues its first recall query.
+/// Polls `moot_drain_status` after ingest completes, waiting until the corpus
+/// lane reports "idle" before the caller issues its first recall query.
 ///
 /// Response shapes handled:
-///   "drains: none"  — no corpus registered; treat as idle.
+///   "drains: none"  — no lane registered; accepted only via the grace window.
 ///   "drains: N"
 ///   "  <name>: draining — pending: N, in_flight: N[, <detail>]"
 ///   "  <name>: idle    — pending: 0, in_flight: 0[, <detail>]"
+///
+/// **Fresh-estate race:** the corpus lane appears in drain status only once
+/// the Corpus is wired; a first poll that beats wiring sees "drains: none".
+/// The barrier therefore accepts no-lanes as idle only after
+/// `DrainBarrierGrace` is satisfied, and records whether the lane was ever
+/// observed (`DrainBarrierOutcome.lane_observed` → report key
+/// `drain_lane_observed`).
 ///
 /// **FATAL on unknown shape.** If `moot_drain_status` returns a response that
 /// does not match a known shape, the process aborts immediately via
@@ -226,10 +381,10 @@ fn parse_int_field(prefix: &str, s: &str) -> Option<u64> {
 /// Proceeding with queries after an unrecognised response would produce
 /// silently invalid recall scores.
 ///
-/// Returns `true` when all drains became idle within `timeout_secs`.
-/// Returns `false` when timed out — a WARNING is printed and the run continues.
+/// Returns `converged == false` when timed out or the transport died — a
+/// WARNING is printed and the run continues.
 ///
-/// Twin of Swift `waitForEncodeDrain(client:label:timeoutSeconds:)`.
+/// Twin of Swift `waitForEncodeDrain(client:label:timeoutSeconds:grace:)`.
 ///
 /// The `client` parameter accepts any `ToolCaller` implementation (including
 /// test stubs). Callers passing `&mut MCPClient` are unaffected — Rust infers
@@ -239,27 +394,53 @@ pub fn wait_for_encode_drain<C: ToolCaller>(
     client: &mut C,
     label: &str,
     timeout_secs: f64,
-) -> bool {
-    let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
+) -> DrainBarrierOutcome {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs_f64(timeout_secs);
     // 500 ms poll interval — frequent enough without hammering the estate.
     let poll_interval = Duration::from_millis(500);
+    let mut state = DrainBarrierState::new(start, DrainBarrierGrace::default());
 
     while Instant::now() < deadline {
         let args: BTreeMap<String, JsonValue> = BTreeMap::new();
         match client.call_tool("moot_drain_status", args, &ResultFormat::MootText) {
             Ok(result) => {
                 let text = result.text_blocks.join("\n");
+                let parsed = parse_drain_response(&text);
+                let was_no_lanes = parsed == DrainParseResult::NoLanes;
+                let was_draining = parsed == DrainParseResult::Draining;
 
-                match parse_drain_response(&text) {
-                    DrainParseResult::Idle => return true,
-
-                    DrainParseResult::Draining => {
-                        // Still draining — log the trimmed response for visibility.
-                        let trimmed = text.trim();
-                        eprintln!("[{label}] drain barrier: waiting — {trimmed}");
+                match state.observe(parsed, Instant::now()) {
+                    DrainBarrierDecision::Converged { lane_observed } => {
+                        if !lane_observed {
+                            // Grace-window acceptance: no lane was ever seen.
+                            // Honest note — either a tiny corpus finished before
+                            // the first poll, or the lane never wired.
+                            eprintln!(
+                                "[{label}] drain barrier: accepted no-lanes as idle after grace \
+                                 window ({:.1}s) — corpus lane never observed. \
+                                 drain_lane_observed=false",
+                                start.elapsed().as_secs_f64()
+                            );
+                        }
+                        return DrainBarrierOutcome { converged: true, lane_observed };
                     }
 
-                    DrainParseResult::Unparseable => {
+                    DrainBarrierDecision::KeepPolling => {
+                        if was_draining {
+                            // Still draining — log the trimmed response for visibility.
+                            let trimmed = text.trim();
+                            eprintln!("[{label}] drain barrier: waiting — {trimmed}");
+                        } else if was_no_lanes && state.lane_observed() {
+                            eprintln!(
+                                "[{label}] drain barrier: WARNING — lane disappeared after \
+                                 being observed (drains: none). Continuing to poll."
+                            );
+                        }
+                        // Pre-lane no-lanes polls are quiet; grace decides.
+                    }
+
+                    DrainBarrierDecision::AbortUnparseable => {
                         // Unknown shape — the benchmark MUST NOT proceed silently.
                         // An unrecognised drain response means we cannot confirm that
                         // encoding has completed; any recall queries would be invalid.
@@ -278,6 +459,7 @@ pub fn wait_for_encode_drain<C: ToolCaller>(
                 }
             }
             Err(e) => {
+                state.note_error();
                 eprintln!(
                     "[{label}] drain barrier: moot_drain_status error: {}",
                     e.description
@@ -298,7 +480,10 @@ pub fn wait_for_encode_drain<C: ToolCaller>(
                         "[{label}] drain barrier: FATAL — MCP transport died \
                          (server exited). Aborting poll."
                     );
-                    return false;
+                    return DrainBarrierOutcome {
+                        converged: false,
+                        lane_observed: state.lane_observed(),
+                    };
                 }
             }
         }
@@ -310,7 +495,7 @@ pub fn wait_for_encode_drain<C: ToolCaller>(
         "[{label}] drain barrier: WARNING — encode drain did not converge within \
          {timeout_secs:.0}s. Proceeding with query; recall quality may be reduced."
     );
-    false
+    DrainBarrierOutcome { converged: false, lane_observed: state.lane_observed() }
 }
 
 #[cfg(test)]
@@ -350,14 +535,16 @@ mod tests {
     // Shape A: "drains: none"
 
     #[test]
-    fn drains_none_is_idle() {
-        assert_eq!(parse_drain_response("drains: none"), DrainParseResult::Idle);
+    fn drains_none_is_no_lanes() {
+        // Shape A means the corpus lane has not registered (or the estate runs
+        // no drains). The state machine, not the parser, decides acceptance.
+        assert_eq!(parse_drain_response("drains: none"), DrainParseResult::NoLanes);
     }
 
     #[test]
-    fn drains_none_with_whitespace_is_idle() {
-        // Leading/trailing whitespace should still parse as idle.
-        assert_eq!(parse_drain_response("  drains: none  \n"), DrainParseResult::Idle);
+    fn drains_none_with_whitespace_is_no_lanes() {
+        // Leading/trailing whitespace should still parse as Shape A.
+        assert_eq!(parse_drain_response("  drains: none  \n"), DrainParseResult::NoLanes);
     }
 
     // Shape B — single drain, 1.0.x-style fixture (corpus_encode lane)
@@ -462,11 +649,13 @@ mod tests {
 
     // MARK: - Fatal-transport early-abort tests
 
-    /// Stub ToolCaller that always returns the configured error or result.
+    /// Stub ToolCaller that always returns the configured error or result text.
     struct StubCaller {
         /// When Some(e), call_tool returns Err(e).
-        /// When None, call_tool returns Ok(idle status).
+        /// When None, call_tool returns Ok with `response_text`.
         error: Option<MCPError>,
+        /// The drain-status text returned on the Ok path.
+        response_text: String,
         /// How many times call_tool was invoked.
         call_count: usize,
     }
@@ -475,23 +664,36 @@ mod tests {
         fn broken_pipe() -> Self {
             StubCaller {
                 error: Some(MCPError { description: "stdio write failed: Broken pipe".into() }),
+                response_text: String::new(),
                 call_count: 0,
             }
         }
         fn stream_closed() -> Self {
             StubCaller {
                 error: Some(MCPError { description: "stdio stream closed by test-endpoint before a full message".into() }),
+                response_text: String::new(),
                 call_count: 0,
             }
         }
         fn not_connected() -> Self {
             StubCaller {
                 error: Some(MCPError { description: "stdio transport not connected for test-endpoint".into() }),
+                response_text: String::new(),
                 call_count: 0,
             }
         }
-        fn idle() -> Self {
-            StubCaller { error: None, call_count: 0 }
+        /// Shape B idle: the lane is registered and drained — trusted evidence.
+        fn lane_idle() -> Self {
+            StubCaller {
+                error: None,
+                response_text:
+                    "drains: 1\n  corpus_encode: idle \u{2014} pending: 0, in_flight: 0".into(),
+                call_count: 0,
+            }
+        }
+        /// Shape A: no lane registered — the fresh-estate race response.
+        fn no_lanes() -> Self {
+            StubCaller { error: None, response_text: "drains: none".into(), call_count: 0 }
         }
     }
 
@@ -509,7 +711,7 @@ mod tests {
                     ordered_ids: vec![],
                     items: vec![],
                     write_assigned_id: None,
-                    text_blocks: vec!["drains: none".into()],
+                    text_blocks: vec![self.response_text.clone()],
                 }),
             }
         }
@@ -524,7 +726,7 @@ mod tests {
         let mut stub = StubCaller::broken_pipe();
         // Use a non-zero timeout so we can verify only 1 call was made.
         let result = wait_for_encode_drain(&mut stub, "test", 5.0);
-        assert!(!result, "fatal transport error must return false");
+        assert!(!result.converged, "fatal transport error must not converge");
         assert_eq!(stub.call_count, 1, "must abort after the first fatal error, not retry");
     }
 
@@ -532,7 +734,7 @@ mod tests {
     fn fatal_transport_stream_closed_returns_immediately() {
         let mut stub = StubCaller::stream_closed();
         let result = wait_for_encode_drain(&mut stub, "test", 5.0);
-        assert!(!result, "fatal transport error must return false");
+        assert!(!result.converged, "fatal transport error must not converge");
         assert_eq!(stub.call_count, 1, "must abort after the first fatal error, not retry");
     }
 
@@ -540,16 +742,156 @@ mod tests {
     fn fatal_transport_not_connected_returns_immediately() {
         let mut stub = StubCaller::not_connected();
         let result = wait_for_encode_drain(&mut stub, "test", 5.0);
-        assert!(!result, "fatal transport error must return false");
+        assert!(!result.converged, "fatal transport error must not converge");
         assert_eq!(stub.call_count, 1, "must abort after the first fatal error, not retry");
     }
 
-    /// An idle status returns true immediately (non-fatal path still works).
+    /// Shape B idle converges on the FIRST poll with lane evidence — the
+    /// trusted-idle fast path is unaffected by the grace window.
     #[test]
-    fn idle_status_returns_true() {
-        let mut stub = StubCaller::idle();
+    fn lane_idle_converges_immediately() {
+        let mut stub = StubCaller::lane_idle();
         let result = wait_for_encode_drain(&mut stub, "test", 5.0);
-        assert!(result, "idle status must return true");
-        assert_eq!(stub.call_count, 1);
+        assert!(result.converged, "Shape B idle must converge");
+        assert!(result.lane_observed, "Shape B idle IS lane evidence");
+        assert_eq!(stub.call_count, 1, "trusted idle must not wait for the grace window");
+    }
+
+    /// The fresh-estate race response ("drains: none" forever): the barrier
+    /// must NOT accept the first poll. It converges only after the grace
+    /// window (>= 4 consecutive polls AND >= 2.0 s) with lane_observed=false.
+    /// Pre-fix, this returned after ONE poll — that was the defect.
+    #[test]
+    fn no_lanes_accepted_only_after_grace_window() {
+        let mut stub = StubCaller::no_lanes();
+        let start = Instant::now();
+        let result = wait_for_encode_drain(&mut stub, "test", 30.0);
+        let elapsed = start.elapsed().as_secs_f64();
+        assert!(result.converged, "persistent no-lanes must converge via grace");
+        assert!(!result.lane_observed, "no lane was ever observed");
+        assert!(stub.call_count >= 4,
+            "grace requires >= 4 consecutive no-lanes polls, got {}", stub.call_count);
+        assert!(elapsed >= 2.0,
+            "grace requires >= 2.0 s elapsed, got {elapsed:.2}s");
+    }
+
+    // MARK: - DrainBarrierState (pure state machine) tests
+    // Twin coverage of Swift `DrainBarrierStateTests`.
+
+    fn grace() -> DrainBarrierGrace {
+        DrainBarrierGrace { min_consecutive_no_lanes: 4, min_seconds: 2.0 }
+    }
+
+    /// Deterministic instants for the state machine: offsets from a base.
+    fn at(base: Instant, secs: f64) -> Instant {
+        base + Duration::from_secs_f64(secs)
+    }
+
+    #[test]
+    fn state_shape_b_idle_converges_immediately() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        assert_eq!(
+            state.observe(DrainParseResult::Idle, base),
+            DrainBarrierDecision::Converged { lane_observed: true }
+        );
+    }
+
+    #[test]
+    fn state_first_no_lanes_keeps_polling() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        assert_eq!(
+            state.observe(DrainParseResult::NoLanes, base),
+            DrainBarrierDecision::KeepPolling
+        );
+    }
+
+    #[test]
+    fn state_no_lanes_then_draining_then_idle_does_not_converge_early() {
+        // The defect scenario: poll beats lane wiring, then the lane appears.
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        assert_eq!(state.observe(DrainParseResult::NoLanes, base),
+                   DrainBarrierDecision::KeepPolling);
+        assert_eq!(state.observe(DrainParseResult::Draining, at(base, 0.5)),
+                   DrainBarrierDecision::KeepPolling);
+        assert_eq!(state.observe(DrainParseResult::Idle, at(base, 1.0)),
+                   DrainBarrierDecision::Converged { lane_observed: true });
+    }
+
+    #[test]
+    fn state_grace_window_needs_count_and_time() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        assert_eq!(state.observe(DrainParseResult::NoLanes, at(base, 0.5)),
+                   DrainBarrierDecision::KeepPolling);
+        assert_eq!(state.observe(DrainParseResult::NoLanes, at(base, 1.0)),
+                   DrainBarrierDecision::KeepPolling);
+        assert_eq!(state.observe(DrainParseResult::NoLanes, at(base, 1.5)),
+                   DrainBarrierDecision::KeepPolling);
+        // 4th consecutive poll AND >= 2.0 s elapsed → accept via grace.
+        assert_eq!(state.observe(DrainParseResult::NoLanes, at(base, 2.0)),
+                   DrainBarrierDecision::Converged { lane_observed: false });
+    }
+
+    #[test]
+    fn state_fast_burst_count_alone_does_not_converge() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        for i in 0..10 {
+            // 10 polls all within 1 second — the 2.0 s time constraint unmet.
+            assert_eq!(
+                state.observe(DrainParseResult::NoLanes, at(base, i as f64 * 0.1)),
+                DrainBarrierDecision::KeepPolling,
+                "poll {i}: count alone must not satisfy the grace window"
+            );
+        }
+    }
+
+    #[test]
+    fn state_single_late_poll_time_alone_does_not_converge() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        assert_eq!(state.observe(DrainParseResult::NoLanes, at(base, 10.0)),
+                   DrainBarrierDecision::KeepPolling);
+    }
+
+    #[test]
+    fn state_no_lanes_after_lane_observed_keeps_polling() {
+        // The lane never deregisters in the product; post-lane no-lanes is
+        // anomalous and must never converge, no matter how late.
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        let _ = state.observe(DrainParseResult::Draining, base);
+        for i in 0..6 {
+            assert_eq!(
+                state.observe(DrainParseResult::NoLanes, at(base, 60.0 + i as f64)),
+                DrainBarrierDecision::KeepPolling
+            );
+        }
+    }
+
+    #[test]
+    fn state_note_error_resets_no_lanes_count() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        let _ = state.observe(DrainParseResult::NoLanes, at(base, 0.5));
+        let _ = state.observe(DrainParseResult::NoLanes, at(base, 1.0));
+        let _ = state.observe(DrainParseResult::NoLanes, at(base, 1.5));
+        state.note_error();
+        // Would be the 4th consecutive poll past 2.0 s — but the error reset
+        // the counter, so it is the 1st.
+        assert_eq!(state.observe(DrainParseResult::NoLanes, at(base, 2.5)),
+                   DrainBarrierDecision::KeepPolling);
+    }
+
+    #[test]
+    fn state_unparseable_aborts() {
+        let base = Instant::now();
+        let mut state = DrainBarrierState::new(base, grace());
+        let _ = state.observe(DrainParseResult::Draining, base);
+        assert_eq!(state.observe(DrainParseResult::Unparseable, at(base, 0.5)),
+                   DrainBarrierDecision::AbortUnparseable);
     }
 }

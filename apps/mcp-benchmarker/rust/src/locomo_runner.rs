@@ -42,6 +42,7 @@ use crate::locomo_corpus::{LoCoMoCorpus, LoCoMoQuestion};
 use crate::locomo_scorer::{LoCoMoManifestEntry, LoCoMoQuestionResult};
 use crate::longmemeval_runner::{probe_mcp_client, SplitMix64};
 use crate::mcp_client::{MCPClient, MCPError, ToolCaller};
+use crate::scratch_posture::{apply_scratch_posture, ScratchEstatePosture};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -65,6 +66,10 @@ pub struct LoCoMoRunConfig {
     pub estate_cache: EstateCacheMode,
     /// Cache root directory. None = <out-dir>/estate-cache (or <cwd>/estate-cache).
     pub cache_dir: Option<PathBuf>,
+    /// At-rest posture for scratch estates. Default PlaintextOptOut (writes
+    /// mootx01's `no-encrypt` marker; no keychain contact). Recorded in the
+    /// report JSON as "estate_encryption".
+    pub scratch_posture: ScratchEstatePosture,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,13 +108,23 @@ pub fn locomo_verb_map() -> VerbMap {
 /// The deterministic naming ensures each conversation has a unique path
 /// even across retries, and the fixed prefix enables guarded teardown.
 ///
-/// Twin of Swift `loCoMoScratchDir()`.
-pub fn locomo_scratch_dir(seed: u64, conv_index: usize) -> Result<PathBuf, MCPError> {
+/// `posture` decides the at-rest encryption of the estate this dir will hold:
+/// PlaintextOptOut writes mootx01's `no-encrypt` marker BEFORE any serve
+/// launch (see scratch_posture.rs). No default on purpose: every call site
+/// decides posture explicitly.
+///
+/// Twin of Swift `loCoMoScratchDir(posture:)`.
+pub fn locomo_scratch_dir(
+    seed: u64,
+    conv_index: usize,
+    posture: ScratchEstatePosture,
+) -> Result<PathBuf, MCPError> {
     let name = format!("locomo-bench-{seed:016x}-{conv_index:08x}");
     let path = PathBuf::from("/tmp").join(&name);
     std::fs::create_dir_all(&path).map_err(|e| MCPError {
         description: format!("failed to create scratch dir {}: {e}", path.display()),
     })?;
+    apply_scratch_posture(posture, &path)?;
     Ok(path)
 }
 
@@ -282,6 +297,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                 config.seed,
                 config.encode_barrier,
                 &binary_fingerprint,
+                config.scratch_posture,
                 &conversation.sample_id,
             ))
         } else {
@@ -291,8 +307,8 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
         // Try cache restore. On hit: reuse cached estate + manifest, skip ingest.
         let cache_restore: Option<(PathBuf, Vec<LoCoMoManifestEntry>)> =
             cache_entry_opt.as_ref().and_then(|entry| {
-                restore_estate_cache_entry(entry, || {
-                    locomo_scratch_dir(config.seed, conv_index)
+                restore_estate_cache_entry(entry, config.scratch_posture, || {
+                    locomo_scratch_dir(config.seed, conv_index, config.scratch_posture)
                         .map_err(|e| e.description.clone())
                 })
             });
@@ -302,7 +318,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                 (s, m, true, Some(true))
             } else {
                 let is_cache_miss = cache_entry_opt.is_some();
-                match locomo_scratch_dir(config.seed, conv_index) {
+                match locomo_scratch_dir(config.seed, conv_index, config.scratch_posture) {
                     Ok(s) => (s, Vec::new(), false, if is_cache_miss { Some(false) } else { None }),
                     Err(e) => {
                         eprintln!("  [locomo] scratch dir error for conv {conv_index}: {}", e.description);
@@ -321,6 +337,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                                 write_mean_latency_seconds: 0.0,
                                 payload_text: None,
                                 cache_hit: None,
+                                drain_lane_observed: None,
                             });
                         }
                         continue;
@@ -349,6 +366,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                     write_mean_latency_seconds: 0.0,
                     payload_text: None,
                     cache_hit: None,
+                    drain_lane_observed: None,
                 });
             }
             continue;
@@ -406,12 +424,15 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
         // ── Drain barrier (EncodeBarrier::Drain mode; skipped on cache hit) ───
         // Wait for background encoding before issuing recall queries.
         // On a cache hit the estate is already committed — no drain needed.
+        // Lane evidence for the report: None when the barrier did not run.
+        let mut drain_lane_observed: Option<bool> = None;
         if !skip_ingest && config.encode_barrier == EncodeBarrier::Drain {
-            wait_for_encode_drain(
+            let outcome = wait_for_encode_drain(
                 &mut client,
                 &format!("locomo conv-{}", conv_index),
                 300.0,
             );
+            drain_lane_observed = Some(outcome.lane_observed);
         }
 
         // ── Snapshot to cache (on cache miss, after drain) ────────────────────
@@ -501,6 +522,7 @@ pub fn run_locomo_questions(corpus: &LoCoMoCorpus, config: &LoCoMoRunConfig) -> 
                 // All questions in the same conversation share the same cache_hit status:
                 // the cache key is per-conversation (not per-question).
                 cache_hit: conv_cache_hit,
+                drain_lane_observed,
             });
         }
 

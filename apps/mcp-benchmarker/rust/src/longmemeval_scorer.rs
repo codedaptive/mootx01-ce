@@ -207,6 +207,11 @@ pub struct LmeQuestionResult {
     /// Whether this question's estate was served from the snapshot cache.
     /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
     pub cache_hit: Option<bool>,
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). None = barrier did not run for this unit.
+    /// Additive — FIX-HARNESS-20260727.
+    pub drain_lane_observed: Option<bool>,
 }
 
 /// The scored result for one LME question.
@@ -498,6 +503,11 @@ pub struct LmeReportPerQuestion {
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_hit: Option<bool>,
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). None = barrier did not run for this unit.
+    /// Additive — FIX-HARNESS-20260727.
+    pub drain_lane_observed: Option<bool>,
 }
 
 /// Token efficiency block of the LME report. Additive key added by LME-03.
@@ -579,6 +589,10 @@ pub struct LmeReport {
     /// Number of questions that triggered a new snapshot (cache miss).
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     pub cache_misses: usize,
+    /// At-rest posture of the run's scratch estates: "plaintext-optout"
+    /// (default) or "encrypted-default" (--no-plaintext-scratch).
+    /// Additive — FIX-HARNESS-20260727.
+    pub estate_encryption: String,
 }
 
 /// Assembles an `LmeReport` from scores and metadata.
@@ -599,6 +613,8 @@ pub fn build_lme_report(
     corpus: &LmeCorpus,
     payload_entries: &[LmePayloadEntry],
     cache_hit_by_id: &HashMap<String, Option<bool>>,
+    drain_lane_by_id: &HashMap<String, Option<bool>>,
+    estate_encryption: String,
     estate_cache: String,
 ) -> LmeReport {
     let (aggregate, latency) = aggregate_lme_scores(scores);
@@ -688,6 +704,7 @@ pub fn build_lme_report(
                 dense_recall_provenance:  prov.and_then(|p| p.dense_recall_provenance.clone()),
                 // Look up cache_hit from the raw results map (key = question_id).
                 cache_hit: cache_hit_by_id.get(&s.question_id).copied().flatten(),
+                drain_lane_observed: drain_lane_by_id.get(&s.question_id).copied().flatten(),
             }
         })
         .collect();
@@ -868,6 +885,7 @@ pub fn build_lme_report(
         token_efficiency,
         lane_health,
         estate_cache,
+        estate_encryption,
         cache_hits,
         cache_misses,
     }

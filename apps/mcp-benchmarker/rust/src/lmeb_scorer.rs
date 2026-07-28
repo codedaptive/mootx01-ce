@@ -176,6 +176,11 @@ pub struct LmebQueryResult {
     /// Whether this query's estate was served from the snapshot cache.
     /// Some(true) = cache hit, Some(false) = cache miss, None = cache off.
     pub cache_hit: Option<bool>,
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). None = barrier did not run for this query.
+    /// Additive — FIX-HARNESS-20260727.
+    pub drain_lane_observed: Option<bool>,
 }
 
 /// The scored result for one LMEB query.
@@ -385,6 +390,11 @@ pub struct LmebReportPerQuery {
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_hit: Option<bool>,
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). None = barrier did not run for this query.
+    /// Additive — FIX-HARNESS-20260727.
+    pub drain_lane_observed: Option<bool>,
 }
 
 /// Token-efficiency and barrier provenance summary for an LMEB run.
@@ -427,6 +437,10 @@ pub struct LmebReport {
     /// Number of queries that triggered a new snapshot (cache miss).
     /// Additive key per BENCHMARKER_OPTIMIZER_CONTRACT.md.
     pub cache_misses: usize,
+    /// At-rest posture of the run's scratch estates: "plaintext-optout"
+    /// (default) or "encrypted-default" (--no-plaintext-scratch).
+    /// Additive — FIX-HARNESS-20260727.
+    pub estate_encryption: String,
     pub per_query: Vec<LmebReportPerQuery>,
     /// Token-efficiency and barrier provenance summary. None when no query had
     /// payload text (e.g. estate was empty during a dry run).
@@ -448,7 +462,9 @@ pub fn build_lmeb_report(
     queries_loaded: usize,
     scores: &[LmebQueryScore],
     cache_hit_by_id: &std::collections::HashMap<String, Option<bool>>,
+    drain_lane_by_id: &std::collections::HashMap<String, Option<bool>>,
     estate_cache: String,
+    estate_encryption: String,
 ) -> LmebReport {
     let (aggregate, latency) = aggregate_lmeb_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
@@ -512,6 +528,7 @@ pub fn build_lmeb_report(
                 tokens_per_result:       tpr,
                 // Look up cache_hit from the raw results map (key = query_id).
                 cache_hit:               cache_hit_by_id.get(&s.query_id).copied().flatten(),
+                drain_lane_observed:     drain_lane_by_id.get(&s.query_id).copied().flatten(),
             }
         })
         .collect();
@@ -541,6 +558,7 @@ pub fn build_lmeb_report(
         aggregate: report_aggregate,
         latency: report_latency,
         estate_cache,
+        estate_encryption,
         cache_hits,
         cache_misses,
         per_query,
@@ -614,7 +632,9 @@ mod tests {
             1, // queries_loaded
             &scores,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             "off".to_string(),
+            "plaintext-optout".to_string(),
         );
 
         // Top-level encode_barrier must be "drain".
@@ -654,7 +674,9 @@ mod tests {
             1,
             &scores,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             "off".to_string(),
+            "plaintext-optout".to_string(),
         );
 
         assert!(
