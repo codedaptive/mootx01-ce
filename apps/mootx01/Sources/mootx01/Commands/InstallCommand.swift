@@ -47,6 +47,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Hide Vault MCP tools (moot_vault_*) from the MCP surface. For a more secure install position that disables import/export. Use --vault-on to re-enable.")
     var vaultOff: Bool = false
 
+    @Flag(name: .long, help: "Create the default estate WITHOUT at-rest encryption. The estate database is stored unencrypted. Default is encrypted (SQLCipher whole-database, key held in the Keychain). Run `mootx01 upgrade` at any time to encrypt an unencrypted estate.")
+    var noEncrypt: Bool = false
+
     @Flag(name: .long, help: "When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).")
     var reuseDb: Bool = false
 
@@ -65,6 +68,78 @@ struct InstallCommand: AsyncParsableCommand {
         // any wiring so a 'replace' that cannot proceed (daemon running,
         // trash failure) aborts the install with nothing half-done.
         try handleExistingDatabase(homeDirectory: home)
+
+        // At-rest encryption posture for the DEFAULT estate.
+        //
+        // install does not create the estate file — it says so itself ("a fresh
+        // estate will be created on first serve"), and the substrate writes the
+        // SQLite file lazily on first open. So --no-encrypt cannot act now; it
+        // records the choice next to the estate, and the shared open posture
+        // (EstateKeyProvider.resolveOpenPosture) honors it when the file is
+        // finally created. Encrypted is the default: absent the marker, first
+        // serve provisions a key and creates a SQLCipher estate.
+        //
+        // Recorded as a marker file rather than only in the daemon environment
+        // because `mootx01 serve` run by hand carries no launchd environment, and
+        // the two must not disagree about the same estate.
+        if noEncrypt {
+            let dataDir = MootPaths.resolveDataDirectory(
+                environment: ProcessInfo.processInfo.environment,
+                homeDirectory: home
+            )
+            let estateURL = MootPaths.estateURL(in: dataDir)
+            switch EstateKeyProvider.detectEstateFileState(at: estateURL) {
+            case .absent:
+                do {
+                    try EstateKeyProvider.writeEncryptionOptOut(forEstateAt: estateURL)
+                    print("Estate encryption: DISABLED (--no-encrypt). The estate will be stored unencrypted.")
+                    print("  Run `mootx01 upgrade` at any time to encrypt it.")
+                } catch {
+                    // Failing to record the choice must not silently produce the
+                    // opposite posture — the user would get an encrypted estate
+                    // after asking for a plaintext one.
+                    throw ValidationError(
+                        "could not record the --no-encrypt choice at \(estateURL.deletingLastPathComponent().path): \(error)")
+                }
+            case .plaintext:
+                print("Estate encryption: already unencrypted; --no-encrypt has nothing to change.")
+            case .ciphertext:
+                // Refuse to imply that --no-encrypt decrypts an existing estate.
+                // It does not, and there is deliberately no path that does.
+                print("Estate encryption: the existing estate is already ENCRYPTED; --no-encrypt does not decrypt it and was ignored.")
+            }
+        } else {
+            // Encrypted is the default for THIS install. A stale --no-encrypt
+            // marker left by an earlier estate at the same path (a prior
+            // opt-out install whose database was later removed outside
+            // --replace-db) must not survive to downgrade the estate this
+            // install just promised would be encrypted: resolveOpenPosture
+            // honors the marker for an ABSENT estate, so first serve would
+            // silently create plaintext (stale-marker downgrade, Codex
+            // fe2cf887). --replace-db trashes the marker with the estate in
+            // DataRetention.applyReplace; this branch covers every other way
+            // a marker outlives its database. Only the absent case is touched
+            // — an existing estate's posture is a fact about the file, never
+            // the marker.
+            let dataDir = MootPaths.resolveDataDirectory(
+                environment: ProcessInfo.processInfo.environment,
+                homeDirectory: home
+            )
+            let estateURL = MootPaths.estateURL(in: dataDir)
+            if case .absent = EstateKeyProvider.detectEstateFileState(at: estateURL) {
+                do {
+                    if try EstateKeyProvider.removeEncryptionOptOut(forEstateAt: estateURL) {
+                        print("Estate encryption: removed a stale --no-encrypt marker; the new estate will be created ENCRYPTED (the default).")
+                    }
+                } catch {
+                    // Failing to enact the default must not silently produce
+                    // the opposite posture — the same rule the opt-out branch
+                    // applies to recording the choice.
+                    throw ValidationError(
+                        "could not remove a stale --no-encrypt marker at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path): \(error). Remove it manually, or pass --no-encrypt if plaintext was intended.")
+                }
+            }
+        }
 
         // Resolve the SOURCE binary (the running executable). We never
         // write this path into a client config — instead we copy it to a
@@ -431,11 +506,18 @@ struct InstallCommand: AsyncParsableCommand {
             // (CLI parse does not block this) --vault-off wins (safer default).
             // When neither is set, vault is on (the open 1.0 Vault posture: default = vault-on).
             let vaultValue = vaultOff ? "0" : "1"
+            // MOOTX01_ENCRYPT: "0" = --no-encrypt, "1" = encrypted (default).
+            // Recorded for observability and parity with MOOTX01_VAULT. The
+            // AUTHORITATIVE signal is the marker file written above, because a
+            // hand-run `mootx01 serve` carries no launchd environment at all and
+            // the two must never disagree about the same estate.
+            let encryptValue = noEncrypt ? "0" : "1"
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
                 "MOOTX01_DATA_DIR": dataDir.path,
                 "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 "MOOTX01_VAULT": vaultValue,
+                "MOOTX01_ENCRYPT": encryptValue,
             ]
             switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
             case let .installed(plistPath, endpointURL):
@@ -479,11 +561,21 @@ struct InstallCommand: AsyncParsableCommand {
                 do {
                     // §4.2: same backup discipline as native configs.
                     try Installer.backupExisting(at: configURL)
+                    // directStdio/vaultOff must be forwarded here exactly as the
+                    // native path forwards them to Installer.install() above.
+                    // Both parameters default to false, so omitting them meant a
+                    // `--no-daemon --vault-off` install still wrote an
+                    // http://127.0.0.1:4242 entry into every Parall clone: the
+                    // clone bypassed both postures, and with no daemon running
+                    // any same-user process could bind that fixed port and
+                    // impersonate the MCP server.
                     try Installer.mergeIntoJSONConfig(
                         at: configURL,
                         client: client,
                         binaryPath: binaryPath,
-                        daemonURL: MootPaths.residentEndpointURL
+                        daemonURL: MootPaths.residentEndpointURL,
+                        directStdio: noDaemon,
+                        vaultOff: vaultOff
                     )
                     parallInstalled.append((client.displayName, configURL.path))
                 } catch {

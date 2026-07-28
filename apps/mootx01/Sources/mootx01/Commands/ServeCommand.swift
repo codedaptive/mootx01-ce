@@ -140,9 +140,35 @@ struct ServeCommand: AsyncParsableCommand {
         // check pre-existence to decide whether to call create (first-run only).
         let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path)
 
+        // At-rest posture. A new estate is created encrypted; an already-encrypted
+        // estate loads its existing key; a plaintext estate keeps opening as
+        // plaintext. serve runs under launchd with NO TTY, so this must never
+        // prompt and never migrate — migration is `mootx01 upgrade` only.
+        let encryption: EstateEncryptionConfig
+        do {
+            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            encryption = resolved.encryption
+            // A plaintext-by-marker open must never be silent: name the posture
+            // AND its source, so a downgrade caused by a stale or planted
+            // no-encrypt marker is visible in the serve log instead of being
+            // discovered months later (Codex fe2cf887).
+            if resolved.posture == .newPlaintextByOptOut {
+                Logging.stderr.log(
+                    "mootx01 serve: creating estate UNENCRYPTED — opt-out marker present at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path). Run `mootx01 upgrade` to encrypt.")
+            }
+        } catch {
+            // Fail closed, in the same style the SQLite open failure below uses.
+            // Never fall back to a plaintext open: that would silently downgrade
+            // at-rest protection, and for an encrypted estate it would look like
+            // the estate had vanished.
+            Logging.stderr.log("mootx01 serve fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0)
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
         )
         let storage: SQLiteStorage
         do {

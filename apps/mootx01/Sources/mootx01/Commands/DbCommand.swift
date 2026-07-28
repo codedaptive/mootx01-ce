@@ -33,13 +33,59 @@ struct DbCreateCommand: AsyncParsableCommand {
     @Argument(help: "Name for the new estate.")
     var name: String
 
+    /// Same opt-out shape as `mootx01 install --no-encrypt`, deliberately: the two
+    /// estate-creating surfaces must not disagree about the default.
+    @Flag(name: .long, help: "Create the estate WITHOUT at-rest encryption. The estate database is stored unencrypted. Default is encrypted (SQLCipher whole-database, key held in the Keychain). Run `mootx01 upgrade` at any time to encrypt an unencrypted estate.")
+    var noEncrypt: Bool = false
+
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let env = ProcessInfo.processInfo.environment
         let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
 
         try DatabaseManager.createEstate(name: name, in: dataDir)
-        print("Created estate '\(name)'.")
+
+        // createEstate makes the estate DIRECTORY; the substrate writes the SQLite
+        // file lazily on first open. So the encryption posture is settled here,
+        // before the file exists, in the same two ways install settles it.
+        let estateURL = DatabaseManager.estateURL(for: name, in: dataDir)
+        if noEncrypt {
+            try EstateKeyProvider.writeEncryptionOptOut(forEstateAt: estateURL)
+            print("Created estate '\(name)' (UNENCRYPTED, --no-encrypt).")
+            print("  Run `mootx01 upgrade` at any time to encrypt it.")
+        } else {
+            #if os(macOS)
+            // Provision the key NOW rather than at first open. Two reasons: a
+            // failure surfaces here, while `db create` can still be retried and
+            // nothing has been half-made; and the delete path disposes the key by
+            // deriving the same account from this same estate URL, so provisioning
+            // eagerly is what keeps create and delete symmetric instead of leaving
+            // a key to be minted later by whoever opens the estate first.
+            do {
+                // A re-created estate name can inherit a stale --no-encrypt
+                // marker from an earlier estate at the same path. The open
+                // posture honors the marker for an absent file — so without
+                // this sweep, first open would create the estate PLAINTEXT
+                // even though a key was just provisioned and the user did not
+                // opt out (stale-marker downgrade, Codex fe2cf887).
+                if try EstateKeyProvider.removeEncryptionOptOut(forEstateAt: estateURL) {
+                    print("Removed a stale --no-encrypt marker for '\(name)'; the estate will be encrypted (the default).")
+                }
+                _ = try EstateKeyProvider.provideKey(for: estateURL)
+                print("Created estate '\(name)' (encrypted at rest).")
+            } catch {
+                // Fail closed and leave nothing behind. An estate directory whose
+                // key could not be provisioned would otherwise be created as
+                // plaintext on first open, silently contradicting the default the
+                // user did not opt out of.
+                try? FileManager.default.removeItem(at: estateURL.deletingLastPathComponent())
+                throw ValidationError(
+                    "could not prepare the encryption key for estate '\(name)': \(error). Nothing was created. Use --no-encrypt to create an unencrypted estate.")
+            }
+            #else
+            print("Created estate '\(name)'.")
+            #endif
+        }
         print("Run `mootx01 db open \(name)` to make it the active estate.")
     }
 }

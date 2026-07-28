@@ -55,14 +55,22 @@ tiers, export gates, receipts) defend against code already running on
 your machine. At that level the protections are the operating
 system's: file permissions, FileVault, and your own judgment about
 what you install. Estates on the default SQLite backend are whole-database encrypted
-at rest by SQLCipher under a 256-bit per-install key,
-Secure-Enclave-wrapped on Apple, with fail-closed key handling.
-Two caveats. Estates created before the encryption lockdown
-(circa v1.0.2) remain plaintext files until migrated. A
-PostgreSQL backend you configure yourself is protected by that
+at rest by SQLCipher under a 256-bit per-install key.
+  
+A PostgreSQL backend you configure yourself is protected by that
 server's controls, not by MOOTx01. `secret` rows remain excluded
 from recall and from every bulk channel in addition to at-rest
 encryption.
+
+`mootx01 upgrade` detects an unencrypted reused estate and offers to
+convert it to encrypted, on every upgrade. This is an allowance for
+users who change their mind after reflecting on what they have stored
+in their moot estate.
+
+Non-default estates are treated as configured deliberately by the
+software that created them, encrypted or not, and have no conversion
+path. This is by design. It protects estates built by software running
+on top of the mootx01 mono-SDK or the open-source moot-xxxx SDK.
 
 **The AI reads what you let it recall.** This is a knowledge engine.
 Anything the AI can recall can leave through a conversation, slowly
@@ -104,6 +112,7 @@ installed is the one we shipped:
   binary. You can check by hand with `shasum -a 256`.
 - macOS binaries are Developer ID signed and notarized. Verify with
   `codesign --verify` and `spctl --assess`.
+- Windows binaries are Authenticode signed.
 - **Linux/POSIX — minisign Ed25519 signature (CAND-004).** Linux does
   not have an OS-enforced code-signing mechanism equivalent to macOS
   Developer ID or Windows Authenticode. As an independent trust root
@@ -118,23 +127,14 @@ installed is the one we shipped:
   verify this signature **fail-closed** on Linux: if `minisign` is not
   installed, or the signature is missing or invalid, installation is
   aborted with a descriptive error rather than proceeding with an
-  unverified binary.
-
+  unverified binary.  
+  
   **Verification order on Linux/POSIX:**
   1. Download asset and `checksums.txt` (TLS from `github.com`)
   2. SHA-256 checksum verification against `checksums.txt`
   3. minisign Ed25519 signature verification of `checksums.txt` against
      the bundled public key (independent trust root)
   4. Extraction
-
-  **Current status:** The verification infrastructure is fully wired
-  and fail-closed, and the **real public key is committed** at
-  `distribution/minisign.pub` (key id `BC4D1E6ABCB5B788`). Releases are
-  signed when the `MINISIGN_SECRET_KEY` GitHub repository secret is
-  present. Until the signing secret is configured, releases are
-  published unsigned and Linux/POSIX installers will (correctly)
-  **reject** them fail-closed. macOS (Developer ID) and Windows
-  (Authenticode) are unaffected.
 
 Do not pipe remote installer content directly to a shell. Download,
 review, verify, then act — in that order. Any verification failure is
@@ -170,25 +170,46 @@ bug bounty and no response-time guarantee.
 
 ## Current posture
 
-Security review is continuous. From June 25 through July 22, 2026,
-the project ran repeated independent adversarial review, remediation,
-cross-port verification, and current-head revalidation across the EE,
-CE, and public SDK repositories.
+Security review is continuous, both human and a for-fee automated
+AI powered service. We do not name the automated service while it is
+in use. If we change services, we will name the one we left.
 
-The combined remediation record contains **537 security findings**:
-281 from the pre-reset EE campaign and 256 fixed findings from the
-retained post-reset archive. The count does not multiply dual-port
-fixes or EE-to-CE backports.
+Official security hardening began on June 25 and has continued since.
+The project is running repeated independent adversarial review,
+remediation, cross-port verification, and current-head revalidation
+across the monorepos for the Community and Enterprise Editions, as
+well as the open-source moot-xxxx SDK repositories.
 
-The full public count, process, and commit record is in the
-[continuous security review audit](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md).
-Its [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
-names every issue and the EE fix, workstream-closing commit, or public
-CE delivery commit that closed it.
-The review covers the codebase at each reviewed commit; the invariants
-above remain design guarantees exercised continuously by the test
-suite.
+The combined remediation record contains 543+ security findings from
+the initial product build campaigns and hardening effort. The count does
+not multiply dual-port fixes or EE-to-CE backports. 
+
+Active development on 1.0 has transitioned to maintenance only.
+Security findings will continue to be fixed until version 1.1 reaches stable
+release, at which time 1.0 users should transition to version 1.1 to
+receive ongoing security fixes.
+
+The full public count, process, and commit record is in the audit
+ledgers under `docs/validation/audits`. The review covers the codebase
+at each reviewed commit. The invariants above remain design guarantees
+exercised continuously by the test suite.
 
 ## Supported versions
 
-Only the tip of `stable/1.0.x` (the default branch) is supported.
+**Security reviewed**
+
+| Branch | What it is |
+|---|---|
+| `stable/1.0.x` | Stable signed releases |
+| `candidate/1.0.x` | Pre-release fix candidates, unsigned |
+| `develop/1.0.x` | Default branch, active maintenance work, unsigned |
+
+**Not security reviewed.** Back-ported fixes from 1.0.x only.
+
+| Branch | What it is |
+|---|---|
+| `candidate/1.1.x` | Beta test candidates, unsigned |
+| `develop/1.1.x` | Current active work, unsigned |
+
+   
+

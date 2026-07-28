@@ -57,7 +57,7 @@ Same memory commands do not have to mean the same memory risk. Keep the interfac
 
 ---
 
-[← Previous: Security Boundaries Are Product Design](04-security-boundaries-are-product-design.md) | [Series index](../README.md) | [Technical edition](../technical/06-same-memory-commands-safer-memory-records.md)
+[← Previous: Security Boundaries Are Product Design](04-security-boundaries-are-product-design.md) | [Series index](../README.md) | [Technical edition](../technical/06-same-memory-commands-safer-memory-records.md) | [Next: Search Found the Right Ticket—and the Wrong Answer →](07-search-found-the-right-ticket-and-the-wrong-answer.md)
 
 Originally published on [LinkedIn](https://www.linkedin.com/feed/update/urn:li:activity:7480599116872306688/) on 2026-07-09. Revised for this repository on 2026-07-22.
 

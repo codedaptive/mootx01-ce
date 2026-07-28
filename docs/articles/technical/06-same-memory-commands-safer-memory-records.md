@@ -82,7 +82,7 @@ Off-Axis Labs: All the science, fewer casualties.
 
 ---
 
-[← Previous: Security Boundaries Are Product Design](04-security-boundaries-are-product-design.md) | [Series index](../README.md) | [Business edition](../business/06-same-memory-commands-safer-memory-records.md)
+[← Previous: Security Boundaries Are Product Design](04-security-boundaries-are-product-design.md) | [Series index](../README.md) | [Business edition](../business/06-same-memory-commands-safer-memory-records.md) | [Next: Search Found the Right Ticket—and the Wrong Answer →](07-search-found-the-right-ticket-and-the-wrong-answer.md)
 
 Originally published on [Off-Axis Labs](https://offaxislabs.io/p/same-memory-commands-safer-memory) on 2026-07-09. Revised for this repository on 2026-07-22.
 

@@ -5,6 +5,114 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## Unreleased (1.0.x finalization — 1.0.35)
+
+**mcp-benchmarker: benchmark suite finalized on the 1.0.x line**
+
+- The benchmark suite (`apps/mcp-benchmarker`) is finalized on the 1.0.x line
+  with LongMemEval, LoCoMo, and LMEB modes, the strategy protocol
+  (`--exact-strategy`), the estate cache (gitignored — multi-GB binary
+  snapshots, regenerable from the run scripts), and recorded diagnostic
+  results under `apps/mcp-benchmarker/results/` (invalidated-rerun 2026-07-27;
+  uncontaminated LME, strategy, and full-matrix grids 2026-07-28).
+- 1.0.x is measurement-frozen from this release: recorded results are the
+  line's final benchmark record, and benchmark development continues on the
+  1.1.x line.
+
+## Unreleased (LME-04 stream)
+
+**mcp-benchmarker: LoCoMo session-recall benchmarking**
+
+- **New `locomo` subcommand** on both twins (Swift + Rust). Provisions one
+  isolated mootx01 estate per conversation (O(10) per run vs O(1,536) for
+  per-question), ingests all turns via `moot_file_memory` with `n=true`
+  (inline encoding), runs a DegeneracyGuard probe, then queries all selected
+  questions for that conversation. Output: `locomo-report-seed<N>.json`.
+- **LoCoMo dataset:** Snap Research, ACL 2024 — 10 multi-session conversations,
+  1,536 scoreable questions (450 adversarial excluded), CC BY-NC 4.0 license.
+  Dataset is gitignored; download via `scripts/fetch-locomo.sh`.
+- **Recall metrics:** `recall_any@k` / `recall_all@k` / `mrr` per question,
+  plus per-category breakdown (single_hop, temporal, multi_hop, open_domain).
+  Reuses LME-01 scoring math via `locomo_manifest_as_lme` bridge (dia_id →
+  session_id mapping). Additive extension per BENCHMARKER_OPTIMIZER_CONTRACT.md.
+- **Cross-language conformance verified** by `conformance/locomo_vectors.json`:
+  recall cases + uuid-mapping cases, tolerance 1e-9, both legs pass.
+- **Diagnostic smoke run:** 50 questions, seed 20260725, both twins. Category
+  n-counts match across twins (single_hop=8, temporal=12, multi_hop=2,
+  open_domain=28); agreement@5 = 46/50 = 92%. Full results in
+  `apps/mcp-benchmarker/results/LOCOMO_DIAGNOSTIC_SMOKE_2026-07-26.md`.
+
+## Unreleased (LME-03 stream)
+
+**mcp-benchmarker: Token-Efficiency Benchmark — Exact vs Dense Recall**
+
+- **Two-arm comparison**: `--arm both` runs `moot_memory_search` (exact) and
+  `moot_recall_distilled` (dense/distilled) per question. Dense arm calls
+  `moot_consolidate` after ingest before issuing the distilled query.
+- **Token estimator**: `(utf8_byte_count + 3) / 4` — deterministic, zero
+  external deps, consistent across Swift and Rust twins.
+- **Evidence-density scorer**: normalized substring match of `has_answer`
+  turn text against the returned payload. Real corpus lacks `has_answer`
+  annotations; the scorer returns nil for real-corpus runs and is validated
+  by `conformance/token_efficiency_vectors.json`.
+- **`token_efficiency` additive JSON key**: new top-level block in
+  `lme-report-*.json` carrying per-arm mean tokens, dense/exact ratio,
+  evidence hit rate, and hits-per-1000-tokens. Additive per
+  BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2.
+- **Judge mode**: `--judge-cmd <cmd>` hooks an external LLM evaluator.
+  Prompt on stdin, answer on stdout. Deterministic grading via the same
+  normalized-substring primitive. Judge transcript written to
+  `judge-transcript-<variant>-seed<N>.jsonl`.
+- **Cross-language conformance**: `conformance/token_efficiency_vectors.json`
+  covers token estimator and evidence scorer. Both twins pass.
+
+## Unreleased (LME-01 stream)
+
+**mcp-benchmarker: LongMemEval session-recall benchmarking**
+
+- **New `longmemeval` subcommand** on both twins (Swift + Rust). Provisions an
+  isolated mootx01 estate per question, ingests all haystack sessions via
+  `moot_file_memory`, runs a three-query DegeneracyGuard probe, queries the
+  question, and scores session-recall. Output: `lme-report-<variant>-seed<N>.json`.
+- **Recall metrics:** `recall_any@k` (any answer session in top-k),
+  `recall_all@k` (all answer sessions in top-k), `mrr` (reciprocal rank of
+  first answer session). Additive extension of the existing benchmarker outcome
+  record (BENCHMARKER_OPTIMIZER_CONTRACT.md §1.2).
+- **Cross-language conformance verified** by `longmemeval_vectors.json`:
+  10 recall cases + 5 uuid-mapping cases, tolerance 1e-9, both legs pass.
+- **Corpus loader fix:** `has_answer` field absent in the real HuggingFace
+  corpus (present only in hand-authored test sample); made optional with
+  `false` default in both loaders.
+- **Diagnostic smoke run:** 50-question Rust run (variant=s, seed=20260725)
+  → recall_any@10=0.88, recall_all@10=0.62, mrr=0.64, 0 guard refusals.
+  See `apps/mcp-benchmarker/results/LONGMEMEVAL_DIAGNOSTIC_SMOKE_2026-07-25.md`.
+
+## v1.0.35 — 2026-07-25
+
+Estate encryption, retrieval-gate parity, and release-pipeline hardening.
+
+- **New estates are encrypted at rest by default.** Both ports provision a
+  256-bit per-install key before the estate is opened and fail closed if the
+  key cannot be prepared. `mootx01 install --no-encrypt` opts out, and
+  `mootx01 db create` follows the same default. An existing unencrypted
+  estate keeps opening as it did before.
+- **`mootx01 upgrade` offers to convert an unencrypted estate.** The
+  conversion clones the estate into an encrypted copy, verifies drawer, fact,
+  tunnel, and trace counts before swapping, and keeps the estate path
+  constant so client configuration continues to resolve. The original moves
+  to the Trash and is still unencrypted there. Every failure path leaves a
+  working estate in place.
+- **`moot_memory_get` applies provenance sensitivity.** Retrieval by id now
+  reports `restricted` and `secret` rows as not found, matching the redaction
+  `moot_memory_search` already applied. Swift and Rust behave identically.
+- **`--no-daemon` and `--vault-off` reach sandboxed client configs.** Parall
+  instance configurations receive the same direct-stdio wiring and vault
+  posture as native configurations.
+- **Release signing runs only on tag pushes.** The Windows signing jobs and
+  the PyPI publish job no longer run from manual dispatches.
+- **The security policy states posture only.** SECURITY.md documents what the
+  project guarantees. The finding record lives in `docs/validation/audits`.
+
 ## v1.0.34 — 2026-07-23
 
 Direct-stdio transport, documentation-authority, and packaging-integrity

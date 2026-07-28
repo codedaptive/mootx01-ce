@@ -31,7 +31,11 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
             eprintln!("mootx01 upgrade: no binary at {path}");
             return ExitCode::from(exit::FAILURE);
         }
-        return place_and_report(&src, &home, no_restart);
+        let code = place_and_report(&src, &home, no_restart);
+        if code == ExitCode::from(exit::OK) {
+            offer_estate_encryption_if_needed();
+        }
+        return code;
     }
 
     // Online: resolve the latest version.
@@ -55,6 +59,10 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         Some(true) => {}
         Some(false) => {
             println!("Already up to date (v{CURRENT_VERSION}).");
+            // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
+            // and it offers whether or not a new version is available — so
+            // the up-to-date early return still offers.
+            offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
         }
         None => {
@@ -88,8 +96,209 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
     let _ = std::fs::remove_dir_all(&tmp);
     if code == ExitCode::from(exit::OK) {
         println!("Upgraded to v{latest}. Run `mootx01 status` to confirm.");
+        // After the services are back up, so a decline leaves a fully
+        // converged install and an accept owns its own stop/start sequence.
+        offer_estate_encryption_if_needed();
     }
     code
+}
+
+/// CE-1.0.35-08 (Rust leg): offer to encrypt an unencrypted active estate.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling): no
+/// detection or prompting lives anywhere else. A plaintext estate reaches
+/// this leg two ways: an estate created before the sibling `db.key`
+/// convention existed (it serves plaintext silently), or a plaintext estate
+/// file migrated in from a macOS install (it fails `PRAGMA key` looking
+/// like corruption). Both end here. TTY-gated: a non-interactive invocation
+/// never prompts and never migrates. Declining is a clean no-op.
+fn offer_estate_encryption_if_needed() {
+    use std::io::IsTerminal;
+
+    use aria_mcp::estate_migration as migration;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+
+    // Only a readable plaintext estate qualifies. Absent means first run
+    // (serve creates new estates keyed); ciphertext means done.
+    if migration::detect_estate_file_state(&estate) != migration::EstateFileState::Plaintext {
+        return;
+    }
+    // Non-TTY invocations skip the offer silently and never migrate.
+    if !io::stdin().is_terminal() {
+        return;
+    }
+
+    println!(
+        "\nYour memory estate at {}\n\
+         is not encrypted at rest. mootx01 can encrypt it now: the estate is\n\
+         cloned into an encrypted copy, verified row-for-row, and swapped in\n\
+         at the same path. Your original is kept beside it until you delete it.",
+        estate.display()
+    );
+    print!("Encrypt the estate now? Type 'yes' to confirm: ");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    let _ = io::stdin().lock().read_line(&mut line);
+    if line.trim() != "yes" {
+        println!("Leaving the estate as it is. Run `mootx01 upgrade` again any time to encrypt it.");
+        return;
+    }
+
+    // Key custody: the sibling db.key convention — the same key
+    // `SqliteStorage` resolves on every open, minted here if absent.
+    //
+    // Track whether THIS run minted it: every failure exit below rolls a
+    // freshly-minted key back. Leaving it beside the still-plaintext estate
+    // is a mismatched state — every subsequent open resolves the key
+    // against a plaintext file and fails, so the estate is unopenable until
+    // a retry succeeds (Codex 5ca9538f). A PREEXISTING key is never
+    // touched: deleting it would orphan every encrypted estate it opens.
+    let estates_dir = estate.parent().unwrap_or(&data).to_path_buf();
+    let key_path = estates_dir.join(aria_mcp::INSTALL_KEY_FILE);
+    let key_preexisted = key_path.exists();
+    let rollback_minted_key = || {
+        if !key_preexisted {
+            let _ = std::fs::remove_file(&key_path);
+        }
+    };
+    let key = match aria_mcp::ensure_install_key(&estates_dir) {
+        Ok(k) => k,
+        Err(e) => {
+            rollback_minted_key();
+            println!(
+                "Could not provision an encryption key ({e}).\n\
+                 Nothing was changed; the estate is untouched."
+            );
+            return;
+        }
+    };
+
+    // Quiesce FIRST (never lose data): no write may land in the original
+    // once the clone exists. Refusing to proceed when the daemon will not
+    // stop is the safe direction — nothing has been touched yet.
+    let was_running = daemon_is_running();
+    if was_running && !daemon_stop() {
+        rollback_minted_key();
+        println!(
+            "The resident daemon would not stop; nothing was changed.\n\
+             Stop it manually and run `mootx01 upgrade` again."
+        );
+        return;
+    }
+
+    println!("Encrypting the estate\u{2026}");
+    let copy = estate.with_file_name(format!(
+        "{}.encrypting",
+        estate.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    // A stale copy from an interrupted earlier run is untrusted by
+    // definition — regenerate rather than resume.
+    migration::remove_database(&copy);
+
+    let outcome = migration::export_encrypted_copy(&estate, &copy, &key)
+        .and_then(|()| migration::verify_encrypted_copy(&estate, &copy, &key))
+        .and_then(|counts| {
+            migration::swap_in_encrypted_copy(&estate, &copy).map(|swap| (counts, swap))
+        });
+
+    match outcome {
+        Ok((counts, swap)) => {
+            let restarted = if was_running { daemon_start() } else { true };
+            println!("  ✓ Estate encrypted in place at {}", estate.display());
+            println!("  ✓ Verified: {counts}");
+            if was_running && !restarted {
+                println!(
+                    "  ✗ The daemon did not restart cleanly. Restart it manually,\n\
+                       or run: mootx01 serve --http auto"
+                );
+            } else if was_running {
+                println!("  ✓ Daemon restarted over the encrypted estate.");
+            }
+            println!(
+                "  ✓ Your original estate was kept at:\n    {}\n    \
+                 That copy is STILL UNENCRYPTED \u{2014} deleting it is the final\n    \
+                 step of this migration, not optional cleanup.",
+                swap.retained_original.display()
+            );
+        }
+        Err(e) => {
+            // Every failure path left the plaintext original at the
+            // canonical path; roll back a key this run minted, then put the
+            // daemon back over the original. Order matters: the daemon's
+            // startup resolves the sibling key, so the mismatched
+            // key-beside-plaintext state must be gone before it opens.
+            rollback_minted_key();
+            if was_running {
+                let _ = daemon_start();
+            }
+            println!(
+                "Migration failed: {e}\n\
+                 Your estate is still the plaintext original at {}.",
+                estate.display()
+            );
+            if key_preexisted {
+                // With a preexisting key beside a plaintext estate, encrypted
+                // opens were already failing before this run — do not claim
+                // otherwise.
+                println!(
+                    "Note: an encryption key (db.key) that predates this run exists beside\n\
+                     the estate; the daemon cannot open the estate until the migration\n\
+                     succeeds. Run `mootx01 upgrade` to try again."
+                );
+            } else {
+                println!(
+                    "The encryption key created for this run was removed; the estate\n\
+                     opens exactly as before. Run `mootx01 upgrade` to try again."
+                );
+            }
+        }
+    }
+}
+
+/// Platform daemon control for the migration's stop → swap → start
+/// sequence. Linux: the systemd unit. Windows: the scheduled task. Other
+/// platforms report "not running" so the migration never tries to manage a
+/// daemon it has no control surface for (the user was told to check).
+fn daemon_is_running() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::core::service::is_active(crate::core::service::DAEMON_UNIT)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::core::service::is_task_running(crate::core::service::DAEMON_TASK)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    false
+}
+
+fn daemon_stop() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::core::service::stop(crate::core::service::DAEMON_UNIT).is_ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::core::service::stop_task(crate::core::service::DAEMON_TASK).is_ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    true
+}
+
+fn daemon_start() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::core::service::restart(crate::core::service::DAEMON_UNIT).is_ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::core::service::restart_task(crate::core::service::DAEMON_TASK).is_ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    true
 }
 
 fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: bool) -> ExitCode {

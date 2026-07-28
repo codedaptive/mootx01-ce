@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="700" viewBox="0 0 1120 700" role="img" aria-labelledby="svg-title svg-desc">
+  <title id="svg-title">The matching sentence can be the wrong answer</title>
+  <desc id="svg-desc">A ticket contains a sequence; search can land in the middle of it.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect id="canvas" width="1120" height="700" fill="#fbfaf7"/>
+  <g font-family="Inter, Arial, sans-serif">
+    <rect id="title-bound" x="45" y="22" width="1030" height="46" fill="none"/>
+<text x="560.0" y="58" text-anchor="middle" font-size="34" font-weight="700" fill="#111827" data-container="title-bound"><tspan x="560.0" dy="0">The matching sentence can be the wrong answer</tspan></text>
+<rect id="subtitle-bound" x="65" y="73" width="990" height="30" fill="none"/>
+<text x="560.0" y="96" text-anchor="middle" font-size="18" font-weight="400" fill="#475569" data-container="subtitle-bound"><tspan x="560.0" dy="0">A ticket contains a sequence; search can land in the middle of it.</tspan></text>
+    <line x1="190" y1="208" x2="930" y2="208" stroke="#94a3b8" stroke-width="4"/>
+<rect id="step-bound-0" x="146" y="170" width="88" height="26" fill="none"/>
+<text x="190" y="189" text-anchor="middle" font-size="14" font-weight="700" letter-spacing="1.2" fill="#12356b" data-container="step-bound-0">STEP 1</text>
+<circle cx="190" cy="208" r="12" fill="#4f83cc"/>
+<rect id="box-0" x="47" y="256" width="286" height="248" rx="8" fill="#ffffff" stroke="#4f83cc" stroke-width="2"/>
+<rect x="48" y="257" width="284" height="7" rx="6" fill="#4f83cc"/>
+<text x="190.0" y="374" text-anchor="middle" font-size="22" font-weight="700" fill="#12356b" data-container="box-0"><tspan x="190.0" dy="0">Symptom</tspan></text>
+<text x="190.0" y="409" text-anchor="middle" font-size="17" font-weight="400" fill="#475569" data-container="box-0"><tspan x="190.0" dy="0">Server refuses to start</tspan></text>
+<rect id="step-bound-1" x="516" y="170" width="88" height="26" fill="none"/>
+<text x="560" y="189" text-anchor="middle" font-size="14" font-weight="700" letter-spacing="1.2" fill="#7a1a13" data-container="step-bound-1">STEP 2</text>
+<circle cx="560" cy="208" r="12" fill="#c2413b"/>
+<rect id="box-1" x="417" y="256" width="286" height="248" rx="8" fill="#ffffff" stroke="#c2413b" stroke-width="2"/>
+<rect x="418" y="257" width="284" height="7" rx="6" fill="#c2413b"/>
+<text x="560.0" y="362" text-anchor="middle" font-size="22" font-weight="700" fill="#7a1a13" data-container="box-1"><tspan x="560.0" dy="0">Failed attempt</tspan></text>
+<text x="560.0" y="397" text-anchor="middle" font-size="17" font-weight="400" fill="#475569" data-container="box-1"><tspan x="560.0" dy="0">Closest match to the new</tspan><tspan x="560.0" dy="24">error</tspan></text>
+<rect id="step-bound-2" x="886" y="170" width="88" height="26" fill="none"/>
+<text x="930" y="189" text-anchor="middle" font-size="14" font-weight="700" letter-spacing="1.2" fill="#116033" data-container="step-bound-2">STEP 3</text>
+<circle cx="930" cy="208" r="12" fill="#39a368"/>
+<rect id="box-2" x="787" y="256" width="286" height="248" rx="8" fill="#ffffff" stroke="#39a368" stroke-width="2"/>
+<rect x="788" y="257" width="284" height="7" rx="6" fill="#39a368"/>
+<text x="930.0" y="374" text-anchor="middle" font-size="22" font-weight="700" fill="#116033" data-container="box-2"><tspan x="930.0" dy="0">Confirmed repair</tspan></text>
+<text x="930.0" y="409" text-anchor="middle" font-size="17" font-weight="400" fill="#475569" data-container="box-2"><tspan x="930.0" dy="0">Customer verifies service</tspan></text>
+  </g>
+</svg>

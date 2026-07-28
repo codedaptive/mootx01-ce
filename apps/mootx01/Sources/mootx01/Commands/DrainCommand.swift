@@ -60,9 +60,23 @@ struct DrainCommand: AsyncParsableCommand {
         // Nothing to drain if the estate file does not exist.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
 
+        // At-rest posture — the SAME shared decision serve and dream use, so the
+        // three commands cannot drift. drain reaches here only when the estate
+        // file already exists (guarded above), so in practice this resolves to
+        // either the existing-ciphertext or the existing-plaintext branch.
+        let encryption: EstateEncryptionConfig
+        do {
+            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            encryption = resolved.encryption
+        } catch {
+            Logging.stderr.log("mootx01 drain fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+
         let configuration = EstateConfiguration(
             estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0)
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
         )
         let storage: SQLiteStorage
         do {

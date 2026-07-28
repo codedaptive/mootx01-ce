@@ -1175,6 +1175,106 @@ struct InstallerTests {
         }
     }
 
+    @Test("Parall integration: --no-daemon --vault-off yields stdio entries, never http")
+    func parallIntegrationHonorsNoDaemonAndVaultOff() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        // Cursor is HTTP-capable (supportsLocalHTTP: true), so without the flags
+        // forwarded it receives a bare {"url": daemonURL} entry. That is exactly
+        // the shape a `--no-daemon --vault-off` install must NOT produce.
+        let client = MCPClients.supported.first { $0.id == "cursor" }!
+        #expect(client.supportsLocalHTTP, "Test premise: the client must be HTTP-capable")
+        let targetFilename = URL(fileURLWithPath: client.configPath).lastPathComponent
+        let binaryPath = "/usr/local/bin/mootx01"
+
+        let parallRoot = home.appendingPathComponent("Library/Application Support/Parall")
+        for name in ["cursor-a", "cursor-b"] {
+            let dir = parallRoot.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try "{}".write(to: dir.appendingPathComponent(targetFilename),
+                           atomically: true, encoding: .utf8)
+        }
+
+        let paths = Installer.parallConfigPaths(client: client, homeDirectory: home)
+        #expect(paths.count == 2, "Both Parall instances must be discovered")
+
+        // The argument set InstallCommand's Parall loop passes for
+        // `mootx01 install --no-daemon --vault-off`.
+        for configURL in paths {
+            try Installer.mergeIntoJSONConfig(
+                at: configURL, client: client, binaryPath: binaryPath,
+                daemonURL: MootPaths.residentEndpointURL,
+                directStdio: true, vaultOff: true
+            )
+        }
+
+        for configURL in paths {
+            let instance = configURL.deletingLastPathComponent().lastPathComponent
+            let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+            let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
+
+            // Predicate 1: it is a command/args stdio entry carrying both postures.
+            #expect(entry?["command"] as? String == binaryPath,
+                    "\(instance): --no-daemon must produce a direct stdio command entry")
+            #expect(entry?["args"] as? [String] == ["serve"],
+                    "\(instance): stdio entry must invoke the serve subcommand")
+            let env = entry?["env"] as? [String: String]
+            #expect(env?["MOOTX01_HTTP_PORT"] == "",
+                    "\(instance): --no-daemon must clear MOOTX01_HTTP_PORT so no HTTP port is used")
+            #expect(env?["MOOTX01_VAULT"] == "0",
+                    "\(instance): --vault-off must set MOOTX01_VAULT=0")
+
+            // Predicate 2: it is NOT an http/url entry. A fixed 127.0.0.1:4242
+            // entry with no daemon running is a port any same-user process can
+            // bind to impersonate the MCP server.
+            #expect(entry?["url"] == nil,
+                    "\(instance): a --no-daemon Parall entry must carry no url")
+            #expect(entry?["type"] == nil,
+                    "\(instance): a --no-daemon Parall entry must carry no http type")
+        }
+    }
+
+    /// Source-level guard on InstallCommand's Parall call site.
+    ///
+    /// The behavioral test above proves the entry shape but passes the flags to
+    /// the helper itself, so it stays green even if the caller stops forwarding
+    /// them — which is precisely the defect. Binding the caller properly needs
+    /// MootInstallerCoreTests to depend on the `mootx01` executable target, and
+    /// that is a Package.swift change outside this mission's scope. Until that
+    /// seam exists, read the call site and assert both arguments are named.
+    /// `directStdio`/`vaultOff` are defaulted parameters, so dropping them is a
+    /// silent, compiling regression that nothing else catches.
+    @Test("InstallCommand's Parall call site forwards directStdio and vaultOff")
+    func parallCallSiteForwardsBothPostureArguments() throws {
+        // Tests/MootInstallerCoreTests/InstallerTests.swift → apps/mootx01
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // MootInstallerCoreTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // apps/mootx01
+        let installCommand = packageRoot
+            .appendingPathComponent("Sources/mootx01/Commands/InstallCommand.swift")
+
+        let source = try String(contentsOf: installCommand, encoding: .utf8)
+
+        // Isolate the mergeIntoJSONConfig call (the Parall loop is its only
+        // caller in this file) and require both posture arguments inside it.
+        guard let callStart = source.range(of: "Installer.mergeIntoJSONConfig(") else {
+            Issue.record("InstallCommand.swift no longer calls Installer.mergeIntoJSONConfig — update this guard")
+            return
+        }
+        guard let callEnd = source.range(of: ")", range: callStart.upperBound..<source.endIndex) else {
+            Issue.record("Could not find the end of the mergeIntoJSONConfig call")
+            return
+        }
+        let call = String(source[callStart.lowerBound..<callEnd.upperBound])
+
+        #expect(call.contains("directStdio:"),
+                "Parall call site must forward directStdio, or --no-daemon silently writes http entries into Parall clones")
+        #expect(call.contains("vaultOff:"),
+                "Parall call site must forward vaultOff, or --vault-off silently fails to set MOOTX01_VAULT=0 in Parall clones")
+    }
+
     @Test("Parall scan skips Continue client (YAML, no JSON config to merge)")
     func parallScanSkipsContinue() throws {
         let home = try makeSandboxHome()

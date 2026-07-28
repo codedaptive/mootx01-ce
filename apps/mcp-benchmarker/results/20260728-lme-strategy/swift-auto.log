@@ -1,0 +1,719 @@
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)
+[longmemeval] encode-barrier: drain
+[longmemeval] exact-strategy: auto
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 277, in_flight: 5, encoded_chunks: 463
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 277, in_flight: 2, encoded_chunks: 463
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 277, encoded_chunks: 788
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 277, encoded_chunks: 999
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 277, encoded_chunks: 999
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 7, encoded_chunks: 861
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 5, encoded_chunks: 864
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 3, encoded_chunks: 867
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 72, in_flight: 1, encoded_chunks: 870
+[lme 60d45044] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 72, encoded_chunks: 1033
+[lme 2788b940] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 6, in_flight: 9, encoded_chunks: 969
+[lme 2788b940] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 986
+[lme 8a2466db] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 5, in_flight: 0, encoded_chunks: 1019
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 7, encoded_chunks: 724
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 5, encoded_chunks: 729
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 3, encoded_chunks: 734
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 136, in_flight: 1, encoded_chunks: 737
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 136, encoded_chunks: 1017
+[lme 4adc0475] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 136, encoded_chunks: 1017
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 5, encoded_chunks: 986
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 3, encoded_chunks: 988
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 18, in_flight: 1, encoded_chunks: 990
+[lme 35a27287] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 18, encoded_chunks: 1018
+[lme 51b23612] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 5, encoded_chunks: 989
+[lme 51b23612] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 995
+[lme 51b23612] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 995
+[lme caf03d32] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 8, in_flight: 0, encoded_chunks: 981
+[lme caf03d32] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 8, encoded_chunks: 997
+[lme 681a1674] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 25, in_flight: 8, encoded_chunks: 950
+[lme 681a1674] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 25, encoded_chunks: 978
+[lme 681a1674] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 25, encoded_chunks: 998
+[lme e61a7584] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 5, in_flight: 7, encoded_chunks: 1004
+[lme e61a7584] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 5, encoded_chunks: 1016
+[lme e61a7584] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 5, encoded_chunks: 1016
+[lme gpt4_e061b84g] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 7, in_flight: 10, encoded_chunks: 1031
+[lme gpt4_e061b84g] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 7, encoded_chunks: 1041
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 274, in_flight: 8, encoded_chunks: 516
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 274, in_flight: 8, encoded_chunks: 516
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 274, in_flight: 8, encoded_chunks: 516
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 274, in_flight: 7, encoded_chunks: 516
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 274, in_flight: 4, encoded_chunks: 516
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 274, in_flight: 1, encoded_chunks: 516
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 274, encoded_chunks: 1037
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 274, encoded_chunks: 1037
+[lme 77eafa52] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 274, encoded_chunks: 1037
+[lme 031748ae_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 1, in_flight: 9, encoded_chunks: 1028
+[lme 031748ae_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 1, in_flight: 9, encoded_chunks: 1028
+[lme 031748ae_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 1, encoded_chunks: 1030
+[lme 2ebe6c92] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 8, in_flight: 8, encoded_chunks: 991
+[lme 2ebe6c92] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 8, encoded_chunks: 1008
+[lme c9f37c46] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 4, encoded_chunks: 972
+[lme c9f37c46] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 0, encoded_chunks: 972
+[lme c9f37c46] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 985
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 7, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 6, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 5, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 3, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 140, in_flight: 1, encoded_chunks: 742
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 140, encoded_chunks: 1019
+[lme gpt4_b5700ca0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 140, encoded_chunks: 1019
+[lme c4f10528] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 8, in_flight: 7, encoded_chunks: 976
+[lme c4f10528] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 8, encoded_chunks: 986
+[lme 1903aded] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 6, encoded_chunks: 993
+[lme 1903aded] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 1001
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 8, encoded_chunks: 987
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 6, encoded_chunks: 990
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 5, encoded_chunks: 991
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 4, encoded_chunks: 994
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 3, encoded_chunks: 995
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 21, in_flight: 2, encoded_chunks: 996
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 21, encoded_chunks: 998
+[lme gpt4_7a0daae1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 21, encoded_chunks: 1044
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 11, encoded_chunks: 558
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 11, encoded_chunks: 558
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 11, encoded_chunks: 558
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 11, encoded_chunks: 558
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 10, encoded_chunks: 559
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 8, encoded_chunks: 565
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 6, encoded_chunks: 569
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 4, encoded_chunks: 573
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 234, in_flight: 2, encoded_chunks: 577
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 234, encoded_chunks: 717
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 234, encoded_chunks: 1017
+[lme ce6d2d27] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 234, encoded_chunks: 1017
+[lme c4a1ceb8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 1, in_flight: 8, encoded_chunks: 994
+[lme c4a1ceb8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 1, encoded_chunks: 998
+[lme c14c00dd] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 8, encoded_chunks: 1004
+[lme c14c00dd] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 1012
+[lme 61f8c8f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 3, in_flight: 8, encoded_chunks: 998
+[lme 61f8c8f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 3, in_flight: 0, encoded_chunks: 998
+[lme 61f8c8f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 3, encoded_chunks: 1006
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 6, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 4, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 35, in_flight: 2, encoded_chunks: 943
+[lme gpt4_7ddcf75f] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 35, encoded_chunks: 988
+[lme 3ba21379] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 5, in_flight: 19, encoded_chunks: 946
+[lme 3ba21379] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 5, in_flight: 19, encoded_chunks: 946
+[lme 3ba21379] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 5, encoded_chunks: 955
+[lme f523d9fe] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 6, in_flight: 8, encoded_chunks: 1016
+[lme f523d9fe] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 1017
+[lme f523d9fe] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 1027
+[lme gpt4_cd90e484] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 57, in_flight: 1, encoded_chunks: 881
+[lme gpt4_cd90e484] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 57, encoded_chunks: 1012
+[lme gpt4_cd90e484] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 57, encoded_chunks: 1012
+[lme gpt4_78cf46a3] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 1, in_flight: 13, encoded_chunks: 989
+[lme gpt4_78cf46a3] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 1, in_flight: 13, encoded_chunks: 1004
+[lme 0862e8bf_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 293, in_flight: 3, encoded_chunks: 431
+[lme 0862e8bf_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 293, encoded_chunks: 564
+[lme 0862e8bf_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 293, encoded_chunks: 1004
+[lme 0862e8bf_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 293, encoded_chunks: 1004
+[lme eeda8a6d] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 3, in_flight: 8, encoded_chunks: 1019
+[lme eeda8a6d] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 3, in_flight: 0, encoded_chunks: 1019
+[lme eeda8a6d] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 3, encoded_chunks: 1024
+[lme 5a4f22c0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 10, encoded_chunks: 1009
+[lme 5a4f22c0] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 1010
+[lme e47becba] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 8, encoded_chunks: 1024
+[lme e47becba] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 0, encoded_chunks: 1024
+[lme e47becba] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 1035
+[lme 28dc39ac] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 9, in_flight: 0, encoded_chunks: 918
+[lme 28dc39ac] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 9, encoded_chunks: 941
+[lme 09ba9854_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 3, in_flight: 7, encoded_chunks: 1005
+[lme 09ba9854_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 3, encoded_chunks: 1012
+[lme gpt4_59c863d7] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 26, encoded_chunks: 992
+[lme gpt4_59c863d7] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 998
+[lme cc6d1ec1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 8, in_flight: 0, encoded_chunks: 941
+[lme cc6d1ec1] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 8, encoded_chunks: 959
+[lme 157a136e] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 1, in_flight: 9, encoded_chunks: 1009
+[lme 157a136e] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 1, encoded_chunks: 1011
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 247, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 245, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 243, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 241, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 239, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 236, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 234, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 231, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 229, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 227, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 224, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 222, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 219, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 217, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 214, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 212, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 209, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 207, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 204, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 202, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 200, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 199, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 196, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 194, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 192, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 190, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 188, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 186, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 183, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 180, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 178, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 176, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 174, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 173, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 171, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 169, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 166, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 163, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 161, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 158, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 156, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 154, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 152, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 149, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 146, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 144, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 141, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 139, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 137, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 135, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 132, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 129, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 127, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 125, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 123, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 121, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 118, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 116, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 113, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 110, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 108, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 105, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 102, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 99, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 97, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 94, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 91, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 88, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 86, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 83, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 80, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 77, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 75, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 72, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 70, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 67, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 65, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 63, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 61, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 59, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 57, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 55, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 52, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 49, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 47, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 44, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 42, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 40, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 38, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 36, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 33, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 31, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 29, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 27, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 25, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 23, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 21, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 19, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 18, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 15, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 13, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 10, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 7, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 4, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 172, in_flight: 1, encoded_chunks: 675
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 172, encoded_chunks: 1003
+[lme 94f70d80] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 172, encoded_chunks: 1003
+[lme gpt4_9a159967] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 6, in_flight: 8, encoded_chunks: 1007
+[lme gpt4_9a159967] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 1008
+[lme gpt4_9a159967] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 1021
+[lme 09d032c9] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 2, in_flight: 8, encoded_chunks: 985
+[lme 09d032c9] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 2, encoded_chunks: 988
+[lme gpt4_2f584639] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 4, in_flight: 11, encoded_chunks: 940
+[lme gpt4_2f584639] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 4, encoded_chunks: 963
+[lme 2133c1b5_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 7, in_flight: 12, encoded_chunks: 951
+[lme 2133c1b5_abs] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 7, encoded_chunks: 971
+[lme gpt4_6ed717ea] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 8, in_flight: 7, encoded_chunks: 1005
+[lme gpt4_6ed717ea] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 8, encoded_chunks: 1017
+[lme gpt4_1e4a8aeb] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 15, in_flight: 259, encoded_chunks: 986
+[lme gpt4_1e4a8aeb] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 15, in_flight: 259, encoded_chunks: 986
+[lme gpt4_1e4a8aeb] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 15, in_flight: 259, encoded_chunks: 986
+[lme gpt4_1e4a8aeb] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 15, in_flight: 259, encoded_chunks: 986
+[lme gpt4_1e4a8aeb] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 15, encoded_chunks: 1005
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 7, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 6, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 4, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 170, in_flight: 2, encoded_chunks: 670
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 170, encoded_chunks: 919
+[lme 21436231] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 170, encoded_chunks: 993
+[lme 7161e7e2] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 6, in_flight: 8, encoded_chunks: 1021
+[lme 7161e7e2] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 1024
+[lme 7161e7e2] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 1031
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 8, encoded_chunks: 680
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 7, encoded_chunks: 684
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 6, encoded_chunks: 685
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 4, encoded_chunks: 690
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 115, in_flight: 2, encoded_chunks: 695
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 115, encoded_chunks: 810
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 115, encoded_chunks: 974
+[lme b320f3f8] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 115, encoded_chunks: 974
+[lme gpt4_e05b82a6] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 8, in_flight: 9, encoded_chunks: 1008
+[lme gpt4_e05b82a6] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 8, encoded_chunks: 1019
+[lme c5e8278d] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 2, in_flight: 9, encoded_chunks: 968
+[lme c5e8278d] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 2, encoded_chunks: 970
+[lme a11281a2] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 9, in_flight: 8, encoded_chunks: 974
+[lme a11281a2] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 9, encoded_chunks: 990
+[longmemeval] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  turns ingested total: 24778
+  recall-any@1:         0.5400
+  recall-any@5:         0.8600
+  recall-any@10:        0.9200
+  recall-all@1:         0.2600
+  recall-all@5:         0.5000
+  recall-all@10:        0.6600
+  mrr:                  0.6754
+  query p50:            1238.0 ms
+  query p95:            1751.0 ms
+  exact mean tokens:    907
+  dense mean tokens:    869
+  dense/exact ratio:    0.958
+  exact evidence rate:  0.000
+  dense evidence rate:  0.000
+  estate strategy:      fresh-per-question
+  report written to:    /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260728-lme-strategy/1.0.x-swift-auto/lme-report-s-seed20260725.json

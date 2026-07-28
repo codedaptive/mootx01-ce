@@ -66,6 +66,31 @@ struct MemoryGetTests {
         return try await kit.capture(handle, frame)
     }
 
+    /// Seed content with a chosen PROVENANCE sensitivity (bits 30-35,
+    /// `Drawer.sensitivity`) — a different axis from the adjective sensitivity
+    /// the `seed` helper above sets. The adjective axis stays `.normal` so the
+    /// RecallFrame chain admits the row and it reaches the provenance gate,
+    /// which is the boundary under test. Mirrors `SearchRedactionTests.seed`.
+    @discardableResult
+    private func seedProvenance(
+        _ content: String,
+        room: String = "mg-tests",
+        provenanceSensitivity: LocusKit.Sensitivity,
+        in handle: EstateHandle,
+        kit: GeniusLocusKit
+    ) async throws -> Drawer {
+        let frame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: room,
+            latticeAnchor: .udc("004"),
+            addedBy: "aria-mcp-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: provenanceSensitivity
+        )
+        return try await kit.capture(handle, frame)
+    }
+
     private func getArgs(id: String, estateID: UUID? = nil) -> JSONValue {
         var args: [String: JSONValue] = ["id": .string(id)]
         if let estateID { args["estateID"] = .string(estateID.uuidString) }
@@ -196,6 +221,120 @@ struct MemoryGetTests {
         await #expect(throws: JSONRPCError.self) {
             _ = try await dispatcher.dispatch(
                 name: "moot_memory_get", arguments: getArgs(id: secret.id))
+        }
+    }
+
+    // Regression pair (Swift/Rust conformance parity with Rust
+    // `memory_get_provenance_secret_drawer_is_reported_not_found`): the two
+    // cases above exercise the ADJECTIVE sensitivity axis, which the
+    // RecallFrame chain already gated — so they passed while the PROVENANCE
+    // axis (bits 30-35) went unchecked and returned verbatim content.
+    // moot_memory_search redacts provenance Restricted/Secret previews while
+    // still surfacing the row id, so by-id must not become a second door to
+    // the body the redaction withheld.
+
+    @Test func provenanceRestrictedDrawerIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-prov-restricted")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let body = "provenance-restricted body must not leak through memory-get"
+        let drawer = try await seedProvenance(
+            body, provenanceSensitivity: .restricted, in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        do {
+            let result = try await dispatcher.dispatch(
+                name: "moot_memory_get", arguments: getArgs(id: drawer.id))
+            Issue.record("provenance-restricted drawer must be reported not-found; got: \(result)")
+        } catch let error as JSONRPCError {
+            #expect(error.code == JSONRPCErrorCode.invalidParams)
+            #expect(error.message.contains("Memory not found: \(drawer.id)"))
+            #expect(!error.message.contains(body),
+                "the not-found shape must not leak the withheld content")
+        }
+    }
+
+    @Test func provenanceSecretDrawerIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-prov-secret")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let body = "provenance-secret body must not leak through memory-get"
+        let drawer = try await seedProvenance(
+            body, provenanceSensitivity: .secret, in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        do {
+            let result = try await dispatcher.dispatch(
+                name: "moot_memory_get", arguments: getArgs(id: drawer.id))
+            Issue.record("provenance-secret drawer must be reported not-found; got: \(result)")
+        } catch let error as JSONRPCError {
+            #expect(error.code == JSONRPCErrorCode.invalidParams)
+            #expect(error.message.contains("Memory not found: \(drawer.id)"))
+            #expect(!error.message.contains(body),
+                "the not-found shape must not leak the withheld content")
+        }
+    }
+
+    /// The other half of the provenance gate: it must be a gate, not a wall.
+    /// Provenance `.normal` and `.elevated` are BELOW the redaction boundary and
+    /// must still return verbatim content, or the fix would have closed the
+    /// by-id door on ordinary rows.
+    @Test func provenanceNormalAndElevatedDrawersAreReturnedInFull() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-prov-open")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        for tier: LocusKit.Sensitivity in [.normal, .elevated] {
+            let body = "provenance-\(tier) body must be returned verbatim by memory-get"
+            let drawer = try await seedProvenance(
+                body, provenanceSensitivity: tier, in: handle, kit: kit)
+
+            let result = try await dispatcher.dispatch(
+                name: "moot_memory_get", arguments: getArgs(id: drawer.id))
+            #expect("\(result)".contains(body),
+                "provenance \(tier) is below the redaction boundary and must return full content")
+        }
+    }
+
+    /// Indistinguishability, the property the gate exists to protect: a gated
+    /// row and an absent id must produce the SAME message text, so by-id lookup
+    /// cannot be used as an existence oracle for redacted content.
+    @Test func provenanceGatedMessageIsByteIdenticalToAbsentIDMessage() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-prov-oracle")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        func message(forID id: String) async -> String? {
+            do {
+                _ = try await dispatcher.dispatch(
+                    name: "moot_memory_get", arguments: getArgs(id: id))
+                return nil
+            } catch let error as JSONRPCError {
+                return error.message
+            } catch {
+                return nil
+            }
+        }
+
+        for tier: LocusKit.Sensitivity in [.restricted, .secret] {
+            let drawer = try await seedProvenance(
+                "gated body for \(tier)", provenanceSensitivity: tier, in: handle, kit: kit)
+
+            guard let gated = await message(forID: drawer.id) else {
+                Issue.record("provenance \(tier) drawer must be reported not-found")
+                continue
+            }
+            // Compare against the absent-id message for the SAME id, so the
+            // only possible difference would be the shape, not the id text.
+            let absentID = UUID().uuidString
+            guard let absent = await message(forID: absentID) else {
+                Issue.record("absent id must be reported not-found")
+                continue
+            }
+            #expect(gated == absent.replacingOccurrences(of: absentID, with: drawer.id),
+                "provenance \(tier) message must be byte-identical to the absent-id message")
         }
     }
 
