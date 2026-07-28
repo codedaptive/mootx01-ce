@@ -1,0 +1,7 @@
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)
+[longmemeval] encode-barrier: drain
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 6, in_flight: 5, encoded_chunks: 982
+[lme gpt4_2ba83207] drain barrier: waiting — drains: 1
+  corpus_encode: draining — pending: 0, in_flight: 6, encoded_chunks: 999

@@ -5,6 +5,20 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## Unreleased (1.0.x finalization — 1.0.35)
+
+**mcp-benchmarker: benchmark suite finalized on the 1.0.x line**
+
+- The benchmark suite (`apps/mcp-benchmarker`) is finalized on the 1.0.x line
+  with LongMemEval, LoCoMo, and LMEB modes, the strategy protocol
+  (`--exact-strategy`), the estate cache (gitignored — multi-GB binary
+  snapshots, regenerable from the run scripts), and recorded diagnostic
+  results under `apps/mcp-benchmarker/results/` (invalidated-rerun 2026-07-27;
+  uncontaminated LME, strategy, and full-matrix grids 2026-07-28).
+- 1.0.x is measurement-frozen from this release: recorded results are the
+  line's final benchmark record, and benchmark development continues on the
+  1.1.x line.
+
 ## Unreleased (LME-04 stream)
 
 **mcp-benchmarker: LoCoMo session-recall benchmarking**

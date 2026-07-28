@@ -1,0 +1,3 @@
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)
+[longmemeval] encode-barrier: impatient
