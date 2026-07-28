@@ -20,7 +20,7 @@ struct LongMemEvalRunnerTests {
 
     @Test("lmeScratchDir creates a directory with the /tmp/lme-bench- prefix")
     func scratchDirHasCorrectPrefix() throws {
-        let dir = try lmeScratchDir()
+        let dir = try lmeScratchDir(posture: .plaintextOptOut)
         defer { try? FileManager.default.removeItem(at: dir) }
 
         #expect(dir.path.hasPrefix("/tmp/lme-bench-"),
@@ -33,8 +33,8 @@ struct LongMemEvalRunnerTests {
 
     @Test("lmeScratchDir creates unique directories on successive calls")
     func scratchDirIsUnique() throws {
-        let a = try lmeScratchDir()
-        let b = try lmeScratchDir()
+        let a = try lmeScratchDir(posture: .plaintextOptOut)
+        let b = try lmeScratchDir(posture: .plaintextOptOut)
         defer {
             try? FileManager.default.removeItem(at: a)
             try? FileManager.default.removeItem(at: b)
@@ -46,7 +46,7 @@ struct LongMemEvalRunnerTests {
 
     @Test("lmeGuardedTeardown removes a valid /tmp/lme-bench- directory")
     func guardedTeardownRemovesDir() throws {
-        let dir = try lmeScratchDir()
+        let dir = try lmeScratchDir(posture: .plaintextOptOut)
         // Write a sentinel file so we can verify the directory is fully removed.
         let sentinel = dir.appendingPathComponent("sentinel.txt")
         try "ok".write(to: sentinel, atomically: true, encoding: .utf8)
@@ -86,7 +86,7 @@ struct LongMemEvalRunnerTests {
     @Test("lmeGuardedTeardown does not throw when the directory was already removed")
     func guardedTeardownIsIdempotent() throws {
         // Create, then pre-delete so teardown finds nothing.
-        let dir = try lmeScratchDir()
+        let dir = try lmeScratchDir(posture: .plaintextOptOut)
         try FileManager.default.removeItem(at: dir)
         // Should not throw — missing directory is a no-op (logged to stderr).
         try lmeGuardedTeardown(dir)
@@ -96,7 +96,7 @@ struct LongMemEvalRunnerTests {
 
     @Test("lmeEndpointConfig builds an endpoint that passes assertScratchBackend")
     func endpointConfigPassesScratchAssert() throws {
-        let scratch = try lmeScratchDir()
+        let scratch = try lmeScratchDir(posture: .plaintextOptOut)
         defer { try? FileManager.default.removeItem(at: scratch) }
 
         // Use a non-existent binary path — the function only builds the config
@@ -135,7 +135,7 @@ struct LongMemEvalRunnerTests {
 
     @Test("assertScratchBackend accepts a valid MOOTX01_DATA_DIR=/tmp/lme-bench- command")
     func assertScratchBackendAcceptsLMEPath() throws {
-        let scratch = try lmeScratchDir()
+        let scratch = try lmeScratchDir(posture: .plaintextOptOut)
         defer { try? FileManager.default.removeItem(at: scratch) }
 
         let endpoint = EndpointConfig(
@@ -165,7 +165,8 @@ struct LongMemEvalRunnerTests {
             judgeCmd: nil,
             encodeBarrier: .drain,
             estateCache: .off,
-            cacheDir: nil
+            cacheDir: nil,
+            scratchPosture: .plaintextOptOut
         )
         #expect(config.encodeBarrier == .drain)
         #expect(config.encodeBarrier.rawValue == "drain")

@@ -103,6 +103,12 @@ struct LoCoMoQuestionResult: Sendable {
     /// One conversation estate is shared by all questions; all questions for the same
     /// conversation carry the same cacheHit value.
     let cacheHit: Bool?
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// (Shape B response) before accepting idle. false = converged via the
+    /// no-lanes grace window (ambiguous evidence). nil = barrier did not run
+    /// (barrier != drain, or estate restored from cache). Shared per
+    /// conversation, like cacheHit.
+    let drainLaneObserved: Bool?
 }
 
 // MARK: - Run config
@@ -133,6 +139,11 @@ struct LoCoMoRunConfig: Sendable {
     /// Root directory for estate snapshots (--cache-dir). nil = <outDir>/estate-cache
     /// (or <cwd>/estate-cache when outDir is also nil).
     let cacheDir: URL?
+    /// At-rest posture for scratch estates. Default plaintextOptOut: writes
+    /// mootx01's `no-encrypt` marker into each scratch data dir before serve
+    /// launch (no keychain contact). --no-plaintext-scratch selects
+    /// encryptedDefault. Recorded in the report JSON as "estate_encryption".
+    let scratchPosture: ScratchEstatePosture
 }
 
 // MARK: - Scratch estate management
@@ -140,18 +151,22 @@ struct LoCoMoRunConfig: Sendable {
 /// Creates a fresh scratch directory under /tmp/locomo-bench-<UUID> for LoCoMo use.
 /// The /tmp/locomo-bench- prefix is the contract with `loCoMoGuardedTeardown`.
 ///
+/// - Parameter posture: At-rest posture for the estate this dir will hold
+///   (see ScratchPosture.swift). No default value on purpose: every call
+///   site decides posture explicitly.
 /// - Returns: The URL of the created directory.
-/// - Throws: `MCPError` when directory creation fails.
-func loCoMoScratchDir() throws -> URL {
+/// - Throws: `MCPError` when directory or marker creation fails.
+func loCoMoScratchDir(posture: ScratchEstatePosture) throws -> URL {
     let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)
     let path = "/tmp/locomo-bench-\(suffix)"
     let url = URL(fileURLWithPath: path)
     do {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
     } catch {
         throw MCPError(description: "loCoMoScratchDir: could not create \(path): \(error)")
     }
+    try applyScratchPosture(posture, to: url)
+    return url
 }
 
 /// Deletes a scratch directory created by `loCoMoScratchDir`. Refuses any path
@@ -267,20 +282,24 @@ func runLoCoMoQuestions(
                 seed: config.seed,
                 encodeBarrier: config.encodeBarrier,
                 binaryFingerprint: binaryFingerprint,
+                posture: config.scratchPosture,
                 unitID: conversation.sampleID
             )
             if let (restored, hit): (URL, [LoCoMoManifestEntry]) =
-                restoreEstateCacheEntry(from: cacheEntry, scratchDirFactory: loCoMoScratchDir) {
+                restoreEstateCacheEntry(
+                    from: cacheEntry,
+                    expectedPosture: config.scratchPosture,
+                    scratchDirFactory: { try loCoMoScratchDir(posture: config.scratchPosture) }) {
                 activeScratchDir = restored
                 manifest = hit
                 convCacheHit = true
             } else {
-                activeScratchDir = try loCoMoScratchDir()
+                activeScratchDir = try loCoMoScratchDir(posture: config.scratchPosture)
                 convCacheHit = false
                 cacheEntryForSnapshot = cacheEntry
             }
         } else {
-            activeScratchDir = try loCoMoScratchDir()
+            activeScratchDir = try loCoMoScratchDir(posture: config.scratchPosture)
         }
 
         let endpoint = try loCoMoEndpointConfig(
@@ -349,11 +368,15 @@ func runLoCoMoQuestions(
         // poll moot_drain_status until the encode queue is idle. Applied once per
         // estate (not per question — the estate is shared within a conversation).
         // Skipped on cache hit (estate was already encoded when it was snapshotted).
+        // Drain-barrier lane evidence for this conversation's estate. nil when
+        // the barrier did not run (barrier != drain, or cache hit).
+        var drainLaneObserved: Bool? = nil
         if !skipIngest && config.encodeBarrier == .drain {
-            let _ = await waitForEncodeDrain(
+            let outcome = await waitForEncodeDrain(
                 client: client,
                 label: "locomo conv=\(conversation.sampleID)"
             )
+            drainLaneObserved = outcome.laneObserved
         }
 
         // Snapshot to cache on miss: estate is fully committed after ingest + encode.
@@ -402,7 +425,8 @@ func runLoCoMoQuestions(
                 turnsIngested: manifest.count,
                 writeMeanLatencySeconds: writeMean,
                 payloadText: rawPayload,
-                cacheHit: convCacheHit
+                cacheHit: convCacheHit,
+                drainLaneObserved: drainLaneObserved
             ))
         }
     }

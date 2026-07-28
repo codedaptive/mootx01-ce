@@ -80,6 +80,11 @@ struct LMEBQueryResult: Sendable {
     /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved).
     /// nil = --estate-cache off (cache not in use for this run).
     let cacheHit: Bool?
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// (Shape B response) before accepting idle. false = converged via the
+    /// no-lanes grace window (ambiguous evidence). nil = barrier did not run
+    /// (barrier != drain, or estate restored from cache).
+    let drainLaneObserved: Bool?
 }
 
 // MARK: - Run config
@@ -112,6 +117,11 @@ struct LMEBRunConfig: Sendable {
     /// Root directory for estate snapshots (--cache-dir). nil = <outDir>/estate-cache
     /// (or <cwd>/estate-cache when outDir is also nil).
     let cacheDir: URL?
+    /// At-rest posture for scratch estates. Default plaintextOptOut: writes
+    /// mootx01's `no-encrypt` marker into each scratch data dir before serve
+    /// launch (no keychain contact). --no-plaintext-scratch selects
+    /// encryptedDefault. Recorded in the report JSON as "estate_encryption".
+    let scratchPosture: ScratchEstatePosture
 }
 
 // MARK: - Scratch estate management
@@ -120,16 +130,21 @@ struct LMEBRunConfig: Sendable {
 ///
 /// The /tmp/lmeb-bench- prefix is the contract with `lmebGuardedTeardown`.
 /// The UUID suffix guarantees uniqueness across concurrent runs.
-func lmebScratchDir() throws -> URL {
+///
+/// - Parameter posture: At-rest posture for the estate this dir will hold
+///   (see ScratchPosture.swift). No default value on purpose: every call
+///   site decides posture explicitly.
+func lmebScratchDir(posture: ScratchEstatePosture) throws -> URL {
     let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)
     let path = "/tmp/lmeb-bench-\(suffix)"
     let url = URL(fileURLWithPath: path)
     do {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
     } catch {
         throw MCPError(description: "lmebScratchDir: could not create \(path): \(error)")
     }
+    try applyScratchPosture(posture, to: url)
+    return url
 }
 
 /// Deletes a scratch directory created by `lmebScratchDir`. Refuses any path
@@ -226,20 +241,24 @@ func runLMEBQueries(
                 seed: config.seed,
                 encodeBarrier: config.encodeBarrier,
                 binaryFingerprint: binaryFingerprint,
+                posture: config.scratchPosture,
                 unitID: query.id
             )
             if let (restored, hit): (URL, [LMEBManifestEntry]) =
-                restoreEstateCacheEntry(from: cacheEntry, scratchDirFactory: lmebScratchDir) {
+                restoreEstateCacheEntry(
+                    from: cacheEntry,
+                    expectedPosture: config.scratchPosture,
+                    scratchDirFactory: { try lmebScratchDir(posture: config.scratchPosture) }) {
                 scratchURL = restored
                 manifest = hit
                 queryCacheHit = true
             } else {
-                scratchURL = try lmebScratchDir()
+                scratchURL = try lmebScratchDir(posture: config.scratchPosture)
                 queryCacheHit = false
                 cacheEntryForSnapshot = cacheEntry
             }
         } else {
-            scratchURL = try lmebScratchDir()
+            scratchURL = try lmebScratchDir(posture: config.scratchPosture)
         }
 
         let endpoint = try lmebEndpointConfig(scratchDir: scratchURL,
@@ -256,6 +275,9 @@ func runLMEBQueries(
         // impatient:true per write, drain polls moot_drain_status after full ingest,
         // none has no barrier.
         let skipIngest = (queryCacheHit == true)
+        // Drain-barrier lane evidence for this query's estate. nil when the
+        // barrier did not run (barrier != drain, or cache hit).
+        var drainLaneObserved: Bool? = nil
         if !skipIngest {
         for docID in candidateDocIDs {
             guard let doc = corpus.docsByID[docID] else {
@@ -291,10 +313,11 @@ func runLMEBQueries(
         // docs are ingested, waiting for idle before the retrieval query.
         // Skipped on cache hit.
         if config.encodeBarrier == .drain {
-            let _ = await waitForEncodeDrain(
+            let outcome = await waitForEncodeDrain(
                 client: client,
                 label: "lmeb q=\(query.id)"
             )
+            drainLaneObserved = outcome.laneObserved
         }
         } // end if !skipIngest
 
@@ -358,7 +381,8 @@ func runLMEBQueries(
             docsIngested: manifest.count,
             writeMeanLatencySeconds: writeMean,
             payloadText: rawPayload,
-            cacheHit: queryCacheHit
+            cacheHit: queryCacheHit,
+            drainLaneObserved: drainLaneObserved
         ))
 
         let progressMsg = "[lmeb] query \(results.count)/\(sliced.count) "

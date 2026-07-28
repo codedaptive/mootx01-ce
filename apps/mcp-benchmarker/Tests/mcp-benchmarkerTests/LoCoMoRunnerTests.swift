@@ -15,7 +15,7 @@ final class LoCoMoRunnerTests: XCTestCase {
     // MARK: - Scratch directory management
 
     func testScratchDirCreatesCorrectPrefix() throws {
-        let url = try loCoMoScratchDir()
+        let url = try loCoMoScratchDir(posture: .plaintextOptOut)
         defer { try? loCoMoGuardedTeardown(url) }
 
         XCTAssert(url.path.hasPrefix("/tmp/locomo-bench-"),
@@ -25,7 +25,7 @@ final class LoCoMoRunnerTests: XCTestCase {
     }
 
     func testScratchDirIsDirectory() throws {
-        let url = try loCoMoScratchDir()
+        let url = try loCoMoScratchDir(posture: .plaintextOptOut)
         defer { try? loCoMoGuardedTeardown(url) }
 
         var isDir: ObjCBool = false
@@ -35,8 +35,8 @@ final class LoCoMoRunnerTests: XCTestCase {
     }
 
     func testScratchDirIsUnique() throws {
-        let a = try loCoMoScratchDir()
-        let b = try loCoMoScratchDir()
+        let a = try loCoMoScratchDir(posture: .plaintextOptOut)
+        let b = try loCoMoScratchDir(posture: .plaintextOptOut)
         defer {
             try? loCoMoGuardedTeardown(a)
             try? loCoMoGuardedTeardown(b)
@@ -46,7 +46,7 @@ final class LoCoMoRunnerTests: XCTestCase {
     }
 
     func testGuardedTeardownRemovesDir() throws {
-        let url = try loCoMoScratchDir()
+        let url = try loCoMoScratchDir(posture: .plaintextOptOut)
         // Verify it exists before teardown.
         XCTAssert(FileManager.default.fileExists(atPath: url.path))
         // Teardown should not throw.

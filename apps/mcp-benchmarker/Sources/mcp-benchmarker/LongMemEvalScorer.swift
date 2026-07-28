@@ -378,6 +378,11 @@ struct LMEReportPerQuestion: Codable, Sendable {
     /// true = cache hit (ingest skipped), false = cache miss (ingest ran + snapshot saved),
     /// nil = --estate-cache off (caching not active for this run).
     let cacheHit: Bool?
+    // MARK: Drain-barrier lane evidence (additive — FIX-HARNESS-20260727)
+    /// Whether the drain barrier observed the corpus_encode lane registered
+    /// before accepting idle. false = converged via the no-lanes grace window
+    /// (ambiguous evidence). nil = barrier did not run for this question.
+    let drainLaneObserved: Bool?
 
     enum CodingKeys: String, CodingKey {
         case questionID              = "question_id"
@@ -402,6 +407,7 @@ struct LMEReportPerQuestion: Codable, Sendable {
         case denseDiscrimination     = "dense_discrimination"
         case denseRecallProvenance   = "dense_recall_provenance"
         case cacheHit                = "cache_hit"
+        case drainLaneObserved       = "drain_lane_observed"
     }
 }
 
@@ -530,6 +536,11 @@ struct LMEReport: Codable, Sendable {
     /// Total number of questions that triggered a fresh ingest + snapshot save.
     /// Zero when estateCache == "off".
     let cacheMisses: Int
+    // MARK: Estate encryption posture (additive — FIX-HARNESS-20260727)
+    /// At-rest posture of the run's scratch estates: "plaintext-optout"
+    /// (default; no-encrypt marker written, no keychain contact) or
+    /// "encrypted-default" (--no-plaintext-scratch).
+    let estateEncryption: String
 
     enum CodingKeys: String, CodingKey {
         case runID           = "run_id"
@@ -546,6 +557,7 @@ struct LMEReport: Codable, Sendable {
         case estateCache     = "estate_cache"
         case cacheHits       = "cache_hits"
         case cacheMisses     = "cache_misses"
+        case estateEncryption = "estate_encryption"
     }
 }
 
@@ -693,7 +705,10 @@ func buildLMEReport(
             denseRecallProvenance: denseProv,
             // Thread cacheHit from the raw result (available via resultByID lookup).
             // Nil when cache was off for this run.
-            cacheHit: raw?.cacheHit ?? nil
+            cacheHit: raw?.cacheHit ?? nil,
+            // Thread drain-barrier lane evidence the same way. Nil when the
+            // barrier did not run for this question.
+            drainLaneObserved: raw?.drainLaneObserved ?? nil
         )
     }
 
@@ -864,7 +879,8 @@ func buildLMEReport(
         laneHealth: laneHealth,
         estateCache: config.estateCache.rawValue,
         cacheHits: cacheHits,
-        cacheMisses: cacheMisses
+        cacheMisses: cacheMisses,
+        estateEncryption: config.scratchPosture.rawValue
     )
 }
 

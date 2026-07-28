@@ -330,12 +330,15 @@ struct LMEBReportProvenanceTests {
             results: [],
             scores: [score],
             encodeBarrier: "drain",
-            estateCache: "off"
+            estateCache: "off",
+            estateEncryption: "plaintext-optout"
         )
 
         // 1. encode_barrier is present and correct.
         #expect(report.encodeBarrier == "drain",
             "encode_barrier must match the encodeBarrier argument")
+        #expect(report.estateEncryption == "plaintext-optout",
+            "estate_encryption must match the estateEncryption argument (FIX-HARNESS-20260727)")
 
         // 2. per_query entry has tokens_per_result set (payload had 2 results).
         guard let q = report.perQuery.first else {
