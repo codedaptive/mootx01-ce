@@ -1292,8 +1292,11 @@ impl CorpusContentEngine {
                             let mut rows = Vec::with_capacity(providers_ref.len() * 2);
                             let mut covered = Vec::with_capacity(providers_ref.len());
                             for (provider, meta) in providers_ref.iter().zip(metadata_ref.iter()) {
+                                // Float-lane embedding uses effective_dense_text so the dense-
+                                // composition text (when present) is used for the vector while
+                                // BM25 below uses the lexical text unchanged.
                                 let (engram, floats) =
-                                    provider.embed_pair(&record.text).map_err(|error| {
+                                    provider.embed_pair(record.effective_dense_text()).map_err(|error| {
                                         CorpusKitError::EmbeddingFailed(format!("{error:?}"))
                                     })?;
                                 if meta.3 {
@@ -1320,6 +1323,7 @@ impl CorpusContentEngine {
                             }
                             output.push((
                                 record.clone(),
+                                // BM25 tokenisation always uses the lexical text.
                                 default_keyword_tokens(&record.text),
                                 rows,
                                 covered,
@@ -1841,7 +1845,9 @@ impl CorpusContentEngine {
 
         let units = self.replace_units(record)?;
 
-        for (key, text) in &units {
+        // BM25 indexing always uses the lexical text (second tuple element),
+        // regardless of whether a dense-composition text is present.
+        for (key, text, _dense) in &units {
             self.inverted_index
                 .index(key, &default_keyword_tokens(text), "")
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
@@ -1868,9 +1874,13 @@ impl CorpusContentEngine {
                 slot_index == 0 || self.configuration.mode() == CorpusOperatingMode::Standalone;
             let handle = slot.handle.lock().unwrap();
             let provider = handle.provider();
-            for (key, text) in &units {
+            for (key, text, dense_composition_text) in &units {
+                // Float-lane embedding uses effective_dense_text: the dense-composition
+                // text when supplied, falling back to the lexical text. BM25 uses only
+                // the lexical text above — the two lanes are intentionally separated.
+                let embed_text = dense_composition_text.as_deref().unwrap_or(text);
                 let (engram, floats) = provider
-                    .embed_pair(text)
+                    .embed_pair(embed_text)
                     .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
                 if write_binary {
                     rows.push(VectorPayloadInput {
@@ -1918,16 +1928,24 @@ impl CorpusContentEngine {
 
     /// Compute the record's index units under the configured policy,
     /// replacing durable passage rows and deleting STALE derived keys by
-    /// exact key. Returns (key, text) pairs.
+    /// exact key. Returns (key, lexical_text, dense_composition_text) triples.
+    ///
+    /// The lexical text is used for BM25 keyword tokenisation; the dense text
+    /// (when Some) is used for float-lane embedding via embed_pair. Passage
+    /// sub-spans are always lexical-only (dense = None) because sub-span
+    /// splitting on an alternative representation is semantically undefined and
+    /// passage indexing is a standalone-only feature that GLK never uses.
     fn replace_units(
         &self,
         record: &CorpusContentRecord,
-    ) -> CorpusKitResult<Vec<(String, String)>> {
+    ) -> CorpusKitResult<Vec<(String, String, Option<String>)>> {
         let mut stale_keys = self.unit_keys(&record.id)?;
 
-        let units: Vec<(String, String)> = match self.configuration.index_unit() {
+        let units: Vec<(String, String, Option<String>)> = match self.configuration.index_unit() {
             CorpusIndexUnitPolicy::WholeContent => {
-                vec![(record.id.clone(), record.text.clone())]
+                // Carry dense_composition_text so embed_pair uses
+                // effective_dense_text (dense when supplied, lexical when None).
+                vec![(record.id.clone(), record.text.clone(), record.dense_composition_text.clone())]
             }
             #[cfg(feature = "standalone-passages")]
             CorpusIndexUnitPolicy::TokenWindows {
@@ -1936,13 +1954,15 @@ impl CorpusContentEngine {
             } => {
                 let ranges = passage_ranges(&record.text, window_tokens, overlap_tokens);
                 let bytes = record.text.as_bytes();
-                let units: Vec<(String, String)> = ranges
+                // Passage sub-spans are lexical-only (None dense text):
+                // sub-span splitting on dense_composition_text is not supported.
+                let units: Vec<(String, String, Option<String>)> = ranges
                     .iter()
                     .map(|(start, length)| {
                         let key = passage_key(&record.id, record.revision, *start, *length);
                         let text =
                             String::from_utf8_lossy(&bytes[*start..*start + *length]).into_owned();
-                        (key, text)
+                        (key, text, None)
                     })
                     .collect();
                 // Replace the durable passage-range rows for this content.
@@ -1956,7 +1976,7 @@ impl CorpusContentEngine {
                         ),
                     )
                     .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-                for ((key, _), (start, length)) in units.iter().zip(ranges.iter()) {
+                for ((key, _, _), (start, length)) in units.iter().zip(ranges.iter()) {
                     let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
                     values.insert("passage_id".into(), TypedValue::Text(key.clone()));
                     values.insert("content_id".into(), TypedValue::Text(record.id.clone()));
@@ -1979,7 +1999,7 @@ impl CorpusContentEngine {
             }
         };
 
-        let fresh: BTreeSet<&String> = units.iter().map(|(k, _)| k).collect();
+        let fresh: BTreeSet<&String> = units.iter().map(|(k, _, _)| k).collect();
         stale_keys.retain(|k| !fresh.contains(k));
         if !stale_keys.is_empty() {
             self.delete_derived_rows(&stale_keys)?;
@@ -2373,7 +2393,12 @@ impl CorpusContentEngine {
                             growth_term_digests: Vec::new(),
                         });
                     }
-                    texts.push(record.text);
+                    // Training coherence: the basis vocabulary must match the text
+                    // that gets projected through it at embed time. Use
+                    // effective_dense_text so the basis is trained on the same
+                    // representation the float-lane will embed later. For records
+                    // with no dense_composition_text this is identical to record.text.
+                    texts.push(record.effective_dense_text().to_string());
                 }
             }
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -2710,8 +2735,11 @@ impl CorpusContentEngine {
                                         {
                                             continue;
                                         }
+                                        // Float-lane embedding uses effective_dense_text,
+                                        // same as prepare_index_record and the structural
+                                        // batch embed path — recomposability contract.
                                         let (engram, floats) =
-                                            provider.embed_pair(&record.text).map_err(|error| {
+                                            provider.embed_pair(record.effective_dense_text()).map_err(|error| {
                                                 CorpusKitError::EmbeddingFailed(format!(
                                                     "{error:?}"
                                                 ))

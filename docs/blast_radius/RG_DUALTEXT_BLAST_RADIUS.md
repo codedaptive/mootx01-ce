@@ -30,6 +30,7 @@
 | rust/src/document_store.rs | 164–170, 215–226, 332–336, 357–364 | grep | MUST_UPDATE | All struct literal constructions must add `dense_composition_text: None` |
 | rust/tests/content_engine_tests.rs | 575–580, 612–619, 659–665, 698–703, 772–778, 1138–1148, 1187–1197 | grep | MUST_UPDATE | Struct literal constructions need `dense_composition_text: None`; Rust doesn't allow missing fields |
 | rust/tests/content_boundary_tests.rs | 103–110, 122–128 | grep | MUST_UPDATE | Struct literal constructions need `dense_composition_text: None` |
+| GeniusLocusKit/rust/src/intake.rs | 74–79 | grep (missed in initial scan) | MUST_UPDATE | GLK intake adapter constructs `CorpusContentRecord` from drawer content; `dense_composition_text: None` — GLK will supply dense text above CorpusKit when it has one, that is GLK's responsibility |
 
 ---
 
@@ -126,7 +127,7 @@
 
 ## Summary
 
-- MUST_UPDATE: 21 sites across Swift sources, Rust sources, and Rust tests
+- MUST_UPDATE: 22 sites across Swift sources, Rust sources, Rust tests, and GLK Rust adapter (one site missed in initial scan; fixed during implementation)
 - INTENTIONALLY_LEFT: 5 sites (callers that ignore nil dense text / protocol consumers)
 - RESCOPE_REQUIRED: 0
 

@@ -105,6 +105,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
                 revision: existing.revision + 1,
                 digest: digest.clone(),
                 text: text.to_string(),
+                dense_composition_text: None,
             };
             state.records.insert(id.to_string(), bumped.clone());
             let seq = state.next_seq;
@@ -124,6 +125,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
             revision: 1,
             digest: digest.clone(),
             text: text.to_string(),
+            dense_composition_text: None,
         };
         state.records.insert(id.to_string(), fresh.clone());
         let seq = state.next_seq;
