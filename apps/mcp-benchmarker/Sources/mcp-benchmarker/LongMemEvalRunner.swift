@@ -576,15 +576,15 @@ func runLMEQuestions(
             exactQueryLatency = Date().timeIntervalSince(queryStart)
         }
 
-        // Dense arm: build distilled factoids via moot_consolidate, then query
+        // Dense arm: build distilled representations via moot_distill, then query
         // moot_recall_distilled. Runs strictly AFTER the exact arm (see the
-        // ordering note above) because consolidation mutates what default
+        // ordering note above) because distillation mutates what default
         // search returns.
         var densePayloadText: String? = nil
         var denseQueryLatency: Double? = nil
         if config.arm == .dense || config.arm == .both {
             let _ = try await client.callTool(
-                "moot_consolidate",
+                "moot_distill",
                 arguments: [:],
                 format: .mootText
             )
