@@ -152,7 +152,7 @@ struct CorpusDocumentStoreDualTextTests {
 //
 // Tests that the engine uses effectiveDenseText from whatever
 // CorpusContentRecord the source adapter returns. This covers the
-// attached / GLK path where the adapter includes the distillate text
+// attached / GLK path where the adapter includes the dense-composition text
 // in the record without CorpusDocumentStore being involved.
 
 /// Minimal content source whose records carry optional dense texts.

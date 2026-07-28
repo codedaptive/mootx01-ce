@@ -70,7 +70,7 @@ public enum CorpusContentDigest {
 /// recomposable from persisted/reachable canonical text. In standalone mode
 /// `denseCompositionText` is stored in `corpus_documents.dense_text` (NULL =
 /// same as lexical). In attached mode the source adapter supplies it at
-/// record-resolution time from the distillate store. Either way the engine
+/// record-resolution time from a dense-composition store above CorpusKit. Either way the engine
 /// never needs to keep a separate in-memory copy — it resolves the record,
 /// calls `effectiveDenseText`, and embeds.
 public struct CorpusContentRecord: Sendable, Equatable {

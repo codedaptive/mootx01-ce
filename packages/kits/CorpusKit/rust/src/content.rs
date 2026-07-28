@@ -58,7 +58,7 @@ pub fn content_digest_bytes(bytes: &[u8]) -> String {
 /// recomposable from persisted/reachable canonical text. In standalone mode
 /// `dense_composition_text` is stored in `corpus_documents.dense_text` (NULL
 /// when `None`). In attached mode the source adapter supplies it at
-/// record-resolution time from the distillate store.
+/// record-resolution time from a dense-composition store above CorpusKit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusContentRecord {
     pub id: CorpusContentId,
