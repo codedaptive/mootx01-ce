@@ -8,8 +8,9 @@
 //!
 //! Bug N: A factoid with a `_distilled_from` provenance tunnel must export such
 //! that the vault note body contains NO `_distilled_from` link text. After
-//! import, the factoid drawer content must be clean, and the `_distilled_from`
-//! tunnel must exist in the re-imported estate.
+//! import, the factoid drawer content must be clean, and NO `_distilled_from`
+//! tunnel may exist in the re-imported estate — the 1.1.x import path ignores
+//! the `distilled_from_sources` frontmatter key and reconstructs nothing.
 //!
 //! CAND-EXP-PROV: provenance tunnel targets are filtered by export scope so a
 //! normal exported factoid cannot leak the wing/room of a secret or
