@@ -46,7 +46,6 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_recall_precise") == .allow)
         #expect(PermissionsWriter.classify("moot_recall_shaped") == .allow)
         #expect(PermissionsWriter.classify("moot_recall_distilled") == .allow)
-        #expect(PermissionsWriter.classify("moot_recollect") == .allow)
         #expect(PermissionsWriter.classify("moot_fact_search") == .allow)
         #expect(PermissionsWriter.classify("moot_fact_timeline") == .allow)
         #expect(PermissionsWriter.classify("moot_connection_search") == .allow)
@@ -74,6 +73,8 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_reindex") == .ask)
         #expect(PermissionsWriter.classify("moot_reclassify_fdc") == .ask)
         #expect(PermissionsWriter.classify("moot_dream") == .ask)
+        #expect(PermissionsWriter.classify("moot_distill") == .ask)
+        // moot_consolidate is the SPEC §3 dispatch alias — same class.
         #expect(PermissionsWriter.classify("moot_consolidate") == .ask)
         #expect(PermissionsWriter.classify("moot_synthesize") == .ask)
         #expect(PermissionsWriter.classify("moot_palace_import") == .ask)
@@ -117,7 +118,7 @@ struct PermissionsWriterTests {
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
-            "moot_connection_search", "moot_consolidate", "moot_drain_status", "moot_dream",
+            "moot_connection_search", "moot_consolidate", "moot_distill", "moot_drain_status", "moot_dream",
             "moot_dataset_query", "moot_dataset_stats", "moot_file_dataset",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
             "moot_fact_search", "moot_fact_timeline", "moot_federated_search", "moot_file_fact",
@@ -133,7 +134,7 @@ struct PermissionsWriterTests {
             "moot_memory_list", "moot_memory_search", "moot_monitoring_status", "moot_move_memory",
             "moot_palace_import",
             "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
-            "moot_reclassify_fdc", "moot_recollect", "moot_reindex", "moot_retire_fact",
+            "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact",
             "moot_review_tunnel", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
