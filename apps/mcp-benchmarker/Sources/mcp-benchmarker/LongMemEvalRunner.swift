@@ -151,6 +151,16 @@ struct LMEQuestionResult: Sendable {
     /// drain barrier did not run for this question (barrier != drain, or the
     /// estate was restored from cache and ingest was skipped).
     let drainLaneObserved: Bool?
+    // MARK: Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C)
+    /// UUIDs returned by the settled exact-arm query, in ranked order.
+    /// nil when --settle was not set or the exact arm was not run.
+    let settledRetrievedUUIDs: [String]?
+    /// Time taken for the settled exact-arm moot_memory_search call, in seconds.
+    /// nil when --settle was not set or the exact arm was not run.
+    let settledQueryLatencySeconds: Double?
+    /// Whether the post-reindex drain barrier observed the corpus_encode lane.
+    /// nil when --settle was not set.
+    let settledDrainLaneObserved: Bool?
 }
 
 // MARK: - Run config
@@ -202,6 +212,17 @@ struct LMERunConfig: Sendable {
     /// Exact-arm retrieval strategy (--exact-strategy). Follows the program's
     /// documented client protocol; see the strategy comment at the query site.
     let exactStrategy: ExactRecallStrategy
+    /// When true, run the query set twice per question: first as the ORGANIC
+    /// cell (immediately after ingest + drain barrier, the current behavior),
+    /// then trigger estate settling via `moot_reindex`, wait for the drain
+    /// barrier again, and re-run the identical queries as the SETTLED cell.
+    ///
+    /// Rationale: with two-tier vector composition, ORGANIC and SETTLED are two
+    /// distinct performance states. A short haystack may finish encoding before
+    /// the first query; `moot_reindex` ensures the estate is at full coverage
+    /// before the settled measurement. Neither cell may substitute for the other
+    /// in published numbers.
+    let settle: Bool
 }
 
 /// How the exact arm drives the estate's recall surface.
@@ -638,6 +659,66 @@ func runLMEQuestions(
             }
         }
 
+        // Settle cell (--settle mode): trigger moot_reindex, wait for drain
+        // to converge, then re-run the exact-arm queries as the SETTLED cell.
+        // Runs only after the organic cell's exact query so both cells use the
+        // same estate and haystack; the dense arm is NOT re-run (consolidation
+        // is not re-entrant and the dense cell is not a settle target).
+        var settledRetrievedUUIDs: [String]? = nil
+        var settledQueryLatencySeconds: Double? = nil
+        var settledDrainLaneObserved: Bool? = nil
+        if config.settle && (config.arm == .exact || config.arm == .both) {
+            // Trigger background reindex so every drawer is at full coverage.
+            let _ = try await client.callTool(
+                "moot_reindex",
+                arguments: [:],
+                format: .mootText
+            )
+            // Wait for the corpus_encode drain to converge after reindex.
+            let settleOutcome = await waitForEncodeDrain(
+                client: client,
+                label: "lme settle \(question.questionID)"
+            )
+            settledDrainLaneObserved = settleOutcome.laneObserved
+            // Re-run the exact-arm queries with the same strategy as the organic cell.
+            var settledArgs: [String: JSONValue] = [
+                lmeMootVerbMap.queryArg: .string(question.question),
+            ]
+            for (k, v) in lmeMootVerbMap.constantArgs { settledArgs[k] = .string(v) }
+            if config.exactStrategy == .relevance || config.exactStrategy == .auto {
+                settledArgs["ordering"] = .string("byRelevanceDesc")
+            }
+            let settledStart = Date()
+            if config.exactStrategy == .precise {
+                let sr = try await client.callTool(
+                    "moot_recall_precise",
+                    arguments: [lmeMootVerbMap.queryArg: .string(question.question)],
+                    format: lmeMootVerbMap.resultFormat
+                )
+                settledRetrievedUUIDs = sr.orderedIDs
+            } else {
+                let sr = try await client.callTool(
+                    lmeMootVerbMap.query,
+                    arguments: settledArgs,
+                    format: lmeMootVerbMap.resultFormat
+                )
+                settledRetrievedUUIDs = sr.orderedIDs
+                let settledPayload = sr.textBlocks.joined(separator: "\n")
+                if config.exactStrategy == .auto,
+                   settledPayload.contains("discrimination: low") {
+                    let pr = try await client.callTool(
+                        "moot_recall_precise",
+                        arguments: [lmeMootVerbMap.queryArg: .string(question.question)],
+                        format: lmeMootVerbMap.resultFormat
+                    )
+                    if !pr.orderedIDs.isEmpty {
+                        settledRetrievedUUIDs = pr.orderedIDs
+                    }
+                }
+            }
+            settledQueryLatencySeconds = Date().timeIntervalSince(settledStart)
+        }
+
         results.append(LMEQuestionResult(
             questionID: question.questionID,
             questionType: question.questionType,
@@ -657,7 +738,10 @@ func runLMEQuestions(
             denseJudgeAnswer: denseJudgeAnswer,
             denseJudgeCorrect: denseJudgeCorrect,
             cacheHit: questionCacheHit,
-            drainLaneObserved: drainLaneObserved
+            drainLaneObserved: drainLaneObserved,
+            settledRetrievedUUIDs: settledRetrievedUUIDs,
+            settledQueryLatencySeconds: settledQueryLatencySeconds,
+            settledDrainLaneObserved: settledDrainLaneObserved
         ))
     }
 

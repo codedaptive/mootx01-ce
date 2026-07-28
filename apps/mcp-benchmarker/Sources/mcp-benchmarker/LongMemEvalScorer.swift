@@ -140,6 +140,18 @@ struct LMEQuestionScore: Sendable {
     let writeMeanLatencySeconds: Double
     let turnsIngested: Int
     let retrievedUUIDCount: Int
+    // MARK: Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C)
+    /// recall_any@5 for the SETTLED cell. nil when settle mode was off.
+    let settledRecallAnyAt5: Double?
+    /// MRR for the SETTLED cell. nil when settle mode was off.
+    let settledMrr: Double?
+    /// Deduplicated session ranking for the SETTLED cell. nil when settle mode was off.
+    let settledRankedSessionIDs: [String]?
+    /// Exact-arm query latency for the SETTLED cell. nil when settle mode was off.
+    let settledQueryLatencySeconds: Double?
+    /// Whether the post-reindex drain barrier observed the corpus_encode lane.
+    /// nil when settle mode was off.
+    let settledDrainLaneObserved: Bool?
 }
 
 /// Scores one `LMEQuestionResult`. If the guard was not healthy, all recall/MRR
@@ -167,6 +179,27 @@ func scoreLMEQuestion(_ result: LMEQuestionResult) -> LMEQuestionScore {
     }
     let (rAny1, rAny5, rAny10, rAll1, rAll5, rAll10, mrrVal) = metrics
 
+    // MARK: Settle cell scoring (--settle mode, Mission 11X-RECALL-GAP-01 Stream C)
+    // Settled scores mirror the organic scoring path using settledRetrievedUUIDs.
+    // Guard exclusion applies equally: a non-.healthy question has no fitness signal
+    // regardless of which cell is being scored.
+    var settledRecallAnyAt5Score: Double? = nil
+    var settledMrrScore: Double? = nil
+    var settledRanked: [String]? = nil
+    if let settledUUIDs = result.settledRetrievedUUIDs {
+        let settled = lmeRankedSessions(uuids: settledUUIDs, manifest: result.manifest)
+        settledRanked = settled
+        if result.guardHealthy {
+            settledRecallAnyAt5Score = lmeRecallAny(rankedSessions: settled, answerIDs: answerSet, k: 5)
+            settledMrrScore          = lmeSessionMRR(rankedSessions: settled, answerIDs: answerSet)
+        } else {
+            // Guard-excluded: sentinel zeros, not nil — the cell ran but produced no
+            // fitness signal (consistent with the organic cell treatment above).
+            settledRecallAnyAt5Score = 0.0
+            settledMrrScore          = 0.0
+        }
+    }
+
     return LMEQuestionScore(
         questionID: result.questionID,
         questionType: result.questionType,
@@ -187,7 +220,12 @@ func scoreLMEQuestion(_ result: LMEQuestionResult) -> LMEQuestionScore {
         queryLatencySeconds: result.queryLatencySeconds ?? 0.0,
         writeMeanLatencySeconds: result.writeMeanLatencySeconds,
         turnsIngested: result.turnsIngested,
-        retrievedUUIDCount: result.retrievedUUIDs.count
+        retrievedUUIDCount: result.retrievedUUIDs.count,
+        settledRecallAnyAt5: settledRecallAnyAt5Score,
+        settledMrr: settledMrrScore,
+        settledRankedSessionIDs: settledRanked,
+        settledQueryLatencySeconds: result.settledQueryLatencySeconds,
+        settledDrainLaneObserved: result.settledDrainLaneObserved
     )
 }
 
@@ -383,6 +421,19 @@ struct LMEReportPerQuestion: Codable, Sendable {
     /// before accepting idle. false = converged via the no-lanes grace window
     /// (ambiguous evidence). nil = barrier did not run for this question.
     let drainLaneObserved: Bool?
+    // MARK: Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C)
+    /// recall_any@5 for the SETTLED cell (after moot_reindex + drain).
+    /// nil when --settle was not set.
+    let settledRecallAnyAt5: Double?
+    /// MRR for the SETTLED cell. nil when --settle was not set.
+    let settledMrr: Double?
+    /// Deduplicated session ranking for the SETTLED cell. nil when --settle was not set.
+    let settledRankedSessionIDs: [String]?
+    /// Exact-arm query latency for the SETTLED cell, in seconds. nil when --settle not set.
+    let settledQueryLatencySeconds: Double?
+    /// Whether the post-reindex drain barrier observed the corpus_encode lane.
+    /// nil when --settle was not set.
+    let settledDrainLaneObserved: Bool?
 
     enum CodingKeys: String, CodingKey {
         case questionID              = "question_id"
@@ -408,6 +459,48 @@ struct LMEReportPerQuestion: Codable, Sendable {
         case denseRecallProvenance   = "dense_recall_provenance"
         case cacheHit                = "cache_hit"
         case drainLaneObserved       = "drain_lane_observed"
+        case settledRecallAnyAt5     = "settled_recall_any_at_5"
+        case settledMrr              = "settled_mrr"
+        case settledRankedSessionIDs = "settled_ranked_session_ids"
+        case settledQueryLatencySeconds = "settled_query_latency_seconds"
+        case settledDrainLaneObserved   = "settled_drain_lane_observed"
+    }
+}
+
+/// Testmark cell descriptor, additive to every LME report.
+///
+/// When --settle is off, `enabled` is false and all settle fields are nil.
+/// When --settle is on, the report carries both the ORGANIC cell (existing
+/// aggregate metrics) and the SETTLED cell (metrics after moot_reindex + drain).
+///
+/// Self-documentation rationale: with two-tier vector composition the ORGANIC
+/// and SETTLED states differ because mechanical stopword-strip composes the
+/// initial vector at ingest and the full distillate recomposes it on the
+/// background sweep. moot_reindex triggers the background backfill to ensure
+/// the settled cell reflects full coverage before being measured. Neither
+/// cell may substitute for the other in published numbers.
+struct LMETestmarkCells: Codable, Sendable {
+    /// True when the settle flag was active for this run.
+    let enabled: Bool
+    /// Ordered list of cells produced by this run. Always ["organic"] when
+    /// settle is off; ["organic", "settled"] when settle is on.
+    let cells: [String]
+    /// The MCP tool invoked to trigger settling. nil when settle is off.
+    let settleTriggerTool: String?
+    /// Human-readable description of what the settle trigger does. nil when settle is off.
+    let settleTriggerDescription: String?
+    /// Rationale for tracking both cells. nil when settle is off.
+    let rationale: String?
+    /// Aggregate metrics for the SETTLED cell. nil when settle is off.
+    let settledAggregate: LMEReportAggregate?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case cells
+        case settleTriggerTool        = "settle_trigger_tool"
+        case settleTriggerDescription = "settle_trigger_description"
+        case rationale
+        case settledAggregate         = "settled_aggregate"
     }
 }
 
@@ -541,6 +634,10 @@ struct LMEReport: Codable, Sendable {
     /// (default; no-encrypt marker written, no keychain contact) or
     /// "encrypted-default" (--no-plaintext-scratch).
     let estateEncryption: String
+    // MARK: Testmark cells (additive — Mission 11X-RECALL-GAP-01 Stream C)
+    /// Testmark cell descriptor. Always present. `enabled` is false when
+    /// --settle was not used; true when both ORGANIC and SETTLED cells were run.
+    let testmarkCells: LMETestmarkCells
 
     enum CodingKeys: String, CodingKey {
         case runID           = "run_id"
@@ -558,6 +655,7 @@ struct LMEReport: Codable, Sendable {
         case cacheHits       = "cache_hits"
         case cacheMisses     = "cache_misses"
         case estateEncryption = "estate_encryption"
+        case testmarkCells   = "testmark_cells"
     }
 }
 
@@ -708,7 +806,15 @@ func buildLMEReport(
             cacheHit: raw?.cacheHit ?? nil,
             // Thread drain-barrier lane evidence the same way. Nil when the
             // barrier did not run for this question.
-            drainLaneObserved: raw?.drainLaneObserved ?? nil
+            drainLaneObserved: raw?.drainLaneObserved ?? nil,
+            // Settle cell fields (--settle mode, Mission 11X-RECALL-GAP-01 Stream C).
+            // Scores come from LMEQuestionScore (computed by scoreLMEQuestion).
+            // The raw drain flag comes directly from the runner result.
+            settledRecallAnyAt5: score.settledRecallAnyAt5,
+            settledMrr: score.settledMrr,
+            settledRankedSessionIDs: score.settledRankedSessionIDs,
+            settledQueryLatencySeconds: score.settledQueryLatencySeconds,
+            settledDrainLaneObserved: raw?.settledDrainLaneObserved ?? nil
         )
     }
 
@@ -865,6 +971,49 @@ func buildLMEReport(
     let cacheHits   = results.filter { $0.cacheHit == true  }.count
     let cacheMisses = results.filter { $0.cacheHit == false }.count
 
+    // MARK: Testmark cells (additive — Mission 11X-RECALL-GAP-01 Stream C)
+    // Build the SETTLED cell aggregate from scores when --settle was active.
+    // Only recall_any@5 and MRR are tracked for the settled cell; the remaining
+    // recall variants are zero-filled — the settled cell is a diagnostic cell,
+    // not a full benchmark replacement.
+    let settledAggregate: LMEReportAggregate? = {
+        guard config.settle else { return nil }
+        let healthyScores = scores.filter(\.guardHealthy)
+        guard !healthyScores.isEmpty else { return nil }
+        let n = Double(healthyScores.count)
+        // compactMap: guard-excluded questions carry sentinel 0.0, so values are
+        // non-nil for every question that ran the settle cell. Use reduce(0,+) directly.
+        let any5Sum = healthyScores.compactMap(\.settledRecallAnyAt5).reduce(0, +)
+        let mrrSum  = healthyScores.compactMap(\.settledMrr).reduce(0, +)
+        return LMEReportAggregate(
+            queryCount:    healthyScores.count,
+            recallAnyAt1:  0,  // not tracked for the settled cell
+            recallAnyAt5:  any5Sum / n,
+            recallAnyAt10: 0,  // not tracked for the settled cell
+            recallAllAt1:  0,  // not tracked for the settled cell
+            recallAllAt5:  0,  // not tracked for the settled cell
+            recallAllAt10: 0,  // not tracked for the settled cell
+            mrr:           mrrSum / n
+        )
+    }()
+    let testmarkCells = LMETestmarkCells(
+        enabled: config.settle,
+        cells: config.settle ? ["organic", "settled"] : ["organic"],
+        settleTriggerTool: config.settle ? "moot_reindex" : nil,
+        settleTriggerDescription: config.settle
+            ? "Triggers background backfill of every unindexed drawer to full coverage; "
+              + "corpus_encode drain barrier polled until idle before re-running queries "
+              + "as the settled cell."
+            : nil,
+        rationale: config.settle
+            ? "With two-tier vector composition, ORGANIC (query immediately after ingest "
+              + "and drain) and SETTLED (query after moot_reindex and drain) are two "
+              + "distinct performance states; neither may substitute for the other in "
+              + "published numbers."
+            : nil,
+        settledAggregate: settledAggregate
+    )
+
     return LMEReport(
         runID: UUID().uuidString,
         runLabel: config.runLabel,
@@ -880,7 +1029,8 @@ func buildLMEReport(
         estateCache: config.estateCache.rawValue,
         cacheHits: cacheHits,
         cacheMisses: cacheMisses,
-        estateEncryption: config.scratchPosture.rawValue
+        estateEncryption: config.scratchPosture.rawValue,
+        testmarkCells: testmarkCells
     )
 }
 

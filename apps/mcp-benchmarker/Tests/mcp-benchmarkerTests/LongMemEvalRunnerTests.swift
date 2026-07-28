@@ -167,7 +167,8 @@ struct LongMemEvalRunnerTests {
             estateCache: .off,
             cacheDir: nil,
             scratchPosture: .plaintextOptOut,
-            exactStrategy: .search
+            exactStrategy: .search,
+            settle: false
         )
         #expect(config.encodeBarrier == .drain)
         #expect(config.encodeBarrier.rawValue == "drain")
