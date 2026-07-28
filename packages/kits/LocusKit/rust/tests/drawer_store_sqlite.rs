@@ -553,6 +553,102 @@ fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
     );
 }
 
+/// Gate-reject conformance: when a lineage sibling's state machine forbids the
+/// tombstone transition (S-3: Accepted → Tombstoned is forbidden), the
+/// content blob AND all four representation columns MUST be zeroed
+/// unconditionally. The sibling's state is preserved. Mirrors Swift
+/// `DrawerStore.expungeGated` lines 1411–1424 (gate-reject branch).
+///
+/// Scenario:
+///   D1 — Trust=Canonical, promoted to Accepted. Representation columns
+///        populated to confirm they are NULLed by the scrub.
+///   D2 — Active, same lineage. D1 is Accepted (g_state_cluster = 3 which
+///        is NOT < 3), so find_active_predecessor does not find it — D1 is
+///        NOT superseded when D2 is added.
+///   expunge_gated(D2) → D2 tombstoned; sibling loop processes D1 → gate
+///        rejects (S-3) → gate-reject branch scrubs D1 content + representation.
+#[test]
+fn expunge_gate_rejected_sibling_content_and_representation_zeroed() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let lineage = Uuid::new_v4();
+
+    // D1: Trust=Canonical (bits 18-23) so S-1 allows promote to Accepted.
+    // Representation columns populated so the gate-reject scrub can be
+    // verified to NULL them.
+    let mut d1 = sample_drawer("d1-gate-reject-accepted", "w", "r", "accepted-sibling-content");
+    d1.lineage_id = lineage;
+    d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
+    d1.distilled = Some("accepted-sibling-distilled-text".to_string());
+    d1.distilled_pipeline_version = Some("p1".to_string());
+    d1.distilled_token_count = Some(7);
+    d1.distilled_at = Some(NOW);
+    store.add_drawer(&d1, NOW).unwrap();
+    // Promote D1: Active → Accepted. Trust=Canonical satisfies S-1.
+    store
+        .mutate_state(
+            &d1.id,
+            State::Accepted,
+            RowVerb::Promote,
+            "alice",
+            None,
+            NOW + 100,
+        )
+        .unwrap();
+
+    // D2: Active state, same lineage.
+    // D1 is Accepted (g_state_cluster = 3, NOT < 3) so find_active_predecessor
+    // does not find D1 — D1 is NOT superseded.
+    let mut d2 = sample_drawer("d2-gate-reject-head", "w", "r", "head-content");
+    d2.lineage_id = lineage;
+    store.add_drawer(&d2, NOW + 200).unwrap();
+
+    // Confirm D1 is still Accepted (not superseded by the D2 add).
+    let d1_mid = store.get_drawer(&d1.id).unwrap().unwrap();
+    assert_eq!(
+        d1_mid.adjective_bitmap & 0x3F,
+        State::Accepted.raw_value(),
+        "D1 must remain Accepted after D2 is added (Accepted is not an active predecessor)"
+    );
+
+    // Expunge D2. The sibling loop processes D1. The gate rejects
+    // Accepted → Tombstoned (S-3). The gate-reject branch must scrub D1's
+    // content and all four representation columns.
+    store
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .unwrap();
+
+    let d1_after = store.get_drawer(&d1.id).unwrap().unwrap();
+    // State unchanged — the gate rejected the transition.
+    assert_eq!(
+        d1_after.adjective_bitmap & 0x3F,
+        State::Accepted.raw_value(),
+        "D1 state must remain Accepted after gate-reject scrub"
+    );
+    // Content unconditionally zeroed (destruction contract: secfix/ws2-coredelete).
+    assert_eq!(
+        d1_after.content, "",
+        "gate-rejected sibling content must be zeroed"
+    );
+    // Four representation columns NULLed (SPEC_DISTILLATION_STORAGE §2; Wave-1 parity).
+    assert!(
+        d1_after.distilled.is_none(),
+        "distilled must be NULL after gate-reject scrub"
+    );
+    assert!(
+        d1_after.distilled_pipeline_version.is_none(),
+        "distilled_pipeline_version must be NULL after gate-reject scrub"
+    );
+    assert!(
+        d1_after.distilled_token_count.is_none(),
+        "distilled_token_count must be NULL after gate-reject scrub"
+    );
+    assert!(
+        d1_after.distilled_at.is_none(),
+        "distilled_at must be NULL after gate-reject scrub"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // § 5 — Tunnel / KGFact / Diary CRUD (parity)
 // ---------------------------------------------------------------------------

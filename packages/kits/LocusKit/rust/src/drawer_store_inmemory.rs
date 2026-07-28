@@ -2176,9 +2176,37 @@ impl DrawerStore for DrawerStoreCore {
                             .audit_log()
                             .append(pk_audit_event_from(&sib_event));
                     }
+                } else {
+                    // Gate rejected the state transition (e.g., a sibling
+                    // whose state cannot legally advance to tombstoned via
+                    // S-3). Content scrub is unconditional and independent
+                    // of the state machine: even when the state cannot
+                    // transition, the verbatim content MUST be zeroed.
+                    // Leaving content intact when the gate fails is a
+                    // destruction-contract violation (secfix/ws2-coredelete).
+                    // The scrub covers the content-derived representation too
+                    // (SPEC_DISTILLATION_STORAGE §2; Wave-1 parity fix).
+                    //
+                    // Mirrors Swift DrawerStore.expungeGated lines 1411–1424:
+                    //   values: Self.withClearedRepresentation(["content": .text("")])
+                    //   followed by refreshContentFingerprint.
+                    let mut vals = BTreeMap::new();
+                    vals.insert("content".to_string(), TypedValue::Text(String::new()));
+                    insert_cleared_representation(&mut vals);
+                    if let Ok(fp) = self.recomputed_fingerprint(sibling_id, |d| {
+                        d.content = String::new();
+                    }) {
+                        vals.insert("content_fingerprint".to_string(), fp);
+                    }
+                    let _ = row_store.update(
+                        T_DRAWERS,
+                        vals,
+                        &StoragePredicate::Eq(
+                            Column::new(T_DRAWERS, "id"),
+                            TypedValue::Text(sibling_id.to_string()),
+                        ),
+                    );
                 }
-                // If the gate rejects (e.g. accepted → tombstoned is
-                // S-3 forbidden), skip silently. Accepted rows survive.
             }
 
             // Record sibling in the erasure ledger.
