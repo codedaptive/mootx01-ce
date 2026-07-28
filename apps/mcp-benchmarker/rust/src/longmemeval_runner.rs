@@ -115,6 +115,11 @@ pub struct LmeRunConfig {
     /// launch (no keychain contact). --no-plaintext-scratch selects
     /// EncryptedDefault. Recorded in the report JSON as "estate_encryption".
     pub scratch_posture: ScratchEstatePosture,
+    /// When true, run each question twice: first as the ORGANIC cell (immediately
+    /// after ingest + drain barrier), then trigger moot_reindex, wait for the
+    /// corpus_encode drain to converge, and re-run identical queries as the
+    /// SETTLED cell. Off by default. Twin of Swift LMERunConfig.settle.
+    pub settle: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -422,6 +427,7 @@ pub fn run_one_question(
     cache_entry: Option<&Path>,
     scratch_posture: ScratchEstatePosture,
     strategy: ExactRecallStrategy,
+    settle: bool,
 ) -> Result<LmeQuestionResult, MCPError> {
     // ── Cache restore attempt (when cache mode is Reuse) ──────────────────────
     // Try to restore a previously-snapshotted estate for this question. On hit,
@@ -679,6 +685,77 @@ pub fn run_one_question(
         }
     }
 
+    // ── Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C) ─────
+    // Runs only when --settle is set AND the exact arm ran. Triggers moot_reindex
+    // to ensure every drawer is at full vector coverage, waits for the
+    // corpus_encode drain to converge, then re-runs the exact-arm queries as the
+    // SETTLED cell. The dense arm is NOT re-run (consolidation is not re-entrant
+    // and the dense cell is not a settle target).
+    let mut settled_retrieved_uuids: Option<Vec<String>> = None;
+    let mut settled_query_latency_seconds: Option<f64> = None;
+    let mut settled_drain_lane_observed: Option<bool> = None;
+    if settle && (arm == &LmeArm::Exact || arm == &LmeArm::Both) {
+        // Trigger background reindex so every drawer is at full coverage.
+        let reindex_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+        if let Err(e) = client.call_tool("moot_reindex", reindex_args, &verb_map.result_format) {
+            eprintln!(
+                "  [lme] settle: moot_reindex error for {question_id}: {}",
+                e.description
+            );
+        }
+        // Wait for corpus_encode drain to converge after reindex.
+        let settle_outcome = wait_for_encode_drain(
+            &mut client,
+            &format!("lme settle {question_id}"),
+            300.0,
+        );
+        settled_drain_lane_observed = Some(settle_outcome.lane_observed);
+        // Re-run the exact-arm queries with the same strategy as the organic cell.
+        let settled_query_start = Instant::now();
+        let mut sargs: BTreeMap<String, JsonValue> = BTreeMap::new();
+        sargs.insert(
+            verb_map.query_arg.clone(),
+            JsonValue::String(question_text.to_string()),
+        );
+        if strategy == ExactRecallStrategy::Relevance || strategy == ExactRecallStrategy::Auto {
+            sargs.insert(
+                "ordering".to_string(),
+                JsonValue::String("byRelevanceDesc".to_string()),
+            );
+        }
+        if strategy == ExactRecallStrategy::Precise {
+            let mut pargs: BTreeMap<String, JsonValue> = BTreeMap::new();
+            pargs.insert(
+                verb_map.query_arg.clone(),
+                JsonValue::String(question_text.to_string()),
+            );
+            if let Ok(r) = client.call_tool("moot_recall_precise", pargs, &verb_map.result_format) {
+                settled_retrieved_uuids = Some(r.ordered_ids);
+            }
+        } else {
+            if let Ok(r) = client.call_tool(&verb_map.query, sargs, &verb_map.result_format) {
+                let payload = r.text_blocks.join("\n");
+                settled_retrieved_uuids = Some(r.ordered_ids);
+                // Documented escalation for auto strategy.
+                if strategy == ExactRecallStrategy::Auto
+                    && payload.contains("discrimination: low")
+                {
+                    let mut pargs: BTreeMap<String, JsonValue> = BTreeMap::new();
+                    pargs.insert(
+                        verb_map.query_arg.clone(),
+                        JsonValue::String(question_text.to_string()),
+                    );
+                    if let Ok(pr) = client.call_tool("moot_recall_precise", pargs, &verb_map.result_format) {
+                        if !pr.ordered_ids.is_empty() {
+                            settled_retrieved_uuids = Some(pr.ordered_ids);
+                        }
+                    }
+                }
+            }
+        }
+        settled_query_latency_seconds = Some(settled_query_start.elapsed().as_secs_f64());
+    }
+
     // ── Teardown ──────────────────────────────────────────────────────────────
     client.disconnect();
     if let Err(e) = lme_guarded_teardown(&scratch) {
@@ -708,6 +785,9 @@ pub fn run_one_question(
         dense_judge_correct,
         cache_hit,
         drain_lane_observed,
+        settled_retrieved_uuids,
+        settled_query_latency_seconds,
+        settled_drain_lane_observed,
     })
 }
 
@@ -791,6 +871,7 @@ pub fn run_lme_questions(
             cache_entry_opt.as_deref(),
             config.scratch_posture,
             config.exact_strategy,
+            config.settle,
         ) {
             Ok(result) => {
                 let guard_str = if result.guard_healthy { "healthy" } else { "GUARD_FAIL" };
@@ -826,6 +907,9 @@ pub fn run_lme_questions(
                     dense_judge_correct: None,
                     cache_hit: None,
                     drain_lane_observed: None,
+                    settled_retrieved_uuids: None,
+                    settled_query_latency_seconds: None,
+                    settled_drain_lane_observed: None,
                 });
             }
         }
