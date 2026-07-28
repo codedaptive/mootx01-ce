@@ -1,3 +1,8 @@
+---
+version: v0.1
+status: draft
+---
+
 # MOOTx01 1.0.x vs 1.1.x — benchmark comparison (2026-07-26 → 2026-07-28)
 
 Diagnostic, not publication. 50-question samples, seed 20260725, LongMemEval
