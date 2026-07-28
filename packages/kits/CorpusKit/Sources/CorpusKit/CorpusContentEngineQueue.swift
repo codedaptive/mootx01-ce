@@ -251,6 +251,19 @@ public extension CorpusContentEngine {
             }
             throw error
         }
+        // Post-encode coordination fires BEFORE the terminal queue reply so
+        // the callback's work is covered by drain-completion accounting:
+        // `awaitIngestDrain` waits for pending+inFlight == 0, and jobs stay
+        // in-flight until the reply below. GLK wires room rollup AND
+        // drain-stage distillation into this callback
+        // (SPEC_DISTILLATION_STORAGE §7.1) — this ordering is what makes
+        // "a fully drained estate is a fully distilled estate" a real
+        // barrier instead of a race. The callback is non-throwing; a hung
+        // callback is bounded by the same lease-reclaim discipline that
+        // covers a hung encode.
+        if !result.encodedIDs.isEmpty, let callback = onEncoded {
+            await callback(result.encodedIDs)
+        }
         do {
             _ = try await queue.reply(batch: result.completions)
         } catch {
@@ -261,9 +274,6 @@ public extension CorpusContentEngine {
                     + "\(publicationError)")
             }
             throw error
-        }
-        if !result.encodedIDs.isEmpty, let callback = onEncoded {
-            await callback(result.encodedIDs)
         }
         return jobs.count
     }

@@ -1337,6 +1337,31 @@ impl Estate {
         self.store.all_drawers()
     }
 
+    /// Write the distilled representation of one drawer — all four
+    /// representation columns in one atomic UPDATE. Estate-level
+    /// pass-through over `DrawerStore::set_distilled_representation`; see
+    /// the trait method for the full contract (direct column write, no
+    /// audit event, no index-feed involvement —
+    /// SPEC_DISTILLATION_STORAGE §4/§7.2). This is the seam GLK's
+    /// distillation paths write through. Mirrors Swift
+    /// `Estate.setDistilledRepresentation`.
+    pub fn set_distilled_representation(
+        &self,
+        drawer_id: &str,
+        distilled: &str,
+        pipeline_version: &str,
+        token_count: i64,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.store.set_distilled_representation(
+            drawer_id,
+            distilled,
+            pipeline_version,
+            token_count,
+            generated_at,
+        )
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is

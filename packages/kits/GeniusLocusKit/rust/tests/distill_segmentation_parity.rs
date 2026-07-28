@@ -13,7 +13,7 @@
 // Tests:
 //  T1 — Segmenter yields ≥3 segments on the parity probe text (the exact
 //       content used in the head-to-head live test that revealed the gap).
-//  T2 — `distill_items_sweep` produces ≥1 factoid for a drawer with content
+//  T2 — `distill_items_sweep` distills ≥1 item for a drawer with content
 //       that has ≥3 sentences AND recurring named entities so the pipeline
 //       emits a non-zero fingerprint. This tests end-to-end eligibility after
 //       the segmentation fix. Note: the live parity test used the HMM extractor
@@ -39,9 +39,9 @@ use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
 
-// Actor string for factoid drawers produced by distill_items_sweep.
-// Mirrors brain::distillation_cycle::DISTILLATION_DAEMON_ACTOR — duplicated
-// here to avoid a pub(crate) boundary crossing in tests.
+// The RETIRED factoid-daemon actor string (SPEC_DISTILLATION_STORAGE §11).
+// Used only to assert its ABSENCE: no new-write path may produce drawers
+// with this provenance on 1.1.x.
 const DISTILLATION_DAEMON_ACTOR: &str = "distillation-daemon";
 
 // The exact probe text used in the head-to-head parity test that revealed
@@ -83,9 +83,9 @@ fn eidetic_segmenter_counts_at_least_three_on_probe_text() {
 
 // MARK: - T2: distill_items_sweep produces ≥1 factoid for eligible content
 
-/// `distill_items_sweep` must produce ≥1 factoid when a drawer contains
-/// content with ≥3 sentences AND recurring named entities detectable by the
-/// default capitalization extractor.
+/// `distill_items_sweep` must distill ≥1 item (write its representation
+/// columns) when a drawer contains content with ≥3 sentences AND recurring
+/// named entities detectable by the default capitalization extractor.
 ///
 /// The live parity failure (Swift=1, Rust=0) was driven by the segmentation
 /// bug plus the HMM-vs-default extractor gap; this test isolates the sweep
@@ -118,7 +118,7 @@ fn distill_items_sweep_produces_factoid_for_eligible_content() {
     coord.capture(&h, frame, NOW).expect("capture drawer");
 
     // Run the sweep without a VectorStore — the fingerprint lane is dark but
-    // factoid drawer capture still succeeds (VectorStore absence is non-fatal
+    // the on-row column writes still land (VectorStore absence is non-fatal
     // per the sweep contract).
     let produced = coord
         .distill_items_sweep(&h, NOW, None)
@@ -126,7 +126,7 @@ fn distill_items_sweep_produces_factoid_for_eligible_content() {
 
     assert!(
         produced >= 1,
-        "distill_items_sweep must produce ≥1 factoid for content with recurring \
+        "distill_items_sweep must distill ≥1 item for content with recurring \
          named entities across ≥3 sentences (got 0)"
     );
 }
@@ -209,37 +209,21 @@ fn eidetic_segmenter_handles_trailing_period_text() {
     );
 }
 
-// MARK: - T5 (secfix/punt-g2): factoid inherits source drawer sensitivity
+// MARK: - T5: the sweep writes the representation ON the source row
 //
-// NOTE: The security fix (secfix/punt-g2 part 1) added the sensitivity floor
-// so factoids inherit their source's sensitivity tier. Part 2 of the same fix
-// added the sweep exclusion: Restricted (32) and Secret (48) source drawers are
-// NOW skipped entirely — the sweep cannot produce a factoid from an
-// above-Elevated source (parity with Swift distillItemsSweep which filters
-// candidates through an empty RecallFrame → insert_defaults →
-// SensitivityAtMost(Elevated)).
-//
-// This test verifies the sensitivity floor for ELEVATED sources — the
-// highest tier that remains within the sweep's admissibility window.
-// The Secret-source exclusion is separately verified in coordinator.rs
-// test co_dist_sec1_sweep_skips_restricted_and_secret_source_drawers.
+// SPEC_DISTILLATION_STORAGE §7.2/§11: distillation performs on-row column
+// writes only — no factoid drawer is captured, at any sensitivity tier.
+// The representation lives on the row whose sensitivity governs it (§2),
+// so an Elevated source simply carries its own representation.
 
-/// T5: A factoid produced from an elevated-sensitivity source drawer must carry
-/// elevated sensitivity — the floor rule applies to the admissible sensitivity
-/// range (Normal–Elevated). Restricted and Secret sources are excluded from
-/// the sweep by the sensitivity ceiling gate (secfix/punt-g2 part 2).
 #[test]
-fn distill_items_sweep_factoid_inherits_source_sensitivity() {
+fn distill_items_sweep_writes_representation_on_source_row() {
     let (coord, h) = open_one();
 
-    // Content with ≥3 sentences and recurring tokens so the pipeline emits
-    // a non-zero fingerprint (same pattern as T2).
     let content = "Both Swift and Rust implement the same algorithm. \
                    Rust parity is verified by the same tests. \
-                   Swift and Rust must produce identical factoid sensitivity.";
+                   Swift and Rust must produce identical renderings.";
 
-    // Capture with ELEVATED sensitivity — the highest tier the sweep's admissibility
-    // window allows (Elevated raw_value == 16 <= SensitivityAtMost(Elevated) ceiling).
     let mut frame = CaptureFrame::new(
         content,
         CaptureChannel::Typed,
@@ -249,31 +233,24 @@ fn distill_items_sweep_factoid_inherits_source_sensitivity() {
         "minilm-v6",
     );
     frame.sensitivity = AdjectiveSensitivity::Elevated;
-    coord.capture(&h, frame, NOW).expect("capture elevated drawer");
+    let source = coord.capture(&h, frame, NOW).expect("capture elevated drawer");
 
-    // Run the sweep; expect at least one factoid.
     let produced = coord
         .distill_items_sweep(&h, NOW, None)
         .expect("distill_items_sweep");
-    assert!(produced >= 1, "sweep must produce ≥1 factoid from Elevated source (got {produced})");
+    assert!(produced >= 1, "sweep must distill the Elevated source (got {produced})");
 
-    // Find factoid drawers produced by the distillation daemon.
-    // `all_drawers` is the public coordinator API (no estate_for_verb crossing
-    // a pub(crate) boundary). Filter by added_by == DISTILLATION_DAEMON_ACTOR
-    // (the constant "distillation-daemon") to isolate factoid rows.
-    let factoids: Vec<_> = coord
-        .all_drawers(&h)
-        .expect("all_drawers")
-        .into_iter()
-        .filter(|d| d.added_by == DISTILLATION_DAEMON_ACTOR)
-        .collect();
-    assert!(!factoids.is_empty(), "must find factoid drawer produced by distillation-daemon");
-    for factoid in &factoids {
-        assert_eq!(
-            factoid.adjective_sensitivity(),
-            AdjectiveSensitivity::Elevated,
-            "factoid produced from Elevated source must inherit Elevated sensitivity; got {:?}",
-            factoid.adjective_sensitivity()
-        );
-    }
+    let all = coord.all_drawers(&h).expect("all_drawers");
+    // §11: no factoid drawers exist in any new-write path.
+    assert!(
+        all.iter().all(|d| d.added_by != DISTILLATION_DAEMON_ACTOR),
+        "the sweep must not capture factoid drawers"
+    );
+    let row = all.iter().find(|d| d.id == source.id).expect("source row");
+    assert_eq!(row.adjective_sensitivity(), AdjectiveSensitivity::Elevated);
+    assert!(row.distilled.is_some(), "the representation rides the source row");
+    assert_eq!(
+        row.distilled_pipeline_version.as_deref(),
+        Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+    );
 }
