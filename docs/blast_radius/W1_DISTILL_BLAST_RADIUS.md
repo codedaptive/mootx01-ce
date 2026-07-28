@@ -207,6 +207,29 @@ change.
 golden conformance vectors; `HydrationRepresentation` (GLK); GLK per-estate
 distillFn registry. Additive files; no existing call sites.
 
+## Symbol 9: T5 exit check — encode-drain-only gate (PERF_W1_DRAIN_RIDER Finding 3)
+
+**Change class:** semantic (the T5 finisher spawn/exit predicate narrows from
+"any drain isDraining" to "the corpus_encode drain isDraining") + additive
+helper `DrainStatus.encodeSettled` / `DrainStatus::encode_settled` +
+`corpusEncodeName` / `CORPUS_ENCODE_NAME` constant.
+**Scope:** public (GLK) / app commands.
+
+### Call sites (`isDraining` / `is_draining` consumers)
+
+| File | Line | Source | Classification | Justification (if INTENTIONALLY_LEFT) |
+|---|---|---|---|---|
+| apps/mootx01/Sources/mootx01/Commands/ServeCommand.swift | 350 | grep | MUST_UPDATE | the Finding 3 spawn condition |
+| apps/mootx01/Sources/mootx01/Commands/DrainCommand.swift | 113 | grep | MUST_UPDATE | the lease-holding poll loop |
+| apps/mootx01/rust/src/commands/drain.rs | 73 | grep | MUST_UPDATE | Rust twin of the poll loop |
+| apps/mootx01/rust/src/commands/serve.rs | 294 | grep | INTENTIONALLY_LEFT | Rust T5 spawn uses `encode_queue_has_pending` (maildir check on the encode queue dirs) — already encode-only, unaffected by drain statuses |
+| packages/kits/AriaMcpKit/.../ToolDispatch.swift | 2824 | grep | INTENTIONALLY_LEFT | `moot_drain_status` display formatting — reporting all drains is the tool's contract |
+| packages/kits/AriaMcpKit/rust/src/interface_tools.rs | 2703 | grep | INTENTIONALLY_LEFT | same display twin |
+| packages/apple/MootIntentKit/.../HeavyVerbCore.swift | 30–106 | grep | INTENTIONALLY_LEFT | separate DrainSnapshot type parsed from tool TEXT output; display/summary only, holds no lease |
+| apps/mcp-benchmarker EncodeBarrier.swift / encode_barrier.rs | — | grep | INTENTIONALLY_LEFT | benchmarker barrier parses tool text and settles on all-lanes-idle; it holds no lease and its behavior on 1.1.x estates with never-swept system drawers is a benchmarker-methodology question flagged in the completion report, out of this fix's sanctioned scope |
+| packages/kits/GeniusLocusKit/.../DistillationDrainStageTests.swift | 215, 224 | grep | INTENTIONALLY_LEFT | asserts the distillation entry itself; unaffected |
+| packages/kits/AriaMcpKit/rust/src/estate_registry.rs | 54 | grep | MUST_UPDATE | additive `pub use genius_locus_kit::DrainStatus` re-export so drain.rs can name the type |
+
 ### Summary
 - MUST_UPDATE: 60+ sites across 9 packages + 2 apps (enumerated above)
 - INTENTIONALLY_LEFT: frozen results/status docs; TwentyRowEstateFixture;

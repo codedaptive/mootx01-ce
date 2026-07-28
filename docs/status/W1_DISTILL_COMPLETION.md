@@ -28,7 +28,8 @@ every commit; conformance vectors byte-identical across legs.
 | `baf29a90` | Part 4b — MCP surface: `moot_distill` + unlisted alias, `moot_recall_distilled` v2, `moot_recollect` removed |
 | `6061e85d` | Part 4c — drain accounting (`distillation` DrainStatus + countUndistilled both legs), VaultKit `_distilled_from` import-reconstruction retirement |
 | `e1ab84ba` | Part 4d — installer `.ask` classification both legs (alias exemption), ARIA_MCP_SPEC.md roster |
-| (this commit) | Part 4e — Adams post-flight comment-fidelity fixes + BRR reclassifications + this report |
+| `834e16e9` | Part 4e — Adams post-flight comment-fidelity fixes + BRR reclassifications + this report |
+| (HEAD) | Part 4f — Finding 3 fix (PERF_W1_DRAIN_RIDER_2026-07-28): T5 finisher gate keys on the encode drain only — `DrainStatus.encodeSettled` / `DrainStatus::encode_settled` both legs, wired into ServeCommand T5 spawn, DrainCommand poll loop, and Rust drain.rs poll loop, + regression tests both legs (GLK Swift 641, GLK Rust t5_encode_settled_parity 4/4) |
 
 ## Test Verification Log (final full runs, real exit codes)
 
@@ -106,6 +107,21 @@ NeuronKit lens conformance suites. The p1 contract pins
 7. Pre-existing divergence observed, not fixed (out of scope): the
    Rust expunge gate-reject branch does not scrub sibling content the
    way Swift does.
+8. **T5 finisher gate is encode-only** (Finding 3,
+   PERF_W1_DRAIN_RIDER_2026-07-28): `DrainStatus.encodeSettled` /
+   `encode_settled` ignores every drain except `corpus_encode`, because
+   the distillation entry counts system-provisioned drawers (wing
+   seeds, AI_Charter_Hint) that never transit the encode queue and can
+   only be distilled by a sweep — a finisher keyed on all drains would
+   hold the encode DrainLease to its full max wait. Two open questions
+   flagged, NOT implemented here: (a) whether `countUndistilled` should
+   exclude system-provisioned drawers — belongs to the bitmap rider
+   design (an operational-bitmap bit is the right discriminator; a
+   provenance/actor-string heuristic would be a schema smell); (b) the
+   mcp-benchmarker EncodeBarrier settles on all-lanes-idle from tool
+   text and would wait out its grace window on a 1.1.x estate whose
+   system drawers were never swept — it holds no lease, so this is a
+   benchmarker-methodology question, not a product bug.
 
 ## Notes
 

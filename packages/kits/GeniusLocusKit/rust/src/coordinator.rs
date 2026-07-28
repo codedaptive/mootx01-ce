@@ -835,14 +835,16 @@ impl Default for EstateCoordinator {
 
 /// A read-only status snapshot of one long-running background drain.
 ///
-/// Today the substrate runs exactly ONE drain: the corpus encode/ingest drain
-/// (the `corpus_ingest_queue` worker, which encodes captured/imported text into
-/// the BM25 + vector lanes asynchronously). `EstateCoordinator::drain_statuses`
-/// returns a `Vec<DrainStatus>` so that when additional drains are added later,
-/// each appends its own entry and the report surfaces all of them with no wire
-/// reshape. There is no speculative drain machinery here — the list is built
-/// from the drains that actually exist, which today is one. Mirrors Swift
-/// `DrainStatus`.
+/// The substrate reports TWO drains: `"corpus_encode"` (the
+/// `corpus_ingest_queue` worker, which encodes captured/imported text into the
+/// BM25 + vector lanes asynchronously) and `"distillation"` (the
+/// SPEC_DISTILLATION_STORAGE §7.1 accounting surface — `pending` is the
+/// row-level eligibility-predicate count, `in_flight` always 0).
+/// `EstateCoordinator::drain_statuses` returns a `Vec<DrainStatus>` so that
+/// when additional drains are added later, each appends its own entry and the
+/// report surfaces all of them with no wire reshape. The list is built from
+/// the drains that actually exist — no speculative drain machinery. Mirrors
+/// Swift `DrainStatus`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrainStatus {
     /// Stable identifier for the drain (e.g. `"corpus_encode"`). Lets a status
@@ -859,10 +861,35 @@ pub struct DrainStatus {
 }
 
 impl DrainStatus {
+    /// Stable name of the corpus encode/ingest drain. The single source of
+    /// truth for the string — `drain_statuses` and `encode_settled` both key
+    /// on it.
+    pub const CORPUS_ENCODE_NAME: &'static str = "corpus_encode";
+
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
     pub fn is_draining(&self) -> bool {
         self.pending + self.in_flight > 0
+    }
+
+    /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
+    /// detached `mootx01 drain` finisher may exit and release the encode
+    /// DrainLease.
+    ///
+    /// Deliberately ignores every drain except "corpus_encode"
+    /// (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3): the "distillation" entry
+    /// counts rows that only a `moot_distill` sweep or the hourly standing
+    /// signal can distill — system-provisioned drawers never transit the
+    /// encode queue, so the drain-stage rider never fires for them and the
+    /// entry does not settle under the drain command. A finisher keyed on ALL
+    /// drains would poll to its full max wait holding the encode lease,
+    /// wedging the next serve session's encode queue. The T5 finisher's
+    /// contract is the encode queue and its lease — nothing else. Mirrors
+    /// Swift `DrainStatus.encodeSettled`.
+    pub fn encode_settled(statuses: &[DrainStatus]) -> bool {
+        !statuses
+            .iter()
+            .any(|s| s.name == Self::CORPUS_ENCODE_NAME && s.is_draining())
     }
 }
 
@@ -1669,7 +1696,7 @@ impl EstateCoordinator {
                 }
             })?;
             statuses.push(DrainStatus {
-                name: "corpus_encode".to_string(),
+                name: DrainStatus::CORPUS_ENCODE_NAME.to_string(),
                 pending,
                 in_flight,
                 detail: Some(format!("encoded_chunks: {encoded_chunks}")),

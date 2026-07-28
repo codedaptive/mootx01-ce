@@ -70,6 +70,30 @@ public struct DrainStatus: Sendable, Equatable {
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
     public var isDraining: Bool { pending + inFlight > 0 }
+
+    /// Stable name of the corpus encode/ingest drain (drain 1 in the header
+    /// comment). The single source of truth for the string — `drainStatuses`
+    /// and `encodeSettled` both key on it.
+    public static let corpusEncodeName = "corpus_encode"
+
+    /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
+    /// detached `mootx01 drain` finisher may exit and release the encode
+    /// DrainLease, and a stdio serve need not spawn one.
+    ///
+    /// Deliberately ignores every drain except "corpus_encode"
+    /// (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3): the "distillation" entry
+    /// counts rows that only a `moot_distill` sweep or the hourly standing
+    /// signal can distill — system-provisioned drawers (wing seeds,
+    /// AI_Charter_Hint) never transit the encode queue, so the drain-stage
+    /// rider never fires for them and the entry does not settle under the
+    /// drain command. A finisher keyed on ALL drains would poll to its full
+    /// maxWait holding the encode lease, wedging the next serve session's
+    /// encode queue (pending > 0, in_flight = 0, indefinitely). The T5
+    /// finisher's contract is the encode queue and its lease — nothing else.
+    /// Mirrors Rust `DrainStatus::encode_settled`.
+    public static func encodeSettled(_ statuses: [DrainStatus]) -> Bool {
+        !statuses.contains { $0.name == corpusEncodeName && $0.isDraining }
+    }
 }
 
 extension GeniusLocusKit {
@@ -102,7 +126,7 @@ extension GeniusLocusKit {
             let depth = try await corpus.ingestQueueDepth()
             let encodedChunks = try await corpus.count()
             statuses.append(DrainStatus(
-                name: "corpus_encode",
+                name: DrainStatus.corpusEncodeName,
                 pending: depth.pending,
                 inFlight: depth.inFlight,
                 detail: "encoded_chunks: \(encodedChunks)"

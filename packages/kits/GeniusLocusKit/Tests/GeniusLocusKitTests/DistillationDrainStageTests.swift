@@ -223,4 +223,65 @@ struct DistillationDrainStageTests {
         #expect(distillAfter.pending == 0, "a swept estate reads fully distilled")
         #expect(!distillAfter.isDraining)
     }
+
+    // MARK: - Finding 3 regression: the T5 finisher gate keys on the ENCODE drain only
+
+    // PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3: the "distillation" drain entry
+    // counts rows that only a sweep can distill (system-provisioned drawers
+    // never transit the encode queue), so a T5 exit check keyed on ALL drains
+    // never settles — the detached drainer holds the encode DrainLease for its
+    // full maxWait and wedges the next serve session's encode queue. The gate
+    // for spawning/exiting the T5 finisher is `DrainStatus.encodeSettled`,
+    // which must ignore every drain except "corpus_encode".
+
+    @Test("a non-idle distillation drain must not block T5 exit / lease release")
+    func encodeSettledIgnoresNonIdleDistillationDrain() {
+        let statuses = [
+            DrainStatus(name: DrainStatus.corpusEncodeName, pending: 0, inFlight: 0,
+                        detail: "encoded_chunks: 42"),
+            // The Finding 3 shape: system-provisioned drawers (wing seeds,
+            // AI_Charter_Hint) counted undistilled on an otherwise-drained estate.
+            DrainStatus(name: "distillation", pending: 7, inFlight: 0,
+                        detail: "pipeline: p1"),
+        ]
+        #expect(DrainStatus.encodeSettled(statuses),
+                "distillation pending must not hold the T5 finisher or its lease")
+    }
+
+    @Test("encode work on either frontier keeps the T5 gate closed")
+    func encodeSettledFalseWhileEncodeDrainHasWork() {
+        let pending = [
+            DrainStatus(name: DrainStatus.corpusEncodeName, pending: 3, inFlight: 0),
+            DrainStatus(name: "distillation", pending: 0, inFlight: 0),
+        ]
+        let inFlight = [
+            DrainStatus(name: DrainStatus.corpusEncodeName, pending: 0, inFlight: 1)
+        ]
+        #expect(!DrainStatus.encodeSettled(pending))
+        #expect(!DrainStatus.encodeSettled(inFlight))
+    }
+
+    @Test("an estate with no encode drain reads settled (bare estate / empty list)")
+    func encodeSettledTrueWhenNoEncodeDrainListed() {
+        #expect(DrainStatus.encodeSettled([]))
+        #expect(DrainStatus.encodeSettled(
+            [DrainStatus(name: "distillation", pending: 7, inFlight: 0)]))
+    }
+
+    @Test("live estate: undistilled rows leave the T5 gate open for exit")
+    func t5GateSettlesOnLiveEstateWithUndistilledRows() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        // Impatient captures are the same shape as Finding 3's system drawers:
+        // rows present and searchable, but never routed through the encode
+        // queue, so only a sweep can distill them. The distillation drain is
+        // non-idle; the encode drain is idle.
+        for body in ["First fact stands alone here.", "Second fact stands alone here."] {
+            _ = try await kit.capture(handle, captureFrame(body), mode: .impatient)
+        }
+        let statuses = try await kit.drainStatuses(handle)
+        let distill = try #require(statuses.first { $0.name == "distillation" })
+        #expect(distill.isDraining, "precondition: the Finding 3 shape is present")
+        #expect(DrainStatus.encodeSettled(statuses),
+                "the T5 finisher must exit (releasing the encode lease) on this estate")
+    }
 }
