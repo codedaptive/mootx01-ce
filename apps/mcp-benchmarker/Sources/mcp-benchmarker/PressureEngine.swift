@@ -2,7 +2,7 @@ import Foundation
 
 // PressureEngine.swift — the `pressure` mode: a synthetic 4-way load driver.
 //
-// The 4-way measurement is {read, write} × {mootx01, MemPalace} — two
+// The 4-way measurement is {read, write} × {mootx01, contender} — two
 // directions (read / write) across two products. The proxy surfaces these four
 // paths from real traffic over time; this driver surfaces the SAME four paths
 // synthetically, exercising each under configurable concurrency for a fixed
@@ -10,12 +10,12 @@ import Foundation
 // path.
 //
 // The four paths map onto the two configured endpoints' verbMaps:
-//   - source endpoint  → MemPalace: read = source.query, write = source.write
+//   - source endpoint  → contender: read = source.query, write = source.write
 //   - target endpoint  → mootx01:   read = target.query, write = target.write
 //
 // so a single config (the same one transfer/serve use) declares all four. Each
 // path's write uses that endpoint's `constantArgs` (mootx01 needs `location`;
-// MemPalace needs `wing` + `room`), so a WRITE path must point at a SCRATCH
+// the contender needs `wing` + `room`), so a WRITE path must point at a SCRATCH
 // backend — never a real DB. The driver does not gate this itself (the config
 // author owns the command); CONFIG.md states the scratch requirement plainly.
 //
@@ -26,8 +26,8 @@ import Foundation
 enum PressurePath: String, Sendable, CaseIterable {
     case mootRead = "mootx01.read"
     case mootWrite = "mootx01.write"
-    case memoryRead = "mempalace.read"
-    case memoryWrite = "mempalace.write"
+    case memoryRead = "contender.read"
+    case memoryWrite = "contender.write"
 }
 
 /// Per-path result of a pressure run.
@@ -70,7 +70,7 @@ struct PressureReport: Sendable {
 
 /// Drives synthetic load across all four read/write × product paths.
 struct PressureEngine {
-    /// MemPalace-side client + verbs (the config `source` endpoint).
+    /// Contender-side client + verbs (the config `source` endpoint).
     let memory: MCPClient
     let memoryVerbs: EndpointConfig.VerbMap
     /// mootx01-side client + verbs (the config `target` endpoint).
@@ -200,7 +200,7 @@ struct PressureEngine {
 
     /// Builds write arguments from a verbMap: the probe content under the
     /// content key plus the endpoint's required constant args (location for
-    /// mootx01; wing + room for MemPalace).
+    /// mootx01; wing + room for the contender).
     private func writeArgs(_ verbs: EndpointConfig.VerbMap) -> [String: JSONValue] {
         var args: [String: JSONValue] = [verbs.contentArg: .string(probeText)]
         for (k, v) in verbs.constantArgs { args[k] = .string(v) }

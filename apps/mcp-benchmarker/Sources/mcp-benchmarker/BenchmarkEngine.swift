@@ -16,7 +16,7 @@ import Foundation
 // state at benchmark time.
 //
 // CROSS-SERVER ID ASYMMETRY (the head-to-head reality): the source and target
-// mint ids in disjoint spaces — MemPalace `search` returns no id at all, and
+// mint ids in disjoint spaces — the contender's `search` returns no id at all, and
 // the target assigns its own UUID on write. So source-vs-target rank
 // divergence cannot be scored by id. When `--compare-source` is set, the
 // rank comparison is therefore computed over the recall CONTENT order
@@ -146,7 +146,7 @@ struct BenchmarkEngine {
     /// whose ids live in disjoint spaces, so the rank-divergence input is the
     /// list of normalized content strings in returned order. Normalization
     /// (trim + lowercase + collapse internal whitespace) absorbs incidental
-    /// formatting differences (e.g. MemPalace truncated previews vs full
+    /// formatting differences (e.g. the contender's truncated previews vs full
     /// MOOTx01 content) on the shared prefix that survives both.
     static func normalizedContentOrder(_ items: [MCPResultItem]) -> [String] {
         items.compactMap { item in
@@ -156,7 +156,7 @@ struct BenchmarkEngine {
                 .split(whereSeparator: { $0.isWhitespace })
                 .joined(separator: " ")
             // Compare on a bounded prefix so a server that truncates content
-            // (MemPalace `content_preview`) still matches the same item from a
+            // (e.g. the contender's `content_preview`) still matches the same item from a
             // server that returns it in full.
             return String(collapsed.prefix(64))
         }

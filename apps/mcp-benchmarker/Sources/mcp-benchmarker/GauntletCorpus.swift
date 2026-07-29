@@ -78,8 +78,8 @@ enum RecordRole: String, Codable, Sendable, Equatable {
 /// to) so the scorer can classify a returned hit without re-deriving it.
 ///
 /// `location` is the per-record filing target. Both backends file by location:
-/// mootx01's `moot_file_memory` takes a single `location` path; MemPalace's
-/// `mempalace_add_drawer` takes wing+room. The runner derives wing/room from the
+/// mootx01's `moot_file_memory` takes a single `location` path; the contender's
+/// write tool takes wing+room. The runner derives wing/room from the
 /// first two path segments of `location`, so one field drives both backends and
 /// the T5 scatter tier can place a record anywhere by setting this string.
 struct GauntletRecord: Codable, Sendable, Equatable {
@@ -91,7 +91,7 @@ struct GauntletRecord: Codable, Sendable, Equatable {
     /// exact string the completeness check byte-compares against.
     let content: String
     /// The filing location, `wing/room[/...]` form. The runner maps the first
-    /// two segments to MemPalace wing+room and passes the whole string as the
+    /// two segments to the contender's wing+room and passes the whole string as the
     /// mootx01 location.
     let location: String
     /// Which tier this record belongs to (the needle and all its distractors

@@ -11,12 +11,12 @@ final class ConfigTests: XCTestCase {
         return url
     }
 
-    /// A complete, valid config: MemPalace source → MOOTx01 target.
+    /// A complete, valid config: contender source → MOOTx01 target.
     private let validJSON = """
     {
       "source": {
-        "name": "mempalace",
-        "transport": { "stdio": { "command": "mempalace-mcp" } },
+        "name": "contender",
+        "transport": { "stdio": { "command": "contender-mcp" } },
         "verbMap": { "write": "store", "query": "search", "list": "list_all" },
         "role": "source"
       },
@@ -34,7 +34,7 @@ final class ConfigTests: XCTestCase {
         let url = try writeTempConfig(validJSON)
         defer { try? FileManager.default.removeItem(at: url) }
         let cfg = try BenchmarkerConfig.load(from: url)
-        XCTAssertEqual(cfg.source.name, "mempalace")
+        XCTAssertEqual(cfg.source.name, "contender")
         XCTAssertEqual(cfg.target.name, "mootx01")
         XCTAssertEqual(cfg.source.verbMap.write, "store")
         XCTAssertEqual(cfg.target.verbMap.query, "recall")

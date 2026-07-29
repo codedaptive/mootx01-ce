@@ -14,31 +14,31 @@ import Foundation
 //   mcp-benchmarker gauntlet-corpus --seed N --out DIR [--per-tier N]
 //        [--distractors N] [--tiers T1=a,T2=b,...]
 //   mcp-benchmarker gauntlet --config c.json --corpus DIR --run-label LABEL
-//        [--out DIR] [--k 1,5,10] [--limit N] [--reuse-backends] [--reuse-mempalace]
+//        [--out DIR] [--k 1,5,10] [--limit N] [--reuse-backends] [--reuse-contender]
 //        [--quick] [--moot-only]
 //
 // --reuse-backends skips the load + dream when both scratch backends already
 // hold the corpus (a load-marker beside each backend's data records the seed +
-// record count). It turns an ablation sweep from "re-pay MemPalace's Chroma load
+// record count). It turns an ablation sweep from "re-pay the contender's load
 // every run" into "load once, then query-only" — the per-iteration cost drops to
 // the query phase. A missing/mismatched marker loads fresh; the DegeneracyGuard
 // still aborts if a reused backend is actually empty.
 //
 // --quick skips ALL moot_recall_precise composition columns and runs only the
-// MemPalace baseline + three moot_memory_search strategy columns (~2-3 min vs
+// contender baseline + three moot_memory_search strategy columns (~2-3 min vs
 // ~25 min for the full ablation grid). The report carries a clear "QUICK MODE"
 // banner so a quick-mode artifact is never mistaken for a full ablation run.
 //
-// --moot-only suppresses MemPalace process startup, corpus loading, guard probes,
+// --moot-only suppresses contender process startup, corpus loading, guard probes,
 // and report columns. Corpus generation, MOOT writes, dreaming, query arguments,
 // scoring, and the MOOT DegeneracyGuard remain unchanged. This supports current
-// product retests without silently presenting historical MemPalace data as a
+// product retests without silently presenting historical contender data as a
 // live comparison.
 //
 // SAFETY: `gauntlet` WRITES to both backends. The CLI asserts the scratch flag
 // forms before constructing the runner: mootx01 must carry MOOTX01_DATA_DIR=/tmp
-// or ARIA_MCP_SQLITE_PATH=/tmp in its stdio command, and MemPalace must carry
-// the `--palace /tmp` FLAG (never the bare env var).
+// or ARIA_MCP_SQLITE_PATH=/tmp in its stdio command, and the contender must carry
+// the `--contender-dir /tmp` FLAG (never the bare env var).
 // A config that fails these checks aborts before a single write.
 
 // MARK: - corpus generation subcommand
@@ -92,25 +92,25 @@ func runGauntletCorpus(_ args: [String]) throws {
 /// Asserts that an endpoint's transport points at a SCRATCH backend per the plan
 /// safety rules. Throws (aborting before any write) when the scratch form is
 /// absent. mootx01 must carry `MOOTX01_DATA_DIR=/tmp` in its stdio command;
-/// MemPalace must carry the `--palace /tmp` FLAG.
+/// the contender must carry the `--contender-dir /tmp` FLAG.
 func assertScratchBackend(_ endpoint: EndpointConfig) throws {
     guard case let .stdio(command) = endpoint.transport else {
         throw MCPError(description: "gauntlet requires stdio backends; '\(endpoint.name)' is not stdio")
     }
     let lower = command.lowercased()
     let isMoot = lower.contains("mootx01") || endpoint.verbMap.write.hasPrefix("moot_")
-    let isMem = lower.contains("mempalace") || endpoint.verbMap.write.hasPrefix("mempalace_")
+    let isMem = lower.contains("contender") || endpoint.verbMap.write.hasPrefix("contender_")
     if isMem {
         // The FLAG form is mandatory — the bare env var leaves the KG on the real
-        // palace (the contamination bug). Require `--palace` AND a /tmp target.
-        guard command.contains("--palace") else {
+        // estate (the contamination bug). Require `--contender-dir` AND a /tmp target.
+        guard command.contains("--contender-dir") else {
             throw MCPError(description:
-                "SAFETY: MemPalace backend '\(endpoint.name)' must use the --palace FLAG "
+                "SAFETY: contender backend '\(endpoint.name)' must use the --contender-dir FLAG "
                 + "(never the bare env var); refusing to write. command=\(command)")
         }
-        guard scratchPathIsTmp(afterFlag: "--palace", in: command) else {
+        guard scratchPathIsTmp(afterFlag: "--contender-dir", in: command) else {
             throw MCPError(description:
-                "SAFETY: MemPalace --palace must point at a /tmp scratch path; refusing to write. "
+                "SAFETY: contender --contender-dir must point at a /tmp scratch path; refusing to write. "
                 + "command=\(command)")
         }
     } else if isMoot {
@@ -138,7 +138,7 @@ func assertScratchBackend(_ endpoint: EndpointConfig) throws {
         }
     } else {
         throw MCPError(description:
-            "SAFETY: backend '\(endpoint.name)' is neither recognizably mootx01 nor MemPalace; "
+            "SAFETY: backend '\(endpoint.name)' is neither recognizably mootx01 nor the contender; "
             + "refusing to write to an unverified backend.")
     }
 }
@@ -171,13 +171,13 @@ func scratchEnvVarIsTmp(key: String, in command: String) -> Bool {
 /// so `--reuse-backends` can place a load-marker beside the data and decide
 /// whether a reload is needed. Returns nil when no recognizable scratch path is
 /// present (reuse is then declined and the corpus loads fresh).
-///   • MemPalace:  the directory is the token after the `--palace` flag.
+///   • contender:  the directory is the token after the `--contender-dir` flag.
 ///   • mootx01:    `ARIA_MCP_SQLITE_PATH=<file>` → the file's PARENT directory;
 ///                 `MOOTX01_DATA_DIR=<dir>`       → that directory directly.
 func scratchDirectory(for endpoint: EndpointConfig) -> URL? {
     guard case let .stdio(command) = endpoint.transport else { return nil }
     let parts = command.split(separator: " ").map(String.init)
-    if let i = parts.firstIndex(of: "--palace"), i + 1 < parts.count {
+    if let i = parts.firstIndex(of: "--contender-dir"), i + 1 < parts.count {
         return URL(fileURLWithPath: parts[i + 1], isDirectory: true)
     }
     if let token = parts.first(where: { $0.hasPrefix("ARIA_MCP_SQLITE_PATH=") }) {
@@ -208,7 +208,7 @@ func loadMarkerMatches(_ url: URL, seed: UInt64, recordCount: Int) -> Bool {
 }
 
 /// gauntlet subcommand — load a corpus into both scratch backends, run every
-/// needle under MemPalace + mootx01×{raw,rrf,matrixAware} + the
+/// needle under the contender + mootx01×{raw,rrf,matrixAware} + the
 /// moot_recall_precise composition grid, score, and write the report. A
 /// DegeneracyGuard refusal aborts the table (non-zero exit, no report).
 ///
@@ -234,51 +234,52 @@ func runGauntlet(_ args: [String]) async throws {
     try assertScratchBackend(config.source)
     try assertScratchBackend(config.target)
 
-    // Identify which configured endpoint is MemPalace and which is mootx01 by
-    // their write-verb prefix (the config convention is source=MemPalace,
+    // Identify which configured endpoint is the contender and which is mootx01 by
+    // their write-verb prefix (the config convention is source=contender,
     // target=mootx01, but identify by verb so a swapped config still works).
-    let (memEndpoint, mootEndpoint) = try classifyEndpoints(config)
+    let (contenderEndpoint, mootEndpoint) = try classifyEndpoints(config)
 
     let corpus = try GauntletIO.loadCorpus(fromDirectory: corpusDir)
 
     let moot = try await connectedClient(for: mootEndpoint)
-    let mempalace = mootOnly ? moot : try await connectedClient(for: memEndpoint)
+    let contender = mootOnly ? moot : try await connectedClient(for: contenderEndpoint)
     defer {
         Task {
-            if !mootOnly { await mempalace.disconnect() }
+            if !mootOnly { await contender.disconnect() }
             await moot.disconnect()
         }
     }
 
-    // Per-backend reuse: MemPalace is a fixed external baseline whose ~20-min
-    // Chroma load is the dominant per-run cost, so it should load ONCE and be
-    // reused thereafter; mootx01 reloads fresh each run (its ingestion changes
-    // with the code under test). `--reuse-mempalace` reuses ONLY MemPalace;
+    // Per-backend reuse: the contender is a fixed external baseline whose load
+    // is the dominant per-run cost, so it should load ONCE and be reused
+    // thereafter; mootx01 reloads fresh each run (its ingestion changes with
+    // the code under test). `--reuse-contender` reuses ONLY the contender;
     // `--reuse-backends` reuses both. Each is gated on its own load-marker; a
     // missing/mismatched marker falls back to a fresh load for that backend, and
     // the DegeneracyGuard still aborts if a reused backend is actually empty.
     let reuseAll = flagPresent("--reuse-backends", in: args)
-    let reuseMemFlag = flagPresent("--reuse-mempalace", in: args)
-    let memMarker = scratchDirectory(for: memEndpoint).map(loadMarkerURL(inScratchDir:))
+    let reuseContenderFlag = flagPresent("--reuse-contender", in: args)
+    let contenderMarker = scratchDirectory(for: contenderEndpoint).map(loadMarkerURL(inScratchDir:))
     let mootMarker = scratchDirectory(for: mootEndpoint).map(loadMarkerURL(inScratchDir:))
     func markerMatches(_ m: URL?) -> Bool {
         guard let m else { return false }
         return loadMarkerMatches(m, seed: corpus.seed, recordCount: corpus.records.count)
     }
-    let reuseMem = (reuseAll || reuseMemFlag) && markerMatches(memMarker)
+    let reuseContender = (reuseAll || reuseContenderFlag) && markerMatches(contenderMarker)
     let reuseMoot = reuseAll && markerMatches(mootMarker)
-    if (reuseAll || reuseMemFlag), !reuseMem {
+    if (reuseAll || reuseContenderFlag), !reuseContender {
         FileHandle.standardError.write(Data((
-            "reuse: requested but no matching MemPalace load-marker (seed \(corpus.seed), "
-            + "\(corpus.records.count) records) — loading MemPalace fresh; marker written for next time.\n").utf8))
+            "reuse: requested but no matching contender load-marker (seed \(corpus.seed), "
+            + "\(corpus.records.count) records) — loading contender fresh; marker written for next time.\n").utf8))
     }
 
     let scorer = GauntletScorer(kValues: kValues)
     let runner = GauntletRunner(
-        mempalace: mempalace, memVerbs: memEndpoint.verbMap,
+        contender: contender, contenderVerbs: contenderEndpoint.verbMap,
         moot: moot, mootVerbs: mootEndpoint.verbMap,
         corpus: corpus, scorer: scorer, runLabel: runLabel, searchLimit: searchLimit,
-        reuseMem: reuseMem, reuseMoot: reuseMoot, memMarker: memMarker, mootMarker: mootMarker,
+        reuseContender: reuseContender, reuseMoot: reuseMoot,
+        contenderMarker: contenderMarker, mootMarker: mootMarker,
         quickMode: quickMode, mootOnly: mootOnly)
 
     // Capture provenance before the run so the timestamp records when queries
@@ -365,18 +366,18 @@ func captureGitSHA() -> String {
     return sha
 }
 
-/// Returns (memPalaceEndpoint, mootx01Endpoint) from a config, identifying each
+/// Returns (contenderEndpoint, mootx01Endpoint) from a config, identifying each
 /// by its write-verb prefix. Throws when the config does not contain exactly one
 /// of each.
-func classifyEndpoints(_ config: BenchmarkerConfig) throws -> (mem: EndpointConfig, moot: EndpointConfig) {
+func classifyEndpoints(_ config: BenchmarkerConfig) throws -> (contender: EndpointConfig, moot: EndpointConfig) {
     let endpoints = [config.source, config.target]
-    let mem = endpoints.first { $0.verbMap.write.hasPrefix("mempalace_") }
+    let contender = endpoints.first { $0.verbMap.write.hasPrefix("contender_") }
     let moot = endpoints.first { $0.verbMap.write.hasPrefix("moot_") }
-    guard let mem, let moot else {
+    guard let contender, let moot else {
         throw MCPError(description:
-            "gauntlet config must contain one MemPalace endpoint (write mempalace_*) and one "
+            "gauntlet config must contain one contender endpoint (write contender_*) and one "
             + "mootx01 endpoint (write moot_*); got writes "
             + "[\(config.source.verbMap.write), \(config.target.verbMap.write)]")
     }
-    return (mem, moot)
+    return (contender, moot)
 }

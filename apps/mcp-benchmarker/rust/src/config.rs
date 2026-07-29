@@ -4,7 +4,7 @@
 //! to two MCP servers whose tool names it does not know in advance. The
 //! `verb_map` on each endpoint is the decoupling layer — it names which of
 //! THIS server's MCP tools mean write / query / list, so the tool is never
-//! hardcoded to MemPalace's or MOOTx01's specific tool names.
+//! hardcoded to any specific server's tool names.
 //!
 //! Config is JSON. The custom decode below reproduces the Swift `VerbMap`
 //! decoder bit for bit:
@@ -12,8 +12,7 @@
 //!     [`ConfigError::MissingField`] with a dotted path, at load time, not at
 //!     first use;
 //!   - the argument-key and result-format fields default when absent, so a
-//!     terse config still decodes and runs against the MOOTx01/MemPalace
-//!     defaults.
+//!     terse config still decodes and runs with defaults.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -72,7 +71,7 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResultFormat {
     /// JSON objects; `id_key` names the id field (None when the server returns
-    /// no stable id, e.g. MemPalace search), `content_key` names the content.
+    /// no stable id), `content_key` names the content.
     JsonObjects {
         id_key: Option<String>,
         content_key: String,
@@ -335,10 +334,10 @@ impl VerbMap {
 }
 
 /// The default constant-args map: the MOOTx01 import case. Mirrors the Swift
-/// `["location": "import/mempalace"]` default.
+/// `["location": "import/contender"]` default.
 fn default_constant_args() -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
-    m.insert("location".to_string(), "import/mempalace".to_string());
+    m.insert("location".to_string(), "import/contender".to_string());
     m
 }
 
@@ -437,8 +436,8 @@ mod tests {
     const VALID: &str = r#"
     {
       "source": {
-        "name": "mempalace",
-        "transport": { "stdio": { "command": "mempalace-mcp" } },
+        "name": "contender",
+        "transport": { "stdio": { "command": "contender-mcp" } },
         "verbMap": { "write": "store", "query": "search", "list": "list_all" },
         "role": "source"
       },
@@ -454,7 +453,7 @@ mod tests {
     #[test]
     fn valid_config_loads() {
         let cfg = BenchmarkerConfig::from_slice(VALID.as_bytes()).unwrap();
-        assert_eq!(cfg.source.name, "mempalace");
+        assert_eq!(cfg.source.name, "contender");
         assert_eq!(cfg.target.name, "mootx01");
         assert_eq!(cfg.source.verb_map.write, "store");
         assert_eq!(cfg.target.verb_map.query, "recall");
@@ -512,22 +511,22 @@ mod tests {
         assert_eq!(vm.query_arg, "query");
         assert_eq!(
             vm.constant_args.get("location").map(|s| s.as_str()),
-            Some("import/mempalace")
+            Some("import/contender")
         );
         assert_eq!(vm.result_format, ResultFormat::default_format());
     }
 
     #[test]
-    fn mempalace_format_decodes() {
+    fn contender_format_decodes() {
         let vm = load_verb_map(
             r#"{
-              "write": "mempalace_add_drawer",
-              "query": "mempalace_search",
-              "list": "mempalace_list_drawers",
+              "write": "contender_add_drawer",
+              "query": "contender_search",
+              "list": "contender_list_drawers",
               "resultFormat": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "content_preview" }
             }"#,
         );
-        assert_eq!(vm.list.as_deref(), Some("mempalace_list_drawers"));
+        assert_eq!(vm.list.as_deref(), Some("contender_list_drawers"));
         assert_eq!(
             vm.result_format,
             ResultFormat::JsonObjects {
@@ -544,7 +543,7 @@ mod tests {
               "write": "moot_file_memory",
               "query": "moot_memory_search",
               "list": null,
-              "constantArgs": { "location": "import/mempalace" },
+              "constantArgs": { "location": "import/contender" },
               "resultFormat": { "kind": "mootText" }
             }"#,
         );
@@ -552,17 +551,17 @@ mod tests {
         assert_eq!(vm.result_format, ResultFormat::MootText);
         assert_eq!(
             vm.constant_args.get("location").map(|s| s.as_str()),
-            Some("import/mempalace")
+            Some("import/contender")
         );
     }
 
     #[test]
-    fn mempalace_two_constant_args() {
+    fn contender_two_constant_args() {
         let vm = load_verb_map(
             r#"{
-              "write": "mempalace_add_drawer",
-              "query": "mempalace_search",
-              "list": "mempalace_list_drawers",
+              "write": "contender_add_drawer",
+              "query": "contender_search",
+              "list": "contender_list_drawers",
               "constantArgs": { "wing": "wing_import", "room": "general" }
             }"#,
         );

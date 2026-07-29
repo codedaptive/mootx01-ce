@@ -2,7 +2,7 @@ import Foundation
 
 // GauntletReport.swift — aggregation + rendering of a gauntlet run (Phase 2.2).
 //
-// A run produces, per STRATEGY COLUMN (MemPalace search; mootx01 raw / rrf /
+// A run produces, per STRATEGY COLUMN (contender search; mootx01 raw / rrf /
 // matrixAware), a set of per-needle NeedleScores. This file aggregates those
 // into the per-tier and per-strategy tables the plan requires (line 136) and
 // renders the human report, including the verbatim "Definition of superior"
@@ -64,11 +64,11 @@ struct StrategyTierAggregate: Sendable, Equatable {
 /// One strategy column's full result: its name, every per-needle score, and the
 /// per-tier + overall aggregates.
 struct StrategyResult: Sendable {
-    /// The column name, e.g. "mempalace", "mootx01:raw", "mootx01:rrf",
+    /// The column name, e.g. "contender", "mootx01:raw", "mootx01:rrf",
     /// "mootx01:matrixAware".
     let name: String
     /// Whether this column is a mootx01 strategy (used by the superiority check
-    /// to identify mootx01's best column vs the MemPalace baseline).
+    /// to identify mootx01's best column vs the contender baseline).
     let isMootx01: Bool
     let scores: [NeedleScore]
     let perTier: [StrategyTierAggregate]
@@ -152,17 +152,17 @@ struct GauntletRunReport: Sendable {
     /// The verbatim definition-of-superior text (plan lines 139-141). Public and
     /// constant so the header always carries it word-for-word.
     static let definitionOfSuperior =
-        "Definition of superior: mootx01's best strategy wins or ties MemPalace "
+        "Definition of superior: mootx01's best strategy wins or ties the contender baseline "
         + "on found@k, MRR, and completeness on EVERY tier, with strictly better "
         + "contamination or latency, before any claim is made."
 
     /// Evaluates the definition-of-superior against the aggregates and returns a
     /// human verdict line. mootx01's BEST column (by overall found@1) is compared
-    /// against the MemPalace column tier by tier. This is a measurement, not a
+    /// against the contender column tier by tier. This is a measurement, not a
     /// claim generator — it states whether the bar is met, and if not, why.
     func superiorityVerdict() -> String {
         guard let baseline = strategies.first(where: { !$0.isMootx01 }) else {
-            return "superiority: NOT EVALUABLE — no MemPalace baseline column present"
+            return "superiority: NOT EVALUABLE — no contender baseline column present"
         }
         let mootColumns = strategies.filter(\.isMootx01)
         guard !mootColumns.isEmpty else {
@@ -189,7 +189,7 @@ struct GauntletRunReport: Sendable {
         }
         if !failingTiers.isEmpty {
             return "superiority: NOT MET — mootx01 best column '\(best.name)' is beaten by "
-                + "MemPalace on tier(s) \(failingTiers.joined(separator: ", ")) "
+                + "contender on tier(s) \(failingTiers.joined(separator: ", ")) "
                 + "(found@k / MRR / completeness). No claim may be made."
         }
         // Tie-or-win on every tier met. Now require STRICTLY better contamination

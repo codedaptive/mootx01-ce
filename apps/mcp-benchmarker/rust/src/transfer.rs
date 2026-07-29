@@ -333,12 +333,12 @@ mod tests {
     }
 
     fn source_verbs() -> VerbMap {
-        // MemPalace-style: list paginates, fetch full content, jsonObjects.
+        // contender-style: list paginates, fetch full content, jsonObjects.
         let mut vm = VerbMap::new(
-            "mempalace_add_drawer",
-            "mempalace_search",
-            Some("mempalace_list_drawers".to_string()),
-            Some("mempalace_get_drawer".to_string()),
+            "contender_add_drawer",
+            "contender_search",
+            Some("contender_list_drawers".to_string()),
+            Some("contender_get_drawer".to_string()),
             None,
             None,
             Some(BTreeMap::new()),
@@ -373,7 +373,7 @@ mod tests {
         let mut source = ScriptedCaller::new();
         // Page 1 (full, 2 items), page 2 (short, 1 item) → corpus end.
         source.script(
-            "mempalace_list_drawers",
+            "contender_list_drawers",
             vec![
                 Ok(list_result(vec![
                     item(Some("d1"), Some("preview-1")),
@@ -383,7 +383,7 @@ mod tests {
             ],
         );
         // Fetch full content per id.
-        source.script("mempalace_get_drawer", vec![
+        source.script("contender_get_drawer", vec![
             Ok(list_result(vec![item(Some("d1"), Some("full content 1"))])),
             Ok(list_result(vec![item(Some("d2"), Some("full content 2"))])),
             Ok(list_result(vec![item(Some("d3"), Some("full content 3"))])),
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn write_failure_recorded_and_capped_sample() {
         let mut source = ScriptedCaller::new();
-        source.script("mempalace_list_drawers", vec![Ok(list_result(vec![
+        source.script("contender_list_drawers", vec![Ok(list_result(vec![
             item(Some("d1"), Some("full-1")),
             item(Some("d2"), Some("full-2")),
         ]))]);

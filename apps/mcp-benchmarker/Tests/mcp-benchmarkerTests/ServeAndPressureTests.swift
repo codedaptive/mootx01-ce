@@ -38,13 +38,13 @@ struct RollingStatsTests {
         let stats = RollingStats()
         await stats.recordLatency(0.010, label: "mootx01.read")
         await stats.recordLatency(0.030, label: "mootx01.read")
-        await stats.recordLatency(0.050, label: "mempalace.read")
+        await stats.recordLatency(0.050, label: "contender.read")
         await stats.recordDivergence(jaccard: 0.2, kendallRank: 0.0)
         await stats.recordDivergence(jaccard: 0.4, kendallRank: 1.0)
 
         let snap = await stats.snapshot()
         // Series are emitted in sorted-label order.
-        #expect(snap.series.map(\.label) == ["mempalace.read", "mootx01.read"])
+        #expect(snap.series.map(\.label) == ["contender.read", "mootx01.read"])
         let mootRead = snap.series.first { $0.label == "mootx01.read" }!
         #expect(abs(mootRead.mean - 0.020) < 1e-9)
         #expect(mootRead.totalCount == 2)
@@ -78,7 +78,7 @@ struct FetchParseTests {
 
     @Test("get_drawer single object parses full content under the fetch key")
     func singleRecordFetch() {
-        // MemPalace get_drawer returns ONE bare object (no array wrapper) with
+        // get_drawer returns ONE bare object (no array wrapper) with
         // full content under `content` (not the truncated `content_preview`).
         let payload = """
         {
@@ -145,21 +145,21 @@ struct ImporterConfigTests {
         #expect(vm.listPageSize == 100)
     }
 
-    @Test("MemPalace source verbMap decodes fetch + pagination fields")
-    func mempalaceImporterFields() throws {
+    @Test("contender source verbMap decodes fetch + pagination fields")
+    func contenderImporterFields() throws {
         let vm = try loadVerbMap("""
         {
-          "write": "mempalace_add_drawer",
-          "query": "mempalace_search",
-          "list": "mempalace_list_drawers",
-          "fetch": "mempalace_get_drawer",
+          "write": "contender_add_drawer",
+          "query": "contender_search",
+          "list": "contender_list_drawers",
+          "fetch": "contender_get_drawer",
           "fetchIDArg": "drawer_id",
           "fetchContentKey": "content",
           "listPageSize": 100,
           "resultFormat": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "content_preview" }
         }
         """)
-        #expect(vm.fetch == "mempalace_get_drawer")
+        #expect(vm.fetch == "contender_get_drawer")
         #expect(vm.fetchContentKey == "content")
         #expect(vm.listPageSize == 100)
     }
@@ -173,7 +173,7 @@ struct PressurePathTests {
     func fourPaths() {
         #expect(PressurePath.allCases.count == 4)
         #expect(Set(PressurePath.allCases.map(\.rawValue)) == [
-            "mootx01.read", "mootx01.write", "mempalace.read", "mempalace.write",
+            "mootx01.read", "mootx01.write", "contender.read", "contender.write",
         ])
     }
 

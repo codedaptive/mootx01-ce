@@ -1,20 +1,20 @@
 {
-  "_comment": "Conformance vectors for CapabilityManifest decode + resolve. Both legs must decode each manifest identically. Sources of truth: manifests/mempalace.json, mem0.json, gbrain.json. See CapabilityManifest.swift for the decode/resolve algorithm.",
+  "_comment": "Conformance vectors for CapabilityManifest decode + resolve. Both legs must decode each manifest identically. Sources of truth: manifests/contender.json, mem0.json, gbrain.json. See CapabilityManifest.swift for the decode/resolve algorithm.",
   "manifests": [
     {
-      "id": "mempalace",
-      "source_file": "manifests/mempalace.json",
+      "id": "contender",
+      "source_file": "manifests/contender.json",
       "expected": {
         "schema_version": 1,
-        "product_id": "mempalace",
+        "product_id": "contender",
         "provenance": "ground-truth-ours",
         "transport_kind": "stdio",
-        "transport_command": "mempalace-mcp",
+        "transport_command": "contender-mcp",
         "role": "both",
         "call_count": 4,
         "calls": {
           "write": {
-            "tool": "mempalace_add_drawer",
+            "tool": "contender_add_drawer",
             "technique": ["embedding"],
             "unmatched": false,
             "result_kind": "jsonObjects",
@@ -23,7 +23,7 @@
             "constant_args": { "wing": "benchmark", "room": "import" }
           },
           "query": {
-            "tool": "mempalace_search",
+            "tool": "contender_search",
             "technique": ["bm25", "vector_cosine"],
             "unmatched": false,
             "result_kind": "jsonObjects",
@@ -32,7 +32,7 @@
             "constant_args": {}
           },
           "list": {
-            "tool": "mempalace_list_drawers",
+            "tool": "contender_list_drawers",
             "technique": ["none"],
             "unmatched": false,
             "result_kind": "jsonObjects",
@@ -41,7 +41,7 @@
             "constant_args": {}
           },
           "fetch": {
-            "tool": "mempalace_get_drawer",
+            "tool": "contender_get_drawer",
             "technique": ["none"],
             "unmatched": false,
             "result_kind": "jsonObjects",
@@ -52,13 +52,13 @@
         },
         "dispatch_table": {
           "write": {
-            "tool_name": "mempalace_add_drawer",
+            "tool_name": "contender_add_drawer",
             "technique": ["embedding"],
             "unmatched": false,
             "provenance": "ground-truth-ours"
           },
           "query": {
-            "tool_name": "mempalace_search",
+            "tool_name": "contender_search",
             "technique": ["bm25", "vector_cosine"],
             "unmatched": false,
             "provenance": "ground-truth-ours"

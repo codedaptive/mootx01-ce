@@ -87,7 +87,7 @@ import Foundation
                 secondaryRanking: ["c", "d"]
             )
         )
-        let text = report.rendered(primaryName: "mootx01", secondaryName: "mempalace")
+        let text = report.rendered(primaryName: "mootx01", secondaryName: "contender")
         #expect(!text.isEmpty)
         // The rendered output must mention the failure count somewhere.
         #expect(text.contains("1"))

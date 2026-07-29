@@ -31,7 +31,7 @@ struct CorpusRecord: Codable, Sendable {
         let confirmation: String   // confirmed | unconfirmed
         let sensitivity: String    // normal | sensitive
         let latticeAnchor: String  // equals clusterId
-        let wing: String           // MemPalace wing (1:1 with cluster)
+        let wing: String           // contender wing (1:1 with cluster)
         let room: String           // equals role
     }
 }
@@ -50,13 +50,13 @@ struct QualityQuery: Codable, Sendable {
 }
 
 /// One filter test, decoded from filter-tests.json. `mootFilter` is always
-/// present (`<key>=<value>` over the tags map); `mempalaceFilter` is present
+/// present (`<key>=<value>` over the tags map); `contenderFilter` is present
 /// only for the wing tests (`wing=<Wing Name>`). `expectIds` is the exact set a
 /// correct filter must return.
 struct FilterTest: Codable, Sendable {
     let id: String
     let mootFilter: String
-    let mempalaceFilter: String?
+    let contenderFilter: String?
     let expectIds: [String]
 }
 
@@ -153,11 +153,11 @@ struct QualityFixture: Sendable {
         // (confirmation/sensitivity) keep whatever expected ids fall in slice.
         let keptFilters: [FilterTest] = filterTests.compactMap { test in
             let narrowed = test.expectIds.filter { keptIDs.contains($0) }
-            let isWing = test.mempalaceFilter != nil
+            let isWing = test.contenderFilter != nil
             if isWing && narrowed.isEmpty { return nil }
             return FilterTest(id: test.id,
                               mootFilter: test.mootFilter,
-                              mempalaceFilter: test.mempalaceFilter,
+                              contenderFilter: test.contenderFilter,
                               expectIds: narrowed)
         }
 
@@ -178,8 +178,8 @@ struct QualityFixture: Sendable {
 ///      `filed memory <UUID>`), record productID → corpusID directly.
 ///   2. content fallback: when a search result carries no usable product id, or
 ///      an id never seen at write time, match on a normalized content prefix —
-///      the only identity shared when ids are not echoed (e.g. MemPalace search
-///      returns content with no stable drawer id in the hit).
+///      the only identity shared when ids are not echoed (e.g. the contender's
+///      search returns content with no stable id in the hit).
 ///
 /// The fallback indexes each corpus article by a normalized prefix of its body;
 /// a search hit's content is normalized the same way and looked up. Content is

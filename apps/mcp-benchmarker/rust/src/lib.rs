@@ -24,7 +24,7 @@
 //!   errors, terse-config defaults). Matches `Config.swift`.
 //! - [`mcp_result`] — `parse_tool_result` for the two real shapes
 //!   (`jsonObjects` + `mootText`), `normalized_content_order`, and the
-//!   MemPalace `drawer_id`/`content_preview` and MOOTx01 `filed memory <UUID>`
+//!   contender `drawer_id`/`content_preview` and MOOTx01 `filed memory <UUID>`
 //!   parsing. Matches the parsing half of `MCPClient.swift` +
 //!   `BenchmarkEngine.normalizedContentOrder`.
 //!

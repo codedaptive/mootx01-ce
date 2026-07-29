@@ -32,7 +32,7 @@ struct BenchmarkReport: Codable, Sendable {
     let verification: SeriesSummary
     /// The source server's recall latency, populated only by a
     /// `--compare-source` run. Its `sampleCount` is 0 on a target-only run, in
-    /// which case the renderer omits the line. This is the MemPalace side of
+    /// which case the renderer omits the line. This is the contender side of
     /// the head-to-head latency comparison.
     let sourceRecall: SeriesSummary
     /// Aggregate Jaccard set divergence across the full expected-vs-found id

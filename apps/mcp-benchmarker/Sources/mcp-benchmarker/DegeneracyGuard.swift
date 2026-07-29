@@ -140,8 +140,8 @@ struct DegeneracyGuard: Sendable {
     // MARK: - confirmation-contradiction check
 
     /// Returns `true` when `confirmedCount` = 0 while `total` > 0 and `recall`
-    /// is above `confirmationRecallFloor`. This is the MemPalace confirmation
-    /// round-trip defect pattern: the count says nothing was confirmed, but the
+    /// is above `confirmationRecallFloor`. This is a confirmation round-trip
+    /// defect pattern: the count says nothing was confirmed, but the
     /// recall says items are being found — a contradiction that makes the number
     /// untrustworthy until the confirmation path is verified.
     func checkConfirmation(confirmedCount: Int, total: Int, recall: Double) -> Bool {

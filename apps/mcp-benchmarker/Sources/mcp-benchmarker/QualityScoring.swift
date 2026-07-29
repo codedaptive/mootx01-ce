@@ -127,7 +127,7 @@ func ndcgAtK(ranked: [String], truth: QueryTruth, k: Int) -> Double {
 
 /// Precision and recall of a filter result against the known-correct id set.
 ///
-/// A filter (mootx01 `userConfirmed`, or MemPalace per-wing) is correct iff it
+/// A filter (mootx01 `userConfirmed`, or the contender's per-wing) is correct iff it
 /// returns EXACTLY the expected corpus ids. Precision = |returned ∩ expected| /
 /// |returned| (did it return only correct ids?); recall = |returned ∩ expected|
 /// / |expected| (did it return all correct ids?). Sets, not ranks: a filter is

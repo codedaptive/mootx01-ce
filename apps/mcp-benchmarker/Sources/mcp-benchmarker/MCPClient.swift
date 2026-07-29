@@ -100,11 +100,11 @@ enum JSONValue: Codable, Sendable, Equatable {
 
 /// One parsed result item: its id (when the server returns one) and its
 /// content (the searchable text). Both are optional so a server that returns
-/// content without a stable id (MemPalace search) and one that returns an id
-/// without inline content both parse into the same shape.
+/// content without a stable id (e.g. a search endpoint that returns no id)
+/// and one that returns an id without inline content both parse into the same shape.
 struct MCPResultItem: Sendable, Equatable {
     /// The item's stable id, when the server returns one. Nil for servers
-    /// whose search results carry no id (e.g. MemPalace `search`).
+    /// whose search results carry no id (e.g. the contender's `search`).
     let id: String?
     /// The item's content / searchable text, when present.
     let content: String?
@@ -550,7 +550,7 @@ actor MCPClient {
     ///   - `.jsonObjects(idKey, contentKey)`: items are JSON objects found in
     ///     `structuredContent` first, else in the first `text` block parsed as
     ///     JSON. Each item's id is read from `idKey` (when non-nil) and its
-    ///     content from `contentKey`. Used by MemPalace (`list_drawers` →
+    ///     content from `contentKey`. Used by the contender (`list_drawers` →
     ///     `drawer_id`/`content_preview`; `search` → no id / `text`).
     ///   - `.mootText`: MOOTx01 plain text. A search result is `found N`
     ///     followed by `<UUID>  [location]  <content>` per ranked line; a write
@@ -610,7 +610,7 @@ actor MCPClient {
 
     /// Pulls the array of result objects out of a value that is either an
     /// array of objects or an object holding such an array under a single
-    /// array-valued key (e.g. MemPalace `results` / `drawers`). An object is
+    /// array-valued key (e.g. the contender's `results` / `drawers`). An object is
     /// kept when it carries the id key (if one is named) or the content key —
     /// so a server that returns content without ids still parses. Returns nil
     /// when no qualifying array is found.
@@ -627,9 +627,9 @@ actor MCPClient {
             return qualifying(array)
         }
         // Object handling: first look at every array-valued member (server
-        // wrappers like MemPalace's `drawers`/`results`); if none qualifies,
+        // wrappers like the contender's `drawers`/`results`); if none qualifies,
         // treat the object ITSELF as a single record when it carries the id or
-        // content key. The single-record case is a `fetch` result (MemPalace
+        // content key. The single-record case is a `fetch` result (the contender's
         // `get_drawer` returns one bare object with full `content`, not an
         // array), which a faithful transfer must read.
         if case .object(let obj) = value {

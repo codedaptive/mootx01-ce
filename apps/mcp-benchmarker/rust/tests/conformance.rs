@@ -159,42 +159,42 @@ fn divergence_rank_vectors() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn manifest_shipped_mempalace() {
-    let path = manifest_path("mempalace.json");
+fn manifest_shipped_contender() {
+    let path = manifest_path("contender.json");
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let manifest = CapabilityManifest::decode(&data)
-        .expect("mempalace.json must decode without error");
+        .expect("contender.json must decode without error");
 
     assert_eq!(manifest.schema_version, 1);
-    assert_eq!(manifest.product.id, "mempalace");
+    assert_eq!(manifest.product.id, "contender");
     assert_eq!(manifest.product.provenance.as_str(), "ground-truth-ours");
-    assert_eq!(manifest.calls.len(), 4, "mempalace must have 4 call entries");
+    assert_eq!(manifest.calls.len(), 4, "contender must have 4 call entries");
 
     let write = manifest.calls.get("write").expect("write entry must exist");
-    assert_eq!(write.tool, "mempalace_add_drawer");
+    assert_eq!(write.tool, "contender_add_drawer");
     assert_eq!(write.technique, vec!["embedding"]);
     assert!(!write.unmatched);
     assert_eq!(write.constant_args.get("wing").map(|s| s.as_str()), Some("benchmark"));
     assert_eq!(write.constant_args.get("room").map(|s| s.as_str()), Some("import"));
 
     let query = manifest.calls.get("query").expect("query entry must exist");
-    assert_eq!(query.tool, "mempalace_search");
+    assert_eq!(query.tool, "contender_search");
     assert!(query.technique.contains(&"bm25".to_string()));
     assert!(query.technique.contains(&"vector_cosine".to_string()));
     assert!(query.constant_args.is_empty());
 
     let list = manifest.calls.get("list").expect("list entry must exist");
-    assert_eq!(list.tool, "mempalace_list_drawers");
+    assert_eq!(list.tool, "contender_list_drawers");
     assert_eq!(list.technique, vec!["none"]);
     assert!(list.pagination.is_some());
 
     let fetch = manifest.calls.get("fetch").expect("fetch entry must exist");
-    assert_eq!(fetch.tool, "mempalace_get_drawer");
+    assert_eq!(fetch.tool, "contender_get_drawer");
 
     // Dispatch table.
     let table = manifest.resolve_dispatch_table();
     let d_query = table.get("query").expect("dispatch query entry must exist");
-    assert_eq!(d_query.tool_name, "mempalace_search");
+    assert_eq!(d_query.tool_name, "contender_search");
     assert_eq!(d_query.provenance.as_str(), "ground-truth-ours");
 }
 

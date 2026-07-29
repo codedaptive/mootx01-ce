@@ -8,8 +8,8 @@ import Foundation
 // DegeneracyGuard ran.
 //
 // SAFETY: the backends are pointed at FRESH /tmp scratch dirs only — mootx01 via
-// MOOTX01_DATA_DIR=/tmp/..., MemPalace via the `--palace /tmp/...` FLAG (never the
-// bare env var). The real ~/.mempalace and the real mootx01 data dir are NEVER
+// MOOTX01_DATA_DIR=/tmp/..., contender via the `--contender-dir /tmp/...` FLAG (never the
+// bare env var). The real contender data dir and the real mootx01 data dir are NEVER
 // touched. The scratch dirs are removed before and after the run.
 //
 // GUARDED: the test is skipped (not failed) when either backend binary is absent,
@@ -22,11 +22,11 @@ struct GauntletLiveE2ETests {
     // Known install paths (CONFIG.md / plan). The test self-skips if either is
     // missing so CI without the servers does not fail.
     private static let mootBinary = "\(NSHomeDirectory())/.mootx01/bin/mootx01"
-    private static let mempalaceBinary = "\(NSHomeDirectory())/.local/bin/mempalace-mcp"
+    private static let contenderBinary = "\(NSHomeDirectory())/.local/bin/contender-mcp"
 
     private static var backendsAvailable: Bool {
         FileManager.default.isExecutableFile(atPath: mootBinary)
-            && FileManager.default.fileExists(atPath: mempalaceBinary)
+            && FileManager.default.fileExists(atPath: contenderBinary)
     }
 
     @Test("tiny corpus loads into both scratch backends, scores, and produces a report")
@@ -37,14 +37,14 @@ struct GauntletLiveE2ETests {
             // Fresh scratch dirs under /tmp — wiped before and after.
             let stamp = UUID().uuidString.prefix(8)
             let mootDir = "/tmp/gauntlet-e2e-moot-\(stamp)"
-            let palaceDir = "/tmp/gauntlet-e2e-palace-\(stamp)"
+            let contenderDir = "/tmp/gauntlet-e2e-contender-\(stamp)"
             let outDir = "/tmp/gauntlet-e2e-out-\(stamp)"
-            for d in [mootDir, palaceDir, outDir] {
+            for d in [mootDir, contenderDir, outDir] {
                 try? FileManager.default.removeItem(atPath: d)
             }
-            try FileManager.default.createDirectory(atPath: palaceDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(atPath: contenderDir, withIntermediateDirectories: true)
             defer {
-                for d in [mootDir, palaceDir, outDir] {
+                for d in [mootDir, contenderDir, outDir] {
                     try? FileManager.default.removeItem(atPath: d)
                 }
             }
@@ -55,12 +55,12 @@ struct GauntletLiveE2ETests {
             #expect(corpus.needles.count == 10)
 
             // Scratch endpoints — the FLAG forms only.
-            let memEndpoint = EndpointConfig(
-                name: "mempalace",
-                transport: .stdio(command: "\(Self.mempalaceBinary) --palace \(palaceDir)"),
+            let contenderEndpoint = EndpointConfig(
+                name: "contender",
+                transport: .stdio(command: "\(Self.contenderBinary) --contender-dir \(contenderDir)"),
                 auth: nil,
                 verbMap: EndpointConfig.VerbMap(
-                    write: "mempalace_add_drawer", query: "mempalace_search",
+                    write: "contender_add_drawer", query: "contender_search",
                     list: nil, resultFormat: .jsonObjects(idKey: nil, contentKey: "text")),
                 role: .source)
             let mootEndpoint = EndpointConfig(
@@ -73,18 +73,18 @@ struct GauntletLiveE2ETests {
                 role: .target)
 
             // The safety gate must accept both (and would throw if it did not).
-            try assertScratchBackend(memEndpoint)
+            try assertScratchBackend(contenderEndpoint)
             try assertScratchBackend(mootEndpoint)
 
-            let mempalace = MCPClient(endpoint: memEndpoint)
+            let contender = MCPClient(endpoint: contenderEndpoint)
             let moot = MCPClient(endpoint: mootEndpoint)
-            try await mempalace.connect()
+            try await contender.connect()
             try await moot.connect()
-            defer { Task { await mempalace.disconnect(); await moot.disconnect() } }
+            defer { Task { await contender.disconnect(); await moot.disconnect() } }
 
             let scorer = GauntletScorer(kValues: [1, 5, 10])
             let runner = GauntletRunner(
-                mempalace: mempalace, memVerbs: memEndpoint.verbMap,
+                contender: contender, contenderVerbs: contenderEndpoint.verbMap,
                 moot: moot, mootVerbs: mootEndpoint.verbMap,
                 corpus: corpus, scorer: scorer, runLabel: "e2e-test", searchLimit: 20)
 
@@ -107,11 +107,11 @@ struct GauntletLiveE2ETests {
                 let report = try await runner.run()
 
                 // Branch (a): healthy. A complete, well-formed report.
-                // Full run: 1 (mempalace) + 3 (scoring) + compositionNames.count (precise).
+                // Full run: 1 (contender) + 3 (scoring) + compositionNames.count (precise).
                 let expectedCount = 1 + MootScoring.allCases.count + GauntletRunner.compositionNames.count
                 #expect(report.guardHealthy == true)
                 #expect(report.strategies.count == expectedCount)
-                #expect(report.strategies.contains { $0.name == "mempalace" })
+                #expect(report.strategies.contains { $0.name == "contender" })
                 #expect(report.strategies.contains { $0.name == "mootx01:raw" })
                 #expect(report.strategies.contains { $0.name == "mootx01:rrf" })
                 #expect(report.strategies.contains { $0.name == "mootx01:matrixAware" })
