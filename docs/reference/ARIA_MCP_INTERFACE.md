@@ -324,7 +324,7 @@ the 23 reasoning-lens tools below.
 
 - `moot_list_lenses`, `moot_list_recipes`, `moot_synthesize`, `moot_recall_precise`,
   `moot_recall_shaped`, `moot_run_migration`, `moot_confirm_migration`, `moot_dream`,
-  `moot_consolidate`, `moot_recall_distilled`, `moot_recollect`,
+  `moot_distill` (alias: `moot_consolidate`), `moot_recall_distilled`, `moot_recollect`,
   `moot_hunt_contradictions`
   (12 CognitionKit recipe tools)
   - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
