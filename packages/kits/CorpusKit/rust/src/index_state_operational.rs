@@ -118,8 +118,17 @@ pub fn is_fully_covered(bitmap: i64, config_mask: i64, current_generation: i64) 
 
 /// Return a new bitmap value with the coverage bit for slot `slot_offset` (K)
 /// set and the basis generation stamped.
+///
+/// **Accumulation semantics:** existing coverage bits from prior providers are
+/// preserved (OR-ed in). After provider A stamps gen N the bitmap may carry
+/// B and C's bits (set under gen N-1) at the new generation stamp. Callers of
+/// `is_fully_covered` that require strict per-generation coverage must call
+/// `clearing_coverage_and_generation` before this function. The backfill path
+/// (which uses the authoritative `corpus_provider_coverage` side table) is
+/// unaffected by this behavior.
 pub fn setting_coverage_slot(bitmap: i64, slot_offset: u32, generation: i64) -> i64 {
     let slot_bit: i64 = 1 << (INDEX_COVERAGE_MASK_SHIFT + slot_offset);
+    // OR-in the new slot bit (preserves other providers' bits); clear and re-stamp generation.
     let with_slot = bitmap | slot_bit;
     let cleared_gen = with_slot & !INDEX_GENERATION_MASK;
     let gen_field = (generation & (INDEX_GENERATION_MODULUS - 1)) << INDEX_GENERATION_SHIFT;

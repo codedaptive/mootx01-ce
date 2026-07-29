@@ -126,6 +126,16 @@ This is the O(1) invalidation property.
 the new basis, it calls `updateBitmap(contentID:bitmap:)` to stamp the
 new coverage slot AND the new generation in the same operation.
 
+**Accumulation behavior:** `settingCoverageSlot(_:generation:)` ORs the
+new slot bit into the existing bitmap without clearing other providers'
+bits. This means once provider A re-stamps a row with gen N, the bitmap
+may show B and C's coverage bits (from gen N-1) at the new generation
+stamp. Callers of `isFullyCovered` that need strict per-generation
+per-provider coverage must clear first with `clearingCoverageAndGeneration()`
+before calling `settingCoverageSlot`. The backfill path uses the
+authoritative `corpus_provider_coverage` side table for all coverage
+decisions and is unaffected by this bitmap accumulation.
+
 ---
 
 ## Wraparound sweep (CoverageSweep)

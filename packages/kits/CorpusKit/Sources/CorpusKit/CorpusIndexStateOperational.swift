@@ -172,9 +172,18 @@ public extension CorpusIndexState {
     /// Return a new bitmap value with the coverage bit for `slotOffset` (K)
     /// set and the basis generation stamped to `generation`. Used by the
     /// engine's coverage write path.
+    ///
+    /// **Accumulation semantics:** existing coverage bits from *prior providers*
+    /// are preserved (ORed in). This means after provider A stamps gen N, the
+    /// bitmap may show B and C's bits (set under gen N-1) with the new generation
+    /// stamp. Callers of `isFullyCovered` must account for this: if accumulation
+    /// of cross-provider bits under a single new-generation stamp is not
+    /// acceptable for a given query path, use `clearingCoverageAndGeneration()`
+    /// before calling this method. The backfill path (which uses the authoritative
+    /// `corpus_provider_coverage` side table) is not affected.
     func settingCoverageSlot(_ slotOffset: Int, generation: Int64) -> Int64 {
         let slotBit: Int64 = 1 << (indexCoverageMaskShift + slotOffset)
-        // Set the slot coverage bit; stamp the generation field.
+        // OR-in the new slot bit (preserves other providers' bits); clear and re-stamp generation.
         let withSlot = operationalBitmap | slotBit
         let clearedGen = withSlot & ~indexGenerationMask
         let genField = (generation & (indexGenerationModulus - 1)) << indexGenerationShift
