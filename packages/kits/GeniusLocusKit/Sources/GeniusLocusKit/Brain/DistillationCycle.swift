@@ -227,6 +227,18 @@ public extension GeniusLocusKit {
                     handle: handle, drawerID: drawer.id, content: drawer.content,
                     distillFn: distillFn, now: now) {
                     produced += 1
+                    // Dense-over-distillate (Stream F): recompose the dense float
+                    // vector from the newly-written distillate. The idempotence gate
+                    // in CorpusContentEngine keys on content digest (not on
+                    // denseCompositionText), so a normal index() call would be
+                    // silently skipped — force=true is required. recomposeDenseVector
+                    // encapsulates this and routes through the CCE actor so counts-
+                    // admission serialization is preserved.
+                    // Best-effort: non-fatal when the engine is absent (non-corpus
+                    // estate) or when the record resolves nil (expunged between
+                    // distillation and here).
+                    try? await corpusKits[handle]?.recomposeDenseVector(
+                        id: drawer.id, now: now)
                 }
             }
         }
