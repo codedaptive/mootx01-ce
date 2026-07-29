@@ -111,6 +111,7 @@ let package = Package(
                 "ConvergenceKitCloudKit",
                 "ConvergenceKitConformance",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
             ],
             path: "Tests/ConvergenceKitCloudKitTests"
         ),
