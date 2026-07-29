@@ -738,6 +738,15 @@ public actor Estate {
         try await store.recentRecallTraces(since: since, now: now)
     }
 
+    /// Insert recall-trace rows directly. The scored-recall path records
+    /// traces itself (opt-in); this forwarder exists for the maintenance
+    /// surfaces that must SEED trace state — dream-cycle tooling and the
+    /// Wave-2 aging-gate tests (D3: the consolidation quiet clock reads
+    /// these rows). Delegates to `DrawerStore.insertRecallTraces`.
+    public func insertRecallTraces(_ items: [RecallTraceItem]) async throws {
+        try await store.insertRecallTraces(items)
+    }
+
     /// Wave-2 §3.2: atomically capture a vague drawer, write its
     /// `_consolidated_from` tunnels, and mark every constituent
     /// `representedByVague` — one serializable commit. Delegates to
