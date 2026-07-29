@@ -51,6 +51,7 @@
 | File | Line | Source | Classification | Justification |
 |---|---|---|---|---|
 | CorpusKit/Sources/CorpusKit/CorpusSchemaProfile.swift | 113,169 | grep | INTENTIONALLY_LEFT | Profile version is the live-sum of components — auto-updates when CorpusIndexStateStore.schemaDeclaration.version bumps |
+| CorpusKit/Tests/CorpusKitTests/CorpusContentBoundaryTests.swift | 240 | grep | MUST_UPDATE | `attachedProfileContainsNoCanonicalContentTable` enumerates table names — must include `corpus_bitmap_generation` (added in v2) |
 | CorpusKit/Tests/CorpusKitTests/CorpusContentBoundaryTests.swift | 306,336 | grep | MUST_UPDATE | Migrate-to calls must work with v2 schema; existing tests must still pass |
 | CorpusKit/rust/src/index_state_store.rs | 43 | grep | MUST_UPDATE | Rust schema_declaration() must match Swift v2 |
 | CorpusKit/rust/src/schema_profile.rs | — | grep | INTENTIONALLY_LEFT | Rust profile version is a sum — auto-updates |
