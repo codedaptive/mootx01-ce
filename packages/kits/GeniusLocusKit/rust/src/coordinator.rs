@@ -2682,6 +2682,17 @@ impl EstateCoordinator {
             }
 
             produced += 1;
+            // Dense-over-distillate (Stream F): recompose the dense float
+            // vector from the newly-written distillate. The idempotence gate
+            // keys on content digest (not on dense_composition_text), so a
+            // normal index call would be silently skipped —
+            // recompose_dense_vector passes force=true to bypass the gate.
+            // Best-effort: non-fatal when corpus is absent (LocusOnly estate)
+            // or when the record resolves None (expunged mid-sweep).
+            // Swift parity: DistillationCycle.distillItemsSweep.
+            if let Some(corpus) = self.corpus_kits.get(handle) {
+                let _ = corpus.recompose_dense_vector(&drawer.id, now);
+            }
             } // end for drawer in &room_drawers
         } // end 'rooms: for entry in &rooms
 
@@ -5971,15 +5982,134 @@ impl EstateCoordinator {
                             reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
                         }
                     })?;
-                    // Capture a cheap clone of the estate (Arc-backed, Send+Sync)
-                    // so the Corpus drain worker's callback can roll up rooms
-                    // without reaching back into the coordinator. Best-effort: a
-                    // rollup failure is non-fatal — the next reindex full-tree
-                    // pass reconciles the Merkle tree. Mirrors Swift's
-                    // wireCorpusRoomRollup setting corpus.onEncoded.
+                    // Capture cheap clones (Arc-backed, Send+Sync) so the
+                    // Corpus drain worker's callback can (1) roll up rooms,
+                    // (2) distill each newly-encoded drawer that is still
+                    // eligible (SPEC_DISTILLATION_STORAGE §7.1 drain path —
+                    // Wave 1 Rust parity gap now closed), and (3) recompose
+                    // the dense float vector from the new distillate
+                    // (MISSION_11X_RECALL_GAP_01 Stream F). Mirrors Swift's
+                    // wireCorpusRoomRollup on_encoded callback. Best-effort:
+                    // all steps are non-fatal — the next distill sweep and
+                    // retrain recover any misses.
                     if let Some(estate) = self.registry.get(&handle).cloned() {
+                        let corpus_for_callback = corpus.clone();
+                        // VectorStore for fingerprint lane (§8); may be absent.
+                        let vector_store_for_callback =
+                            self.vector_stores.get(&handle).cloned();
                         corpus.set_on_encoded(move |drawer_ids| {
+                            use crate::brain::distillation_cycle::{
+                                compaction_rendering, item_is_distillable,
+                                DISTILLATION_LANE_MODEL_ID,
+                            };
+                            use substrate_ml::distillation_pipeline::{
+                                DistillationInput, DistillationPipeline,
+                            };
+                            use substrate_ml::token_compaction;
+
+                            // (1) Room-rollup — always best-effort.
                             let _ = estate.rollup_rooms_for_drawers(drawer_ids);
+
+                            // (2) Drain-stage distillation + (3) dense recompose.
+                            // The wall clock at drain time is the process boundary
+                            // where `now` legitimately enters; `distilled_at` is
+                            // audit-only (§4), so the epoch-millis timestamp here
+                            // carries no behavioral weight. Mirrors Swift's use of
+                            // `Date()` at the head of the on_encoded loop.
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+
+                            for drawer_id in drawer_ids {
+                                // Fetch the current drawer row.
+                                let drawer = match estate.drawer_by_id(drawer_id) {
+                                    Ok(Some(d)) => d,
+                                    _ => continue,
+                                };
+                                if drawer.content.is_empty() {
+                                    continue;
+                                }
+                                // Eligibility: bit 19 (has_current_representation)
+                                // clear, OR pipeline version mismatch.
+                                if drawer.has_current_representation()
+                                    && drawer.distilled_pipeline_version.as_deref()
+                                        == Some(
+                                            token_compaction::DISTILLATION_PIPELINE_VERSION,
+                                        )
+                                {
+                                    continue;
+                                }
+
+                                // Distillation: same matrix / short-item logic
+                                // as distill_items_sweep.
+                                let sentences: Vec<String> =
+                                    eidetic_lib::segmenter::sentences(&drawer.content);
+                                let (rendering, fingerprint) =
+                                    if item_is_distillable(sentences.len()) {
+                                        let input = DistillationInput::new(
+                                            sentences,
+                                            None,
+                                            drawer.id.clone(),
+                                            vec![drawer.id.clone()],
+                                        );
+                                        let output = DistillationPipeline::run(
+                                            &input,
+                                            DistillationPipeline::default_extractor,
+                                            true,
+                                        );
+                                        let r = if output.distilled_text.is_empty() {
+                                            compaction_rendering(&drawer.content)
+                                        } else {
+                                            output.distilled_text
+                                        };
+                                        (r, output.feature_fingerprint)
+                                    } else {
+                                        (
+                                            compaction_rendering(&drawer.content),
+                                            DistillationPipeline::query_fingerprint(
+                                                &drawer.content,
+                                                DistillationPipeline::default_extractor,
+                                            ),
+                                        )
+                                    };
+
+                                // Write 1 of 2 (§7.2): the four distillation columns.
+                                let token_count =
+                                    token_compaction::estimate_token_count(&rendering);
+                                let wrote = estate.set_distilled_representation(
+                                    &drawer.id,
+                                    &rendering,
+                                    token_compaction::DISTILLATION_PIPELINE_VERSION,
+                                    token_count,
+                                    now_ms,
+                                );
+                                if let Ok(1) = wrote {
+                                    // Write 2 of 2 (§7.2/§8): fingerprint lane.
+                                    if fingerprint
+                                        != substrate_types::fingerprint256::Fingerprint256::ZERO
+                                    {
+                                        if let Some(vs) = &vector_store_for_callback {
+                                            let _ = vs.add_vector(
+                                                &drawer.id,
+                                                &fingerprint,
+                                                DISTILLATION_LANE_MODEL_ID,
+                                                "1",
+                                                now_ms,
+                                            );
+                                        }
+                                    }
+                                    // (3) Dense-over-distillate (Stream F): recompose
+                                    // the dense float vector from the new distillate.
+                                    // The idempotence gate keys on content digest (not
+                                    // on dense_composition_text), so a normal index
+                                    // call would be skipped — recompose_dense_vector
+                                    // passes force=true to bypass it.
+                                    // Swift parity: on_encoded in wireCorpusRoomRollup.
+                                    let _ = corpus_for_callback
+                                        .recompose_dense_vector(&drawer.id, now_ms);
+                                }
+                            }
                         });
                     }
                 }
