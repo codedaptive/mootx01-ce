@@ -1,140 +1,119 @@
-# MOOT benchmark
+# moot-math-benchmark
 
-`apps/moot-math-benchmark` is the repository's reproducible performance-data
-program for substrate kernels and cold-path learning algorithms. It records
-what ran, on which hardware, from which commit, under which timing budget.
+Cross-platform performance benchmarks for the GeniusLocus substrate
+primitives. Run on your hardware, submit the results — those measurements
+shape which kernel backend ships as the default per platform.
 
-The current harness measures implementation performance. It is not yet a
-product-level memory-quality benchmark and its results must not be presented as
-recall-quality, usefulness, or competitor-comparison scores.
-
-## Current evidence
-
-The tracked result sets are indexed in [`results/README.md`](results/README.md).
-They currently cover:
-
-- Swift and Rust kernel sweeps on Apple M5 Max;
-- Swift and Rust top-K sweeps;
-- Swift and Rust SubstrateML sweeps;
-- a Rust, Go, and Python cross-language kernel set.
-
-Benchmark data remains an active program. A missing language, platform, or
-operation is an unmeasured cell, not evidence of equal or worse performance.
-
-## What it measures
-
-| Binary | Scope | Schema |
-|---|---|---|
-| `stress-test` | Hamming, SimHash, and OR-reduce across kernels, batch sizes, and call modes | `2` |
-| `topk-bench` | `hamming_top_k` across K ∈ {1, 4, 10, 32, 100} and N ∈ {256 … 1M} | `topk-1` |
-| `ml-bench` | SubstrateML cold-path algorithms used by maintenance and dreaming work | `ml-1` |
-
-Every optimized kernel must separately pass bit-identity conformance against
-the scalar reference. A fast result cannot override a conformance failure.
-
-## Quick start
-
-From the repository root:
+## Quick start: run + submit on your hardware
 
 ```sh
 apps/moot-math-benchmark/submit-results.sh
 ```
 
-For a build-and-run smoke test:
+That runs all six bench binaries (Rust + Swift × stress + topk + ml) on
+your machine, gathers a system report, and bundles everything in
+`apps/moot-math-benchmark/results/<date>-<hardware-tag>/` ready to `git add`
+and PR. Add `--quick` for a smoke test. See the generated
+`SUBMISSION.md` inside the bundle for the next steps.
+
+The output schema is locked in [`SCHEMA.md`](SCHEMA.md). Every
+implementation must emit byte-comparable JSON; that's how the
+aggregator joins cross-language data.
+
+## Why this exists
+
+The substrate has multiple kernel backends per platform:
+
+- **Swift:** ScalarKernel, SimdKernel (`import simd`), NeonKernel
+  (aarch64 only), BnnsKernel (Apple platforms), MetalKernel (GPU)
+- **Rust:** ScalarKernel, plus a nightly portable-SIMD kernel
+  (`std::simd::u64x4`, gated on `simd-nightly`)
+
+All backends are conformance-gated to be **bit-identical** to the scalar
+reference (see `docs/validation/substrate_math_performance/`). The
+question this tool answers is *which is the fastest on your hardware*.
+
+Results from the community become the inputs to platform-specific
+`#if arch(...)` / `#[cfg(target_feature = ...)]` gates in the kernel
+dispatch path, so the default backend on each platform is the one that
+actually won on real hardware — not the one someone calculated should
+win.
+
+## What it measures
+
+| Bin           | What it sweeps                                       |
+| ------------- | ---------------------------------------------------- |
+| `stress-test` | Every (op, batch_size, mode) cell across all kernels |
+| `topk-bench`  | `hamming_top_k` across K ∈ {1, 4, 10, 32, 100} × N ∈ {256 … 1M} |
+| `ml-bench`    | The 15 SubstrateML cold-path algorithms (NMF, FFT, eigenvalue centrality, anomaly detection, …) — the dreaming-daemon math (schema `ml-1`) |
+
+Each run produces a structured JSON file with:
+
+- Hardware identification (CPU model, core count, RAM, OS)
+- Software identification (commit SHA, Swift/Rust toolchain version)
+- Per-cell timing (median, p50, p90, p99 from N iterations)
+
+## Running
+
+### Swift
 
 ```sh
-apps/moot-math-benchmark/submit-results.sh --quick
+cd swift
+swift run -c release stress-test --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-stress.json
+swift run -c release topk-bench   --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-topk.json
+swift run -c release ml-bench     --out ../results/$(date +%Y-%m-%d)-$(uname -m)-swift-ml.json
 ```
 
-The script runs the six Swift/Rust binaries, captures a system report, and
-creates:
-
-```text
-apps/moot-math-benchmark/results/<date>-<hardware-tag>/
-```
-
-Review the generated `SUBMISSION.md` before committing the result bundle.
-Quick-mode results are diagnostic and should not be used for published
-performance claims.
-
-## Run one language
-
-Swift:
+### Rust
 
 ```sh
-cd apps/moot-math-benchmark/swift-bench
-swift build -c release
-.build/release/stress-test --out ../results/local-swift/
-.build/release/topk-bench --out ../results/local-swift/hamming_topk-swift.json
-.build/release/ml-bench --out ../results/local-swift/substrate_ml-swift.json
+cd rust
+cargo run --release --bin stress-test -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-stress.json
+cargo run --release --bin topk-bench  -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-topk.json
+cargo run --release --bin ml-bench    -- --out ../results/$(date +%Y-%m-%d)-$(uname -m)-rust-ml.json
 ```
 
-Rust:
+### `--quick` mode
 
-```sh
-cd apps/moot-math-benchmark/rust-bench
-cargo run --release --bin stress-test -- --out ../results/local-rust/
-cargo run --release --bin topk-bench -- --out ../results/local-rust/hamming_topk-rust.json
-cargo run --release --bin ml-bench -- --out ../results/local-rust/substrate_ml-rust.json
-```
+Add `--quick` to skip the long sweeps (good for sanity-checking that the
+binaries build + run; full sweeps take a few minutes).
 
-Use a dated hardware tag instead of `local-*` for a submission.
+## Submitting results
 
-## Reproducibility contract
-
-A publishable result set must include:
-
-| Evidence | Requirement |
-|---|---|
-| Source | Exact Git commit |
-| Hardware | CPU/architecture, core count, RAM, and hardware tag |
-| Software | OS plus Swift/Rust or other language toolchain |
-| Timing | Warmup, measurement window, and whether quick mode was used |
-| Input | Canonical seed and complete sweep grid |
-| Output | JSON conforming to [`SCHEMA.md`](SCHEMA.md) |
-| Conditions | Power/thermal state and material background load |
-
-Do not compare files from different hardware or run conditions as if language
-alone caused the difference. Prefer repeated full runs when the measured
-margin is small.
-
-## Add another language
-
-Swift and Rust are the maintained reference ports. Go and Python evidence is
-present in the tracked cross-language result set, but those ports are not
-maintained in this directory.
-
-- Schema and canonical field names: [`SCHEMA.md`](SCHEMA.md)
-- Experimental protocol and caveats: [`METHODOLOGY.md`](METHODOLOGY.md)
-- Maintained executable references: `swift-bench/` and `rust-bench/`
-
-New ports must emit the same schema, operation names, parameter strings, seeds,
-and sweep cells. Cross-language aggregation is a join over those stable fields,
-not a hand-normalized spreadsheet.
-
-## Submit results
-
-1. Run the full sweep on an otherwise quiet machine.
-2. Complete the generated `SUBMISSION.md`.
-3. Confirm every JSON file parses and uses the expected schema.
-4. Place all files under one dated hardware directory.
-5. Open a PR titled `bench: <hardware-tag> <date>`.
-
-Maintainers should review provenance and coverage before adding a result to an
-aggregate. The repository does not currently publish a single headline score.
+1. Run all six (Swift stress + topk + ml, Rust stress + topk + ml) on
+   a single piece of hardware in one session.
+2. Add the six JSON files to `results/<hostname>-<date>/`.
+3. Open a PR with title `bench: <hardware-tag> <date>` (e.g.
+   `bench: apple-m3-max 2026-05-29`).
+4. Maintainers aggregate periodically. The aggregated table lives in
+   `results/AGGREGATED.md` and drives the default-kernel selection per
+   target triple.
 
 ## Conformance is separate
 
-Performance results live here. Cross-port correctness lives under
-[`../../docs/validation/substrate_math_performance/`](../../docs/validation/substrate_math_performance/).
-The release gates check catalog drift, Swift/Rust lockstep, test placement, and
-clean harness builds. Optimized output must remain byte-identical to the scalar
-reference.
+This tool measures speed only. Bit-identity of every backend against the
+scalar reference is verified by the conformance harness at
+`docs/validation/substrate_math_performance/test-harness/`, with four
+release-blocking scripts:
 
-## Relationship to future memory benchmarks
+- `check-catalog-drift.py`        — CRC docs match vector files
+- `check-lockstep.py`              — Swift/Rust 1:1 type parity
+- `check-test-locations.py`        — tests live with their source
+- `check-harness-builds-clean.sh`  — harness rebuilds clean +
+                                     23/23 primitives conformance
 
-Product-level memory evaluation needs a different layer: a fixed corpus,
-task/query set, expected evidence, scoring rules, latency/cost reporting, and
-versioned result provenance. That work may reuse this directory's evidence
-discipline, but kernel nanoseconds and memory usefulness must remain separate
-datasets.
+A backend that wins the benchmark but fails conformance is rejected.
+
+## Decision-doc protocol
+
+When a new kernel backend is proposed, the protocol per
+`docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`:
+
+1. Implement the candidate as a new `SubstrateKernel` conformer.
+2. Register it in `kernel_registry` on both ports.
+3. Run all four bins above on the dev hardware.
+4. Attach the resulting JSON files to the decision-doc PR.
+5. The decision doc cites the JSON file path + commit hash + hardware
+   tag in its "measured at" line.
+
+No more "I calculated that X would be slower."
