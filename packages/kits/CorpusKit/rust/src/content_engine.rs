@@ -28,6 +28,10 @@ use crate::corpus_provider_counts_store::{
 use crate::document_store::CorpusDocumentStore;
 use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::error::{CorpusKitError, CorpusKitResult};
+use crate::index_state_operational::{
+    coverage_mask_bit_offset, fresh_checkpoint_bitmap, setting_coverage_slot,
+    INDEX_BIT_HAS_DENSE_TEXT,
+};
 use crate::index_state_store::{CorpusIndexState, CorpusIndexStateStore};
 use crate::schema_profile::{
     attached_declaration, standalone_declaration, CorpusContentConfiguration,
@@ -39,7 +43,7 @@ use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// GLK's room-rollup coordination callback (fired with Drawer IDs).
@@ -395,6 +399,10 @@ pub struct CorpusContentEngine {
     train_fault_before_commit_model: Mutex<Option<String>>,
     /// Test-only backfill fault hook (crash-boundary suites).
     backfill_fault_hook: Mutex<Option<ContentBackfillFaultHook>>,
+    /// In-memory cache of the global basis-generation counter. Loaded from
+    /// `corpus_bitmap_generation` at engine open; bumped in-memory after each
+    /// `train_trainable_slots` call. All bitmap coverage writes stamp this value.
+    current_basis_generation: AtomicI64,
 }
 
 impl CorpusContentEngine {
@@ -454,6 +462,10 @@ impl CorpusContentEngine {
         let basis_store = BasisStore::new(Arc::clone(&storage));
         let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
         let index_state = CorpusIndexStateStore::new(Arc::clone(&storage));
+        // Read the global basis-generation counter into the in-memory cache. A
+        // missing singleton row returns 0 — the same default the per-row bitmap
+        // field carries after the v1→v2 column addition.
+        let initial_basis_generation = index_state.basis_generation().unwrap_or(0);
         let coverage_store =
             crate::provider_coverage_store::CorpusProviderCoverageStore::new(Arc::clone(&storage));
         let provider_configuration_store =
@@ -492,6 +504,7 @@ impl CorpusContentEngine {
             train_fault_after_model: Mutex::new(None),
             train_fault_before_commit_model: Mutex::new(None),
             backfill_fault_hook: Mutex::new(None),
+            current_basis_generation: AtomicI64::new(initial_basis_generation),
         };
         // Rehydrate the base snapshot plus crash-durable reference deltas.
         engine.reload_counts_from_storage()?;
@@ -695,7 +708,14 @@ impl CorpusContentEngine {
     /// Clear one content ID's derived state directly (expunge/withdraw path).
     pub fn remove_content(&self, id: &str) -> CorpusKitResult<()> {
         Self::validate(id)?;
-        self.clear_derived_state(id)
+        let now_millis = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        };
+        self.clear_derived_state(id, now_millis)
     }
 
     /// Embed on the default signal (the recall probe surface).
@@ -1164,7 +1184,7 @@ impl CorpusContentEngine {
                 Ok(true)
             }
             None => {
-                self.clear_derived_state(id)?;
+                self.clear_derived_state(id, now_millis)?;
                 Ok(false)
             }
         }
@@ -1183,7 +1203,7 @@ impl CorpusContentEngine {
                 Ok(true)
             }
             None => {
-                self.clear_derived_state(id)?;
+                self.clear_derived_state(id, now_millis)?;
                 Ok(false)
             }
         }
@@ -1246,12 +1266,16 @@ impl CorpusContentEngine {
         for id in ids {
             Self::validate(id)?;
             let Some(record) = self.source.record(id)? else {
-                self.clear_derived_state(id)?;
+                self.clear_derived_state(id, now_millis)?;
                 continue;
             };
             if !force {
                 if let Some(existing) = self.index_state.state(id)? {
-                    if existing.revision == record.revision
+                    // The `!existing.is_removed()` guard is belt-and-suspenders:
+                    // soft_remove resets revision=0 so the revision check already
+                    // fires, but the explicit removed flag makes intent explicit.
+                    if !existing.is_removed()
+                        && existing.revision == record.revision
                         && existing.digest == record.digest
                         && existing.index_version == CONTENT_ENGINE_INDEX_VERSION
                     {
@@ -1389,7 +1413,20 @@ impl CorpusContentEngine {
             .flat_map(|item| item.3.iter().cloned())
             .collect();
         self.coverage_store.mark_covered(&covered, now_millis)?;
-        for (record, _, _, _) in &prepared {
+        let generation = self.current_basis_generation.load(Ordering::Acquire);
+        for (record, _, _, record_covered) in &prepared {
+            // Build the operational bitmap for this checkpoint: lexically_indexed=1,
+            // has_dense_text from the record, coverage bits for each registered provider
+            // in `record_covered`, generation stamp.
+            let mut bitmap = fresh_checkpoint_bitmap();
+            if record.dense_composition_text.is_some() {
+                bitmap |= INDEX_BIT_HAS_DENSE_TEXT;
+            }
+            for (_, model_id, _) in record_covered {
+                if let Some(k) = coverage_mask_bit_offset(model_id) {
+                    bitmap = setting_coverage_slot(bitmap, k, generation);
+                }
+            }
             self.index_state.advance(&CorpusIndexState {
                 content_id: record.id.clone(),
                 revision: record.revision,
@@ -1397,6 +1434,7 @@ impl CorpusContentEngine {
                 index_version: CONTENT_ENGINE_INDEX_VERSION,
                 applied_cursor: None,
                 updated_at_millis: now_millis,
+                operational_bitmap: bitmap,
             })?;
         }
         Ok(prepared.len())
@@ -1434,7 +1472,7 @@ impl CorpusContentEngine {
                 self.index_record(&record, cursor, false, now_millis, SlotScope::All)?;
             }
             CorpusContentChange::Remove { id, .. } => {
-                self.clear_derived_state(id)?;
+                self.clear_derived_state(id, now_millis)?;
             }
         }
         if let Some(cursor) = cursor {
@@ -1540,9 +1578,13 @@ impl CorpusContentEngine {
                     }
                 }
             }
-            ContentIndexJobKind::Remove => self.clear_derived_state(&job.content_id)?,
+            ContentIndexJobKind::Remove => {
+                self.clear_derived_state(&job.content_id, now_millis)?;
+            }
         }
         if let Some(cursor) = &job.cursor {
+            // Feed-cursor sentinel carries a zero bitmap: no lifecycle bits,
+            // no coverage, no generation. Mirrors Swift feedCursorBitmap = 0.
             checkpoints.push(CorpusIndexState {
                 content_id: FEED_CURSOR_ROW_ID.to_string(),
                 revision: 0,
@@ -1550,6 +1592,7 @@ impl CorpusContentEngine {
                 index_version: CONTENT_ENGINE_INDEX_VERSION,
                 applied_cursor: Some(cursor.clone()),
                 updated_at_millis: now_millis,
+                operational_bitmap: 0,
             });
         }
         Ok((checkpoints, counts_update))
@@ -1857,9 +1900,13 @@ impl CorpusContentEngine {
         // Idempotence anchor: a checkpoint covering this exact (revision,
         // digest, index_version) means the derived rows are complete —
         // replay writes NOTHING. `force` (reindex) bypasses deliberately.
+        // The `!existing.is_removed()` guard is belt-and-suspenders: soft_remove
+        // resets revision=0 so the revision check would already fire, but the
+        // explicit removed flag ensures intent is unambiguous.
         if !force {
             if let Some(existing) = self.index_state.state(&record.id)? {
-                if existing.revision == record.revision
+                if !existing.is_removed()
+                    && existing.revision == record.revision
                     && existing.digest == record.digest
                     && existing.index_version == CONTENT_ENGINE_INDEX_VERSION
                 {
@@ -1944,6 +1991,20 @@ impl CorpusContentEngine {
         // overstates coverage).
         self.coverage_store.mark_covered(&covered, now_millis)?;
 
+        // Build the operational bitmap for this checkpoint.
+        // lexically_indexed=1 always; has_dense_text from the record;
+        // coverage bits from the registered providers in `covered`.
+        let generation = self.current_basis_generation.load(Ordering::Acquire);
+        let mut bitmap = fresh_checkpoint_bitmap();
+        if record.dense_composition_text.is_some() {
+            bitmap |= INDEX_BIT_HAS_DENSE_TEXT;
+        }
+        for (_, model_id, _) in &covered {
+            if let Some(k) = coverage_mask_bit_offset(model_id) {
+                bitmap = setting_coverage_slot(bitmap, k, generation);
+            }
+        }
+
         // The caller publishes this checkpoint LAST.
         Ok(Some(CorpusIndexState {
             content_id: record.id.clone(),
@@ -1952,6 +2013,7 @@ impl CorpusContentEngine {
             index_version: CONTENT_ENGINE_INDEX_VERSION,
             applied_cursor: applied_cursor.map(str::to_string),
             updated_at_millis: now_millis,
+            operational_bitmap: bitmap,
         }))
     }
 
@@ -2126,7 +2188,12 @@ impl CorpusContentEngine {
     }
 
     /// Clear EVERYTHING derived for `id` (the remove path).
-    fn clear_derived_state(&self, id: &str) -> CorpusKitResult<()> {
+    /// Soft-delete derived state for `id`. Clears BM25, vectors, and coverage
+    /// rows; retains the `corpus_index_state` row as a tombstone with
+    /// `removed=1`. The tombstone ensures the idempotence gate distinguishes
+    /// removed content from never-indexed content, and re-ingest fires
+    /// naturally when the content is re-introduced.
+    fn clear_derived_state(&self, id: &str, now_millis: i64) -> CorpusKitResult<()> {
         let keys = self.unit_keys(id)?;
         self.delete_derived_rows(&keys)?;
         self.coverage_store.clear(id)?;
@@ -2146,11 +2213,16 @@ impl CorpusContentEngine {
                 )
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         }
-        self.index_state.clear(id)?;
+        // Soft-remove: retain the checkpoint row as a tombstone with removed=1
+        // rather than hard-deleting it. This distinguishes removed content from
+        // never-indexed content and allows re-ingest to fire naturally.
+        self.index_state.soft_remove(id, now_millis)?;
         Ok(())
     }
 
     fn advance_feed_cursor(&self, cursor: &str, now_millis: i64) -> CorpusKitResult<()> {
+        // Feed-cursor sentinel carries a zero bitmap: no lifecycle bits, no
+        // coverage, no generation. Mirrors Swift feedCursorBitmap = 0.
         self.index_state.advance(&CorpusIndexState {
             content_id: FEED_CURSOR_ROW_ID.to_string(),
             revision: 0,
@@ -2158,6 +2230,7 @@ impl CorpusContentEngine {
             index_version: CONTENT_ENGINE_INDEX_VERSION,
             applied_cursor: Some(cursor.to_string()),
             updated_at_millis: now_millis,
+            operational_bitmap: 0,
         })
     }
 
@@ -2169,14 +2242,15 @@ impl CorpusContentEngine {
             .and_then(|s| s.applied_cursor))
     }
 
-    /// Content IDs with a live checkpoint.
+    /// Content IDs with a live, non-removed checkpoint. The feed-cursor
+    /// sentinel and soft-removed tombstones are excluded — callers see only
+    /// the active indexed content set.
     pub fn indexed_content_ids(&self) -> CorpusKitResult<Vec<CorpusContentId>> {
         Ok(self
             .index_state
-            .all_states()?
+            .active_indexed_states()?
             .into_iter()
             .map(|s| s.content_id)
-            .filter(|id| id != FEED_CURSOR_ROW_ID)
             .collect())
     }
 
@@ -2648,6 +2722,20 @@ impl CorpusContentEngine {
                 }
             }
         }
+        // Bump the global basis-generation counter after any training jobs
+        // committed. The counter is 4 bits (0–15); at wraparound (back to 0)
+        // all coverage bits and generation stamps are cleared from every
+        // content row so the backfill path re-stamps them under the new basis.
+        if !jobs.is_empty() {
+            let new_gen = self.index_state.increment_basis_generation()?;
+            if new_gen == 0 {
+                // Generation wrapped: sweep all rows and clear their coverage
+                // bits so the backfill path re-covers them under generation 0.
+                self.index_state.reset_generation_sweep()?;
+            }
+            self.current_basis_generation
+                .store(new_gen, Ordering::Release);
+        }
         Ok(digests)
     }
 
@@ -2830,6 +2918,27 @@ impl CorpusContentEngine {
             self.coverage_store.mark_covered(&covered, now_millis)?;
             if let Some(hook) = self.backfill_fault_hook.lock().unwrap().as_ref() {
                 hook("afterCoverage", batch_index).map_err(CorpusKitError::InvalidConfiguration)?;
+            }
+            // Stamp the operational bitmap for each newly-covered row. For
+            // registered providers (K=0–5), update the per-row coverage slot
+            // and generation stamp without touching any other bitmap field.
+            let generation = self.current_basis_generation.load(Ordering::Acquire);
+            let mut by_content: HashMap<String, Vec<u32>> = HashMap::new();
+            for (content_id, model_id, _) in &covered {
+                if let Some(k) = coverage_mask_bit_offset(model_id) {
+                    by_content.entry(content_id.clone()).or_default().push(k);
+                }
+            }
+            for (content_id, slots) in &by_content {
+                if let Ok(Some(state)) = self.index_state.state(content_id) {
+                    let mut new_bitmap = state.operational_bitmap;
+                    for &k in slots {
+                        new_bitmap = setting_coverage_slot(new_bitmap, k, generation);
+                    }
+                    // Ignore errors: bitmap updates are best-effort here;
+                    // the coverage_store side table is the durable truth.
+                    let _ = self.index_state.update_bitmap(content_id, new_bitmap);
+                }
             }
             written += covered.len();
         }
@@ -3015,7 +3124,7 @@ impl CorpusContentEngine {
                             self.index_state.advance(&checkpoint)?;
                         }
                     }
-                    None => self.clear_derived_state(&id)?,
+                    None => self.clear_derived_state(&id, now_millis)?,
                 }
             }
         }
