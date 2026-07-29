@@ -250,6 +250,33 @@ impl Estate {
             .map_err(LocusKitError::InvalidContent)?;
         self.patch_dataset_handle_content(drawer_id, &new_json)?;
 
+        // Clear path: content changed in place so patch_dataset_handle_content
+        // already cleared bit 19 (HAS_CURRENT_REPRESENTATION) on the drawer row.
+        // AND the post-clear bitmap into the room fingerprint so the distillation
+        // sweep does not falsely skip this room.
+        //
+        // OR is monotone (safe to defer to rebuildAll); AND must be immediate to
+        // preserve the under-approximation invariant — a falsely-present bit 19
+        // in operationalAND would cause the sweep to skip a room that contains
+        // eligible work (cookbook §8.2).
+        //
+        // `and_into_operational` is a no-op when no fingerprint row exists for
+        // the room yet (returns Ok(()) silently), so this is safe to call
+        // unconditionally.
+        let cleared_op = existing.operational_bitmap
+            & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let resolved = self.store.resolve_node_names(&[existing.parent_node_id.clone()])?;
+        let (wing, room) = resolved
+            .get(&existing.parent_node_id)
+            .map(|(w, r)| (w.as_str(), r.as_str()))
+            .unwrap_or(("", ""));
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.store
+            .and_in_container_fingerprint(wing, room, cleared_op, now_secs)?;
+
         // Read back the drawer so the caller has the current storage state.
         self.store
             .get_drawer(drawer_id)?

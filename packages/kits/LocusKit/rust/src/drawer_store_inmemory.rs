@@ -4455,6 +4455,21 @@ impl DrawerStore for DrawerStoreCore {
         fp_store.or_in(wing, room, adjective, operational, provenance, now)
     }
 
+    fn and_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        operational: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // AND the operational bitmap into the operationalAND column only,
+        // leaving the three OR columns unchanged. Used after a bit-CLEAR
+        // event on a live (non-tombstoned) drawer. Mirrors Swift
+        // `ContainerFingerprintStore.andInOperational(wing:room:operational:now:)`.
+        let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+        fp_store.and_in_operational(wing, room, operational, now)
+    }
+
     fn rebuild_container_fingerprints(&self, now: i64) -> Result<(), LocusKitError> {
         // Backfill so the aggregate covers every active row and is therefore
         // sound to prune against (spec § 11.5). One full scan at open,
@@ -5066,6 +5081,16 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<(), LocusKitError> {
         self.inner
             .or_in_container_fingerprint(wing, room, adjective, operational, provenance, now)
+    }
+    fn and_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        operational: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .and_in_container_fingerprint(wing, room, operational, now)
     }
     fn rebuild_container_fingerprints(&self, now: i64) -> Result<(), LocusKitError> {
         self.inner.rebuild_container_fingerprints(now)

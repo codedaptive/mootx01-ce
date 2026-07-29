@@ -1752,6 +1752,26 @@ pub trait DrawerStore: Send + Sync {
         Ok(())
     }
 
+    /// AND an operational bitmap into the `operationalAND` column for the
+    /// room and wing fingerprint rows, leaving the three OR columns unchanged.
+    ///
+    /// Use this after a bit-CLEAR event on a LIVE (non-tombstoned) drawer to
+    /// prevent the distillation sweep from falsely skipping the container.
+    /// Lowering the AND is always safe (under-approximation → safe direction).
+    ///
+    /// Default is a no-op for backends without a container aggregate. The
+    /// storage-backed core overrides to AND into the room and wing rows.
+    fn and_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        operational: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        let _ = (wing, room, operational, now);
+        Ok(())
+    }
+
     /// Rebuild the entire container-fingerprint aggregate from the active
     /// drawer set so it covers every active container (spec § 11.5
     /// soundness: the aggregate must cover every active row or pruning is
