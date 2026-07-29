@@ -64,7 +64,7 @@ Passthrough. `enable()` succeeds, `push()` and `pull()` return empty receipts, `
 
 ### ConvergenceKitCloudKit (v1.0 complete)
 
-Generic CKRecord mapping driven by SyncManifest. The mapper translates `[String: TypedValue]` to and from `CKRecord`, with sync metadata in reserved `_syncHLC`, `_syncSchemaVersion`, `_syncKitID` fields. Per-estate zone in the private database. Lazy container initialization so the engine can be instantiated in unit tests without iCloud entitlements.
+Generic CKRecord mapping driven by SyncManifest. The mapper translates `[String: TypedValue]` to and from `CKRecord`, with sync metadata in reserved `moot_sync_hlc`, `moot_sync_schema_version`, `moot_sync_kit_id` fields. Per-estate zone in the private database. Lazy container initialization so the engine can be instantiated in unit tests without iCloud entitlements.
 
 ```swift
 let engine = CloudKitSyncEngine()  // resolves CKContainer at enable() time

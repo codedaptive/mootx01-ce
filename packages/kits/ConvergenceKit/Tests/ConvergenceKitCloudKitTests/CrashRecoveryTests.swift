@@ -95,7 +95,7 @@ struct CrashRecoveryTests {
     /// B must end up with exactly one copy of the row — no divergence.
     ///
     /// This scenario also regression-tests the uuid fix: the re-pushed record
-    /// carries the .uuid discriminator in the _syncTypeTags map, so B decodes
+    /// carries the .uuid discriminator in the moot_sync_type_tags map, so B decodes
     /// it as .uuid, not .text, and the upsert deduplicates correctly.
     @Test("(2) re-push after mid-push crash is idempotent — no duplicate divergence")
     func rePushAfterMidPushCrashIsIdempotent() async throws {

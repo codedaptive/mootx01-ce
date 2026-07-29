@@ -71,17 +71,17 @@ struct EncryptedValuesEnableValidationTests {
         }
     }
 
-    // MARK: (2) Invalid declaration: _sync* column is rejected before zone setup
+    // MARK: (2) Invalid declaration: wire metadata column is rejected before zone setup
 
-    @Test("enable() throws on _sync* column in encryptedContentColumns")
-    func enableRejectsSyncPrefixColumn() async throws {
+    @Test("enable() throws on reserved wire metadata column in encryptedContentColumns")
+    func enableRejectsReservedMetadataColumn() async throws {
         let storage = try await makeStorage()
         let manifest = SyncManifest(
             kitID: "TestKit",
             schemaVersion: 1,
             zoneIdentifier: "EV2-ENABLE-VALIDATION",
             tables: [SyncedTable(name: "items", primaryKeyColumn: "id")],
-            encryptedContentColumns: ["items": ["_syncHLC"]]
+            encryptedContentColumns: ["items": ["moot_sync_future"]]
         )
         let engine = await makeEngine(manifest: manifest, storage: storage)
         await #expect(throws: SyncError.self) {

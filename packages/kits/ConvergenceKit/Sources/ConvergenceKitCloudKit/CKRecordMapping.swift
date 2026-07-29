@@ -46,7 +46,7 @@ public enum CKRecordMapping {
     /// non-pushOnly table (D1 defect). A typed tombstone CKRecord encodes
     /// the table name in its `recordType` (`kitID_tableName`), giving the
     /// pull path the routing information it needs. The delete HLC is stored
-    /// in `_syncHLC` so the receiver applies the same LWW gate as for
+    /// in `moot_sync_hlc` so the receiver applies the same LWW gate as for
     /// upserts (D2 fix) and persists the HLC in `_ck_sync_meta` after
     /// hard-deleting the row (A6 adjudication, stale-resurrect guard).
     public static func tombstoneRecord(
@@ -59,25 +59,25 @@ public enum CKRecordMapping {
     ) -> CKRecord {
         let id = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: id)
-        // Tombstone marker: receiver detects _syncDeleted == 1 and routes through
+        // Tombstone marker: receiver detects moot_sync_deleted == 1 and routes through
         // the tombstone apply path rather than a normal upsert.
         record[SyncTombstone.deletedFieldKey] = NSNumber(value: 1)
         // Delete HLC: lets the receiver gate against stale resurrections via the
         // standard LWW comparison and persist the HLC in _ck_sync_meta after delete.
-        record["_syncHLC"] = packed(deleteHLC) as NSNumber
-        record["_syncSchemaVersion"] = NSNumber(value: schemaVersion)
-        record["_syncKitID"] = kitID as NSString
+        record[SyncMetadataField.hlc] = packed(deleteHLC) as NSNumber
+        record[SyncMetadataField.schemaVersion] = NSNumber(value: schemaVersion)
+        record[SyncMetadataField.kitID] = kitID as NSString
         return record
     }
 
     /// Convert a row to a CKRecord. Reserved field names
-    /// (_syncHLC, _syncSchemaVersion, _syncKitID, _syncColumnHLCs, _syncTypeTags)
+    /// (`SyncMetadataField.all`)
     /// carry sync metadata so the receiver can apply conflict policy, schema check,
     /// and restore exact TypedValue discriminators after CKRecord round-trip.
     ///
     /// - Parameters:
     ///   - columnHLCs: Per-column HLC map for `fieldLevelLWW` records. When
-    ///     non-nil and non-empty, encoded as a JSON blob in `_syncColumnHLCs`.
+    ///     non-nil and non-empty, encoded as a JSON blob in `moot_sync_column_hlcs`.
     ///     Nil or empty for non-fieldLevelLWW records — field is omitted.
     public static func record(
         from values: [String: TypedValue],
@@ -93,6 +93,12 @@ public enum CKRecordMapping {
         let recordID = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: recordID)
 
+        if let reservedKey = values.keys.first(where: SyncMetadataField.isReserved) {
+            throw SyncError.encodingFailure(
+                detail: "application column '\(reservedKey)' uses reserved CloudKit metadata namespace \(SyncMetadataField.namespacePrefix)"
+            )
+        }
+
         // Collect type tags for CKRecord-lossy discriminators BEFORE assigning values.
         // CKRecord does not carry Swift type metadata, so certain discriminators collapse
         // to coarser types on the wire:
@@ -101,7 +107,7 @@ public enum CKRecordMapping {
         //   .hlc         → NSNumber(Int64, packed) → decoded as .int (packed value)
         //   .json        → NSString or NSData → decoded as .text or .blob
         //   .fingerprint → NSData (32 bytes) → decoded as .blob
-        // The _syncTypeTags map restores exact discriminators at decode time without
+        // The moot_sync_type_tags map restores exact discriminators at decode time without
         // guessing. Non-lossy cases (.null, .bool, .int, .float, .text, .blob,
         // .timestamp) round-trip with the correct discriminator and need no tag.
         var typeTags: [String: String] = [:]
@@ -122,26 +128,26 @@ public enum CKRecordMapping {
             let target = encryptedColumns.contains(key) ? record.encryptedValues : record
             try assign(value: value, to: target, forKey: key)
         }
-        // Sync metadata fields (reserved names start with _sync).
-        record["_syncHLC"] = packed(hlc) as NSNumber
-        record["_syncSchemaVersion"] = NSNumber(value: schemaVersion)
-        record["_syncKitID"] = kitID as NSString
-        // _syncColumnHLCs: present only for fieldLevelLWW records (B-8).
+        // Sync metadata fields use client-writable names from one canonical vocabulary.
+        record[SyncMetadataField.hlc] = packed(hlc) as NSNumber
+        record[SyncMetadataField.schemaVersion] = NSNumber(value: schemaVersion)
+        record[SyncMetadataField.kitID] = kitID as NSString
+        // moot_sync_column_hlcs: present only for fieldLevelLWW records (B-8).
         // JSON-encoded ColumnHLCMap blob. Omitted when nil or empty so non-fieldLevelLWW
         // records stay compact on the wire.
         if let map = columnHLCs, !map.isEmpty,
            let data = try? JSONEncoder().encode(map) {
-            record["_syncColumnHLCs"] = data as NSData
+            record[SyncMetadataField.columnHLCs] = data as NSData
         }
-        // _syncTypeTags: compact JSON map from column name → discriminator string.
+        // moot_sync_type_tags: compact JSON map from column name → discriminator string.
         // Carries only the lossy discriminators listed above; omitted when all present
         // column discriminators round-trip cleanly so non-lossy records stay compact.
-        // The _sync prefix ensures decode() filters this field from the app-data values
-        // map automatically (the key.hasPrefix("_sync") guard in the decode loop).
+        // The canonical metadata set ensures decode() filters this field from app data
+        // without treating unrelated application columns as reserved by prefix.
         if !typeTags.isEmpty,
            let tagsData = try? JSONEncoder().encode(typeTags),
            let tagsString = String(data: tagsData, encoding: .utf8) {
-            record["_syncTypeTags"] = tagsString as NSString
+            record[SyncMetadataField.typeTags] = tagsString as NSString
         }
         return record
     }
@@ -149,17 +155,19 @@ public enum CKRecordMapping {
     /// Decode sync metadata + values from a CKRecord.
     ///
     /// Sets `DecodedRecord.isTombstone = true` when the record carries
-    /// `_syncDeleted == 1`. Tombstone records are applied through the
+    /// `moot_sync_deleted == 1`. Tombstone records are applied through the
     /// standard LWW gate; on a win the row is hard-deleted and the HLC
     /// persists in `_ck_sync_meta` (A6 adjudication).
     public static func decode(_ record: CKRecord) throws -> DecodedRecord {
-        guard let hlcPacked = (record["_syncHLC"] as? NSNumber)?.int64Value else {
-            throw SyncError.decodingFailure(detail: "missing _syncHLC on \(record.recordID.recordName)")
+        guard let hlcPacked = (record[SyncMetadataField.hlc] as? NSNumber)?.int64Value else {
+            throw SyncError.decodingFailure(
+                detail: "missing \(SyncMetadataField.hlc) on \(record.recordID.recordName)"
+            )
         }
-        guard let schemaVersion = (record["_syncSchemaVersion"] as? NSNumber)?.intValue else {
-            throw SyncError.decodingFailure(detail: "missing _syncSchemaVersion")
+        guard let schemaVersion = (record[SyncMetadataField.schemaVersion] as? NSNumber)?.intValue else {
+            throw SyncError.decodingFailure(detail: "missing \(SyncMetadataField.schemaVersion)")
         }
-        let kitID = (record["_syncKitID"] as? String) ?? ""
+        let kitID = (record[SyncMetadataField.kitID] as? String) ?? ""
         let hlc = unpacked(hlcPacked)
         let parts = record.recordType.split(separator: "_", maxSplits: 1)
         let tableName = parts.count > 1 ? String(parts[1]) : record.recordType
@@ -173,14 +181,14 @@ public enum CKRecordMapping {
             throw SyncError.corruptRemoteIdentity(recordName: record.recordID.recordName)
         }
 
-        // Detect tombstone marker. _syncDeleted is filtered from values below
-        // (all _sync* keys are excluded) so it does not leak into the app schema.
+        // Detect the tombstone marker. Every canonical metadata key is filtered
+        // below so the marker cannot leak into the application schema.
         let isTombstone = (record[SyncTombstone.deletedFieldKey] as? NSNumber)?.intValue == 1
 
         // Decode per-column HLC map for fieldLevelLWW records (B-8).
         // Absent on non-fieldLevelLWW records and on records from older peers.
         let columnHLCs: ColumnHLCMap?
-        if let data = record["_syncColumnHLCs"] as? Data {
+        if let data = record[SyncMetadataField.columnHLCs] as? Data {
             columnHLCs = try? JSONDecoder().decode(ColumnHLCMap.self, from: data)
         } else {
             columnHLCs = nil
@@ -192,7 +200,7 @@ public enum CKRecordMapping {
         // the server-side transition where plaintext rows coexist with encrypted ones.
         let allDataKeys = Set(record.allKeys()).union(record.encryptedValues.allKeys())
         for key in allDataKeys {
-            if key.hasPrefix("_sync") { continue }
+            if SyncMetadataField.isReserved(key) { continue }
             if let any = record.encryptedValues[key] {
                 values[key] = try typedValue(from: any)
             } else if let any = record[key] {
@@ -209,7 +217,7 @@ public enum CKRecordMapping {
         // Absent on records from older peers; decoded values remain in their coarser
         // form (backward-compat: existing callers that tolerated .text for uuid columns
         // continue to work).
-        if let tagsString = record["_syncTypeTags"] as? String,
+        if let tagsString = record[SyncMetadataField.typeTags] as? String,
            let tagsData = tagsString.data(using: .utf8),
            let typeTags = try? JSONDecoder().decode([String: String].self, from: tagsData) {
             for (col, tag) in typeTags {
@@ -365,9 +373,9 @@ public enum CKRecordMapping {
     }
 }
 
-/// Sync metadata extracted from the `_sync*` fields of a CKRecord.
+/// Sync metadata extracted from the `moot_sync_*` fields of a CKRecord.
 /// Carried separately from `values` so `values` remains clean
-/// (no `_sync*` keys) while the engine retains the metadata needed
+/// (no `moot_sync_*` keys) while the engine retains the metadata needed
 /// for conflict resolution and durable HLC persistence.
 public struct SyncMeta: Sendable {
     public let hlc: HLC
@@ -378,11 +386,11 @@ public struct SyncMeta: Sendable {
 public struct DecodedRecord: Sendable {
     public let table: String
     public let rowKey: UUID
-    /// App-data values. Contains no `_sync*` keys.
+    /// App-data values. Contains no `moot_sync_*` keys.
     public let values: [String: TypedValue]
     /// Sync metadata extracted during decode.
     public let syncMeta: SyncMeta
-    /// True when this record represents a delete tombstone (`_syncDeleted == 1`).
+    /// True when this record represents a delete tombstone (`moot_sync_deleted == 1`).
     ///
     /// WHY: the tombstone flag routes this record to the tombstone apply path
     /// in `applyInbound` — LWW gate → hard-delete row → persist delete HLC in
@@ -391,7 +399,7 @@ public struct DecodedRecord: Sendable {
     /// Defaults to false for normal (non-delete) records.
     public var isTombstone: Bool = false
 
-    /// Per-column HLC map decoded from `_syncColumnHLCs` (B-8).
+    /// Per-column HLC map decoded from `moot_sync_column_hlcs` (B-8).
     ///
     /// Non-nil only for `fieldLevelLWW` records where the sender populated
     /// the column HLC map. Nil on non-fieldLevelLWW records and on records

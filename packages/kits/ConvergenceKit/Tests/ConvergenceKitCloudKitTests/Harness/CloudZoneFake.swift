@@ -12,7 +12,7 @@
 //   instance; fresh instances carry no tag.
 //
 // HLC-aware merge (changedKeys, data records):
-//   Only updates the stored record when incoming _syncHLC >= existing _syncHLC
+//   Only updates the stored record when incoming moot_sync_hlc >= existing moot_sync_hlc
 //   (compared as UInt64 with bitPattern reinterpret). Stale pushes lose silently,
 //   matching real CloudKit LWW semantics in the convergence engine.
 //
@@ -27,6 +27,7 @@
 
 import Foundation
 import CloudKit
+import ConvergenceKit
 import ConvergenceKitCloudKit
 
 // MARK: - CloudZoneFake
@@ -173,8 +174,12 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
                     } else {
                         // Normal HLC-aware merge for slot records and non-failing data records.
                         if !isSlot, let existing = store[id] {
-                            let inHLC = UInt64(bitPattern: (record["_syncHLC"] as? NSNumber)?.int64Value ?? 0)
-                            let exHLC = UInt64(bitPattern: (existing["_syncHLC"] as? NSNumber)?.int64Value ?? 0)
+                            let inHLC = UInt64(
+                                bitPattern: (record[SyncMetadataField.hlc] as? NSNumber)?.int64Value ?? 0
+                            )
+                            let exHLC = UInt64(
+                                bitPattern: (existing[SyncMetadataField.hlc] as? NSNumber)?.int64Value ?? 0
+                            )
                             if inHLC < exHLC {
                                 partialResults[id] = .success(existing)
                                 continue
@@ -209,11 +214,15 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
                 }
             } else {
                 // .changedKeys: HLC-aware merge for data records.
-                // Slot-registry records have no _syncHLC field;
+                // Slot-registry records have no moot_sync_hlc field;
                 // allow them to overwrite unconditionally.
                 if record.recordType != SlotRecordMapping.recordType, let existing = store[id] {
-                    let inHLC  = UInt64(bitPattern: (record["_syncHLC"]   as? NSNumber)?.int64Value ?? 0)
-                    let exHLC  = UInt64(bitPattern: (existing["_syncHLC"] as? NSNumber)?.int64Value ?? 0)
+                    let inHLC = UInt64(
+                        bitPattern: (record[SyncMetadataField.hlc] as? NSNumber)?.int64Value ?? 0
+                    )
+                    let exHLC = UInt64(
+                        bitPattern: (existing[SyncMetadataField.hlc] as? NSNumber)?.int64Value ?? 0
+                    )
                     if inHLC < exHLC {
                         // Stale push: existing record wins; acknowledge without updating.
                         saveResults[id] = .success(existing)

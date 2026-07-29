@@ -55,7 +55,7 @@ public struct OutboxEntry: Sendable {
     /// Populated by `CloudKitStateActor.recordOutbound` when the synced table
     /// uses `conflictPolicy == .fieldLevelLWW`. The push path (PushCycle)
     /// decodes this and passes it to `CKRecordMapping.record(...)` so the
-    /// `_syncColumnHLCs` field is present in the CKRecord on the wire.
+    /// `moot_sync_column_hlcs` field is present in the CKRecord on the wire.
     ///
     /// WHY pre-encoded (not a live ColumnHLCMap):
     /// Mirrors `valuesData` — the outbox stores opaque JSON blobs so the push

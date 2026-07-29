@@ -7,7 +7,7 @@
 // CKRecord objects are constructed and read entirely in process, the
 // same way the existing CloudKit stub test instantiates CloudKit types.
 //
-// Type-tag fidelity tests (P4-M2): CKRecordMapping writes a _syncTypeTags
+// Type-tag fidelity tests (P4-M2): CKRecordMapping writes a moot_sync_type_tags
 // compact JSON map for lossy discriminators (.uuid, .bitmap, .hlc, .json,
 // .fingerprint) and restores them at decode time. Each lossy case gets its
 // own round-trip test: encode → CKRecord (discriminator collapsed) →
@@ -75,13 +75,89 @@ struct CKRecordMappingTests {
         #expect(decoded.hlc.logicalCount == 5)
         #expect(decoded.hlc.nodeID == 3)
     }
+
+    @Test("CloudKit wire metadata uses client-writable field names")
+    func wireMetadataFieldNamesAreClientWritable() throws {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        let rowKey = UUID()
+        let hlc = HLC(physicalTime: 1000, logicalCount: 5, nodeID: 3)
+        let record = try CKRecordMapping.record(
+            from: ["id": .uuid(rowKey)],
+            table: "items",
+            rowKey: rowKey,
+            hlc: hlc,
+            schemaVersion: 2,
+            kitID: "MyKit",
+            zone: zoneID,
+            columnHLCs: ColumnHLCMap(entries: ["id": PackedHLC(hlc)])
+        )
+        let tombstone = CKRecordMapping.tombstoneRecord(
+            rowKey: rowKey,
+            table: "items",
+            kitID: "MyKit",
+            deleteHLC: hlc,
+            schemaVersion: 2,
+            zone: zoneID
+        )
+
+        let metadataKeys = Set(record.allKeys())
+            .union(tombstone.allKeys())
+            .subtracting(["id"])
+
+        #expect(metadataKeys == [
+            "moot_sync_hlc",
+            "moot_sync_schema_version",
+            "moot_sync_kit_id",
+            "moot_sync_column_hlcs",
+            "moot_sync_type_tags",
+            "moot_sync_deleted",
+        ])
+        #expect(metadataKeys.allSatisfy { $0.first?.isLetter == true })
+    }
+
+    @Test("future wire metadata namespace keys do not leak into application values")
+    func futureMetadataKeyIsFiltered() throws {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        let rowKey = UUID()
+        let record = try CKRecordMapping.record(
+            from: ["note": .text("hello")],
+            table: "items",
+            rowKey: rowKey,
+            hlc: HLC(physicalTime: 1000, logicalCount: 5, nodeID: 3),
+            schemaVersion: 2,
+            kitID: "MyKit",
+            zone: zoneID
+        )
+        record["moot_sync_origin"] = "future-peer" as NSString
+
+        let decoded = try CKRecordMapping.decode(record)
+
+        #expect(decoded.values["note"] == .text("hello"))
+        #expect(decoded.values["moot_sync_origin"] == nil)
+    }
+
+    @Test("application values cannot occupy the wire metadata namespace")
+    func applicationMetadataCollisionIsRejected() {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        #expect(throws: SyncError.self) {
+            try CKRecordMapping.record(
+                from: ["moot_sync_origin": .text("application-value")],
+                table: "items",
+                rowKey: UUID(),
+                hlc: HLC(physicalTime: 1000, logicalCount: 5, nodeID: 3),
+                schemaVersion: 2,
+                kitID: "MyKit",
+                zone: zoneID
+            )
+        }
+    }
 }
 
 // MARK: - SyncMeta preservation
 
 extension CKRecordMappingTests {
 
-    @Test("decode populates syncMeta and values contains no _sync* keys")
+    @Test("decode populates syncMeta and values contains no wire metadata keys")
     func syncMetaPreservedThroughDecode() throws {
         let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
         let rowKey = UUID()
@@ -104,10 +180,10 @@ extension CKRecordMappingTests {
         #expect(decoded.syncMeta.schemaVersion == 3)
         #expect(decoded.syncMeta.kitID == "K")
 
-        // values must not leak _sync* keys.
-        #expect(decoded.values["_syncHLC"] == nil)
-        #expect(decoded.values["_syncSchemaVersion"] == nil)
-        #expect(decoded.values["_syncKitID"] == nil)
+        // Values must not leak ConvergenceKit wire metadata keys.
+        #expect(decoded.values[SyncMetadataField.hlc] == nil)
+        #expect(decoded.values[SyncMetadataField.schemaVersion] == nil)
+        #expect(decoded.values[SyncMetadataField.kitID] == nil)
     }
 }
 
@@ -123,9 +199,9 @@ struct CorruptRemoteIdentityTests {
         let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
         let id = CKRecord.ID(recordName: name, zoneID: zoneID)
         let record = CKRecord(recordType: "TestKit_items", recordID: id)
-        record["_syncHLC"] = NSNumber(value: Int64(1000))
-        record["_syncSchemaVersion"] = NSNumber(value: 1)
-        record["_syncKitID"] = "TestKit" as NSString
+        record[SyncMetadataField.hlc] = NSNumber(value: Int64(1000))
+        record[SyncMetadataField.schemaVersion] = NSNumber(value: 1)
+        record[SyncMetadataField.kitID] = "TestKit" as NSString
         record["note"] = "test-value" as NSString
         return record
     }
@@ -235,12 +311,12 @@ struct LWWDurableHLCTests {
         let engine = CloudKitStateActor(containerIdentifier: nil)
         let rowID = UUID()
 
-        // First inbound at T=1000 — wins; _syncHLC must be persisted.
+        // First inbound at T=1000 wins and its HLC must persist in side metadata.
         let first = makeDecoded(id: rowID, note: "first-at-T1000", hlcTime: 1000)
         try await engine.applyInbound(first, syncedTable: syncedTable, storage: storage)
 
         // Second inbound at T=500 — older; must be rejected because the
-        // fix persists _syncHLC so the HLC guard in applyInbound can fire.
+        // The side-metadata HLC lets the guard in applyInbound reject this stale write.
         let stale = makeDecoded(id: rowID, note: "stale-at-T500", hlcTime: 500)
         try await engine.applyInbound(stale, syncedTable: syncedTable, storage: storage)
 
@@ -307,7 +383,7 @@ struct LWWDurableHLCTests {
 
 // MARK: - Type-tag fidelity round-trip tests (P4-M2)
 
-/// Verifies that the _syncTypeTags map written by record(from:) is consumed
+/// Verifies that the moot_sync_type_tags map written by record(from:) is consumed
 /// by decode(_:) to restore the exact TypedValue discriminator for every lossy
 /// CKRecord case. Each test: encode a single-column record, decode it, assert
 /// type equality (discriminator) and byte equality (value content).
@@ -344,7 +420,7 @@ struct CKRecordTypeFidelityTests {
         let result = try roundTrip(column: "col", value: .uuid(u))
         // Without tag map: would decode as .text(u.uuidString). With tag map: .uuid(u).
         #expect(result == .uuid(u),
-                "uuid discriminator must be restored by _syncTypeTags; got \(String(describing: result))")
+                "uuid discriminator must be restored by moot_sync_type_tags; got \(String(describing: result))")
     }
 
     @Test(".bitmap round-trips through CKRecord with discriminator restored by tag map")
@@ -353,7 +429,7 @@ struct CKRecordTypeFidelityTests {
         let result = try roundTrip(column: "col", value: .bitmap(bm))
         // Without tag map: would decode as .int(bm). With tag map: .bitmap(bm).
         #expect(result == .bitmap(bm),
-                "bitmap discriminator must be restored by _syncTypeTags; got \(String(describing: result))")
+                "bitmap discriminator must be restored by moot_sync_type_tags; got \(String(describing: result))")
     }
 
     @Test(".hlc round-trips through CKRecord with discriminator and value restored by tag map")
@@ -401,7 +477,7 @@ struct CKRecordTypeFidelityTests {
 
     @Test("non-lossy discriminators round-trip without a tag map entry")
     func nonLossyDiscriminatorsRoundTrip() throws {
-        // These cases must round-trip correctly without any _syncTypeTags assistance.
+        // These cases must round-trip correctly without any moot_sync_type_tags assistance.
         let rowKey = UUID()
         let record = try CKRecordMapping.record(
             from: [
@@ -472,8 +548,8 @@ struct CKRecordTypeFidelityTests {
     /// Group (b) of the gap 6 regression tests: a column HLC with
     /// `physicalTime` above the old 40-bit `HLC.packed` truncation ceiling
     /// (`0xFF_FFFF_FFFF`, ~1.0995e12) must survive the ACTUAL production
-    /// `_syncColumnHLCs` wire path — `CKRecordMapping.record(from:...)`'s
-    /// `JSONEncoder().encode(map)` into `record["_syncColumnHLCs"]` as
+    /// `moot_sync_column_hlcs` wire path — `CKRecordMapping.record(from:...)`'s
+    /// `JSONEncoder().encode(map)` into `record["moot_sync_column_hlcs"]` as
     /// `NSData`, then `CKRecordMapping.decode(_:)`'s
     /// `JSONDecoder().decode(ColumnHLCMap.self, from:)` — byte-exact, with
     /// no truncation. This is the WIRE half of gap 6's fix; the PERSIST half
@@ -487,7 +563,7 @@ struct CKRecordTypeFidelityTests {
     /// `HLC.packed`/`HLC(packed:)` round-trip. This test documents and locks
     /// in that the wire path was — and remains — full-width, so any future
     /// change that accidentally routes columnHLCs through `packed(hlc)` (the
-    /// row-grain `_syncHLC` field's encoding, which DOES truncate) would be
+    /// row-grain `moot_sync_hlc` field's encoding, which DOES truncate) would be
     /// caught here.
     @Test("columnHLCs with physicalTime above the 40-bit truncation ceiling survive the CKRecord wire round-trip byte-exact")
     func columnHLCsRealMagnitudeWireRoundTrip() throws {

@@ -97,8 +97,8 @@ private func p4m3NodeIDOf(_ hlcWireBytes: Data) -> Int {
     Int((try? HLC(wireBytes: [UInt8](hlcWireBytes)))?.nodeID ?? -1)
 }
 
-/// Extract the HLC nodeID from bits 3–0 of a CKRecord `_syncHLC` field value.
-/// Applies to CKRecords where _syncHLC = CKRecordMapping.packed(hlc).
+/// Extract the HLC nodeID from bits 3–0 of a CKRecord `moot_sync_hlc` field value.
+/// Applies to CKRecords where moot_sync_hlc = CKRecordMapping.packed(hlc).
 /// Layout (CKRecordMapping.packed): physical 48 | logical 12 | node 4.
 /// This is a DIFFERENT layout from HLC.packed — the nodeID is in the low 4 bits.
 private func ckRecordNodeIDOf(_ packedHLC: Int64) -> Int {
@@ -450,7 +450,7 @@ struct SlotFencingScenarios {
     ///   3. A's push(): EpochFence fires reenrollRequired → engine auto-reenrolls
     ///      (claims new slot, remints outbox) → push completes without error.
     ///   4. B pulls and receives all 3 rows from A.
-    ///   5. All pushed CKRecords carry A's NEW slot nodeID in _syncHLC.
+    ///   5. All pushed CKRecords carry A's NEW slot nodeID in moot_sync_hlc.
     @Test("(3c) integration: epoch bump → push auto-reenrolls → B converges; pushed records carry new nodeID")
     func reenrollAndConvergeViaEngine() async throws {
         let fixture = try await TwoEstateFixture.make()
@@ -504,9 +504,9 @@ struct SlotFencingScenarios {
         let cloudRecords = await fixture.allCloudDataRecords()
         #expect(!cloudRecords.isEmpty, "cloud must have data records after A's push")
         for record in cloudRecords {
-            // CKRecord _syncHLC uses CKRecordMapping.packed() layout (48|12|4),
+            // CKRecord moot_sync_hlc uses CKRecordMapping.packed() layout (48|12|4),
             // NOT HLC.packed layout (8|16|40). nodeID lives in the low 4 bits.
-            let packed    = (record["_syncHLC"] as? NSNumber)?.int64Value ?? 0
+            let packed = (record[SyncMetadataField.hlc] as? NSNumber)?.int64Value ?? 0
             let recordNID = ckRecordNodeIDOf(packed)
             #expect(recordNID == newSlotA,
                     "cloud record \(record.recordID.recordName): expected nodeID \(newSlotA), got \(recordNID)")
