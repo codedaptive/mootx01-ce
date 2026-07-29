@@ -172,7 +172,19 @@ public extension GeniusLocusKit {
 
         // Step 2: Open the estate through the standard coordinator path.
         // This validates the manifest, issues the handle, and sets mount state to .mounted.
-        let handle = try await open(storage: storage, owner: owner)
+        //
+        // Identity key store selection by lifetime (estate-key-lifetime fix):
+        //   .durable  → nil (default resolution: SQLite → KeychainEstateIdentityKeyStore,
+        //               inMemory → InMemoryEstateIdentityKeyStore). No change from
+        //               pre-fix behaviour.
+        //   .ephemeral → InMemoryEstateIdentityKeyStore() always, regardless of
+        //               storage backend. The Ed25519 signing key is generated, lives
+        //               in process memory, and leaves zero Keychain residue at
+        //               process exit. This is the fix for the test-loop incident.
+        let identityKeyStore: (any EstateIdentityKeyStore)? = params.lifetime == .ephemeral
+            ? InMemoryEstateIdentityKeyStore()
+            : nil // nil → defaultIdentityKeyStore(for:storage) in LocusKit.Estate.open
+        let handle = try await open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
 
         // Step 2b: Wire sub-stores based on kind — BEFORE seeding the wings.
         // Wiring registers the Corpus (and mounts the encode queue), so the wing
@@ -687,11 +699,27 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Step 3: Close the estate through the standard coordinator path.
+        // Step 3: Dispose Keychain key material (estate-key-lifetime fix, 2026-07-29).
+        //
+        // This was the MISSING step that caused the incident: provisioning an estate
+        // writes an Ed25519 identity key to the Keychain; the old destroy() path
+        // never deleted it, so test loops that created and destroyed thousands of
+        // estates orphaned one Keychain item per estate.
+        //
+        // Must run AFTER sub-store teardown (steps 1–2) so the storage connection
+        // is still alive for the db-key URL derivation, and BEFORE close() so we
+        // still hold the estate UUID from the handle.
+        //
+        // disposeEstateKeys is idempotent (missing Keychain items are not errors),
+        // so calling it on an in-memory estate or an ephemeral estate is safe.
+        try await disposeEstateKeys(for: handle, storage: storage)
+        Self.lifecycleLog.info("disposeEstateKeys: key material disposed for \(handle.estateUUID, privacy: .public)")
+
+        // Step 4: Close the estate through the standard coordinator path.
         // This flushes LocusKit, drops all registry entries (registry, auditLogs,
         // corpusKits, vectorStores, mountStates, storages, etc.), and calls
         // storage.close() to release the SQLite connection.
-        // Sub-store teardown (steps 1–2) must complete before this call.
+        // Sub-store teardown (steps 1–3) must complete before this call.
         if registry[handle] != nil {
             try await close(handle)
         }
