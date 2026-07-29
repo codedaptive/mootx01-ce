@@ -224,6 +224,61 @@ struct ContainerFingerprintStoreTests {
         #expect(fp.provenance & d2.provenance == d2.provenance)
     }
 
+    // MARK: - setDistilledRepresentation fingerprint maintenance
+
+    /// `Estate.setDistilledRepresentation` must OR bit 19
+    /// (`hasCurrentRepresentation`) into the room/wing OR aggregate in the
+    /// same logical operation, so a subsequent recall filter on
+    /// `.hasFeatureFlag(.hasCurrentRepresentation)` does not falsely exclude
+    /// the container mid-session without requiring an estate reopen.
+    @Test("setDistilledRepresentation ORs bit 19 into the room and wing fingerprint without reopen")
+    func setDistilledRepresentationUpdatesFingerprint() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let estate = try await Estate.create(
+            storage: TestStorage.sqlite(url),
+            owner: OwnerCredentials(ownerIdentifier: "dist-fp"))
+
+        // Capture a drawer — bit 19 (hasCurrentRepresentation) is clear at capture.
+        let frame = CaptureFrame(content: "content to distil",
+                                 channel: .voiced,
+                                 room: "r-dist",
+                                 latticeAnchor: LatticeAnchor(udcCode: "004"),
+                                 addedBy: "t",
+                                 embeddingModelID: "m",
+                                 kind: .prose)
+        let dr = try await estate.capture(frame)
+
+        // Resolve wing name from the node tree.
+        let names = try await estate.resolveNodeNames(parentNodeIds: [dr.parentNodeId])
+        let wing = names[dr.parentNodeId]!.wing
+        let bit19: Int64 = 1 << 19
+
+        // Bit 19 is absent from the OR aggregate before distillation.
+        let preFP = try await estate.containerFP.get(wing: wing, room: "r-dist")
+        #expect((preFP?.operational ?? 0) & bit19 == 0,
+                "bit 19 must be absent from the room aggregate before distillation")
+
+        // Distil the drawer post-capture — no estate reopen.
+        let count = try await estate.setDistilledRepresentation(
+            drawerId: dr.id,
+            distilled: "distilled text",
+            pipelineVersion: "v1",
+            tokenCount: 42,
+            at: Date(timeIntervalSince1970: 1_700_001_000))
+        #expect(count == 1)
+
+        // Bit 19 must now appear in both the room-level and wing-level OR aggregates.
+        let postRoomFP = try await estate.containerFP.get(wing: wing, room: "r-dist")
+        let roomFP = try #require(postRoomFP, "room aggregate must exist after distillation")
+        #expect(roomFP.operational & bit19 == bit19,
+                "bit 19 must be set in the room OR aggregate after setDistilledRepresentation")
+        let postWingFP = try await estate.containerFP.get(wing: wing, room: "")
+        let wingFP = try #require(postWingFP, "wing aggregate must exist after distillation")
+        #expect(wingFP.operational & bit19 == bit19,
+                "bit 19 must be set in the wing OR aggregate after setDistilledRepresentation")
+    }
+
     @Test("Estate.open backfills the aggregate from existing rows")
     func openBackfillsAggregate() async throws {
         let url = TestStorage.tempURL()

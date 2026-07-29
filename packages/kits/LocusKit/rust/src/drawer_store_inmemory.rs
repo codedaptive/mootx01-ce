@@ -2382,16 +2382,25 @@ impl DrawerStore for DrawerStoreCore {
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
         );
-        // Read the current operationalBitmap to set bit 19 (HAS_CURRENT_REPRESENTATION)
-        // in the same UPDATE as the four distillation columns (§4 invariant).
-        // Row not found → return 0 (mirrors Swift's guard let row = rows.first else { return 0 }).
+        // Read the current bitmap fields:
+        //   operationalBitmap — to set bit 19 (HAS_CURRENT_REPRESENTATION) in
+        //     the same UPDATE as the four distillation columns (§4 invariant).
+        //   adjectiveBitmap, provenance, parent_node_id — to OR into the
+        //     container-fingerprint aggregate after a successful write, so
+        //     recall filters on .hasFeatureFlag(.hasCurrentRepresentation) do
+        //     not falsely exclude this container mid-session without a reopen.
+        // Row not found → return 0.
         let rows = row_store
             .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
             .map_err(map_storage_err)?;
-        let current_op = match rows.first() {
-            Some(row) => i64_value_of(row.get("operationalBitmap")),
+        let row = match rows.first() {
+            Some(r) => r,
             None => return Ok(0),
         };
+        let current_op = i64_value_of(row.get("operationalBitmap"));
+        let adjective = i64_value_of(row.get("adjectiveBitmap"));
+        let provenance = i64_value_of(row.get("provenance"));
+        let parent_node_id = string_value_of(row.get("parent_node_id"));
         let set_op = current_op | DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
         let mut values = BTreeMap::new();
         values.insert(
@@ -2411,9 +2420,29 @@ impl DrawerStore for DrawerStoreCore {
             TypedValue::Timestamp(generated_at),
         );
         values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(set_op));
-        row_store
+        let updated = row_store
             .update(T_DRAWERS, values, &id_pred)
-            .map_err(map_storage_err)
+            .map_err(map_storage_err)?;
+        // OR bit 19 into the room/wing fingerprint aggregate. The OR aggregate
+        // is monotone — ORing a set bit is always safe. Clear paths need no
+        // rollup change: stale set bits are a harmless over-approximation
+        // (§ 11.5); rebuild_all at estate open tightens.
+        if updated == 1 {
+            let names = self.resolve_node_names(&[parent_node_id.clone()])?;
+            let (wing, room) = names
+                .get(&parent_node_id)
+                .map(|(w, r)| (w.as_str(), r.as_str()))
+                .unwrap_or(("", ""));
+            self.or_in_container_fingerprint(
+                wing,
+                room,
+                adjective,
+                set_op,
+                provenance,
+                generated_at,
+            )?;
+        }
+        Ok(updated)
     }
 
     /// Count of active drawers still awaiting distillation (§7.1

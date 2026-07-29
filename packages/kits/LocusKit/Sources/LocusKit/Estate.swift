@@ -447,6 +447,15 @@ public actor Estate {
     /// involvement). This is the seam GLK's distillation paths (drain-stage
     /// and `moot_distill` sweep) write through.
     ///
+    /// After a successful write, OR bit 19 (`hasCurrentRepresentation`)
+    /// into the room/wing container-fingerprint aggregate so that any
+    /// subsequent recall filter on `.hasFeatureFlag(.hasCurrentRepresentation)`
+    /// does not falsely exclude this container mid-session without requiring
+    /// an estate reopen. The OR aggregate is monotone — ORing a set bit is
+    /// always safe. Clear paths need no rollup change: stale set bits are a
+    /// harmless over-approximation (spec § 11.5); `rebuildAll` at estate open
+    /// tightens. Mirrors the `addDrawerCovered` pattern.
+    ///
     /// - Returns: Count of rows updated (0 = drawer not found).
     @discardableResult
     public func setDistilledRepresentation(
@@ -456,12 +465,24 @@ public actor Estate {
         tokenCount: Int64,
         at generatedAt: Date
     ) async throws -> Int {
-        try await store.setDistilledRepresentation(
+        let count = try await store.setDistilledRepresentation(
             drawerId: drawerId,
             distilled: distilled,
             pipelineVersion: pipelineVersion,
             tokenCount: tokenCount,
             at: generatedAt)
+        if count == 1, let drawer = try await store.getDrawer(id: drawerId) {
+            let names = try await store.resolveNodeNames(
+                parentNodeIds: [drawer.parentNodeId])
+            let resolved = names[drawer.parentNodeId] ?? (wing: "", room: "")
+            try await containerFP.orIn(
+                wing: resolved.wing, room: resolved.room,
+                adjective: drawer.adjectiveBitmap,
+                operational: drawer.operationalBitmap,
+                provenance: drawer.provenance,
+                now: generatedAt)
+        }
+        return count
     }
 
     /// Count of active drawers still awaiting distillation (the §7.1
