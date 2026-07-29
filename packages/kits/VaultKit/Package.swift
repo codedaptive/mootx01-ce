@@ -45,6 +45,7 @@ let package = Package(
         .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
         .package(name: "LocusKit", path: "../LocusKit"),
         .package(name: "EideticLib", path: "../../libs/EideticLib"),
+        .package(name: "SubstrateTypes", path: "../../libs/SubstrateTypes"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
         // QueueKit: the outbound MemPalace pump (PalacePump.swift) uses the
         // queue as its checkpoint + pacing layer — each note becomes a job, so
@@ -71,6 +72,7 @@ let package = Package(
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "EideticLib", package: "EideticLib"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "QueueKit", package: "QueueKit"),
             ],
             path: "Sources/VaultKit"
