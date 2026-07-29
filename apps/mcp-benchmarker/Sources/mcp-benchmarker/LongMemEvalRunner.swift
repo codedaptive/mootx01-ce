@@ -522,12 +522,12 @@ func runLMEQuestions(
 
         // Exact arm query: moot_memory_search.
         // ORDER IS LOAD-BEARING: the exact-arm query MUST run before any
-        // moot_consolidate. Consolidation is not read-only — it subsumes source
-        // drawers into distilled factoids, after which the originals no longer
-        // surface in default search (proven 2026-07-27: LME q1 answer at rank 2
-        // pre-consolidate, absent from top-20 post-consolidate, 330 factoids).
-        // Consolidating first contaminates the exact-arm measurement; it
-        // depressed 1.1.x any@5 from ~0.85-shape to ~0.6 across two full grids.
+        // moot_distill call (Wave 1 rename from moot_consolidate). Distillation
+        // is not read-only — it writes on-row distilled representations, after
+        // which the originals no longer surface in default search (proven
+        // 2026-07-27: LME q1 answer at rank 2 pre-distill, absent from top-20
+        // post-distill, 330 rows). Distilling first contaminates the exact-arm
+        // measurement; it depressed 1.1.x any@5 from ~0.85-shape to ~0.6.
         var exactPayloadText: String? = nil
         var exactQueryLatency: Double? = nil
         var retrievedUUIDs: [String] = []
@@ -584,15 +584,15 @@ func runLMEQuestions(
             exactQueryLatency = Date().timeIntervalSince(queryStart)
         }
 
-        // Dense arm: build distilled factoids via moot_consolidate, then query
+        // Dense arm: build distilled representations via moot_distill, then query
         // moot_recall_distilled. Runs strictly AFTER the exact arm (see the
-        // ordering note above) because consolidation mutates what default
+        // ordering note above) because distillation mutates what default
         // search returns.
         var densePayloadText: String? = nil
         var denseQueryLatency: Double? = nil
         if config.arm == .dense || config.arm == .both {
             let _ = try await client.callTool(
-                "moot_consolidate",
+                "moot_distill",
                 arguments: [:],
                 format: .mootText
             )

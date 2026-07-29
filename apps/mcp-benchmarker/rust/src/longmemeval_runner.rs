@@ -192,8 +192,9 @@ pub fn lme_verb_map() -> VerbMap {
 /// Returns the VerbMap for the dense recall arm of the LME token-efficiency benchmark.
 ///
 /// Uses `moot_recall_distilled`, which:
-///   - Returns ~10-token distilled factoid prose per hit (capped at ~300 chars)
-///   - Requires `moot_consolidate` to be called after ingest, before the first query
+///   - Returns distilled prose per hit (token-economical representation)
+///   - Requires `moot_distill` to be called after ingest, before the first query
+///     (Wave 1: replaces the retired `moot_consolidate` alias)
 ///   - Does NOT use a location constant arg (queries the estate-default wing)
 ///
 /// Twin of Swift `lmeDenseMootVerbMap`.
@@ -532,11 +533,11 @@ pub fn run_one_question(
 
     // ── Exact arm: moot_memory_search ─────────────────────────────────────────
     // ORDER IS LOAD-BEARING: the exact-arm query MUST run before any
-    // moot_consolidate. Consolidation subsumes source drawers into distilled
-    // factoids, after which the originals no longer surface in default search
-    // (proven 2026-07-27: LME q1 answer rank 2 pre-consolidate, absent from
-    // top-20 post-consolidate). Consolidating first contaminated the exact-arm
-    // measurement on two full grids. Twin of the Swift ordering note.
+    // moot_distill call (Wave 1 rename from moot_consolidate). Distillation
+    // writes on-row representations, after which the originals no longer surface
+    // in default search (proven 2026-07-27: LME q1 answer rank 2 pre-distill,
+    // absent from top-20 post-distill). Distilling first contaminated the
+    // exact-arm measurement on two full grids. Twin of the Swift ordering note.
     let mut exact_payload_text: Option<String> = None;
     let mut exact_query_latency: Option<f64> = None;
     let mut retrieved_uuids: Vec<String> = Vec::new();
@@ -598,16 +599,17 @@ pub fn run_one_question(
         exact_query_latency = Some(query_start.elapsed().as_secs_f64());
     }
 
-    // ── Dense arm: consolidate, then moot_recall_distilled ───────────────────
+    // ── Dense arm: distill, then moot_recall_distilled ───────────────────────
     // Runs strictly AFTER the exact arm (see ordering note above) because
-    // consolidation mutates what default search returns.
+    // distillation mutates what default search returns. Wave 1: calls
+    // moot_distill (the canonical name); moot_consolidate retired as the alias.
     let mut dense_payload_text: Option<String> = None;
     let mut dense_query_latency: Option<f64> = None;
     if arm == &LmeArm::Dense || arm == &LmeArm::Both {
-        let consolidate_args: BTreeMap<String, JsonValue> = BTreeMap::new();
-        if let Err(e) = client.call_tool("moot_consolidate", consolidate_args, &verb_map.result_format) {
+        let distill_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+        if let Err(e) = client.call_tool("moot_distill", distill_args, &verb_map.result_format) {
             eprintln!(
-                "  [lme] consolidate warning for {question_id}: {}",
+                "  [lme] distill warning for {question_id}: {}",
                 e.description
             );
             // Non-fatal: dense arm query may return empty results, but we continue.

@@ -1,11 +1,11 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 68-tool surface: 23 interface tools (Tier 1–5 + moot_monitoring_status,
+//! Tests the 70-tool surface: 23 interface tools (Tier 1–5 + moot_monitoring_status,
 //! including moot_memory_get and moot_review_tunnel), 1 federation tool,
-//! 12 recipe tools (including moot_hunt_contradictions), 23 lens tools
-//! (including moot_lens_cohesion and moot_lens_contradiction), 5 vault tools,
-//! and 4 maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
-//! moot_palace_import).
+//! 11 recipe tools (Wave 1: moot_distill replaced moot_consolidate+moot_recollect;
+//! moot_consolidate is an unlisted ACK-gated alias; moot_recollect is a notice-only stub),
+//! 23 lens tools (including moot_lens_cohesion and moot_lens_contradiction),
+//! 5 vault tools, 4 maintenance tools, and 3 dataset tools (MX-TAB-7).
 //! Exercises dispatch routing, argument validation, and result shapes through
 //! the full stack using an in-memory estate. One success path + one
 //! error/validation path per tool group.
@@ -326,10 +326,11 @@ fn tools_list_name_set_matches_expected_70_names() {
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (12) — list_lenses + list_recipes + synthesize + run_migration
+        // Recipe (11) — list_lenses + list_recipes + synthesize + run_migration
         //               + confirm_migration + recall_precise + recall_shaped + dream
-        //               + consolidate + recall_distilled + recollect
-        //               + hunt_contradictions
+        //               + distill + recall_distilled + hunt_contradictions
+        //               (moot_consolidate is an unlisted ACK-gated alias;
+        //                moot_recollect is a notice-only stub; neither is listed)
         "moot_list_lenses",
         "moot_list_recipes",
         "moot_synthesize",
@@ -6356,6 +6357,8 @@ fn shaped_recall_negative_limit_returns_invalid_params() {
 }
 
 /// `moot_recall_distilled` with zero `limit` returns invalidParams.
+/// ack: "recall_distilled/v2" is required to pass the ACK gate (Wave 1 contract
+/// change) so the call reaches the limit-validation guard.
 #[test]
 fn distilled_recall_zero_limit_returns_invalid_params() {
     let registry = EstateRegistry::new_inmemory();
@@ -6363,7 +6366,7 @@ fn distilled_recall_zero_limit_returns_invalid_params() {
 
     let err = dispatch_tool(
         "moot_recall_distilled",
-        &args!["query" => "test", "limit" => 0_i64],
+        &args!["query" => "test", "limit" => 0_i64, "ack" => "recall_distilled/v2"],
         &registry,
         &ledger,
     ).unwrap_err();
@@ -7824,4 +7827,207 @@ fn successful_results_pass_through_untouched() {
     let result = aria_mcp::dispatch::surface_dispatch_failure("moot_file_memory", routed)
         .expect("Ok results must pass through");
     assert_eq!(result, ok, "a successful result must not be rewritten by the funnel");
+}
+
+// ---------------------------------------------------------------------------
+// ACK gate and notice-only stub tests (Wave 1) — mirrors RecipeToolsTests.swift
+// ---------------------------------------------------------------------------
+
+fn text_from_result(result: &serde_json::Value) -> &str {
+    result["content"][0]["text"].as_str().expect("text_result must have content[0].text")
+}
+
+fn is_error_result(result: &serde_json::Value) -> bool {
+    result["isError"].as_bool().unwrap_or(false)
+}
+
+/// is_recipe_tool returns true for moot_recollect (notice-only stub must reach dispatch).
+#[test]
+fn recollect_is_in_recipe_tool_routing_set() {
+    assert!(aria_mcp::recipe_tools::is_recipe_tool("moot_recollect"),
+        "moot_recollect must be in the routing set so callers receive the removal notice");
+}
+
+/// moot_recollect always returns the removal notice; never executes regardless of args.
+#[test]
+fn recollect_stub_returns_notice_never_executes() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // No ack, no query — still returns the removal notice.
+    let result = dispatch_tool(
+        "moot_recollect",
+        &args!["ack" => "anything", "query" => "test"],
+        &registry,
+        &ledger,
+    ).expect("moot_recollect stub must not return Err — it returns Ok(notice)");
+
+    assert!(!is_error_result(&result), "removal notice must not be isError");
+    let text = text_from_result(&result);
+    assert_eq!(
+        text,
+        "moot_recollect was removed: its substrate (factoid drawers) was retired; \
+         recall hits now ARE source drawers; use moot_memory_search or moot_recall_distilled.",
+        "byte-identical removal notice required"
+    );
+    assert!(!text.starts_with("CONTRACT CHANGE NOTICE:"),
+        "removal notice is not a contract-change gate — different wording");
+}
+
+/// moot_consolidate without ack returns the contract change notice.
+#[test]
+fn consolidate_without_ack_returns_contract_notice() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_consolidate",
+        &args![],
+        &registry,
+        &ledger,
+    ).expect("ACK gate must return Ok(notice), not Err");
+
+    assert!(!is_error_result(&result));
+    let text = text_from_result(&result);
+    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"),
+        "notice must start with CONTRACT CHANGE NOTICE:");
+    assert!(text.contains(r#"ack: "moot_distill/p1""#),
+        "notice must quote the current token");
+    assert!(!text.contains("moot_distill: sweep complete"),
+        "no distill must have run — estate untouched");
+}
+
+/// moot_consolidate with a wrong/stale ack returns the same notice.
+#[test]
+fn consolidate_wrong_ack_returns_contract_notice() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_consolidate",
+        &args!["ack" => "moot_consolidate/v1"],
+        &registry,
+        &ledger,
+    ).expect("wrong ack must return Ok(notice)");
+
+    assert!(!is_error_result(&result));
+    let text = text_from_result(&result);
+    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"));
+    assert!(text.contains(r#"ack: "moot_distill/p1""#),
+        "notice must always show the current token, not the caller's stale one");
+}
+
+/// moot_consolidate with correct ack executes (runs the distill handler).
+#[test]
+fn consolidate_correct_ack_executes() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_consolidate",
+        &args!["ack" => "moot_distill/p1"],
+        &registry,
+        &ledger,
+    ).expect("correct ack must execute and return Ok");
+
+    assert!(!is_error_result(&result));
+    let text = text_from_result(&result);
+    // The distill handler runs and reports a sweep on the empty estate.
+    assert!(text.contains("moot_distill: sweep complete"),
+        "correct ack must run the distill handler: {:?}", text);
+    assert!(!text.starts_with("CONTRACT CHANGE NOTICE:"),
+        "correct ack must not return a contract notice");
+}
+
+/// moot_recall_distilled without ack returns the contract change notice.
+#[test]
+fn recall_distilled_without_ack_returns_contract_notice() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_recall_distilled",
+        &args!["query" => "any query"],
+        &registry,
+        &ledger,
+    ).expect("ACK gate must return Ok(notice), not Err");
+
+    assert!(!is_error_result(&result));
+    let text = text_from_result(&result);
+    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"),
+        "notice must start with CONTRACT CHANGE NOTICE:");
+    assert!(text.contains(r#"ack: "recall_distilled/v2""#),
+        "notice must quote the current token");
+    assert!(!text.contains("found "),
+        "no recall must have run — estate untouched");
+}
+
+/// moot_recall_distilled with a wrong/stale ack returns the same notice.
+#[test]
+fn recall_distilled_wrong_ack_returns_contract_notice() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_recall_distilled",
+        &args!["query" => "any query", "ack" => "recall_distilled/v1"],
+        &registry,
+        &ledger,
+    ).expect("wrong ack must return Ok(notice)");
+
+    assert!(!is_error_result(&result));
+    let text = text_from_result(&result);
+    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"));
+    assert!(text.contains(r#"ack: "recall_distilled/v2""#),
+        "notice must always show the current token");
+}
+
+/// moot_recall_distilled with correct ack executes.
+#[test]
+fn recall_distilled_correct_ack_executes() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let result = dispatch_tool(
+        "moot_recall_distilled",
+        &args!["query" => "any query", "ack" => "recall_distilled/v2"],
+        &registry,
+        &ledger,
+    ).expect("correct ack must execute and return Ok");
+
+    assert!(!is_error_result(&result));
+    let text = text_from_result(&result);
+    // Recall handler runs and reports 0 results on the empty estate.
+    assert!(text.contains("found "),
+        "correct ack must run the recall handler: {:?}", text);
+    assert!(!text.starts_with("CONTRACT CHANGE NOTICE:"),
+        "correct ack must not return a contract notice");
+}
+
+/// The recall_distilled tool schema exposes an "ack" property.
+#[test]
+fn recall_distilled_schema_exposes_ack_param() {
+    let tools = build_tool_list_with_flags(vault_enabled(), false);
+    let arr = tools.as_array().expect("tool list must be array");
+    let tool = arr.iter()
+        .find(|t| t["name"].as_str() == Some("moot_recall_distilled"))
+        .expect("moot_recall_distilled must appear in tools list");
+    let props = &tool["inputSchema"]["properties"];
+    assert!(props["ack"].is_object(),
+        "moot_recall_distilled schema must have 'ack' property; schema: {props:?}");
+    assert_eq!(props["ack"]["type"].as_str(), Some("string"),
+        "ack param must be type: string");
+}
+
+/// The recall_distilled description documents the current ack token.
+#[test]
+fn recall_distilled_description_contains_ack_token() {
+    let tools = build_tool_list_with_flags(vault_enabled(), false);
+    let arr = tools.as_array().expect("tool list must be array");
+    let tool = arr.iter()
+        .find(|t| t["name"].as_str() == Some("moot_recall_distilled"))
+        .expect("moot_recall_distilled must appear in tools list");
+    let desc = tool["description"].as_str().unwrap_or("");
+    assert!(desc.contains("recall_distilled/v2"),
+        "description must document the current ack token; got: {desc:?}");
 }

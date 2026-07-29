@@ -799,7 +799,7 @@ func runLongMemEval(_ args: [String]) async throws {
     }
     // --arm exact|dense|both (default: both). Controls which recall paths are exercised.
     //   exact: moot_memory_search only (LME-01 baseline path)
-    //   dense: moot_recall_distilled only (requires moot_consolidate after ingest)
+    //   dense: moot_recall_distilled only (requires moot_distill after ingest; Wave 1 rename)
     //   both:  both arms per question for the two-arm token-efficiency comparison
     let armStr = optionValue("--arm", in: args) ?? "both"
     let arm: LMEArm
