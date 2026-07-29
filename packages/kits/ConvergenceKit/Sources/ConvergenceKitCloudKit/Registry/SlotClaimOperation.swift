@@ -220,14 +220,32 @@ public struct SlotClaimOperation: Sendable {
         var slots: [DeviceSlot] = []
         var recordsBySlot: [Int: CKRecord] = [:]
 
-        for (_, result) in results {
-            if case .success(let record) = result {
-                if let slot = try? SlotRecordMapping.slot(from: record) {
+        for id in ids {
+            guard let result = results[id] else {
+                throw SyncError.transportFailure(
+                    detail: "slot registry fetch: missing result for \(id.recordName)"
+                )
+            }
+            switch result {
+            case .success(let record):
+                do {
+                    let slot = try SlotRecordMapping.slot(from: record)
                     slots.append(slot)
                     recordsBySlot[slot.slot] = record
+                } catch {
+                    throw SyncError.decodingFailure(
+                        detail: "slot registry fetch \(id.recordName): \(error)"
+                    )
+                }
+            case .failure(let error):
+                // CloudKit represents an absent requested record as unknownItem.
+                // Every other per-record failure is operational, not a free slot.
+                guard isCloudKitError(error, code: .unknownItem) else {
+                    throw SyncError.transportFailure(
+                        detail: "slot registry fetch \(id.recordName): \(error)"
+                    )
                 }
             }
-            // Failure entries mean the slot record doesn't exist → slot is free.
         }
 
         return RegistrySnapshot(table: SlotTable(slots: slots), recordsBySlot: recordsBySlot)
@@ -235,40 +253,72 @@ public struct SlotClaimOperation: Sendable {
 
     /// Perform a compare-and-swap save of `record` using `.ifServerRecordUnchanged`.
     ///
-    /// Returns `true` if the CAS succeeded, `false` if serverRecordChanged was thrown
-    /// (another device modified the record between our fetch and our save).
+    /// Returns `true` if the requested record's save result succeeded, `false`
+    /// only when that result is `serverRecordChanged` (another device modified
+    /// the record between our fetch and our save).
     ///
     /// All other errors are rethrown as `SyncError.transportFailure`.
     private func casModify(record: CKRecord) async throws -> Bool {
+        let saveResults: [CKRecord.ID: Result<CKRecord, any Error>]
         do {
-            _ = try await database.modifyRecords(
+            saveResults = try await database.modifyRecords(
                 saving: [record],
                 deleting: [],
                 savePolicy: .ifServerRecordUnchanged,
                 atomically: false
-            )
-            return true
+            ).saveResults
         } catch {
-            // Check if any per-record result is a serverRecordChanged CAS loss.
-            // We check the error as NSError (works for both real CKError from
-            // production and NSError-fabricated from tests).
-            let nsErr = error as NSError
-            if nsErr.domain == CKErrorDomain && nsErr.code == CKError.Code.serverRecordChanged.rawValue {
+            if isServerRecordChanged(error, recordID: record.recordID) {
                 return false
-            }
-            // Also check for a batch error where individual record results carry serverRecordChanged.
-            // modifyRecords(atomically: false) may throw a CKError.partialFailure where
-            // individual records are in the userInfo.
-            if nsErr.domain == CKErrorDomain, nsErr.code == CKError.Code.partialFailure.rawValue,
-               let partialErrors = nsErr.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Error] {
-                let allServerRecordChanged = partialErrors.values.allSatisfy { perErr in
-                    let ns = perErr as NSError
-                    return ns.domain == CKErrorDomain && ns.code == CKError.Code.serverRecordChanged.rawValue
-                }
-                if allServerRecordChanged { return false }
             }
             throw SyncError.transportFailure(detail: "slot CAS save: \(error)")
         }
+
+        guard let saveResult = saveResults[record.recordID] else {
+            throw SyncError.transportFailure(
+                detail: "slot CAS save: missing result for \(record.recordID.recordName)"
+            )
+        }
+
+        switch saveResult {
+        case .success:
+            return true
+        case .failure(let error):
+            if isServerRecordChanged(error, recordID: record.recordID) {
+                return false
+            }
+            throw SyncError.transportFailure(
+                detail: "slot CAS save \(record.recordID.recordName): \(error)"
+            )
+        }
+    }
+
+    /// Return whether `error` is the CAS-conflict outcome for `recordID`.
+    ///
+    /// CloudKit may surface the conflict directly or inside a top-level
+    /// `partialFailure`. Only the requested record's result is authoritative.
+    private func isServerRecordChanged(_ error: any Error, recordID: CKRecord.ID) -> Bool {
+        if isCloudKitError(error, code: .serverRecordChanged) {
+            return true
+        }
+        let nsError = error as NSError
+        guard nsError.domain == CKErrorDomain,
+              nsError.code == CKError.Code.partialFailure.rawValue,
+              let partialErrors = nsError.userInfo[CKPartialErrorsByItemIDKey]
+                as? [AnyHashable: any Error],
+              let recordError = partialErrors[recordID]
+        else {
+            return false
+        }
+        let recordNSError = recordError as NSError
+        return recordNSError.domain == CKErrorDomain
+            && recordNSError.code == CKError.Code.serverRecordChanged.rawValue
+    }
+
+    /// Return whether a CloudKit or NSError value has the requested code.
+    private func isCloudKitError(_ error: any Error, code: CKError.Code) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == CKErrorDomain && nsError.code == code.rawValue
     }
 }
 

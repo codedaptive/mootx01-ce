@@ -4,8 +4,8 @@
 //
 // WHY tombstones: naive CKRecord.ID deletion carries no record type,
 // causing fan-out across every non-pushOnly manifest table (D1 defect).
-// A typed tombstone CKRecord (`kitID_tableName`, `_syncDeleted=1`)
-// restores the routing guarantee. The delete HLC is carried in `_syncHLC`
+// A typed tombstone CKRecord (`kitID_tableName`, `moot_sync_deleted=1`)
+// restores the routing guarantee. The delete HLC is carried in `moot_sync_hlc`
 // so the receiver can apply the same last-writer-wins-by-HLC gate that
 // guards regular upserts (D2 fix).
 //
@@ -30,11 +30,11 @@
 /// and Federation sync backends.
 public enum SyncTombstone {
 
-    /// The CKRecord field key (and side-table column) that marks a
-    /// record as a delete tombstone. Value is 1 (NSNumber) when set.
-    /// Prefixed `_sync` so `CKRecordMapping.decode` filters it from
-    /// application values, same as `_syncHLC`, `_syncSchemaVersion`.
-    public static let deletedFieldKey = "_syncDeleted"
+    /// The CKRecord field key that marks a record as a delete tombstone.
+    /// Value is 1 (NSNumber) when set.
+    /// Kept as an alias for the shared metadata vocabulary so existing
+    /// tombstone call sites remain coupled to the same canonical key set.
+    public static let deletedFieldKey = SyncMetadataField.deleted
 
     /// Minimum seconds a tombstone HLC entry persists in the side table
     /// before GC may compact it. 90 days (7 776 000 seconds).

@@ -149,7 +149,7 @@ extension CloudKitStateActor {
                 // Push a tombstone CKRecord instead of a CKRecord.ID deletion.
                 // The typed record (`kitID_tableName`) gives the pull path the
                 // table identity it needs for routing (D1 fix). The delete HLC
-                // in `_syncHLC` enables the receiver's LWW gate (D2 fix) and
+                // in `moot_sync_hlc` enables the receiver's LWW gate (D2 fix) and
                 // the A6 tombstone-HLC persistence in `_ck_sync_meta`. The HLC
                 // is the outbox entry's capture-time HLC, preserving ordering.
                 let tombstone = CKRecordMapping.tombstoneRecord(

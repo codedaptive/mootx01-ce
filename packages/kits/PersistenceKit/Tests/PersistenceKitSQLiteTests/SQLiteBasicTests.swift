@@ -258,6 +258,166 @@ struct SQLiteBasicTests {
         await storage.close()
     }
 
+    @Test func schemasFromMultipleKitsRetainTypedValues() async throws {
+        let storage = try makeStorage()
+        let applicationSchema = SchemaDeclaration(
+            kitID: "ApplicationKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "application_rows",
+                    columns: [
+                        .uuid("id"),
+                        .timestamp("created_at"),
+                        .bitmap("flags"),
+                    ],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+        let sideSchema = SchemaDeclaration(
+            kitID: "SideKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "_side_rows",
+                    columns: [
+                        .uuid("id"),
+                        .timestamp("created_at"),
+                        .bitmap("flags"),
+                    ],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+
+        try await storage.open(schema: applicationSchema)
+        try await storage.migrate(to: sideSchema)
+
+        let applicationID = UUID()
+        let sideID = UUID()
+        let createdAt = Date(timeIntervalSince1970: 1_750_000_000)
+        _ = try await storage.rowStore.insert(
+            table: "application_rows",
+            values: [
+                "id": .uuid(applicationID),
+                "created_at": .timestamp(createdAt),
+                "flags": .bitmap(0x05),
+            ]
+        )
+        _ = try await storage.rowStore.insert(
+            table: "_side_rows",
+            values: [
+                "id": .uuid(sideID),
+                "created_at": .timestamp(createdAt),
+                "flags": .bitmap(0x0A),
+            ]
+        )
+
+        let applicationRows = try await storage.rowStore.query(
+            table: "application_rows", where: nil
+        )
+        #expect(applicationRows.count == 1)
+        #expect(applicationRows[0]["id"] == .uuid(applicationID))
+        #expect(applicationRows[0]["created_at"] == .timestamp(createdAt))
+        #expect(applicationRows[0]["flags"] == .bitmap(0x05))
+
+        let transactionalSideRows = try await storage.transaction { transaction in
+            try await transaction.rowStore.query(table: "_side_rows", where: nil)
+        }
+        #expect(transactionalSideRows.count == 1)
+        #expect(transactionalSideRows[0]["id"] == .uuid(sideID))
+        #expect(transactionalSideRows[0]["created_at"] == .timestamp(createdAt))
+        #expect(transactionalSideRows[0]["flags"] == .bitmap(0x0A))
+        await storage.close()
+    }
+
+    @Test func sameKitMigrationRefreshesTypedTableDeclaration() async throws {
+        let storage = try makeStorage()
+        let v1 = SchemaDeclaration(
+            kitID: "TypedMigrationKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "typed_rows",
+                    columns: [.uuid("id")],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+        let payloadColumn = ColumnDeclaration.uuid("payload_id", nullable: true)
+        let v2 = SchemaDeclaration(
+            kitID: "TypedMigrationKit",
+            version: 2,
+            tables: [
+                TableDeclaration(
+                    name: "typed_rows",
+                    columns: [.uuid("id"), payloadColumn],
+                    primaryKey: ["id"]
+                )
+            ],
+            migrations: [
+                Migration(
+                    fromVersion: 1,
+                    toVersion: 2,
+                    operations: [.addColumn(table: "typed_rows", column: payloadColumn)]
+                )
+            ]
+        )
+
+        try await storage.open(schema: v1)
+        try await storage.migrate(to: v2)
+        let rowID = UUID()
+        let payloadID = UUID()
+        _ = try await storage.rowStore.insert(
+            table: "typed_rows",
+            values: ["id": .uuid(rowID), "payload_id": .uuid(payloadID)]
+        )
+        let rows = try await storage.rowStore.query(table: "typed_rows", where: nil)
+        #expect(rows.count == 1)
+        #expect(rows[0]["payload_id"] == .uuid(payloadID))
+        await storage.close()
+    }
+
+    @Test func conflictingCrossKitTableDeclarationsFail() async throws {
+        let storage = try makeStorage()
+        let ownerSchema = SchemaDeclaration(
+            kitID: "OwnerKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "shared_rows",
+                    columns: [.uuid("id")],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+        let conflictingSchema = SchemaDeclaration(
+            kitID: "ConflictingKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "shared_rows",
+                    columns: [.text("id")],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+        try await storage.open(schema: ownerSchema)
+
+        do {
+            try await storage.migrate(to: conflictingSchema)
+            Issue.record("expected conflicting cross-kit declaration to fail")
+        } catch let StorageError.constraintViolation(detail) {
+            #expect(detail.contains("shared_rows"))
+            #expect(detail.contains("OwnerKit"))
+            #expect(detail.contains("ConflictingKit"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        await storage.close()
+    }
+
     /// Opening a FRESH database directly at a schema whose latest table already
     /// declares the added column must not fail. The open path creates every
     /// table at the latest schema first, then replays migrations from version 0

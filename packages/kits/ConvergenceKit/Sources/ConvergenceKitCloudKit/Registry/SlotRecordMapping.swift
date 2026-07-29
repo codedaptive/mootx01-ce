@@ -4,8 +4,9 @@
 //
 // SLOT REGISTRY SCHEMA:
 // Each of the 15 assignable HLC node-ID slots (1–15) maps to one CKRecord in
-// the manifest's sync zone. Records are named "_slot_1" through "_slot_15"
-// with recordType "_ck_device_slot". Fields:
+// the manifest's sync zone. Records are named "slot_1" through "slot_15"
+// with recordType "ck_device_slot". CloudKit requires both record types and
+// record names to begin with an ASCII letter. Fields:
 //
 //   device_uuid   String  — the claiming device's stable UUID (UUID.uuidString)
 //   epoch         Int64   — bumped by evictors; enables fenced re-enrollment (N2)
@@ -40,9 +41,10 @@ public enum SlotRecordMapping {
 
     /// CloudKit record type for all 15 slot records.
     ///
-    /// Prefixed with `_ck_` to avoid collision with application record types
-    /// and to follow the ConvergenceKit side-table naming convention.
-    public static let recordType = "_ck_device_slot"
+    /// Starts with a letter because CloudKit rejects record types whose first
+    /// character is an underscore. The `ck_` namespace still separates registry
+    /// metadata from application record types.
+    public static let recordType = "ck_device_slot"
 
     // ISO 8601 formatter shared across encode/decode. Formatter is configured
     // once (thread-safe after configuration) and never mutated after init.
@@ -59,14 +61,14 @@ public enum SlotRecordMapping {
 
     /// CKRecord.ID for slot number `slot` in `zoneID`.
     ///
-    /// Record names are "_slot_1" through "_slot_15" — stable, human-readable
+    /// Record names are "slot_1" through "slot_15" — stable, human-readable
     /// identifiers that do not depend on UUIDs so they can be hard-coded in
     /// both claim and fetch operations.
     ///
     /// - Precondition: `slot` must be in `1...15`.
     public static func recordID(slot: Int, zoneID: CKRecordZone.ID) -> CKRecord.ID {
         precondition((1...15).contains(slot), "SlotRecordMapping: slot must be 1–15")
-        return CKRecord.ID(recordName: "_slot_\(slot)", zoneID: zoneID)
+        return CKRecord.ID(recordName: "slot_\(slot)", zoneID: zoneID)
     }
 
     /// The full set of 15 record IDs for `zoneID`.
@@ -83,7 +85,7 @@ public enum SlotRecordMapping {
     ///
     /// - Parameter deviceSlot: The slot to encode.
     /// - Parameter zoneID: The manifest's sync zone.
-    /// - Returns: A `CKRecord` with `recordType == "_ck_device_slot"` and all
+    /// - Returns: A `CKRecord` with `recordType == "ck_device_slot"` and all
     ///   four fields populated. The record has no change tag — callers that need
     ///   a conditional save (CAS) must first `fetch` the existing record and
     ///   update its fields rather than constructing a new record.
@@ -112,15 +114,15 @@ public enum SlotRecordMapping {
 
     /// Decode a CKRecord into a DeviceSlot.
     ///
-    /// - Parameter record: A CloudKit record with `recordType == "_ck_device_slot"`.
+    /// - Parameter record: A CloudKit record with `recordType == "ck_device_slot"`.
     /// - Returns: The decoded `DeviceSlot`.
     /// - Throws: `SyncError.decodingFailure` when any required field is missing or
     ///   cannot be converted to the expected type.
     public static func slot(from record: CKRecord) throws -> DeviceSlot {
-        // Extract slot number from the well-known record name "_slot_N".
+        // Extract slot number from the well-known record name "slot_N".
         let recordName = record.recordID.recordName
-        guard recordName.hasPrefix("_slot_"),
-              let slotNumber = Int(recordName.dropFirst("_slot_".count)),
+        guard recordName.hasPrefix("slot_"),
+              let slotNumber = Int(recordName.dropFirst("slot_".count)),
               (1...15).contains(slotNumber)
         else {
             throw SyncError.decodingFailure(

@@ -78,7 +78,8 @@ let package = Package(
         .target(
             name: "CorpusKit",
             dependencies: [
-                "SubstrateTypes", "SubstrateLib", "SubstrateML",
+                "SubstrateTypes", "SubstrateLib", "SubstrateKernel",
+                "SubstrateML",
                 "EngramLib",
                 .product(name: "EideticLib", package: "EideticLib"),
                 // IntellectusLib for self-report telemetry (cp-corpuskit-report).

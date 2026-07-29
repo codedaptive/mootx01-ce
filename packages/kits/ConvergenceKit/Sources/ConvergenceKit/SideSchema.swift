@@ -208,7 +208,7 @@ public enum CKSideSchema {
         //   column_hlcs  — JSON-encoded ColumnHLCMap for fieldLevelLWW outbox entries.
         //                  Null for entries written before v6 or for non-fieldLevelLWW
         //                  tables. The push path decodes this and passes it to
-        //                  CKRecordMapping to populate _syncColumnHLCs in the CKRecord.
+        //                  CKRecordMapping to populate moot_sync_column_hlcs in the CKRecord.
         //   hlc_wire     — HLC.wireBytes(hlc), 16-byte BLOB (gap 6, D38.1). Replaces
         //                  `hlc` (legacy, dead) as the coalescing/ordering key.
         //                  `_ck_outbox` is develop/1.1.x-only (confirmed absent from

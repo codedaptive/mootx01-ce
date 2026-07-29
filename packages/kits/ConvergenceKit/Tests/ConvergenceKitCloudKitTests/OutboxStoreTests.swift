@@ -17,6 +17,7 @@ import Foundation
 @testable import ConvergenceKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
 import SubstrateTypes
 
 // MARK: - Helpers
@@ -95,6 +96,48 @@ struct OutboxStoreTests {
         #expect(batch.first?.id == entry.id)
         #expect(batch.first?.rowKey == rowKey)
         #expect(batch.first?.tableName == "items")
+    }
+
+    @Test("SQLite decodes outbox UUIDs after application schema opens first")
+    func sqliteApplicationThenSideSchemaRoundTrip() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("convergence-outbox-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(
+                url: directory.appendingPathComponent("estate.sqlite"),
+                busyTimeout: 5.0
+            )
+        ))
+        try await storage.open(schema: SchemaDeclaration(
+            kitID: "TestApp",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "items",
+                    columns: [.uuid("id"), .text("name")],
+                    primaryKey: ["id"]
+                )
+            ]
+        ))
+        try await CKSideSchema.ensure(storage: storage)
+
+        let entries = [
+            makeEntry(rowKey: UUID().uuidString, packedHLC: 100),
+            makeEntry(rowKey: UUID().uuidString, packedHLC: 200),
+            makeEntry(rowKey: UUID().uuidString, packedHLC: 300),
+        ]
+        for entry in entries {
+            try await OutboxStore.append(entry: entry, to: storage)
+        }
+
+        let batch = try await OutboxStore.readBatch(from: storage)
+        #expect(batch.count == entries.count)
+        #expect(Set(batch.map(\.id)) == Set(entries.map(\.id)))
+
+        await storage.close()
     }
 
     // MARK: - Coalescing: newest-wins by HLC

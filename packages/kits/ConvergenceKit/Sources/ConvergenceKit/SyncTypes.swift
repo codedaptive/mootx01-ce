@@ -138,8 +138,9 @@ public struct SyncManifest: Sendable {
     /// Key: table name matching an entry in `tables`. Value: set of column names
     /// to encrypt. Empty default → every existing caller's behavior is byte-identical.
     /// Not wire-carried: this is a local CloudKit encoding directive, never transmitted
-    /// in a SyncRecord. Columns starting with `_sync` and tables starting with `_ck_`
-    /// are rejected by `validateEncryptedColumns()`. Registry columns stay plaintext.
+    /// in a SyncRecord. Columns in the `moot_sync_` namespace and tables starting
+    /// with `_ck_` are rejected by `validateEncryptedColumns()`. Registry columns
+    /// stay plaintext.
     public let encryptedContentColumns: [String: Set<String>]
 
     /// Optional callback invoked once per pull batch AFTER all
@@ -181,7 +182,7 @@ public struct SyncManifest: Sendable {
     }
 
     /// Validate `encryptedContentColumns` entries before use.
-    /// Rejects `_sync*` columns (reserved sync-metadata fields) and `_ck_*`
+    /// Rejects ConvergenceKit wire-metadata columns and `_ck_*`
     /// tables (registry tables that must stay plaintext per the mission spec).
     /// Phase-2 engine wiring will call this from CloudKitSyncEngine.enable(); tests call it directly.
     public func validateEncryptedColumns() throws {
@@ -192,9 +193,9 @@ public struct SyncManifest: Sendable {
                 )
             }
             for column in columns {
-                if column.hasPrefix("_sync") {
+                if SyncMetadataField.isReserved(column) {
                     throw SyncError.encodingFailure(
-                        detail: "encryptedContentColumns: column '\(column)' in '\(table)' is a reserved _sync* field"
+                        detail: "encryptedContentColumns: column '\(column)' in '\(table)' is a reserved sync-metadata field"
                     )
                 }
             }

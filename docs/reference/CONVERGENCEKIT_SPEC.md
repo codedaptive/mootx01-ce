@@ -278,12 +278,16 @@ CVK-WC5).
 **B-6 (CloudKit metadata):** the CloudKit mapper drives record mapping
 from the manifest, not from per-entity hardcoding. Each table maps to
 record type `kitID_tableName`; sync metadata travels in reserved fields
-(`_syncHLC`, `_syncSchemaVersion`, `_syncKitID`).
+(`moot_sync_hlc`, `moot_sync_schema_version`, `moot_sync_kit_id`,
+`moot_sync_column_hlcs`, `moot_sync_type_tags`, `moot_sync_deleted`).
+The entire letter-leading `moot_sync_` namespace is reserved so future
+metadata keys cannot collide with application columns. Leading-underscore
+wire fields are prohibited because CloudKit treats them as system fields.
 
 *Wire note (FAB5-EV — encryptedValues):* columns declared in
 `SyncManifest.encryptedContentColumns` are routed through
 `CKRecord.encryptedValues` at encode time. All other columns remain on the
-plaintext `CKRecord` channel. The `_sync*` metadata fields and registry
+plaintext `CKRecord` channel. The `moot_sync_*` metadata fields and registry
 (`_ck_*`) tables are always plaintext. The decode path performs dual-read:
 `encryptedValues` channel is checked first; the plaintext channel is the
 fallback for pre-migration rows. This is the zone-feed pull design
@@ -307,8 +311,9 @@ different layers and never mixed:
    node ID occupies the low 4 bits, which limits the assignable node
    range to 1–15 (node 0 permanently reserved) as enforced by the slot
    registry (B-13). Used only inside `CKRecordMapping.packed()` and
-   `CKRecordMapping.unpacked()`, and in the `_syncHLC`, `_ck_sync_meta`,
-   and `_ck_outbox` columns that those helpers write and read.
+   `CKRecordMapping.unpacked()`, and for the `moot_sync_hlc` CKRecord field.
+   Local CloudKit side tables (`_ck_sync_meta` and `_ck_outbox`) store the
+   same packed value independently of the CKRecord wire-field name.
 
 2. **`SubstrateTypes.HLC.packed` — compact federation/fingerprint form
    (node MSB):**
@@ -415,8 +420,9 @@ records applied through the LWW gate. The tombstone HLC persists in the
 side table after a hard-delete on both backends — `_ck_sync_meta` on
 CloudKit, an equivalent side-table entry on Federation — so a stale
 insert for the same `(table, rowKey)` cannot resurrect a deleted row.
-The `_syncHLC` storage location for both backends is the side table after
-R7 lands, not the row itself. Note on `pushOnly` and tombstones: a
+The durable local HLC storage location for both backends is the side table
+after R7 lands, not the application row. This local side metadata is distinct
+from CloudKit's `moot_sync_hlc` wire field. Note on `pushOnly` and tombstones: a
 `pushOnly` table (I-5) silently swallows remote tombstones; it never
 accepts inbound deletes. Consumers who need delete propagation on
 `pushOnly`-declared tables must use soft-delete bitmap columns instead.

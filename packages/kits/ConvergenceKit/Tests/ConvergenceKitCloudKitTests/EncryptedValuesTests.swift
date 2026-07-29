@@ -127,13 +127,13 @@ struct EncryptedValuesDualReadTests {
         #expect(decoded.values["tag"] == .int(99))
     }
 
-    @Test("_sync* keys never appear in decoded values regardless of channel")
+    @Test("moot_sync_* keys never appear in decoded values regardless of channel")
     func syncKeysFilteredFromBothChannels() throws {
         let record = try encRecord(["real": .text("data")], encryptedColumns: ["real"])
         let decoded = try CKRecordMapping.decode(record)
-        // No _sync* keys should leak into values.
+        // No moot_sync_* keys should leak into values.
         for key in decoded.values.keys {
-            #expect(!key.hasPrefix("_sync"))
+            #expect(!key.hasPrefix(SyncMetadataField.namespacePrefix))
         }
     }
 }
@@ -194,15 +194,15 @@ struct ManifestValidationTests {
         #expect(throws: Never.self) { try m.validateEncryptedColumns() }
     }
 
-    @Test("_sync* column is rejected")
+    @Test("moot_sync_* column is rejected")
     func syncPrefixColumnRejected() throws {
-        let m = manifest(encryptedContentColumns: ["items": ["_syncHLC"]])
+        let m = manifest(encryptedContentColumns: ["items": [SyncMetadataField.hlc]])
         #expect(throws: SyncError.self) { try m.validateEncryptedColumns() }
     }
 
     @Test("_ck_* table is rejected")
     func ckPrefixTableRejected() throws {
-        let m = manifest(encryptedContentColumns: ["_ck_device_slot": ["device_uuid"]])
+        let m = manifest(encryptedContentColumns: ["_ck_registry_table": ["device_uuid"]])
         #expect(throws: SyncError.self) { try m.validateEncryptedColumns() }
     }
 
