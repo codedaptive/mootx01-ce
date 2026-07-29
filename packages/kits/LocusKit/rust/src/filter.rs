@@ -50,6 +50,31 @@ pub enum StateCluster {
     Terminal,
 }
 
+// MARK: - RecallTier ----------------------------------------------------------
+
+/// Fast Recall tier — controls which vague-tier items a recall request sees.
+/// The fourth `insert_defaults` axis (SPEC_CONSOLIDATION_VAGUE_RECALL §4.2).
+///
+/// The default (injected automatically when no tier filter is present) is
+/// `CurrentAndVague`, which includes both ordinary drawers and vague items
+/// but excludes constituents that have been absorbed into a vague item
+/// (`represented_by_vague = 1`, bit 21 set).
+///
+/// Mirrors Swift `RecallTier`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallTier {
+    /// Include ordinary drawers and vague items; exclude absorbed constituents
+    /// (`represented_by_vague = 1`). Default tier. Predicate:
+    /// `(operational_bitmap & 0x200000) == 0`.
+    CurrentAndVague,
+    /// Include all drawers regardless of vague-tier status. No bitmap gate.
+    All,
+    /// Only vague items: `is_vague = 1` (bit 20 set).
+    VagueOnly,
+    /// Only ordinary episodic drawers: bit 20 = 0 AND bit 21 = 0.
+    CurrentOnly,
+}
+
 // MARK: - HydrationLevel ------------------------------------------------------
 
 /// How much of a row to include in a recall response. Per spec § 7.3.
@@ -162,6 +187,14 @@ pub enum Filter {
     /// of the `DrawerFeatureFlags::*` constants or a bitwise-OR
     /// composition.
     HasFeatureFlag(i64),
+
+    // ---------- Recall tier queries (Wave 2, §4.2) ----------
+    /// Fast Recall tier filter. Controls whether absorbed constituents and/or
+    /// vague items appear in recall results. The evaluator injects
+    /// `RecallTier(RecallTier::CurrentAndVague)` when no tier filter is
+    /// present (the fourth `insert_defaults` axis). Mirrors Swift
+    /// `Filter.recallTier(_:)`.
+    RecallTier(RecallTier),
 
     // ---------- Structural queries ----------
     /// Rows filed in this room.
