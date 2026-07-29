@@ -691,6 +691,43 @@ public actor CorpusContentEngine {
         return true
     }
 
+    /// Force re-embedding of the dense float lane for a single content ID.
+    ///
+    /// Resolves the current record from the source — picking up any newly-written
+    /// `denseCompositionText` (e.g. a distillate written by the GLK distillation
+    /// rider) — and re-embeds through all active embedding slots with `force: true`,
+    /// bypassing the `(revision, digest, indexVersion)` idempotence gate.
+    /// BM25 postings are also rewritten; the content is unchanged so the tokens
+    /// are identical, making the lexical lane write idempotent.
+    ///
+    /// **Why force?** The idempotence gate keys on the CONTENT digest. When the
+    /// distillation rider writes a distillate, the `content` column is unchanged,
+    /// so `revision` and `digest` are unchanged, and a `force: false` call would
+    /// silently skip re-embedding. The distillate is ONLY reflected in
+    /// `effectiveDenseText` — bypassing the gate with `force: true` is the
+    /// correct response.
+    ///
+    /// **Concurrency:** routes through the CCE actor (not direct to `VectorStore`)
+    /// so `countsAdmission` serialization is maintained against concurrent
+    /// trainable-slot operations (FINDING_11X_MAINTENANCE_WALK_2026-07-28
+    /// constraint 3). Returns false only when the content ID no longer resolves
+    /// in the source; derived state is left unchanged in that case.
+    ///
+    /// - Parameters:
+    ///   - id: The content ID to re-embed.
+    ///   - now: The operation timestamp (passed in — never read inside the engine).
+    /// - Returns: true when live content was found and re-embedded; false when
+    ///   the ID no longer resolves.
+    @discardableResult
+    public func recomposeDenseVector(id: CorpusContentID, now: Date) async throws -> Bool {
+        try validate(id: id)
+        guard let record = try await source.record(for: id) else {
+            return false
+        }
+        try await index(record: record, appliedCursor: nil, force: true, now: now)
+        return true
+    }
+
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
     /// checkpoint, and STATELESS-slot vectors + coverage only. Trainable
     /// slots are deferred to `trainTrainableSlots` + the coverage backfill

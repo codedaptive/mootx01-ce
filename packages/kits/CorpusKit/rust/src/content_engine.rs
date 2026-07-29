@@ -1190,6 +1190,35 @@ impl CorpusContentEngine {
         }
     }
 
+    /// Force re-embedding of the dense float lane for a single content ID.
+    ///
+    /// Resolves the current record from the source — picking up any newly-written
+    /// `dense_composition_text` (e.g. a distillate) — and re-embeds through all
+    /// active embedding slots with `force = true`, bypassing the
+    /// `(revision, digest, index_version)` idempotence gate. BM25 postings are
+    /// also rewritten; the content is unchanged so the tokens are identical.
+    ///
+    /// The idempotence gate keys on the CONTENT digest. A distillate write changes
+    /// `dense_composition_text` / `effective_dense_text` without touching
+    /// `content`, so `revision` and `digest` are unchanged and a `force = false`
+    /// call would silently skip re-embedding. `force = true` is correct here.
+    ///
+    /// Routes through the CCE (not direct to `VectorStore`) to maintain
+    /// counts-admission serialization (FINDING_11X_MAINTENANCE_WALK_2026-07-28
+    /// constraint 3). Returns `false` only when the ID no longer resolves.
+    ///
+    /// Swift parity: `CorpusContentEngine.recomposeDenseVector(id:now:)`.
+    pub fn recompose_dense_vector(&self, id: &str, now_millis: i64) -> CorpusKitResult<bool> {
+        Self::validate(id)?;
+        match self.source.record(id)? {
+            Some(record) => {
+                self.index_record(&record, None, true, now_millis, SlotScope::All)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
     /// checkpoint, and STATELESS-slot vectors + coverage only. Trainable
     /// slots are deferred to `train_trainable_slots` + the coverage
