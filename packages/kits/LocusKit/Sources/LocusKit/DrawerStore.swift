@@ -4357,10 +4357,13 @@ public actor DrawerStore {
         addedBy: String,
         now: Date
     ) async throws {
-        precondition(
-            (vagueDrawer.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0,
-            "vagueDrawer must have isVague (bit 20) set before calling consolidateTransactionally"
-        )
+        // Thrown, not a precondition: a background consolidation job passing a
+        // malformed drawer must surface an error the caller can handle, never
+        // crash the daemon process.
+        guard (vagueDrawer.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent(
+                "vagueDrawer must have isVague (bit 20) set before consolidateTransactionally")
+        }
         guard constituentIDs.count >= 3 else {
             throw LocusKitError.invalidContent(
                 "consolidation requires at least 3 constituents (D5); got \(constituentIDs.count)")
