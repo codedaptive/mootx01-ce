@@ -82,13 +82,10 @@ public enum EpochFence {
 
         // Step 2: Verify the record exists.
         guard let fetchResult = fetchResults[recordID] else {
-            // Record not found: slot was deleted from the registry (e.g. server reset).
-            // Treat as reenroll — the engine will claim a fresh slot.
-            logger.warning("epoch fence: slot \(identity.slot) record absent from registry → reenrollRequired")
-            throw SyncError.reenrollRequired(
-                slot: identity.slot,
-                staleEpoch: Int(identity.epoch),
-                currentEpoch: 0
+            // A missing dictionary entry is not CloudKit's unknown-item signal.
+            // Fail closed because the server did not acknowledge this record ID.
+            throw SyncError.transportFailure(
+                detail: "EpochFence fetch slot \(identity.slot): missing per-record result"
             )
         }
 
@@ -97,6 +94,14 @@ public enum EpochFence {
         case .success(let r):
             slotRecord = r
         case .failure(let err):
+            if isCloudKitError(err, code: .unknownItem) {
+                logger.warning("epoch fence: slot \(identity.slot) record absent from registry → reenrollRequired")
+                throw SyncError.reenrollRequired(
+                    slot: identity.slot,
+                    staleEpoch: Int(identity.epoch),
+                    currentEpoch: 0
+                )
+            }
             throw SyncError.transportFailure(detail: "EpochFence fetch slot \(identity.slot): \(err)")
         }
 
@@ -127,57 +132,99 @@ public enum EpochFence {
         // this slot is still active so they don't evict it.
         slotRecord["last_active_hlc"] = Int64(bitPattern: currentHLC.packed) as CKRecordValue
 
+        let saveResults: [CKRecord.ID: Result<CKRecord, any Error>]
         do {
-            _ = try await database.modifyRecords(
+            saveResults = try await database.modifyRecords(
                 saving: [slotRecord],
                 deleting: [],
                 savePolicy: .ifServerRecordUnchanged,
                 atomically: false
-            )
-            logger.debug("epoch fence: heartbeat ok for slot \(identity.slot) epoch \(identity.epoch)")
+            ).saveResults
         } catch {
-            // Check if the failure is a serverRecordChanged CAS loss.
-            // (Works for both real CKError from CloudKit and NSError fabricated in tests.)
-            let nsErr = error as NSError
-            let isServerRecordChanged: Bool
-            if nsErr.domain == CKErrorDomain && nsErr.code == CKError.Code.serverRecordChanged.rawValue {
-                isServerRecordChanged = true
-            } else if nsErr.domain == CKErrorDomain, nsErr.code == CKError.Code.partialFailure.rawValue,
-                      let partials = nsErr.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Error],
-                      partials.values.contains(where: { perErr in
-                          let ns = perErr as NSError
-                          return ns.domain == CKErrorDomain && ns.code == CKError.Code.serverRecordChanged.rawValue
-                      }) {
-                isServerRecordChanged = true
-            } else {
-                isServerRecordChanged = false
-            }
-
-            if isServerRecordChanged {
-                // Another device modified our slot record since our fetch (very rare —
-                // only possible if two devices simultaneously hold the same slot due to
-                // a prior claim race, or the device was evicted by a concurrent evictor).
-                // Extract the server epoch from the CKError's serverRecord if available.
-                let serverEpoch: Int64
-                if let ckErr = error as? CKError,
-                   let serverRecord = ckErr.serverRecord,
-                   let ep = serverRecord["epoch"] as? Int64 {
-                    serverEpoch = ep
-                } else {
-                    // Conservative fallback: assume epoch was bumped.
-                    serverEpoch = remoteEpoch + 1
-                }
-                logger.warning(
-                    "epoch fence: heartbeat CAS rejected for slot \(identity.slot), serverEpoch=\(serverEpoch) → reenrollRequired"
-                )
-                throw SyncError.reenrollRequired(
-                    slot: identity.slot,
-                    staleEpoch: Int(identity.epoch),
-                    currentEpoch: Int(serverEpoch)
+            if isServerRecordChanged(error, recordID: recordID) {
+                throw reenrollError(
+                    identity: identity,
+                    remoteEpoch: remoteEpoch,
+                    error: error
                 )
             }
-
             throw SyncError.transportFailure(detail: "EpochFence heartbeat save: \(error)")
         }
+
+        guard let saveResult = saveResults[recordID] else {
+            throw SyncError.transportFailure(
+                detail: "EpochFence heartbeat save: missing result for \(recordID.recordName)"
+            )
+        }
+
+        switch saveResult {
+        case .success:
+            logger.debug("epoch fence: heartbeat ok for slot \(identity.slot) epoch \(identity.epoch)")
+        case .failure(let error):
+            if isServerRecordChanged(error, recordID: recordID) {
+                throw reenrollError(
+                    identity: identity,
+                    remoteEpoch: remoteEpoch,
+                    error: error
+                )
+            }
+            throw SyncError.transportFailure(
+                detail: "EpochFence heartbeat save \(recordID.recordName): \(error)"
+            )
+        }
+    }
+
+    /// Return whether a CloudKit or NSError value has the requested code.
+    private static func isCloudKitError(
+        _ error: any Error,
+        code: CKError.Code
+    ) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == CKErrorDomain && nsError.code == code.rawValue
+    }
+
+    /// Return whether `error` is a CAS conflict for the requested record.
+    private static func isServerRecordChanged(
+        _ error: any Error,
+        recordID: CKRecord.ID
+    ) -> Bool {
+        if isCloudKitError(error, code: .serverRecordChanged) {
+            return true
+        }
+        let nsError = error as NSError
+        guard isCloudKitError(error, code: .partialFailure),
+              let partialErrors = nsError.userInfo[CKPartialErrorsByItemIDKey]
+                as? [AnyHashable: any Error],
+              let recordError = partialErrors[recordID]
+        else {
+            return false
+        }
+        return isCloudKitError(recordError, code: .serverRecordChanged)
+    }
+
+    /// Build the loud re-enrollment error for a heartbeat CAS loss.
+    private static func reenrollError(
+        identity: DeviceIdentity,
+        remoteEpoch: Int64,
+        error: any Error
+    ) -> SyncError {
+        let serverEpoch: Int64
+        if let cloudError = error as? CKError,
+           let serverRecord = cloudError.serverRecord,
+           let epoch = serverRecord["epoch"] as? Int64 {
+            serverEpoch = epoch
+        } else {
+            // A CAS loss means the server record changed after the fetch.
+            // Conservatively advance the observed epoch when CloudKit omits it.
+            serverEpoch = remoteEpoch + 1
+        }
+        logger.warning(
+            "epoch fence: heartbeat CAS rejected for slot \(identity.slot), serverEpoch=\(serverEpoch) → reenrollRequired"
+        )
+        return SyncError.reenrollRequired(
+            slot: identity.slot,
+            staleEpoch: Int(identity.epoch),
+            currentEpoch: Int(serverEpoch)
+        )
     }
 }

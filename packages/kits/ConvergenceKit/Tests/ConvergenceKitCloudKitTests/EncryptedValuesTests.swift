@@ -202,7 +202,7 @@ struct ManifestValidationTests {
 
     @Test("_ck_* table is rejected")
     func ckPrefixTableRejected() throws {
-        let m = manifest(encryptedContentColumns: ["_ck_device_slot": ["device_uuid"]])
+        let m = manifest(encryptedContentColumns: ["_ck_registry_table": ["device_uuid"]])
         #expect(throws: SyncError.self) { try m.validateEncryptedColumns() }
     }
 

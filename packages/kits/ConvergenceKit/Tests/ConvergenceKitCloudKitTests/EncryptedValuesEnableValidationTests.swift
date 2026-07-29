@@ -63,7 +63,7 @@ struct EncryptedValuesEnableValidationTests {
             schemaVersion: 1,
             zoneIdentifier: "EV2-ENABLE-VALIDATION",
             tables: [SyncedTable(name: "items", primaryKeyColumn: "id")],
-            encryptedContentColumns: ["_ck_device_slot": ["device_uuid"]]
+            encryptedContentColumns: ["_ck_registry_table": ["device_uuid"]]
         )
         let engine = await makeEngine(manifest: manifest, storage: storage)
         await #expect(throws: SyncError.self) {

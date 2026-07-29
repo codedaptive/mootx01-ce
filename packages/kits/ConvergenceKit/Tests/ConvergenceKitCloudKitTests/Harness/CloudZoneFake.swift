@@ -18,8 +18,8 @@
 //
 // fetchZoneChanges:
 //   Always returns ALL data records for the requested zone (full re-pull), with
-//   changeToken: nil. Filters out _ck_device_slot records so the pull path never
-//   routes slot-registry entries as application data.
+//   changeToken: nil. Returns slot-registry records alongside application data
+//   so the production pull-path metadata filter is exercised by integration tests.
 //
 // Fault injection:
 //   Assign a FaultInjector to the `faults` property to script failures on specific
@@ -32,7 +32,7 @@ import ConvergenceKitCloudKit
 // MARK: - CloudZoneFake
 
 /// In-process fake CloudKit database. Shared by both estates in TwoEstateFixture.
-/// Handles slot-registry records (_ck_device_slot) and application data records
+/// Handles slot-registry records and application data records
 /// in a single in-memory store.
 actor CloudZoneFake: CloudKitDatabaseProtocol {
 
@@ -73,9 +73,9 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
         storedIdentifiers.removeValue(forKey: id)
     }
 
-    /// All data records across all zones (excludes _ck_device_slot records).
+    /// All data records across all zones (excludes slot-registry records).
     func allDataRecords() -> [CKRecord] {
-        store.values.filter { $0.recordType != "_ck_device_slot" }
+        store.values.filter { $0.recordType != SlotRecordMapping.recordType }
     }
 
     // MARK: - Subscription test helpers
@@ -93,14 +93,14 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
     /// Data records filtered to a specific zone.
     func dataRecords(in zoneID: CKRecordZone.ID) -> [CKRecord] {
         store.values.filter {
-            $0.recordID.zoneID == zoneID && $0.recordType != "_ck_device_slot"
+            $0.recordID.zoneID == zoneID && $0.recordType != SlotRecordMapping.recordType
         }
     }
 
     /// Number of data records in the store (for convergence assertions).
     func dataRecordCount(in zoneID: CKRecordZone.ID) -> Int {
         store.values.filter {
-            $0.recordID.zoneID == zoneID && $0.recordType != "_ck_device_slot"
+            $0.recordID.zoneID == zoneID && $0.recordType != SlotRecordMapping.recordType
         }.count
     }
 
@@ -139,12 +139,14 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
         deleteResults: [CKRecord.ID: Result<Void, any Error>]
     ) {
         // Fault injection: only applies to batches that contain at least one data record.
-        // Slot-registry heartbeat calls (all records have type "_ck_device_slot") are
+        // Slot-registry heartbeat calls are
         // transparent to data-push faults — they must not consume a queued fault that
         // was intended for the subsequent data modifyRecords call. Without this guard,
         // a .partialBatchFailure injected for a data push would be consumed by the slot
         // heartbeat and the data push would receive no fault, causing the test to fail.
-        let hasDataRecords = recordsToSave.contains { $0.recordType != "_ck_device_slot" }
+        let hasDataRecords = recordsToSave.contains {
+            $0.recordType != SlotRecordMapping.recordType
+        }
 
         if hasDataRecords, let fault = await faults?.nextFault(for: .modifyRecords) {
             // .partialBatchFailure: do NOT throw. Fall through to normal processing
@@ -163,7 +165,7 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
                 var dataFailIdx = 0
                 for record in recordsToSave {
                     let id = record.recordID
-                    let isSlot = record.recordType == "_ck_device_slot"
+                    let isSlot = record.recordType == SlotRecordMapping.recordType
                     if !isSlot && dataFailIdx < failCount {
                         // Fail this data record at per-record level; do not update store.
                         partialResults[id] = .failure(perRecordError)
@@ -207,9 +209,9 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
                 }
             } else {
                 // .changedKeys: HLC-aware merge for data records.
-                // Slot-registry records (_ck_device_slot) have no _syncHLC field;
+                // Slot-registry records have no _syncHLC field;
                 // allow them to overwrite unconditionally.
-                if record.recordType != "_ck_device_slot", let existing = store[id] {
+                if record.recordType != SlotRecordMapping.recordType, let existing = store[id] {
                     let inHLC  = UInt64(bitPattern: (record["_syncHLC"]   as? NSNumber)?.int64Value ?? 0)
                     let exHLC  = UInt64(bitPattern: (existing["_syncHLC"] as? NSNumber)?.int64Value ?? 0)
                     if inHLC < exHLC {
@@ -245,15 +247,15 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
         if let fault = await faults?.nextFault(for: .fetchZoneChanges) {
             throw FaultInjector.makeError(for: fault)
         }
-        // Full re-pull: return all data records for this zone.
+        // Full re-pull: return all records for this zone, including slot metadata.
+        // PullCycle owns the production filter that prevents registry records from
+        // entering application decoding; returning them here exercises that boundary.
         // changeToken is always nil — the fake does not track incremental changes;
         // every pull fetches the current full zone state. The pull path handles
         // re-applying previously-seen records correctly: the LWW gate (localHLC
         // >= incomingHLC → skip) makes re-application idempotent, and all writes
         // use upsertSync (.syncApply origin) so they never re-enter the outbox.
-        let records = store.values.filter {
-            $0.recordID.zoneID == zoneID && $0.recordType != "_ck_device_slot"
-        }
+        let records = store.values.filter { $0.recordID.zoneID == zoneID }
         return CloudKitZoneChanges(
             modifiedRecords: Array(records),
             deletedRecordIDs: [],

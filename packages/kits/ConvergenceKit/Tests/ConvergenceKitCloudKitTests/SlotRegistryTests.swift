@@ -53,6 +53,21 @@ actor FakeCloudKitDatabase: CloudKitDatabaseProtocol {
     // A fresh CKRecord has a different ObjectIdentifier than any stored record.
     private var storedIdentifiers: [CKRecord.ID: ObjectIdentifier] = [:]
 
+    /// One-shot per-record failure returned from the next save call.
+    private var nextSaveFailureCode: CKError.Code?
+
+    /// When true, the next save call omits the requested record from saveResults.
+    private var omitNextSaveResult = false
+
+    /// One-shot per-record failure returned from the next fetch call.
+    private var nextFetchFailureCode: CKError.Code?
+
+    /// When true, the next fetch call omits its first requested record.
+    private var omitNextFetchResult = false
+
+    /// Number of modifyRecords calls, used to prove a CAS loss caused a retry.
+    private var modifyRecordsCallCount = 0
+
     /// Pre-populate the fake database with a record, bypassing CAS.
     /// Used by tests to set up initial registry state (occupied slots, ghosts, etc.).
     func seed(record: CKRecord) {
@@ -68,13 +83,51 @@ actor FakeCloudKitDatabase: CloudKitDatabaseProtocol {
         // Keep same object identity — the record was modified server-side
     }
 
+    /// Return a per-record failure, rather than throwing, for the next save.
+    func failNextSaveResult(with code: CKError.Code) {
+        nextSaveFailureCode = code
+    }
+
+    /// Omit the requested record from the next saveResults dictionary.
+    func omitNextSaveResultOnce() {
+        omitNextSaveResult = true
+    }
+
+    /// Return a per-record failure, rather than throwing, for the next fetch.
+    func failNextFetchResult(with code: CKError.Code) {
+        nextFetchFailureCode = code
+    }
+
+    /// Omit the first requested record from the next fetch result dictionary.
+    func omitNextFetchResultOnce() {
+        omitNextFetchResult = true
+    }
+
+    /// Read the number of modifyRecords calls observed by the fake.
+    func modifyCallCount() -> Int {
+        modifyRecordsCallCount
+    }
+
     // MARK: - CloudKitDatabaseProtocol
 
     func fetch(
         withRecordIDs recordIDs: [CKRecord.ID]
     ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
         var results: [CKRecord.ID: Result<CKRecord, any Error>] = [:]
-        for id in recordIDs {
+        for (index, id) in recordIDs.enumerated() {
+            if index == 0, omitNextFetchResult {
+                omitNextFetchResult = false
+                continue
+            }
+            if index == 0, let code = nextFetchFailureCode {
+                nextFetchFailureCode = nil
+                results[id] = .failure(NSError(
+                    domain: CKErrorDomain,
+                    code: code.rawValue,
+                    userInfo: nil
+                ))
+                continue
+            }
             if let record = store[id] {
                 results[id] = .success(record)
             } else {
@@ -99,10 +152,26 @@ actor FakeCloudKitDatabase: CloudKitDatabaseProtocol {
         saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
         deleteResults: [CKRecord.ID: Result<Void, any Error>]
     ) {
+        modifyRecordsCallCount += 1
         var saveResults: [CKRecord.ID: Result<CKRecord, any Error>] = [:]
 
-        for record in recordsToSave {
+        for (index, record) in recordsToSave.enumerated() {
             let id = record.recordID
+
+            if index == 0, omitNextSaveResult {
+                omitNextSaveResult = false
+                continue
+            }
+
+            if index == 0, let code = nextSaveFailureCode {
+                nextSaveFailureCode = nil
+                saveResults[id] = .failure(NSError(
+                    domain: CKErrorDomain,
+                    code: code.rawValue,
+                    userInfo: nil
+                ))
+                continue
+            }
 
             if savePolicy == .ifServerRecordUnchanged {
                 if let existingIdentifier = storedIdentifiers[id] {
@@ -223,6 +292,16 @@ private func makeClaimOp(
 @Suite("Slot registry — claim flow")
 struct SlotClaimTests {
 
+    /// Slot registry identifiers must satisfy CloudKit's letter-leading rule.
+    @Test("slot identifiers begin with a letter")
+    func slotIdentifiersBeginWithLetter() {
+        let id = SlotRecordMapping.recordID(slot: 1, zoneID: testZoneID)
+        #expect(SlotRecordMapping.recordType == "ck_device_slot")
+        #expect(id.recordName == "slot_1")
+        #expect(SlotRecordMapping.recordType.first?.isLetter == true)
+        #expect(id.recordName.first?.isLetter == true)
+    }
+
     /// Empty registry → claim succeeds and returns slot 1 (lowest free).
     @Test("claim-free-slot: empty registry → slot 1")
     func claimFreeSlot() async throws {
@@ -265,6 +344,87 @@ struct SlotClaimTests {
         // Both should have their own UUIDs.
         #expect(a.deviceUUID == uuidA)
         #expect(b.deviceUUID == uuidB)
+    }
+
+    /// A per-record CAS conflict is a normal lost race and must trigger retry.
+    @Test("per-record serverRecordChanged retries the slot claim")
+    func perRecordCASConflictRetries() async throws {
+        let db = FakeCloudKitDatabase()
+        await db.failNextSaveResult(with: .serverRecordChanged)
+        let op = makeClaimOp(database: db, maxAttempts: 2)
+
+        let claimed = try await op.claim(preferring: nil)
+
+        #expect(claimed.slot == 1)
+        #expect(await db.modifyCallCount() == 2)
+    }
+
+    /// A non-CAS per-record save failure must not be reported as a successful claim.
+    @Test("per-record non-CAS failure surfaces transportFailure")
+    func perRecordSaveFailureSurfacesTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        await db.failNextSaveResult(with: .networkFailure)
+        let op = makeClaimOp(database: db, maxAttempts: 1)
+
+        do {
+            _ = try await op.claim(preferring: nil)
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct: the server did not persist the slot.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
+    }
+
+    /// A missing per-record result is ambiguous and must fail closed.
+    @Test("missing per-record save result surfaces transportFailure")
+    func missingSaveResultSurfacesTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        await db.omitNextSaveResultOnce()
+        let op = makeClaimOp(database: db, maxAttempts: 1)
+
+        do {
+            _ = try await op.claim(preferring: nil)
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct: absence of an acknowledgement is not success.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
+    }
+
+    /// A per-record fetch failure is not evidence that the slot is free.
+    @Test("per-record registry fetch failure surfaces transportFailure")
+    func registryFetchFailureSurfacesTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        await db.failNextFetchResult(with: .networkFailure)
+        let op = makeClaimOp(database: db, maxAttempts: 1)
+
+        do {
+            _ = try await op.claim(preferring: nil)
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
+    }
+
+    /// Missing requested fetch results are ambiguous and must fail closed.
+    @Test("missing registry fetch result surfaces transportFailure")
+    func missingRegistryFetchResultSurfacesTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        await db.omitNextFetchResultOnce()
+        let op = makeClaimOp(database: db, maxAttempts: 1)
+
+        do {
+            _ = try await op.claim(preferring: nil)
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
     }
 
     /// Debug helper: verify FakeDB fetch returns all seeded records
@@ -362,6 +522,88 @@ struct SlotClaimTests {
 @Suite("Epoch fence — push-path verification")
 struct EpochFenceTests {
 
+    /// An unknown-item result means the slot no longer exists and requires re-enrollment.
+    @Test("missing slot result maps unknownItem to reenrollRequired")
+    func missingSlotResultRequiresReenrollment() async {
+        let db = FakeCloudKitDatabase()
+        let identity = DeviceIdentity(
+            deviceUUID: UUID(),
+            slot: 4,
+            epoch: 3,
+            claimedAt: Date()
+        )
+
+        do {
+            try await EpochFence.heartbeat(
+                identity: identity,
+                currentHLC: HLC(physicalTime: 1_000, logicalCount: 0, nodeID: 4),
+                database: db,
+                zoneID: testZoneID
+            )
+            Issue.record("expected reenrollRequired")
+        } catch SyncError.reenrollRequired(let slot, let staleEpoch, let currentEpoch) {
+            #expect(slot == 4)
+            #expect(staleEpoch == 3)
+            #expect(currentEpoch == 0)
+        } catch {
+            Issue.record("expected reenrollRequired, got \(error)")
+        }
+    }
+
+    /// Other per-record fetch failures remain transport failures.
+    @Test("non-unknown fetch result failure maps to transportFailure")
+    func fetchFailureRemainsTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        await db.failNextFetchResult(with: .networkFailure)
+        let identity = DeviceIdentity(
+            deviceUUID: UUID(),
+            slot: 4,
+            epoch: 3,
+            claimedAt: Date()
+        )
+
+        do {
+            try await EpochFence.heartbeat(
+                identity: identity,
+                currentHLC: HLC(physicalTime: 1_000, logicalCount: 0, nodeID: 4),
+                database: db,
+                zoneID: testZoneID
+            )
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
+    }
+
+    /// A missing dictionary entry is not the same as CloudKit unknownItem.
+    @Test("missing fetch dictionary entry maps to transportFailure")
+    func missingFetchResultRemainsTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        await db.omitNextFetchResultOnce()
+        let identity = DeviceIdentity(
+            deviceUUID: UUID(),
+            slot: 4,
+            epoch: 3,
+            claimedAt: Date()
+        )
+
+        do {
+            try await EpochFence.heartbeat(
+                identity: identity,
+                currentHLC: HLC(physicalTime: 1_000, logicalCount: 0, nodeID: 4),
+                database: db,
+                zoneID: testZoneID
+            )
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
+    }
+
     /// If the slot's epoch on CloudKit has been bumped (evicted while away),
     /// EpochFence.heartbeat must throw reenrollRequired BEFORE any outbox processing.
     @Test("fence-epoch-mismatch: stale epoch → reenrollRequired before outbox read")
@@ -412,6 +654,98 @@ struct EpochFenceTests {
         #expect(slot == 3)
         #expect(staleEpoch == 1)
         #expect(currentEpoch == 2)
+    }
+
+    /// Heartbeat must inspect the requested record's save result.
+    @Test("per-record heartbeat failure surfaces transportFailure")
+    func heartbeatSaveFailureSurfacesTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        let slot = makeSlot(slotNumber: 6, epoch: 1)
+        let record = SlotRecordMapping.record(from: slot, zoneID: testZoneID)
+        await db.seed(record: record)
+        await db.failNextSaveResult(with: .networkFailure)
+        let identity = DeviceIdentity(
+            deviceUUID: slot.deviceUUID,
+            slot: slot.slot,
+            epoch: slot.epoch,
+            claimedAt: slot.claimedAt
+        )
+
+        do {
+            try await EpochFence.heartbeat(
+                identity: identity,
+                currentHLC: HLC(physicalTime: 2_000, logicalCount: 0, nodeID: 6),
+                database: db,
+                zoneID: testZoneID
+            )
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
+    }
+
+    /// A per-record heartbeat CAS loss means the slot changed after fetch.
+    @Test("per-record heartbeat serverRecordChanged requires reenrollment")
+    func heartbeatCASLossRequiresReenrollment() async {
+        let db = FakeCloudKitDatabase()
+        let slot = makeSlot(slotNumber: 7, epoch: 2)
+        let record = SlotRecordMapping.record(from: slot, zoneID: testZoneID)
+        await db.seed(record: record)
+        await db.failNextSaveResult(with: .serverRecordChanged)
+        let identity = DeviceIdentity(
+            deviceUUID: slot.deviceUUID,
+            slot: slot.slot,
+            epoch: slot.epoch,
+            claimedAt: slot.claimedAt
+        )
+
+        do {
+            try await EpochFence.heartbeat(
+                identity: identity,
+                currentHLC: HLC(physicalTime: 2_000, logicalCount: 0, nodeID: 7),
+                database: db,
+                zoneID: testZoneID
+            )
+            Issue.record("expected reenrollRequired")
+        } catch SyncError.reenrollRequired(let slotNumber, let staleEpoch, let currentEpoch) {
+            #expect(slotNumber == 7)
+            #expect(staleEpoch == 2)
+            #expect(currentEpoch == 3)
+        } catch {
+            Issue.record("expected reenrollRequired, got \(error)")
+        }
+    }
+
+    /// Missing heartbeat acknowledgement must fail closed.
+    @Test("missing heartbeat save result surfaces transportFailure")
+    func missingHeartbeatSaveResultSurfacesTransportFailure() async {
+        let db = FakeCloudKitDatabase()
+        let slot = makeSlot(slotNumber: 8, epoch: 1)
+        let record = SlotRecordMapping.record(from: slot, zoneID: testZoneID)
+        await db.seed(record: record)
+        await db.omitNextSaveResultOnce()
+        let identity = DeviceIdentity(
+            deviceUUID: slot.deviceUUID,
+            slot: slot.slot,
+            epoch: slot.epoch,
+            claimedAt: slot.claimedAt
+        )
+
+        do {
+            try await EpochFence.heartbeat(
+                identity: identity,
+                currentHLC: HLC(physicalTime: 2_000, logicalCount: 0, nodeID: 8),
+                database: db,
+                zoneID: testZoneID
+            )
+            Issue.record("expected transportFailure")
+        } catch SyncError.transportFailure {
+            // Correct.
+        } catch {
+            Issue.record("expected transportFailure, got \(error)")
+        }
     }
 }
 

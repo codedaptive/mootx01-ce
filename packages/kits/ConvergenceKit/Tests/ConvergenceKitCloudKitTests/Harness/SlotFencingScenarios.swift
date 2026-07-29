@@ -147,8 +147,8 @@ extension TwoEstateFixture {
     /// Uses `Self.zoneID` (the fixture's convergence zone) because the engines'
     /// EpochFence fetches slot records from that zone.
     func bumpSlotEpoch(slot: Int, to epoch: Int64) async {
-        let recordID = CKRecord.ID(recordName: "_slot_\(slot)", zoneID: Self.zoneID)
-        let record = CKRecord(recordType: "_ck_device_slot", recordID: recordID)
+        let recordID = SlotRecordMapping.recordID(slot: slot, zoneID: Self.zoneID)
+        let record = CKRecord(recordType: SlotRecordMapping.recordType, recordID: recordID)
         // New owner UUID — another device took this slot after eviction.
         record["device_uuid"]     = UUID().uuidString as CKRecordValue
         record["epoch"]           = epoch as CKRecordValue
@@ -312,8 +312,8 @@ struct SlotFencingScenarios {
         let cloud = CloudZoneFake()
 
         // Seed slot 5 at epoch=2 (another device evicted and re-claimed it).
-        let bumpedID = CKRecord.ID(recordName: "_slot_5", zoneID: p4m3ZoneID)
-        let bumped   = CKRecord(recordType: "_ck_device_slot", recordID: bumpedID)
+        let bumpedID = SlotRecordMapping.recordID(slot: 5, zoneID: p4m3ZoneID)
+        let bumped = CKRecord(recordType: SlotRecordMapping.recordType, recordID: bumpedID)
         bumped["device_uuid"]     = UUID().uuidString as CKRecordValue
         bumped["epoch"]           = Int64(2) as CKRecordValue
         bumped["last_active_hlc"] = Int64(0) as CKRecordValue
