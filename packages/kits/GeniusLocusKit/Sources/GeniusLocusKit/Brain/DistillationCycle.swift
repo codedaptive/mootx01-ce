@@ -248,13 +248,13 @@ public extension GeniusLocusKit {
 
 // MARK: - Private helpers
 
-private extension GeniusLocusKit {
+extension GeniusLocusKit {
 
     /// The §7.5 short-item rendering: the §7.6 compaction transform, with
     /// the content itself as the last-resort rendering when compaction
     /// eliminates everything (pathological all-stopword content) — §13.1
     /// requires every non-empty item to carry a representation.
-    static func compactionRendering(of content: String) -> String {
+    internal static func compactionRendering(of content: String) -> String {
         let compacted = TokenCompaction.compact(content)
         return compacted.isEmpty ? content : compacted
     }

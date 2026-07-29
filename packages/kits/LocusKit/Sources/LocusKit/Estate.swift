@@ -738,6 +738,30 @@ public actor Estate {
         try await store.recentRecallTraces(since: since, now: now)
     }
 
+    /// Wave-2 §3.2: atomically capture a vague drawer, write its
+    /// `_consolidated_from` tunnels, and mark every constituent
+    /// `representedByVague` — one serializable commit. Delegates to
+    /// `DrawerStore.consolidateTransactionally`.
+    public func consolidateTransactionally(
+        vagueDrawer: Drawer,
+        constituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        try await store.consolidateTransactionally(
+            vagueDrawer: vagueDrawer,
+            constituentIDs: constituentIDs,
+            addedBy: addedBy,
+            now: now)
+    }
+
+    /// Wave-2 §4.4 hop 2: the constituent drawer IDs reachable through a
+    /// vague item's active `_consolidated_from` tunnels. Delegates to
+    /// `DrawerStore.constituentIDsForVagueItem`.
+    public func vagueConstituents(of vagueDrawerID: String) async throws -> [String] {
+        try await store.constituentIDsForVagueItem(vagueDrawerID: vagueDrawerID)
+    }
+
     /// All non-tombstoned tunnels across all wings, in filed-at order.
     /// Used by the dreaming daemon to suppress candidate proposals that
     /// already have a Tunnel. Delegates to `DrawerStore.allTunnels`.
