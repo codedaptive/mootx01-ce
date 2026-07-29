@@ -1,0 +1,268 @@
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem
+[lmeb] evidence types: ["user_evidence"]
+[lmeb] corpus: 107736 docs, 1340 queries, 3304 qrels
+[lmeb] binary: /Users/bob/.mootx01/bin/mootx01  seed: 20260725
+[lmeb] limit: 50  offset: 0
+[lmeb] 1/50: scene_100_q_0 (84 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000000b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000000b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=84 retrieved=20 query_ms=81
+[lmeb] 2/50: scene_784_q_0 (130 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000044b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000044b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=130 retrieved=20 query_ms=126
+[lmeb] 3/50: scene_390_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000296, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000296/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=57
+[lmeb] 4/50: scene_1123_q_0 (188 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000089, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000089/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=188 retrieved=20 query_ms=184
+[lmeb] 5/50: scene_964_q_0 (146 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000513, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000513/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=146 retrieved=20 query_ms=150
+[lmeb] 6/50: scene_1331_q_0 (54 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000170, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000170/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=54 retrieved=20 query_ms=55
+[lmeb] 7/50: scene_422_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ba, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ba/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=52
+[lmeb] 8/50: scene_1211_q_0 (28 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000eb, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000eb/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=28 retrieved=20 query_ms=24
+[lmeb] 9/50: scene_401_q_0 (82 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=62
+[lmeb] 10/50: scene_282_q_0 (74 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000021e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000021e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=74 retrieved=20 query_ms=87
+[lmeb] 11/50: scene_1069_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000004c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000004c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=159
+[lmeb] 12/50: scene_1007_q_0 (118 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=118 retrieved=20 query_ms=132
+[lmeb] 13/50: scene_290_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000227, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000227/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=46
+[lmeb] 14/50: scene_36_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000027f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000027f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=48
+[lmeb] 15/50: scene_52_q_0 (62 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000331, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000331/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=62 retrieved=20 query_ms=67
+[lmeb] 16/50: scene_953_q_0 (124 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000507, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000507/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=124 retrieved=20 query_ms=135
+[lmeb] 17/50: scene_831_q_0 (30 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000480, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000480/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=30 retrieved=20 query_ms=29
+[lmeb] 18/50: scene_1214_q_0 (160 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000ee, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000ee/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=160 retrieved=20 query_ms=162
+[lmeb] 19/50: scene_76_q_0 (68 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000043b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000043b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=68 retrieved=20 query_ms=87
+[lmeb] 20/50: scene_460_q_0 (82 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002e4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002e4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=80
+[lmeb] 21/50: scene_832_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000481, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000481/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=118
+[lmeb] 22/50: scene_805_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000463, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000463/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=132
+[lmeb] 23/50: scene_119_q_0 (12 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000dd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000dd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=12 retrieved=12 query_ms=16
+[lmeb] 24/50: scene_663_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=95
+[lmeb] 25/50: scene_757_q_0 (134 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000042d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000042d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=134 retrieved=20 query_ms=113
+[lmeb] 26/50: scene_1162_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000b4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000b4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=182
+[lmeb] 27/50: scene_977_q_0 (137 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000521, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000521/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=137 retrieved=20 query_ms=120
+[lmeb] 28/50: scene_667_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c9, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c9/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=79
+[lmeb] 29/50: scene_1311_q_0 (36 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000015a, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000015a/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=36 retrieved=20 query_ms=31
+[lmeb] 30/50: scene_224_q_0 (52 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000001de, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000001de/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=52 retrieved=20 query_ms=52
+[lmeb] 31/50: scene_513_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000031f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000031f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=75
+[lmeb] 32/50: scene_90_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004d7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004d7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=57
+[lmeb] 33/50: scene_1329_q_0 (56 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000016d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000016d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=56 retrieved=20 query_ms=44
+[lmeb] 34/50: scene_564_q_0 (86 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000357, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000357/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=86 retrieved=20 query_ms=102
+[lmeb] 35/50: scene_731_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000411, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000411/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=74
+[lmeb] 36/50: scene_814_q_0 (110 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000046d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000046d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=110 retrieved=20 query_ms=122
+[lmeb] 37/50: scene_349_q_0 (50 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000268, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000268/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=50 retrieved=20 query_ms=51
+[lmeb] 38/50: scene_342_q_0 (11 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000261, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000261/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=11 retrieved=11 query_ms=15
+[lmeb] 39/50: scene_1088_q_0 (166 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000061, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000061/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=166 retrieved=20 query_ms=171
+[lmeb] 40/50: scene_492_q_0 (89 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000307, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000307/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=89 retrieved=20 query_ms=81
+[lmeb] 41/50: scene_1245_q_0 (200 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000110, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000110/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=200 retrieved=20 query_ms=163
+[lmeb] 42/50: scene_709_q_0 (72 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003f8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003f8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=72 retrieved=20 query_ms=86
+[lmeb] 43/50: scene_39_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a0, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a0/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=50
+[lmeb] 44/50: scene_98_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000052f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000052f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=63
+[lmeb] 45/50: scene_960_q_0 (66 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000050f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000050f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=66 retrieved=20 query_ms=87
+[lmeb] 46/50: scene_1111_q_0 (150 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000007c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000007c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=150 retrieved=20 query_ms=154
+[lmeb] 47/50: scene_414_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002b1, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002b1/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=59
+[lmeb] 48/50: scene_1252_q_0 (40 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000118, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000118/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=40 retrieved=20 query_ms=31
+[lmeb] 49/50: scene_939_q_0 (122 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004f7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004f7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=122 retrieved=20 query_ms=123
+[lmeb] 50/50: scene_437_q_0 (83 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ca, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ca/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=83 retrieved=20 query_ms=72
+LMEB results (label=lmeb-seed20260725, seed=20260725):
+  queries_run:     50
+  guard_excluded:  0
+  query_count:     50
+  nDCG@10:         0.4588
+  MRR:             0.5425
+  recall@1:        0.2483
+  recall@5:        0.4593
+  recall@10:       0.5533
+  MAP@10:          0.3640
+  query_p50_s:     0.0804
+  query_p95_s:     0.1707
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-rerun/lmeb-report-seed20260725.json

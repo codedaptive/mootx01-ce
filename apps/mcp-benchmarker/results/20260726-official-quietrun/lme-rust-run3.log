@@ -1,0 +1,273 @@
+[lme] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[lme] corpus: 500 questions (0 abstention excluded)
+[lme] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  variant: s  seed: 20260725
+[lme] limit: 50
+[lme] 1/50: gpt4_2ba83207 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000060, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000060/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=502 query_ms=1154
+[lme] 2/50: 60d45044 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000023, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000023/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=541 query_ms=1055
+[lme] 3/50: 2788b940 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000068, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000068/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=475 query_ms=1230
+[lme] 4/50: 8a2466db (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000084, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000084/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=508 query_ms=962
+[lme] 5/50: 4adc0475 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000b5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000b5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=490 query_ms=1160
+[lme] 6/50: 35a27287 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000088, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000088/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=519 query_ms=1211
+[lme] 7/50: 51b23612 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001dc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001dc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=961
+[lme] 8/50: caf03d32 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000008c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000008c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=493 query_ms=722
+[lme] 9/50: 681a1674 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000b3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000b3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=476 query_ms=953
+[lme] 10/50: e61a7584 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000190, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000190/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=496 query_ms=802
+[lme] 11/50: gpt4_e061b84g (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000011f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000011f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=566 query_ms=1276
+[lme] 12/50: 77eafa52 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000bf, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000bf/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=527 query_ms=1785
+[lme] 13/50: 031748ae_abs (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001b5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001b5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=523 query_ms=657
+[lme] 14/50: 2ebe6c92 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000011e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000011e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=487 query_ms=945
+[lme] 15/50: c9f37c46 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000014b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000014b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=511 query_ms=897
+[lme] 16/50: gpt4_b5700ca0 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000130, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000130/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=500 query_ms=1551
+[lme] 17/50: c4f10528 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001bd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001bd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=485 query_ms=841
+[lme] 18/50: 1903aded (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001c3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001c3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=486 query_ms=1272
+[lme] 19/50: gpt4_7a0daae1 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000fd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000fd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=561 query_ms=936
+[lme] 20/50: ce6d2d27 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000176, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000176/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=521 query_ms=1391
+[lme] 21/50: c4a1ceb8 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000050, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000050/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=488 query_ms=747
+[lme] 22/50: c14c00dd (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000003c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000003c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=492 query_ms=1135
+[lme] 23/50: 61f8c8f8 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000cc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000cc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=459 query_ms=1133
+[lme] 24/50: gpt4_7ddcf75f (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000116, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000116/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=480 query_ms=1091
+[lme] 25/50: 3ba21379 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001aa, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001aa/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=431 query_ms=1943
+[lme] 26/50: f523d9fe (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=484 query_ms=1238
+[lme] 27/50: gpt4_cd90e484 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000158, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000158/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=508 query_ms=993
+[lme] 28/50: gpt4_78cf46a3 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000015f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000015f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=505 query_ms=1660
+[lme] 29/50: 0862e8bf_abs (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000040, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000040/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=523 query_ms=1203
+[lme] 30/50: eeda8a6d (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000067, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000067/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=513 query_ms=1321
+[lme] 31/50: 5a4f22c0 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000184, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000184/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=487 query_ms=1072
+[lme] 32/50: e47becba (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=550 query_ms=1051
+[lme] 33/50: 28dc39ac (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000055, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000055/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=431 query_ms=886
+[lme] 34/50: 09ba9854_abs (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000e8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000e8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=513 query_ms=1148
+[lme] 35/50: gpt4_59c863d7 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000048, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000048/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=871
+[lme] 36/50: cc6d1ec1 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000150, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000150/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=457 query_ms=915
+[lme] 37/50: 157a136e (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000d4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000d4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=503 query_ms=1157
+[lme] 38/50: 94f70d80 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000000f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000000f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=510 query_ms=1520
+[lme] 39/50: gpt4_9a159967 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000014f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000014f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=470 query_ms=1665
+[lme] 40/50: 09d032c9 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000091, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000091/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=992
+[lme] 41/50: gpt4_2f584639 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000162, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000162/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=472 query_ms=1208
+[lme] 42/50: 2133c1b5_abs (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001b7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001b7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=476 query_ms=1078
+[lme] 43/50: gpt4_6ed717ea (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000013f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000013f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=489 query_ms=1258
+[lme] 44/50: gpt4_1e4a8aeb (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000100, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000100/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=479 query_ms=1357
+[lme] 45/50: 21436231 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000018, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000018/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=512 query_ms=1009
+[lme] 46/50: 7161e7e2 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001bc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001bc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=550 query_ms=951
+[lme] 47/50: b320f3f8 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000002d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000002d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=463 query_ms=1692
+[lme] 48/50: gpt4_e05b82a6 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000072, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000072/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=497 query_ms=1313
+[lme] 49/50: c5e8278d (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=469 query_ms=1088
+[lme] 50/50: a11281a2 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000a5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000a5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=457 query_ms=1229
+LongMemEval results (variant=s, seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@1:       0.7400
+  recall_any@5:       0.8600
+  recall_any@10:      0.9400
+  recall_all@1:       0.2800
+  recall_all@5:       0.5200
+  recall_all@10:      0.6400
+  mrr:                0.7862
+  query_p50_s:        1.1334
+  query_p95_s:        1.6924
+  exact_mean_tokens:  886
+  dense_mean_tokens:  887
+  dense/exact ratio:  1.002
+  exact_evidence_rate:0.000
+  dense_evidence_rate:0.000
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lme-report-s-seed20260725.json

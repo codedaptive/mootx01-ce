@@ -1,0 +1,35 @@
+[2026-07-26T16:36:24] Pre-flight checks passed.
+[2026-07-26T16:36:24] Holes log: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/holes-11x.log
+
+[2026-07-26T16:36:24] ============================================================
+[2026-07-26T16:36:24] 1.1.x FULL GRID — 18 runs (no tokeneff)
+[2026-07-26T16:36:24] ============================================================
+
+[2026-07-26T16:36:24] START  1.1.x-lme-swift-r1
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)
+[longmemeval] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  turns ingested total: 24778
+  recall-any@1:         0.4400
+  recall-any@5:         0.5600
+  recall-any@10:        0.7000
+  recall-all@1:         0.1600
+  recall-all@5:         0.3400
+  recall-all@10:        0.4200
+  mrr:                  0.5031
+  query p50:            1343.8 ms
+  query p95:            2042.2 ms
+  exact mean tokens:    927
+  dense mean tokens:    892
+  dense/exact ratio:    0.963
+  exact evidence rate:  0.000
+  dense evidence rate:  0.000
+  estate strategy:      fresh-per-question
+  report written to:    /Users/bob/devlop/mootx01-ce-develop_1.1.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lme-report-s-seed20260725.json
+[2026-07-26T17:02:38] DONE   1.1.x-lme-swift-r1 → lme-11x-swift-r1.json
+[2026-07-26T17:02:38] START  1.1.x-lme-swift-r2
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)

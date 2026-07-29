@@ -1,0 +1,120 @@
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] corpus: 10 conversations, 1536 questions (450 adversarial excluded)
+[locomo] binary: /Users/bob/.mootx01/bin/mootx01  seed: 20260725
+[locomo] limit: 50
+[locomo] conv=conv-26 (3 questions, 419 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=419 write_mean_ms=16
+  q=conv-26_q129 cat=open_domain query_ms=258
+  q=conv-26_q76 cat=single_hop query_ms=306
+  q=conv-26_q99 cat=open_domain query_ms=260
+[locomo] conv=conv-30 (3 questions, 369 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000001, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000001/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=369 write_mean_ms=14
+  q=conv-30_q68 cat=open_domain query_ms=207
+  q=conv-30_q64 cat=open_domain query_ms=222
+  q=conv-30_q10 cat=temporal query_ms=245
+[locomo] conv=conv-41 (4 questions, 663 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000002, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000002/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=663 write_mean_ms=19
+  q=conv-41_q101 cat=open_domain query_ms=282
+  q=conv-41_q121 cat=open_domain query_ms=263
+  q=conv-41_q86 cat=open_domain query_ms=235
+  q=conv-41_q100 cat=open_domain query_ms=254
+[locomo] conv=conv-42 (6 questions, 629 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000003, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000003/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=629 write_mean_ms=18
+  q=conv-42_q70 cat=single_hop query_ms=237
+  q=conv-42_q24 cat=temporal query_ms=238
+  q=conv-42_q54 cat=temporal query_ms=271
+  q=conv-42_q143 cat=open_domain query_ms=225
+  q=conv-42_q40 cat=temporal query_ms=229
+  q=conv-42_q186 cat=open_domain query_ms=226
+[locomo] conv=conv-43 (7 questions, 680 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000004, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000004/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=680 write_mean_ms=19
+  q=conv-43_q0 cat=single_hop query_ms=259
+  q=conv-43_q26 cat=single_hop query_ms=207
+  q=conv-43_q85 cat=open_domain query_ms=247
+  q=conv-43_q151 cat=open_domain query_ms=256
+  q=conv-43_q42 cat=single_hop query_ms=209
+  q=conv-43_q88 cat=open_domain query_ms=225
+  q=conv-43_q126 cat=open_domain query_ms=238
+[locomo] conv=conv-44 (8 questions, 675 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=675 write_mean_ms=18
+  q=conv-44_q112 cat=open_domain query_ms=235
+  q=conv-44_q16 cat=temporal query_ms=234
+  q=conv-44_q91 cat=open_domain query_ms=258
+  q=conv-44_q36 cat=single_hop query_ms=231
+  q=conv-44_q1 cat=temporal query_ms=226
+  q=conv-44_q85 cat=open_domain query_ms=244
+  q=conv-44_q66 cat=open_domain query_ms=250
+  q=conv-44_q79 cat=open_domain query_ms=249
+[locomo] conv=conv-47 (2 questions, 689 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000006, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000006/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=689 write_mean_ms=19
+  q=conv-47_q136 cat=open_domain query_ms=233
+  q=conv-47_q21 cat=temporal query_ms=219
+[locomo] conv=conv-48 (7 questions, 681 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000007, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000007/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=681 write_mean_ms=18
+  q=conv-48_q190 cat=open_domain query_ms=218
+  q=conv-48_q120 cat=open_domain query_ms=233
+  q=conv-48_q2 cat=temporal query_ms=209
+  q=conv-48_q146 cat=open_domain query_ms=241
+  q=conv-48_q174 cat=open_domain query_ms=257
+  q=conv-48_q86 cat=single_hop query_ms=219
+  q=conv-48_q32 cat=temporal query_ms=232
+[locomo] conv=conv-49 (8 questions, 509 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=509 write_mean_ms=17
+  q=conv-49_q25 cat=temporal query_ms=237
+  q=conv-49_q109 cat=open_domain query_ms=220
+  q=conv-49_q27 cat=multi_hop query_ms=240
+  q=conv-49_q76 cat=temporal query_ms=246
+  q=conv-49_q136 cat=open_domain query_ms=246
+  q=conv-49_q20 cat=multi_hop query_ms=259
+  q=conv-49_q14 cat=single_hop query_ms=250
+  q=conv-49_q116 cat=open_domain query_ms=225
+[locomo] conv=conv-50 (2 questions, 568 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000009, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000009/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=568 write_mean_ms=18
+  q=conv-50_q136 cat=open_domain query_ms=267
+  q=conv-50_q14 cat=temporal query_ms=254
+LoCoMo results (seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@5:       0.2400
+  recall_all@5:       0.2000
+  recall_any@10:      0.2800
+  mrr:                0.1902
+  query_p50_s:        0.2377
+  query_p95_s:        0.2712
+  category_breakdown:
+    single_hop    n=   8  any@5=0.2500  all@5=0.1250  mrr=0.2705
+    temporal      n=  12  any@5=0.2500  all@5=0.2500  mrr=0.2083
+    multi_hop     n=   2  any@5=0.5000  all@5=0.0000  mrr=0.1000
+    open_domain   n=  28  any@5=0.2143  all@5=0.2143  mrr=0.1660
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-rerun/locomo-report-seed20260725.json

@@ -1,0 +1,33 @@
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] loaded 10 conversations, 1536 scoreable questions (450 adversarial excluded)
+[locomo] conv=conv-26 (3 questions, 419 turns)
+[locomo] conv=conv-30 (3 questions, 369 turns)
+[locomo] conv=conv-41 (4 questions, 663 turns)
+[locomo] conv=conv-42 (6 questions, 629 turns)
+[locomo] conv=conv-43 (7 questions, 680 turns)
+[locomo] conv=conv-44 (8 questions, 675 turns)
+[locomo] conv=conv-47 (2 questions, 689 turns)
+[locomo] conv=conv-48 (7 questions, 681 turns)
+[locomo] conv=conv-49 (8 questions, 509 turns)
+[locomo] conv=conv-50 (2 questions, 568 turns)
+[locomo] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  conversations used:   1
+  turns ingested total: 30303
+  recall-any@1:         0.1600
+  recall-any@5:         0.2000
+  recall-any@10:        0.2600
+  recall-all@1:         0.1400
+  recall-all@5:         0.1800
+  recall-all@10:        0.2000
+  mrr:                  0.1860
+  query p50:            250.5 ms
+  query p95:            279.8 ms
+  single_hop @5 any=0.2500 all=0.1250 mrr=0.2656 (n=8)
+  temporal @5 any=0.1667 all=0.1667 mrr=0.1667 (n=12)
+  multi_hop @5 any=0.0000 all=0.0000 mrr=0.0833 (n=2)
+  open_domain @5 any=0.2143 all=0.2143 mrr=0.1789 (n=28)
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+

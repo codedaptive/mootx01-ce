@@ -1,0 +1,66 @@
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem (evidence types: user_evidence)
+[lmeb] loaded 1340 queries, 107736 docs, 3304 qrels
+[lmeb] query 1/50 scene_100_q_0: ingested 84 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 2/50 scene_784_q_0: ingested 130 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 3/50 scene_390_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 4/50 scene_1123_q_0: ingested 188 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 5/50 scene_964_q_0: ingested 146 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 6/50 scene_1331_q_0: ingested 54 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 7/50 scene_422_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 8/50 scene_1211_q_0: ingested 28 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 9/50 scene_401_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 10/50 scene_282_q_0: ingested 74 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 11/50 scene_1069_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 12/50 scene_1007_q_0: ingested 118 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 13/50 scene_290_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 14/50 scene_36_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 15/50 scene_52_q_0: ingested 62 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 16/50 scene_953_q_0: ingested 124 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 17/50 scene_831_q_0: ingested 30 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 18/50 scene_1214_q_0: ingested 160 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 19/50 scene_76_q_0: ingested 68 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 20/50 scene_460_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 21/50 scene_832_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 22/50 scene_805_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 23/50 scene_119_q_0: ingested 12 docs, guard=healthy, retrieved 12 docs
+[lmeb] query 24/50 scene_663_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 25/50 scene_757_q_0: ingested 134 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 26/50 scene_1162_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 27/50 scene_977_q_0: ingested 137 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 28/50 scene_667_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 29/50 scene_1311_q_0: ingested 36 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 30/50 scene_224_q_0: ingested 52 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 31/50 scene_513_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 32/50 scene_90_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 33/50 scene_1329_q_0: ingested 56 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 34/50 scene_564_q_0: ingested 86 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 35/50 scene_731_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 36/50 scene_814_q_0: ingested 110 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 37/50 scene_349_q_0: ingested 50 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 38/50 scene_342_q_0: ingested 11 docs, guard=healthy, retrieved 11 docs
+[lmeb] query 39/50 scene_1088_q_0: ingested 166 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 40/50 scene_492_q_0: ingested 89 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 41/50 scene_1245_q_0: ingested 200 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 42/50 scene_709_q_0: ingested 72 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 43/50 scene_39_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 44/50 scene_98_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 45/50 scene_960_q_0: ingested 66 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 46/50 scene_1111_q_0: ingested 150 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 47/50 scene_414_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 48/50 scene_1252_q_0: ingested 40 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 49/50 scene_939_q_0: ingested 122 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 50/50 scene_437_q_0: ingested 83 docs, guard=healthy, retrieved 20 docs
+[lmeb] run complete
+  queries processed: 50
+  guard healthy:     50
+  guard refusals:    0
+  docs ingested:     4360
+  nDCG@10:           0.4631
+  MRR:               0.5403
+  recall@1:          0.2617
+  recall@5:          0.4393
+  recall@10:         0.5583
+  MAP@10:            0.3708
+  query p50:         78.8 ms
+  query p95:         170.1 ms
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-rerun/lmeb-report-seed20260725.json

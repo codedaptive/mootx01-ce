@@ -1,0 +1,23 @@
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)
+[longmemeval] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  turns ingested total: 24778
+  recall-any@1:         0.6800
+  recall-any@5:         0.8600
+  recall-any@10:        0.9000
+  recall-all@1:         0.2200
+  recall-all@5:         0.4600
+  recall-all@10:        0.5800
+  mrr:                  0.7494
+  query p50:            1092.4 ms
+  query p95:            1634.5 ms
+  exact mean tokens:    879
+  dense mean tokens:    896
+  dense/exact ratio:    1.020
+  exact evidence rate:  0.000
+  dense evidence rate:  0.000
+  estate strategy:      fresh-per-question
+  report written to:    /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lme-report-s-seed20260725.json

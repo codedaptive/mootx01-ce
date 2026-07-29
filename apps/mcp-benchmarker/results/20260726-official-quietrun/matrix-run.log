@@ -1,0 +1,2046 @@
+[2026-07-26T14:37:47] Pre-flight checks passed.
+[2026-07-26T14:37:47] Holes log: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/holes.log
+
+[2026-07-26T14:37:47] ============================================================
+[2026-07-26T14:37:47] 1.0.x REMAINDER (16 runs)
+[2026-07-26T14:37:47] ============================================================
+
+[2026-07-26T14:37:47] Pre-rename: lme-report-s-seed20260725.json → lme-10x-rust-r1.json (from stalled session)
+[2026-07-26T14:37:47] START  1.0.x-lme-rust-r2
+[lme] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[lme] corpus: 500 questions (0 abstention excluded)
+[lme] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  variant: s  seed: 20260725
+[lme] limit: 50
+[lme] 1/50: gpt4_2ba83207 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000060, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000060/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=502 query_ms=1300
+[lme] 2/50: 60d45044 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000023, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000023/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=541 query_ms=1090
+[lme] 3/50: 2788b940 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000068, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000068/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=475 query_ms=1362
+[lme] 4/50: 8a2466db (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000084, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000084/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=508 query_ms=955
+[lme] 5/50: 4adc0475 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000b5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000b5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=490 query_ms=1194
+[lme] 6/50: 35a27287 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000088, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000088/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=519 query_ms=1028
+[lme] 7/50: 51b23612 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001dc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001dc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=1106
+[lme] 8/50: caf03d32 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000008c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000008c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=493 query_ms=851
+[lme] 9/50: 681a1674 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000b3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000b3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=476 query_ms=893
+[lme] 10/50: e61a7584 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000190, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000190/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=496 query_ms=904
+[lme] 11/50: gpt4_e061b84g (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000011f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000011f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=566 query_ms=1179
+[lme] 12/50: 77eafa52 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000bf, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000bf/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=527 query_ms=1681
+[lme] 13/50: 031748ae_abs (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001b5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001b5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=523 query_ms=719
+[lme] 14/50: 2ebe6c92 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000011e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000011e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=487 query_ms=1015
+[lme] 15/50: c9f37c46 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000014b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000014b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=511 query_ms=940
+[lme] 16/50: gpt4_b5700ca0 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000130, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000130/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=500 query_ms=1524
+[lme] 17/50: c4f10528 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001bd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001bd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=485 query_ms=861
+[lme] 18/50: 1903aded (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001c3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001c3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=486 query_ms=835
+[lme] 19/50: gpt4_7a0daae1 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000fd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000fd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=561 query_ms=933
+[lme] 20/50: ce6d2d27 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000176, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000176/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=521 query_ms=1475
+[lme] 21/50: c4a1ceb8 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000050, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000050/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=488 query_ms=824
+[lme] 22/50: c14c00dd (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000003c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000003c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=492 query_ms=1054
+[lme] 23/50: 61f8c8f8 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000cc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000cc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=459 query_ms=1109
+[lme] 24/50: gpt4_7ddcf75f (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000116, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000116/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=480 query_ms=1051
+[lme] 25/50: 3ba21379 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001aa, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001aa/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=431 query_ms=2207
+[lme] 26/50: f523d9fe (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=484 query_ms=1210
+[lme] 27/50: gpt4_cd90e484 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000158, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000158/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=508 query_ms=982
+[lme] 28/50: gpt4_78cf46a3 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000015f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000015f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=505 query_ms=1436
+[lme] 29/50: 0862e8bf_abs (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000040, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000040/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=523 query_ms=1136
+[lme] 30/50: eeda8a6d (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000067, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000067/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=513 query_ms=1270
+[lme] 31/50: 5a4f22c0 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000184, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000184/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=487 query_ms=985
+[lme] 32/50: e47becba (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=550 query_ms=1058
+[lme] 33/50: 28dc39ac (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000055, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000055/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=431 query_ms=876
+[lme] 34/50: 09ba9854_abs (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000e8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000e8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=513 query_ms=1176
+[lme] 35/50: gpt4_59c863d7 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000048, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000048/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=1133
+[lme] 36/50: cc6d1ec1 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000150, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000150/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=457 query_ms=908
+[lme] 37/50: 157a136e (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000d4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000d4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=503 query_ms=1204
+[lme] 38/50: 94f70d80 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000000f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000000f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=510 query_ms=1313
+[lme] 39/50: gpt4_9a159967 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000014f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000014f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=470 query_ms=1770
+[lme] 40/50: 09d032c9 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000091, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000091/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=722
+[lme] 41/50: gpt4_2f584639 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000162, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000162/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=472 query_ms=1186
+[lme] 42/50: 2133c1b5_abs (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001b7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001b7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=476 query_ms=1093
+[lme] 43/50: gpt4_6ed717ea (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000013f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000013f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=489 query_ms=1098
+[lme] 44/50: gpt4_1e4a8aeb (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000100, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000100/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=479 query_ms=1350
+[lme] 45/50: 21436231 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000018, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000018/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=512 query_ms=1018
+[lme] 46/50: 7161e7e2 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001bc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001bc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=550 query_ms=751
+[lme] 47/50: b320f3f8 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000002d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000002d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=463 query_ms=1597
+[lme] 48/50: gpt4_e05b82a6 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000072, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000072/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=497 query_ms=1477
+[lme] 49/50: c5e8278d (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=469 query_ms=1022
+[lme] 50/50: a11281a2 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000a5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000a5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=457 query_ms=1257
+LongMemEval results (variant=s, seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@1:       0.6600
+  recall_any@5:       0.8600
+  recall_any@10:      0.9000
+  recall_all@1:       0.2000
+  recall_all@5:       0.4600
+  recall_all@10:      0.6200
+  mrr:                0.7284
+  query_p50_s:        1.0935
+  query_p95_s:        1.6806
+  exact_mean_tokens:  885
+  dense_mean_tokens:  894
+  dense/exact ratio:  1.010
+  exact_evidence_rate:0.000
+  dense_evidence_rate:0.000
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lme-report-s-seed20260725.json
+[2026-07-26T15:13:29] DONE   1.0.x-lme-rust-r2 → lme-10x-rust-r2.json
+[2026-07-26T15:13:29] START  1.0.x-lme-rust-r3
+[lme] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[lme] corpus: 500 questions (0 abstention excluded)
+[lme] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  variant: s  seed: 20260725
+[lme] limit: 50
+[lme] 1/50: gpt4_2ba83207 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000060, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000060/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=502 query_ms=1154
+[lme] 2/50: 60d45044 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000023, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000023/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=541 query_ms=1055
+[lme] 3/50: 2788b940 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000068, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000068/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=475 query_ms=1230
+[lme] 4/50: 8a2466db (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000084, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000084/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=508 query_ms=962
+[lme] 5/50: 4adc0475 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000b5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000b5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=490 query_ms=1160
+[lme] 6/50: 35a27287 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000088, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000088/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=519 query_ms=1211
+[lme] 7/50: 51b23612 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001dc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001dc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=961
+[lme] 8/50: caf03d32 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000008c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000008c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=493 query_ms=722
+[lme] 9/50: 681a1674 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000b3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000b3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=476 query_ms=953
+[lme] 10/50: e61a7584 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000190, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000190/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=496 query_ms=802
+[lme] 11/50: gpt4_e061b84g (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000011f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000011f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=566 query_ms=1276
+[lme] 12/50: 77eafa52 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000bf, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000bf/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=527 query_ms=1785
+[lme] 13/50: 031748ae_abs (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001b5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001b5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=523 query_ms=657
+[lme] 14/50: 2ebe6c92 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000011e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000011e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=487 query_ms=945
+[lme] 15/50: c9f37c46 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000014b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000014b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=511 query_ms=897
+[lme] 16/50: gpt4_b5700ca0 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000130, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000130/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=500 query_ms=1551
+[lme] 17/50: c4f10528 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001bd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001bd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=485 query_ms=841
+[lme] 18/50: 1903aded (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001c3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001c3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=486 query_ms=1272
+[lme] 19/50: gpt4_7a0daae1 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000fd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000fd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=561 query_ms=936
+[lme] 20/50: ce6d2d27 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000176, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000176/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=521 query_ms=1391
+[lme] 21/50: c4a1ceb8 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000050, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000050/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=488 query_ms=747
+[lme] 22/50: c14c00dd (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000003c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000003c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=492 query_ms=1135
+[lme] 23/50: 61f8c8f8 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000cc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000cc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=459 query_ms=1133
+[lme] 24/50: gpt4_7ddcf75f (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000116, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000116/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=480 query_ms=1091
+[lme] 25/50: 3ba21379 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001aa, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001aa/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=431 query_ms=1943
+[lme] 26/50: f523d9fe (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=484 query_ms=1238
+[lme] 27/50: gpt4_cd90e484 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000158, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000158/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=508 query_ms=993
+[lme] 28/50: gpt4_78cf46a3 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000015f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000015f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=505 query_ms=1660
+[lme] 29/50: 0862e8bf_abs (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000040, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000040/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=523 query_ms=1203
+[lme] 30/50: eeda8a6d (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000067, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000067/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=513 query_ms=1321
+[lme] 31/50: 5a4f22c0 (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000184, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000184/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=487 query_ms=1072
+[lme] 32/50: e47becba (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=550 query_ms=1051
+[lme] 33/50: 28dc39ac (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000055, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000055/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=431 query_ms=886
+[lme] 34/50: 09ba9854_abs (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000e8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000e8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=513 query_ms=1148
+[lme] 35/50: gpt4_59c863d7 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000048, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000048/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=871
+[lme] 36/50: cc6d1ec1 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000150, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000150/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=457 query_ms=915
+[lme] 37/50: 157a136e (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000d4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000d4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=503 query_ms=1157
+[lme] 38/50: 94f70d80 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000000f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000000f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=510 query_ms=1520
+[lme] 39/50: gpt4_9a159967 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000014f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000014f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=470 query_ms=1665
+[lme] 40/50: 09d032c9 (single-session-preference)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000091, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000091/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=481 query_ms=992
+[lme] 41/50: gpt4_2f584639 (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000162, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000162/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=472 query_ms=1208
+[lme] 42/50: 2133c1b5_abs (knowledge-update)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001b7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001b7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=476 query_ms=1078
+[lme] 43/50: gpt4_6ed717ea (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000013f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000013f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=489 query_ms=1258
+[lme] 44/50: gpt4_1e4a8aeb (temporal-reasoning)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000100, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000100/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=479 query_ms=1357
+[lme] 45/50: 21436231 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000018, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000018/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=512 query_ms=1009
+[lme] 46/50: 7161e7e2 (single-session-assistant)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000001bc, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000001bc/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=550 query_ms=951
+[lme] 47/50: b320f3f8 (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-0000002d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-0000002d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=463 query_ms=1692
+[lme] 48/50: gpt4_e05b82a6 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000072, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000072/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=497 query_ms=1313
+[lme] 49/50: c5e8278d (single-session-user)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=469 query_ms=1088
+[lme] 50/50: a11281a2 (multi-session)
+mootx01 serve starting (estate: default, data dir: /tmp/lme-bench-0000000001352775-000000a5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lme-bench-0000000001352775-000000a5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=457 query_ms=1229
+LongMemEval results (variant=s, seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@1:       0.7400
+  recall_any@5:       0.8600
+  recall_any@10:      0.9400
+  recall_all@1:       0.2800
+  recall_all@5:       0.5200
+  recall_all@10:      0.6400
+  mrr:                0.7862
+  query_p50_s:        1.1334
+  query_p95_s:        1.6924
+  exact_mean_tokens:  886
+  dense_mean_tokens:  887
+  dense/exact ratio:  1.002
+  exact_evidence_rate:0.000
+  dense_evidence_rate:0.000
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lme-report-s-seed20260725.json
+[2026-07-26T15:49:11] DONE   1.0.x-lme-rust-r3 → lme-10x-rust-r3.json
+[2026-07-26T15:49:11] START  1.0.x-locomo-swift-r1
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] loaded 10 conversations, 1536 scoreable questions (450 adversarial excluded)
+[locomo] conv=conv-26 (3 questions, 419 turns)
+[locomo] conv=conv-30 (3 questions, 369 turns)
+[locomo] conv=conv-41 (4 questions, 663 turns)
+[locomo] conv=conv-42 (6 questions, 629 turns)
+[locomo] conv=conv-43 (7 questions, 680 turns)
+[locomo] conv=conv-44 (8 questions, 675 turns)
+[locomo] conv=conv-47 (2 questions, 689 turns)
+[locomo] conv=conv-48 (7 questions, 681 turns)
+[locomo] conv=conv-49 (8 questions, 509 turns)
+[locomo] conv=conv-50 (2 questions, 568 turns)
+[locomo] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  conversations used:   1
+  turns ingested total: 30303
+  recall-any@1:         0.1600
+  recall-any@5:         0.2200
+  recall-any@10:        0.3000
+  recall-all@1:         0.1400
+  recall-all@5:         0.2000
+  recall-all@10:        0.2400
+  mrr:                  0.1954
+  query p50:            250.9 ms
+  query p95:            280.7 ms
+  single_hop @5 any=0.2500 all=0.1250 mrr=0.2722 (n=8)
+  temporal @5 any=0.1667 all=0.1667 mrr=0.1667 (n=12)
+  multi_hop @5 any=0.0000 all=0.0000 mrr=0.0500 (n=2)
+  open_domain @5 any=0.2500 all=0.2500 mrr=0.1961 (n=28)
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+
+[2026-07-26T15:52:51] DONE   1.0.x-locomo-swift-r1 → locomo-10x-swift-r1.json
+[2026-07-26T15:52:51] START  1.0.x-locomo-swift-r2
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] loaded 10 conversations, 1536 scoreable questions (450 adversarial excluded)
+[locomo] conv=conv-26 (3 questions, 419 turns)
+[locomo] conv=conv-30 (3 questions, 369 turns)
+[locomo] conv=conv-41 (4 questions, 663 turns)
+[locomo] conv=conv-42 (6 questions, 629 turns)
+[locomo] conv=conv-43 (7 questions, 680 turns)
+[locomo] conv=conv-44 (8 questions, 675 turns)
+[locomo] conv=conv-47 (2 questions, 689 turns)
+[locomo] conv=conv-48 (7 questions, 681 turns)
+[locomo] conv=conv-49 (8 questions, 509 turns)
+[locomo] conv=conv-50 (2 questions, 568 turns)
+[locomo] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  conversations used:   1
+  turns ingested total: 30303
+  recall-any@1:         0.0800
+  recall-any@5:         0.1200
+  recall-any@10:        0.2000
+  recall-all@1:         0.0600
+  recall-all@5:         0.1000
+  recall-all@10:        0.1600
+  mrr:                  0.1148
+  query p50:            249.3 ms
+  query p95:            289.3 ms
+  single_hop @5 any=0.1250 all=0.0000 mrr=0.1651 (n=8)
+  temporal @5 any=0.1667 all=0.1667 mrr=0.1667 (n=12)
+  multi_hop @5 any=0.0000 all=0.0000 mrr=0.0333 (n=2)
+  open_domain @5 any=0.1071 all=0.1071 mrr=0.0839 (n=28)
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+
+[2026-07-26T15:56:30] DONE   1.0.x-locomo-swift-r2 → locomo-10x-swift-r2.json
+[2026-07-26T15:56:30] START  1.0.x-locomo-swift-r3
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] loaded 10 conversations, 1536 scoreable questions (450 adversarial excluded)
+[locomo] conv=conv-26 (3 questions, 419 turns)
+[locomo] conv=conv-30 (3 questions, 369 turns)
+[locomo] conv=conv-41 (4 questions, 663 turns)
+[locomo] conv=conv-42 (6 questions, 629 turns)
+[locomo] conv=conv-43 (7 questions, 680 turns)
+[locomo] conv=conv-44 (8 questions, 675 turns)
+[locomo] conv=conv-47 (2 questions, 689 turns)
+[locomo] conv=conv-48 (7 questions, 681 turns)
+[locomo] conv=conv-49 (8 questions, 509 turns)
+[locomo] conv=conv-50 (2 questions, 568 turns)
+[locomo] run complete
+  questions processed:  50
+  guard healthy:        50
+  guard refusals:       0
+  conversations used:   1
+  turns ingested total: 30303
+  recall-any@1:         0.1600
+  recall-any@5:         0.2000
+  recall-any@10:        0.2600
+  recall-all@1:         0.1400
+  recall-all@5:         0.1800
+  recall-all@10:        0.2000
+  mrr:                  0.1860
+  query p50:            250.5 ms
+  query p95:            279.8 ms
+  single_hop @5 any=0.2500 all=0.1250 mrr=0.2656 (n=8)
+  temporal @5 any=0.1667 all=0.1667 mrr=0.1667 (n=12)
+  multi_hop @5 any=0.0000 all=0.0000 mrr=0.0833 (n=2)
+  open_domain @5 any=0.2143 all=0.2143 mrr=0.1789 (n=28)
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+
+[2026-07-26T16:00:05] DONE   1.0.x-locomo-swift-r3 → locomo-10x-swift-r3.json
+[2026-07-26T16:00:05] START  1.0.x-locomo-rust-r1
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] corpus: 10 conversations, 1536 questions (450 adversarial excluded)
+[locomo] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  seed: 20260725
+[locomo] limit: 50
+[locomo] conv=conv-26 (3 questions, 419 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=419 write_mean_ms=25
+  q=conv-26_q129 cat=open_domain query_ms=250
+  q=conv-26_q76 cat=single_hop query_ms=294
+  q=conv-26_q99 cat=open_domain query_ms=246
+[locomo] conv=conv-30 (3 questions, 369 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000001, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000001/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=369 write_mean_ms=20
+  q=conv-30_q68 cat=open_domain query_ms=180
+  q=conv-30_q64 cat=open_domain query_ms=218
+  q=conv-30_q10 cat=temporal query_ms=259
+[locomo] conv=conv-41 (4 questions, 663 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000002, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000002/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=663 write_mean_ms=31
+  q=conv-41_q101 cat=open_domain query_ms=284
+  q=conv-41_q121 cat=open_domain query_ms=282
+  q=conv-41_q86 cat=open_domain query_ms=266
+  q=conv-41_q100 cat=open_domain query_ms=277
+[locomo] conv=conv-42 (6 questions, 629 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000003, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000003/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=629 write_mean_ms=27
+  q=conv-42_q70 cat=single_hop query_ms=237
+  q=conv-42_q24 cat=temporal query_ms=262
+  q=conv-42_q54 cat=temporal query_ms=262
+  q=conv-42_q143 cat=open_domain query_ms=245
+  q=conv-42_q40 cat=temporal query_ms=226
+  q=conv-42_q186 cat=open_domain query_ms=229
+[locomo] conv=conv-43 (7 questions, 680 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000004, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000004/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=680 write_mean_ms=30
+  q=conv-43_q0 cat=single_hop query_ms=264
+  q=conv-43_q26 cat=single_hop query_ms=230
+  q=conv-43_q85 cat=open_domain query_ms=273
+  q=conv-43_q151 cat=open_domain query_ms=280
+  q=conv-43_q42 cat=single_hop query_ms=246
+  q=conv-43_q88 cat=open_domain query_ms=250
+  q=conv-43_q126 cat=open_domain query_ms=267
+[locomo] conv=conv-44 (8 questions, 675 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=675 write_mean_ms=27
+  q=conv-44_q112 cat=open_domain query_ms=257
+  q=conv-44_q16 cat=temporal query_ms=257
+  q=conv-44_q91 cat=open_domain query_ms=274
+  q=conv-44_q36 cat=single_hop query_ms=243
+  q=conv-44_q1 cat=temporal query_ms=241
+  q=conv-44_q85 cat=open_domain query_ms=273
+  q=conv-44_q66 cat=open_domain query_ms=270
+  q=conv-44_q79 cat=open_domain query_ms=250
+[locomo] conv=conv-47 (2 questions, 689 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000006, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000006/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=689 write_mean_ms=30
+  q=conv-47_q136 cat=open_domain query_ms=242
+  q=conv-47_q21 cat=temporal query_ms=230
+[locomo] conv=conv-48 (7 questions, 681 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000007, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000007/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=681 write_mean_ms=28
+  q=conv-48_q190 cat=open_domain query_ms=237
+  q=conv-48_q120 cat=open_domain query_ms=241
+  q=conv-48_q2 cat=temporal query_ms=219
+  q=conv-48_q146 cat=open_domain query_ms=238
+  q=conv-48_q174 cat=open_domain query_ms=245
+  q=conv-48_q86 cat=single_hop query_ms=222
+  q=conv-48_q32 cat=temporal query_ms=231
+[locomo] conv=conv-49 (8 questions, 509 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=509 write_mean_ms=27
+  q=conv-49_q25 cat=temporal query_ms=255
+  q=conv-49_q109 cat=open_domain query_ms=231
+  q=conv-49_q27 cat=multi_hop query_ms=257
+  q=conv-49_q76 cat=temporal query_ms=264
+  q=conv-49_q136 cat=open_domain query_ms=270
+  q=conv-49_q20 cat=multi_hop query_ms=271
+  q=conv-49_q14 cat=single_hop query_ms=262
+  q=conv-49_q116 cat=open_domain query_ms=244
+[locomo] conv=conv-50 (2 questions, 568 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000009, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000009/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=568 write_mean_ms=27
+  q=conv-50_q136 cat=open_domain query_ms=275
+  q=conv-50_q14 cat=temporal query_ms=262
+LoCoMo results (seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@5:       0.2600
+  recall_all@5:       0.2400
+  recall_any@10:      0.3000
+  mrr:                0.2303
+  query_p50_s:        0.2505
+  query_p95_s:        0.2817
+  category_breakdown:
+    single_hop    n=   8  any@5=0.2500  all@5=0.1250  mrr=0.2701
+    temporal      n=  12  any@5=0.3333  all@5=0.3333  mrr=0.3333
+    multi_hop     n=   2  any@5=0.0000  all@5=0.0000  mrr=0.0385
+    open_domain   n=  28  any@5=0.2500  all@5=0.2500  mrr=0.1885
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+[2026-07-26T16:03:45] DONE   1.0.x-locomo-rust-r1 → locomo-10x-rust-r1.json
+[2026-07-26T16:03:45] START  1.0.x-locomo-rust-r2
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] corpus: 10 conversations, 1536 questions (450 adversarial excluded)
+[locomo] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  seed: 20260725
+[locomo] limit: 50
+[locomo] conv=conv-26 (3 questions, 419 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=419 write_mean_ms=23
+  q=conv-26_q129 cat=open_domain query_ms=285
+  q=conv-26_q76 cat=single_hop query_ms=187
+  q=conv-26_q99 cat=open_domain query_ms=254
+[locomo] conv=conv-30 (3 questions, 369 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000001, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000001/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=369 write_mean_ms=20
+  q=conv-30_q68 cat=open_domain query_ms=176
+  q=conv-30_q64 cat=open_domain query_ms=214
+  q=conv-30_q10 cat=temporal query_ms=266
+[locomo] conv=conv-41 (4 questions, 663 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000002, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000002/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=663 write_mean_ms=29
+  q=conv-41_q101 cat=open_domain query_ms=306
+  q=conv-41_q121 cat=open_domain query_ms=269
+  q=conv-41_q86 cat=open_domain query_ms=248
+  q=conv-41_q100 cat=open_domain query_ms=276
+[locomo] conv=conv-42 (6 questions, 629 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000003, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000003/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=629 write_mean_ms=27
+  q=conv-42_q70 cat=single_hop query_ms=255
+  q=conv-42_q24 cat=temporal query_ms=254
+  q=conv-42_q54 cat=temporal query_ms=269
+  q=conv-42_q143 cat=open_domain query_ms=241
+  q=conv-42_q40 cat=temporal query_ms=244
+  q=conv-42_q186 cat=open_domain query_ms=245
+[locomo] conv=conv-43 (7 questions, 680 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000004, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000004/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=680 write_mean_ms=31
+  q=conv-43_q0 cat=single_hop query_ms=268
+  q=conv-43_q26 cat=single_hop query_ms=237
+  q=conv-43_q85 cat=open_domain query_ms=267
+  q=conv-43_q151 cat=open_domain query_ms=270
+  q=conv-43_q42 cat=single_hop query_ms=240
+  q=conv-43_q88 cat=open_domain query_ms=257
+  q=conv-43_q126 cat=open_domain query_ms=258
+[locomo] conv=conv-44 (8 questions, 675 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=675 write_mean_ms=28
+  q=conv-44_q112 cat=open_domain query_ms=256
+  q=conv-44_q16 cat=temporal query_ms=246
+  q=conv-44_q91 cat=open_domain query_ms=272
+  q=conv-44_q36 cat=single_hop query_ms=245
+  q=conv-44_q1 cat=temporal query_ms=236
+  q=conv-44_q85 cat=open_domain query_ms=264
+  q=conv-44_q66 cat=open_domain query_ms=264
+  q=conv-44_q79 cat=open_domain query_ms=246
+[locomo] conv=conv-47 (2 questions, 689 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000006, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000006/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=689 write_mean_ms=29
+  q=conv-47_q136 cat=open_domain query_ms=248
+  q=conv-47_q21 cat=temporal query_ms=225
+[locomo] conv=conv-48 (7 questions, 681 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000007, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000007/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=681 write_mean_ms=28
+  q=conv-48_q190 cat=open_domain query_ms=236
+  q=conv-48_q120 cat=open_domain query_ms=248
+  q=conv-48_q2 cat=temporal query_ms=231
+  q=conv-48_q146 cat=open_domain query_ms=243
+  q=conv-48_q174 cat=open_domain query_ms=254
+  q=conv-48_q86 cat=single_hop query_ms=224
+  q=conv-48_q32 cat=temporal query_ms=231
+[locomo] conv=conv-49 (8 questions, 509 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=509 write_mean_ms=26
+  q=conv-49_q25 cat=temporal query_ms=254
+  q=conv-49_q109 cat=open_domain query_ms=231
+  q=conv-49_q27 cat=multi_hop query_ms=255
+  q=conv-49_q76 cat=temporal query_ms=257
+  q=conv-49_q136 cat=open_domain query_ms=263
+  q=conv-49_q20 cat=multi_hop query_ms=267
+  q=conv-49_q14 cat=single_hop query_ms=261
+  q=conv-49_q116 cat=open_domain query_ms=239
+[locomo] conv=conv-50 (2 questions, 568 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000009, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000009/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=568 write_mean_ms=27
+  q=conv-50_q136 cat=open_domain query_ms=281
+  q=conv-50_q14 cat=temporal query_ms=277
+LoCoMo results (seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@5:       0.2400
+  recall_all@5:       0.2200
+  recall_any@10:      0.3200
+  mrr:                0.2004
+  query_p50_s:        0.2536
+  query_p95_s:        0.2814
+  category_breakdown:
+    single_hop    n=   8  any@5=0.1250  all@5=0.0000  mrr=0.1585
+    temporal      n=  12  any@5=0.2500  all@5=0.2500  mrr=0.2500
+    multi_hop     n=   2  any@5=0.0000  all@5=0.0000  mrr=0.0500
+    open_domain   n=  28  any@5=0.2857  all@5=0.2857  mrr=0.2018
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+[2026-07-26T16:07:05] DONE   1.0.x-locomo-rust-r2 → locomo-10x-rust-r2.json
+[2026-07-26T16:07:05] START  1.0.x-locomo-rust-r3
+[locomo] loading corpus from /Users/bob/devlop/mootx01-ce-lme-locomo/apps/mcp-benchmarker/fixtures/locomo/locomo10.json
+[locomo] corpus: 10 conversations, 1536 questions (450 adversarial excluded)
+[locomo] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  seed: 20260725
+[locomo] limit: 50
+[locomo] conv=conv-26 (3 questions, 419 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000000, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000000/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=419 write_mean_ms=25
+  q=conv-26_q129 cat=open_domain query_ms=250
+  q=conv-26_q76 cat=single_hop query_ms=288
+  q=conv-26_q99 cat=open_domain query_ms=247
+[locomo] conv=conv-30 (3 questions, 369 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000001, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000001/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=369 write_mean_ms=21
+  q=conv-30_q68 cat=open_domain query_ms=189
+  q=conv-30_q64 cat=open_domain query_ms=234
+  q=conv-30_q10 cat=temporal query_ms=293
+[locomo] conv=conv-41 (4 questions, 663 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000002, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000002/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=663 write_mean_ms=28
+  q=conv-41_q101 cat=open_domain query_ms=297
+  q=conv-41_q121 cat=open_domain query_ms=279
+  q=conv-41_q86 cat=open_domain query_ms=248
+  q=conv-41_q100 cat=open_domain query_ms=267
+[locomo] conv=conv-42 (6 questions, 629 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000003, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000003/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=629 write_mean_ms=28
+  q=conv-42_q70 cat=single_hop query_ms=221
+  q=conv-42_q24 cat=temporal query_ms=260
+  q=conv-42_q54 cat=temporal query_ms=263
+  q=conv-42_q143 cat=open_domain query_ms=248
+  q=conv-42_q40 cat=temporal query_ms=237
+  q=conv-42_q186 cat=open_domain query_ms=230
+[locomo] conv=conv-43 (7 questions, 680 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000004, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000004/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=680 write_mean_ms=31
+  q=conv-43_q0 cat=single_hop query_ms=279
+  q=conv-43_q26 cat=single_hop query_ms=242
+  q=conv-43_q85 cat=open_domain query_ms=279
+  q=conv-43_q151 cat=open_domain query_ms=265
+  q=conv-43_q42 cat=single_hop query_ms=251
+  q=conv-43_q88 cat=open_domain query_ms=259
+  q=conv-43_q126 cat=open_domain query_ms=261
+[locomo] conv=conv-44 (8 questions, 675 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000005, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000005/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=675 write_mean_ms=27
+  q=conv-44_q112 cat=open_domain query_ms=287
+  q=conv-44_q16 cat=temporal query_ms=233
+  q=conv-44_q91 cat=open_domain query_ms=249
+  q=conv-44_q36 cat=single_hop query_ms=236
+  q=conv-44_q1 cat=temporal query_ms=271
+  q=conv-44_q85 cat=open_domain query_ms=254
+  q=conv-44_q66 cat=open_domain query_ms=253
+  q=conv-44_q79 cat=open_domain query_ms=238
+[locomo] conv=conv-47 (2 questions, 689 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000006, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000006/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=689 write_mean_ms=30
+  q=conv-47_q136 cat=open_domain query_ms=244
+  q=conv-47_q21 cat=temporal query_ms=232
+[locomo] conv=conv-48 (7 questions, 681 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000007, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000007/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=681 write_mean_ms=29
+  q=conv-48_q190 cat=open_domain query_ms=244
+  q=conv-48_q120 cat=open_domain query_ms=253
+  q=conv-48_q2 cat=temporal query_ms=220
+  q=conv-48_q146 cat=open_domain query_ms=244
+  q=conv-48_q174 cat=open_domain query_ms=253
+  q=conv-48_q86 cat=single_hop query_ms=212
+  q=conv-48_q32 cat=temporal query_ms=235
+[locomo] conv=conv-49 (8 questions, 509 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=509 write_mean_ms=25
+  q=conv-49_q25 cat=temporal query_ms=252
+  q=conv-49_q109 cat=open_domain query_ms=230
+  q=conv-49_q27 cat=multi_hop query_ms=252
+  q=conv-49_q76 cat=temporal query_ms=259
+  q=conv-49_q136 cat=open_domain query_ms=264
+  q=conv-49_q20 cat=multi_hop query_ms=268
+  q=conv-49_q14 cat=single_hop query_ms=250
+  q=conv-49_q116 cat=open_domain query_ms=243
+[locomo] conv=conv-50 (2 questions, 568 turns)
+mootx01 serve starting (estate: default, data dir: /tmp/locomo-bench-0000000001352775-00000009, transport: stdio)
+first-run: creating estate 'default' at /tmp/locomo-bench-0000000001352775-00000009/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy turns=568 write_mean_ms=27
+  q=conv-50_q136 cat=open_domain query_ms=271
+  q=conv-50_q14 cat=temporal query_ms=265
+LoCoMo results (seed=20260725):
+  questions_run:      50
+  guard_excluded:     0
+  query_count:        50
+  recall_any@5:       0.2400
+  recall_all@5:       0.2200
+  recall_any@10:      0.2800
+  mrr:                0.2254
+  query_p50_s:        0.2507
+  query_p95_s:        0.2884
+  category_breakdown:
+    single_hop    n=   8  any@5=0.2500  all@5=0.1250  mrr=0.2708
+    temporal      n=  12  any@5=0.3333  all@5=0.3333  mrr=0.3333
+    multi_hop     n=   2  any@5=0.0000  all@5=0.0000  mrr=0.0417
+    open_domain   n=  28  any@5=0.2143  all@5=0.2143  mrr=0.1793
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/locomo-report-seed20260725.json
+[2026-07-26T16:10:28] DONE   1.0.x-locomo-rust-r3 → locomo-10x-rust-r3.json
+[2026-07-26T16:10:28] START  1.0.x-lmeb-swift-r1
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem (evidence types: user_evidence)
+[lmeb] loaded 1340 queries, 107736 docs, 3304 qrels
+[lmeb] query 1/50 scene_100_q_0: ingested 84 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 2/50 scene_784_q_0: ingested 130 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 3/50 scene_390_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 4/50 scene_1123_q_0: ingested 188 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 5/50 scene_964_q_0: ingested 146 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 6/50 scene_1331_q_0: ingested 54 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 7/50 scene_422_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 8/50 scene_1211_q_0: ingested 28 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 9/50 scene_401_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 10/50 scene_282_q_0: ingested 74 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 11/50 scene_1069_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 12/50 scene_1007_q_0: ingested 118 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 13/50 scene_290_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 14/50 scene_36_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 15/50 scene_52_q_0: ingested 62 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 16/50 scene_953_q_0: ingested 124 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 17/50 scene_831_q_0: ingested 30 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 18/50 scene_1214_q_0: ingested 160 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 19/50 scene_76_q_0: ingested 68 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 20/50 scene_460_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 21/50 scene_832_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 22/50 scene_805_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 23/50 scene_119_q_0: ingested 12 docs, guard=healthy, retrieved 12 docs
+[lmeb] query 24/50 scene_663_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 25/50 scene_757_q_0: ingested 134 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 26/50 scene_1162_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 27/50 scene_977_q_0: ingested 137 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 28/50 scene_667_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 29/50 scene_1311_q_0: ingested 36 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 30/50 scene_224_q_0: ingested 52 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 31/50 scene_513_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 32/50 scene_90_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 33/50 scene_1329_q_0: ingested 56 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 34/50 scene_564_q_0: ingested 86 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 35/50 scene_731_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 36/50 scene_814_q_0: ingested 110 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 37/50 scene_349_q_0: ingested 50 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 38/50 scene_342_q_0: ingested 11 docs, guard=healthy, retrieved 11 docs
+[lmeb] query 39/50 scene_1088_q_0: ingested 166 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 40/50 scene_492_q_0: ingested 89 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 41/50 scene_1245_q_0: ingested 200 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 42/50 scene_709_q_0: ingested 72 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 43/50 scene_39_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 44/50 scene_98_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 45/50 scene_960_q_0: ingested 66 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 46/50 scene_1111_q_0: ingested 150 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 47/50 scene_414_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 48/50 scene_1252_q_0: ingested 40 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 49/50 scene_939_q_0: ingested 122 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 50/50 scene_437_q_0: ingested 83 docs, guard=healthy, retrieved 20 docs
+[lmeb] run complete
+  queries processed: 50
+  guard healthy:     50
+  guard refusals:    0
+  docs ingested:     4360
+  nDCG@10:           0.4657
+  MRR:               0.5415
+  recall@1:          0.2617
+  recall@5:          0.4393
+  recall@10:         0.5617
+  MAP@10:            0.3737
+  query p50:         78.4 ms
+  query p95:         174.2 ms
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lmeb-report-seed20260725.json
+[2026-07-26T16:15:05] DONE   1.0.x-lmeb-swift-r1 → lmeb-10x-swift-r1.json
+[2026-07-26T16:15:05] START  1.0.x-lmeb-swift-r2
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem (evidence types: user_evidence)
+[lmeb] loaded 1340 queries, 107736 docs, 3304 qrels
+[lmeb] query 1/50 scene_100_q_0: ingested 84 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 2/50 scene_784_q_0: ingested 130 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 3/50 scene_390_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 4/50 scene_1123_q_0: ingested 188 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 5/50 scene_964_q_0: ingested 146 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 6/50 scene_1331_q_0: ingested 54 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 7/50 scene_422_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 8/50 scene_1211_q_0: ingested 28 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 9/50 scene_401_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 10/50 scene_282_q_0: ingested 74 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 11/50 scene_1069_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 12/50 scene_1007_q_0: ingested 118 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 13/50 scene_290_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 14/50 scene_36_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 15/50 scene_52_q_0: ingested 62 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 16/50 scene_953_q_0: ingested 124 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 17/50 scene_831_q_0: ingested 30 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 18/50 scene_1214_q_0: ingested 160 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 19/50 scene_76_q_0: ingested 68 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 20/50 scene_460_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 21/50 scene_832_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 22/50 scene_805_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 23/50 scene_119_q_0: ingested 12 docs, guard=healthy, retrieved 12 docs
+[lmeb] query 24/50 scene_663_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 25/50 scene_757_q_0: ingested 134 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 26/50 scene_1162_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 27/50 scene_977_q_0: ingested 137 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 28/50 scene_667_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 29/50 scene_1311_q_0: ingested 36 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 30/50 scene_224_q_0: ingested 52 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 31/50 scene_513_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 32/50 scene_90_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 33/50 scene_1329_q_0: ingested 56 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 34/50 scene_564_q_0: ingested 86 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 35/50 scene_731_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 36/50 scene_814_q_0: ingested 110 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 37/50 scene_349_q_0: ingested 50 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 38/50 scene_342_q_0: ingested 11 docs, guard=healthy, retrieved 11 docs
+[lmeb] query 39/50 scene_1088_q_0: ingested 166 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 40/50 scene_492_q_0: ingested 89 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 41/50 scene_1245_q_0: ingested 200 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 42/50 scene_709_q_0: ingested 72 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 43/50 scene_39_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 44/50 scene_98_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 45/50 scene_960_q_0: ingested 66 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 46/50 scene_1111_q_0: ingested 150 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 47/50 scene_414_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 48/50 scene_1252_q_0: ingested 40 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 49/50 scene_939_q_0: ingested 122 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 50/50 scene_437_q_0: ingested 83 docs, guard=healthy, retrieved 20 docs
+[lmeb] run complete
+  queries processed: 50
+  guard healthy:     50
+  guard refusals:    0
+  docs ingested:     4360
+  nDCG@10:           0.4698
+  MRR:               0.5546
+  recall@1:          0.2683
+  recall@5:          0.4543
+  recall@10:         0.5617
+  MAP@10:            0.3763
+  query p50:         79.7 ms
+  query p95:         170.6 ms
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lmeb-report-seed20260725.json
+[2026-07-26T16:19:45] DONE   1.0.x-lmeb-swift-r2 → lmeb-10x-swift-r2.json
+[2026-07-26T16:19:45] START  1.0.x-lmeb-swift-r3
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem (evidence types: user_evidence)
+[lmeb] loaded 1340 queries, 107736 docs, 3304 qrels
+[lmeb] query 1/50 scene_100_q_0: ingested 84 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 2/50 scene_784_q_0: ingested 130 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 3/50 scene_390_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 4/50 scene_1123_q_0: ingested 188 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 5/50 scene_964_q_0: ingested 146 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 6/50 scene_1331_q_0: ingested 54 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 7/50 scene_422_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 8/50 scene_1211_q_0: ingested 28 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 9/50 scene_401_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 10/50 scene_282_q_0: ingested 74 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 11/50 scene_1069_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 12/50 scene_1007_q_0: ingested 118 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 13/50 scene_290_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 14/50 scene_36_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 15/50 scene_52_q_0: ingested 62 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 16/50 scene_953_q_0: ingested 124 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 17/50 scene_831_q_0: ingested 30 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 18/50 scene_1214_q_0: ingested 160 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 19/50 scene_76_q_0: ingested 68 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 20/50 scene_460_q_0: ingested 82 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 21/50 scene_832_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 22/50 scene_805_q_0: ingested 120 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 23/50 scene_119_q_0: ingested 12 docs, guard=healthy, retrieved 12 docs
+[lmeb] query 24/50 scene_663_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 25/50 scene_757_q_0: ingested 134 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 26/50 scene_1162_q_0: ingested 156 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 27/50 scene_977_q_0: ingested 137 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 28/50 scene_667_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 29/50 scene_1311_q_0: ingested 36 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 30/50 scene_224_q_0: ingested 52 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 31/50 scene_513_q_0: ingested 90 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 32/50 scene_90_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 33/50 scene_1329_q_0: ingested 56 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 34/50 scene_564_q_0: ingested 86 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 35/50 scene_731_q_0: ingested 80 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 36/50 scene_814_q_0: ingested 110 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 37/50 scene_349_q_0: ingested 50 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 38/50 scene_342_q_0: ingested 11 docs, guard=healthy, retrieved 11 docs
+[lmeb] query 39/50 scene_1088_q_0: ingested 166 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 40/50 scene_492_q_0: ingested 89 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 41/50 scene_1245_q_0: ingested 200 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 42/50 scene_709_q_0: ingested 72 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 43/50 scene_39_q_0: ingested 44 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 44/50 scene_98_q_0: ingested 48 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 45/50 scene_960_q_0: ingested 66 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 46/50 scene_1111_q_0: ingested 150 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 47/50 scene_414_q_0: ingested 46 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 48/50 scene_1252_q_0: ingested 40 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 49/50 scene_939_q_0: ingested 122 docs, guard=healthy, retrieved 20 docs
+[lmeb] query 50/50 scene_437_q_0: ingested 83 docs, guard=healthy, retrieved 20 docs
+[lmeb] run complete
+  queries processed: 50
+  guard healthy:     50
+  guard refusals:    0
+  docs ingested:     4360
+  nDCG@10:           0.4584
+  MRR:               0.5364
+  recall@1:          0.2617
+  recall@5:          0.4343
+  recall@10:         0.5467
+  MAP@10:            0.3711
+  query p50:         79.8 ms
+  query p95:         168.3 ms
+  report written to: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lmeb-report-seed20260725.json
+[2026-07-26T16:24:21] DONE   1.0.x-lmeb-swift-r3 → lmeb-10x-swift-r3.json
+[2026-07-26T16:24:21] START  1.0.x-lmeb-rust-r1
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem
+[lmeb] evidence types: ["user_evidence"]
+[lmeb] corpus: 107736 docs, 1340 queries, 3304 qrels
+[lmeb] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  seed: 20260725
+[lmeb] limit: 50  offset: 0
+[lmeb] 1/50: scene_100_q_0 (84 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000000b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000000b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=84 retrieved=20 query_ms=79
+[lmeb] 2/50: scene_784_q_0 (130 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000044b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000044b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=130 retrieved=20 query_ms=118
+[lmeb] 3/50: scene_390_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000296, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000296/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=56
+[lmeb] 4/50: scene_1123_q_0 (188 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000089, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000089/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=188 retrieved=20 query_ms=185
+[lmeb] 5/50: scene_964_q_0 (146 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000513, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000513/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=146 retrieved=20 query_ms=145
+[lmeb] 6/50: scene_1331_q_0 (54 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000170, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000170/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=54 retrieved=20 query_ms=54
+[lmeb] 7/50: scene_422_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ba, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ba/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=51
+[lmeb] 8/50: scene_1211_q_0 (28 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000eb, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000eb/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=28 retrieved=20 query_ms=24
+[lmeb] 9/50: scene_401_q_0 (82 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=60
+[lmeb] 10/50: scene_282_q_0 (74 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000021e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000021e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=74 retrieved=20 query_ms=86
+[lmeb] 11/50: scene_1069_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000004c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000004c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=160
+[lmeb] 12/50: scene_1007_q_0 (118 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=118 retrieved=20 query_ms=131
+[lmeb] 13/50: scene_290_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000227, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000227/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=45
+[lmeb] 14/50: scene_36_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000027f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000027f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=47
+[lmeb] 15/50: scene_52_q_0 (62 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000331, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000331/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=62 retrieved=20 query_ms=65
+[lmeb] 16/50: scene_953_q_0 (124 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000507, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000507/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=124 retrieved=20 query_ms=135
+[lmeb] 17/50: scene_831_q_0 (30 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000480, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000480/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=30 retrieved=20 query_ms=29
+[lmeb] 18/50: scene_1214_q_0 (160 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000ee, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000ee/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=160 retrieved=20 query_ms=151
+[lmeb] 19/50: scene_76_q_0 (68 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000043b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000043b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=68 retrieved=20 query_ms=86
+[lmeb] 20/50: scene_460_q_0 (82 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002e4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002e4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=79
+[lmeb] 21/50: scene_832_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000481, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000481/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=117
+[lmeb] 22/50: scene_805_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000463, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000463/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=132
+[lmeb] 23/50: scene_119_q_0 (12 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000dd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000dd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=12 retrieved=12 query_ms=15
+[lmeb] 24/50: scene_663_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=94
+[lmeb] 25/50: scene_757_q_0 (134 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000042d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000042d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=134 retrieved=20 query_ms=136
+[lmeb] 26/50: scene_1162_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000b4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000b4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=176
+[lmeb] 27/50: scene_977_q_0 (137 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000521, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000521/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=137 retrieved=20 query_ms=115
+[lmeb] 28/50: scene_667_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c9, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c9/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=79
+[lmeb] 29/50: scene_1311_q_0 (36 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000015a, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000015a/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=36 retrieved=20 query_ms=30
+[lmeb] 30/50: scene_224_q_0 (52 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000001de, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000001de/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=52 retrieved=20 query_ms=52
+[lmeb] 31/50: scene_513_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000031f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000031f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=73
+[lmeb] 32/50: scene_90_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004d7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004d7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=56
+[lmeb] 33/50: scene_1329_q_0 (56 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000016d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000016d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=56 retrieved=20 query_ms=40
+[lmeb] 34/50: scene_564_q_0 (86 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000357, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000357/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=86 retrieved=20 query_ms=99
+[lmeb] 35/50: scene_731_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000411, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000411/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=79
+[lmeb] 36/50: scene_814_q_0 (110 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000046d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000046d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=110 retrieved=20 query_ms=121
+[lmeb] 37/50: scene_349_q_0 (50 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000268, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000268/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=50 retrieved=20 query_ms=50
+[lmeb] 38/50: scene_342_q_0 (11 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000261, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000261/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=11 retrieved=11 query_ms=15
+[lmeb] 39/50: scene_1088_q_0 (166 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000061, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000061/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=166 retrieved=20 query_ms=171
+[lmeb] 40/50: scene_492_q_0 (89 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000307, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000307/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=89 retrieved=20 query_ms=81
+[lmeb] 41/50: scene_1245_q_0 (200 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000110, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000110/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=200 retrieved=20 query_ms=165
+[lmeb] 42/50: scene_709_q_0 (72 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003f8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003f8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=72 retrieved=20 query_ms=83
+[lmeb] 43/50: scene_39_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a0, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a0/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=49
+[lmeb] 44/50: scene_98_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000052f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000052f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=57
+[lmeb] 45/50: scene_960_q_0 (66 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000050f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000050f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=66 retrieved=20 query_ms=87
+[lmeb] 46/50: scene_1111_q_0 (150 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000007c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000007c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=150 retrieved=20 query_ms=147
+[lmeb] 47/50: scene_414_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002b1, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002b1/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=60
+[lmeb] 48/50: scene_1252_q_0 (40 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000118, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000118/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=40 retrieved=20 query_ms=29
+[lmeb] 49/50: scene_939_q_0 (122 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004f7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004f7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=122 retrieved=20 query_ms=124
+[lmeb] 50/50: scene_437_q_0 (83 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ca, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ca/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=83 retrieved=20 query_ms=70
+LMEB results (label=lmeb-seed20260725, seed=20260725):
+  queries_run:     50
+  guard_excluded:  0
+  query_count:     50
+  nDCG@10:         0.4707
+  MRR:             0.5551
+  recall@1:        0.2683
+  recall@5:        0.4353
+  recall@10:       0.5617
+  MAP@10:          0.3772
+  query_p50_s:     0.0792
+  query_p95_s:     0.1712
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lmeb-report-seed20260725.json
+[2026-07-26T16:28:58] DONE   1.0.x-lmeb-rust-r1 → lmeb-10x-rust-r1.json
+[2026-07-26T16:28:58] START  1.0.x-lmeb-rust-r2
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem
+[lmeb] evidence types: ["user_evidence"]
+[lmeb] corpus: 107736 docs, 1340 queries, 3304 qrels
+[lmeb] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  seed: 20260725
+[lmeb] limit: 50  offset: 0
+[lmeb] 1/50: scene_100_q_0 (84 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000000b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000000b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=84 retrieved=20 query_ms=80
+[lmeb] 2/50: scene_784_q_0 (130 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000044b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000044b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=130 retrieved=20 query_ms=118
+[lmeb] 3/50: scene_390_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000296, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000296/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=57
+[lmeb] 4/50: scene_1123_q_0 (188 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000089, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000089/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=188 retrieved=20 query_ms=183
+[lmeb] 5/50: scene_964_q_0 (146 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000513, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000513/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=146 retrieved=20 query_ms=146
+[lmeb] 6/50: scene_1331_q_0 (54 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000170, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000170/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=54 retrieved=20 query_ms=54
+[lmeb] 7/50: scene_422_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ba, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ba/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=50
+[lmeb] 8/50: scene_1211_q_0 (28 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000eb, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000eb/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=28 retrieved=20 query_ms=24
+[lmeb] 9/50: scene_401_q_0 (82 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=60
+[lmeb] 10/50: scene_282_q_0 (74 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000021e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000021e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=74 retrieved=20 query_ms=92
+[lmeb] 11/50: scene_1069_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000004c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000004c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=161
+[lmeb] 12/50: scene_1007_q_0 (118 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=118 retrieved=20 query_ms=130
+[lmeb] 13/50: scene_290_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000227, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000227/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=44
+[lmeb] 14/50: scene_36_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000027f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000027f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=47
+[lmeb] 15/50: scene_52_q_0 (62 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000331, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000331/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=62 retrieved=20 query_ms=65
+[lmeb] 16/50: scene_953_q_0 (124 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000507, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000507/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=124 retrieved=20 query_ms=135
+[lmeb] 17/50: scene_831_q_0 (30 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000480, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000480/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=30 retrieved=20 query_ms=63
+[lmeb] 18/50: scene_1214_q_0 (160 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000ee, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000ee/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=160 retrieved=20 query_ms=149
+[lmeb] 19/50: scene_76_q_0 (68 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000043b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000043b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=68 retrieved=20 query_ms=86
+[lmeb] 20/50: scene_460_q_0 (82 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002e4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002e4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=79
+[lmeb] 21/50: scene_832_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000481, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000481/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=118
+[lmeb] 22/50: scene_805_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000463, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000463/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=129
+[lmeb] 23/50: scene_119_q_0 (12 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000dd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000dd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=12 retrieved=12 query_ms=15
+[lmeb] 24/50: scene_663_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=92
+[lmeb] 25/50: scene_757_q_0 (134 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000042d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000042d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=134 retrieved=20 query_ms=110
+[lmeb] 26/50: scene_1162_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000b4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000b4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=183
+[lmeb] 27/50: scene_977_q_0 (137 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000521, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000521/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=137 retrieved=20 query_ms=114
+[lmeb] 28/50: scene_667_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c9, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c9/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=79
+[lmeb] 29/50: scene_1311_q_0 (36 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000015a, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000015a/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=36 retrieved=20 query_ms=30
+[lmeb] 30/50: scene_224_q_0 (52 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000001de, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000001de/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=52 retrieved=20 query_ms=51
+[lmeb] 31/50: scene_513_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000031f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000031f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=72
+[lmeb] 32/50: scene_90_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004d7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004d7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=57
+[lmeb] 33/50: scene_1329_q_0 (56 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000016d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000016d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=56 retrieved=20 query_ms=41
+[lmeb] 34/50: scene_564_q_0 (86 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000357, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000357/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=86 retrieved=20 query_ms=99
+[lmeb] 35/50: scene_731_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000411, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000411/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=69
+[lmeb] 36/50: scene_814_q_0 (110 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000046d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000046d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=110 retrieved=20 query_ms=120
+[lmeb] 37/50: scene_349_q_0 (50 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000268, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000268/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=50 retrieved=20 query_ms=51
+[lmeb] 38/50: scene_342_q_0 (11 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000261, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000261/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=11 retrieved=11 query_ms=14
+[lmeb] 39/50: scene_1088_q_0 (166 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000061, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000061/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=166 retrieved=20 query_ms=170
+[lmeb] 40/50: scene_492_q_0 (89 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000307, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000307/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=89 retrieved=20 query_ms=79
+[lmeb] 41/50: scene_1245_q_0 (200 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000110, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000110/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=200 retrieved=20 query_ms=168
+[lmeb] 42/50: scene_709_q_0 (72 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003f8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003f8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=72 retrieved=20 query_ms=86
+[lmeb] 43/50: scene_39_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a0, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a0/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=49
+[lmeb] 44/50: scene_98_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000052f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000052f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=60
+[lmeb] 45/50: scene_960_q_0 (66 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000050f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000050f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=66 retrieved=20 query_ms=87
+[lmeb] 46/50: scene_1111_q_0 (150 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000007c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000007c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=150 retrieved=20 query_ms=149
+[lmeb] 47/50: scene_414_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002b1, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002b1/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=57
+[lmeb] 48/50: scene_1252_q_0 (40 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000118, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000118/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=40 retrieved=20 query_ms=29
+[lmeb] 49/50: scene_939_q_0 (122 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004f7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004f7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=122 retrieved=20 query_ms=122
+[lmeb] 50/50: scene_437_q_0 (83 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ca, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ca/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=83 retrieved=20 query_ms=69
+LMEB results (label=lmeb-seed20260725, seed=20260725):
+  queries_run:     50
+  guard_excluded:  0
+  query_count:     50
+  nDCG@10:         0.4717
+  MRR:             0.5599
+  recall@1:        0.2683
+  recall@5:        0.4353
+  recall@10:       0.5617
+  MAP@10:          0.3784
+  query_p50_s:     0.0789
+  query_p95_s:     0.1700
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lmeb-report-seed20260725.json
+[2026-07-26T16:32:10] DONE   1.0.x-lmeb-rust-r2 → lmeb-10x-rust-r2.json
+[2026-07-26T16:32:10] START  1.0.x-lmeb-rust-r3
+[lmeb] loading corpus from /Users/bob/devlop/mootx01-ce-lme-lmeb/apps/mcp-benchmarker/fixtures/lmeb/data/ConvoMem
+[lmeb] evidence types: ["user_evidence"]
+[lmeb] corpus: 107736 docs, 1340 queries, 3304 qrels
+[lmeb] binary: /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mootx01/.build/release/mootx01  seed: 20260725
+[lmeb] limit: 50  offset: 0
+[lmeb] 1/50: scene_100_q_0 (84 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000000b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000000b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=84 retrieved=20 query_ms=79
+[lmeb] 2/50: scene_784_q_0 (130 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000044b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000044b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=130 retrieved=20 query_ms=117
+[lmeb] 3/50: scene_390_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000296, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000296/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=56
+[lmeb] 4/50: scene_1123_q_0 (188 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000089, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000089/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=188 retrieved=20 query_ms=188
+[lmeb] 5/50: scene_964_q_0 (146 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000513, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000513/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=146 retrieved=20 query_ms=151
+[lmeb] 6/50: scene_1331_q_0 (54 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000170, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000170/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=54 retrieved=20 query_ms=54
+[lmeb] 7/50: scene_422_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ba, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ba/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=51
+[lmeb] 8/50: scene_1211_q_0 (28 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000eb, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000eb/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=28 retrieved=20 query_ms=24
+[lmeb] 9/50: scene_401_q_0 (82 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a3, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a3/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=60
+[lmeb] 10/50: scene_282_q_0 (74 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000021e, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000021e/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=74 retrieved=20 query_ms=85
+[lmeb] 11/50: scene_1069_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000004c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000004c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=160
+[lmeb] 12/50: scene_1007_q_0 (118 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000008, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000008/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=118 retrieved=20 query_ms=131
+[lmeb] 13/50: scene_290_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000227, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000227/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=45
+[lmeb] 14/50: scene_36_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000027f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000027f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=47
+[lmeb] 15/50: scene_52_q_0 (62 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000331, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000331/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=62 retrieved=20 query_ms=65
+[lmeb] 16/50: scene_953_q_0 (124 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000507, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000507/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=124 retrieved=20 query_ms=134
+[lmeb] 17/50: scene_831_q_0 (30 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000480, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000480/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=30 retrieved=20 query_ms=28
+[lmeb] 18/50: scene_1214_q_0 (160 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000ee, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000ee/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=160 retrieved=20 query_ms=162
+[lmeb] 19/50: scene_76_q_0 (68 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000043b, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000043b/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=68 retrieved=20 query_ms=86
+[lmeb] 20/50: scene_460_q_0 (82 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002e4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002e4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=82 retrieved=20 query_ms=80
+[lmeb] 21/50: scene_832_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000481, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000481/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=118
+[lmeb] 22/50: scene_805_q_0 (120 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000463, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000463/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=120 retrieved=20 query_ms=132
+[lmeb] 23/50: scene_119_q_0 (12 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000dd, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000dd/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=12 retrieved=12 query_ms=15
+[lmeb] 24/50: scene_663_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c5, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c5/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=92
+[lmeb] 25/50: scene_757_q_0 (134 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000042d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000042d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=134 retrieved=20 query_ms=109
+[lmeb] 26/50: scene_1162_q_0 (156 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000000b4, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000000b4/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=156 retrieved=20 query_ms=179
+[lmeb] 27/50: scene_977_q_0 (137 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000521, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000521/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=137 retrieved=20 query_ms=117
+[lmeb] 28/50: scene_667_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003c9, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003c9/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=78
+[lmeb] 29/50: scene_1311_q_0 (36 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000015a, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000015a/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=36 retrieved=20 query_ms=30
+[lmeb] 30/50: scene_224_q_0 (52 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000001de, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000001de/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=52 retrieved=20 query_ms=51
+[lmeb] 31/50: scene_513_q_0 (90 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000031f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000031f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=90 retrieved=20 query_ms=73
+[lmeb] 32/50: scene_90_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004d7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004d7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=56
+[lmeb] 33/50: scene_1329_q_0 (56 candidates, 6 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000016d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000016d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=56 retrieved=20 query_ms=40
+[lmeb] 34/50: scene_564_q_0 (86 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000357, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000357/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=86 retrieved=20 query_ms=106
+[lmeb] 35/50: scene_731_q_0 (80 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000411, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000411/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=80 retrieved=20 query_ms=70
+[lmeb] 36/50: scene_814_q_0 (110 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000046d, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000046d/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=110 retrieved=20 query_ms=119
+[lmeb] 37/50: scene_349_q_0 (50 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000268, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000268/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=50 retrieved=20 query_ms=50
+[lmeb] 38/50: scene_342_q_0 (11 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000261, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000261/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=11 retrieved=11 query_ms=14
+[lmeb] 39/50: scene_1088_q_0 (166 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000061, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000061/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=166 retrieved=20 query_ms=172
+[lmeb] 40/50: scene_492_q_0 (89 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000307, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000307/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=89 retrieved=20 query_ms=79
+[lmeb] 41/50: scene_1245_q_0 (200 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000110, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000110/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=200 retrieved=20 query_ms=163
+[lmeb] 42/50: scene_709_q_0 (72 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000003f8, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000003f8/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=72 retrieved=20 query_ms=83
+[lmeb] 43/50: scene_39_q_0 (44 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002a0, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002a0/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=44 retrieved=20 query_ms=49
+[lmeb] 44/50: scene_98_q_0 (48 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000052f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000052f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=48 retrieved=20 query_ms=57
+[lmeb] 45/50: scene_960_q_0 (66 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000050f, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000050f/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=66 retrieved=20 query_ms=86
+[lmeb] 46/50: scene_1111_q_0 (150 candidates, 4 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-0000007c, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-0000007c/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=150 retrieved=20 query_ms=149
+[lmeb] 47/50: scene_414_q_0 (46 candidates, 1 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002b1, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002b1/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=46 retrieved=20 query_ms=58
+[lmeb] 48/50: scene_1252_q_0 (40 candidates, 5 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-00000118, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-00000118/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=40 retrieved=20 query_ms=29
+[lmeb] 49/50: scene_939_q_0 (122 candidates, 3 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000004f7, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000004f7/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=122 retrieved=20 query_ms=121
+[lmeb] 50/50: scene_437_q_0 (83 candidates, 2 relevant)
+mootx01 serve starting (estate: default, data dir: /tmp/lmeb-bench-0000000001352775-000002ca, transport: stdio)
+first-run: creating estate 'default' at /tmp/lmeb-bench-0000000001352775-000002ca/estate.sqlite
+mootx01 serve ready (68 tools, stdio)
+  guard=healthy docs_ingested=83 retrieved=20 query_ms=69
+LMEB results (label=lmeb-seed20260725, seed=20260725):
+  queries_run:     50
+  guard_excluded:  0
+  query_count:     50
+  nDCG@10:         0.4732
+  MRR:             0.5590
+  recall@1:        0.2683
+  recall@5:        0.4493
+  recall@10:       0.5617
+  MAP@10:          0.3811
+  query_p50_s:     0.0792
+  query_p95_s:     0.1724
+report written to /Users/bob/devlop/mootx01-ce-develop_1.0.x/apps/mcp-benchmarker/results/20260726-official-quietrun/lmeb-report-seed20260725.json
+[2026-07-26T16:35:22] DONE   1.0.x-lmeb-rust-r3 → lmeb-10x-rust-r3.json
+[2026-07-26T16:35:22] START  1.0.x-tokeneff-swift
+[longmemeval] loading corpus from /Users/bob/devlop/mootx01-ce-lme/apps/mcp-benchmarker/fixtures/longmemeval/data/longmemeval_s_cleaned.json
+[longmemeval] loaded 500 questions (0 abstentions excluded)
