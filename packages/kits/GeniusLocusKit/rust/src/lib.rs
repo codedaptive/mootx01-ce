@@ -137,7 +137,7 @@ pub use hydration::{
 // GLK_PROVISION_001: estate provisioning and lifecycle types.
 pub use coordinator::{
     EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
-    EstateKind, EstateMountState, EstateProvisionParams, SyncMode,
+    EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams, SyncMode,
     FederatedRecallResult, FederatedReadRefusalReason,
     SyncEngineEntry, format_sync_state_token,
     ExpungeIntegritySweepResult, DrainStatus,

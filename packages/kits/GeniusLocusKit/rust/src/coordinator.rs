@@ -302,6 +302,34 @@ impl SyncMode {
     }
 }
 
+/// Key-material lifetime for a provisioned estate.
+///
+/// Mirrors Swift `EstateLifetime`. The distinction matters on Apple platforms
+/// where the Ed25519 identity key is written to the Apple Keychain on
+/// `.durable` estates. On Linux/non-Darwin targets the Rust coordinator does
+/// not interact with a system Keychain; `dispose_estate_keys` is therefore a
+/// no-op regardless of lifetime. The field exists for parity so callers that
+/// round-trip params across the Swift/Rust boundary do not need conditional
+/// logic.
+///
+/// ## .durable (default)
+/// Identity and db-key material live in the system Keychain (Apple platforms)
+/// or process-local secure storage (other targets). Correct for all
+/// production/user-owned estates.
+///
+/// ## .ephemeral
+/// Identity material lives only in process memory. No Keychain writes at any
+/// point. Use for test loops and agent-driven harnesses that need SQLite
+/// persistence semantics without accumulating Keychain items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EstateLifetime {
+    /// Keychain-backed identity and db-key material. Correct for production. (default)
+    #[default]
+    Durable,
+    /// In-memory identity only. No Keychain writes. For test loops.
+    Ephemeral,
+}
+
 /// Provisioning parameters for `EstateCoordinator::provision`.
 /// Mirrors Swift `EstateProvisionParams`.
 #[derive(Debug, Clone)]
@@ -312,6 +340,11 @@ pub struct EstateProvisionParams {
     pub zoom_window_high: i64,
     pub framework_profile: String,
     pub sync_mode: SyncMode,
+    /// Key-material lifetime declaration. Defaults to `EstateLifetime::Durable`.
+    /// All existing call sites are unaffected (struct literal construction on the
+    /// Rust side must add this field; callers using `..Default::default()` inherit
+    /// Durable automatically).
+    pub lifetime: EstateLifetime,
 }
 
 /// Lifecycle state for an open estate. Mirrors Swift `EstateMountState`.
@@ -6159,14 +6192,47 @@ impl EstateCoordinator {
                 })?;
         }
 
-        // Step 4: Close the estate (drops registry, grant store, corpus/vector
-        // refs, and storage Arc). Sub-store teardown (steps 1–3) must complete
+        // Step 4: Dispose key material (estate-key-lifetime fix, 2026-07-29).
+        //
+        // On Apple platforms the Swift coordinator deletes the Ed25519 identity
+        // key and the SQLCipher db key from the Apple Keychain here. The Rust
+        // coordinator does not interact with a system Keychain; estate files
+        // are managed by the application layer (moot-mgr Cluster F). This call
+        // is therefore a no-op on all Rust targets, but it exists for parity
+        // so that the overall destroy() contract ("dispose key material before
+        // close") is visible and testable on both legs.
+        self.dispose_estate_keys(handle);
+
+        // Step 5: Close the estate (drops registry, grant store, corpus/vector
+        // refs, and storage Arc). Sub-store teardown (steps 1–4) must complete
         // before this call, matching the Swift ordering.
         if self.registry.contains_key(handle) {
             self.close(handle)?;
         }
 
         Ok(())
+    }
+
+    /// Dispose key material for an estate being permanently retired.
+    ///
+    /// On Apple platforms (Swift coordinator) this deletes the Ed25519 identity
+    /// key from the Keychain (`com.mootx01.estate.identity` service) and the
+    /// SQLCipher whole-file db key (`com.codedaptive.mootx01` service). On
+    /// Linux and other non-Keychain targets, estate file keys are managed by
+    /// the application layer (file deletion) rather than a system Keychain,
+    /// so this method is a documented no-op here.
+    ///
+    /// It exists for API parity with the Swift coordinator so that `destroy()`
+    /// explicitly names the disposal step on both legs and the parity tests
+    /// can verify the calling contract.
+    ///
+    /// Idempotent: calling on a handle whose keys were already disposed
+    /// (or were never written to a Keychain) is always safe.
+    pub fn dispose_estate_keys(&self, _handle: &EstateHandle) {
+        // No-op on Rust targets. File-based key material (SQLCipher key) is
+        // part of the estate file itself and is removed when the application
+        // layer deletes the backing file after destroy() returns. No separate
+        // Keychain clean-up is needed.
     }
 
     // MARK: - recall_scored
@@ -8275,6 +8341,7 @@ mod tests {
             zoom_window_high: 10,
             framework_profile: "KnowledgeWork".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         }
     }
 
@@ -8286,6 +8353,7 @@ mod tests {
             zoom_window_high: 5,
             framework_profile: "MinimalProfile".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         }
     }
 
@@ -8337,6 +8405,7 @@ mod tests {
             zoom_window_high: 5,
             framework_profile: "KnowledgeWork".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let handle = coord
@@ -8363,6 +8432,7 @@ mod tests {
             zoom_window_high: 12,
             framework_profile: "ZoomProfile".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let handle = coord
@@ -8419,6 +8489,7 @@ mod tests {
             zoom_window_high: 5,
             framework_profile: "P".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let err = coord
@@ -8444,6 +8515,7 @@ mod tests {
             zoom_window_high: 3, // inverted
             framework_profile: "P".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let err = coord
@@ -8588,6 +8660,7 @@ mod tests {
             zoom_window_high: 8,
             framework_profile: "CorpusTest".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let handle = coord
