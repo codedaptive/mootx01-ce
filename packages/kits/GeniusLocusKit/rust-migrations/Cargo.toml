@@ -32,3 +32,7 @@ required-features = ["migration-v1-0-to-v1-1"]
 [[test]]
 name = "scale_qualification"
 required-features = ["migration-v1-0-to-v1-1"]
+
+[[test]]
+name = "distillation_storage_migration_tests"
+required-features = ["migration-v1-0-to-v1-1"]

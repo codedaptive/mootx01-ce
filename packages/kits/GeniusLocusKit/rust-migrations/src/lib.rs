@@ -10,6 +10,12 @@ mod shared_content_migration;
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 pub use shared_content_migration::*;
 
+#[cfg(feature = "migration-v1-0-to-v1-1")]
+mod distillation_storage_migration;
+
+#[cfg(feature = "migration-v1-0-to-v1-1")]
+pub use distillation_storage_migration::*;
+
 use genius_locus_kit::estate_format::EstateFormatVersion;
 
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
