@@ -572,15 +572,33 @@ public actor CorpusContentEngine {
     /// (`attachedModeViolation`) — removal/authorship authority there is the
     /// GLK/LocusKit verb surface.
     public func ingest(_ text: String, contentID: CorpusContentID, now: Date) async throws {
+        try await ingest(text, denseCompositionText: nil, contentID: contentID, now: now)
+    }
+
+    /// STANDALONE convenience with dual-text support: put canonical text
+    /// plus an optional dense-composition text and index in one call.
+    ///
+    /// `denseCompositionText` is stored in the document store's `dense_text`
+    /// column (NULL when nil) and carried in every subsequent
+    /// `source.record(for:)` call so retrain and reindex paths can recompose
+    /// the dense vector without external input (recomposability rule).
+    ///
+    /// BM25/lexical indexing always uses `text`; the dense float lane uses
+    /// `denseCompositionText` when non-nil, falling back to `text` otherwise.
+    public func ingest(
+        _ text: String, denseCompositionText: String?,
+        contentID: CorpusContentID, now: Date
+    ) async throws {
         guard configuration.allowsContentMutation,
-              let store = source as? any CorpusContentStore else {
+              let store = source as? CorpusDocumentStore else {
             throw CorpusKitError.attachedModeViolation(
                 "content mutation through CorpusKit is standalone-only — attached "
                 + "content changes flow through the canonical store's own verbs")
         }
         try validate(id: contentID)
         guard !text.isEmpty else { return }
-        _ = try await store.put(text, id: contentID, now: now)
+        _ = try await store.put(text, denseCompositionText: denseCompositionText,
+                                id: contentID, now: now)
         try await indexContent(id: contentID, now: now)
     }
 
@@ -806,8 +824,11 @@ public actor CorpusContentEngine {
             rows.reserveCapacity(providers.count * 2)
             var covered: [(CorpusContentID, String, String)] = []
             covered.reserveCapacity(providers.count)
+            // Dense lane uses effectiveDenseText (denseCompositionText when set,
+            // text otherwise). BM25 tokens always use the lexical text.
+            let denseText = record.effectiveDenseText
             for target in providers {
-                let (engram, floats) = try await target.provider.embedPair(record.text)
+                let (engram, floats) = try await target.provider.embedPair(denseText)
                 if target.writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: record.id, vectorIndex: 0,
@@ -826,6 +847,7 @@ public actor CorpusContentEngine {
             }
             return PreparedStructuralRecord(
                 record: record,
+                // BM25 keyword tokens: always lexical text, never dense text.
                 tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
                 vectorRows: rows,
                 covered: covered)
@@ -1154,10 +1176,13 @@ public actor CorpusContentEngine {
             let prepared = try await boundedConcurrentMap(records, cap: cap) { record in
                 var rows: [VectorPayloadInput] = []
                 var covered: [(CorpusContentID, String, String)] = []
+                // Backfill uses the same dense-composition text as initial
+                // indexing — recomposability rule: same input, same vector.
+                let denseText = record.effectiveDenseText
                 for (targetIndex, target) in computeTargets.enumerated()
                     where missingSnapshot[targetSlotIndices[targetIndex]]?.contains(record.id) == true
                 {
-                    let (engram, floats) = try await target.provider.embedPair(record.text)
+                    let (engram, floats) = try await target.provider.embedPair(denseText)
                     if target.writeBinary {
                         rows.append(VectorPayloadInput(
                             itemID: record.id, vectorIndex: 0,
@@ -1615,7 +1640,11 @@ public actor CorpusContentEngine {
             }
             let writeBinary = slotIndex == 0 || configuration.mode == .standalone
             for unit in units {
-                let (engram, floats) = try await slot.provider.embedPair(unit.text)
+                // Dense lane: use effectiveDenseText (denseText when set,
+                // lexical text otherwise). BM25 tokenisation above always
+                // uses unit.text (the lexical surface) — the two paths are
+                // kept independent so a nil denseText is a true no-op.
+                let (engram, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
                 if writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 0,
@@ -1653,10 +1682,22 @@ public actor CorpusContentEngine {
         return checkpoint
     }
 
-    /// One index unit: its derived-row key and the text it covers.
+    /// One index unit: its derived-row key plus the two text surfaces.
+    ///
+    /// `text` is always the LEXICAL text — used for BM25 keyword tokenisation.
+    /// `denseText` is the dense-composition text for the float vector lane; nil
+    /// means fall back to `text` (default). Separating the two here keeps the
+    /// BM25 / dense-embedding split explicit through every downstream code path
+    /// that receives an `IndexUnit`.
     private struct IndexUnit {
         let key: String
+        /// Lexical text — BM25 tokenisation only.
         let text: String
+        /// Dense-composition text for vector embedding. nil → use `text`.
+        let denseText: String?
+        /// The text the engine passes to `embedPair`. Returns `denseText`
+        /// when set, falls back to `text`.
+        var effectiveDenseText: String { denseText ?? text }
     }
 
     /// Compute the record's index units under the configured policy,
@@ -1671,7 +1712,12 @@ public actor CorpusContentEngine {
         let units: [IndexUnit]
         switch configuration.indexUnit {
         case .wholeContent:
-            units = [IndexUnit(key: record.id, text: record.text)]
+            // Whole-content unit: lexical text for BM25; dense-composition
+            // text (when set) for vector embedding. The two paths stay
+            // independent through replaceUnits and prepareIndex.
+            units = [IndexUnit(
+                key: record.id, text: record.text,
+                denseText: record.denseCompositionText)]
 #if CORPUSKIT_STANDALONE_PASSAGES
         case .tokenWindows(let window, let overlap):
             let ranges = PassageProduction.passageRanges(
@@ -1682,7 +1728,13 @@ public actor CorpusContentEngine {
                     contentID: record.id, revision: record.revision,
                     utf8Start: range.utf8Start, utf8Length: range.utf8Length)
                 let bytes = utf8[range.utf8Start..<(range.utf8Start + range.utf8Length)]
-                return IndexUnit(key: key, text: String(decoding: bytes, as: UTF8.self))
+                // Passage text is a UTF-8 sub-span of the LEXICAL text.
+                // Dense-composition text is whole-document; sub-span
+                // splitting on it is not supported — passages embed the
+                // lexical sub-span only (denseText: nil → falls back to text).
+                return IndexUnit(key: key,
+                                 text: String(decoding: bytes, as: UTF8.self),
+                                 denseText: nil)
             }
             // Replace the durable passage-range rows for this content.
             _ = try await storage.rowStore.delete(
@@ -2013,7 +2065,16 @@ public actor CorpusContentEngine {
             texts.reserveCapacity(end - cursor)
             for id in allIDs[cursor..<end] {
                 if let record = try await source.record(for: id) {
-                    texts.append(record.text)
+                    // Train the basis on the same text the dense lane uses at
+                    // embed time — effectiveDenseText (denseCompositionText when
+                    // set, lexical text otherwise). This keeps the basis
+                    // vocabulary coherent with the composed vectors: both the
+                    // training corpus and the per-document embed use the same
+                    // text surface, so the basis projects the dense text into
+                    // a geometry that the query (always lexical/short) can match.
+                    // For callers without a dense-composition text the behaviour
+                    // is identical to pre-dual-text code (effectiveDenseText == text).
+                    texts.append(record.effectiveDenseText)
                     let indexed = indexedStates[record.id]
                     if indexed?.revision != record.revision
                         || indexed?.digest != record.digest
@@ -2623,6 +2684,29 @@ public actor CorpusContentEngine {
         await floatPerSignal(query: query, limit: limit, direction: .farthest)
     }
 
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
+    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
+    /// Discrimination is non-nil exactly when the outcome is `.hits` with ≥1 result.
+    ///
+    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
+    /// RecallDirector (GLK) consumes the signal to discount the dense contribution
+    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
+    /// for their own fusion decisions.
+    ///
+    /// See `FloatDiscriminationSignal` for the statistic definition and threshold guidance.
+    public func floatNearestPerSignalWithDiscrimination(
+        query: String, limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
+        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
+        return perSignal.map { entry in
+            (modelID: entry.modelID,
+             outcome: entry.outcome,
+             discrimination: Corpus.discriminationSignal(from: entry.outcome))
+        }
+    }
+
     /// Test-only: when non-nil, the next per-signal float call reports
     /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
     /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane
@@ -2643,6 +2727,33 @@ public actor CorpusContentEngine {
     /// Arm (or clear) the drain failure-injection hook (test seam).
     public func _armIngestFailureHook(_ hook: (@Sendable (String) throws -> Void)?) {
         _ingestFailureHook = hook
+    }
+
+    // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
+
+    /// Score a bounded candidate set at sub-span granularity (transient).
+    ///
+    /// Delegates to `SubSpanScoring.score(query:candidateIDs:source:provider:)`,
+    /// passing the engine's own `source` (the `CorpusContentSource` — works for
+    /// BOTH standalone `CorpusDocumentStore` and GLK's LocusKit-backed adapter)
+    /// and the DEFAULT slot's provider.
+    ///
+    /// Sub-span vectors are computed on the fly and DISCARDED — zero persistence.
+    /// Compute is bounded by `candidateIDs.count`, not corpus size.
+    ///
+    /// - Parameters:
+    ///   - query: The query text to score against.
+    ///   - candidateIDs: Bounded content ID set (typically ~40 from the pool).
+    /// - Returns: Max-cosine ∈ [0,1] per candidate ID. Missing keys → 0.0.
+    public func scoreSubSpans(
+        query: String,
+        candidateIDs: [CorpusContentID]
+    ) async -> [CorpusContentID: Float] {
+        await SubSpanScoring.score(
+            query: query,
+            candidateIDs: candidateIDs,
+            source: source,
+            provider: slots[0].provider)
     }
 
     private func floatPerSignal(

@@ -1121,6 +1121,11 @@ public extension GeniusLocusKit {
         var denseSignalsByID: [String: [String]] = [:]
         var denseHits: [RecallHit] = []
         var denseLaneExplainerTag: String? = nil
+        // Discrimination factor for the matrixAware scoring formula (Item 3).
+        // Declared here (outside the corpus block) so it is in scope for the
+        // scoring loop at step 9, which runs after the corpus block closes.
+        // Default 1.0 = no discount (contrastive, or no dense lane at all).
+        var denseDiscriminationFactor: Float = 1.0
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
             // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
             // `dense:<modelID>` key is in `shape.antiSimilarLanes` inverts its
@@ -1133,7 +1138,17 @@ public extension GeniusLocusKit {
             // With no anti-similar lanes (the default) only the nearest pass runs
             // — byte-identical to the pre-antisim behaviour.
             let antiSimilarLanes = request.recallShape?.antiSimilarLanes ?? []
-            let nearestPerSignal = await corpus.floatNearestPerSignal(query: text, limit: plan.frontierK)
+            // Use the discrimination-aware call so we can measure saturation on the
+            // nearest-similarity outcomes BEFORE any anti-similar lane substitution.
+            // Discrimination is always computed from the standard nearest-similarity
+            // distribution — it measures "are the top-K nearest cosines near-uniform?"
+            // not anything about the farthest lane. The (outcome, discrimination) pairs
+            // are available here; `nearestPerSignal` is extracted for the anti-similar
+            // logic that follows (which uses only outcomes, not discrimination).
+            let nearestPerSignalWithDisc = await corpus.floatNearestPerSignalWithDiscrimination(
+                query: text, limit: plan.frontierK)
+            let nearestPerSignal: [(modelID: String, outcome: FloatLaneOutcome)] =
+                nearestPerSignalWithDisc.map { (modelID: $0.modelID, outcome: $0.outcome) }
             let perSignal: [(modelID: String, outcome: FloatLaneOutcome)]
             if antiSimilarLanes.isEmpty {
                 perSignal = nearestPerSignal
@@ -1152,6 +1167,33 @@ public extension GeniusLocusKit {
                     return entry
                 }
             }
+            // Aggregate discrimination factor across all .hits signals from the NEAREST
+            // pass (before any anti-similar substitution). Uses the mean relative spread
+            // across all signals that returned hits — if even one signal is contrastive,
+            // the mean rises toward 1.0, reducing the discount.
+            // At N=1 (the production default): mean == single signal's spread.
+            //
+            // Mapping: discriminationFactor = min(1.0, meanSpread / 0.15)
+            //   - meanSpread = 0.05 (saturated, short chat turns): factor ≈ 0.33
+            //   - meanSpread = 0.10 (transition):                  factor ≈ 0.67
+            //   - meanSpread ≥ 0.15 (contrastive, clear winner):  factor = 1.0
+            // This is a continuous linear ramp — no cliff. Factor = 1.0 when no .hits
+            // signals are present (dense column will be empty; factor is irrelevant).
+            // Compute discrimination factor from the nearest-pass signals.
+            // Saturation threshold: above this spread the dense lane is contrastive
+            // and carries full weight. Below this threshold a linear discount applies.
+            // Chosen to be 3× above the measured saturated-regime mean (~0.05), with
+            // a transition band to avoid a cliff at the boundary.
+            let saturationThreshold: Float = 0.15
+            let discriminationSpreads: [Float] = nearestPerSignalWithDisc.compactMap {
+                $0.discrimination?.relativeSpread
+            }
+            if !discriminationSpreads.isEmpty {
+                let meanSpread = discriminationSpreads.reduce(0, +) / Float(discriminationSpreads.count)
+                denseDiscriminationFactor = min(1.0, meanSpread / saturationThreshold)
+            }
+            // No else branch: factor stays 1.0 when no .hits signals returned
+            // (the dense column will be empty; the factor is irrelevant).
 
             // Per-signal ranked id lists feed the N-way RRF voter set. Each list is
             // tagged with its `modelID` so the dense-steering weight
@@ -1495,6 +1537,45 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Step 5.8 — sub-span dense refinement (MISSION_11X_RECALL_GAP_01 Item 1).
+        //
+        // Runs for .matrixAware scoring when a CorpusContentEngine is registered.
+        // Computes transient sentence-level sub-span vectors for each candidate
+        // in the buffer and takes max(buffer.dense[i], subSpanMaxCosine[i]) as the
+        // refined dense score. Sub-span vectors are immediately discarded — zero
+        // persistence; compute is bounded by the candidate pool (~40), not corpus size.
+        //
+        // BLEND RULE: max-cosine — if the sub-span max-cosine of a candidate
+        // exceeds its whole-doc dense cosine, the sub-span wins. This preserves the
+        // whole-doc score when it is already high (contrastive regime), and rescues
+        // the true answer when the whole-doc score is saturated but a specific sub-
+        // span matches the query (the 1.0.x rescue mechanism without storage cost).
+        //
+        // The step fires unconditionally for matrixAware regardless of the
+        // discrimination factor: even in the contrastive regime, sub-span scores can
+        // only improve precision (they cannot lower the dense column). The gating
+        // on matrixAware keeps it off the cheaper .raw/.rrf paths.
+        //
+        // Degradation: if scoreSubSpans returns empty (provider no float lane,
+        // source unavailable), the buffer.dense column is left unchanged. The step
+        // is non-throwing and non-fatal.
+        if request.scoring == .matrixAware,
+           let corpus = corpusKits[handle],
+           let text = sketch.queryText, !text.isEmpty,
+           buffer.count > 0 {
+            let candidateIDs = Array(buffer.ids[0..<buffer.count])
+            let subSpanScores = await corpus.scoreSubSpans(
+                query: text, candidateIDs: candidateIDs)
+            if !subSpanScores.isEmpty {
+                for i in 0..<buffer.count {
+                    if let subSpan = subSpanScores[buffer.ids[i]] {
+                        // max-cosine blend: sub-span only improves the dense column.
+                        buffer.dense[i] = max(buffer.dense[i], subSpan)
+                    }
+                }
+            }
+        }
+
         // Step 6 — normalise score columns to [0, 1].
         buffer.normalizeFinals()
 
@@ -1609,11 +1690,21 @@ public extension GeniusLocusKit {
                 // adding dense does not inflate the vector lane's overall share.
                 // Each lane — retrieval AND matrix/graph/preference — is scaled by its
                 // RecallShape weight on top of the adaptive RecallWeights budget.
+                //
+                // DISCRIMINATION DISCOUNT (Item 3, MISSION_11X_RECALL_GAP_01):
+                // `denseDiscriminationFactor` ∈ [0, 1] is computed above from the
+                // mean relative spread of top-K nearest cosines across all signals.
+                // When the lane is saturated (spread ≈ 0.05, short-turn stopword mass),
+                // factor ≈ 0.33, reducing the dense column contribution by ~67%.
+                // When the lane is contrastive (spread ≥ 0.15), factor = 1.0 — no
+                // change. This is a continuous linear ramp; no cliff at the boundary.
+                // Back-compat: at factor = 1.0 (contrastive / no .hits signal) the
+                // score is BYTE-IDENTICAL to the pre-discount formula.
                 scores[i] =
                     shapeLocus      * weights.locus    * buffer.locus[i] +
                     shapeBM25       * weights.bm25     * buffer.bm25[i] +
                     shapeHamming    * weights.vector   * buffer.vector[i] +
-                    shapeDense      * weights.vector   * buffer.dense[i] +
+                    denseDiscriminationFactor * shapeDense * weights.vector * buffer.dense[i] +
                     shapeFieldFit   * weights.fieldFit * buffer.fieldFit[i] +
                     matrixTerm +
                     shapeGraph      * weights.graph    * buffer.graph[i] +

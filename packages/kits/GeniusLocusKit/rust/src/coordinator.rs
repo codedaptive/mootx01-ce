@@ -6792,10 +6792,17 @@ impl EstateCoordinator {
         // contributes no cosine.
         let mut dense_order: Vec<String> = Vec::new();
         let mut dense_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // DISCRIMINATION FACTOR (Item 3, MISSION_11X_RECALL_GAP_01): continuous
+        // discount applied to the dense column in the matrixAware scoring formula.
+        // Declared here (outside the corpus block) so it is in scope for the
+        // scoring loop that follows. Default 1.0 = no discount. Mirrors Swift
+        // RecallDirector's `denseDiscriminationFactor`. See coordinator comments
+        // at the scoring loop for the full mapping.
+        let mut dense_discrimination_factor: f32 = 1.0;
         if include_dense {
             if let Some(ref c) = corpus {
                 if !query_str.is_empty() {
-                    use corpus_kit::FloatLaneOutcome;
+                    use corpus_kit::{FloatDiscriminationSignal, FloatLaneOutcome};
                     let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
                     // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
                     // `dense:<model_id>` key is in `shape.anti_similar_lanes`
@@ -6812,8 +6819,28 @@ impl EstateCoordinator {
                         .as_ref()
                         .map(|s| s.anti_similar_lanes.clone())
                         .unwrap_or_default();
-                    let nearest_per_signal =
-                        c.float_nearest_per_signal(&query_str, plan.frontier_k);
+                    // Use the discrimination-aware call. Discrimination is always
+                    // measured on the standard nearest-similarity pass — it measures
+                    // "are the top-K nearest cosines near-uniform?". The outcomes are
+                    // extracted for the anti-similar substitution logic below.
+                    let nearest_per_signal_with_disc: Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> =
+                        c.float_nearest_per_signal_with_discrimination(&query_str, plan.frontier_k);
+                    // Aggregate discrimination: mean relative spread across .Hits signals.
+                    // Saturation threshold 0.15 mirrors Swift RecallDirector.
+                    // linear ramp: factor = min(1.0, mean_spread / 0.15)
+                    //   spread ≈ 0.05 (saturated, short turns): factor ≈ 0.33
+                    //   spread ≥ 0.15 (contrastive, clear winner): factor = 1.0
+                    let saturation_threshold: f32 = 0.15;
+                    let spreads: Vec<f32> = nearest_per_signal_with_disc.iter()
+                        .filter_map(|(_, _, d)| d.as_ref().map(|s| s.relative_spread))
+                        .collect();
+                    if !spreads.is_empty() {
+                        let mean_spread: f32 = spreads.iter().sum::<f32>() / spreads.len() as f32;
+                        dense_discrimination_factor = (mean_spread / saturation_threshold).min(1.0);
+                    }
+                    // Extract (model_id, outcome) pairs for the anti-similar substitution.
+                    let nearest_per_signal: Vec<(String, FloatLaneOutcome)> =
+                        nearest_per_signal_with_disc.into_iter().map(|(m, o, _)| (m, o)).collect();
                     let per_signal: Vec<(String, FloatLaneOutcome)> = if anti_similar_lanes
                         .is_empty()
                     {
@@ -7332,10 +7359,17 @@ impl EstateCoordinator {
                     sh_co_occur  * weights.matrix * 0.5 * col_co_occur[i]
                         + sh_temporal * weights.matrix * 0.5 * col_temporal[i]
                 };
+                // DISCRIMINATION DISCOUNT (Item 3, MISSION_11X_RECALL_GAP_01):
+                // `dense_discrimination_factor` ∈ [0, 1] (computed above from the
+                // mean relative spread of top-K nearest cosines across all signals).
+                // Saturated: factor ≈ 0.33 (spread ~0.05, short-turn stopword mass).
+                // Contrastive: factor = 1.0 (spread ≥ 0.15, clear semantic winner).
+                // Linear ramp — no cliff. At factor = 1.0 the score is
+                // byte-identical to the pre-discount formula. Mirrors Swift.
                 *v = sh_locus   * weights.locus    * col_locus[i]
                    + sh_bm25    * weights.bm25     * col_bm25[i]
                    + sh_hamming * weights.vector   * col_vector[i]
-                   + sh_dense   * weights.vector   * col_dense[i]     // dense shares vector weight budget
+                   + dense_discrimination_factor * sh_dense * weights.vector * col_dense[i]
                    + sh_field_fit * weights.field_fit * col_field_fit[i]
                    + matrix_term
                    // graph + preference share the `weights.graph` budget slice, exactly

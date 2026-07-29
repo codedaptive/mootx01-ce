@@ -76,6 +76,11 @@ impl CorpusContentSource for LocusDrawerContentSource {
             revision: 1,
             digest: content_digest(&drawer.content),
             text: drawer.content,
+            // dense_composition_text is None here: the GLK intake adapter exposes
+            // the verbatim drawer content as the lexical text. The dense-composition
+            // text (when GLK later wants to supply one) will be set by the GLK layer
+            // that sits above CorpusKit — that is GLK's business, not CorpusKit's.
+            dense_composition_text: None,
         }))
     }
 
