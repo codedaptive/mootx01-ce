@@ -16,21 +16,9 @@ your machine, gathers a system report, and bundles everything in
 and PR. Add `--quick` for a smoke test. See the generated
 `SUBMISSION.md` inside the bundle for the next steps.
 
-## Add a new language port
-
-Two reference languages ship with the project (Rust + Swift). To
-add another:
-
-- **Go:** read [`HINTS-GO.md`](HINTS-GO.md). Two files (this one
-  + `SCHEMA.md`) are enough to produce runnable `topk-bench`,
-  `stress-test`, and `ml-bench` binaries in Go.
-- **Python:** read [`HINTS-PYTHON.md`](HINTS-PYTHON.md). Same shape.
-- **Other languages:** copy one of the hint files, adapt the
-  pseudocode + skeleton to the target language, and submit via PR.
-
-The output schema is locked in [`SCHEMA.md`](SCHEMA.md). Every port
-must emit byte-comparable JSON; that's how the aggregator joins
-cross-language data.
+The output schema is locked in [`SCHEMA.md`](SCHEMA.md). Every
+implementation must emit byte-comparable JSON; that's how the
+aggregator joins cross-language data.
 
 ## Why this exists
 
