@@ -290,4 +290,115 @@ struct DistillationCycleTests {
         #expect(row.adjectiveSensitivity == .secret)
         #expect(row.distilled == "secret rendering")
     }
+
+    // MARK: - AND-aggregate room-skip safety tests
+
+    /// UNSAFE direction: a room with 199 distilled + 1 undistilled drawer
+    /// must NEVER be skipped by the sweep, regardless of how many drawers
+    /// carry bit 19.  The operationalAND for the room has bit 19 = 0
+    /// (because captures lower the AND) so the sweep must enter the room.
+    @Test("unsafe direction: room with 199 distilled + 1 undistilled is never skipped")
+    func unsafeDirectionRoomWithOneUndistilledIsNeverSkipped() async throws {
+        let (kit, handle, _) = try await openEstate()
+
+        // Capture 200 drawers in the same room.
+        var ids: [String] = []
+        for i in 0..<200 {
+            let id = try await captureItem(
+                body: "Item \(i). Sentence two. Sentence three.",
+                kit: kit, handle: handle)
+            ids.append(id)
+        }
+
+        // Distill the first 199 via distillItem directly (bypasses the sweep
+        // skip-gate so we control which drawer remains undistilled).
+        let distillFn = stubFn(rendering: "rendered", fingerprint: nonZeroFingerprint256)
+        for id in ids.prefix(199) {
+            _ = try await kit.distillItem(
+                handle: handle, drawerID: id,
+                content: "Item. Sentence two. Sentence three.",
+                distillFn: distillFn, now: t0)
+        }
+
+        // One drawer (ids[199]) is still undistilled.  The sweep MUST enter
+        // the room and distill it.
+        let produced = try await kit.distillItemsSweep(
+            handle: handle, distillFn: distillFn, now: t0, limit: nil)
+        #expect(produced == 1,
+            "one undistilled drawer in the room must be found regardless of the 199 distilled ones")
+    }
+
+    /// Win fixture: after a close+reopen (rebuildAll tightens the AND) all
+    /// fully-distilled rooms are skipped and the sweep returns 0.
+    ///
+    /// Without rebuildAll the AND has bit 19 = 0 (captures lower it);
+    /// after rebuildAll with all drawers having bit 19 = 1, the AND has
+    /// bit 19 = 1 and the sweep skips those rooms.
+    @Test("win fixture: fully-distilled rooms skipped after rebuildAll via reopen")
+    func winFixtureFullyDistilledRoomsSkippedAfterReopen() async throws {
+        // Build the estate inline so we hold a reference to the storage
+        // for the close/reopen cycle that triggers rebuildAll.
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-distill-win")
+        let estateStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: estateStorage, owner: owner)
+        try await estateStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+        let handle = try await kit.open(storage: estateStorage, owner: owner)
+        let vsStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        try await vsStorage.open(schema: VectorStore.schemaDeclaration)
+        await kit.registerVectorStore(VectorStore(storage: vsStorage), for: handle)
+
+        let distillFn = stubFn(rendering: "rendered", fingerprint: nonZeroFingerprint256)
+
+        // Capture two items in "inbox" room.
+        _ = try await captureItem(body: threeSentenceBody, kit: kit, handle: handle)
+        _ = try await captureItem(body: "Short item.", kit: kit, handle: handle)
+
+        // First sweep: both items distill.
+        let firstSweep = try await kit.distillItemsSweep(
+            handle: handle, distillFn: distillFn, now: t0, limit: nil)
+        #expect(firstSweep == 2, "both items must distill on the first sweep")
+
+        // Mid-session second sweep: rooms are entered (operationalAND bit 19
+        // is still 0 because captures lowered it and only rebuildAll raises
+        // it), but nothing to distill — produced == 0.
+        let midSessionSweep = try await kit.distillItemsSweep(
+            handle: handle, distillFn: distillFn, now: t0, limit: nil)
+        #expect(midSessionSweep == 0,
+            "mid-session second sweep produces 0 — all drawers have bit 19")
+
+        // Confirm AND is still 0 for bit 19 mid-session (captures lowered it
+        // and distillation cannot raise it — only rebuildAll can).
+        let estate1 = try await kit.estate(for: handle)
+        let skipBit = DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+        let midEntries = try await estate1.roomLevelFingerprints()
+        if let inboxMid = midEntries.first(where: { $0.room == "inbox" }) {
+            #expect((inboxMid.fingerprint.operationalAnd & skipBit) == 0,
+                "mid-session AND must still have bit 19 = 0 (rebuildAll not yet called)")
+        }
+
+        // Close and reopen — rebuildAll fires at open, tightening the AND.
+        try await kit.close(handle)
+        let handle2 = try await kit.open(storage: estateStorage, owner: owner)
+        let vs2Storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        try await vs2Storage.open(schema: VectorStore.schemaDeclaration)
+        await kit.registerVectorStore(VectorStore(storage: vs2Storage), for: handle2)
+
+        // After rebuildAll the sweep must skip the fully-distilled room.
+        let postReopenSweep = try await kit.distillItemsSweep(
+            handle: handle2, distillFn: distillFn, now: t0, limit: nil)
+        #expect(postReopenSweep == 0,
+            "after rebuildAll (via reopen) the fully-distilled room is skipped")
+
+        // Fingerprint sanity: operationalAND bit 19 must be 1 after rebuildAll.
+        let estate2 = try await kit.estate(for: handle2)
+        let postEntries = try await estate2.roomLevelFingerprints()
+        if let inboxPost = postEntries.first(where: { $0.room == "inbox" }) {
+            #expect((inboxPost.fingerprint.operationalAnd & skipBit) == skipBit,
+                "operationalAND bit 19 must be 1 after rebuildAll when all drawers carry it")
+        }
+    }
 }

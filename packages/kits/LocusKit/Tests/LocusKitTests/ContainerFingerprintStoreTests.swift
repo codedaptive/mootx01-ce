@@ -42,9 +42,13 @@ struct ContainerFingerprintStoreTests {
         try await store.orIn(wing: "w", room: "r2", adjective: 0b1000, operational: 0b0000, provenance: 0b0000)
 
         let r1 = try await store.get(wing: "w", room: "r1")
-        #expect(r1 == ContainerFingerprint(adjective: 0b0001, operational: 0b0010, provenance: 0b0100))
+        // operationalAnd for r1 = -1 (identity) & 0b0010 = 0b0010.
+        #expect(r1 == ContainerFingerprint(adjective: 0b0001, operational: 0b0010, provenance: 0b0100,
+                                           operationalAnd: 0b0010))
         let wing = try await store.get(wing: "w", room: "")
-        #expect(wing == ContainerFingerprint(adjective: 0b1001, operational: 0b0010, provenance: 0b0100))
+        // Wing AND = r1.operationalAnd & r2.operationalAnd = 0b0010 & 0b0000 = 0.
+        #expect(wing == ContainerFingerprint(adjective: 0b1001, operational: 0b0010, provenance: 0b0100,
+                                             operationalAnd: 0b0000))
     }
 
     @Test("orIn into the same room accumulates by OR")
@@ -123,13 +127,17 @@ struct ContainerFingerprintStoreTests {
         let d1Wing = names[d1.parentNodeId]!.wing
 
         let room1 = try await estate.containerFP.get(wing: d1Wing, room: "r1")
+        // operationalAnd for room1 = -1 & d1.operationalBitmap = d1.operationalBitmap.
         #expect(room1 == ContainerFingerprint(adjective: d1.adjectiveBitmap,
                                               operational: d1.operationalBitmap,
-                                              provenance: d1.provenance))
+                                              provenance: d1.provenance,
+                                              operationalAnd: d1.operationalBitmap))
         let wing = try await estate.containerFP.get(wing: d1Wing, room: "")
+        // Wing AND = d1.operationalBitmap & d2.operationalBitmap (AND of all room ANDs).
         #expect(wing == ContainerFingerprint(adjective: d1.adjectiveBitmap | d2.adjectiveBitmap,
                                              operational: d1.operationalBitmap | d2.operationalBitmap,
-                                             provenance: d1.provenance | d2.provenance))
+                                             provenance: d1.provenance | d2.provenance,
+                                             operationalAnd: d1.operationalBitmap & d2.operationalBitmap))
     }
 
     // MARK: - §11.5 Option B: add-coverage conformance

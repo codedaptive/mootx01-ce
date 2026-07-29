@@ -3373,11 +3373,15 @@ public actor DrawerStore {
             ])
         )
         guard let wingRow = wingRows.first else { return [] }
-        let wingId = Self.string(wingRow["id"])
+        // Nodes store `id` and `parent_id` as .uuid(UUID). Query parent_id using
+        // .uuid() so InMemoryStorage's strict-type predicate evaluator matches correctly.
+        // SQLiteStorage binds .uuid(UUID) as its uuidString, which equals the stored
+        // TEXT, so both backends produce the same result.
+        let wingIdValue = Self.nodeIdValue(wingRow["id"])
         let roomRows = try await storage.rowStore.query(
             table: "nodes",
             where: .and([
-                .eq(Column(table: "nodes", name: "parent_id"), .text(wingId)),
+                .eq(Column(table: "nodes", name: "parent_id"), wingIdValue),
                 .eq(Column(table: "nodes", name: "depth"), .int(2)),
                 .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
             ])
@@ -3398,18 +3402,34 @@ public actor DrawerStore {
             ])
         )
         guard let wingRow = wingRows.first else { return nil }
-        let wingId = Self.string(wingRow["id"])
+        // Nodes store `id` and `parent_id` as .uuid(UUID). Query parent_id using
+        // .uuid() so InMemoryStorage's strict-type predicate evaluator matches correctly.
+        // SQLiteStorage binds .uuid(UUID) as its uuidString, which equals the stored
+        // TEXT, so both backends produce the same result.
+        let wingIdValue = Self.nodeIdValue(wingRow["id"])
         let roomLookup = Node.normalizeLookupName(roomName)
         let roomRows = try await storage.rowStore.query(
             table: "nodes",
             where: .and([
-                .eq(Column(table: "nodes", name: "parent_id"), .text(wingId)),
+                .eq(Column(table: "nodes", name: "parent_id"), wingIdValue),
                 .eq(Column(table: "nodes", name: "lookup_name"), .text(roomLookup)),
                 .eq(Column(table: "nodes", name: "depth"), .int(2)),
                 .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
             ])
         )
         return roomRows.first.map { Self.string($0["id"]) }
+    }
+
+    /// Extract a node `id` or `parent_id` column as a TypedValue suitable for
+    /// predicate use. Nodes store these columns as `.uuid(UUID)`. Using
+    /// `.uuid(UUID)` in predicates (rather than `.text(uuidString)`) keeps
+    /// InMemoryStorage's strict-type evaluator and SQLiteStorage consistent:
+    /// InMemory compares `.uuid` vs `.uuid` (exact match); SQLite binds
+    /// `.uuid` as `uuidString` TEXT, which compares equal to the stored TEXT.
+    private static func nodeIdValue(_ v: TypedValue?) -> TypedValue {
+        if case .uuid(let u) = v { return .uuid(u) }
+        // Fallback for legacy rows or backends that coerce UUID to text on read.
+        return .text(string(v))
     }
 
     // MARK: - Node-name resolution

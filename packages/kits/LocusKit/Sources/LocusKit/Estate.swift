@@ -583,6 +583,19 @@ public actor Estate {
         try await containerFP.roomLevelEntries()
     }
 
+    /// All non-tombstoned drawers in a room, ordered by `filedAt` ascending.
+    ///
+    /// Used by `distillItemsSweep` (GeniusLocusKit) to load drawers for
+    /// rooms that survived the `operationalAND` skip-gate: rooms where
+    /// `(operationalAND & (1<<19)) == (1<<19)` are skipped entirely; for
+    /// surviving rooms this call loads all candidates in one indexed query.
+    ///
+    /// Returns an empty array when the room node does not exist.
+    /// Delegates to `store.drawersIn(wing:room:)`.
+    public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
+        try await store.drawersIn(wing: wing, room: room)
+    }
+
     /// Batch by-id drawer load. Returns the drawers matching `ids` in
     /// unspecified order, omitting ids with no row, via a single indexed
     /// `IN` query per chunk rather than a full-estate scan. The O(candidates)

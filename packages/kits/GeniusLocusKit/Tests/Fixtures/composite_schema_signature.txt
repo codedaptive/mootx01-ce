@@ -29,6 +29,7 @@ table=container_fingerprints
   col=operationalOR type=bitmap null=0 default=bitmap role=-
   col=provenanceOR type=bitmap null=0 default=bitmap role=-
   col=updatedAt type=timestamp null=0 default=- role=-
+  col=operationalAND type=bitmap null=0 default=bitmap role=-
   pk=wing,room
   appendOnly=0 hashable=0
 table=corpus_index_state

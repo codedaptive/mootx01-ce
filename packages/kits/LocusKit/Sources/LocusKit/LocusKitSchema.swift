@@ -435,11 +435,13 @@ public enum LocusKitSchema {
             .bitmap("adjectiveOR"),
             .bitmap("operationalOR"),
             .bitmap("provenanceOR"),
+            .timestamp("updatedAt"),
             // AND-aggregate: under-approximation (lower bound). Default
             // -1 = AND-identity (all bits set) so fresh/empty rows do
             // not falsely suppress skipping. See v11 comment above.
-            .bitmap("operationalAND", default: Int64(-1)),
-            .timestamp("updatedAt")
+            // Column order matches Rust schema.rs to keep cross-port
+            // layout signatures byte-identical (composite fixture gate).
+            .bitmap("operationalAND", default: Int64(-1))
         ],
         primaryKey: ["wing", "room"]
     )
