@@ -45,6 +45,7 @@ pub mod document_store;
 pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
+pub mod index_state_operational;
 pub mod index_state_store;
 #[cfg(feature = "standalone-passages")]
 pub mod index_configuration_store;
