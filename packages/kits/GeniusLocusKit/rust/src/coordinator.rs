@@ -3087,71 +3087,100 @@ impl EstateCoordinator {
         let vector_store = self.vector_store_for(handle);
 
         if corpus.is_some() || vector_store.is_some() {
+            // Resolve the full lineage chain so the cross-kit vector delete
+            // fans out to ALL lineage members, not just the head row.
+            // After the storage expunge (step 1) tombstones and
+            // content-scrubs every lineage member, each member may carry
+            // its own Corpus and VectorStore entries (BM25 postings,
+            // semantic embeddings, distillation-lane fingerprints) that
+            // must also be deleted — otherwise those entries leak
+            // content-derived representations past the destruction
+            // contract (secfix/ws2-coredelete).
+            //
+            // Mirrors Swift VerbSurface.expunge lines 739–780:
+            //   let lineageIds = try await estate.lineageChain(for: frame.rowID)
+            //   let idsToDelete = lineageIds.isEmpty ? [frame.rowID] : lineageIds
+            //   for deleteId in idsToDelete { corpus.removeContent + vs.deleteAll… }
+            //
+            // lineage_chain returns all IDs sharing the lineageID column,
+            // including the head row itself; the loop therefore covers the
+            // head plus every predecessor in one pass. An empty result
+            // (no lineageID or row not found) falls back to [row_id] to
+            // guarantee the head row is always processed.
+            let ids_to_delete: Vec<String> = match estate.lineage_chain(row_id) {
+                Ok(chain) if !chain.is_empty() => chain,
+                _ => vec![row_id.to_string()],
+            };
+
             let step2_result: Result<(), VerbDispatchError> = (|| {
-                if let Some(ref c) = corpus {
-                    // Shared-content 1.1: clear the engine's derived state for
-                    // this Drawer ID by exact key (BM25 postings + Drawer-keyed
-                    // vectors). The canonical text lives only in the Drawer row
-                    // LocusKit just handled — no second copy to scrub.
-                    c.remove_content(row_id).map_err(|e| {
-                        VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
-                            row_id: row_id.to_string(),
-                            reason: format!("{:?}", e),
-                        })
-                    })?;
-                }
-                if let Some(ref vs) = vector_store {
-                    // Distillation lane scrub (SPEC_DISTILLATION_STORAGE
-                    // §7.2/§8 + custodian walk 2026-07-28): the
-                    // distillation-features-v1 entry is keyed by the SOURCE
-                    // drawer id, so every expunged drawer may carry one.
-                    // UNCONDITIONAL on the corpus handle — the lane exists
-                    // independently of the semantic embedding lane, and an
-                    // orphaned structural fingerprint would leak a
-                    // content-derived signature past the destruction
-                    // contract. Runs BEFORE the corpus-model delete so the
-                    // lane is scrubbed even when the corpus-less branch
-                    // below fails the semantic-lane delete. Mirrors the
-                    // Swift VerbSurface.expunge ordering.
-                    vs.delete_all_vectors(
-                        row_id,
-                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
-                    )
-                    .map_err(|e| {
-                        VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
-                            row_id: row_id.to_string(),
-                            reason: format!("{:?}", e),
-                        })
-                    })?;
+                for delete_id in &ids_to_delete {
                     if let Some(ref c) = corpus {
-                        // For .glk estates: the standalone VectorStore's resident
-                        // array must also be invalidated (it shares the backing table
-                        // with the corpus's internal VectorStore but maintains a
-                        // separate in-memory live/tombstone bitmap). Derive modelID
-                        // from the corpus.
-                        let model_id = c.model_id();
-                        vs.delete_all_vectors(row_id, &model_id).map_err(|e| {
+                        // Clear the engine's derived state for this lineage
+                        // member by exact key (BM25 postings + Drawer-keyed
+                        // vectors). Each lineage member's canonical text
+                        // lives only in its own Drawer row — no second copy.
+                        c.remove_content(delete_id).map_err(|e| {
                             VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
-                                row_id: row_id.to_string(),
+                                row_id: delete_id.to_string(),
                                 reason: format!("{:?}", e),
                             })
                         })?;
-                    } else {
-                        // Standalone VectorStore registered without a Corpus (not a
-                        // standard provisioning path, but handled defensively). The
-                        // modelID is not available; raise a clear error rather than
-                        // silently leaving an orphan.
-                        return Err(VerbDispatchError::Verb(
-                            VerbError::CrossKitVectorDeleteFailed {
-                                row_id: row_id.to_string(),
-                                reason: format!(
-                                    "standalone VectorStore registered without a Corpus — \
-                                     model_id unavailable for delete_all_vectors; \
-                                     manual cleanup required for estate {}",
-                                    uuid_to_str(&handle.estate_uuid)
-                                ),
-                            },
-                        ));
+                    }
+                    if let Some(ref vs) = vector_store {
+                        // Distillation lane scrub (SPEC_DISTILLATION_STORAGE
+                        // §7.2/§8): the distillation-features-v1 entry is
+                        // keyed by the SOURCE drawer id. Each lineage member
+                        // is a source drawer and may carry its own entry.
+                        // UNCONDITIONAL on the corpus handle — the lane
+                        // exists independently of the semantic embedding lane,
+                        // and an orphaned structural fingerprint would leak a
+                        // content-derived signature past the destruction
+                        // contract. Runs BEFORE the corpus-model delete so the
+                        // lane is scrubbed even when the corpus-less branch
+                        // below would fail the semantic-lane delete. Mirrors
+                        // the Swift VerbSurface.expunge ordering.
+                        vs.delete_all_vectors(
+                            delete_id,
+                            crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                        )
+                        .map_err(|e| {
+                            VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
+                                row_id: delete_id.to_string(),
+                                reason: format!("{:?}", e),
+                            })
+                        })?;
+                        if let Some(ref c) = corpus {
+                            // For .glk estates: the standalone VectorStore's
+                            // resident array must also be invalidated (it
+                            // shares the backing table with the corpus's
+                            // internal VectorStore but maintains a separate
+                            // in-memory live/tombstone bitmap). Derive
+                            // modelID from the corpus.
+                            let model_id = c.model_id();
+                            vs.delete_all_vectors(delete_id, &model_id).map_err(|e| {
+                                VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
+                                    row_id: delete_id.to_string(),
+                                    reason: format!("{:?}", e),
+                                })
+                            })?;
+                        } else {
+                            // Standalone VectorStore registered without a
+                            // Corpus (not a standard provisioning path, but
+                            // handled defensively). The modelID is not
+                            // available; raise a clear error rather than
+                            // silently leaving an orphan.
+                            return Err(VerbDispatchError::Verb(
+                                VerbError::CrossKitVectorDeleteFailed {
+                                    row_id: row_id.to_string(),
+                                    reason: format!(
+                                        "standalone VectorStore registered without a Corpus — \
+                                         model_id unavailable for delete_all_vectors; \
+                                         manual cleanup required for estate {}",
+                                        uuid_to_str(&handle.estate_uuid)
+                                    ),
+                                },
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -3281,7 +3310,12 @@ impl EstateCoordinator {
     ///      re-attempts remediation.
     ///
     /// For each tombstoned row without a "tombstone" or "expungeOrphan" audit:
-    ///   - Re-attempt the cross-kit vector+corpus delete.
+    ///   - Re-attempt the cross-kit vector+corpus delete. This includes:
+    ///       * corpus.remove_content — scrubs BM25 + semantic-embedding index
+    ///       * VectorStore.delete_all_vectors(distillation-features-v1) — scrubs
+    ///         the structural fingerprint lane (unconditional on corpus presence)
+    ///       * VectorStore.delete_all_vectors(corpus model id) — scrubs the
+    ///         semantic embedding lane (requires corpus for model id)
     ///   - On success: seal a "tombstone" success audit (`seal_expunge_audit`).
     ///   - On failure: seal an "expungeOrphan" audit (`seal_expunge_orphan_audit`).
     ///
@@ -3337,8 +3371,16 @@ impl EstateCoordinator {
 
             // Re-attempt the cross-kit vector+corpus delete (step 2 of the
             // original §B-2a expunge). Same logic as the normal expunge step 2:
-            // corpus.expunge scrubs chunk text + clears BM25+vector index entries;
-            // VectorStore.delete_all_vectors clears the resident in-memory bitmap.
+            // corpus.remove_content scrubs chunk text + clears BM25+vector
+            // index entries; VectorStore.delete_all_vectors clears the resident
+            // in-memory bitmap for each lane.
+            //
+            // The distillation-features-v1 lane is scrubbed FIRST, UNCONDITIONAL
+            // on the corpus handle — the structural fingerprint lane is independent
+            // of the semantic embedding lane, and an orphaned fingerprint leaks a
+            // content-derived signature past the destruction contract
+            // (SPEC_DISTILLATION_STORAGE §7.2/§8; Wave-1 parity fix, addendum).
+            // Mirrors the ordering in the main expunge path (coordinator.rs step 2).
             //
             // When neither corpus nor vectorStore is registered (locusOnly estate),
             // no cross-kit cleanup is needed — the audit gap is closed below
@@ -3357,6 +3399,22 @@ impl EstateCoordinator {
                         .map_err(|e| format!("corpus.remove_content failed: {:?}", e))?;
                 }
                 if let Some(ref vs) = vector_store {
+                    // Distillation lane scrub: the distillation-features-v1 entry
+                    // is keyed by the SOURCE drawer id. Unconditional on corpus —
+                    // the lane exists independently of the semantic embedding lane.
+                    // Runs before the corpus-model delete so the fingerprint lane
+                    // is scrubbed even when the corpus-less branch below would
+                    // fail the semantic-lane delete.
+                    vs.delete_all_vectors(
+                        row_id,
+                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "VectorStore.delete_all_vectors(distillation-features-v1) failed: {:?}",
+                            e
+                        )
+                    })?;
                     if let Some(ref c) = corpus {
                         let model_id = c.model_id();
                         vs.delete_all_vectors(row_id, &model_id)

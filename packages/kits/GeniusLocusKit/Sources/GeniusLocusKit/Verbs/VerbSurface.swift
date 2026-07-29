@@ -930,8 +930,12 @@ public extension GeniusLocusKit {
     /// process crashed before step 3 (the audit seal) completed.
     ///
     /// For each crash-window row, the sweep:
-    ///   1. Re-attempts the cross-kit vector+corpus delete (same logic as the
-    ///      normal expunge step 2).
+    ///   1. Re-attempts the cross-kit vector+corpus delete. This includes:
+    ///      - `corpus.removeContent` — scrubs BM25 + semantic-embedding index
+    ///      - `vectorStore.deleteAllVectors(distillation-features-v1)` — scrubs
+    ///        the structural fingerprint lane, unconditional on corpus presence
+    ///      - `vectorStore.deleteAllVectors(corpus model id)` — scrubs the
+    ///        semantic embedding lane (requires corpus for model id)
     ///   2. Seals a synthetic "expungeOrphan" audit event via
     ///      `sealExpungeOrphanAuditSynthetic` to close the audit gap.
     ///      Both the success and failure paths seal the orphan event — the
@@ -1001,6 +1005,21 @@ public extension GeniusLocusKit {
                         try await corpus.removeContent(id: rowID)
                     }
                     if let vectorStore {
+                        // Distillation lane scrub (SPEC_DISTILLATION_STORAGE
+                        // §7.2/§8): the distillation-features-v1 entry is keyed
+                        // by the SOURCE drawer id. UNCONDITIONAL on the corpus
+                        // handle — the lane exists independently of the semantic
+                        // embedding lane, and an orphaned structural fingerprint
+                        // leaks a content-derived signature past the destruction
+                        // contract. Runs BEFORE the corpus-model delete so the
+                        // fingerprint lane is scrubbed even when the corpus-less
+                        // branch below would fail the semantic-lane delete.
+                        // Mirrors the main expunge path (Wave-1 parity fix,
+                        // addendum).
+                        try await vectorStore.deleteAllVectors(
+                            itemID: rowID,
+                            modelID: Self.distillationLaneModelID
+                        )
                         if let corpus {
                             let modelID = await corpus.modelID
                             try await vectorStore.deleteAllVectors(itemID: rowID, modelID: modelID)
