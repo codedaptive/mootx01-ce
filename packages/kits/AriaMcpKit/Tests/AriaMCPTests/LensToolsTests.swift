@@ -88,9 +88,9 @@ struct LensToolsTests {
         let nonLensRecipes: Set<String> = [
             "grounded_synthesis", "migration_benchmark", "shaped_recall",
             "recall_exploratory",
-            // Distillation-family recipes registered by Dc4: dispatched as
-            // recipe tools by RecipeTools, not as lens tools by LensTools.
-            "consolidate", "distilled_recall", "recollect",
+            // Distillation-family recipes: dispatched as recipe tools by
+            // RecipeTools, not as lens tools by LensTools.
+            "distill", "distilled_recall",
         ]
         let lensToolCount = RecipeCatalog.names
             .filter { !nonLensRecipes.contains($0) }

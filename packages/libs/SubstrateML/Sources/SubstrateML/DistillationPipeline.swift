@@ -1,7 +1,13 @@
 // DistillationPipeline.swift
 //
 // Full five-stage cold-path distillation algorithm per
-// DISTILLATION_MATH_SSA.md §1–7 and DISTILLATION_MATH_DIFFUSION.md §1–8.
+// DISTILLATION_MATH_SSA.md §1–7 and DISTILLATION_MATH_DIFFUSION.md §1–8,
+// with the Stage 5 rendering contract of SPEC_DISTILLATION_STORAGE §5/§7.4:
+// the output is token-economical prose (a dense parallel rendering of the
+// item, zero inline metadata), NOT a feature bag and NOT a bracketed
+// header format. Confidence, SNR, and delta type remain fields of
+// DistillationOutput for the generation-time caller's logging/telemetry;
+// they are never embedded in the rendering.
 //
 // Mirrors Rust distillation_pipeline.rs (bit-identical output required).
 // Conformance vectors: DistillationOutput for matching (query, memories) inputs.
@@ -9,8 +15,8 @@
 // Callers:
 //   NeuronKit.distillCluster  — thin lens wrapper that supplies the
 //                               EideticLib feature extraction seam
-//   DistilledRecall recipe    — DistilledHeader.parse() for result post-processing
-//   Recollect recipe          — DistilledHeader.parse() for factoid validation
+//   GLK distillation paths    — drain-stage + sweep write the rendering
+//                               into the drawer's representation columns
 //
 // Prerequisite types (DeltaType, DeltaFeatureExtractor, DistillationFeatureType,
 // TypedDecayWeighting, ExtractedFeature, DistillationSNR, FeatureGraph,
@@ -18,6 +24,8 @@
 //   DeltaFeatureExtractor.swift (Ds1)
 //   TypedDecayWeighting.swift   (Ds2)
 //   DistillationScorer.swift    (Ds3)
+// The §7.6 token-compaction transform Stage 5 renders through lives in
+// TokenCompaction.swift.
 
 import Foundation
 import SubstrateTypes
@@ -52,9 +60,13 @@ public struct DistillationInput: Sendable {
 
 /// Output from the five-stage distillation pipeline.
 public struct DistillationOutput: Sendable {
-    /// Content string for the "_distilled" drawer capture.
-    /// Format: "[DIST|conf=X.XX|src=N|snr=Y.YY|delta=STATIC] prose text"
-    public let drawerContent: String
+    /// The distilled rendering (SPEC_DISTILLATION_STORAGE §5): the item's
+    /// unit sentences compacted through the §7.6 token-compaction
+    /// transform, dominant-component (core) sentences first in stable
+    /// source order, the episodic tail after. Zero inline metadata —
+    /// every byte is payload. Written into the source drawer's
+    /// `distilled` column by the GLK distillation paths.
+    public let distilledText: String
     /// Confidence score conf(F*) ∈ [0, 1].
     public let confidence: Float32
     /// True when conf ∈ [0.4, 0.7): signal to inject with additional provenance.
@@ -74,82 +86,6 @@ public struct DistillationOutput: Sendable {
     public let featureFingerprint: Fingerprint256
 }
 
-/// Parser for the DIST header on "_distilled" drawers.
-///
-/// Co-located with the pipeline because the code that writes the format owns the
-/// parser. Consumed by CognitionKit recipes (DistilledRecall, Recollect) and
-/// AriaMcpKit injection-depth post-processing.
-public struct DistilledHeader: Sendable, Equatable {
-    /// Factoid prose: everything after "] " in the DIST content string.
-    public let prose: String
-    /// Confidence score conf(F*) ∈ [0, 1].
-    public let confidence: Float32
-    /// Number of source memories M.
-    public let sourceCount: Int
-    /// Cluster SNR at distillation time.
-    public let snr: Float32
-    /// DeltaType of the dominant feature, if non-static.
-    public let deltaType: DeltaType?
-    /// True when confidence ∈ [0.4, 0.7).
-    public let uncertain: Bool
-
-    /// Parse a "_distilled" drawer's content string.
-    ///
-    /// Expected format (from DISTILLATION_DESIGN.md §1):
-    ///   "[DIST|conf=0.85|src=5|snr=6.2|delta=STATIC] prose text"
-    ///   "[DIST|conf=0.55|src=3|snr=3.1|delta=CONVERGENT|uncertain] prose"
-    ///
-    /// Returns nil if the content does not start with "[DIST|".
-    public static func parse(_ content: String) -> DistilledHeader? {
-        guard content.hasPrefix("[DIST|") else { return nil }
-
-        // Find the closing bracket
-        guard let bracketEnd = content.firstIndex(of: "]") else { return nil }
-
-        // Extract the header fields (after "[DIST|" and before "]")
-        let headerStart = content.index(content.startIndex, offsetBy: 6)  // skip "[DIST|"
-        let headerStr = String(content[headerStart..<bracketEnd])
-
-        // Prose is everything after "] "
-        let afterBracket = content.index(after: bracketEnd)
-        let prose: String
-        if afterBracket < content.endIndex && content[afterBracket] == " " {
-            prose = String(content[content.index(after: afterBracket)...])
-        } else {
-            prose = afterBracket < content.endIndex ? String(content[afterBracket...]) : ""
-        }
-
-        // Parse key=value pairs from header
-        var conf: Float32 = 0
-        var src: Int = 0
-        var snr: Float32 = 0
-        var delta: DeltaType? = nil
-        var uncertain = false
-
-        for part in headerStr.split(separator: "|") {
-            let s = String(part)
-            if s == "uncertain" {
-                uncertain = true
-                continue
-            }
-            guard let eqIdx = s.firstIndex(of: "=") else { continue }
-            let key = String(s[s.startIndex..<eqIdx])
-            let val = String(s[s.index(after: eqIdx)...])
-            switch key {
-            case "conf": conf = Float32(val) ?? 0
-            case "src":  src = Int(val) ?? 0
-            case "snr":  snr = Float32(val) ?? 0
-            case "delta": delta = DeltaType(rawValue: val)
-            default: break
-            }
-        }
-
-        return DistilledHeader(
-            prose: prose, confidence: conf, sourceCount: src,
-            snr: snr, deltaType: delta, uncertain: uncertain)
-    }
-}
-
 // MARK: - DistillationPipeline
 
 /// The five-stage cold-path distillation pipeline.
@@ -165,7 +101,8 @@ public struct DistilledHeader: Sendable, Equatable {
 ///             CONVERGENT/MONOTONE sequences.
 /// Stage 3: Build PMI coherence graph, select dominant component (F*).
 /// Stage 4: Compute structural scores on F*.
-/// Stage 5: Compute confidence, format drawerContent, compute featureFingerprint.
+/// Stage 5: Compute confidence, render distilledText (§7.6 compaction,
+///          core-first ordering), compute featureFingerprint.
 public enum DistillationPipeline {
 
     /// Feature extractor signature. Called once per (memory, featureType) pair.
@@ -274,7 +211,7 @@ public enum DistillationPipeline {
     ///         (the Falcon doc lost database/tables/shadow to a non-dominant
     ///         component). Intra-item keeps all structural features.
     ///     Default false preserves the cross-memory cluster behaviour.
-    /// - Returns: DistillationOutput with drawerContent, confidence, featureFingerprint.
+    /// - Returns: DistillationOutput with distilledText, confidence, featureFingerprint.
     public static func run(
         input: DistillationInput,
         extractFeatures: FeatureExtractor,
@@ -494,32 +431,38 @@ public enum DistillationPipeline {
         // ── Stage 4: Structural scores ────────────────────────────────────────
         DistillationScorer.computeStructuralScores(features: &selected)
 
-        // ── Stage 5: Confidence, content, fingerprint ─────────────────────────
+        // ── Stage 5: Confidence, rendering, fingerprint ───────────────────────
 
         let confidence = DistillationScorer.computeConfidence(
             selected: selected, allThreshold: passing)
         let uncertain = confidence >= 0.4 && confidence < 0.7
 
-        // Format drawerContent: "[DIST|conf=X.XX|src=N|snr=Y.YY|delta=Z] prose"
-        let confStr = String(format: "%.2f", confidence)
-        let snrStr  = String(format: "%.1f", snrResult.snr)
-        let deltaStr = deltaTypeForFactoid?.rawValue ?? DeltaType.static.rawValue
-        let uncertainFlag = uncertain ? "|uncertain" : ""
-
-        // Prose: top features by structural score, rendered as readable surface
-        // forms (display), not stems.
-        let prose = selected
-            .sorted { $0.structuralScore > $1.structuralScore }
-            .map { $0.display }
+        // Rendering (SPEC_DISTILLATION_STORAGE §5/§7.4): token-economical
+        // prose built from the item's OWN unit sentences, not from the
+        // feature bag. The structural core orders retention: sentences
+        // carrying a dominant-component (selected) feature render first in
+        // stable source order; the episodic tail follows in source order.
+        // Every unit renders through the ONE §7.6 compaction transform —
+        // rule 1 (propositional fidelity, priority 1) bounds how hard the
+        // tail may compress, so core and tail share the same transform and
+        // "compresses hardest" is realized by ordering, not by a lossier
+        // second transform. Zero inline metadata: confidence/SNR/delta ride
+        // the DistillationOutput fields only, never the text.
+        let selectedValues = Set(selected.map { $0.value })
+        var coreUnits: [String] = []
+        var tailUnits: [String] = []
+        for (i, unit) in input.memoryContents.enumerated() {
+            let carriesCore = perMemoryFeatures[i].contains { selectedValues.contains($0.value) }
+            if carriesCore {
+                coreUnits.append(unit)
+            } else {
+                tailUnits.append(unit)
+            }
+        }
+        let distilledText = (coreUnits + tailUnits)
+            .map { TokenCompaction.compact($0) }
+            .filter { !$0.isEmpty }
             .joined(separator: " ")
-
-        // src= records the number of SOURCE MEMORIES (input.sourceIDs.count), NOT the
-        // number of incidence-matrix rows (M = memoryContents.count). In the cross-memory
-        // cluster model both happen to be equal, but in the intra-item model memoryContents
-        // holds the item's sentences (M ≥ 3) while sourceIDs holds exactly the one source
-        // drawer ID. src= must equal the number of _distilled_from tunnels captureFactoid
-        // writes, which iterates memberDrawers — one per sourceID.
-        let drawerContent = "[DIST|conf=\(confStr)|src=\(input.sourceIDs.count)|snr=\(snrStr)|delta=\(deltaStr)\(uncertainFlag)] \(prose)"
 
         // Feature fingerprint: OR-reduce of featureHash for each selected feature
         let fingerprint = selected.reduce(Fingerprint256.zero) { acc, feature in
@@ -527,7 +470,7 @@ public enum DistillationPipeline {
         }
 
         return DistillationOutput(
-            drawerContent: drawerContent,
+            distilledText: distilledText,
             confidence: confidence,
             uncertain: uncertain,
             snr: snrResult.snr,
@@ -545,7 +488,7 @@ private extension DistillationOutput {
     /// Construct a failure output with zero fingerprint.
     static func failure(snr: Float32, reason: String) -> DistillationOutput {
         DistillationOutput(
-            drawerContent: "",
+            distilledText: "",
             confidence: 0,
             uncertain: false,
             snr: snr,

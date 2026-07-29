@@ -5,6 +5,7 @@ import OSLog
 import LocusKit
 import PersistenceKit
 import QueueKit
+import SubstrateML
 import SubstrateTypes
 import VectorKit
 
@@ -110,6 +111,16 @@ public actor GeniusLocusKit {
     /// drawer IDs (not chunk IDs) so RecallDirector hits join directly to
     /// LocusKit `Drawer` rows. Dropped when the estate is closed.
     internal var vectorStores: [EstateHandle: VectorStore] = [:]
+
+    /// Per-estate distillation function override for the drain-stage path
+    /// (SPEC_DISTILLATION_STORAGE §7.1). When absent, the drain-stage
+    /// distills with `GeniusLocusKit.defaultDistillFn` — the p1 contract
+    /// (intra-item pipeline, default extractor). Test scaffolds register a
+    /// stub via `registerDistillationFunction(_:for:)`; production wiring
+    /// never needs to (the p1 contract pins ONE function so drain-stage
+    /// and sweep renderings are byte-identical). Dropped on close.
+    internal var distillFunctions:
+        [EstateHandle: @Sendable (DistillationInput) -> DistillationOutput] = [:]
 
     /// Per-estate grant persistence (GRT-01). Built lazily on the first
     /// grant verb against a handle via `ensureGrantSurface(for:)`; the
@@ -402,6 +413,21 @@ public extension GeniusLocusKit {
     ///   - handle: The estate this store is associated with. Must be open.
     func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
         vectorStores[handle] = store
+    }
+
+    /// Register a distillation-function override for the given estate's
+    /// drain-stage path (SPEC_DISTILLATION_STORAGE §7.1). Test scaffolds
+    /// inject stubs here; production wiring omits it and the drain-stage
+    /// runs `GeniusLocusKit.defaultDistillFn` (the p1 contract — one
+    /// function for drain-stage AND sweep, so renderings are
+    /// byte-identical regardless of which path produced them).
+    ///
+    /// Re-registering replaces the existing entry.
+    func registerDistillationFunction(
+        _ distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
+        for handle: EstateHandle
+    ) {
+        distillFunctions[handle] = distillFn
     }
 
     /// The `VectorStore` registered for `handle`, or `nil` when none has been

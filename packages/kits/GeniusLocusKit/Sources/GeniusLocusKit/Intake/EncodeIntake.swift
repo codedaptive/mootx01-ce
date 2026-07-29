@@ -34,6 +34,7 @@ import EideticLib
 import Foundation
 import LocusKit
 import OSLog
+import SubstrateML
 
 /// The execution mode for a write verb (D-A).
 ///
@@ -592,15 +593,26 @@ public extension GeniusLocusKit {
 
     // MARK: - Internals
 
-    /// Wire the engine's `onEncoded` callback to roll up the touched
-    /// LocusKit rooms for each drained batch.
+    /// Wire the engine's `onEncoded` callback to (1) roll up the touched
+    /// LocusKit rooms and (2) distill the encoded drawers — the drain-stage
+    /// distillation path (SPEC_DISTILLATION_STORAGE §7.1).
     ///
     /// CorpusKit owns the encode pipeline and fires this callback with the
-    /// encoded drawer ids after its drain worker ingests a batch. GLK's only
-    /// role is to coordinate the LocusKit-side deferred room rollup — off the
-    /// encode path, coalesced per batch. GLK never performs the encode itself.
-    /// Best-effort: a rollup failure is non-fatal — the drawer rows are durable
-    /// and the next reindex full-tree pass reconciles the Merkle tree.
+    /// encoded drawer ids while the batch's jobs are STILL IN-FLIGHT (the
+    /// engine replies after the callback returns), so both the rollup and
+    /// the distillation participate in drain-completion accounting: after
+    /// `awaitEncodeDrain` returns, every captured drawer that rode the
+    /// encode stream is BM25/vector searchable AND carries its distilled
+    /// representation — "a fully drained estate is a fully distilled
+    /// estate". GLK never performs the encode itself.
+    ///
+    /// The distillation runs the estate's registered distillFn (test
+    /// stubs) or `GeniusLocusKit.defaultDistillFn` (the p1 contract).
+    /// Only drawers still eligible (representation NULL or stale pipeline
+    /// version) are distilled, so regeneration jobs and capture jobs ride
+    /// the same path idempotently. Best-effort like the rollup: a
+    /// distillation failure is non-fatal — the drawer rows are durable and
+    /// the next `moot_distill` sweep repopulates by the NULL predicate.
     ///
     /// Called from `wireSubstores` at provision (for `.glk`/`.corpusOnly`
     /// estates). The closure captures the GLK actor weakly so a torn-down estate
@@ -610,7 +622,35 @@ public extension GeniusLocusKit {
             guard let self else { return }
             guard let estate = try? await self.estate(for: handle) else { return }
             try? await estate.rollupRoomsForDrawers(drawerIDs)
+            // Drain-stage distillation (§7.1): distill each encoded drawer
+            // that is still eligible. The clock is the wall clock at drain
+            // time — `distilled_at` is audit-only and carries no behavioral
+            // weight (§4), and the drain worker is the process boundary
+            // where "now" legitimately enters (the same boundary that
+            // stamps the drain loop's lease heartbeats). Determinism of the
+            // RENDERING is unaffected: it is a function of
+            // (content, pipeline version) only.
+            let distillFn = await self.distillFunction(for: handle)
+            let now = Date()
+            for drawerID in drawerIDs {
+                guard let drawer = try? await estate.getDrawers(ids: [drawerID]).first,
+                      !drawer.content.isEmpty,
+                      drawer.distilled == nil
+                        || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
+                else { continue }
+                _ = try? await self.distillItem(
+                    handle: handle, drawerID: drawer.id, content: drawer.content,
+                    distillFn: distillFn, now: now)
+            }
         }
+    }
+
+    /// The estate's drain-stage distillation function: the registered
+    /// override (test scaffolds) or the p1 default.
+    internal func distillFunction(
+        for handle: EstateHandle
+    ) -> @Sendable (DistillationInput) -> DistillationOutput {
+        distillFunctions[handle] ?? Self.defaultDistillFn
     }
 
     /// Ingest a single drawer into the estate's Corpus (the P6 inline path),

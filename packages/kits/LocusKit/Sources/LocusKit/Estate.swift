@@ -438,6 +438,40 @@ public actor Estate {
         // storage reference owns teardown.
     }
 
+    // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
+
+    /// Write the distilled representation of one drawer — all four
+    /// representation columns in one atomic UPDATE. Delegates to
+    /// `DrawerStore.setDistilledRepresentation`; see that method for the
+    /// full contract (direct column write, no audit event, no index-feed
+    /// involvement). This is the seam GLK's distillation paths (drain-stage
+    /// and `moot_distill` sweep) write through.
+    ///
+    /// - Returns: Count of rows updated (0 = drawer not found).
+    @discardableResult
+    public func setDistilledRepresentation(
+        drawerId: String,
+        distilled: String,
+        pipelineVersion: String,
+        tokenCount: Int64,
+        at generatedAt: Date
+    ) async throws -> Int {
+        try await store.setDistilledRepresentation(
+            drawerId: drawerId,
+            distilled: distilled,
+            pipelineVersion: pipelineVersion,
+            tokenCount: tokenCount,
+            at: generatedAt)
+    }
+
+    /// Count of active drawers still awaiting distillation (the §7.1
+    /// eligibility predicate as an aggregate). Estate-level pass-through
+    /// over `DrawerStore.countUndistilled` — the distillation
+    /// drain-accounting observable GLK's `drainStatuses` reports.
+    public func countUndistilled(pipelineVersion: String) async throws -> Int {
+        try await store.countUndistilled(pipelineVersion: pipelineVersion)
+    }
+
     // MARK: - Drawer enumeration
 
     /// Enumerate every drawer in the estate. Used by cross-row

@@ -259,10 +259,11 @@ fn tools_list_count_is_68() {
     // moot_hunt_contradictions recipe tool):
     //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
     //    1  federation tool (moot_federated_search)
-    //   12  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream,
-    //                     consolidate, recall_distilled, recollect,
-    //                     hunt_contradictions)
+    //                     distill, recall_distilled, hunt_contradictions —
+    //                     moot_consolidate is an unlisted dispatch alias and
+    //                     moot_recollect retired with the factoid tier, SPEC §3/§11)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
@@ -270,26 +271,27 @@ fn tools_list_count_is_68() {
     // ----
     //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   71  total (memory adapter excluded — opt-in, off by default)
+    //   70  total (memory adapter excluded — opt-in, off by default)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 71.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 70, "expected 70 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_71_names() {
-    // Gate: all 71 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_70_names() {
+    // Gate: all 70 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
     // moot_vault_job is a vault tool (Bob's ruling 2026-06-12: tool-surface
     // parity matters even when the Rust backend is synchronous).
     // moot_recall_shaped is the named RecallShape preset surface.
-    // moot_consolidate, moot_recall_distilled, moot_recollect are the
-    // distillation tools added for parity with Swift (R1 fix, 2026-06-20).
+    // moot_distill + moot_recall_distilled are the distillation tools
+    // (SPEC_DISTILLATION_STORAGE §3/§10.3; moot_consolidate survives only as
+    // an unlisted dispatch alias, moot_recollect retired with the factoid tier).
     // moot_memory_get fetches a full drawer by id (fetch-drawer-by-ID gap,
     // shipped in the 1.0.x train per Bob's build-now ruling).
     let expected: std::collections::HashSet<&str> = [
@@ -336,9 +338,8 @@ fn tools_list_name_set_matches_expected_71_names() {
         "moot_recall_precise",
         "moot_recall_shaped",
         "moot_dream",
-        "moot_consolidate",
+        "moot_distill",
         "moot_recall_distilled",
-        "moot_recollect",
         "moot_hunt_contradictions",
         "moot_reindex",
         "moot_drain_status",
@@ -5585,7 +5586,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 71, "vault-on must produce 71 tools (66 + 2 contradiction-hunter + 3 dataset)");
+    assert_eq!(arr.len(), 70, "vault-on must produce 70 tools (65 + 2 contradiction-hunter + 3 dataset)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -5600,7 +5601,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 65, "vault-off must produce 65 tools (71 - 5 vault - palace import)");
+    assert_eq!(arr.len(), 64, "vault-off must produce 64 tools (70 - 5 vault - palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

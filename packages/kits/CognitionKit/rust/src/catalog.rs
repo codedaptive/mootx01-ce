@@ -274,37 +274,25 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::ExploratoryRecall],
         },
-        // Distillation-family recipes. Descriptions match Swift byte-for-byte.
+        // Distillation-family recipes. Descriptions match Swift byte-for-byte
+        // (SPEC_DISTILLATION_STORAGE §3/§10.3 — the factoid tier is retired).
         RecipeDescriptor {
-            name: "consolidate".into(),
-            version: "1.0.0".into(),
+            name: "distill".into(),
+            version: "2.0.0".into(),
             description:
-                "Compact working memory by distilling open clusters into factoids. \
-                Calls the GLK distillation sweep, which processes all ready clusters \
-                (member_count \u{2265} 3, status = open) and persists each factoid as a \
-                drawer in room `_distilled`."
+                "Distill working memory: populate the on-row distilled representation \
+                (token-economical prose) of every active item whose representation \
+                is missing or stale. Idempotent by the NULL predicate."
                     .into(),
             required_capabilities: vec![],
         },
         RecipeDescriptor {
             name: "distilled_recall".into(),
-            version: "1.0.0".into(),
+            version: "2.0.0".into(),
             description:
-                "Dense recall: search the distilled memory tier and return factoid prose \
-                (~10 tokens/hit) for AI reasoning. Uses structural fingerprint Hamming NN \
-                — no embedding model inference, no full corpus scan."
-                    .into(),
-            required_capabilities: vec![],
-        },
-        RecipeDescriptor {
-            name: "recollect".into(),
-            version: "1.0.0".into(),
-            description:
-                "Recollect: fan-out from a distilled factoid to its source memories. \
-                Follows the _distilled_from tunnel graph and returns full episodic content from the M \
-                memories that produced the factoid. Use when the user needs the full \
-                explanation behind a dense factoid. The AI synthesises the sources into a \
-                user-facing narrative."
+                "Distilled recall: exact-search geometry over originals with the \
+                hydration selector pinned to `distilled` — identical ranking to \
+                exact search, smaller payloads, per-hit token counts."
                     .into(),
             required_capabilities: vec![],
         },
@@ -337,9 +325,9 @@ mod tests {
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
-        // plus 3 distillation recipes (consolidate, distilled_recall, recollect)
-        // = 30 total. Note: `consolidate.rs` holds data types only;
-        // distilled_recall carries a descriptor but no full Rust body here.
+        // plus 2 distillation recipes (distill, distilled_recall —
+        // recollect retired with the factoid tier, SPEC §11)
+        // = 29 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -351,8 +339,8 @@ mod tests {
                 "bias",
                 "cohesion",
                 "complexity",
-                "consolidate",
                 "constellation",
+                "distill",
                 "distilled_recall",
                 "drift",
                 "estate_divergence",
@@ -369,7 +357,6 @@ mod tests {
                 "partial_cue_recall",
                 "precedence",
                 "recall_exploratory",
-                "recollect",
                 "rhythm",
                 "shaped_recall",
                 "theme_weather",
@@ -517,17 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn consolidate_descriptor_matches_swift() {
-        // Byte-for-byte parity anchor with Swift Consolidate recipe
-        // metadata (`Consolidate.swift`).
-        let d = recipe_descriptor("consolidate").unwrap();
-        assert_eq!(d.version, "1.0.0");
+    fn distill_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift Distill recipe
+        // metadata (`Distill.swift`).
+        let d = recipe_descriptor("distill").unwrap();
+        assert_eq!(d.version, "2.0.0");
         assert_eq!(
             d.description,
-            "Compact working memory by distilling open clusters into factoids. \
-            Calls the GLK distillation sweep, which processes all ready clusters \
-            (member_count \u{2265} 3, status = open) and persists each factoid as a \
-            drawer in room `_distilled`."
+            "Distill working memory: populate the on-row distilled representation \
+            (token-economical prose) of every active item whose representation \
+            is missing or stale. Idempotent by the NULL predicate."
         );
         assert!(d.required_capabilities.is_empty());
     }

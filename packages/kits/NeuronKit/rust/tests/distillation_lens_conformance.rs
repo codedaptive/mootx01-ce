@@ -33,10 +33,13 @@ fn cluster_5() -> DistillationInput {
     )
 }
 
-// drawer_content starts with "[DIST|" — DIST header format per DISTILLATION_DESIGN.md §1.
-// Mirrors the Swift "cluster_5: drawerContent starts with [DIST| marker" test.
+// distilled_text is the SPEC §5 rendering: core sentences (Alice/CERN)
+// compacted and ordered first, the episodic tail last, zero inline
+// metadata. Both legs pin this SAME byte-exact rendering (§13.9 golden
+// vector for the Stage 5 path). Mirrors the Swift
+// "cluster_5: distilledText renders byte-exact (§13.9)" test.
 #[test]
-fn cluster_5_drawer_content_starts_with_dist_marker() {
+fn cluster_5_distilled_text_renders_byte_exact() {
     let input = cluster_5();
     let result = distill_cluster(&input, Some(DistillationPipeline::default_extractor));
     assert!(
@@ -44,10 +47,13 @@ fn cluster_5_drawer_content_starts_with_dist_marker() {
         "pipeline should succeed for cluster_5; failure_reason={:?}",
         result.failure_reason
     );
-    assert!(
-        result.drawer_content.starts_with("[DIST|"),
-        "drawer_content must start with [DIST|, got: {}",
-        result.drawer_content
+    assert_eq!(
+        result.distilled_text,
+        "Research by Alice at CERN on particle physics \
+         Lab where Alice works CERN facility \
+         Studies conducted by Alice show CERN advances science \
+         Data from CERN shows Alice leading breakthrough research \
+         Maintenance was completed on schedule today"
     );
 }
 

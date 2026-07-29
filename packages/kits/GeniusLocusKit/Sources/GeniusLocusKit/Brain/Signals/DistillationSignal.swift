@@ -3,7 +3,8 @@ import Foundation
 /// Distillation sweep standing signal — architecture spec §11.2, signal 8.
 ///
 /// Fires the per-item distillation sweep on each hourly tick and surfaces
-/// the factoid count as a diagnostic. Mirrors TemporalCausalitySignal
+/// the items-distilled count as a diagnostic (drawer rows whose
+/// representation columns were populated this sweep — SPEC_DISTILLATION_STORAGE §3). Mirrors TemporalCausalitySignal
 /// exactly in structure: hourly cadence, .single concurrency, diagnostic
 /// emission, injected closure for the live cycle.
 ///
@@ -14,7 +15,7 @@ import Foundation
 ///
 ///     let spec = DistillationSignal.spec { now in
 ///         // Caller owns the estate and distillation pipeline;
-///         // it runs the per-item sweep and returns the factoid count.
+///         // it runs the per-item sweep and returns the items-distilled count.
 ///         return try await kit.distillItemsSweep(handle: handle,
 ///             distillFn: distillFn, now: now)
 ///     }
@@ -40,15 +41,14 @@ public enum DistillationSignal {
     ///
     /// The `distillationCycle` closure is called with the scheduler's `now`
     /// and should run the per-item distillation sweep, returning the count of
-    /// factoids produced. An empty successful return (0) is correct when no
+    /// items distilled (representation columns populated). An empty successful return (0) is correct when no
     /// items were ready to distill. On error the throw is caught and surfaced
     /// as a `.diagnostic` emission.
     ///
     /// - Parameter distillationCycle: async closure that executes the
-    ///   distillation sweep. Captures the estate's cluster store and
-    ///   distillation pipeline via its surrounding context. Called with `now`
-    ///   (deterministic clock) as the single argument. Returns the count of
-    ///   factoids produced. Throws on sweep or persistence failures.
+    ///   distillation sweep. Captures the estate context it needs. Called with
+    ///   `now` (deterministic clock) as the single argument. Returns the
+    ///   count of items distilled. Throws on sweep or persistence failures.
     public static func spec(
         distillationCycle: @escaping @Sendable (Date) async throws -> Int
     ) -> SignalSpec {
@@ -62,7 +62,7 @@ public enum DistillationSignal {
                     let count = try await distillationCycle(context.now)
                     return [.diagnostic(DiagnosticReport(
                         title: "distillation-sweep.complete",
-                        detail: "produced \(count) factoid(s) at \(context.now.ISO8601Format())",
+                        detail: "distilled \(count) item(s) at \(context.now.ISO8601Format())",
                         observedAt: context.now))]
                 } catch {
                     // Surface sweep errors as diagnostics so the scheduler's

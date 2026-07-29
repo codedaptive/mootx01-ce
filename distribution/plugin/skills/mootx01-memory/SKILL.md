@@ -54,7 +54,7 @@ Use this skill for prompts containing or implying:
    - `moot_memory_search` for broad recall.
    - `moot_recall_precise` for exact facts, paths, versions, names, numbers, and near-duplicates.
    - `moot_recall_shaped` for associative, conceptual, or other fusion-steered recall.
-   - `moot_recall_distilled` for compact factoid answers from the distilled tier.
+   - `moot_recall_distilled` for the same search ranking with compact distilled payloads (token-economical prose + per-hit token counts).
    - `moot_fact_search` for structured facts.
 
 3. Analyze:

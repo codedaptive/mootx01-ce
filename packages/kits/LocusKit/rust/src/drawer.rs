@@ -160,6 +160,37 @@ pub struct Drawer {
     /// every retrieval path. Format is the comma-separated Q-ID list
     /// with no internal whitespace.
     pub wikidata_qids_secondary: Option<String>,
+
+    /// The distilled representation of this drawer's content — a dense
+    /// parallel rendering (token-economical prose) of the same content
+    /// per SPEC_DISTILLATION_STORAGE §4/§5. A representation is a VIEW
+    /// of this one item: no independent identity, lifecycle, or
+    /// provenance. None means "no representation exists yet" and is the
+    /// sweep-eligibility predicate — no staleness flag, no bool; callers
+    /// test `distilled.is_some()`. The four `distilled*` fields are None
+    /// together or populated together (one atomic column write,
+    /// `set_distilled_representation`); every write that touches
+    /// `content` NULLs all four in the same statement (§7.3 regeneration
+    /// trigger + erasure scrub). Mirrors Swift `Drawer.distilled`.
+    pub distilled: Option<String>,
+
+    /// Identifier of the format + pipeline contract that produced
+    /// `distilled` (Phase 1 value: "p1"). A row whose value differs from
+    /// the current build's contract identifier is a regeneration
+    /// candidate for the sweep. None iff `distilled` is None.
+    pub distilled_pipeline_version: Option<String>,
+
+    /// Approximate token count of `distilled` (SPEC §6): deterministic,
+    /// vendor-neutral estimate so AI clients can budget context before
+    /// hydrating. Advisory only — never load-bearing. None iff
+    /// `distilled` is None.
+    pub distilled_token_count: Option<i64>,
+
+    /// When the representation was generated (epoch millis, stored as
+    /// TEXT ISO8601 by the timestamp column type). Audit and sweep-
+    /// observability only; carries no behavioral weight. None iff
+    /// `distilled` is None.
+    pub distilled_at: Option<i64>,
 }
 
 impl Drawer {
@@ -199,6 +230,10 @@ impl Drawer {
             udc_facets: None,
             wikidata_qid: None,
             wikidata_qids_secondary: None,
+            distilled: None,
+            distilled_pipeline_version: None,
+            distilled_token_count: None,
+            distilled_at: None,
         }
     }
 }

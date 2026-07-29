@@ -104,13 +104,21 @@ struct DrainCommand: AsyncParsableCommand {
         }
 
         // Poll the drain status (the same surface as `moot_drain_status`) until
-        // every drain is idle — the queue is empty whether this process drained it
-        // (held the lease) or a resident did. Capped so a wedged drain cannot hang
-        // forever.
+        // the ENCODE drain is idle — the queue is empty whether this process
+        // drained it (held the lease) or a resident did. Capped so a wedged
+        // drain cannot hang forever.
+        //
+        // Keyed on the encode drain only via `DrainStatus.encodeSettled`
+        // (PERF_W1_DRAIN_RIDER Finding 3): the "distillation" entry can only
+        // settle via a `moot_distill` sweep or the hourly standing signal —
+        // neither of which this command runs — so polling ALL drains would
+        // spin to `maxWait` holding the encode DrainLease and wedge the next
+        // serve session's encode queue. This finisher's contract is the
+        // encode queue and its lease; it exits as soon as that is settled.
         let deadline = Date().addingTimeInterval(Self.maxWait)
         while Date() < deadline {
             let drains = (try? await kit.drainStatuses(handle)) ?? []
-            if !drains.contains(where: { $0.isDraining }) { break }
+            if DrainStatus.encodeSettled(drains) { break }
             try? await Task.sleep(for: .seconds(1))
         }
         Logging.stderr.log("mootx01 drain: encode queue settled for estate '\(estateName)' — exiting")

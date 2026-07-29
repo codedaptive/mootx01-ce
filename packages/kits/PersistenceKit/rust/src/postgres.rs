@@ -1469,8 +1469,12 @@ impl RowStore for TxRowStore {
         values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
-        // Guard: a content-bearing update on a Mode 2 estate must carry ciphertext
-        // under a keyID, mirroring the SQLite update path.
+        // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
+        // path since the distilled-representation columns landed
+        // (SPEC_DISTILLATION_STORAGE §2/§7.2). Seals non-empty protected
+        // text and stamps keyID; no-op for bitmap/timestamp updates and the
+        // expunge scrub. Mirrors the SQLite update path.
+        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name and all column names from the caller-supplied `values` map before
@@ -2119,8 +2123,12 @@ impl RowStore for PgRowStore {
         values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
-        // Guard: a content-bearing update on a Mode 2 estate must carry ciphertext
-        // under a keyID, mirroring the SQLite update path.
+        // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
+        // path since the distilled-representation columns landed
+        // (SPEC_DISTILLATION_STORAGE §2/§7.2). Seals non-empty protected
+        // text and stamps keyID; no-op for bitmap/timestamp updates and the
+        // expunge scrub. Mirrors the SQLite update path.
+        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name and all column names from the caller-supplied `values` map before

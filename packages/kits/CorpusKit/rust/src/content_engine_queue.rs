@@ -393,6 +393,18 @@ impl CorpusContentEngine {
                 )),
             });
         }
+        // Post-encode coordination fires BEFORE the terminal queue reply so
+        // the callback's work is covered by drain-completion accounting:
+        // await-drain waits for pending+in_flight == 0, and jobs stay
+        // in-flight until the reply below. GLK wires room rollup AND
+        // drain-stage distillation into this callback
+        // (SPEC_DISTILLATION_STORAGE §7.1) — this ordering is what makes
+        // "a fully drained estate is a fully distilled estate" a real
+        // barrier instead of a race. Mirrors the Swift
+        // drainContentQueueOnce ordering.
+        if !encoded_ids.is_empty() {
+            self.fire_on_encoded(&encoded_ids);
+        }
         if let Err(error) = queue.reply_batch(&completions) {
             let error = CorpusKitError::StoreUnavailable(format!("content reply batch: {error:?}"));
             return Err(match self.publish_vector_index() {
@@ -402,9 +414,6 @@ impl CorpusContentEngine {
                      {publication_error:?}"
                 )),
             });
-        }
-        if !encoded_ids.is_empty() {
-            self.fire_on_encoded(&encoded_ids);
         }
         Ok(batch.len())
     }

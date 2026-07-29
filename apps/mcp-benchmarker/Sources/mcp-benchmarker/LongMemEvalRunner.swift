@@ -53,9 +53,15 @@ let lmeMootVerbMap = EndpointConfig.VerbMap(
 )
 
 /// Dense recall VerbMap for the token-efficiency benchmark.
-/// Uses `moot_recall_distilled`, which:
-///   - Returns ~10-token distilled factoid prose per hit (capped at ~300 chars)
-///   - Requires `moot_consolidate` to be called BEFORE the first dense query
+/// Uses `moot_recall_distilled` (v2, SPEC_DISTILLATION_STORAGE §10.3), which:
+///   - Runs the SAME exact-search geometry as moot_memory_search and hydrates
+///     each hit with its on-row DISTILLED representation (token-economical
+///     prose) — identical ranking, smaller payloads, per-hit
+///     distilled_token_count metadata
+///   - Falls back to full content (marked served-from-content) for rows not
+///     yet distilled — no pre-sweep call is REQUIRED, though running
+///     moot_distill first (or letting the capture drain distill) yields the
+///     dense payloads this benchmark measures
 ///   - Does NOT use a location constant arg (queries the estate-default wing)
 ///
 /// write:         moot_file_memory  (same ingest tool as lmeMootVerbMap)
@@ -121,7 +127,9 @@ struct LMEQuestionResult: Sendable {
     /// estimator and evidence scorer. nil when arm = .dense.
     let exactPayloadText: String?
     /// Raw payload text from the dense-arm moot_recall_distilled call.
-    /// Contains distilled factoid prose (~300 chars/factoid cap).
+    /// Contains each hit's distilled representation (token-economical prose,
+    /// uncapped) with per-hit `tokens:`/`source:` metadata lines; rows not
+    /// yet distilled appear as full content marked served-from-content.
     /// nil when arm = .exact.
     let densePayloadText: String?
     /// Time taken for the dense-arm moot_recall_distilled call, in seconds.

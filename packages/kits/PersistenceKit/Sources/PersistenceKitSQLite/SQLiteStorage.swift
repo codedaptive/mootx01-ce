@@ -598,11 +598,17 @@ actor SQLiteBackend {
         // `validateSQLIdentifier`, no forked validator.
         try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
-        // Structural content/keyID invariant (FUP-D): updateRows does not run
-        // the encryption seam, so a content update on an encrypting estate
-        // would write plaintext with a null keyID. Guard it like the other
-        // write paths. All current callers update only bitmap/timestamp
-        // columns, so this is a no-op for them.
+        // At-rest encryption seam (mode 2): UPDATE is a protected-text write
+        // path since the distilled-representation columns landed (a
+        // distillation write is an UPDATE carrying "distilled" text —
+        // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals any non-empty
+        // protected text ("content"/"distilled") and stamps keyID; it is a
+        // no-op for the bitmap/timestamp updates that were this path's only
+        // traffic before, and for the expunge scrub (empty text is exempt so
+        // erasure stays a plaintext-empty marker).
+        let values = try encryptedForWrite(values, config: encryptionConfig)
+        // Structural content/keyID invariant (FUP-D): after the seam, a
+        // protected-text update on an encrypting estate must carry a keyID.
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         // Pre-read full rows before mutating (CVK-WB4 changedColumns diff).
         // `fetchMatchingRowValues` does a SELECT * so we have the pre-update

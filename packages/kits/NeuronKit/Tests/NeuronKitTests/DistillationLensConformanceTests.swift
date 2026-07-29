@@ -41,15 +41,22 @@ struct DistillationLensConformanceTests {
         )
     }
 
-    // drawerContent starts with "[DIST|" — DIST header format per DISTILLATION_DESIGN.md §1.
-    // Both Swift and Rust conformance legs assert this same prefix.
+    // distilledText is the SPEC §5 rendering: core sentences (Alice/CERN)
+    // compacted and ordered first, the episodic tail last, zero inline
+    // metadata. Both Swift and Rust conformance legs pin this SAME
+    // byte-exact rendering (§13.9 golden vector for the Stage 5 path).
     // Uses defaultExtractor explicitly to decouple from the production default.
-    @Test("cluster_5: drawerContent starts with [DIST| marker")
-    func drawerContentPrefix() {
+    @Test("cluster_5: distilledText renders byte-exact (§13.9)")
+    func distilledTextRendering() {
         let result = NeuronKit.distillCluster(
             input: cluster5(), extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(result.succeeded)
-        #expect(result.drawerContent.hasPrefix("[DIST|"))
+        #expect(result.distilledText
+            == "Research by Alice at CERN on particle physics "
+            + "Lab where Alice works CERN facility "
+            + "Studies conducted by Alice show CERN advances science "
+            + "Data from CERN shows Alice leading breakthrough research "
+            + "Maintenance was completed on schedule today")
     }
 
     // confidence is passed through from DistillationOutput unchanged.

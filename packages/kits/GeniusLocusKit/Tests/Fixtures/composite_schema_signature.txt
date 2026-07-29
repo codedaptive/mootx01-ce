@@ -123,6 +123,10 @@ table=drawers
   col=keyID type=text null=1 default=- role=-
   col=content_hash type=blob null=1 default=- role=-
   col=content_fingerprint type=blob null=1 default=- role=-
+  col=distilled type=text null=1 default=- role=-
+  col=distilled_pipeline_version type=text null=1 default=- role=-
+  col=distilled_token_count type=int null=1 default=- role=-
+  col=distilled_at type=timestamp null=1 default=- role=-
   gen=g_state_cluster type=int
   gen=g_provenance_source type=int
   gen=g_provenance_confirmation type=int

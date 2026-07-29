@@ -95,9 +95,9 @@ struct DistillationSignalTests {
     }
 
     @Test
-    func specWithClosureReturningThreeEmitsCompleteWithFactoidCount() async throws {
+    func specWithClosureReturningThreeEmitsCompleteWithItemCount() async throws {
         let (kit, handle) = try await openOneEstate()
-        // Closure returns 3 factoids — verifies diagnostic detail contains count.
+        // Closure reports 3 items distilled — verifies diagnostic detail contains count.
         let spec = DistillationSignal.spec { _ in 3 }
         let id = try await registerAndFire(
             kit, in: handle,
@@ -110,8 +110,8 @@ struct DistillationSignalTests {
         #expect(report.recentDiagnostics.count == 1)
         #expect(report.recentDiagnostics.first?.title == "distillation-sweep.complete")
         let detail = report.recentDiagnostics.first?.detail ?? ""
-        #expect(detail.contains("3 factoid(s)"),
-            "diagnostic detail must contain the factoid count; got: \(detail)")
+        #expect(detail.contains("3 item(s)"),
+            "diagnostic detail must contain the items-distilled count; got: \(detail)")
     }
 
     @Test

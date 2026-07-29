@@ -31,7 +31,7 @@ happened unless you actually queried it.
    - `moot_memory_search` for broad recall.
    - `moot_recall_precise` for exact facts, paths, versions, names, numbers, and near-duplicates.
    - `moot_recall_shaped` for associative, conceptual, or other fusion-steered recall.
-   - `moot_recall_distilled` for compact factoid answers from the distilled tier.
+   - `moot_recall_distilled` for the same search ranking with compact distilled payloads (token-economical prose + per-hit token counts).
    - `moot_fact_search` for structured facts.
 
 3. Analyze:
@@ -49,7 +49,7 @@ happened unless you actually queried it.
 5. Dream:
    - Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
    - Run `moot_dream` after bulk import, major filing, or substantial memory growth.
-   - Run `moot_consolidate` periodically to populate the distilled factoid tier.
+   - Run `moot_distill` (alias: `moot_consolidate`) to populate on-row distilled representations; captures also distill automatically as the encode queue drains.
 
 ## Answer Discipline
 

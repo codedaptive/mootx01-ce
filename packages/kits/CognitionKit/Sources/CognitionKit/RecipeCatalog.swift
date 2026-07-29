@@ -174,9 +174,8 @@ public enum RecipeCatalog {
         // Distillation-family recipes (Dc1–Dc3). Registered here in one step
         // rather than one per mission to avoid three concurrent stream edits
         // to this file (Dc4 consolidation strategy).
-        RecipeDescriptor(Consolidate()),
+        RecipeDescriptor(Distill()),
         RecipeDescriptor(DistilledRecall()),
-        RecipeDescriptor(Recollect()),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

@@ -175,6 +175,11 @@ impl Estate {
         );
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(content.to_string()));
+        // Content changed in place → the distilled representation (a view of
+        // the OLD content) is stale. NULL-on-edit in the same statement is
+        // the SPEC §7.3 regeneration trigger. Mirrors Swift
+        // updateDatasetContent.
+        crate::drawer_store_inmemory::insert_cleared_representation(&mut values);
         let count = row_store
             .update(T_DRAWERS, values, &pred)
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;

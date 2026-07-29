@@ -1647,23 +1647,31 @@ public extension GeniusLocusKit {
         // hydrateBodies fails, mmrContentByID is empty and the MMR selection
         // order may differ from the fully-hydrated path. The stage is recorded.
         var mmrContentByID: [String: String] = [:]
+        // The distilled TEXT rides the same late-hydration read (it is the
+        // second text column the structured pool projects away —
+        // SPEC_DISTILLATION_STORAGE §10.1 needs it on returned hits).
+        var mmrDistilledByID: [String: String] = [:]
         if case .full = request.frame.hydrationLevel {
             let forcedMMRError = _testForceMMRHydrationError
             _testForceMMRHydrationError = nil
-            let mmrResult: Result<[(id: String, content: String)], Error>
+            let mmrResult: Result<[(id: String, content: String, distilled: String?)], Error>
             if let forcedError = forcedMMRError {
                 mmrResult = .failure(forcedError)
             } else {
                 do {
                     let bodies = try await estate.hydrateBodies(ids: buffer.ids)
-                    mmrResult = .success(bodies.map { ($0.id, $0.content) })
+                    mmrResult = .success(bodies.map { ($0.id, $0.content, $0.distilled) })
                 } catch {
                     mmrResult = .failure(error)
                 }
             }
             switch mmrResult {
             case .success(let pairs):
-                mmrContentByID = Dictionary(uniqueKeysWithValues: pairs)
+                mmrContentByID = Dictionary(uniqueKeysWithValues: pairs.map { ($0.0, $0.1) })
+                mmrDistilledByID = Dictionary(
+                    uniqueKeysWithValues: pairs.compactMap { pair in
+                        pair.2.map { (pair.0, $0) }
+                    })
             case .failure(let error):
                 // MMR content hydration DEGRADED — MMR uses sourceMask Jaccard proxy.
                 Self.recallLog.error(
@@ -1753,26 +1761,32 @@ public extension GeniusLocusKit {
         // correct. The stage is recorded in degradedStages.
         let selectedIDs = selected.map { buffer.ids[$0] }
         var returnedContentByID: [String: String]
+        var returnedDistilledByID: [String: String]
         switch request.frame.hydrationLevel {
         case .full:
             returnedContentByID = mmrContentByID
+            returnedDistilledByID = mmrDistilledByID
         case .structured:
             let forcedReturnError = _testForceReturnHydrationError
             _testForceReturnHydrationError = nil
-            let returnResult: Result<[(id: String, content: String)], Error>
+            let returnResult: Result<[(id: String, content: String, distilled: String?)], Error>
             if let forcedError = forcedReturnError {
                 returnResult = .failure(forcedError)
             } else {
                 do {
                     let bodies = try await estate.hydrateBodies(ids: selectedIDs)
-                    returnResult = .success(bodies.map { ($0.id, $0.content) })
+                    returnResult = .success(bodies.map { ($0.id, $0.content, $0.distilled) })
                 } catch {
                     returnResult = .failure(error)
                 }
             }
             switch returnResult {
             case .success(let pairs):
-                returnedContentByID = Dictionary(uniqueKeysWithValues: pairs)
+                returnedContentByID = Dictionary(uniqueKeysWithValues: pairs.map { ($0.0, $0.1) })
+                returnedDistilledByID = Dictionary(
+                    uniqueKeysWithValues: pairs.compactMap { pair in
+                        pair.2.map { (pair.0, $0) }
+                    })
             case .failure(let error):
                 // Return hydration DEGRADED — structured hits carry empty content.
                 Self.recallLog.error(
@@ -1785,9 +1799,11 @@ public extension GeniusLocusKit {
                 )
                 degradedStages.append("pool.hydrateBodies.return")
                 returnedContentByID = [:]
+                returnedDistilledByID = [:]
             }
         case .bitmapOnly:
             returnedContentByID = [:]   // content is stripped by applyHydration
+            returnedDistilledByID = [:]
         }
 
         // Step 11 — build RecallHit array in MMR-selected order.
@@ -1831,7 +1847,9 @@ public extension GeniusLocusKit {
             // `.bitmapOnly` strips content regardless. This mirrors the stripping
             // RecallStream applies on the locus page-emission path.
             let drawer = drawerIndex[id].map { pool -> LocusKit.Drawer in
-                let hydrated = withContent(pool, returnedContentByID[id] ?? "")
+                let hydrated = withContent(
+                    pool, returnedContentByID[id] ?? "",
+                    distilled: returnedDistilledByID[id])
                 return applyHydration(hydrated, level: request.frame.hydrationLevel)
             }
             var sources: Set<RecallEvidencePath> = []
@@ -2056,14 +2074,20 @@ public extension GeniusLocusKit {
 
     // MARK: - Late-hydration helper
 
-    /// Return a copy of `d` with its `content` replaced by `body` — the
+    /// Return a copy of `d` with its TEXT columns re-materialized — the
     /// dense-first late-hydration step. The pool is loaded body-free
-    /// (`content == ""`); this re-materializes the body onto the returned
-    /// drawer for exactly the survivor/top-k ids. Every other field is
-    /// preserved verbatim. When `body` is empty this is an identity rebuild
-    /// (the drawer was already body-free), so callers may invoke it
-    /// unconditionally.
-    private func withContent(_ d: LocusKit.Drawer, _ body: String) -> LocusKit.Drawer {
+    /// (`content == ""` and `distilled == nil`; both text columns are
+    /// projected away at `.structured`); this re-materializes the body AND
+    /// the distilled rendering onto the returned drawer for exactly the
+    /// survivor/top-k ids, so the §10.1 hydration selector can read
+    /// `drawer.distilled` off returned hits. The distilled METADATA columns
+    /// (pipeline version, token count, generated-at) ride the structured
+    /// pool projection and are preserved from `d`. When `body` is empty and
+    /// `distilled` nil this is an identity rebuild, so callers may invoke
+    /// it unconditionally.
+    private func withContent(
+        _ d: LocusKit.Drawer, _ body: String, distilled: String?
+    ) -> LocusKit.Drawer {
         LocusKit.Drawer(
             id: d.id,
             content: body,
@@ -2083,7 +2107,11 @@ public extension GeniusLocusKit {
             udcCode: d.udcCode,
             udcFacets: d.udcFacets,
             wikidataQID: d.wikidataQID,
-            wikidataQidsSecondary: d.wikidataQidsSecondary
+            wikidataQidsSecondary: d.wikidataQidsSecondary,
+            distilled: distilled,
+            distilledPipelineVersion: d.distilledPipelineVersion,
+            distilledTokenCount: d.distilledTokenCount,
+            distilledAt: d.distilledAt
         )
     }
 

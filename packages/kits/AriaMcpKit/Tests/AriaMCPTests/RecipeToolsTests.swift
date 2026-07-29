@@ -51,11 +51,13 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 34 total: 11 recipe tools + 23 lens tools (moot_lens_node_motion added by
-        // node motion modeling diffusion node-layer lens).
+        // 33 total: 10 recipe tools + 23 lens tools. moot_distill replaced the
+        // listed moot_consolidate (which survives as an unlisted dispatch
+        // alias) and moot_recollect retired with the factoid tier
+        // (SPEC_DISTILLATION_STORAGE §3/§11).
         #expect(recipeNames == [
             "moot_confirm_migration",
-            "moot_consolidate",
+            "moot_distill",
             "moot_dream",
             "moot_hunt_contradictions",
             "moot_lens_anticipate",
@@ -86,7 +88,6 @@ struct RecipeToolsTests {
             "moot_recall_distilled",
             "moot_recall_precise",
             "moot_recall_shaped",
-            "moot_recollect",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -659,49 +660,58 @@ struct RecipeToolsTests {
 
     // MARK: - isRecipeTool
 
-    @Test func testIsRecipeToolReturnsTrueForAllThreeDistillationTools() {
+    @Test func testIsRecipeToolCoversDistillationToolsAndAlias() {
+        #expect(RecipeTools.isRecipeTool("moot_distill"))
+        // moot_consolidate is the SPEC §3 dispatch alias — accepted, unlisted.
         #expect(RecipeTools.isRecipeTool("moot_consolidate"))
         #expect(RecipeTools.isRecipeTool("moot_recall_distilled"))
-        #expect(RecipeTools.isRecipeTool("moot_recollect"))
+        // moot_recollect retired with the factoid tier (§11).
+        #expect(!RecipeTools.isRecipeTool("moot_recollect"))
     }
 
     // MARK: - tools() count
 
     @Test func testRecipeToolsCount() {
-        // 12 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
+        // 11 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
         // preciseRecall, shapedRecall, runMigration, confirmMigration, dream,
-        // consolidate, recallDistilled, recollect, huntContradictions.
-        #expect(RecipeTools.tools().count == 12)
+        // distill, recallDistilled, huntContradictions. (moot_consolidate is a
+        // dispatch alias, deliberately NOT listed.)
+        #expect(RecipeTools.tools().count == 11)
+        let names = RecipeTools.tools().map(\.name)
+        #expect(names.contains("moot_distill"))
+        #expect(!names.contains("moot_consolidate"))
+        #expect(!names.contains("moot_recollect"))
     }
 
-    // MARK: - moot_consolidate dispatch
+    // MARK: - moot_distill dispatch (and its moot_consolidate alias)
 
-    @Test func testConsolidateDispatchRoutesToRunConsolidate() async throws {
+    @Test func testDistillDispatchRoutesToRunDistill() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-dispatch"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "distill-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Empty estate has no open clusters — sweep completes with 0 factoids.
+        // Empty estate has no eligible items — sweep completes with 0.
         let result = try await dispatcher.dispatch(
-            name: "moot_consolidate",
+            name: "moot_distill",
             arguments: .object([:]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("moot_consolidate: sweep complete"))
-        #expect(text.contains("factoidsProduced: 0"))
+        #expect(text.contains("moot_distill: sweep complete"))
+        #expect(text.contains("itemsDistilled: 0"))
     }
 
-    @Test func testConsolidateDispatchAcceptsIncludeHeld() async throws {
+    @Test func testConsolidateAliasResolvesToIdenticalHandler() async throws {
+        // SPEC §3: moot_consolidate resolves to the same handler with
+        // identical results (and identical output text).
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-held"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-alias"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // include_held = true is accepted without error.
         let result = try await dispatcher.dispatch(
             name: "moot_consolidate",
             arguments: .object(["include_held": .bool(true)]))
@@ -710,7 +720,9 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("moot_consolidate: sweep complete"))
+        #expect(text.contains("moot_distill: sweep complete"),
+                "the alias runs the identical moot_distill handler")
+        #expect(text.contains("itemsDistilled: 0"))
     }
 
     // MARK: - moot_recall_distilled dispatch
@@ -721,7 +733,7 @@ struct RecipeToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Empty distilled tier returns 0 matches — format starts correctly.
+        // Empty estate returns 0 matches — format starts correctly.
         let result = try await dispatcher.dispatch(
             name: "moot_recall_distilled",
             arguments: .object(["query": .string("any query")]))
@@ -730,13 +742,13 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Default output starts with "found N distilled factoid(s)" — no query echo.
-        // (echo_query:true opt-in restores the old "for: {query}" suffix.)
+        // Default output starts with "found N memory(s) [distilled]" — no
+        // query echo. (echo_query:true opt-in restores the "for:" suffix.)
         #expect(text.hasPrefix("found "),
-                "moot_recall_distilled output must start with 'found N distilled factoid(s)'")
-        #expect(text.contains("distilled factoid(s)"),
-                "output header must include 'distilled factoid(s)'")
-        #expect(!text.hasPrefix("found 0 distilled factoid(s) for:"),
+                "moot_recall_distilled output must start with 'found N memory(s) [distilled]'")
+        #expect(text.contains("memory(s) [distilled]"),
+                "output header must include 'memory(s) [distilled]'")
+        #expect(!text.contains("] for:"),
                 "default response must NOT echo the query in the header")
     }
 
@@ -760,7 +772,7 @@ struct RecipeToolsTests {
         // First line must start with "found" per mission test requirements.
         let firstLine = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
         #expect(firstLine.hasPrefix("found "),
-                "first line must start with 'found N distilled factoid(s) for:'")
+                "first line must start with 'found N memory(s) [distilled]'")
     }
 
     @Test func testRecallDistilledEchoQueryOptIn() async throws {
@@ -786,7 +798,7 @@ struct RecipeToolsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         // With echo_query:true, header must echo the query.
-        #expect(text.hasPrefix("found 0 distilled factoid(s) for: test echo query"),
+        #expect(text.hasPrefix("found 0 memory(s) [distilled] for: test echo query"),
                 "echo_query:true must restore 'for: {query}' suffix in header")
         // echo_query is a declared arg — no unrecognized-arg hint must appear.
         #expect(!text.contains("hint: unrecognized argument(s) ignored"),
@@ -809,104 +821,10 @@ struct RecipeToolsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         // Default (no echo_query) must omit the query from the header.
-        #expect(!text.hasPrefix("found 0 distilled factoid(s) for:"),
+        #expect(!text.contains("] for:"),
                 "default response must NOT echo the query in the header")
-        #expect(text.contains("found 0 distilled factoid(s)"),
-                "header must still contain the factoid count line")
-    }
-
-    // MARK: - moot_recollect dispatch
-
-    @Test func testRecollectNonDistilledDrawerReturnsErrorResult() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-non-distilled"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // File a regular (non-distilled) memory and get its drawer id.
-        let fileResult = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "ordinary memory content"))
-        let fileText = try #require(
-            fileResult.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Extract the drawer id from the response.
-        let drawerID = try #require(
-            Self.uuids(in: fileText).first?.uuidString,
-            "file result must contain a UUID for the captured drawer")
-
-        // Recollecting from a non-distilled drawer must return errorResult, not throw.
-        let result = try await dispatcher.dispatch(
-            name: "moot_recollect",
-            arguments: .object(["drawer_id": .string(drawerID)]))
-
-        let obj = try #require(result.objectValue)
-        // RecollectError.notADistilledDrawer surfaces as a tool error (isError: true),
-        // not as a JSONRPC throw — matching the recipe-level refusal discipline.
-        #expect(obj["isError"]?.boolValue == true,
-                "recollecting a non-distilled drawer must return a tool error")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("not a distilled factoid"),
-                "error message must indicate the drawer is not a distilled factoid")
-    }
-
-    @Test func testRecollectDispatchRoutesToRunRecollect() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-dispatch"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Unknown drawer id returns factoidNotFound errorResult.
-        let unknownID = UUID().uuidString
-        let result = try await dispatcher.dispatch(
-            name: "moot_recollect",
-            arguments: .object(["drawer_id": .string(unknownID)]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true,
-                "unknown drawer_id must return a tool error (factoidNotFound)")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // factoidNotFound path: "not found — it may have been expunged"
-        #expect(text.contains("not found"),
-                "error must say the drawer was not found")
-    }
-
-    @Test func testRecollectOutputStartsWithExpand() async throws {
-        // Verify the output format prefix when a valid distilled drawer is supplied.
-        // We can't easily produce a full distilled drawer in a unit test without
-        // running the distillation pipeline — instead we verify the dispatch route
-        // is correctly wired by checking that a known-non-distilled drawer produces
-        // the expected errorResult shape (tested above), and verify the output FORMAT
-        // by checking the error result doesn't start with "expand:" (routing worked).
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-fmt"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // The spec says success output starts with "expand: {drawer_id}".
-        // We verify this indirectly: a non-distilled drawer error does NOT start
-        // with "expand:", confirming the format is gated by a successful run path.
-        let fileResult = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "test content for format check"))
-        let fileText = try #require(
-            fileResult.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        let drawerID = try #require(Self.uuids(in: fileText).first?.uuidString)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recollect",
-            arguments: .object(["drawer_id": .string(drawerID)]))
-        let obj = try #require(result.objectValue)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-
-        // A non-distilled drawer returns an error — it does NOT start with "expand:".
-        // This confirms dispatch() routes correctly to runRecollect (not to some
-        // default path that could accidentally produce "expand:"-prefixed output).
-        #expect(obj["isError"]?.boolValue == true)
-        #expect(!text.hasPrefix("expand:"),
-                "error result must not start with 'expand:' — only success output does")
+        #expect(text.contains("found 0 memory(s) [distilled]"),
+                "header must still contain the count line")
     }
 
     // MARK: - helpers

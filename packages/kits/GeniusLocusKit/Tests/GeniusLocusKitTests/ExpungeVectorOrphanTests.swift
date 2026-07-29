@@ -27,6 +27,7 @@ import VectorKit
 import PersistenceKit
 import PersistenceKitInMemory
 import SubstrateTypes
+import SubstrateML
 @testable import LocusKit     // needed for Estate.auditTrail (internal) and Estate.store
 @testable import GeniusLocusKit
 
@@ -458,5 +459,105 @@ struct ExpungeVectorOrphanTests {
         let vectorPresent = chunksAfter.contains { $0.id == drawer.id }
         #expect(vectorPresent,
                 "corpus vector must survive when expunge is rejected by validation — validation-first preserved")
+    }
+
+    // MARK: - E8: distillation-lane entry is scrubbed on expunge
+
+    /// SPEC_DISTILLATION_STORAGE §7.2/§8 + custodian walk 2026-07-28: the
+    /// distillation-features-v1 lane is keyed by the SOURCE drawer id, so
+    /// expunge must delete the lane entry alongside the semantic-lane vector.
+    /// An orphaned structural fingerprint would leak a content-derived
+    /// signature past the destruction contract.
+    @Test
+    func expungeScrubsDistillationLaneEntry() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // "Tantalum" recurs mid-sentence (capitalized, non-first word) in all
+        // three sentences so the default extractor forms a non-zero fingerprint.
+        let content = "Alloys with Tantalum resist heat. Tests on Tantalum ran well. Labs shipped Tantalum today."
+        let drawer = try await kit.capture(handle, captureFrame(content: content), mode: .impatient)
+        try await kit.distillItem(
+            handle: handle, drawerID: drawer.id, content: content,
+            distillFn: GeniusLocusKit.defaultDistillFn, now: Date(timeIntervalSince1970: 1_750_000_000))
+
+        let vectorStore = try #require(await kit.vectorStores[handle])
+        let probe = DistillationPipeline.queryFingerprint(
+            query: content, extractFeatures: DistillationPipeline.defaultExtractor)
+        let before = try await vectorStore.findNearest(
+            probe: probe, modelID: GeniusLocusKit.distillationLaneModelID, limit: 10)
+        #expect(before.contains { $0.itemID == drawer.id },
+                "lane entry keyed by the source id must exist before expunge")
+
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id, reason: "distillation lane scrub test", confirmation: true))
+
+        let after = try await vectorStore.findNearest(
+            probe: probe, modelID: GeniusLocusKit.distillationLaneModelID, limit: 10)
+        #expect(!after.contains { $0.itemID == drawer.id },
+                "the distillation-features-v1 entry must be deleted on expunge")
+    }
+
+    // MARK: - E9: expunging an undistilled drawer is unaffected by the lane scrub
+
+    /// The lane delete is unconditional but a row with no lane entry must
+    /// expunge cleanly — deleteAllVectors on an absent key is a no-op.
+    @Test
+    func expungeOfUndistilledDrawerSucceeds() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        let drawer = try await kit.capture(
+            handle, captureFrame(content: "plain undistilled polonium note"), mode: .impatient)
+
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id, reason: "undistilled lane no-op test", confirmation: true))
+
+        let estate = try await kit.estate(for: handle)
+        let row = try await estate.allDrawers().first { $0.id == drawer.id }
+        #expect(row?.state == .tombstoned, "expunge must complete normally")
+    }
+
+    // MARK: - E10: lineage cascade scrubs every member's lane entry
+
+    /// Expunge cascades over the whole lineage chain; each member may carry
+    /// its own lane entry (keyed by its own id) — all must be deleted.
+    @Test
+    func expungeScrubsLaneEntriesAcrossLineage() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+        let t0 = Date(timeIntervalSince1970: 1_750_000_000)
+
+        // v1 then v2 in the SAME lineage (v2 supersedes v1).
+        let v1 = try await kit.capture(
+            handle, captureFrame(content: "Batch one used Rhenium wire. Tests on Rhenium passed. Labs shipped Rhenium first."),
+            mode: .impatient)
+        var v2Frame = captureFrame(content: "Batch two used Rhenium wire. Retests on Rhenium passed. Labs shipped Rhenium again.")
+        v2Frame.lineageID = v1.lineageID
+        let v2 = try await kit.capture(handle, v2Frame, mode: .impatient)
+
+        for d in [v1, v2] {
+            try await kit.distillItem(
+                handle: handle, drawerID: d.id, content: d.content,
+                distillFn: GeniusLocusKit.defaultDistillFn, now: t0)
+        }
+        let vectorStore = try #require(await kit.vectorStores[handle])
+        let probe = DistillationPipeline.queryFingerprint(
+            query: v1.content, extractFeatures: DistillationPipeline.defaultExtractor)
+        let before = try await vectorStore.findNearest(
+            probe: probe, modelID: GeniusLocusKit.distillationLaneModelID, limit: 10)
+        #expect(before.contains { $0.itemID == v1.id })
+        #expect(before.contains { $0.itemID == v2.id })
+
+        // Expunge the head — the cascade covers the whole lineage.
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: v2.id, reason: "lineage lane scrub test", confirmation: true))
+
+        let after = try await vectorStore.findNearest(
+            probe: probe, modelID: GeniusLocusKit.distillationLaneModelID, limit: 10)
+        #expect(!after.contains { $0.itemID == v1.id },
+                "the predecessor's lane entry must be scrubbed by the cascade")
+        #expect(!after.contains { $0.itemID == v2.id },
+                "the head's lane entry must be scrubbed")
     }
 }

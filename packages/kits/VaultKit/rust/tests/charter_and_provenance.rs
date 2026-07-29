@@ -8,8 +8,9 @@
 //!
 //! Bug N: A factoid with a `_distilled_from` provenance tunnel must export such
 //! that the vault note body contains NO `_distilled_from` link text. After
-//! import, the factoid drawer content must be clean, and the `_distilled_from`
-//! tunnel must exist in the re-imported estate.
+//! import, the factoid drawer content must be clean, and NO `_distilled_from`
+//! tunnel may exist in the re-imported estate — the 1.1.x import path ignores
+//! the `distilled_from_sources` frontmatter key and reconstructs nothing.
 //!
 //! CAND-EXP-PROV: provenance tunnel targets are filtered by export scope so a
 //! normal exported factoid cannot leak the wing/room of a secret or
@@ -263,7 +264,7 @@ fn export_includes_hint_drawers_as_normal_entries() {
 ///
 /// Mirrors Swift `VaultBridgeTests.distilledFromProvenanceRoundTrips`.
 #[test]
-fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
+fn distilled_from_export_clean_body_and_no_tunnel_reconstruction_on_import() {
     // --- Source estate: plain open (no provision; hint seeding not needed). ---
     let (coord1, handle1) = open_simple("distilled-source");
 
@@ -383,29 +384,22 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
         factoid.content
     );
 
-    // --- Assertion 3: `_distilled_from` tunnel must exist after import. ---
-    // Use Estate::tunnels_from_wing — the only surface that returns tunnels
-    // originating from a specific wing without going through the recall pipeline.
-    // Resolve the factoid's wing name from the node tree.
+    // --- Assertion 3: NO `_distilled_from` tunnel is reconstructed. ---
+    // SPEC_DISTILLATION_STORAGE §11.2/§13.2: the factoid tier is retired on
+    // 1.1.x and no new-write path may create `_distilled_from` tunnels. The
+    // frontmatter key from an old export is ignored on import (the
+    // provenance semantic now rides the fingerprint-lane key and the
+    // on-row representation columns). Mirrors the Swift Bug N test.
     let (factoid_wing_imported, _) = imported_names.get(&factoid.parent_node_id).cloned().unwrap_or_default();
     let estate2 = coord2.estate_for(&handle2).expect("estate_for target");
     let tunnels = estate2
         .tunnels_from_wing(&factoid_wing_imported)
         .expect("tunnels_from_wing");
-    let provenance_tunnels: Vec<_> = tunnels
-        .iter()
-        .filter(|t| t.label == "_distilled_from" && t.source_room == "_distilled")
-        .collect();
     assert!(
-        !provenance_tunnels.is_empty(),
-        "Bug N: _distilled_from provenance tunnel must exist after round-trip import"
+        tunnels.iter().all(|t| t.label != "_distilled_from"),
+        "§13.2: import must NOT reconstruct _distilled_from tunnels"
     );
-    let p_tunnel = &provenance_tunnels[0];
-    assert_eq!(
-        p_tunnel.target_room, source_room,
-        "Bug N: provenance tunnel must point to the source drawer's room ('{}'); got '{}'",
-        source_room, p_tunnel.target_room
-    );
+    let _ = source_room; // room assertion retired with the reconstruction
 
     // Cleanup.
     let _ = std::fs::remove_dir_all(&vault);
