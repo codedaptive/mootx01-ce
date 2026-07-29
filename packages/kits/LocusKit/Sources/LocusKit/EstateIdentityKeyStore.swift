@@ -30,6 +30,17 @@ public protocol EstateIdentityKeyStore: Sendable {
     /// Persist the raw 32-byte Curve25519 private signing key bytes for the given
     /// estate UUID. A second call for the same UUID overwrites the previous value.
     func storePrivateKey(_ keyData: Data, forEstateID estateID: UUID) throws
+
+    /// Delete the private signing key for the given estate UUID from persistent
+    /// storage, so the key does not outlive the data it identifies.
+    ///
+    /// Called by the explicit-teardown path (`GeniusLocusKit.disposeEstateKeys`)
+    /// when an estate is permanently retired. Must be idempotent: an absent item
+    /// is NOT an error (mirrors `KeychainKeyStore.deleteKey()` for the db-key).
+    ///
+    /// For in-memory implementations this removes the entry from the in-memory
+    /// dictionary, making the key unreachable from any subsequent call.
+    func deletePrivateKey(forEstateID estateID: UUID) throws
 }
 
 // MARK: - Keychain implementation (production)
@@ -111,6 +122,29 @@ public struct KeychainEstateIdentityKeyStore: EstateIdentityKeyStore {
             throw EstateError.keychainError(status: Int32(addStatus))
         }
     }
+
+    /// Delete the estate's identity key from the Keychain. Called by
+    /// `GeniusLocusKit.disposeEstateKeys` when an estate is permanently
+    /// retired, so the Ed25519 signing key never outlives the estate data.
+    ///
+    /// Idempotent: `errSecItemNotFound` is treated as success, so calling
+    /// this on an already-deleted or never-written estate UUID is safe.
+    /// Matches the `KeychainKeyStore.deleteKey()` posture for the db-key.
+    public func deletePrivateKey(forEstateID estateID: UUID) throws {
+        let query: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: estateID.uuidString,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        switch status {
+        case errSecSuccess, errSecItemNotFound:
+            // Item deleted, or was never present — both are success for teardown.
+            return
+        default:
+            throw EstateError.keychainError(status: Int32(status))
+        }
+    }
 }
 
 // MARK: - In-memory implementation (tests)
@@ -140,6 +174,12 @@ public final class InMemoryEstateIdentityKeyStore: EstateIdentityKeyStore, @unch
 
     public func storePrivateKey(_ keyData: Data, forEstateID estateID: UUID) throws {
         lock.withLock { store[estateID] = keyData }
+    }
+
+    /// Remove the private key for the given estate UUID from the in-memory
+    /// dictionary. Idempotent: deleting a UUID that was never stored is a no-op.
+    public func deletePrivateKey(forEstateID estateID: UUID) throws {
+        lock.withLock { store.removeValue(forKey: estateID) }
     }
 
     /// TEST-ONLY — read back the stored private key bytes for inspection.

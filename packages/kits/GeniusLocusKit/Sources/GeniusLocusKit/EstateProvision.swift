@@ -57,6 +57,59 @@ public enum EstateKind: String, Sendable, Equatable, CaseIterable {
     case locusOnly = "LocusOnly"
 }
 
+// MARK: - EstateLifetime
+
+/// Declares how long the estate's identity and encryption-key material should
+/// live.
+///
+/// ## .durable (default)
+///
+/// The identity key (Ed25519 signing key) is written to the Apple Keychain and
+/// survives process restarts. The whole-file database key (SQLCipher) is minted
+/// by `EstateKeyProvider` and stored in the Keychain keyed to the estate file
+/// path. This is the correct posture for user-owned estates that must survive
+/// device restarts.
+///
+/// ## .ephemeral
+///
+/// The estate uses durable storage mechanics — a real SQLite file on disk, full
+/// schema migration, SQLite persistence semantics — but with THROWAWAY identity
+/// material. The identity key store is in-memory (`InMemoryEstateIdentityKeyStore`):
+/// the Ed25519 signing key is generated at open time, lives only in process
+/// memory, and leaves zero Keychain residue at process exit.
+///
+/// The whole-file database key, when used with an `.ephemeral` estate, must be
+/// supplied by the caller WITHOUT minting a Keychain item — either as an
+/// in-memory random key (for tests that care about SQLCipher semantics), or by
+/// using `.plaintext` encryption (for tests that only care about persistence
+/// without encryption overhead).
+///
+/// **Use case:** automated test loops and agent-driven test harnesses that need
+/// to exercise SQLite persistence semantics without accumulating Keychain items.
+/// Provision N ephemeral estates, run tests, tear down — zero keychain residue
+/// by construction. This is the fix for the production incident where ~200 k
+/// test estates left one identity-key Keychain item each.
+///
+/// **Security note:** ephemeral-with-encryption works — an ephemeral estate can
+/// still use a SQLCipher-encrypted file. The key simply lives in-memory and is
+/// not recoverable after the process exits (the file becomes unreadable, which
+/// is the correct posture for a throwaway test estate).
+///
+/// ## Declaration over inference
+///
+/// The choice of `.ephemeral` vs `.durable` is made explicitly by the caller at
+/// provision time. GLK never infers ephemeral status from the storage backend or
+/// from heuristics — declaration is the only mechanism.
+public enum EstateLifetime: String, Sendable, Equatable, CaseIterable {
+    /// Identity and db-key material are durable (Keychain-backed). Default.
+    /// Correct for all user-owned production estates.
+    case durable = "durable"
+    /// Identity material lives only in process memory. SQLite storage mechanics
+    /// are fully operational; the key store is in-memory. No Keychain writes at
+    /// any point during the estate's life.
+    case ephemeral = "ephemeral"
+}
+
 // MARK: - EstateProvisionParams
 
 /// Parameters that fully describe a new estate being provisioned through GLK.
@@ -99,6 +152,12 @@ public struct EstateProvisionParams: Sendable {
     /// bitmap field via the existing mode encoding.
     public let syncMode: SyncMode
 
+    /// Key-material lifetime for this estate. Defaults to `.durable` so all
+    /// existing callers are unchanged. Pass `.ephemeral` for test loops and
+    /// agent-driven test harnesses that need SQLite persistence semantics with
+    /// zero Keychain residue (see `EstateLifetime` for the full contract).
+    public let lifetime: EstateLifetime
+
     /// Memberwise initialiser.
     ///
     /// - Parameters:
@@ -108,13 +167,16 @@ public struct EstateProvisionParams: Sendable {
     ///   - zoomWindowHigh: UDC lattice upper bound.
     ///   - frameworkProfile: Framework profile name (unqualified; GLK adds the kind prefix when writing).
     ///   - syncMode: ConvergenceKit sync mode.
+    ///   - lifetime: Key-material lifetime — `.durable` (default, Keychain-backed identity)
+    ///     or `.ephemeral` (in-memory identity, no Keychain writes). See `EstateLifetime`.
     public init(
         estateName: String,
         kind: EstateKind,
         zoomWindowLow: Int,
         zoomWindowHigh: Int,
         frameworkProfile: String,
-        syncMode: SyncMode
+        syncMode: SyncMode,
+        lifetime: EstateLifetime = .durable
     ) {
         self.estateName = estateName
         self.kind = kind
@@ -122,6 +184,7 @@ public struct EstateProvisionParams: Sendable {
         self.zoomWindowHigh = zoomWindowHigh
         self.frameworkProfile = frameworkProfile
         self.syncMode = syncMode
+        self.lifetime = lifetime
     }
 }
 

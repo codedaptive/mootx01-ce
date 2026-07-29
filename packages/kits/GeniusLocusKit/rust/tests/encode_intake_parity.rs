@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use corpus_kit::corpus::EmbeddingModelConfig;
 use genius_locus_kit::coordinator::{
-    EstateCoordinator, EstateKind, EstateProvisionParams, SyncMode,
+    EstateCoordinator, EstateKind, EstateLifetime, EstateProvisionParams, SyncMode,
 };
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath,
@@ -65,6 +65,7 @@ fn provision_glk_estate() -> (EstateCoordinator, EstateHandle) {
         zoom_window_high: 10,
         framework_profile: "KnowledgeWork".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     };
     // Deterministic embedding model — reproducible, no CoreML.
     let handle = coord
@@ -251,6 +252,7 @@ fn locus_only_degrades_both_modes_to_row_only() {
         zoom_window_high: 10,
         framework_profile: "PersonalLifeMgmt".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     };
     let handle = coord
         .provision(

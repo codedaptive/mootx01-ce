@@ -882,7 +882,7 @@ mod tests {
     // dark for semantic search.
     #[test]
     fn br8_promoted_rows_are_semantically_searchable_after_drain() {
-        use crate::coordinator::{EstateKind, EstateProvisionParams, SyncMode};
+        use crate::coordinator::{EstateKind, EstateLifetime, EstateProvisionParams, SyncMode};
         use crate::recall::{
             GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath,
             RecallFallbackPolicy,
@@ -910,6 +910,7 @@ mod tests {
             zoom_window_high: 10,
             framework_profile: "KnowledgeWork".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
         let handle = coord
             .provision(

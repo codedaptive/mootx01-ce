@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import AriaMCP
 import CorpusKit
 import CorpusKitProviders
@@ -72,6 +73,27 @@ struct AriaMCPMain {
         // that fails fast, not a silent fallback.
         let rawPostgresURL = ProcessInfo.processInfo.environment["ARIA_MCP_POSTGRES_URL"] ?? ""
         let rawSQLitePath = ProcessInfo.processInfo.environment["ARIA_MCP_SQLITE_PATH"] ?? ""
+
+        // Estate key-material lifetime (estate-key-lifetime fix, 2026-07-29).
+        //
+        // MOOTX01_ESTATE_LIFETIME=ephemeral — agent-driven test loops declare this
+        // so they can provision and destroy estates in bulk without accumulating
+        // Keychain items. When set:
+        //   1. The SQLite branch skips KeychainKeyStore.loadOrCreateKey() and uses
+        //      a freshly-generated in-memory random db key (the file is still
+        //      SQLCipher-encrypted, but the key is not persisted to the Keychain
+        //      and is not recoverable after process exit — correct for a throwaway
+        //      estate).
+        //   2. kit.open() receives an InMemoryEstateIdentityKeyStore() so the
+        //      Ed25519 signing key never touches the Keychain.
+        //
+        // The default (.durable) is production behavior; all existing callers that
+        // do not set this var are unaffected.
+        let rawLifetime = ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? ""
+        let isEphemeral = rawLifetime.lowercased() == "ephemeral"
+        let identityKeyStore: (any EstateIdentityKeyStore)? = isEphemeral
+            ? InMemoryEstateIdentityKeyStore()
+            : nil  // nil → Estate.open resolves from storage backend (Keychain for SQLite)
 
         let storage: any Storage
 
@@ -162,25 +184,47 @@ struct AriaMCPMain {
             // Construct the SQLite storage. busyTimeout of 5.0 seconds is
             // the PersistenceKit BackendConfiguration.sqlite default; sufficient
             // for a single-process server with no concurrent writers.
-            // Whole-file encryption: open the estate as FullDatabase
-            // with this estate's per-estate key from the Keychain (keyed by the
-            // estate file path), so the file — schema and content — is
-            // SQLCipher-encrypted at rest. The app and this server point at the
-            // same file, so they derive the same account and load the same key;
-            // the shared keychain access group (verified on a signed build) lets
-            // them read the same item.
+            //
+            // Whole-file encryption (durable path, the default):
+            //   Open the estate as FullDatabase with this estate's per-estate
+            //   key from the Keychain (keyed by the estate file path), so the
+            //   file — schema and content — is SQLCipher-encrypted at rest.
+            //   The app and this server point at the same file, so they derive
+            //   the same account and load the same key; the shared Keychain
+            //   access group (verified on a signed build) lets them read the
+            //   same item.
+            //
+            // Ephemeral path (MOOTX01_ESTATE_LIFETIME=ephemeral):
+            //   Generate a random 32-byte db key in process memory — no Keychain
+            //   write. The file is still SQLCipher-encrypted (full-database), but
+            //   the key is never persisted and is not recoverable after process
+            //   exit. Correct for a throwaway agent test estate. The identity key
+            //   is handled below (InMemoryEstateIdentityKeyStore via identityKeyStore).
             do {
-                // Shared access group (#94): match the app's group so both
-                // processes read the same Keychain item for the same estate.
-                let dbKey = try KeychainKeyStore(
-                    service: "com.codedaptive.mootx01",
-                    estateURL: dbURL,
-                    accessGroup: "com.codedaptive.mootx01.shared"
-                ).loadOrCreateKey()
+                let encryptionConfig: EstateEncryptionConfig
+                if isEphemeral {
+                    // Random ephemeral db key — no Keychain write.
+                    var keyBytes = [UInt8](repeating: 0, count: 32)
+                    let result = SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes)
+                    guard result == errSecSuccess else {
+                        fputs("ARIA_MCP fatal: cannot generate ephemeral db key (SecRandomCopyBytes: \(result))\n", stderr)
+                        exit(1)
+                    }
+                    encryptionConfig = .fullDatabase(key: Data(keyBytes))
+                } else {
+                    // Shared access group (#94): match the app's group so both
+                    // processes read the same Keychain item for the same estate.
+                    let dbKey = try KeychainKeyStore(
+                        service: "com.codedaptive.mootx01",
+                        estateURL: dbURL,
+                        accessGroup: "com.codedaptive.mootx01.shared"
+                    ).loadOrCreateKey()
+                    encryptionConfig = .fullDatabase(key: dbKey)
+                }
                 let configuration = EstateConfiguration(
                     estateID: UUID(),
                     backend: .sqlite(url: dbURL, busyTimeout: 5.0),
-                    encryptionConfig: .fullDatabase(key: dbKey)
+                    encryptionConfig: encryptionConfig
                 )
                 storage = try SQLiteStorage(configuration: configuration)
             } catch {
@@ -219,7 +263,11 @@ struct AriaMCPMain {
             // its first real TCP connection — a connectivity failure surfaces
             // here as a thrown error.
             _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-            handle = try await kit.open(storage: storage, owner: owner)
+            // identityKeyStore is nil for durable estates (backend-heuristic
+            // resolution: Keychain for SQLite, in-memory for .inMemory) and
+            // InMemoryEstateIdentityKeyStore() for ephemeral estates so the
+            // Ed25519 signing key never touches the Keychain.
+            handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
         } catch {
             // Redact the raw PostgreSQL connection string from error descriptions —
             // storage errors may propagate the full connection string (which can contain

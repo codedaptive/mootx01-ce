@@ -30,7 +30,7 @@ use corpus_kit::CorpusContentEngine;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use genius_locus_kit::coordinator::{
-    EstateCoordinator, EstateKind, EstateMountState, EstateProvisionParams,
+    EstateCoordinator, EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams,
     GeniusLocusKitError, SyncMode,
 };
 use corpus_kit::corpus::EmbeddingModelConfig;
@@ -140,6 +140,7 @@ fn locus_only_params(name: &str) -> EstateProvisionParams {
         zoom_window_high: 10,
         framework_profile: "Test".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     }
 }
 
