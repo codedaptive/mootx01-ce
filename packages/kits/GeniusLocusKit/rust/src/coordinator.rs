@@ -6678,9 +6678,14 @@ impl EstateCoordinator {
             Vec::new()
         };
 
-        // --- Lane 3: Vector (active when corpus+vector both registered and query non-empty) ---
+        // --- Lane 3a: Vector Hamming (Lane A, "random-indexing-v1") ---
         // Requires corpus for embed(); vector store for find_nearest().
         // Score = (256 - hamming_distance) / 256.0, matching Swift's hamming→score mapping.
+        //
+        // Lane B ("distillation-features-v1", structural fingerprint) is merged into
+        // vector_list below using max-score deduplication — a drawer in both lanes
+        // keeps the higher Hamming similarity score. Combined, Lane A + Lane B share
+        // the weights.vector * 0.5 budget slice (FINDING_11X_HAMMING_LANE_2026-07-28).
         //
         // P1 fail-loud contract (SPEC §P1_FAIL_LOUD):
         //   embed failure        → degrade "corpus.embed" (query survives on locus + BM25)
@@ -6688,7 +6693,7 @@ impl EstateCoordinator {
         //   Both are RECOVERABLE: the query returns with fewer signals, not an error throw.
         //   "stage failed" (degraded_stages non-empty) is DISTINGUISHABLE from
         //   "absent evidence" (empty Vec, no matching docs) per gate criterion (3).
-        let vector_list: Vec<(String, f32)> = if let (Some(ref c), Some(ref vs)) = (&corpus, &vector) {
+        let mut vector_list: Vec<(String, f32)> = if let (Some(ref c), Some(ref vs)) = (&corpus, &vector) {
             if !query_str.is_empty() {
                 // embed stage — may be forced by a test seam (single-use, already taken
                 // from the cfg(any(test, feature = "test-seams")) RefCell by the dispatcher).
@@ -6755,6 +6760,76 @@ impl EstateCoordinator {
         } else {
             Vec::new()
         };
+
+        // --- Lane 3b: Structural fingerprint (Lane B, "distillation-features-v1") ---
+        //
+        // Queries per-drawer distillation fingerprints written by DistillationCycle.
+        // The probe is computed via DistillationPipeline::query_fingerprint with the
+        // capitalization-heuristic default_extractor — the same extractor used at
+        // distillation write time, so stored and query fingerprints are self-consistent.
+        //
+        // Dark-lane safety: drawers without a Lane B entry are absent from fp_matches
+        // and contribute zero candidates — no penalty relative to distilled drawers.
+        // A zero query_fingerprint (query had no structural features) skips this block
+        // entirely — same zero-contribution outcome.
+        //
+        // Hits are merged into vector_list with max-score deduplication: a drawer
+        // already returned by Lane A keeps the higher Hamming similarity score.
+        // Lane B results therefore only improve, never worsen, any candidate already
+        // present from Lane A.
+        //
+        // Unlike Lane A, Lane B is never covered by the _testForceVectorHammingError
+        // seam (that seam is single-use and consumed by Lane A). Lane B uses a plain
+        // match — degraded silently (no telemetry), matching Swift's debug-log-only behavior.
+        if !query_str.is_empty() {
+            if let Some(ref vs) = vector {
+                use substrate_ml::distillation_pipeline::DistillationPipeline;
+                let fp = DistillationPipeline::query_fingerprint(
+                    &query_str,
+                    DistillationPipeline::default_extractor,
+                );
+                if fp != Engram::ZERO {
+                    if let Ok(fp_matches) = vs.find_nearest(
+                        &fp,
+                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                        plan.frontier_k,
+                    ) {
+                        // Max-score merge: build id→score from Lane A, then walk Lane B.
+                        let mut score_by_id: HashMap<String, f32> = vector_list
+                            .iter()
+                            .map(|(id, s)| (id.clone(), *s))
+                            .collect();
+                        // Ordered id list: Lane A order first, Lane B-only appended.
+                        let mut ordered_ids: Vec<String> =
+                            vector_list.iter().map(|(id, _)| id.clone()).collect();
+                        for m in fp_matches {
+                            let score =
+                                (256 - m.distance.clamp(0, 256)) as f32 / 256.0;
+                            if let Some(existing) = score_by_id.get_mut(&m.item_id) {
+                                // Already in Lane A — keep higher score.
+                                if score > *existing {
+                                    *existing = score;
+                                }
+                            } else {
+                                // Lane B only — append to both structures.
+                                score_by_id.insert(m.item_id.clone(), score);
+                                ordered_ids.push(m.item_id.clone());
+                            }
+                        }
+                        // Rebuild vector_list with updated scores, preserving order.
+                        vector_list = ordered_ids
+                            .into_iter()
+                            .map(|id| {
+                                let s = score_by_id.get(&id).copied().unwrap_or(0.0);
+                                (id, s)
+                            })
+                            .collect();
+                    }
+                    // else: Lane B dark — expected for estates with no distilled entries.
+                    // No telemetry: a dark Lane B is a normal operating state.
+                }
+            }
+        }
 
         // --- Lane 4: Dense float (Lane D), PER-SIGNAL — UnionBest mode only ---
         // Cosine over the pooled float vector via Corpus.float_nearest_per_signal,
@@ -7366,10 +7441,18 @@ impl EstateCoordinator {
                 // Contrastive: factor = 1.0 (spread ≥ 0.15, clear semantic winner).
                 // Linear ramp — no cliff. At factor = 1.0 the score is
                 // byte-identical to the pre-discount formula. Mirrors Swift.
-                *v = sh_locus   * weights.locus    * col_locus[i]
-                   + sh_bm25    * weights.bm25     * col_bm25[i]
-                   + sh_hamming * weights.vector   * col_vector[i]
-                   + dense_discrimination_factor * sh_dense * weights.vector * col_dense[i]
+                // Budget split: Lane A+B Hamming (col_vector) and Dense float (col_dense)
+                // each receive HALF the weights.vector budget. Combined they sum to at most
+                // weights.vector — eliminating the 2× inflation that occurred when each
+                // received the full budget (FINDING_11X_HAMMING_LANE_2026-07-28 §facts 9-10).
+                // Mirrors Swift RecallDirector matrixAware scoring formula.
+                // The Hamming column does not carry the saturation discount (structural
+                // fingerprints are contrastive by design). dense_discrimination_factor applies
+                // to col_dense only, not col_vector — parity with Swift.
+                *v = sh_locus   * weights.locus              * col_locus[i]
+                   + sh_bm25    * weights.bm25               * col_bm25[i]
+                   + sh_hamming * weights.vector * 0.5       * col_vector[i]
+                   + dense_discrimination_factor * sh_dense * weights.vector * 0.5 * col_dense[i]
                    + sh_field_fit * weights.field_fit * col_field_fit[i]
                    + matrix_term
                    // graph + preference share the `weights.graph` budget slice, exactly
