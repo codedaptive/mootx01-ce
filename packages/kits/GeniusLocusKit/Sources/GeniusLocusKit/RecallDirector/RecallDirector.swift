@@ -1868,6 +1868,14 @@ public extension GeniusLocusKit {
                 // The Hamming column (buffer.vector) does not carry the saturation
                 // discount: it is already structurally contrastive (feature-OR
                 // fingerprints, not centroid-collapsed float projections).
+                // isPinned bias: user-pinned drawers receive a small retrieval
+                // priority bonus capped at the signal-agreement bonus magnitude
+                // (0.05). The cap prevents over-weighting in small estates
+                // where many drawers are pinned. Feature-flag adoption bit 16;
+                // flag-adoptions §1.
+                let pinnedBonus: Float =
+                    drawerIndex[buffer.ids[i]]?.hasFeatureFlag(.isPinned) == true
+                        ? agreementBonus : 0
                 scores[i] =
                     shapeLocus      * weights.locus          * buffer.locus[i] +
                     shapeBM25       * weights.bm25           * buffer.bm25[i] +
@@ -1877,7 +1885,8 @@ public extension GeniusLocusKit {
                     matrixTerm +
                     shapeGraph      * weights.graph          * buffer.graph[i] +
                     shapePreference * weights.graph          * buffer.preference[i] +
-                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0
+                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0 +
+                    pinnedBonus
             }
         case .raw, .rrf:
             // .raw: use the normalised lane-rank score directly — no matrix signals,
