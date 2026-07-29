@@ -841,6 +841,12 @@ func runLongMemEval(_ args: [String]) async throws {
     // encrypted-estate overhead deliberately.
     let lmeScratchPosture: ScratchEstatePosture =
         flagPresent("--no-plaintext-scratch", in: args) ? .encryptedDefault : .plaintextOptOut
+    // --settle: run each question twice — first as the ORGANIC cell (immediately
+    // after ingest + drain), then trigger moot_reindex, wait for the corpus_encode
+    // drain to converge, and re-run identical queries as the SETTLED cell.
+    // Reports both cells in the run report under testmark_cells. Off by default.
+    // Adds ~30-60s per question for the reindex + drain wait.
+    let lmeSettle = flagPresent("--settle", in: args)
 
     // Warn on shared-estate: methodology-affecting (haystack contamination).
     if sharedEstate {
@@ -874,9 +880,14 @@ func runLongMemEval(_ args: [String]) async throws {
         estateCache: lmeEstateCache,
         cacheDir: lmeCacheDir,
         scratchPosture: lmeScratchPosture,
-        exactStrategy: lmeExactStrategy
+        exactStrategy: lmeExactStrategy,
+        settle: lmeSettle
     )
     FileHandle.standardOutput.write(Data("[longmemeval] exact-strategy: \(lmeExactStrategy.rawValue)\n".utf8))
+    if lmeSettle {
+        FileHandle.standardOutput.write(Data(
+            "[longmemeval] settle: on (ORGANIC + SETTLED cells via moot_reindex)\n".utf8))
+    }
 
     let results = try await runLMEQuestions(questions: corpus.questions, config: runConfig)
 

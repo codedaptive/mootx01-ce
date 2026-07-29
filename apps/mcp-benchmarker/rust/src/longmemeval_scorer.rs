@@ -212,6 +212,15 @@ pub struct LmeQuestionResult {
     /// (ambiguous evidence). None = barrier did not run for this unit.
     /// Additive — FIX-HARNESS-20260727.
     pub drain_lane_observed: Option<bool>,
+    // ── Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C) ───────
+    /// UUIDs returned by the settled exact-arm query. None when settle was off or
+    /// exact arm was not run.
+    pub settled_retrieved_uuids: Option<Vec<String>>,
+    /// Settled exact-arm query latency in seconds. None when settle was off.
+    pub settled_query_latency_seconds: Option<f64>,
+    /// Whether the post-reindex drain barrier observed the corpus_encode lane.
+    /// None when settle was off.
+    pub settled_drain_lane_observed: Option<bool>,
 }
 
 /// The scored result for one LME question.
@@ -236,6 +245,18 @@ pub struct LmeQuestionScore {
     pub write_mean_latency_seconds: f64,
     pub turns_ingested: usize,
     pub retrieved_uuid_count: usize,
+    // ── Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C) ───────
+    /// recall_any@5 for the SETTLED cell. None when settle was off.
+    pub settled_recall_any_at_5: Option<f64>,
+    /// MRR for the SETTLED cell. None when settle was off.
+    pub settled_mrr: Option<f64>,
+    /// Deduplicated session ranking for the SETTLED cell. None when settle was off.
+    pub settled_ranked_session_ids: Option<Vec<String>>,
+    /// Settled exact-arm query latency. None when settle was off.
+    pub settled_query_latency_seconds: Option<f64>,
+    /// Whether the post-reindex drain barrier observed corpus_encode lane.
+    /// None when settle was off.
+    pub settled_drain_lane_observed: Option<bool>,
 }
 
 /// Scores one `LmeQuestionResult`. Guard-excluded questions get zeroed metrics.
@@ -260,6 +281,29 @@ pub fn score_lme_question(result: LmeQuestionResult) -> LmeQuestionScore {
     };
 
     let retrieved_uuid_count = result.retrieved_uuids.len();
+
+    // ── Settle cell scoring (--settle mode, Mission 11X-RECALL-GAP-01 Stream C) ──
+    // Mirror the organic scoring path using settled_retrieved_uuids.
+    // Guard exclusion applies equally: non-healthy questions have no fitness signal
+    // regardless of which cell is scored.
+    let (settled_recall_any_at_5, settled_mrr, settled_ranked_session_ids) =
+        if let Some(ref settled_uuids) = result.settled_retrieved_uuids {
+            let settled_ranked = lme_ranked_sessions(settled_uuids, &result.manifest);
+            let (any5, mrr_val) = if result.guard_healthy {
+                (
+                    lme_recall_any(&settled_ranked, &answer_ids, 5),
+                    lme_session_mrr(&settled_ranked, &answer_ids),
+                )
+            } else {
+                // Guard-excluded: sentinel zeros (not None) — the cell ran but
+                // produced no fitness signal, consistent with organic treatment.
+                (0.0, 0.0)
+            };
+            (Some(any5), Some(mrr_val), Some(settled_ranked))
+        } else {
+            (None, None, None)
+        };
+
     LmeQuestionScore {
         question_id: result.question_id,
         question_type: result.question_type,
@@ -280,6 +324,11 @@ pub fn score_lme_question(result: LmeQuestionResult) -> LmeQuestionScore {
         write_mean_latency_seconds: result.write_mean_latency_seconds,
         turns_ingested: result.turns_ingested,
         retrieved_uuid_count,
+        settled_recall_any_at_5,
+        settled_mrr,
+        settled_ranked_session_ids,
+        settled_query_latency_seconds: result.settled_query_latency_seconds,
+        settled_drain_lane_observed: result.settled_drain_lane_observed,
     }
 }
 
@@ -509,6 +558,24 @@ pub struct LmeReportPerQuestion {
     /// Additive — FIX-HARNESS-20260727.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drain_lane_observed: Option<bool>,
+    // ── Settle cell (--settle mode, Mission 11X-RECALL-GAP-01 Stream C) ───────
+    /// recall_any@5 for the SETTLED cell (after moot_reindex + drain).
+    /// None when --settle was not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_recall_any_at_5: Option<f64>,
+    /// MRR for the SETTLED cell. None when --settle was not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_mrr: Option<f64>,
+    /// Deduplicated session ranking for the SETTLED cell. None when --settle was not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_ranked_session_ids: Option<Vec<String>>,
+    /// Settled exact-arm query latency in seconds. None when --settle was not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_query_latency_seconds: Option<f64>,
+    /// Whether the post-reindex drain barrier observed the corpus_encode lane.
+    /// None when --settle was not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_drain_lane_observed: Option<bool>,
 }
 
 /// Token efficiency block of the LME report. Additive key added by LME-03.
@@ -553,6 +620,39 @@ pub struct LmeReportTokenEfficiency {
     pub dense_exact_tokens_per_result_ratio: Option<f64>,
 }
 
+/// Testmark cell descriptor, additive to every LME report.
+///
+/// When --settle is off, `enabled` is false and settle fields are None.
+/// When --settle is on, both ORGANIC and SETTLED cells are documented.
+///
+/// Self-documentation rationale: with two-tier vector composition the ORGANIC
+/// and SETTLED states differ because mechanical stopword-strip composes the
+/// initial vector at ingest and the full distillate recomposes it on the
+/// background sweep. moot_reindex triggers the background backfill to ensure
+/// the settled cell reflects full coverage before being measured. Neither cell
+/// may substitute for the other in published numbers.
+///
+/// Twin of Swift `LMETestmarkCells`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LmeTestmarkCells {
+    /// True when the settle flag was active for this run.
+    pub enabled: bool,
+    /// Ordered cells produced by this run: ["organic"] or ["organic", "settled"].
+    pub cells: Vec<String>,
+    /// MCP tool invoked to trigger settling. None when settle is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settle_trigger_tool: Option<String>,
+    /// Human-readable description of what the settle trigger does. None when settle is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settle_trigger_description: Option<String>,
+    /// Rationale for tracking both cells. None when settle is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// Aggregate metrics for the SETTLED cell. None when settle is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_aggregate: Option<LmeReportAggregate>,
+}
+
 /// Lightweight per-question payload snapshot, extracted before results are
 /// consumed by `score_lme_question`. Passed to `build_lme_report` so it can
 /// compute the `token_efficiency` block without needing the full results vec.
@@ -594,6 +694,10 @@ pub struct LmeReport {
     /// (default) or "encrypted-default" (--no-plaintext-scratch).
     /// Additive — FIX-HARNESS-20260727.
     pub estate_encryption: String,
+    // ── Testmark cells (additive — Mission 11X-RECALL-GAP-01 Stream C) ─────────
+    /// Testmark cell descriptor. Always present; `enabled` is false when
+    /// --settle was not used.
+    pub testmark_cells: LmeTestmarkCells,
 }
 
 /// Assembles an `LmeReport` from scores and metadata.
@@ -621,6 +725,8 @@ pub fn build_lme_report(
     // swaps the two report keys (Adams CRITICAL, FIX-HARNESS-20260727).
     estate_cache: String,
     estate_encryption: String,
+    // --settle mode: whether both ORGANIC and SETTLED cells were run.
+    settle: bool,
 ) -> LmeReport {
     let (aggregate, latency) = aggregate_lme_scores(scores);
     let guard_excluded = scores.iter().filter(|s| !s.guard_healthy).count();
@@ -710,6 +816,12 @@ pub fn build_lme_report(
                 // Look up cache_hit from the raw results map (key = question_id).
                 cache_hit: cache_hit_by_id.get(&s.question_id).copied().flatten(),
                 drain_lane_observed: drain_lane_by_id.get(&s.question_id).copied().flatten(),
+                // Settle cell fields — sourced from LmeQuestionScore (scored by score_lme_question).
+                settled_recall_any_at_5: s.settled_recall_any_at_5,
+                settled_mrr: s.settled_mrr,
+                settled_ranked_session_ids: s.settled_ranked_session_ids.clone(),
+                settled_query_latency_seconds: s.settled_query_latency_seconds,
+                settled_drain_lane_observed: s.settled_drain_lane_observed,
             }
         })
         .collect();
@@ -877,6 +989,65 @@ pub fn build_lme_report(
         dense_degraded_count,
     };
 
+    // ── Testmark cells (additive — Mission 11X-RECALL-GAP-01 Stream C) ─────────
+    // Build the SETTLED cell aggregate from guard-healthy scores when --settle was active.
+    // Only recall_any@5 and MRR are tracked for the settled cell; other variants are 0.0.
+    let settled_aggregate: Option<LmeReportAggregate> = if settle {
+        let healthy: Vec<&LmeQuestionScore> = scores.iter().filter(|s| s.guard_healthy).collect();
+        if healthy.is_empty() {
+            None
+        } else {
+            let n = healthy.len() as f64;
+            // compactMap equivalent: guard-excluded questions carry 0.0 (not None),
+            // so sentinel zeros contribute correctly to the mean.
+            let any5_sum: f64 = healthy.iter().filter_map(|s| s.settled_recall_any_at_5).sum();
+            let mrr_sum:  f64 = healthy.iter().filter_map(|s| s.settled_mrr).sum();
+            Some(LmeReportAggregate {
+                query_count:      healthy.len(),
+                recall_any_at_1:  0.0,  // not tracked for the settled cell
+                recall_any_at_5:  any5_sum / n,
+                recall_any_at_10: 0.0,  // not tracked for the settled cell
+                recall_all_at_1:  0.0,  // not tracked for the settled cell
+                recall_all_at_5:  0.0,  // not tracked for the settled cell
+                recall_all_at_10: 0.0,  // not tracked for the settled cell
+                mrr:              mrr_sum / n,
+            })
+        }
+    } else {
+        None
+    };
+    let testmark_cells = LmeTestmarkCells {
+        enabled: settle,
+        cells: if settle {
+            vec!["organic".to_string(), "settled".to_string()]
+        } else {
+            vec!["organic".to_string()]
+        },
+        settle_trigger_tool: if settle { Some("moot_reindex".to_string()) } else { None },
+        settle_trigger_description: if settle {
+            Some(
+                "Triggers background backfill of every unindexed drawer to full coverage; \
+                 corpus_encode drain barrier polled until idle before re-running queries \
+                 as the settled cell."
+                    .to_string(),
+            )
+        } else {
+            None
+        },
+        rationale: if settle {
+            Some(
+                "With two-tier vector composition, ORGANIC (query immediately after ingest \
+                 and drain) and SETTLED (query after moot_reindex and drain) are two \
+                 distinct performance states; neither may substitute for the other in \
+                 published numbers."
+                    .to_string(),
+            )
+        } else {
+            None
+        },
+        settled_aggregate,
+    };
+
     LmeReport {
         run_id,
         run_label,
@@ -893,6 +1064,7 @@ pub fn build_lme_report(
         estate_encryption,
         cache_hits,
         cache_misses,
+        testmark_cells,
     }
 }
 
@@ -1084,6 +1256,7 @@ mod report_provenance_tests {
             &HashMap::new(),
             "CACHE-SENTINEL".to_string(),
             "ENCRYPTION-SENTINEL".to_string(),
+            false,  // settle: off for this boundary test
         );
         assert_eq!(report.estate_cache, "CACHE-SENTINEL");
         assert_eq!(report.estate_encryption, "ENCRYPTION-SENTINEL");

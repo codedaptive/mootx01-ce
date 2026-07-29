@@ -212,7 +212,12 @@ struct LMEScorerInfrastructureTests {
             denseDiscrimination: nil,
             denseRecallProvenance: nil,
             cacheHit: nil,
-            drainLaneObserved: nil
+            drainLaneObserved: nil,
+            settledRecallAnyAt5: nil,
+            settledMrr: nil,
+            settledRankedSessionIDs: nil,
+            settledQueryLatencySeconds: nil,
+            settledDrainLaneObserved: nil
         )
         let tokenEfficiency = LMEReportTokenEfficiency(
             exactArmMeanTokens: 1200.0, denseArmMeanTokens: 300.0,
@@ -229,6 +234,14 @@ struct LMEScorerInfrastructureTests {
             exactDegradedCount: 0,
             denseDegradedCount: 0
         )
+        let testmarkCells = LMETestmarkCells(
+            enabled: false,
+            cells: ["organic"],
+            settleTriggerTool: nil,
+            settleTriggerDescription: nil,
+            rationale: nil,
+            settledAggregate: nil
+        )
         let report = LMEReport(
             runID: "TEST-RUN-ID", runLabel: "lme-s-seed20260725",
             variant: "s", generatedAt: "2026-07-25T00:00:00Z",
@@ -240,7 +253,8 @@ struct LMEScorerInfrastructureTests {
             estateCache: "off",
             cacheHits: 0,
             cacheMisses: 0,
-            estateEncryption: "plaintext-optout"
+            estateEncryption: "plaintext-optout",
+            testmarkCells: testmarkCells
         )
 
         let encoder = JSONEncoder()
@@ -320,7 +334,10 @@ struct LMEScorerInfrastructureTests {
             denseJudgeAnswer: nil,
             denseJudgeCorrect: nil,
             cacheHit: nil,
-            drainLaneObserved: nil
+            drainLaneObserved: nil,
+            settledRetrievedUUIDs: nil,
+            settledQueryLatencySeconds: nil,
+            settledDrainLaneObserved: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == false)
@@ -359,7 +376,10 @@ struct LMEScorerInfrastructureTests {
             denseJudgeAnswer: nil,
             denseJudgeCorrect: nil,
             cacheHit: nil,
-            drainLaneObserved: nil
+            drainLaneObserved: nil,
+            settledRetrievedUUIDs: nil,
+            settledQueryLatencySeconds: nil,
+            settledDrainLaneObserved: nil
         )
         let score = scoreLMEQuestion(result)
         #expect(score.guardHealthy == true)
@@ -505,6 +525,11 @@ private func makeScore(
         queryLatencySeconds: queryLatency,
         writeMeanLatencySeconds: 0.01,
         turnsIngested: 5,
-        retrievedUUIDCount: 3
+        retrievedUUIDCount: 3,
+        settledRecallAnyAt5: nil,
+        settledMrr: nil,
+        settledRankedSessionIDs: nil,
+        settledQueryLatencySeconds: nil,
+        settledDrainLaneObserved: nil
     )
 }

@@ -254,6 +254,10 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     } else {
         ScratchEstatePosture::PlaintextOptOut
     };
+    // --settle: run each question twice — ORGANIC cell (immediately after ingest +
+    // drain) and SETTLED cell (after moot_reindex + drain). Both cells appear in the
+    // report under testmark_cells. Off by default. Twin of Swift --settle flag.
+    let settle = flag_present("--settle", args);
 
     eprintln!("[lme] loading corpus from {corpus_path}");
     let corpus = load_corpus(Path::new(&corpus_path))
@@ -274,6 +278,9 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
     };
     eprintln!("[lme] exact-strategy: {}", exact_strategy.as_str());
     eprintln!("[lme] encode-barrier: {}", encode_barrier.as_str());
+    if settle {
+        eprintln!("[lme] settle: on (ORGANIC + SETTLED cells via moot_reindex)");
+    }
 
     let run_config = LmeRunConfig {
         moot_binary: binary,
@@ -289,6 +296,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         exact_strategy,
         cache_dir,
         scratch_posture,
+        settle,
     };
 
     // Keep results alongside scores so the transcript writer can read judge fields,
@@ -363,6 +371,7 @@ fn run_longmemeval(args: &[String]) -> Result<(), String> {
         &drain_lane_by_id,
         estate_cache.as_str().to_string(),
         scratch_posture.as_str().to_string(),
+        settle,
     );
 
     // Print summary.
