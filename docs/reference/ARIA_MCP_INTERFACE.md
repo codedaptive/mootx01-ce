@@ -245,10 +245,11 @@ as the final line of the text payload. The line carries two space-separated toke
   `GLKRecallResult.denseLaneStatus` vocabulary: `providerOptOut`, `noFloatRows`,
   `storeError`, `emptyQuery`). The default provider is `deterministic` (FNV-1a
   tokenization + FloatSimHash projection — permanent federation-grade vector,
-  surface/lexical signal). The v1.1 learned semantic lane (MiniLM/MPNet/Gemma)
-  is additive; when wired it contributes a richer signal but does not replace
-  the deterministic lane. Callers use `dense_lane` to distinguish a result that
-  included vector scoring from a structural/BM25-only result.
+  surface/lexical signal). An optional host-supplied learned semantic lane
+  (MiniLM/MPNet/Gemma, per CORPUSKIT_SPEC §9.2) is additive; when wired it
+  contributes a richer signal but does not replace the deterministic lane.
+  Callers use `dense_lane` to distinguish a result that included vector scoring
+  from a structural/BM25-only result.
 
 - `degraded_stages:<list>` — pipeline stages that encountered a recoverable error
   and were skipped. `degraded_stages:none` means every stage succeeded (happy

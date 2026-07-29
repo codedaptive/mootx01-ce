@@ -175,7 +175,7 @@ enum RecipeTools {
     private static func shapedRecallTool() -> ProjectedTool {
         ProjectedTool(
             name: shapedRecallToolName,
-            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that are weaker on small corpora until the embedding encoder lands (v1.1 planned), so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision.",
+            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that produce narrower relative score gaps on small estates, so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema("The search query text — drives BM25 + vector recall."),

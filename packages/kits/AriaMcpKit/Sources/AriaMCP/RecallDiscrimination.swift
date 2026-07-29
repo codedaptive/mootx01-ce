@@ -141,11 +141,10 @@ public enum RecallDiscrimination {
         case .medium:
             base = "discrimination: medium — partial separation."
         case .low:
-            // For small corpora the semantic/associative modes (conceptual
-            // shaped-recall, partial_cue) produce near-flat scores until the
-            // embedding encoder (v1.1) lands — this is expected, not an error.
-            // Direct the AI toward lexical/precise modes when it needs ranking
-            // that it can trust on small estates.
+            // For small estates the semantic/associative modes (conceptual
+            // shaped-recall, partial_cue) produce narrower relative score gaps —
+            // low discrimination is expected here, not an error.
+            // Direct the AI toward lexical/precise modes for precision retrieval.
             base = "discrimination: low — top results are within epsilon; treat as effectively unranked. "
                 + "Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for "
                 + "precision, or widen the query."
