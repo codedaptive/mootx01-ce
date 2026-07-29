@@ -656,6 +656,84 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    // ── Wave-2 vague tier methods (SPEC_CONSOLIDATION_VAGUE_RECALL §3.2, §4.4, §5.1) ──
+
+    /// Atomically consolidate N constituents into a pre-built vague drawer.
+    ///
+    /// Executes steps 2–4 of spec §3.2 in one serializable transaction:
+    ///   2. Capture the vague drawer.
+    ///   3. Create `_consolidated_from` tunnels (vague → each constituent).
+    ///   4. Set `represented_by_vague` (bit 21) on each constituent.
+    ///
+    /// Pre-conditions (checked by caller, ConsolidationSweep):
+    ///   - `vague_drawer.is_vague()` is true (bit 20 set).
+    ///   - `constituent_ids.len() >= 3` (D5 min cluster size).
+    ///
+    /// Mirrors Swift `DrawerStore.consolidateTransactionally`.
+    fn consolidate_transactionally(
+        &self,
+        _vague_drawer: &crate::drawer::Drawer,
+        _constituent_ids: &[&str],
+        _added_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "consolidate_transactionally not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Return a bounded slice of candidate drawers eligible for consolidation.
+    ///
+    /// Returns active, non-vague, non-absorbed drawers. The caller applies
+    /// the recall-clock aging gate (D3) and Hamming-NN cluster detection (§3.1).
+    ///
+    /// Mirrors Swift `DrawerStore.drawersEligibleForConsolidation`.
+    fn drawers_eligible_for_consolidation(
+        &self,
+        _older_than: i64,
+        _limit: usize,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "drawers_eligible_for_consolidation not implemented for this DrawerStore impl"
+                .to_string(),
+        ))
+    }
+
+    /// Return the IDs of all constituent drawers for a vague item.
+    ///
+    /// Reads active `_consolidated_from` tunnels where
+    /// `source_drawer_id == vague_drawer_id`. Used by the two-hop `vague_recall`
+    /// verb (hop-2 constituent hydration) and by `expunge_gated` cascade.
+    ///
+    /// Mirrors Swift `DrawerStore.constituentIDsForVagueItem`.
+    fn constituent_ids_for_vague_item(
+        &self,
+        _vague_drawer_id: &str,
+    ) -> Result<Vec<String>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "constituent_ids_for_vague_item not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Fold one new constituent into an existing vague item (§5.1).
+    ///
+    /// Sets `represented_by_vague` (bit 21) on the constituent and appends a
+    /// `_consolidated_from` tunnel in one transaction. Rejects if the vague
+    /// item is already at level 2 (§5.4 level cap).
+    ///
+    /// Mirrors Swift `DrawerStore.foldIn`.
+    fn fold_in(
+        &self,
+        _constituent_id: &str,
+        _into_vague_drawer_id: &str,
+        _added_by: &str,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "fold_in not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Append a previously-produced expunge audit event to the audit log.
     ///
     /// Called by the GLK orchestration path after step 2 (cross-kit vector

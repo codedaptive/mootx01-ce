@@ -2071,6 +2071,48 @@ impl DrawerStore for DrawerStoreCore {
         let _ = row_store.insert("erasure_ledger", ledger_vals);
         // Ignore duplicate-key if already in the ledger.
 
+        // Wave-2 deletion cascade (§5.3 / SPEC_CONSOLIDATION_VAGUE_RECALL):
+        // if this drawer is a vague item (bit 20), clear representedByVague
+        // (bit 21) from every constituent before they lose their reference
+        // home. Runs in the same logical write group as the tombstone above.
+        // Mirrors Swift DrawerStore.expungeGated vague cascade block.
+        if (prior_operational & DrawerFeatureFlags::IS_VAGUE) != 0 {
+            let tunnel_pred = StoragePredicate::And(vec![
+                StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "sourceDrawerId"),
+                    TypedValue::Text(drawer_id.to_string()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "label"),
+                    TypedValue::Text("_consolidated_from".to_string()),
+                ),
+                StoragePredicate::IsNull(Column::new(T_TUNNELS, "tombstonedAt")),
+            ]);
+            let tunnel_rows = row_store
+                .query(T_TUNNELS, Some(&tunnel_pred), &[], None, None)
+                .map_err(map_storage_err)?;
+            for tr in &tunnel_rows {
+                let constituent_id = match opt_string_value_of(tr.get("targetDrawerId")) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let constituent_op = self
+                    .read_drawer_bitmap(&constituent_id, "operationalBitmap")
+                    .unwrap_or(0);
+                let cleared_op = constituent_op & !DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
+                let mut cv = BTreeMap::new();
+                cv.insert("operationalBitmap".to_string(), TypedValue::Bitmap(cleared_op));
+                let _ = row_store.update(
+                    T_DRAWERS,
+                    cv,
+                    &StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(constituent_id),
+                    ),
+                );
+            }
+        }
+
         // ── Scrub every lineage sibling ──
         for sibling_id in &lineage_ids {
             if sibling_id == drawer_id {
@@ -4530,6 +4572,328 @@ impl DrawerStore for DrawerStoreCore {
         let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
         fp_store.get(wing, room)
     }
+
+    // ── Wave-2 vague tier (SPEC_CONSOLIDATION_VAGUE_RECALL §3.2 / §4.4 / §5.1) ──
+
+    /// Atomically consolidate N constituents into a pre-built vague drawer.
+    ///
+    /// Executes steps 2–4 of §3.2:
+    ///   2. Capture the vague drawer via `add_drawer`.
+    ///   3. Insert one `_consolidated_from` tunnel per constituent.
+    ///   4. OR representedByVague (bit 21) into each constituent's bitmap.
+    ///
+    /// The in-memory store's single-threaded mutex makes these writes
+    /// effectively atomic without an explicit BEGIN/COMMIT.
+    ///
+    /// Mirrors Swift `DrawerStore.consolidateTransactionally`.
+    fn consolidate_transactionally(
+        &self,
+        vague_drawer: &crate::drawer::Drawer,
+        constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Pre-condition: vague drawer must have bit 20 set.
+        if (vague_drawer.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) == 0 {
+            return Err(LocusKitError::InvalidContent(
+                "vagueDrawer must have isVague (bit 20) set before calling \
+                 consolidate_transactionally"
+                    .to_string(),
+            ));
+        }
+        // D5 minimum cluster size.
+        if constituent_ids.len() < 3 {
+            return Err(LocusKitError::InvalidContent(format!(
+                "consolidation requires at least 3 constituents (D5); got {}",
+                constituent_ids.len()
+            )));
+        }
+
+        let row_store = self.storage.row_store();
+
+        // Read constituent parent_node_ids and current operational bitmaps
+        // before any writes (mirrors Swift pre-transaction read block).
+        let mut constituent_parent_ids: Vec<String> = Vec::with_capacity(constituent_ids.len());
+        let mut constituent_op_bitmaps: Vec<i64> = Vec::with_capacity(constituent_ids.len());
+        for &cid in constituent_ids {
+            let rows = row_store
+                .query(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(cid.to_string()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            let cr = rows.into_iter().next().ok_or_else(|| LocusKitError::DrawerNotFound {
+                id: cid.to_string(),
+            })?;
+            constituent_parent_ids.push(string_value_of(cr.get("parent_node_id")));
+            constituent_op_bitmaps.push(i64_value_of(cr.get("operationalBitmap")));
+        }
+
+        // Resolve node display names for tunnel endpoint labeling.
+        let mut all_parent_ids: Vec<String> = Vec::with_capacity(constituent_ids.len() + 1);
+        all_parent_ids.push(vague_drawer.parent_node_id.clone());
+        all_parent_ids.extend_from_slice(&constituent_parent_ids);
+        let node_names = self.resolve_node_names(&all_parent_ids)?;
+        let (vague_wing, vague_room) = node_names
+            .get(&vague_drawer.parent_node_id)
+            .cloned()
+            .unwrap_or_default();
+
+        // Step 2: Capture the vague drawer (gated write, audit event).
+        self.add_drawer(vague_drawer, now)?;
+
+        // Step 3: Insert one _consolidated_from tunnel per constituent.
+        // kind = References (raw 1); label discriminates from other references.
+        for (i, &cid) in constituent_ids.iter().enumerate() {
+            let c_parent_id = &constituent_parent_ids[i];
+            let (c_wing, c_room) = node_names.get(c_parent_id).cloned().unwrap_or_default();
+            let mut tunnel = Tunnel::new(
+                format!("_consolidated_from:{}:{}", vague_drawer.id, cid),
+                vague_wing.clone(),
+                vague_room.clone(),
+                c_wing,
+                c_room,
+                "_consolidated_from".to_string(),
+                added_by.to_string(),
+                now,
+            );
+            tunnel.kind = TunnelKind::References;
+            tunnel.source_drawer_id = Some(vague_drawer.id.clone());
+            tunnel.target_drawer_id = Some(cid.to_string());
+            row_store
+                .insert(T_TUNNELS, tunnel_values(&tunnel))
+                .map_err(map_storage_err)?;
+        }
+
+        // Step 4: OR representedByVague (bit 21) into each constituent.
+        for (i, &cid) in constituent_ids.iter().enumerate() {
+            let new_op = constituent_op_bitmaps[i] | DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
+            let mut uv = BTreeMap::new();
+            uv.insert("operationalBitmap".to_string(), TypedValue::Bitmap(new_op));
+            row_store
+                .update(
+                    T_DRAWERS,
+                    uv,
+                    &StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(cid.to_string()),
+                    ),
+                )
+                .map_err(map_storage_err)?;
+        }
+
+        Ok(())
+    }
+
+    /// Return a bounded slice of candidate drawers eligible for consolidation.
+    ///
+    /// Returns active, non-vague (bit 20 = 0), non-absorbed (bit 21 = 0)
+    /// drawers ordered oldest-first. The `older_than` aging gate is applied
+    /// by the caller (ConsolidationSweep) on top of this result set.
+    ///
+    /// Mirrors Swift `DrawerStore.drawersEligibleForConsolidation`.
+    fn drawers_eligible_for_consolidation(
+        &self,
+        _older_than: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        let row_store = self.storage.row_store();
+        // Eligible: not tombstoned, bit-20 clear, bit-21 clear.
+        // The full aging gate (D3 recall-clock) and cluster detection (§3.1)
+        // are applied by ConsolidationSweep on top of this result set.
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            // bit 20 (is_vague) must be clear.
+            StoragePredicate::BitmaskNone {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::IS_VAGUE,
+            },
+            // bit 21 (represented_by_vague) must be clear.
+            StoragePredicate::BitmaskNone {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::REPRESENTED_BY_VAGUE,
+            },
+        ]);
+        let limit_opt = if limit > 0 { Some(limit) } else { None };
+        let rows = row_store
+            .query(
+                T_DRAWERS,
+                Some(&predicate),
+                &[OrderClause::new(
+                    Column::new(T_DRAWERS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                limit_opt,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        decode_rows_skip_corrupt(&rows, "drawers_eligible_for_consolidation")
+    }
+
+    /// Return the constituent drawer IDs for a vague item.
+    ///
+    /// Reads all active `_consolidated_from` tunnels where
+    /// `sourceDrawerId == vague_drawer_id`. Used by the two-hop
+    /// `vague_recall` verb and by the `expunge_gated` cascade.
+    ///
+    /// Mirrors Swift `DrawerStore.constituentIDsForVagueItem`.
+    fn constituent_ids_for_vague_item(
+        &self,
+        vague_drawer_id: &str,
+    ) -> Result<Vec<String>, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new(T_TUNNELS, "sourceDrawerId"),
+                TypedValue::Text(vague_drawer_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new(T_TUNNELS, "label"),
+                TypedValue::Text("_consolidated_from".to_string()),
+            ),
+            StoragePredicate::IsNull(Column::new(T_TUNNELS, "tombstonedAt")),
+        ]);
+        let tunnel_rows = row_store
+            .query(T_TUNNELS, Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(tunnel_rows
+            .iter()
+            .filter_map(|r| opt_string_value_of(r.get("targetDrawerId")))
+            .collect())
+    }
+
+    /// Fold one new constituent into an existing vague item (§5.1).
+    ///
+    /// Sets `representedByVague` (bit 21) on the constituent and appends a
+    /// `_consolidated_from` tunnel. Rejects if the vague item is at level 2
+    /// (§5.4 cap). The rejection-rate counter (D10) is driven by the caller.
+    ///
+    /// Mirrors Swift `DrawerStore.foldIn`.
+    fn fold_in(
+        &self,
+        constituent_id: &str,
+        into_vague_drawer_id: &str,
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        let row_store = self.storage.row_store();
+
+        // Read vague item's operational bitmap and parent_node_id.
+        let vague_rows = row_store
+            .query(
+                T_DRAWERS,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(into_vague_drawer_id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let vague_row = vague_rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| LocusKitError::DrawerNotFound {
+                id: into_vague_drawer_id.to_string(),
+            })?;
+        let vague_op = i64_value_of(vague_row.get("operationalBitmap"));
+
+        // Enforce: target must be a vague item (bit 20 set).
+        if (vague_op & DrawerFeatureFlags::IS_VAGUE) == 0 {
+            return Err(LocusKitError::InvalidContent(format!(
+                "fold_in target {} is not a vague item (bit 20 not set)",
+                into_vague_drawer_id
+            )));
+        }
+
+        // Enforce vagueLevel cap (§5.4 / D8): level must be ≤ 1.
+        // vague_level 2-bit sub-field: mask 0xC00000, shift 22 (cookbook §2.4.2).
+        let current_level = (((vague_op & DrawerFeatureFlags::VAGUE_LEVEL_MASK)
+            >> DrawerFeatureFlags::VAGUE_LEVEL_SHIFT) as u8)
+            .min(2);
+        if current_level >= 2 {
+            return Err(LocusKitError::InvalidContent(format!(
+                "level cap: vague item {} is already at level {}",
+                into_vague_drawer_id, current_level
+            )));
+        }
+
+        // Read constituent's operational bitmap and parent_node_id.
+        let constituent_rows = row_store
+            .query(
+                T_DRAWERS,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(constituent_id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let constituent_row = constituent_rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| LocusKitError::DrawerNotFound {
+                id: constituent_id.to_string(),
+            })?;
+        let constituent_op = i64_value_of(constituent_row.get("operationalBitmap"));
+        let constituent_parent_id = string_value_of(constituent_row.get("parent_node_id"));
+        let vague_parent_id = string_value_of(vague_row.get("parent_node_id"));
+
+        // Resolve node names for tunnel endpoint labeling.
+        let node_names = self.resolve_node_names(&[
+            vague_parent_id.clone(),
+            constituent_parent_id.clone(),
+        ])?;
+        let (vague_wing, vague_room) =
+            node_names.get(&vague_parent_id).cloned().unwrap_or_default();
+        let (c_wing, c_room) =
+            node_names.get(&constituent_parent_id).cloned().unwrap_or_default();
+
+        // Build _consolidated_from tunnel.
+        let mut tunnel = Tunnel::new(
+            format!("_consolidated_from:{}:{}", into_vague_drawer_id, constituent_id),
+            vague_wing,
+            vague_room,
+            c_wing,
+            c_room,
+            "_consolidated_from".to_string(),
+            added_by.to_string(),
+            now,
+        );
+        tunnel.kind = TunnelKind::References;
+        tunnel.source_drawer_id = Some(into_vague_drawer_id.to_string());
+        tunnel.target_drawer_id = Some(constituent_id.to_string());
+
+        let new_constituent_op = constituent_op | DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
+
+        // Atomic pair: tunnel insert + constituent bitmap update.
+        row_store
+            .insert(T_TUNNELS, tunnel_values(&tunnel))
+            .map_err(map_storage_err)?;
+        let mut uv = BTreeMap::new();
+        uv.insert("operationalBitmap".to_string(), TypedValue::Bitmap(new_constituent_op));
+        row_store
+            .update(
+                T_DRAWERS,
+                uv,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(constituent_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5130,6 +5494,38 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError>
     {
         self.inner.get_container_fingerprint(wing, room)
+    }
+    // Wave-2 vague tier delegation — forward to DrawerStoreCore.
+    fn consolidate_transactionally(
+        &self,
+        vague_drawer: &crate::drawer::Drawer,
+        constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.consolidate_transactionally(vague_drawer, constituent_ids, added_by, now)
+    }
+    fn drawers_eligible_for_consolidation(
+        &self,
+        older_than: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.drawers_eligible_for_consolidation(older_than, limit)
+    }
+    fn constituent_ids_for_vague_item(
+        &self,
+        vague_drawer_id: &str,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.inner.constituent_ids_for_vague_item(vague_drawer_id)
+    }
+    fn fold_in(
+        &self,
+        constituent_id: &str,
+        into_vague_drawer_id: &str,
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.fold_in(constituent_id, into_vague_drawer_id, added_by, now)
     }
 }
 
