@@ -38,6 +38,7 @@ import Foundation
 import GeniusLocusKit
 import OSLog
 import PersistenceKit
+import VectorKit
 
 private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 
@@ -264,6 +265,13 @@ private extension GeniusLocusKit {
     static func _runDistillationDataMigration(
         storage: any Storage
     ) async throws -> DistillationStorageMigrationReport {
+
+        // Ensure the VectorKit schema (vectors table) is registered before
+        // we query it in step (c). On a 1.0.x estate the schema was already
+        // applied; on a fresh 1.1.x estate the table may not exist yet.
+        // This mirrors the pattern in SharedContentMigration (line 832).
+        // Idempotent: if already at the current version, migrate(to:) is a no-op.
+        try await storage.migrate(to: VectorStore.schemaDeclaration)
 
         // Steps (c)→(b)→(d) run inside a single storage transaction.
         // Ordering is load-bearing: (c) reads the tunnels that (d) drops
