@@ -1657,10 +1657,12 @@ struct VaultBridgeTests {
         let factoidFileText = try String(contentsOf: factoidFile, encoding: .utf8)
         #expect(!factoidFileText.contains("_distilled_from"),
                 "Bug N: factoid vault file must NOT contain '_distilled_from' link text in body")
-        // The frontmatter carries the key for backward compatibility with old
-        // exports — the 1.1.x import path IGNORES it (see Assertion 3 below).
-        #expect(factoidFileText.contains("distilled_from_sources"),
-                "Bug N: factoid vault file must carry 'distilled_from_sources' frontmatter key")
+        // SPEC_DISTILLATION_STORAGE §13.2 (completion-decision 6): the
+        // `distilled_from_sources` frontmatter key is retired in 1.1.x and
+        // must NOT appear in any new export. The import path already ignores
+        // it for old exports (see Assertion 3 below).
+        #expect(!factoidFileText.contains("distilled_from_sources"),
+                "§13.2: export must NOT emit the retired 'distilled_from_sources' frontmatter key")
 
         // --- Assertion 2: re-import into a fresh estate, assert clean content ---
         let (kit2, handle2) = try await openEstate()
