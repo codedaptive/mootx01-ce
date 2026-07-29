@@ -225,7 +225,7 @@ enum RecipeTools {
             description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary recall across any confirmation state. null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve, hasLinks. Omit for ordinary recall across any confirmation state. \"hasLinks\" scopes synthesis to drawers with links/citations — citation-scoped synthesis. null is invalid."),
                     "limit": integerSchema("Max drawers to recall. Omit for no explicit cap; null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
@@ -1309,6 +1309,11 @@ enum RecipeTools {
         case "exportable": return [.exportable]
         case "contained": return [.contained]
         case "currentlyBelieve": return [.currentlyBelieve]
+        // hasLinks filter: constrains grounded synthesis recall to drawers
+        // that contain links/citations (bit 15). Enables citation-scoped
+        // synthesis — the synthesizer receives only link-bearing sources.
+        // Feature-flag adoption §2.
+        case "hasLinks": return [.hasFeatureFlag(.hasLinks)]
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
