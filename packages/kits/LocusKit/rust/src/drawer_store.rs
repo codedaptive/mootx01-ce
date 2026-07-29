@@ -715,22 +715,24 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Fold one new constituent into an existing vague item (§5.1).
+    /// Wave-2 §5.1 fold-in reconsolidation: capture a regenerated vague
+    /// version in the SAME lineage as the prior vague item (the capture
+    /// cascade supersedes the prior — the ONE legitimate supersession,
+    /// §3.3), then write `_consolidated_from` tunnels to the FULL enlarged
+    /// constituent set and OR `represented_by_vague` (bit 21, idempotent)
+    /// on every constituent.
     ///
-    /// Sets `represented_by_vague` (bit 21) on the constituent and appends a
-    /// `_consolidated_from` tunnel in one transaction. Rejects if the vague
-    /// item is already at level 2 (§5.4 level cap).
-    ///
-    /// Mirrors Swift `DrawerStore.foldIn`.
-    fn fold_in(
+    /// Mirrors Swift `DrawerStore.foldInTransactionally`.
+    fn fold_in_transactionally(
         &self,
-        _constituent_id: &str,
-        _into_vague_drawer_id: &str,
+        _vague_v2: &crate::drawer::Drawer,
+        _prior_vague_id: &str,
+        _enlarged_constituent_ids: &[&str],
         _added_by: &str,
         _now: i64,
     ) -> Result<(), LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "fold_in not implemented for this DrawerStore impl".to_string(),
+            "fold_in_transactionally not implemented for this DrawerStore impl".to_string(),
         ))
     }
 

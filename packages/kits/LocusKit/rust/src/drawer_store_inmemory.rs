@@ -4775,123 +4775,139 @@ impl DrawerStore for DrawerStoreCore {
     /// (§5.4 cap). The rejection-rate counter (D10) is driven by the caller.
     ///
     /// Mirrors Swift `DrawerStore.foldIn`.
-    fn fold_in(
+    fn fold_in_transactionally(
         &self,
-        constituent_id: &str,
-        into_vague_drawer_id: &str,
+        vague_v2: &crate::drawer::Drawer,
+        prior_vague_id: &str,
+        enlarged_constituent_ids: &[&str],
         added_by: &str,
         now: i64,
     ) -> Result<(), LocusKitError> {
+        // Validations mirror Swift foldInTransactionally: thrown, not trapped.
+        if (vague_v2.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) == 0 {
+            return Err(LocusKitError::InvalidContent(
+                "vagueV2 must have isVague (bit 20) set before fold_in_transactionally"
+                    .to_string(),
+            ));
+        }
+        if enlarged_constituent_ids.len() < 3 {
+            return Err(LocusKitError::InvalidContent(format!(
+                "fold-in requires at least 3 constituents (D5); got {}",
+                enlarged_constituent_ids.len()
+            )));
+        }
         let row_store = self.storage.row_store();
-
-        // Read vague item's operational bitmap and parent_node_id.
-        let vague_rows = row_store
+        let prior_rows = row_store
             .query(
                 T_DRAWERS,
                 Some(&StoragePredicate::Eq(
                     Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(into_vague_drawer_id.to_string()),
+                    TypedValue::Text(prior_vague_id.to_string()),
                 )),
                 &[],
                 Some(1),
                 None,
             )
             .map_err(map_storage_err)?;
-        let vague_row = vague_rows
+        let prior_row = prior_rows
             .into_iter()
             .next()
             .ok_or_else(|| LocusKitError::DrawerNotFound {
-                id: into_vague_drawer_id.to_string(),
+                id: prior_vague_id.to_string(),
             })?;
-        let vague_op = i64_value_of(vague_row.get("operationalBitmap"));
-
-        // Enforce: target must be a vague item (bit 20 set).
-        if (vague_op & DrawerFeatureFlags::IS_VAGUE) == 0 {
+        let prior_op = i64_value_of(prior_row.get("operationalBitmap"));
+        if (prior_op & DrawerFeatureFlags::IS_VAGUE) == 0 {
             return Err(LocusKitError::InvalidContent(format!(
-                "fold_in target {} is not a vague item (bit 20 not set)",
-                into_vague_drawer_id
+                "fold-in prior {} is not a vague item",
+                prior_vague_id
             )));
         }
-
-        // Enforce vagueLevel cap (§5.4 / D8): level must be ≤ 1.
-        // vague_level 2-bit sub-field: mask 0xC00000, shift 22 (cookbook §2.4.2).
-        let current_level = (((vague_op & DrawerFeatureFlags::VAGUE_LEVEL_MASK)
-            >> DrawerFeatureFlags::VAGUE_LEVEL_SHIFT) as u8)
-            .min(2);
-        if current_level >= 2 {
-            return Err(LocusKitError::InvalidContent(format!(
-                "level cap: vague item {} is already at level {}",
-                into_vague_drawer_id, current_level
-            )));
+        let prior_lineage = string_value_of(prior_row.get("lineageID"));
+        if prior_lineage != vague_v2.lineage_id.to_string() {
+            return Err(LocusKitError::InvalidContent(
+                "fold-in v2 must share the prior vague item's lineage (§3.3 containment)"
+                    .to_string(),
+            ));
         }
 
-        // Read constituent's operational bitmap and parent_node_id.
-        let constituent_rows = row_store
-            .query(
-                T_DRAWERS,
-                Some(&StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(constituent_id.to_string()),
-                )),
-                &[],
-                Some(1),
-                None,
-            )
-            .map_err(map_storage_err)?;
-        let constituent_row = constituent_rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| LocusKitError::DrawerNotFound {
-                id: constituent_id.to_string(),
+        // Pre-read constituents (parents + bitmaps) before any writes.
+        let mut constituent_parent_ids: Vec<String> =
+            Vec::with_capacity(enlarged_constituent_ids.len());
+        let mut constituent_op_bitmaps: Vec<i64> =
+            Vec::with_capacity(enlarged_constituent_ids.len());
+        for &cid in enlarged_constituent_ids {
+            let rows = row_store
+                .query(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(cid.to_string()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            let cr = rows.into_iter().next().ok_or_else(|| LocusKitError::DrawerNotFound {
+                id: cid.to_string(),
             })?;
-        let constituent_op = i64_value_of(constituent_row.get("operationalBitmap"));
-        let constituent_parent_id = string_value_of(constituent_row.get("parent_node_id"));
-        let vague_parent_id = string_value_of(vague_row.get("parent_node_id"));
+            constituent_parent_ids.push(string_value_of(cr.get("parent_node_id")));
+            constituent_op_bitmaps.push(i64_value_of(cr.get("operationalBitmap")));
+        }
+        let mut all_parent_ids: Vec<String> =
+            Vec::with_capacity(enlarged_constituent_ids.len() + 1);
+        all_parent_ids.push(vague_v2.parent_node_id.clone());
+        all_parent_ids.extend_from_slice(&constituent_parent_ids);
+        let node_names = self.resolve_node_names(&all_parent_ids)?;
+        let (vague_wing, vague_room) = node_names
+            .get(&vague_v2.parent_node_id)
+            .cloned()
+            .unwrap_or_default();
 
-        // Resolve node names for tunnel endpoint labeling.
-        let node_names = self.resolve_node_names(&[
-            vague_parent_id.clone(),
-            constituent_parent_id.clone(),
-        ])?;
-        let (vague_wing, vague_room) =
-            node_names.get(&vague_parent_id).cloned().unwrap_or_default();
-        let (c_wing, c_room) =
-            node_names.get(&constituent_parent_id).cloned().unwrap_or_default();
+        // Step 2 (§5.1): capture v2. add_drawer detects the active
+        // predecessor in the SAME lineage and runs the supersession cascade
+        // (supersedes tunnel + gate-validated state flip) — the one
+        // legitimate supersession in the consolidation design (§3.3).
+        self.add_drawer(vague_v2, now)?;
 
-        // Build _consolidated_from tunnel.
-        let mut tunnel = Tunnel::new(
-            format!("_consolidated_from:{}:{}", into_vague_drawer_id, constituent_id),
-            vague_wing,
-            vague_room,
-            c_wing,
-            c_room,
-            "_consolidated_from".to_string(),
-            added_by.to_string(),
-            now,
-        );
-        tunnel.kind = TunnelKind::References;
-        tunnel.source_drawer_id = Some(into_vague_drawer_id.to_string());
-        tunnel.target_drawer_id = Some(constituent_id.to_string());
+        // Step 3: _consolidated_from tunnels to the FULL enlarged set.
+        for (i, &cid) in enlarged_constituent_ids.iter().enumerate() {
+            let c_parent_id = &constituent_parent_ids[i];
+            let (c_wing, c_room) = node_names.get(c_parent_id).cloned().unwrap_or_default();
+            let mut tunnel = Tunnel::new(
+                format!("_consolidated_from:{}:{}", vague_v2.id, cid),
+                vague_wing.clone(),
+                vague_room.clone(),
+                c_wing,
+                c_room,
+                "_consolidated_from".to_string(),
+                added_by.to_string(),
+                now,
+            );
+            tunnel.kind = TunnelKind::References;
+            tunnel.source_drawer_id = Some(vague_v2.id.clone());
+            tunnel.target_drawer_id = Some(cid.to_string());
+            row_store
+                .insert(T_TUNNELS, tunnel_values(&tunnel))
+                .map_err(map_storage_err)?;
+        }
 
-        let new_constituent_op = constituent_op | DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
-
-        // Atomic pair: tunnel insert + constituent bitmap update.
-        row_store
-            .insert(T_TUNNELS, tunnel_values(&tunnel))
-            .map_err(map_storage_err)?;
-        let mut uv = BTreeMap::new();
-        uv.insert("operationalBitmap".to_string(), TypedValue::Bitmap(new_constituent_op));
-        row_store
-            .update(
-                T_DRAWERS,
-                uv,
-                &StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(constituent_id.to_string()),
-                ),
-            )
-            .map_err(map_storage_err)?;
-
+        // Step 4: OR represented_by_vague (idempotent for prior constituents).
+        for (i, &cid) in enlarged_constituent_ids.iter().enumerate() {
+            let new_op = constituent_op_bitmaps[i] | DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
+            let mut uv = BTreeMap::new();
+            uv.insert("operationalBitmap".to_string(), TypedValue::Bitmap(new_op));
+            row_store
+                .update(
+                    T_DRAWERS,
+                    uv,
+                    &StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(cid.to_string()),
+                    ),
+                )
+                .map_err(map_storage_err)?;
+        }
         Ok(())
     }
 }
@@ -5518,14 +5534,16 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Vec<String>, LocusKitError> {
         self.inner.constituent_ids_for_vague_item(vague_drawer_id)
     }
-    fn fold_in(
+    fn fold_in_transactionally(
         &self,
-        constituent_id: &str,
-        into_vague_drawer_id: &str,
+        vague_v2: &crate::drawer::Drawer,
+        prior_vague_id: &str,
+        enlarged_constituent_ids: &[&str],
         added_by: &str,
         now: i64,
     ) -> Result<(), LocusKitError> {
-        self.inner.fold_in(constituent_id, into_vague_drawer_id, added_by, now)
+        self.inner.fold_in_transactionally(
+            vague_v2, prior_vague_id, enlarged_constituent_ids, added_by, now)
     }
 }
 
