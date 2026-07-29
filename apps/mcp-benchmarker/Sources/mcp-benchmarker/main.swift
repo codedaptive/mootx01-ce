@@ -26,7 +26,7 @@ import ObserverSink
 // serve     : PRIMARY measurement path. Run as a transparent passthrough MCP
 //             proxy — forward the client to the primary verbatim, optionally
 //             mirror+time+compare a shadow. Guard runs before run report.
-// pressure  : synthetic 4-way load driver ({read,write}×{mootx01,MemPalace}).
+// pressure  : synthetic 4-way load driver ({read,write}×{mootx01,contender}).
 // quality   : DIAGNOSTIC-ONLY corpus scorer. The scratch-ingest publish path
 //             has been removed (SPEC §0 delta, FINDINGS-2026-06-07). Labelled
 //             recall comes only from the transfer→benchmark path. No --report.
@@ -79,10 +79,10 @@ func usageText() -> String {
         diagnosis. The scratch-ingest publish path has been removed (SPEC §0
         delta); labelled recall comes only from the transfer→benchmark path.
         WRITES to both products — point them at SCRATCH backends only
-        (MOOTX01_DATA_DIR=/tmp/..., mempalace --palace /tmp/...).
+        (MOOTX01_DATA_DIR=/tmp/..., contender-mcp --contender-dir /tmp/...).
         --limit-clusters N runs a small slice for quick diagnosis.
 
-      gauntlet --moot-only: run and score only the MOOT backend. MemPalace is
+      gauntlet --moot-only: run and score only the MOOT backend. The contender is
         not started, loaded, guarded, or reported. The corpus, MOOT load/dream,
         query arguments, scorer, and MOOT DegeneracyGuard are unchanged.
 
@@ -601,7 +601,7 @@ func runServe(_ args: [String]) async throws {
 ///   mcp-benchmarker pressure --config c.json [--concurrency N] [--duration S]
 ///       [--stats-store s.sqlite]
 ///
-/// Exercises {read, write} × {mootx01, MemPalace} (source=MemPalace,
+/// Exercises {read, write} × {mootx01, contender} (source=contender,
 /// target=mootx01 in the config) for `--duration` seconds with `--concurrency`
 /// workers per path, reporting throughput + latency per path. WRITE paths
 /// mutate their backend — point them at SCRATCH backends (see CONFIG.md).
@@ -664,10 +664,10 @@ func defaultFixturesRoot() -> URL {
 /// NOT publish a recall comparison. Labelled absolute recall comes only from the
 /// transfer → benchmark live path against the transfer manifest (SPEC §5.4).
 ///
-/// Config convention (same as pressure): source = MemPalace, target = mootx01.
+/// Config convention (same as pressure): source = contender, target = mootx01.
 /// The engine WRITES the corpus to both products, so both MUST be configured
-/// against SCRATCH backends (MOOTX01_DATA_DIR=/tmp/..., mempalace --palace
-/// /tmp/...); never the real palace. `--limit-clusters N` runs only the first N
+/// against SCRATCH backends (MOOTX01_DATA_DIR=/tmp/..., contender-mcp
+/// --contender-dir /tmp/...); never the real estate. `--limit-clusters N` runs only the first N
 /// clusters for a quick diagnostic pass.
 func runQuality(_ args: [String]) async throws {
     let configPath = try requireOption("--config", in: args)
@@ -691,17 +691,17 @@ func runQuality(_ args: [String]) async throws {
 
     """.utf8))
 
-    // source = MemPalace, target = mootx01 (the config convention shared with
+    // source = contender, target = mootx01 (the config convention shared with
     // the pressure mode). The engine writes to BOTH — scratch backends only.
-    let mempalace = try await connectedClient(for: config.source)
+    let contender = try await connectedClient(for: config.source)
     let moot = try await connectedClient(for: config.target)
-    defer { Task { await mempalace.disconnect(); await moot.disconnect() } }
+    defer { Task { await contender.disconnect(); await moot.disconnect() } }
 
     let engine = QualityEngine(
         moot: moot,
         mootVerbs: config.target.verbMap,
-        mempalace: mempalace,
-        mempalaceVerbs: config.source.verbMap,
+        contender: contender,
+        contenderVerbs: config.source.verbMap,
         fixture: fixture,
         limitedToClusters: limitClusters)
 

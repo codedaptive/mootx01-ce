@@ -9,9 +9,9 @@ import Foundation
 // Pipeline (per product, then head-to-head):
 //   1. LOAD   — write every corpus article to BOTH products. mootx01:
 //               location=clusterId, sensitivity=(sensitive→restricted, else
-//               normal). MemPalace: wing=tag.wing, room=tag.room. Each write's
+//               normal). contender: wing=tag.wing, room=tag.room. Each write's
 //               returned product id is recorded in the CorpusIDResolver
-//               (mootx01 echoes a UUID; MemPalace's add returns a drawer_id),
+//               (mootx01 echoes a UUID; the contender's add returns a drawer_id),
 //               and the article body is indexed for the content fallback.
 //   2. CONFIRM— mootx01 only: call moot_confirm_memory on the corpus records
 //               whose tag confirmation=="confirmed" (confirmation is NOT
@@ -21,13 +21,13 @@ import Foundation
 //               / nDCG / precision@k against the query's ground truth.
 //   4. FILTER — score only what each product can actually filter:
 //               mootx01 confirmation (search filter:userConfirmed) and
-//               MemPalace wing (list_drawers wing=<Wing>). Sensitivity / lattice
+//               contender wing (list_drawers wing=<Wing>). Sensitivity / lattice
 //               are NOT search-filterable on mootx01, so those corpus
 //               filter-tests are recorded as skipped, never faked.
 //
 // SCRATCH BOUNDARY (security): both products are launched against SCRATCH data
 // dirs by the config the caller supplies (MOOTX01_DATA_DIR=/tmp/... and
-// mempalace-mcp --palace /tmp/...). This engine WRITES to both products, so the
+// contender-mcp --contender-dir /tmp/...). This engine WRITES to both products, so the
 // caller MUST point them at scratch backends — the real palace is never a valid
 // target. The engine cannot enforce this (the command string is operator
 // input, same trust level as a CLI arg); the quality subcommand's help and
@@ -42,8 +42,8 @@ private let retrievalLimit = 10
 struct QualityEngine {
     let moot: MCPClient
     let mootVerbs: EndpointConfig.VerbMap
-    let mempalace: MCPClient
-    let mempalaceVerbs: EndpointConfig.VerbMap
+    let contender: MCPClient
+    let contenderVerbs: EndpointConfig.VerbMap
     let fixture: QualityFixture
     /// Echoed back into the report so a partial run is labelled as such.
     let limitedToClusters: Int?
@@ -52,9 +52,9 @@ struct QualityEngine {
     func run() async throws -> QualityReport {
         // --- 1. LOAD both products, building each product's id resolver. ---
         var mootResolver = CorpusIDResolver()
-        var mempResolver = CorpusIDResolver()
+        var contenderResolver = CorpusIDResolver()
         var mootWritten = 0
-        var mempWritten = 0
+        var contenderWritten = 0
         // mootx01 product-id per corpus id, needed for the confirm pass (confirm
         // takes the product's own row id, not the corpus id).
         var mootProductID: [String: String] = [:]
@@ -62,7 +62,7 @@ struct QualityEngine {
         for record in fixture.records {
             let body = try fixture.articleText(for: record.id)
             mootResolver.indexArticle(corpusID: record.id, body: body)
-            mempResolver.indexArticle(corpusID: record.id, body: body)
+            contenderResolver.indexArticle(corpusID: record.id, body: body)
 
             // mootx01 write: location = clusterId; sensitivity mapped per the
             // mission rule (corpus "sensitive" → product "restricted", else
@@ -82,22 +82,22 @@ struct QualityEngine {
             }
             mootWritten += 1
 
-            // MemPalace write: wing = tag.wing, room = tag.room.
-            let mempResult = try await mempalace.callTool(
-                mempalaceVerbs.write,
+            // contender write: wing = tag.wing, room = tag.room.
+            let contenderResult = try await contender.callTool(
+                contenderVerbs.write,
                 arguments: [
-                    mempalaceVerbs.contentArg: .string(body),
+                    contenderVerbs.contentArg: .string(body),
                     "wing": .string(record.tags.wing),
                     "room": .string(record.tags.room),
                 ],
-                format: mempalaceVerbs.resultFormat)
-            // MemPalace add returns a drawer_id; record it when present so a
+                format: contenderVerbs.resultFormat)
+            // The contender's add returns a drawer_id; record it when present so a
             // later hit that echoes the drawer id resolves by id (else by
             // content). The drawer id parses as the write's first ordered id.
-            if let pid = mempResult.writeAssignedID ?? mempResult.orderedIDs.first {
-                mempResolver.recordWrite(productID: pid, corpusID: record.id)
+            if let pid = contenderResult.writeAssignedID ?? contenderResult.orderedIDs.first {
+                contenderResolver.recordWrite(productID: pid, corpusID: record.id)
             }
-            mempWritten += 1
+            contenderWritten += 1
         }
 
         // --- 2. CONFIRM pass (mootx01 only). ---
@@ -119,32 +119,32 @@ struct QualityEngine {
         // --- 3. RETRIEVAL scoring for both products. ---
         let mootScored = try await scoreRetrieval(client: moot, verbs: mootVerbs,
                                                   resolver: mootResolver)
-        let mempScored = try await scoreRetrieval(client: mempalace, verbs: mempalaceVerbs,
-                                                  resolver: mempResolver)
+        let contenderScored = try await scoreRetrieval(client: contender, verbs: contenderVerbs,
+                                                       resolver: contenderResolver)
         let mootRetrieval = aggregateRetrieval(mootScored)
-        let mempRetrieval = aggregateRetrieval(mempScored)
+        let contenderRetrieval = aggregateRetrieval(contenderScored)
 
         // --- 4. FILTER scoring (only what each product can filter). ---
         var notes: [String] = []
         let mootFilters = try await scoreMootFilters(resolver: mootResolver, notes: &notes)
-        let mempFilters = try await scoreMempalaceFilters(resolver: mempResolver)
+        let contenderFilters = try await scoreContenderFilters(resolver: contenderResolver)
 
         // --- assemble the report + head-to-head. ---
         let mootProduct = ProductQuality(name: "mootx01", retrieval: mootRetrieval,
                                          filters: mootFilters,
                                          writtenCount: mootWritten, confirmedCount: mootConfirmed)
-        let mempProduct = ProductQuality(name: "mempalace", retrieval: mempRetrieval,
-                                         filters: mempFilters,
-                                         writtenCount: mempWritten, confirmedCount: 0)
+        let contenderProduct = ProductQuality(name: "contender", retrieval: contenderRetrieval,
+                                              filters: contenderFilters,
+                                              writtenCount: contenderWritten, confirmedCount: 0)
 
         let headToHead = [
-            HeadToHead.higherWins(metric: "recall@1", moot: mootRetrieval.recallAt1, mempalace: mempRetrieval.recallAt1),
-            HeadToHead.higherWins(metric: "recall@5", moot: mootRetrieval.recallAt5, mempalace: mempRetrieval.recallAt5),
-            HeadToHead.higherWins(metric: "recall@10", moot: mootRetrieval.recallAt10, mempalace: mempRetrieval.recallAt10),
-            HeadToHead.higherWins(metric: "MRR", moot: mootRetrieval.mrr, mempalace: mempRetrieval.mrr),
-            HeadToHead.higherWins(metric: "nDCG@10", moot: mootRetrieval.ndcgAt10, mempalace: mempRetrieval.ndcgAt10),
-            HeadToHead.higherWins(metric: "P@5", moot: mootRetrieval.precisionAt5, mempalace: mempRetrieval.precisionAt5),
-            HeadToHead.higherWins(metric: "P@10", moot: mootRetrieval.precisionAt10, mempalace: mempRetrieval.precisionAt10),
+            HeadToHead.higherWins(metric: "recall@1", moot: mootRetrieval.recallAt1, contender: contenderRetrieval.recallAt1),
+            HeadToHead.higherWins(metric: "recall@5", moot: mootRetrieval.recallAt5, contender: contenderRetrieval.recallAt5),
+            HeadToHead.higherWins(metric: "recall@10", moot: mootRetrieval.recallAt10, contender: contenderRetrieval.recallAt10),
+            HeadToHead.higherWins(metric: "MRR", moot: mootRetrieval.mrr, contender: contenderRetrieval.mrr),
+            HeadToHead.higherWins(metric: "nDCG@10", moot: mootRetrieval.ndcgAt10, contender: contenderRetrieval.ndcgAt10),
+            HeadToHead.higherWins(metric: "P@5", moot: mootRetrieval.precisionAt5, contender: contenderRetrieval.precisionAt5),
+            HeadToHead.higherWins(metric: "P@10", moot: mootRetrieval.precisionAt10, contender: contenderRetrieval.precisionAt10),
         ]
 
         return QualityReport(
@@ -152,7 +152,7 @@ struct QualityEngine {
             clusterCount: fixture.clustersInOrder.count,
             articleCount: fixture.records.count,
             mootx01: mootProduct,
-            mempalace: mempProduct,
+            contender: contenderProduct,
             headToHead: headToHead,
             notes: notes)
     }
@@ -194,8 +194,8 @@ struct QualityEngine {
                                   notes: inout [String]) async throws -> [FilterResult] {
         var results: [FilterResult] = []
         for test in fixture.filterTests {
-            // Wing tests are MemPalace's axis, not mootx01's — skip here.
-            if test.mempalaceFilter != nil { continue }
+            // Wing tests are the contender's axis, not mootx01's — skip here.
+            if test.contenderFilter != nil { continue }
             // mootx01 can only filter confirmation (userConfirmed). The
             // sensitivity tag is stored but not a search filter enum value.
             guard test.mootFilter.hasPrefix("confirmation=") else {
@@ -234,17 +234,17 @@ struct QualityEngine {
         return results
     }
 
-    /// Scores MemPalace's filterable axis: wing. Each wing filter-test lists the
+    /// Scores the contender's filterable axis: wing. Each wing filter-test lists the
     /// exact cluster membership; list_drawers(wing:) should return exactly that
     /// set. Pagination loops by `offset` until a short/empty page so the full
     /// wing is enumerated (list_drawers caps at 100 per page).
-    private func scoreMempalaceFilters(resolver: CorpusIDResolver) async throws -> [FilterResult] {
+    private func scoreContenderFilters(resolver: CorpusIDResolver) async throws -> [FilterResult] {
         var results: [FilterResult] = []
         for test in fixture.filterTests {
-            // Only the wing tests are MemPalace's axis.
-            guard let mempFilter = test.mempalaceFilter,
-                  mempFilter.hasPrefix("wing=") else { continue }
-            let wing = String(mempFilter.dropFirst("wing=".count))
+            // Only the wing tests are the contender's axis.
+            guard let contenderFilter = test.contenderFilter,
+                  contenderFilter.hasPrefix("wing=") else { continue }
+            let wing = String(contenderFilter.dropFirst("wing=".count))
 
             // Paginate the wing. list_drawers truncates content to a preview,
             // so resolution falls back to the drawer id recorded at write time
@@ -253,14 +253,14 @@ struct QualityEngine {
             var offset = 0
             let pageSize = 100  // list_drawers max
             while true {
-                let page = try await mempalace.callTool(
-                    "mempalace_list_drawers",
+                let page = try await contender.callTool(
+                    contenderVerbs.list ?? "contender_list_drawers",
                     arguments: [
                         "wing": .string(wing),
                         "limit": .number(Double(pageSize)),
                         "offset": .number(Double(offset)),
                     ],
-                    format: mempalaceVerbs.resultFormat)
+                    format: contenderVerbs.resultFormat)
                 let mapped = resolver.resolveRanked(page.items)
                 returned.formUnion(mapped)
                 // Stop on a short page (fewer items than a full page) or no items.
@@ -271,7 +271,7 @@ struct QualityEngine {
             let expected = Set(test.expectIds)
             let score = scoreFilter(returned: returned, expected: expected)
             results.append(FilterResult(testId: test.id,
-                                        filterExpression: mempFilter,
+                                        filterExpression: contenderFilter,
                                         precision: score.precision, recall: score.recall,
                                         f1: score.f1, returnedCount: score.returnedCount,
                                         expectedCount: score.expectedCount,

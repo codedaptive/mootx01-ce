@@ -414,11 +414,11 @@ mod tests {
             None,
             "content",
             "query",
-            &[("location", "import/mempalace")],
+            &[("location", "import/contender")],
         );
         let secondary = verb_map(
-            "mempalace_add_drawer",
-            "mempalace_search",
+            "contender_add_drawer",
+            "contender_search",
             None,
             "content",
             "query",
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(json.get("method").and_then(JsonValue::string_value), Some("tools/call"));
         assert_eq!(
             json.get("params").and_then(|p| p.get("name")).and_then(JsonValue::string_value),
-            Some("mempalace_add_drawer")
+            Some("contender_add_drawer")
         );
         let args = json.get("params").and_then(|p| p.get("arguments")).unwrap();
         assert_eq!(args.get("content").and_then(JsonValue::string_value), Some("hello world"));
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn write_translation_uses_fresh_id() {
         let primary = verb_map("moot_file_memory", "moot_memory_search", None, "content", "query", &[]);
-        let secondary = verb_map("mempalace_add_drawer", "mempalace_search", None, "content", "query", &[]);
+        let secondary = verb_map("contender_add_drawer", "contender_search", None, "content", "query", &[]);
         let client_bytes = client_call(42, "moot_file_memory", &[("content", "text")]);
         let translated = translate_mirror_call(
             &client_bytes,
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn translates_query_to_secondary_verb() {
         let primary = verb_map("moot_file_memory", "moot_memory_search", None, "content", "query", &[]);
-        let secondary = verb_map("mempalace_add_drawer", "mempalace_search", None, "content", "query", &[]);
+        let secondary = verb_map("contender_add_drawer", "contender_search", None, "content", "query", &[]);
         let client_bytes = client_call(7, "moot_memory_search", &[("query", "what did I decide about auth")]);
         let translated = translate_mirror_call(
             &client_bytes,
@@ -492,7 +492,7 @@ mod tests {
         let json = JsonValue::from_slice(&translated).unwrap();
         assert_eq!(
             json.get("params").and_then(|p| p.get("name")).and_then(JsonValue::string_value),
-            Some("mempalace_search")
+            Some("contender_search")
         );
         assert_eq!(
             json.get("params")
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn mirror_reads_only_skips_write() {
         let primary = verb_map("moot_file_memory", "moot_memory_search", None, "content", "query", &[]);
-        let secondary = verb_map("mempalace_add_drawer", "mempalace_search", None, "content", "query", &[]);
+        let secondary = verb_map("contender_add_drawer", "contender_search", None, "content", "query", &[]);
         let client_bytes = client_call(1, "moot_file_memory", &[("content", "data")]);
         let result = translate_mirror_call(
             &client_bytes,
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn mirror_reads_only_allows_query() {
         let primary = verb_map("moot_file_memory", "moot_memory_search", None, "content", "query", &[]);
-        let secondary = verb_map("mempalace_add_drawer", "mempalace_search", None, "content", "query", &[]);
+        let secondary = verb_map("contender_add_drawer", "contender_search", None, "content", "query", &[]);
         let client_bytes = client_call(5, "moot_memory_search", &[("query", "test query")]);
         let translated = translate_mirror_call(
             &client_bytes,
@@ -562,7 +562,7 @@ mod tests {
         let json = JsonValue::from_slice(&translated).unwrap();
         assert_eq!(
             json.get("params").and_then(|p| p.get("name")).and_then(JsonValue::string_value),
-            Some("mempalace_search")
+            Some("contender_search")
         );
     }
 
@@ -570,8 +570,8 @@ mod tests {
     fn secondary_constant_args_injected_when_primary_has_none() {
         let primary = verb_map("w1", "q1", None, "content", "query", &[]);
         let secondary = verb_map(
-            "mempalace_add_drawer",
-            "mempalace_search",
+            "contender_add_drawer",
+            "contender_search",
             None,
             "content",
             "query",
@@ -655,7 +655,7 @@ mod tests {
         acc.record_divergence(0.5, 0.10, vec!["a".into(), "b".into()], vec!["c".into(), "d".into()]);
         acc.record_divergence(0.0, 0.10, vec!["a".into()], vec!["a".into()]);
         let report = acc.build_report();
-        let text = report.rendered("mootx01", "mempalace");
+        let text = report.rendered("mootx01", "contender");
         assert!(!text.is_empty());
         assert!(text.contains('1'));
     }

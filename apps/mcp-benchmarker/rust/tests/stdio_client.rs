@@ -5,7 +5,7 @@
 //! through `connect` (the `initialize` handshake) and a `tools/call`. This
 //! proves the newline framing, monotonic id stream, and result parsing work
 //! end-to-end against a live process — the one piece of the Rust leg with real
-//! IO. The mock speaks the MemPalace `search` shape (`results` array under a
+//! IO. The mock speaks the contender `search` shape (`results` array under a
 //! text block) so the parse path is exercised too.
 //!
 //! The mock is a `sh` script (always present) that echoes a canned `result`
@@ -20,7 +20,7 @@ use std::io::Write;
 /// Writes a mock MCP server script to a temp path and returns it. The script
 /// reads one JSON line per request and prints one canned JSON-RPC response per
 /// line. The first response (to `initialize`) and every later one are valid
-/// JSON-RPC `result` envelopes; the `tools/call` reply carries a MemPalace
+/// JSON-RPC `result` envelopes; the `tools/call` reply carries a contender
 /// `search`-shaped payload in a text content block.
 fn write_mock_server() -> std::path::PathBuf {
     let dir = std::env::temp_dir();
@@ -36,7 +36,7 @@ while IFS= read -r line; do
     printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}'
     first=0
   else
-    # tools/call reply: MemPalace search shape (results array in a text block)
+    # tools/call reply: contender search shape (results array in a text block)
     printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"results\":[{\"text\":\"first hit\"},{\"text\":\"second hit\"}]}"}]}}'
   fi
 done
@@ -60,8 +60,8 @@ fn endpoint(command: &str) -> EndpointConfig {
         transport: Transport::Stdio { command: command.to_string() },
         auth: None,
         verb_map: VerbMap::new(
-            "mempalace_add_drawer",
-            "mempalace_search",
+            "contender_add_drawer",
+            "contender_search",
             None,
             None,
             None,
@@ -83,7 +83,7 @@ fn stdio_client_connects_and_calls_tool() {
 
     let result = client
         .call_tool(
-            "mempalace_search",
+            "contender_search",
             {
                 let mut m = BTreeMap::new();
                 m.insert(
@@ -96,7 +96,7 @@ fn stdio_client_connects_and_calls_tool() {
         )
         .expect("tools/call must succeed");
 
-    // The MemPalace search shape parses to two content items, no ids.
+    // The contender search shape parses to two content items, no ids.
     assert!(result.ordered_ids.is_empty());
     assert_eq!(
         result.items.iter().filter_map(|i| i.content.clone()).collect::<Vec<_>>(),

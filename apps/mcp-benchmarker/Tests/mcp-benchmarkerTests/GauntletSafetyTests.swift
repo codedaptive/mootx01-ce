@@ -3,19 +3,19 @@ import Foundation
 @testable import mcp_benchmarker
 
 // GauntletSafetyTests — the scratch-backend safety gate (plan rules 1-2). These
-// pin the contamination-bug guard: MemPalace MUST use the --palace FLAG to a /tmp
+// pin the contamination-bug guard: contender MUST use the --contender-dir FLAG to a /tmp
 // path; mootx01 MUST set MOOTX01_DATA_DIR=/tmp or ARIA_MCP_SQLITE_PATH=/tmp.
 // A config that fails any of these must throw BEFORE any write. Pure: no live backend.
 
 @Suite("Gauntlet safety gate")
 struct GauntletSafetyTests {
 
-    private func memEndpoint(command: String) -> EndpointConfig {
-        EndpointConfig(name: "mempalace",
+    private func contenderEndpoint(command: String) -> EndpointConfig {
+        EndpointConfig(name: "contender",
                        transport: .stdio(command: command),
                        auth: nil,
                        verbMap: EndpointConfig.VerbMap(
-                           write: "mempalace_add_drawer", query: "mempalace_search",
+                           write: "contender_add_drawer", query: "contender_search",
                            list: nil, resultFormat: .jsonObjects(idKey: nil, contentKey: "text")),
                        role: .source)
     }
@@ -30,24 +30,24 @@ struct GauntletSafetyTests {
                        role: .target)
     }
 
-    @Test("MemPalace with the --palace /tmp FLAG passes")
-    func memPalaceFlagPasses() throws {
-        try assertScratchBackend(memEndpoint(command: "mempalace-mcp --palace /tmp/bench-palace"))
+    @Test("contender with the --contender-dir /tmp FLAG passes")
+    func contenderFlagPasses() throws {
+        try assertScratchBackend(contenderEndpoint(command: "contender-mcp --contender-dir /tmp/bench-contender"))
     }
 
-    @Test("MemPalace WITHOUT --palace is refused (the bare-env-var contamination bug)")
-    func memPalaceBareEnvVarRefused() {
-        // The exact bug the plan calls out: an env-var form leaves the KG on the
-        // real palace. Only the FLAG form is accepted; this must throw.
+    @Test("contender WITHOUT --contender-dir is refused (the bare-call contamination bug)")
+    func contenderBareCallRefused() {
+        // The exact bug the plan calls out: a call without --contender-dir leaves the
+        // data dir at the real path. Only the FLAG form is accepted; this must throw.
         #expect(throws: MCPError.self) {
-            try assertScratchBackend(memEndpoint(command: "MEMPALACE_PATH=/tmp/x mempalace-mcp"))
+            try assertScratchBackend(contenderEndpoint(command: "contender-mcp"))
         }
     }
 
-    @Test("MemPalace --palace pointing outside /tmp is refused")
-    func memPalaceNonTmpRefused() {
+    @Test("contender --contender-dir pointing outside /tmp is refused")
+    func contenderNonTmpRefused() {
         #expect(throws: MCPError.self) {
-            try assertScratchBackend(memEndpoint(command: "mempalace-mcp --palace ~/.mempalace"))
+            try assertScratchBackend(contenderEndpoint(command: "contender-mcp --contender-dir ~/.contender"))
         }
     }
 
@@ -82,13 +82,13 @@ struct GauntletSafetyTests {
         }
     }
 
-    @Test("classifyEndpoints identifies mem and moot by write-verb prefix regardless of role")
+    @Test("classifyEndpoints identifies contender and moot by write-verb prefix regardless of role")
     func classify() throws {
         let config = BenchmarkerConfig(
-            source: memEndpoint(command: "mempalace-mcp --palace /tmp/p"),
+            source: contenderEndpoint(command: "contender-mcp --contender-dir /tmp/p"),
             target: mootEndpoint(command: "MOOTX01_DATA_DIR=/tmp/m ~/.mootx01/bin/mootx01"))
-        let (mem, moot) = try classifyEndpoints(config)
-        #expect(mem.name == "mempalace")
+        let (contender, moot) = try classifyEndpoints(config)
+        #expect(contender.name == "contender")
         #expect(moot.name == "mootx01")
     }
 }

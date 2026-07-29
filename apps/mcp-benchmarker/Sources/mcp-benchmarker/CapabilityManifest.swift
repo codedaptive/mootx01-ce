@@ -74,7 +74,7 @@ enum TechniqueToken: String, Sendable, Codable, CaseIterable {
 /// fact (SPEC §10 honesty statement).
 enum ManifestProvenance: String, Sendable, Codable {
     /// Authored by us for a product whose internals we know. Technique map is
-    /// verified against our own code/specs. (e.g. mempalace, mootx01)
+    /// verified against our own code/specs. (e.g. contender, mootx01)
     case groundTruthOurs          = "ground-truth-ours"
     /// Supplied by the product's vendor. Authoritative as a claim; not
     /// independently verified by us.

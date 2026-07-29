@@ -2,7 +2,7 @@ import Foundation
 
 // GauntletRunner.swift — the live runner (Phase 2.2). Loads a generated corpus
 // into BOTH scratch backends via their OWN live write tools, runs every needle
-// query against MemPalace search and against mootx01 moot_memory_search under
+// query against the contender search and against mootx01 moot_memory_search under
 // each scoring strategy, scores each needle (completeness is derived from the
 // returned items themselves — no separate full-record fetch), runs the
 // DegeneracyGuard, and assembles the run report.
@@ -10,15 +10,15 @@ import Foundation
 // SAFETY (plan lines 51-62): the runner writes during load, then dreams, runs
 // degeneracy guard probes, queries, scores, and reads backend responses. It must
 // be pointed at SCRATCH backends — mootx01 via MOOTX01_DATA_DIR=/tmp/... or
-// ARIA_MCP_SQLITE_PATH=/tmp/... in its stdio command, MemPalace via the
-// `--palace /tmp/...` FLAG (never the bare env var). The runner does not choose
+// ARIA_MCP_SQLITE_PATH=/tmp/... in its stdio command, the contender via the
+// `--contender-dir /tmp/...` FLAG (never the bare env var). The runner does not choose
 // the backends; the CLI asserts the scratch flag forms before the runner is
 // constructed.
 //
-// IDENTITY. Backends do not share an id space and MemPalace search returns no id,
+// IDENTITY. Backends do not share an id space and the contender's search returns no id,
 // so the runner scores by CONTENT (via GauntletScorer's normalization). The
 // per-record location drives filing in BOTH backends: mootx01 takes the whole
-// `location` string; MemPalace takes wing+room from its first two path segments.
+// `location` string; the contender takes wing+room from its first two path segments.
 
 /// A mootx01 `moot_memory_search` scoring strategy column. The raw value is the
 /// `scoring` MCP arg. These are the fusion-only baselines (no precise reduce).
@@ -30,7 +30,7 @@ enum MootScoring: String, Sendable, CaseIterable {
 }
 
 /// One backend column the runner evaluates. A column is one of:
-///   - the MemPalace search baseline (`isMootx01 == false`),
+///   - the contender search baseline (`isMootx01 == false`),
 ///   - a mootx01 `moot_memory_search` under a named `scoring` strategy, or
 ///   - a mootx01 `moot_recall_precise` under a named reduction `composition`
 ///     (the ablation grid — one column per composition).
@@ -58,8 +58,8 @@ struct GauntletRunner {
     /// returns the same mootText shape.
     static let preciseRecallToolName = "moot_recall_precise"
 
-    let mempalace: MCPClient
-    let memVerbs: EndpointConfig.VerbMap
+    let contender: MCPClient
+    let contenderVerbs: EndpointConfig.VerbMap
     let moot: MCPClient
     let mootVerbs: EndpointConfig.VerbMap
     let corpus: GauntletCorpus
@@ -69,24 +69,25 @@ struct GauntletRunner {
     /// deepest k so found@10 is observable. Default 20 (mootx01's own default).
     let searchLimit: Int
 
-    /// Per-backend reuse controls (`reuseMem`, `reuseMoot`). When true for a
+    /// Per-backend reuse controls (`reuseContender`, `reuseMoot`). When true for a
     /// backend, the load and dream for that backend are skipped and queries run
     /// straight against the persisted estate. Each backend is guarded by its own
     /// load-marker; a stale/mismatched marker falls back to a fresh load. The
     /// DegeneracyGuard still warm-probes both backends. Default false — normal
     /// runs load fresh.
-    /// PER-BACKEND reuse. MemPalace is a fixed external baseline (same corpus +
-    /// queries every run) and its Chroma load is the ~20-min dominant cost, so it
-    /// should load ONCE and be reused thereafter. mootx01 reloads fresh each run
-    /// (its ingestion changes with the code under test). When `reuseMem` is true
-    /// the MemPalace load is skipped (palace already populated, verified by the
-    /// CLI marker); when `reuseMoot` is true the mootx01 load + dream are skipped.
-    /// The DegeneracyGuard still warm-probes both, so a stale/empty reuse aborts.
-    let reuseMem: Bool
+    /// PER-BACKEND reuse. The contender is a fixed external baseline (same corpus +
+    /// queries every run) and its load is the dominant per-run cost, so it should
+    /// load ONCE and be reused thereafter. mootx01 reloads fresh each run
+    /// (its ingestion changes with the code under test). When `reuseContender` is
+    /// true the contender load is skipped (estate already populated, verified by
+    /// the CLI marker); when `reuseMoot` is true the mootx01 load + dream are
+    /// skipped. The DegeneracyGuard still warm-probes both, so a stale/empty reuse
+    /// aborts.
+    let reuseContender: Bool
     let reuseMoot: Bool
 
     /// When true, skip ALL `moot_recall_precise` composition columns and run only
-    /// the search-strategy columns (raw, rrf, matrixAware) plus the MemPalace
+    /// the search-strategy columns (raw, rrf, matrixAware) plus the contender
     /// baseline. Cuts a ~25-min full run down to ~2-3 min — useful for rapid
     /// iteration on recall quality without waiting for the full ablation grid.
     /// The report prints a clear "QUICK MODE" banner so the reduced column set is
@@ -98,7 +99,7 @@ struct GauntletRunner {
     /// `.gauntlet-loaded` marker beside each backend's data, written after a FRESH
     /// load of that backend so the next run can reuse it. nil when the path can't
     /// be derived. A fresh load writes its own marker; a reused backend keeps its.
-    let memMarker: URL?
+    let contenderMarker: URL?
     let mootMarker: URL?
 
     /// Coarse-pool width requested for every precise-recall (composition) column.
@@ -108,24 +109,24 @@ struct GauntletRunner {
     /// available candidates, so an over-wide value is harmless.
     let precisePoolWidth = 500
 
-    init(mempalace: MCPClient, memVerbs: EndpointConfig.VerbMap,
+    init(contender: MCPClient, contenderVerbs: EndpointConfig.VerbMap,
          moot: MCPClient, mootVerbs: EndpointConfig.VerbMap,
          corpus: GauntletCorpus, scorer: GauntletScorer,
          runLabel: String, searchLimit: Int = 20,
-         reuseMem: Bool = false, reuseMoot: Bool = false,
-         memMarker: URL? = nil, mootMarker: URL? = nil,
+         reuseContender: Bool = false, reuseMoot: Bool = false,
+         contenderMarker: URL? = nil, mootMarker: URL? = nil,
          quickMode: Bool = false, mootOnly: Bool = false) {
-        self.mempalace = mempalace
-        self.memVerbs = memVerbs
+        self.contender = contender
+        self.contenderVerbs = contenderVerbs
         self.moot = moot
         self.mootVerbs = mootVerbs
         self.corpus = corpus
         self.scorer = scorer
         self.runLabel = runLabel
         self.searchLimit = max(searchLimit, (scorer.kValues.max() ?? 10))
-        self.reuseMem = reuseMem
+        self.reuseContender = reuseContender
         self.reuseMoot = reuseMoot
-        self.memMarker = memMarker
+        self.contenderMarker = contenderMarker
         self.mootMarker = mootMarker
         self.quickMode = quickMode
         self.mootOnly = mootOnly
@@ -160,13 +161,13 @@ struct GauntletRunner {
     ]
 
     /// Every column evaluated, in a fixed order so the report is stable:
-    ///   1. MemPalace baseline,
+    ///   1. contender baseline,
     ///   2. mootx01 `moot_memory_search` under each scoring strategy (raw, rrf,
     ///      matrixAware) — the fusion baselines,
     ///   3. mootx01 `moot_recall_precise` under each reduction composition — the
     ///      ablation grid (one column per composition).
     static func columns() -> [GauntletColumn] {
-        var cols = [GauntletColumn(name: "mempalace", isMootx01: false, scoring: nil, composition: nil)]
+        var cols = [GauntletColumn(name: "contender", isMootx01: false, scoring: nil, composition: nil)]
         for s in MootScoring.allCases {
             cols.append(GauntletColumn(
                 name: "mootx01:\(s.rawValue)", isMootx01: true, scoring: s, composition: nil))
@@ -192,15 +193,15 @@ struct GauntletRunner {
         //    compositions (matrix, text+matrix, the matrix term in weighted-all)
         //    score 0 until it runs. One moot_dream call rebuilds + registers the
         //    matrix tier and runs one dreaming cycle; deterministic `now` keeps it
-        //    reproducible. Only the mootx01 backend has a matrix tier; MemPalace
+        //    reproducible. Only the mootx01 backend has a matrix tier; the contender
         //    needs no equivalent. On reuse, both the load and the dream are
         //    skipped: the matrix persists in the estate SQLite across the process
         //    restart, and the DegeneracyGuard below still warm-probes both
         //    backends so an empty/stale reuse is caught rather than scored.
-        if reuseMem {
+        if reuseContender {
             FileHandle.standardError.write(Data((
-                "gauntlet: reusing persisted MemPalace palace (seed \(corpus.seed), "
-                + "\(corpus.records.count) records) — MemPalace load skipped.\n").utf8))
+                "gauntlet: reusing persisted contender estate (seed \(corpus.seed), "
+                + "\(corpus.records.count) records) — contender load skipped.\n").utf8))
         }
         if reuseMoot {
             FileHandle.standardError.write(Data((
@@ -212,7 +213,7 @@ struct GauntletRunner {
         // dreamed matrix; the daemon rebuilds it on open regardless).
         if !reuseMoot { try await dreamMootEstate() }
         // Write each freshly-loaded backend's marker so the next run can reuse it.
-        if !reuseMem && !mootOnly { writeMarker(memMarker) }
+        if !reuseContender && !mootOnly { writeMarker(contenderMarker) }
         if !reuseMoot { writeMarker(mootMarker) }
 
         // 2. GUARD before scoring: probe each backend with ≥3 distinct queries
@@ -224,7 +225,7 @@ struct GauntletRunner {
         var strategyResults: [StrategyResult] = []
         var retained: [RetainedFailure] = []
         // Quick mode: skip all precise-recall composition columns and run only
-        // the MemPalace baseline + three moot_memory_search strategy columns.
+        // the contender baseline + three moot_memory_search strategy columns.
         // The report prints a banner so the reduced set is never mistaken for a
         // full run. ~2-3 min vs ~25 min for the full ablation grid.
         let allColumns = Self.columns().filter { !mootOnly || $0.isMootx01 }
@@ -298,7 +299,7 @@ struct GauntletRunner {
     /// Writes every corpus record into both backends via their live write tools,
     /// threading the per-record location (so the T5 scatter tier actually files
     /// records where it intends to). mootx01 gets the whole location string;
-    /// MemPalace gets wing+room derived from the first two path segments.
+    /// the contender gets wing+room derived from the first two path segments.
     private func loadCorpus() async throws {
         // Build the full write batch for each backend up front, then fire each as
         // one pipelined stream rather than a per-record round-trip. The serial
@@ -331,14 +332,14 @@ struct GauntletRunner {
             }
             mootCalls.append((name: mootVerbs.write, arguments: mootArgs))
 
-            // MemPalace: mempalace_add_drawer { content, wing, room }.
+            // contender: write tool { content, wing, room }.
             let (wing, room) = wingRoom(from: record.location)
             let memArgs: [String: JSONValue] = [
-                memVerbs.contentArg: .string(record.content),
+                contenderVerbs.contentArg: .string(record.content),
                 "wing": .string(wing),
                 "room": .string(room),
             ]
-            memCalls.append((name: memVerbs.write, arguments: memArgs))
+            memCalls.append((name: contenderVerbs.write, arguments: memArgs))
         }
 
         // Fire only the backend(s) not being reused. A reused backend's writes are
@@ -349,8 +350,8 @@ struct GauntletRunner {
             _ = try await moot.pipelinedCallTools(mootCalls, format: mootVerbs.resultFormat)
         }()
         async let memLoad: Void = {
-            guard !reuseMem && !mootOnly else { return }
-            _ = try await mempalace.pipelinedCallTools(memCalls, format: memVerbs.resultFormat)
+            guard !reuseContender && !mootOnly else { return }
+            _ = try await contender.pipelinedCallTools(memCalls, format: contenderVerbs.resultFormat)
         }()
         _ = try await (mootLoad, memLoad)
     }
@@ -442,10 +443,10 @@ struct GauntletRunner {
             }
             result = try await moot.callTool(toolName, arguments: args, format: format)
         } else {
-            toolName = memVerbs.query
-            format = memVerbs.resultFormat
-            args = [memVerbs.queryArg: .string(needle.query)]
-            result = try await mempalace.callTool(toolName, arguments: args, format: format)
+            toolName = contenderVerbs.query
+            format = contenderVerbs.resultFormat
+            args = [contenderVerbs.queryArg: .string(needle.query)]
+            result = try await contender.callTool(toolName, arguments: args, format: format)
         }
         let latency = elapsedSeconds(since: start)
 
@@ -471,17 +472,17 @@ struct GauntletRunner {
         // queries are the discriminating probe set.
         let probes = guardProbes(from: corpus.needles)
         if !mootOnly {
-            // MemPalace probes.
-            var memRankings: [[String]] = []
+            // contender probes.
+            var contenderRankings: [[String]] = []
             for q in probes {
-                let r = try await mempalace.callTool(
-                    memVerbs.query, arguments: [memVerbs.queryArg: .string(q)],
-                    format: memVerbs.resultFormat)
-                memRankings.append(BenchmarkEngine.normalizedContentOrder(r.items))
+                let r = try await contender.callTool(
+                    contenderVerbs.query, arguments: [contenderVerbs.queryArg: .string(q)],
+                    format: contenderVerbs.resultFormat)
+                contenderRankings.append(BenchmarkEngine.normalizedContentOrder(r.items))
             }
-            if case let verdict = guard_.classify(probeRankings: memRankings),
+            if case let verdict = guard_.classify(probeRankings: contenderRankings),
                !isHealthy(verdict) {
-                throw GauntletGuardRefusal(backend: "mempalace", diagnostic: verdict.diagnostic)
+                throw GauntletGuardRefusal(backend: "contender", diagnostic: verdict.diagnostic)
             }
         }
         // mootx01 probes (default scoring).
@@ -537,10 +538,10 @@ struct GauntletRunner {
         return corpus.records.first { $0.id == pid }?.content
     }
 
-    /// Derives a MemPalace (wing, room) from a `wing/room[/...]` location string.
+    /// Derives a contender (wing, room) from a `wing/room[/...]` location string.
     /// The first segment is the wing; the second (or "General" when absent) is the
     /// room. Extra segments are folded into the room with hyphens so a deep
-    /// location still maps to a single drawer location deterministically.
+    /// location still maps to a single filing location deterministically.
     private func wingRoom(from location: String) -> (wing: String, room: String) {
         let parts = location.split(separator: "/").map(String.init)
         let wing = parts.first ?? "General"

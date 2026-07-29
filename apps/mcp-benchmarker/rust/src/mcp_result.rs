@@ -9,7 +9,7 @@
 //! Two shapes, exactly as the Swift leg:
 //!   - `JsonObjects { id_key, content_key }`: items are JSON objects found in
 //!     `structuredContent` first, else in the first `text` block parsed as
-//!     JSON. Used by MemPalace (`list_drawers` → `drawer_id`/`content_preview`;
+//!     JSON. Used by contender (`list_drawers` → `drawer_id`/`content_preview`;
 //!     `search` → no id / `text`).
 //!   - `MootText`: MOOTx01 plain text. A search result is `found N` followed by
 //!     `<UUID>  [location]  <content>` per ranked line; a write result is
@@ -20,7 +20,7 @@ use crate::json_value::JsonValue;
 
 /// One parsed result item: its id (when the server returns one) and its content
 /// (the searchable text). Both optional so a server that returns content
-/// without a stable id (MemPalace search) and one that returns an id without
+/// without a stable id (contender search) and one that returns an id without
 /// inline content both parse into the same shape. Mirrors Swift `MCPResultItem`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MCPResultItem {
@@ -138,7 +138,7 @@ fn parse_json_objects(
 
 /// Pulls the array of result objects out of a value that is either an array of
 /// objects or an object holding such an array under a single array-valued key
-/// (e.g. MemPalace `results` / `drawers`). An object is kept when it carries
+/// (e.g. contender `results` / `drawers`). An object is kept when it carries
 /// the id key (if one is named) or the content key. Returns None when no
 /// qualifying array is found. Mirrors Swift `objectArray`.
 fn object_array<'a>(
@@ -178,7 +178,7 @@ fn object_array<'a>(
                 }
             }
             // No qualifying nested array — is the object itself one record?
-            // (MemPalace `get_drawer` returns one bare object with full content.)
+            // (`get_drawer` returns one bare object with full content.)
             let single = std::slice::from_ref(value);
             qualifying(single)
         }
@@ -282,7 +282,7 @@ pub fn normalized_content_order(items: &[MCPResultItem]) -> Vec<String> {
                 .collect::<Vec<_>>()
                 .join(" ");
             // Bound on a 64-char prefix so a server that truncates content
-            // (MemPalace `content_preview`) still matches the same item from a
+            // (contender `content_preview`) still matches the same item from a
             // server that returns it in full. Use char-boundary-safe truncation.
             Some(collapsed.chars().take(64).collect::<String>())
         })
@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn mempalace_list_drawers() {
+    fn contender_list_drawers() {
         let payload = r#"
         {
           "drawers": [
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn mempalace_search_no_id() {
+    fn contender_search_no_id() {
         let payload = r#"
         {
           "query": "q",
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn moot_search_ranked() {
-        let payload = "found 2 memory(s)\n7CF35028-84BE-40D0-A8CB-7FCFE8EB6018  [import/test]  The benchmarker proves mootx01 outperforms MemPalace.\n84B0178B-A133-4F43-91D0-2854E7AC45FB  [import/test]  Apple Silicon Metal kernel dispatch.";
+        let payload = "found 2 memory(s)\n7CF35028-84BE-40D0-A8CB-7FCFE8EB6018  [import/test]  The benchmarker proves mootx01 outperforms the contender.\n84B0178B-A133-4F43-91D0-2854E7AC45FB  [import/test]  Apple Silicon Metal kernel dispatch.";
         let result = parse_tool_result(&text_result(payload), &ResultFormat::MootText);
         assert_eq!(
             result.ordered_ids,
@@ -379,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             result.items.first().and_then(|i| i.content.clone()),
-            Some("The benchmarker proves mootx01 outperforms MemPalace.".to_string())
+            Some("The benchmarker proves mootx01 outperforms the contender.".to_string())
         );
         assert_eq!(result.items.len(), 2);
         assert!(result.write_assigned_id.is_none());
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn single_record_fetch_object() {
-        // MemPalace get_drawer returns one bare object with full content.
+        // get_drawer returns one bare object with full content.
         let payload = r#"{ "drawer_id": "d9", "content": "full content here", "wing": "w" }"#;
         let result = parse_tool_result(
             &text_result(payload),

@@ -83,14 +83,14 @@ struct ProxyRunReport: Sendable {
 // ProxyServer.swift — the `serve` mode: a transparent passthrough MCP server.
 //
 // The client (Claude Code, an agent, anything that speaks MCP) points its
-// stdio MCP transport at the benchmarker INSTEAD of at mootx01/MemPalace. The
+// stdio MCP transport at the benchmarker INSTEAD of at mootx01/the contender. The
 // benchmarker then:
 //
 //   1. Forwards every client message to the PRIMARY backend verbatim and
 //      returns the primary's response unchanged. Ids are preserved end-to-end,
 //      so the client cannot tell it is not talking to the backend directly —
 //      this is the "non-invasive" contract: nothing breaks for the client, and
-//      no change is made to mootx01 / MemPalace / the client.
+//      no change is made to mootx01 / the contender / the client.
 //
 //   2. Optionally MIRRORS each `tools/call` to a SECONDARY backend (fire and
 //      time; the secondary's response is NOT returned to the client). For a
@@ -102,8 +102,8 @@ struct ProxyRunReport: Sendable {
 //      the ObserverSink stats store so moot-mgr can dashboard them.
 //
 // This realizes the spec's "serve mode (production-shadow path)" and the
-// migration mirror as a PROXY, not by forking inside ARIA. Example: a MemPalace
-// user keeps working (primary=MemPalace) while mootx01 is shadowed and compared
+// migration mirror as a PROXY, not by forking inside ARIA. Example: a contender
+// user keeps working (primary=contender) while mootx01 is shadowed and compared
 // (secondary=mootx01) — the adoption on-ramp. Reverse the roles to A/B the
 // other way.
 //

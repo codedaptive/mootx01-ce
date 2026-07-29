@@ -92,14 +92,14 @@ private func loadJSON(_ url: URL) throws -> [String: Any] {
 
 @Suite struct ConformanceVectorManifestTests {
 
-    @Test("Shipped mempalace.json: Swift decode matches conformance vector")
-    func mempalaceManifestVector() throws {
-        let data = try Data(contentsOf: manifestPath("mempalace.json"))
+    @Test("Shipped contender.json: Swift decode matches conformance vector")
+    func contenderManifestVector() throws {
+        let data = try Data(contentsOf: manifestPath("contender.json"))
         let manifest = try CapabilityManifest.decode(from: data)
 
         let json = try loadJSON(conformancePath("manifest_vectors.json"))
         let manifests = try #require(json["manifests"] as? [[String: Any]])
-        let vec = try #require(manifests.first(where: { ($0["id"] as? String) == "mempalace" }))
+        let vec = try #require(manifests.first(where: { ($0["id"] as? String) == "contender" }))
         let expected = try #require(vec["expected"] as? [String: Any])
 
         #expect(manifest.schemaVersion == (expected["schema_version"] as? Int))

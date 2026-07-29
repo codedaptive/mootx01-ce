@@ -95,16 +95,16 @@ private func clientCall(id: Int = 42,
     @Test("Write call is translated to secondary write verb with contentArg remap + constantArgs")
     func translatesWriteToSecondaryVerb() throws {
         // Primary: mootx01 (moot_file_memory, content arg = "content", constant: location)
-        // Secondary: MemPalace (mempalace_add_drawer, content arg = "content", constants: wing + room)
+        // Secondary: contender (contender_add_drawer, content arg = "content", constants: wing + room)
         let primary = verbMap(
             write: "moot_file_memory",
             query: "moot_memory_search",
             contentArg: "content",
-            constantArgs: ["location": "import/mempalace"]
+            constantArgs: ["location": "import/contender"]
         )
         let secondary = verbMap(
-            write: "mempalace_add_drawer",
-            query: "mempalace_search",
+            write: "contender_add_drawer",
+            query: "contender_search",
             contentArg: "content",
             constantArgs: ["wing": "general", "room": "notes"]
         )
@@ -127,7 +127,7 @@ private func clientCall(id: Int = 42,
 
         // Tool name must be the secondary's write tool.
         #expect(json["method"]?.stringValue == "tools/call")
-        #expect(json["params"]?["name"]?.stringValue == "mempalace_add_drawer")
+        #expect(json["params"]?["name"]?.stringValue == "contender_add_drawer")
 
         let args = json["params"]?["arguments"]
         // Content is carried under the secondary's contentArg key.
@@ -143,7 +143,7 @@ private func clientCall(id: Int = 42,
     @Test("Write call translation assigns the fresh id, not the client's id")
     func writeTranslationUsesFreshID() throws {
         let primary = verbMap(write: "moot_file_memory", query: "moot_memory_search")
-        let secondary = verbMap(write: "mempalace_add_drawer", query: "mempalace_search")
+        let secondary = verbMap(write: "contender_add_drawer", query: "contender_search")
         let clientBytes = clientCall(id: 42, toolName: "moot_file_memory", arguments: [
             "content": .string("text"),
         ])
@@ -176,8 +176,8 @@ private func clientCall(id: Int = 42,
             queryArg: "query"
         )
         let secondary = verbMap(
-            write: "mempalace_add_drawer",
-            query: "mempalace_search",
+            write: "contender_add_drawer",
+            query: "contender_search",
             queryArg: "query"
         )
         let clientBytes = clientCall(id: 7, toolName: "moot_memory_search", arguments: [
@@ -193,7 +193,7 @@ private func clientCall(id: Int = 42,
             freshID: 2001
         ))
         let json = try decode(translated)
-        #expect(json["params"]?["name"]?.stringValue == "mempalace_search")
+        #expect(json["params"]?["name"]?.stringValue == "contender_search")
         #expect(json["params"]?["arguments"]?["query"]?.stringValue == "what did I decide about auth")
     }
 
@@ -227,7 +227,7 @@ private func clientCall(id: Int = 42,
     @Test("mirror-reads-only: translateMirrorCall returns nil for a write call")
     func mirrorReadsOnlySkipsWrite() {
         let primary = verbMap(write: "moot_file_memory", query: "moot_memory_search")
-        let secondary = verbMap(write: "mempalace_add_drawer", query: "mempalace_search")
+        let secondary = verbMap(write: "contender_add_drawer", query: "contender_search")
         let clientBytes = clientCall(id: 1, toolName: "moot_file_memory", arguments: [
             "content": .string("data"),
         ])
@@ -247,7 +247,7 @@ private func clientCall(id: Int = 42,
     @Test("mirror-reads-only: translateMirrorCall passes through a query call")
     func mirrorReadsOnlyAllowsQuery() throws {
         let primary = verbMap(write: "moot_file_memory", query: "moot_memory_search")
-        let secondary = verbMap(write: "mempalace_add_drawer", query: "mempalace_search")
+        let secondary = verbMap(write: "contender_add_drawer", query: "contender_search")
         let clientBytes = clientCall(id: 5, toolName: "moot_memory_search", arguments: [
             "query": .string("test query"),
         ])
@@ -263,7 +263,7 @@ private func clientCall(id: Int = 42,
         // A query call is mirrored even when mirrorReadsOnly=true.
         let translated = try #require(result)
         let json = try decode(translated)
-        #expect(json["params"]?["name"]?.stringValue == "mempalace_search")
+        #expect(json["params"]?["name"]?.stringValue == "contender_search")
     }
 
     // MARK: - unclassifiable tool call
@@ -288,7 +288,7 @@ private func clientCall(id: Int = 42,
         // primary response — translateMirrorCall only produces the secondary call,
         // never mutates the primary bytes.
         let primary = verbMap(write: "moot_file_memory", query: "moot_memory_search")
-        let secondary = verbMap(write: "mempalace_add_drawer", query: "mempalace_search")
+        let secondary = verbMap(write: "contender_add_drawer", query: "contender_search")
         let clientBytes = clientCall(id: 77, toolName: "moot_file_memory", arguments: [
             "content": .string("hello"),
         ])
@@ -319,8 +319,8 @@ private func clientCall(id: Int = 42,
         // Primary has no constant args; secondary requires wing + room.
         let primary = verbMap(write: "w1", query: "q1", constantArgs: [:])
         let secondary = EndpointConfig.VerbMap(
-            write: "mempalace_add_drawer",
-            query: "mempalace_search",
+            write: "contender_add_drawer",
+            query: "contender_search",
             list: nil,
             contentArg: "content",
             queryArg: "query",

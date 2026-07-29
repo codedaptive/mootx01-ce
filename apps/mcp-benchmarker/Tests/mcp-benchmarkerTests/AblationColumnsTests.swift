@@ -76,12 +76,12 @@ struct AblationColumnsTests {
         get throws { try loadFixtureCompositions() }
     }
 
-    @Test("columns include mempalace, the three search strategies, and every composition")
+    @Test("columns include contender, the three search strategies, and every composition")
     func columnSet() throws {
         let expected = try fixtureCompositions
         let cols = GauntletRunner.columns()
         let names = cols.map(\.name)
-        #expect(names.first == "mempalace")
+        #expect(names.first == "contender")
         #expect(names.contains("mootx01:raw"))
         #expect(names.contains("mootx01:rrf"))
         #expect(names.contains("mootx01:matrixAware"))
@@ -202,7 +202,7 @@ struct AblationColumnsTests {
             tierCounts: [:], strategies: [], worstFailures: [], guardHealthy: true)
         report.gitSHA = "abc1234"
         report.runTimestamp = "2026-06-12T00:00:00Z"
-        report.columnsRun = ["mempalace", "mootx01:raw"]
+        report.columnsRun = ["contender", "mootx01:raw"]
         report.compositionListVersion = ["text", "hamming"]
 
         let rendered = report.rendered()
@@ -211,7 +211,7 @@ struct AblationColumnsTests {
         #expect(rendered.contains("run timestamp:"))
         #expect(rendered.contains("2026-06-12T00:00:00Z"))
         #expect(rendered.contains("columns run:"))
-        #expect(rendered.contains("mempalace"))
+        #expect(rendered.contains("contender"))
         #expect(rendered.contains("composition grid:"))
         #expect(rendered.contains("text"))
     }

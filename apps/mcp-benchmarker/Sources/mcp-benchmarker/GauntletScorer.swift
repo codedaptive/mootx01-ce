@@ -9,7 +9,7 @@ import Foundation
 // the same discipline DegeneracyGuard follows.
 //
 // IDENTITY ACROSS BACKENDS. The two backends do NOT share an id space, and one
-// of them (MemPalace `search`) returns NO id at all — only content. So scoring
+// of them (the contender's `search`) returns NO id at all — only content. So scoring
 // matches a returned item to a corpus record by CONTENT, using the same
 // normalization the benchmarker's cross-server comparison uses (trim, lowercase,
 // collapse whitespace, bounded prefix). Content is the only identity both
@@ -96,7 +96,7 @@ struct GauntletScorer: Sendable {
     /// whitespace, bounded 64-char prefix. This MUST match
     /// `BenchmarkEngine.normalizedContentOrder`'s per-item normalization so a
     /// hit identified here is the same notion of "same item" the rest of the
-    /// tool uses. (The prefix bound absorbs MemPalace preview truncation vs
+    /// tool uses. (The prefix bound absorbs the contender's preview truncation vs
     /// mootx01 full content on the shared leading text.)
     static func normalize(_ content: String) -> String {
         let collapsed = content
@@ -113,7 +113,7 @@ struct GauntletScorer: Sendable {
     ///   - returned: the backend's ordered result items for the needle's query.
     ///   - distractorContents: the verbatim contents of the needle's planted
     ///     distractors, keyed by distractor id (so contamination can count them
-    ///     by content match — the only key MemPalace exposes).
+    ///     by content match — the only key the contender exposes).
     ///   - splitPartnerContent: the partner half's verbatim content for a T4
     ///     split needle (nil for non-split). Required for the split found/rank
     ///     logic — both halves must appear.

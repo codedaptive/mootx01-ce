@@ -37,7 +37,7 @@ struct GauntletReportTests {
     @Test("superiority MET: mootx01 ties/wins every tier and is strictly less contaminated")
     func superiorityMet() {
         let report = buildReport(
-            mempalace: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 3, latency: 0.05)],
+            contender: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 3, latency: 0.05)],
             mootRaw:   [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)],
             mootRrf:   [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)],
             mootMatrix:[score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)])
@@ -48,11 +48,11 @@ struct GauntletReportTests {
     @Test("superiority NOT MET: mootx01 loses a tier on found@k")
     func superiorityLostTier() {
         let report = buildReport(
-            mempalace: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)],
+            contender: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)],
             mootRaw:   [score(needle: "a", tier: .lexical, rank: 3, complete: 1.0, contam: 0, latency: 0.01)],
             mootRrf:   [score(needle: "a", tier: .lexical, rank: 3, complete: 1.0, contam: 0, latency: 0.01)],
             mootMatrix:[score(needle: "a", tier: .lexical, rank: 3, complete: 1.0, contam: 0, latency: 0.01)])
-        // MemPalace found@1=1.0, mootx01 found@1=0.0 → mootx01 loses tier T1.
+        // contender found@1=1.0, mootx01 found@1=0.0 → mootx01 loses tier T1.
         #expect(report.superiorityVerdict().contains("NOT MET"))
         #expect(report.superiorityVerdict().contains("T1"))
     }
@@ -60,7 +60,7 @@ struct GauntletReportTests {
     @Test("superiority NOT MET: ties every tier but no strict edge on contam or latency")
     func superiorityNoEdge() {
         let report = buildReport(
-            mempalace: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)],
+            contender: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)],
             mootRaw:   [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)],
             mootRrf:   [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)],
             mootMatrix:[score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 1, latency: 0.05)])
@@ -72,7 +72,7 @@ struct GauntletReportTests {
     @Test("definition-of-superior text appears verbatim in the rendered header")
     func definitionVerbatim() {
         let report = buildReport(
-            mempalace: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)],
+            contender: [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)],
             mootRaw:   [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)],
             mootRrf:   [score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)],
             mootMatrix:[score(needle: "a", tier: .lexical, rank: 1, complete: 1.0, contam: 0, latency: 0.05)])
@@ -81,10 +81,10 @@ struct GauntletReportTests {
 
     // MARK: - helper
 
-    private func buildReport(mempalace: [NeedleScore], mootRaw: [NeedleScore],
+    private func buildReport(contender: [NeedleScore], mootRaw: [NeedleScore],
                              mootRrf: [NeedleScore], mootMatrix: [NeedleScore]) -> GauntletRunReport {
         let strategies = [
-            StrategyResult.build(name: "mempalace", isMootx01: false, scores: mempalace, kValues: kValues),
+            StrategyResult.build(name: "contender", isMootx01: false, scores: contender, kValues: kValues),
             StrategyResult.build(name: "mootx01:raw", isMootx01: true, scores: mootRaw, kValues: kValues),
             StrategyResult.build(name: "mootx01:rrf", isMootx01: true, scores: mootRrf, kValues: kValues),
             StrategyResult.build(name: "mootx01:matrixAware", isMootx01: true, scores: mootMatrix, kValues: kValues),

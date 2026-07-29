@@ -4,12 +4,12 @@ import Foundation
 
 // LiveRunParsingTests.swift — Swift Testing coverage for the live-run fixes:
 // config-driven argument mapping, target-assigned-ID correlation, and the two
-// real result formats (MemPalace text-JSON, MOOTx01 plain text). These exercise
+// real result formats (contender text-JSON, MOOTx01 plain text). These exercise
 // the same logic the live head-to-head depends on, using captured raw shapes as
 // fixtures so no live server is needed.
 //
 // The fixtures are the verbatim shapes captured from the running servers on
-// 2026-06-06 (see BENCHMARKER_001_BLAST_RADIUS.md): MemPalace `list_drawers`
+// 2026-06-06 (see BENCHMARKER_001_BLAST_RADIUS.md): contender `list_drawers`
 // and `search`, and MOOTx01 `moot_file_memory` / `moot_memory_search`.
 
 // MARK: - Fixture builders
@@ -24,10 +24,10 @@ private func textResult(_ text: String) -> JSONValue {
 
 struct LiveRunParsingTests {
 
-    // MARK: - MemPalace list_drawers (jsonObjects, drawer_id / content_preview)
+    // MARK: - contender list_drawers (jsonObjects, drawer_id / content_preview)
 
-    @Test("MemPalace list_drawers parses drawer_id + content_preview in order")
-    func mempalaceListDrawers() {
+    @Test("contender list_drawers parses drawer_id + content_preview in order")
+    func contenderListDrawers() {
         let payload = """
         {
           "drawers": [
@@ -45,10 +45,10 @@ struct LiveRunParsingTests {
         #expect(result.writeAssignedID == nil)
     }
 
-    // MARK: - MemPalace search (jsonObjects, no id, content under `text`)
+    // MARK: - contender search (jsonObjects, no id, content under `text`)
 
-    @Test("MemPalace search parses content from `text` with no stable id")
-    func mempalaceSearch() {
+    @Test("contender search parses content from `text` with no stable id")
+    func contenderSearch() {
         let payload = """
         {
           "query": "q",
@@ -86,7 +86,7 @@ struct LiveRunParsingTests {
     func mootSearchRanked() {
         let payload = """
         found 2 memory(s)
-        7CF35028-84BE-40D0-A8CB-7FCFE8EB6018  [import/test]  The benchmarker proves mootx01 outperforms MemPalace.
+        7CF35028-84BE-40D0-A8CB-7FCFE8EB6018  [import/test]  The benchmarker proves mootx01 outperforms the contender.
         84B0178B-A133-4F43-91D0-2854E7AC45FB  [import/test]  Apple Silicon Metal kernel dispatch.
         """
         let result = MCPClient.parseToolResult(textResult(payload), format: .mootText)
@@ -94,7 +94,7 @@ struct LiveRunParsingTests {
             "7CF35028-84BE-40D0-A8CB-7FCFE8EB6018",
             "84B0178B-A133-4F43-91D0-2854E7AC45FB",
         ])
-        #expect(result.items.first?.content == "The benchmarker proves mootx01 outperforms MemPalace.")
+        #expect(result.items.first?.content == "The benchmarker proves mootx01 outperforms the contender.")
         // The `found N` header line carries no UUID and is not an item.
         #expect(result.items.count == 2)
         // No write id on a search response.
@@ -173,21 +173,21 @@ struct LiveRunConfigTests {
         let vm = try loadVerbMap(#"{ "write": "w", "query": "q", "list": "l" }"#)
         #expect(vm.contentArg == "content")
         #expect(vm.queryArg == "query")
-        #expect(vm.constantArgs == ["location": "import/mempalace"])
+        #expect(vm.constantArgs == ["location": "import/contender"])
         #expect(vm.resultFormat == .jsonObjects(idKey: "id", contentKey: "content"))
     }
 
-    @Test("MemPalace source verbMap decodes drawer_id / content_preview format")
-    func mempalaceFormatDecodes() throws {
+    @Test("contender source verbMap decodes drawer_id / content_preview format")
+    func contenderFormatDecodes() throws {
         let vm = try loadVerbMap("""
         {
-          "write": "mempalace_add_drawer",
-          "query": "mempalace_search",
-          "list": "mempalace_list_drawers",
+          "write": "contender_add_drawer",
+          "query": "contender_search",
+          "list": "contender_list_drawers",
           "resultFormat": { "kind": "jsonObjects", "idKey": "drawer_id", "contentKey": "content_preview" }
         }
         """)
-        #expect(vm.list == "mempalace_list_drawers")
+        #expect(vm.list == "contender_list_drawers")
         #expect(vm.resultFormat == .jsonObjects(idKey: "drawer_id", contentKey: "content_preview"))
     }
 
@@ -198,25 +198,25 @@ struct LiveRunConfigTests {
           "write": "moot_file_memory",
           "query": "moot_memory_search",
           "list": null,
-          "constantArgs": { "location": "import/mempalace" },
+          "constantArgs": { "location": "import/contender" },
           "resultFormat": { "kind": "mootText" }
         }
         """)
         #expect(vm.write == "moot_file_memory")
         #expect(vm.resultFormat == .mootText)
-        #expect(vm.constantArgs == ["location": "import/mempalace"])
+        #expect(vm.constantArgs == ["location": "import/contender"])
     }
 
-    @Test("MemPalace write verbMap decodes two constant args (wing + room)")
-    func mempalaceTwoConstantArgs() throws {
-        // The export direction: MemPalace `add_drawer` requires wing AND room,
+    @Test("contender write verbMap decodes two constant args (wing + room)")
+    func contenderTwoConstantArgs() throws {
+        // The contender `add_drawer` requires wing AND room,
         // so the constantArgs map carries two keys (proves the multi-constant
         // generalization the single-key form could not express).
         let vm = try loadVerbMap("""
         {
-          "write": "mempalace_add_drawer",
-          "query": "mempalace_search",
-          "list": "mempalace_list_drawers",
+          "write": "contender_add_drawer",
+          "query": "contender_search",
+          "list": "contender_list_drawers",
           "constantArgs": { "wing": "wing_import", "room": "general" }
         }
         """)

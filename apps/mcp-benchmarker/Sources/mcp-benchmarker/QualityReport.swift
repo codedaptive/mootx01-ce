@@ -57,22 +57,22 @@ struct ProductQuality: Codable, Sendable {
 struct HeadToHead: Codable, Sendable {
     let metric: String
     let mootValue: Double
-    let mempalaceValue: Double
-    let winner: String          // mootx01 | mempalace | tie
+    let contenderValue: Double
+    let winner: String          // mootx01 | contender | tie
 
     /// Builds a head-to-head where HIGHER is better (all quality metrics are).
     /// A difference within `eps` is a tie. `eps` is small but non-zero so two
     /// numerically-equal means do not arbitrarily pick a "winner".
-    static func higherWins(metric: String, moot: Double, mempalace: Double,
+    static func higherWins(metric: String, moot: Double, contender: Double,
                            eps: Double = 1e-9) -> HeadToHead {
         let winner: String
-        if abs(moot - mempalace) <= eps {
+        if abs(moot - contender) <= eps {
             winner = "tie"
         } else {
-            winner = moot > mempalace ? "mootx01" : "mempalace"
+            winner = moot > contender ? "mootx01" : "contender"
         }
         return HeadToHead(metric: metric, mootValue: moot,
-                          mempalaceValue: mempalace, winner: winner)
+                          contenderValue: contender, winner: winner)
     }
 }
 
@@ -86,11 +86,11 @@ struct QualityReport: Codable, Sendable {
     let articleCount: Int
 
     let mootx01: ProductQuality
-    let mempalace: ProductQuality
+    let contender: ProductQuality
 
     /// Per-retrieval-metric head-to-head (higher wins). Filter results are NOT
     /// in the head-to-head because the two products filter on DIFFERENT axes
-    /// (mootx01 confirmation vs MemPalace wing) that are not comparable head to
+    /// (mootx01 confirmation vs the contender's wing) that are not comparable head to
     /// head; they are reported per product instead.
     let headToHead: [HeadToHead]
 
@@ -121,21 +121,21 @@ struct QualityReport: Codable, Sendable {
                       clusterCount, articleCount, mootx01.queryCount)
 
         out += renderProduct(mootx01)
-        out += renderProduct(mempalace)
+        out += renderProduct(contender)
 
         out += "\n  head-to-head (retrieval, higher wins):\n"
-        var mootWins = 0, mempWins = 0
+        var mootWins = 0, contenderWins = 0
         for h in headToHead {
-            out += String(format: "    %@  mootx01 %.4f  vs  mempalace %.4f  → %@\n",
+            out += String(format: "    %@  mootx01 %.4f  vs  contender %.4f  → %@\n",
                           h.metric.padding(toLength: 14, withPad: " ", startingAt: 0) as NSString,
-                          h.mootValue, h.mempalaceValue, h.winner as NSString)
+                          h.mootValue, h.contenderValue, h.winner as NSString)
             if h.winner == "mootx01" { mootWins += 1 }
-            else if h.winner == "mempalace" { mempWins += 1 }
+            else if h.winner == "contender" { contenderWins += 1 }
         }
 
         out += "\n  filter quality (per product, axes are not comparable head-to-head):\n"
         out += renderFilters(product: mootx01)
-        out += renderFilters(product: mempalace)
+        out += renderFilters(product: contender)
 
         if !notes.isEmpty {
             out += "\n  notes:\n"
@@ -145,13 +145,13 @@ struct QualityReport: Codable, Sendable {
         // Bottom line: the answer the mission asks for.
         out += "\n  BOTTOM LINE — which delivers the results an AI wants:\n"
         let verdict: String
-        if mootWins > mempWins {
+        if mootWins > contenderWins {
             verdict = String(format: "    mootx01 wins %d of %d retrieval metrics.", mootWins, headToHead.count)
-        } else if mempWins > mootWins {
-            verdict = String(format: "    mempalace wins %d of %d retrieval metrics.", mempWins, headToHead.count)
+        } else if contenderWins > mootWins {
+            verdict = String(format: "    contender wins %d of %d retrieval metrics.", contenderWins, headToHead.count)
         } else {
             verdict = String(format: "    split decision — %d–%d across %d retrieval metrics.",
-                             mootWins, mempWins, headToHead.count)
+                             mootWins, contenderWins, headToHead.count)
         }
         out += verdict + "\n"
         return out

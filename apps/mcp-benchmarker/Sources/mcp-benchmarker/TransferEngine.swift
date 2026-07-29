@@ -6,10 +6,10 @@ import Foundation
 // Flow:
 //   1. PAGINATE the source `list` verb (limit + offset) to exhaustion, so the
 //      whole corpus is enumerated, not just the first default page. A
-//      `maxEntries` cap stops early when sampling a large corpus (MemPalace is
-//      ~39k drawers) — and the cap is reported, never a silent truncation.
+//      `maxEntries` cap stops early when sampling a large corpus — and the cap
+//      is reported, never a silent truncation.
 //   2. For each listed item, fetch its FULL content by id via the source
-//      `fetch` verb when one is configured (MemPalace `list_drawers` returns a
+//      `fetch` verb when one is configured (the contender's `list_drawers` returns a
 //      TRUNCATED `content_preview`; `get_drawer` returns the full content). A
 //      faithful transfer writes full content, not previews.
 //   3. Write to the target via the target `write` verb, timing each capture; a
@@ -59,7 +59,7 @@ struct TransferEngine {
     /// recorded as permanently failed.
     let maxRetries: Int
     /// Cap on entries to transfer. nil = whole corpus. Used to sample a large
-    /// source (MemPalace ~39k) without a silent truncation — the cap is
+    /// source without a silent truncation — the cap is
     /// reported in the result.
     let maxEntries: Int?
     /// When true, query the target after each write to confirm the entry
@@ -180,7 +180,7 @@ struct TransferEngine {
             return item.content
         }
         // The fetch result is a single full record whose content lives under a
-        // DIFFERENT key than the list preview (MemPalace: list → `content_preview`,
+        // DIFFERENT key than the list preview (e.g. list → `content_preview`,
         // get_drawer → `content`). Parse it with a format keyed on the full
         // content key. The list's id key still applies to the single record.
         let fetchFormat: ResultFormat
@@ -225,7 +225,7 @@ struct TransferEngine {
             do {
                 // Build write arguments from the TARGET verbMap: the content
                 // under the target's content key, plus any required constant
-                // args (MOOTx01 needs `location`; MemPalace needs `wing`+`room`).
+                // args (MOOTx01 needs `location`; the contender may need `wing`+`room`).
                 // The caller's id is never sent — the target either ignores it
                 // (MOOTx01) or assigns its own.
                 var arguments: [String: JSONValue] = [

@@ -267,10 +267,9 @@ private func decode(_ json: String) throws -> CapabilityManifest {
 
 // MARK: - Shipped reference manifest (ground-truth)
 
-// Guards the shipped reference manifest at manifests/mempalace.json: it must
+// Guards the shipped reference manifest at manifests/contender.json: it must
 // decode through the real loader and carry the ground-truth technique map we
-// authored (ChromaDB hybrid = bm25 + vector_cosine on the query path). This is
-// the conformance reference the Rust leg must also decode identically.
+// authored. This is the conformance reference the Rust leg must also decode identically.
 @Suite struct ShippedManifestTests {
 
     /// Resolves a path relative to the package root from this test file's
@@ -283,14 +282,14 @@ private func decode(_ json: String) throws -> CapabilityManifest {
             .deletingLastPathComponent()   // package root
     }
 
-    @Test("Shipped mempalace.json decodes and carries its ground-truth technique map")
-    func mempalaceManifestDecodes() throws {
-        let url = packageRootURL().appendingPathComponent("manifests/mempalace.json")
+    @Test("Shipped contender.json decodes and carries its ground-truth technique map")
+    func contenderManifestDecodes() throws {
+        let url = packageRootURL().appendingPathComponent("manifests/contender.json")
         let data = try Data(contentsOf: url)
         let manifest = try CapabilityManifest.decode(from: data)
 
         #expect(manifest.schemaVersion == 1)
-        #expect(manifest.product.id == "mempalace")
+        #expect(manifest.product.id == "contender")
         #expect(manifest.product.provenance == .groundTruthOurs)
 
         // All four standard call types are declared.
@@ -299,20 +298,20 @@ private func decode(_ json: String) throws -> CapabilityManifest {
         #expect(manifest.calls["list"] != nil)
         #expect(manifest.calls["fetch"] != nil)
 
-        // The hybrid query path is bm25 + vector_cosine (ChromaDB ground truth).
+        // The hybrid query path is bm25 + vector_cosine (ground truth).
         let query = try #require(manifest.calls["query"])
-        #expect(query.tool == "mempalace_search")
+        #expect(query.tool == "contender_search")
         #expect(query.technique.contains("bm25"))
         #expect(query.technique.contains("vector_cosine"))
 
         // Write embeds on ingest.
         let write = try #require(manifest.calls["write"])
-        #expect(write.tool == "mempalace_add_drawer")
+        #expect(write.tool == "contender_add_drawer")
         #expect(write.technique.contains("embedding"))
 
         // Resolves into a dispatch table with the pre-compiled tool name.
         let table = manifest.resolveDispatchTable()
-        #expect(table["query"]?.toolName == "mempalace_search")
+        #expect(table["query"]?.toolName == "contender_search")
         #expect(table["query"]?.provenance == .groundTruthOurs)
     }
 
