@@ -32,6 +32,11 @@ table=container_fingerprints
   col=operationalAND type=bitmap null=0 default=bitmap role=-
   pk=wing,room
   appendOnly=0 hashable=0
+table=corpus_bitmap_generation
+  col=singleton_id type=int null=0 default=- role=-
+  col=basis_generation type=int null=0 default=int role=-
+  pk=singleton_id
+  appendOnly=0 hashable=0
 table=corpus_index_state
   col=content_id type=text null=0 default=- role=-
   col=revision type=int null=0 default=- role=-
@@ -39,6 +44,7 @@ table=corpus_index_state
   col=index_version type=int null=0 default=- role=-
   col=applied_cursor type=text null=1 default=- role=-
   col=updated_at type=timestamp null=0 default=- role=-
+  col=operational_bitmap type=bitmap null=0 default=bitmap role=-
   pk=content_id
   appendOnly=0 hashable=0
 table=corpus_provider_basis
