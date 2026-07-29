@@ -1190,18 +1190,19 @@ impl CorpusContentEngine {
         }
     }
 
-    /// Force re-embedding of the dense float lane for a single content ID.
+    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
     ///
     /// Resolves the current record from the source — picking up any newly-written
-    /// `dense_composition_text` (e.g. a distillate) — and re-embeds through all
-    /// active embedding slots with `force = true`, bypassing the
-    /// `(revision, digest, index_version)` idempotence gate. BM25 postings are
-    /// also rewritten; the content is unchanged so the tokens are identical.
+    /// `dense_composition_text` (e.g. a distillate written by the GLK drain rider)
+    /// — and writes a fresh float-vector row (vector_index: 1) for each active slot.
+    /// Only the float lane is updated: BM25, binary (Hamming) vectors, coverage,
+    /// and the idempotence checkpoint are NOT touched.
     ///
-    /// The idempotence gate keys on the CONTENT digest. A distillate write changes
-    /// `dense_composition_text` / `effective_dense_text` without touching
-    /// `content`, so `revision` and `digest` are unchanged and a `force = false`
-    /// call would silently skip re-embedding. `force = true` is correct here.
+    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
+    /// digest (unchanged by distillation). Calling `index_record(force: true)`
+    /// would bypass the gate but also re-run BM25 indexing, disturbing IDF state.
+    /// This method targets only the float lane, preserving §9 BM25 isolation
+    /// (SPEC_DISTILLATION_STORAGE): BM25 scores are byte-identical before/after.
     ///
     /// Routes through the CCE (not direct to `VectorStore`) to maintain
     /// counts-admission serialization (FINDING_11X_MAINTENANCE_WALK_2026-07-28
@@ -1212,11 +1213,57 @@ impl CorpusContentEngine {
         Self::validate(id)?;
         match self.source.record(id)? {
             Some(record) => {
-                self.index_record(&record, None, true, now_millis, SlotScope::All)?;
+                self.recompose_dense_float(&record, now_millis)?;
                 Ok(true)
             }
             None => Ok(false),
         }
+    }
+
+    /// Dense-float-only vector upsert for one content record. Writes the float
+    /// (vector_index: 1) row across all active slots using `effective_dense_text`.
+    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
+    /// Swift parity: `CorpusContentEngine.recomposeDenseFloat(record:now:)`.
+    fn recompose_dense_float(
+        &self,
+        record: &CorpusContentRecord,
+        now_millis: i64,
+    ) -> CorpusKitResult<()> {
+        // The whole-content key is the content ID itself. For passage mode,
+        // passages use lexical text only — no dense-text split — so only the
+        // whole-document float row is updated here, which is correct for all
+        // GLK-attached configurations.
+        let key = &record.id;
+        let embed_text = record
+            .dense_composition_text
+            .as_deref()
+            .unwrap_or(&record.text);
+
+        let mut rows: Vec<VectorPayloadInput> = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            let handle = slot.handle.lock().unwrap();
+            let provider = handle.provider();
+            let (_engram, floats) = provider
+                .embed_pair(embed_text)
+                .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
+            if floats.is_empty() {
+                continue;
+            }
+            rows.push(VectorPayloadInput {
+                item_id: key.clone(),
+                vector_index: 1,
+                payload: VectorPayload::from_f32(&floats),
+                model_id: provider.model_id().to_string(),
+                model_version: provider.model_version().to_string(),
+                filed_at_unix_secs: now_millis,
+            });
+        }
+        if !rows.is_empty() {
+            self.vector_store
+                .add_payloads(&rows)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        }
+        Ok(())
     }
 
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,

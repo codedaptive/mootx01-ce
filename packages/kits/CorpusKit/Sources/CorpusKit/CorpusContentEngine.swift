@@ -691,21 +691,21 @@ public actor CorpusContentEngine {
         return true
     }
 
-    /// Force re-embedding of the dense float lane for a single content ID.
+    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
     ///
     /// Resolves the current record from the source — picking up any newly-written
     /// `denseCompositionText` (e.g. a distillate written by the GLK distillation
-    /// rider) — and re-embeds through all active embedding slots with `force: true`,
-    /// bypassing the `(revision, digest, indexVersion)` idempotence gate.
-    /// BM25 postings are also rewritten; the content is unchanged so the tokens
-    /// are identical, making the lexical lane write idempotent.
+    /// rider) — and writes a fresh float-vector row (vectorIndex: 1) for each
+    /// active slot. Only the float (dense RI) lane is updated; BM25, binary
+    /// (Hamming) vectors, coverage, and the idempotence checkpoint are untouched.
     ///
-    /// **Why force?** The idempotence gate keys on the CONTENT digest. When the
-    /// distillation rider writes a distillate, the `content` column is unchanged,
-    /// so `revision` and `digest` are unchanged, and a `force: false` call would
-    /// silently skip re-embedding. The distillate is ONLY reflected in
-    /// `effectiveDenseText` — bypassing the gate with `force: true` is the
-    /// correct response.
+    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
+    /// digest (unchanged by distillation). Calling `index(force: true)` would
+    /// bypass the gate but would also re-run BM25 indexing — unnecessary and
+    /// potentially disruptive to IDF state. This method bypasses BOTH the gate
+    /// AND the BM25 path by targeting only the float lane directly. §9 BM25
+    /// isolation (SPEC_DISTILLATION_STORAGE) is preserved: the content and digest
+    /// are unchanged, so BM25 scores remain byte-identical before and after.
     ///
     /// **Concurrency:** routes through the CCE actor (not direct to `VectorStore`)
     /// so `countsAdmission` serialization is maintained against concurrent
@@ -724,8 +724,31 @@ public actor CorpusContentEngine {
         guard let record = try await source.record(for: id) else {
             return false
         }
-        try await index(record: record, appliedCursor: nil, force: true, now: now)
+        try await recomposeDenseFloat(record: record, now: now)
         return true
+    }
+
+    /// Dense-float-only vector upsert for one content record. Writes the float
+    /// (vectorIndex: 1) row across all active slots using `effectiveDenseText`.
+    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
+    /// Called by `recomposeDenseVector` and the drain/sweep integration points.
+    private func recomposeDenseFloat(record: CorpusContentRecord, now: Date) async throws {
+        let unit = IndexUnit(
+            key: record.id, text: record.text, denseText: record.denseCompositionText)
+        var rows: [VectorPayloadInput] = []
+        for slot in slots {
+            let (_, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
+            guard !floats.isEmpty else { continue }
+            rows.append(VectorPayloadInput(
+                itemID: unit.key, vectorIndex: 1,
+                payload: VectorPayload(floats: floats),
+                modelID: slot.provider.modelID,
+                modelVersion: slot.provider.modelVersion,
+                filedAt: now))
+        }
+        if !rows.isEmpty {
+            try await vectorStore.addPayloads(rows)
+        }
     }
 
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
