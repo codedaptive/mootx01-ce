@@ -13,18 +13,16 @@
 // relative (divided by max(|s0|, EPS)) so the classification is
 // score-scale-agnostic — it applies whether scores are in [0, 1] or [0, 1000].
 //
-// ## Dense-lane dark cap
+// ## Dense-lane dark cap (saturation discount)
 //
 // When the semantic vector lane (Lane D) is dark — i.e. the recall result
 // carried `denseLaneStatus != nil` — the ranking is lexical/BM25 only.
 // A pure-lexical ranking CAN produce a high score-gap (e.g. one memory
-// contains the exact query token, others do not), but reporting "high — clear
-// top result" while the semantic lane was unavailable violates the
-// discrimination signal's own contract: it is supposed to tell the caller
-// whether the ranking is TRUSTWORTHY. BM25-only rankings on small corpora are
-// not semantically trustworthy. When the dense lane is dark the result is
-// capped at .medium and a caveat is appended to the result line so the calling
-// AI knows the semantic lane did not contribute.
+// contains the exact query token, others do not), but the relative-gap
+// classification alone overstates the signal when the semantic lane did not
+// contribute — the saturation discount is missing. When the dense lane is dark
+// the result is capped at .medium and a caveat is appended to the result line
+// so the calling AI knows the semantic lane did not contribute.
 //
 // The cap is applied by `resultLine(for:denseLaneDark:)`. The plain
 // `resultLine(for:)` overload (no dark-lane parameter) is preserved for
@@ -136,7 +134,7 @@ public enum RecallDiscrimination {
         case .single:
             base = "discrimination: n/a — single/zero results."
         case .high:
-            // Only reachable when denseLaneDark == false.
+            // Only reachable when denseLaneDark == false (saturation discount not applied).
             base = "discrimination: high — clear top result."
         case .medium:
             base = "discrimination: medium — partial separation."

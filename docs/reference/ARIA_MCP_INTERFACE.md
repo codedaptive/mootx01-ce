@@ -798,11 +798,20 @@ public struct StderrLogger: Sendable { public init(); public func log(_ message:
 
 ### Recall discrimination — `DiscriminationLevel` / `RecallDiscrimination`
 
-A pure confidence heuristic appended to ranked recall results. Classifies how
-well the top hit separates from the rest of the list using a relative gap
-ratio (scale-independent). Applied by `moot_memory_search` and `moot_recall_precise`.
-Swift and Rust thresholds are named constants mirrored verbatim; any change
-must update both ports simultaneously.
+A relative-gap confidence estimate appended to ranked recall results. Classifies
+how well the top hit separates from the rest of the list using a relative gap
+ratio (scale-independent), composed with a saturation discount when the semantic
+vector lane is dark (dense-lane-dark cap). Applied by `moot_memory_search`,
+`moot_recall_precise`, and `moot_recall_shaped`. This is a confidence estimate
+of relative separation — it says nothing about whether the leading result is
+the correct answer. Swift and Rust thresholds are named constants mirrored
+verbatim; any change must update both ports simultaneously.
+
+A second signal, `DistilledDiscriminationLevel`, is used by `moot_recall_distilled`
+and maps to the same wire prefix (`discrimination: `) — both signals share the
+`high/medium/low/n/a` ladder but classify different rank geometry (exact-search
+originals vs distilled representations). See `moot_recall_distilled` output
+format for the distilled variant.
 
 ```swift
 public enum DiscriminationLevel: Sendable, Equatable {
@@ -815,7 +824,8 @@ public enum DiscriminationLevel: Sendable, Equatable {
 public enum RecallDiscrimination {
     public static func classify(_ scores: [Double]) -> DiscriminationLevel
     // Returns a result-line string for the given level. When denseLaneDark is
-    // true the classification is capped at .medium and a caveat is appended.
+    // true the classification is capped at .medium (saturation discount applied)
+    // and a caveat is appended.
     public static func resultLine(for level: DiscriminationLevel, denseLaneDark: Bool = false) -> String
 }
 ```

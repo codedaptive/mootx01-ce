@@ -1196,13 +1196,17 @@ enum RecipeTools {
                 lines.append("    tokens: \(match.tokenCount.map(String.init) ?? "—") | source: distilled")
             }
         }
-        // Discrimination signal mirrors moot_memory_search phrasing.
+        // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
+        // geometry over originals). Wire prefix matches moot_memory_search phrasing;
+        // wording unified with the RecallDiscrimination main ladder.
         let discLevel: String
         switch out.discrimination {
         case .high:   discLevel = "discrimination: high — clear top result."
-        case .medium: discLevel = "discrimination: medium — some separation."
-        case .low:    discLevel = "discrimination: low — results are effectively unranked."
-        case .single: discLevel = "discrimination: single — only one result."
+        case .medium: discLevel = "discrimination: medium — partial separation."
+        case .low:    discLevel = "discrimination: low — top results are within epsilon; treat as effectively unranked. "
+                                + "Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for "
+                                + "precision, or widen the query."
+        case .single: discLevel = "discrimination: n/a — single/zero results."
         }
         lines.append(discLevel)
         if anyFallback {
