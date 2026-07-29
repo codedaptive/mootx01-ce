@@ -25,7 +25,8 @@ import VectorKit
 ///
 /// Signal 8 (DistillationSignal) was wired in DG5. Production callers
 /// supply a `distillationCycle` closure that runs the per-item
-/// distillation sweep and returns the count of factoids produced.
+/// distillation sweep and returns the count of items distilled
+/// (drawer rows whose representation columns were populated).
 ///
 /// Signal 9 (TrainingSignal) was wired. Production
 /// callers supply a `trainingCycle` closure that invokes
@@ -76,9 +77,10 @@ public extension GeniusLocusKit {
     ///   - distillationCycle: async closure forwarded to
     ///     `DistillationSignal.spec(distillationCycle:)`. The caller wraps
     ///     the per-item distillation sweep (`kit.distillItemsSweep`) with
-    ///     the estate handle and a NeuronKit-backed `distillFn` closure here.
-    ///     Defaults to a no-op that returns zero factoids — correct for
-    ///     test registration where no live distillation engine is available.
+    ///     the estate handle and `GeniusLocusKit.defaultDistillFn` (the p1
+    ///     contract) here. Defaults to a no-op that returns zero — correct
+    ///     for test registration where no live distillation engine is
+    ///     available.
     ///   - trainingCycle: async closure forwarded to
     ///     `TrainingSignal.spec(trainingCycle:)`. The caller wraps
     ///     `TrainingDaemon.runOnce` with the estate's audit log, matrix

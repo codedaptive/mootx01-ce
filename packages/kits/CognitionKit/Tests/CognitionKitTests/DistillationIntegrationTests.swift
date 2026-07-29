@@ -1,21 +1,19 @@
 // DistillationIntegrationTests.swift
 //
-// End-to-end integration test for the full INTRA-ITEM distillation pipeline.
-//
-// Four test cases exercising the complete write-path → dense recall → expand
-// → search injection depth sequence against a real in-memory estate.
+// End-to-end integration tests for the full distillation flow —
+// SPEC_DISTILLATION_STORAGE §7 (generation), §8 (lane re-key),
+// §10 (distilled recall), §11/§13.2 (factoid retirement).
 //
 // Test IDs: CK-INT-1..4
 //
-// Layer discipline: estates opened via the public GeniusLocusKit API. A single
-// multi-sentence item is captured; Consolidate runs the per-item sweep, which
-// reduces the item from its OWN sentences (intraItem: true) into one factoid.
+// Layer discipline: estates opened via the public GeniusLocusKit API. A
+// multi-sentence item is captured; Distill runs the per-item sweep, which
+// writes the four representation columns on the SOURCE row and one
+// distillation-features-v1 lane entry keyed by the SOURCE drawer id.
 //
 // Content determinism: the item's five sentences each repeat "Provenance"
-// (capitalized, non-first word) so defaultExtractor extracts the same entity
-// from every sentence. Recurrence across the item's sentences → docFrequency=1.0
-// → confidence=1.0 → factoid produced. featureFingerprint = featureHash of the
-// stem of "provenance", non-zero, deterministic.
+// (capitalized, non-first word) so the p1 default extractor extracts the
+// same entity from every sentence — a deterministic non-zero fingerprint.
 
 import Testing
 import Foundation
@@ -29,27 +27,16 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import CognitionKit
 
-// MARK: - Error types for setup failures
-
-private enum IntegrationSetupError: Error {
-    case consolidationProducedNoFactoid
-    case noDistilledDrawer
-}
-
-// MARK: - Test suite
-
-@Suite("DistillationIntegrationTests — end-to-end intra-item distillation")
+@Suite("DistillationIntegrationTests — end-to-end distillation flow")
 struct DistillationIntegrationTests {
 
     private static let ownerID = "distillation-integration-tests"
     private let t0 = Date(timeIntervalSince1970: 1_750_000_000)
 
     // One item whose five sentences each repeat "Provenance" at a non-first,
-    // capitalized position so defaultExtractor extracts the same entity from
-    // every sentence. Recurrence across the item's own sentences drives
-    // docFrequency=1.0 → confidence=1.0 → a factoid is produced. The item is
-    // segmented into M=5 sentences for the incidence matrix; however src= in the
-    // DIST header records sourceIDs.count = 1 (the single source memory), not M.
+    // capitalized position so the default extractor extracts the same entity
+    // from every sentence — recurrence across the item's own sentences gives
+    // a deterministic non-zero structural fingerprint.
     private static let itemBody: String =
         "Records exist. The Provenance record confirms zero. " +
         "The Provenance record confirms one. The Provenance record confirms two. " +
@@ -60,18 +47,13 @@ struct DistillationIntegrationTests {
     private struct DistilledEstate {
         let kit: GeniusLocusKit
         let handle: EstateHandle
-        let storage: InMemoryStorage
         let vectorStore: VectorStore
-        let factoidID: String
         let sourceID: String
     }
 
-    /// Open an estate with a registered VectorStore, capture ONE multi-sentence
-    /// item, and run Consolidate so the estate contains exactly one factoid drawer
-    /// in room `_distilled` linked back to the source item by a `_distilled_from`
-    /// tunnel. The factoid's lineageID equals the source item's id.
-    ///
-    /// Throws `IntegrationSetupError` if consolidation does not produce a factoid.
+    /// Open an estate with a registered VectorStore, capture ONE
+    /// multi-sentence item, and run Distill so the item carries its on-row
+    /// representation and its lane entry (keyed by the source drawer id).
     private func setUpDistilledEstate() async throws -> DistilledEstate {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: Self.ownerID)
@@ -94,206 +76,122 @@ struct DistillationIntegrationTests {
             channel: .typed,
             room: "inbox",
             latticeAnchor: LatticeAnchor.udc("000"),
-            addedBy: "dp3-integration-test",
+            addedBy: "distillation-integration-test",
             embeddingModelID: "test-v1")
         let sourceDrawer = try await kit.capture(handle, frame)
-        let sourceID = sourceDrawer.id
 
-        // Run the per-item distillation sweep via the Consolidate recipe. Pass
-        // defaultExtractor explicitly so the fixture sentences (capitalization
-        // heuristic, not HMM tagger output) produce deterministic features.
-        let consolidateOut = try await Consolidate().run(
-            input: Consolidate.Input(),
-            estate: handle,
-            kit: kit,
-            extractFeatures: DistillationPipeline.defaultExtractor,
-            now: t0)
-
-        guard consolidateOut.factoidsProduced >= 1 else {
-            throw IntegrationSetupError.consolidationProducedNoFactoid
-        }
-
-        // Resolve the factoid: the only drawer in room "_distilled" whose
-        // lineageID equals the source item's id (set by distillItemsSweep
-        // via captureFactoid using the source drawer's UUID as lineageID).
-        // Drawer no longer carries wing/room — resolve via the node tree.
-        let allDrawers = try await kit.allDrawers(in: handle)
-        let estate = try await kit.estate(for: handle)
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: allDrawers.map(\.parentNodeId))
-        guard let factoid = allDrawers.first(where: {
-            nodeNames[$0.parentNodeId]?.room == "_distilled" && $0.lineageID.uuidString == sourceID
-        }) else {
-            throw IntegrationSetupError.noDistilledDrawer
-        }
+        // The moot_distill sweep (p1 contract, deterministic clock).
+        let out = try await Distill().run(
+            input: Distill.Input(), estate: handle, kit: kit, now: t0)
+        #expect(out.itemsDistilled >= 1)
 
         return DistilledEstate(
-            kit: kit, handle: handle, storage: estateStorage,
-            vectorStore: vectorStore, factoidID: factoid.id, sourceID: sourceID)
+            kit: kit, handle: handle, vectorStore: vectorStore,
+            sourceID: sourceDrawer.id)
     }
 
-    // MARK: - CK-INT-1: Full write path
+    // MARK: - CK-INT-1: §7.2 two writes
 
-    /// CK-INT-1: one multi-sentence item → Consolidate → 1 factoid + 1
-    /// `_distilled_from` tunnel back to the source item.
-    ///
-    /// Verifies the complete intra-item distillation write path from capture to
-    /// factoid drawer capture, VectorStore fingerprint storage, and tunnel wiring.
-    @Test("CK-INT-1: full write path — one item → Consolidate → 1 factoid + 1 tunnel")
-    func fullWritePath() async throws {
+    @Test("CK-INT-1: sweep writes the on-row representation and the source-keyed lane entry")
+    func sweepWritesColumnsAndLane() async throws {
         try await withCognitionLock {
-            let estate = try await setUpDistilledEstate()
+            let fixture = try await setUpDistilledEstate()
 
-            // Factoid drawer must exist and carry a DIST header.
-            let factoidContent = try await estate.kit.hydrate(
-                estate.handle, ids: [estate.factoidID])
-            let content = try #require(
-                factoidContent[estate.factoidID],
-                "factoid drawer must be hydrateable from the estate")
-            #expect(content.hasPrefix("[DIST|"),
-                "factoid content must start with a DIST header")
+            // Write 1: the four representation columns on the SOURCE row.
+            let estate = try await fixture.kit.estate(for: fixture.handle)
+            let row = try #require(
+                try await estate.getDrawers(ids: [fixture.sourceID]).first)
+            #expect(row.distilled != nil)
+            #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+            #expect(row.distilledTokenCount
+                == TokenCompaction.estimateTokenCount(row.distilled ?? ""))
+            #expect(row.distilledAt == t0)
 
-            // Verify a single _distilled_from tunnel wired from factoid to the
-            // source item (intra-item provenance: one source = the item itself).
-            // tunnels are filed in LocusKit.defaultWingName ("Agentic Memory").
-            let allTunnels = try await estate.kit.recallTunnels(estate.handle, wing: LocusKit.defaultWingName)
-            let distilledFromTunnels = allTunnels.filter {
-                $0.label == "_distilled_from" && $0.sourceDrawerId == estate.factoidID
-            }
-            #expect(distilledFromTunnels.count == 1,
-                "intra-item distillation writes one _distilled_from tunnel to the source item")
-
-            // The single source item ID must appear as the tunnel target.
-            let targetIDs = Set(distilledFromTunnels.compactMap(\.targetDrawerId))
-            #expect(targetIDs == Set([estate.sourceID]),
-                "the source item ID must appear as the tunnel target")
+            // Write 2: the lane entry keyed by the SOURCE drawer id (§8).
+            let probe = DistillationPipeline.queryFingerprint(
+                query: Self.itemBody,
+                extractFeatures: DistillationPipeline.defaultExtractor)
+            let matches = try await fixture.vectorStore.findNearest(
+                probe: probe,
+                modelID: GeniusLocusKit.distillationLaneModelID,
+                limit: 5)
+            #expect(matches.contains { $0.itemID == fixture.sourceID },
+                "the lane key is the SOURCE drawer id, not a factoid id")
         }
     }
 
-    // MARK: - CK-INT-2: Dense recall (no embedding inference)
+    // MARK: - CK-INT-2: §10.3 distilled recall end-to-end
 
-    /// CK-INT-2: moot_recall_distilled → ≥1 DistilledMatch, no embedding call.
-    ///
-    /// The dense path uses DistillationPipeline.queryFingerprint (pure bit ops)
-    /// and VectorStore Hamming NN over the "distillation-features-v1" lane.
-    /// No float-vector embedding model is invoked.
-    @Test("CK-INT-2: dense recall returns ≥1 DistilledMatch via fingerprint Hamming NN")
-    func denseRecall() async throws {
+    @Test("CK-INT-2: distilled recall returns the SOURCE id with the distilled payload")
+    func distilledRecallEndToEnd() async throws {
         try await withCognitionLock {
-            let estate = try await setUpDistilledEstate()
+            let fixture = try await setUpDistilledEstate()
 
-            // Query with lowercase "provenance" — defaultExtractor extracts no features
-            // (first word, or not capitalized), yielding Fingerprint256.zero. The stored
-            // fingerprint is featureHash("Provenance") ≠ zero. VectorStore.findNearest
-            // returns the factoid as the nearest available vector regardless of Hamming
-            // distance, since it is the only vector in the distillation-features-v1 lane.
-            let recipe = DistilledRecall()
-            let output = try await recipe.run(
-                input: DistilledRecall.Input(query: "provenance"),
-                estate: estate.handle, kit: estate.kit)
+            let output = try await DistilledRecall().run(
+                input: DistilledRecall.Input(query: "Provenance record"),
+                estate: fixture.handle, kit: fixture.kit)
 
-            #expect(!output.matches.isEmpty,
-                "moot_recall_distilled must return ≥1 DistilledMatch from the _distilled lane")
-
-            // The factoid produced by Consolidate has confidence=1.0 (single dominant
-            // feature, docFrequency=1.0). Verify injectionDepth matches threshold.
-            if let match = output.matches.first {
-                #expect(match.confidence > 0.4,
-                    "factoid confidence must be above 0.4 (distillation confidence gate)")
-                // confidence=1.0 ≥ 0.7 → factoidOnly (prose only, no annotation suffix)
-                #expect(match.injectionDepth == .factoidOnly,
-                    "confidence ≥ 0.7 must yield .factoidOnly injection depth")
-            }
+            let match = try #require(
+                output.matches.first { $0.id == fixture.sourceID },
+                "the hit is the SOURCE drawer — there is no factoid tier")
+            #expect(!match.servedFromContent)
+            #expect(match.tokenCount != nil)
+            #expect(match.text != Self.itemBody, "payload is the dense rendering")
         }
     }
 
-    // MARK: - CK-INT-3: Recollect
+    // MARK: - CK-INT-3: §7.3/§13.6 regeneration on version mismatch
 
-    /// CK-INT-3: moot_recollect(factoidID) → the single source item.
-    ///
-    /// Verifies the recollect path: factoid hydration → DIST header validation →
-    /// tunnel graph traversal → source hydration. Under the intra-item model the
-    /// factoid links back to exactly one source (the item it was distilled from).
-    @Test("CK-INT-3: recollect returns the single source item")
-    func recollect() async throws {
+    @Test("CK-INT-3: a stale pipeline version regenerates on the next sweep and replaces the lane entry")
+    func staleVersionRegenerates() async throws {
         try await withCognitionLock {
-            let estate = try await setUpDistilledEstate()
+            let fixture = try await setUpDistilledEstate()
+            let estate = try await fixture.kit.estate(for: fixture.handle)
 
-            let out = try await Recollect().run(
-                input: Recollect.Input(factoidDrawerID: estate.factoidID),
-                estate: estate.handle, kit: estate.kit)
+            // Simulate a representation from an older contract.
+            _ = try await estate.setDistilledRepresentation(
+                drawerId: fixture.sourceID,
+                distilled: "stale rendering from an older contract",
+                pipelineVersion: "p0",
+                tokenCount: 5,
+                at: t0)
 
-            #expect(out.factoidID == estate.factoidID,
-                "Recollect.Output.factoidID must match the requested factoid drawer ID")
-            #expect(out.sources.count == 1,
-                "recollect must return the single source item linked by the _distilled_from tunnel")
+            let out = try await Distill().run(
+                input: Distill.Input(), estate: fixture.handle, kit: fixture.kit,
+                now: t0.addingTimeInterval(100))
+            #expect(out.itemsDistilled >= 1, "version mismatch is a regeneration candidate (§7.3)")
 
-            // The source item ID must appear in the expansion.
-            let expandedIDs = Set(out.sources.map(\.id))
-            #expect(expandedIDs == Set([estate.sourceID]),
-                "the original source item ID must appear in Recollect output")
+            let row = try #require(
+                try await estate.getDrawers(ids: [fixture.sourceID]).first)
+            #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+            #expect(row.distilled != "stale rendering from an older contract")
+            #expect(row.distilledAt == t0.addingTimeInterval(100))
 
-            // Prose is the dominant feature extracted by the pipeline.
-            #expect(!out.prose.isEmpty,
-                "Recollect.Output.prose must be non-empty for a successful factoid")
-            #expect(out.confidence > 0.4,
-                "factoid confidence must exceed the 0.4 distillation gate")
+            // The lane still carries exactly one entry for this drawer id
+            // (addVector upserts — §8 replace semantics, §13.6).
+            let probe = DistillationPipeline.queryFingerprint(
+                query: Self.itemBody,
+                extractFeatures: DistillationPipeline.defaultExtractor)
+            let matches = try await fixture.vectorStore.findNearest(
+                probe: probe,
+                modelID: GeniusLocusKit.distillationLaneModelID,
+                limit: 10)
+            #expect(matches.filter { $0.itemID == fixture.sourceID }.count == 1)
         }
     }
 
-    // MARK: - CK-INT-4: Search injection depth annotation
+    // MARK: - CK-INT-4: §13.2 zero factoid artifacts
 
-    /// CK-INT-4: moot_memory_search result for a _distilled hit is correctly annotated.
-    ///
-    /// Hydrates the factoid, parses the DIST header, and verifies that InjectionDepth
-    /// classification matches the confidence value produced by the pipeline.
-    ///
-    /// confidence=1.0 (single feature, df=1.0) → InjectionDepth.factoidOnly:
-    ///   prose only, no annotation suffix appended by ToolDispatch.
-    @Test("CK-INT-4: _distilled hit DIST header parses correctly and yields .factoidOnly depth")
-    func searchInjectionDepth() async throws {
+    @Test("CK-INT-4: no factoid drawers, no _distilled_from tunnels, no [DIST| content")
+    func zeroFactoidArtifacts() async throws {
         try await withCognitionLock {
-            let estate = try await setUpDistilledEstate()
-
-            // Hydrate the factoid drawer — this is the content that ToolDispatch reads
-            // when a moot_memory_search result has room == "_distilled".
-            let bodyMap = try await estate.kit.hydrate(
-                estate.handle, ids: [estate.factoidID])
-            let factoidContent = try #require(
-                bodyMap[estate.factoidID],
-                "factoid content must be hydrateable by its drawer ID")
-
-            // Parse the DIST header. This is the same call ToolDispatch makes before
-            // applying InjectionDepth formatting in the moot_memory_search result.
-            let header = try #require(
-                DistilledHeader.parse(factoidContent),
-                "factoid content must contain a parseable DIST header starting with '[DIST|'")
-
-            // confidence=1.0 is expected from the single-feature (Provenance) cluster.
-            #expect(header.confidence > 0.4,
-                "parsed confidence must exceed 0.4 — pipeline gate ensures this")
-            // src= in the DIST header records the number of SOURCE MEMORIES (sourceIDs.count),
-            // not the sentence count (M). For intra-item distillation there is always exactly
-            // one source memory (the item itself), so sourceCount must be 1. This is the
-            // invariant: sourceCount == number of _distilled_from tunnels == expand returns.
-            #expect(header.sourceCount == 1,
-                "DIST header src= must record source memory count (1 for intra-item), not sentence count")
-            #expect(header.deltaType == .static,
-                "identical recurring feature across sentences yields deltaType=STATIC")
-
-            // Verify InjectionDepth classification using the same thresholds as ToolDispatch.
-            // conf ≥ 0.7 → .factoidOnly (prose only, no annotation suffix).
-            // conf ∈ [0.4, 0.7) → .factoidWithMeta.
-            // conf < 0.4 → .factoidWithProvenance (never reached for a produced factoid).
-            if header.confidence >= 0.7 {
-                // Pipeline produced high-confidence factoid: annotation is prose only.
-                #expect(!header.prose.isEmpty,
-                    "prose must be non-empty for a high-confidence factoid")
-            } else {
-                // Borderline confidence: factoidWithMeta annotation expected.
-                // Record for observability — does not block the test.
-                Issue.record(
-                    "Unexpected borderline confidence \(header.confidence); expected >= 0.7 for single-feature cluster with df=1.0")
-            }
+            let fixture = try await setUpDistilledEstate()
+            let estate = try await fixture.kit.estate(for: fixture.handle)
+            let drawers = try await estate.allDrawers()
+            #expect(!drawers.contains { $0.addedBy == "distillation-daemon" })
+            #expect(!drawers.contains { $0.content.hasPrefix("[DIST|") })
+            let tunnels = try await estate.allTunnels()
+            #expect(!tunnels.contains { $0.label == "_distilled_from" })
         }
     }
 }

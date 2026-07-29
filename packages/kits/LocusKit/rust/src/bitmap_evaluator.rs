@@ -1350,19 +1350,11 @@ mod tests {
     #[test]
     fn container_survives_drops_only_provably_excluded() {
         let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::IS_PINNED)];
-        let empty_fp = ContainerFingerprint {
-            adjective: 0,
-            operational: 0,
-            provenance: 0,
-        };
+        let empty_fp = ContainerFingerprint::new(0, 0, 0);
         // Empty OR cannot satisfy a set-bit filter — drop.
         assert!(!BitmapEvaluator::container_survives(&chain, empty_fp));
         // Non-empty OR with the bit set — keep.
-        let fp = ContainerFingerprint {
-            adjective: 0,
-            operational: DrawerFeatureFlags::IS_PINNED,
-            provenance: 0,
-        };
+        let fp = ContainerFingerprint::new(0, DrawerFeatureFlags::IS_PINNED, 0);
         assert!(BitmapEvaluator::container_survives(&chain, fp));
     }
 
@@ -1371,11 +1363,7 @@ mod tests {
         // Threshold filters cannot be decided from an OR — they must
         // never exclude a container.
         let chain = vec![Filter::Trustworthy];
-        let empty_fp = ContainerFingerprint {
-            adjective: 0,
-            operational: 0,
-            provenance: 0,
-        };
+        let empty_fp = ContainerFingerprint::new(0, 0, 0);
         assert!(BitmapEvaluator::container_survives(&chain, empty_fp));
     }
 

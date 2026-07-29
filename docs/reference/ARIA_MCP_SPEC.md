@@ -249,8 +249,10 @@ provenance.
 
 Twelve CognitionKit recipe tools (`moot_list_lenses`, `moot_list_recipes`,
 `moot_synthesize`, `moot_recall_precise`, `moot_recall_shaped`,
-`moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_consolidate`,
-`moot_recall_distilled`, `moot_recollect`, `moot_hunt_contradictions`),
+`moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_distill`
+(with `moot_consolidate` accepted as an unlisted compatibility alias —
+SPEC_DISTILLATION_STORAGE §3), `moot_recall_distilled`,
+`moot_hunt_contradictions`),
 twenty-three reasoning-lens tools (`moot_lens_*`), and five vault control tools
 (`moot_vault_export`, `moot_vault_import`, `moot_vault_status`,
 `moot_vault_reconcile`, `moot_vault_job`) carry `.recipe` and `.vault`
@@ -325,8 +327,8 @@ assembled from `LensTools.tools()` and four Tier 6 recipe tools, listing 27
 cognition tools total (23 `moot_lens_*` tools + `moot_synthesize`,
 `moot_list_lenses`, `moot_recall_precise`, `moot_recall_shaped`).
 Migration and distillation tools (Tier 7: `moot_run_migration`,
-`moot_confirm_migration`, `moot_consolidate`, `moot_recall_distilled`,
-`moot_recollect`) are intentionally excluded — they have their own tier and
+`moot_confirm_migration`, `moot_distill`, `moot_recall_distilled`)
+are intentionally excluded — they have their own tier and
 teachme guides.
 
 Response shape:

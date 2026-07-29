@@ -17,7 +17,7 @@
 //! ```text
 //! bits 0–5    capture_channel        (contiguous, 6 cases at raw 0..5)
 //! bits 6–11   content_kind           (contiguous, 8 cases at raw 0..7)
-//! bits 12–23  feature_flags          (bitset, 7 named bits 12..18)
+//! bits 12–23  feature_flags          (bitset, 8 named bits 12..19)
 //! bit  24     state_extension flag
 //! bit  25     lineage_clustering flag (NEW in v0.6)
 //! bits 26–63  reserved
@@ -137,12 +137,14 @@ impl ContentKind {
 // MARK: - DrawerFeatureFlags
 
 /// Feature-flag bitset constants. Lives in bits 12–23 of
-/// `Drawer::operational_bitmap` (12-bit bitset; 7 named bits 12..18,
-/// bits 19..23 reserved). Per cookbook §2.4.
+/// `Drawer::operational_bitmap` (12-bit bitset; 8 named bits 12..19,
+/// bits 20..23 reserved). Per cookbook §2.4.
 ///
 /// F12 cascade (2026-05-27): shifted from v0.35 bits 8–15 to v0.6
 /// bits 12–23. NEW flags: `IS_KEYSTONE` (bit 17, cookbook §7.2),
-/// `IS_LOCKED_ZONE` (bit 18).
+/// `IS_LOCKED_ZONE` (bit 18). 2026-07-28: `HAS_CURRENT_REPRESENTATION`
+/// (bit 19, cookbook §2.4.1) assigned — first of the formerly reserved
+/// bits 19–23.
 ///
 /// Bit positions match `DrawerFeatureFlags` OptionSet members in
 /// `DrawerOperational.swift`. The Swift OptionSet's `rawValue` and
@@ -176,6 +178,21 @@ impl DrawerFeatureFlags {
     /// Bit 18 — locked-zone drawer (NEW in v0.6 per cookbook §2.4).
     /// Privacy-aware bucket; recall gated by zone-policy check.
     pub const IS_LOCKED_ZONE: i64 = 1 << 18;
+
+    /// Bit 19 — drawer carries a current distilled representation per
+    /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
+    ///
+    /// Set iff all four distillation columns (`distilled`,
+    /// `distilled_pipeline_version`, `distilled_token_count`,
+    /// `distilled_at`) are populated. Clear when those columns are NULL.
+    ///
+    /// The §4 invariant makes this bit skew-impossible: it travels in the
+    /// SAME UPDATE as the four columns — set by `set_distilled_representation`,
+    /// cleared by every `insert_cleared_representation` call site and by
+    /// the dataset-content patch path. Wire value: 1 << 19 = 524288 (0x80000).
+    ///
+    /// Mirrors Swift `DrawerFeatureFlags.hasCurrentRepresentation`.
+    pub const HAS_CURRENT_REPRESENTATION: i64 = 1 << 19;
 
     /// Mask covering the 12-bit feature region (bits 12–23). Matches
     /// the Swift `featureFlags` accessor's `0xFFF000` mask.
@@ -237,6 +254,22 @@ impl Drawer {
     /// Mirrors the Swift `hasFeatureFlag(_:)`.
     pub fn has_feature_flag(&self, flag: i64) -> bool {
         (self.operational_bitmap & flag) == flag
+    }
+
+    /// True when bit 19 of `operational_bitmap` is set, indicating that
+    /// all four distillation columns are populated (cookbook §2.4.1).
+    ///
+    /// Consumers use this instead of `distilled.is_some()` for eligibility
+    /// checks — it is a direct bitmap read, not a column-presence test.
+    /// `distill_items_sweep` uses this accessor as the primary eligibility
+    /// gate; `count_undistilled` uses the corresponding `BitmaskNone`
+    /// predicate on the database side.
+    ///
+    /// Mirrors Swift `Drawer.hasCurrentRepresentation`.
+    pub fn has_current_representation(&self) -> bool {
+        // Cookbook §2.4.1: has_current_representation at bit 19.
+        (self.operational_bitmap & DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION)
+            == DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION
     }
 
     /// True when bit 24 of `operational_bitmap` is set, indicating the
@@ -409,9 +442,35 @@ mod tests {
         assert_eq!(DrawerFeatureFlags::HAS_IMAGE, 1 << 14);
         assert_eq!(DrawerFeatureFlags::HAS_LINKS, 1 << 15);
         assert_eq!(DrawerFeatureFlags::IS_PINNED, 1 << 16);
-        assert_eq!(DrawerFeatureFlags::IS_KEYSTONE, 1 << 17); // NEW
-        assert_eq!(DrawerFeatureFlags::IS_LOCKED_ZONE, 1 << 18); // NEW
+        assert_eq!(DrawerFeatureFlags::IS_KEYSTONE, 1 << 17); // NEW in v0.6
+        assert_eq!(DrawerFeatureFlags::IS_LOCKED_ZONE, 1 << 18); // NEW in v0.6
+        // Cookbook §2.4.1 (2026-07-28): first formerly-reserved bit assigned.
+        assert_eq!(DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION, 1 << 19);
+        assert_eq!(DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION, 524288);
         assert_eq!(DrawerFeatureFlags::FIELD_MASK, 0xFFF000);
+    }
+
+    #[test]
+    fn has_current_representation_is_bit_19() {
+        // Cookbook §2.4.1: has_current_representation at bit 19.
+        let mut d = sample();
+        assert!(!d.has_current_representation());
+        d.operational_bitmap = 1 << 19;
+        assert!(d.has_current_representation());
+        // Adjacent bits must not trigger.
+        d.operational_bitmap = 1 << 18;
+        assert!(!d.has_current_representation());
+        d.operational_bitmap = 1 << 20;
+        assert!(!d.has_current_representation());
+        // Composing with other feature flags: bit 19 must be detectable
+        // regardless of what other feature bits are set.
+        d.operational_bitmap = DrawerFeatureFlags::HAS_VOICE
+            | DrawerFeatureFlags::IS_KEYSTONE
+            | DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        assert!(d.has_current_representation());
+        // Clear it: representation removed.
+        d.operational_bitmap &= !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        assert!(!d.has_current_representation());
     }
 
     #[test]

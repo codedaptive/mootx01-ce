@@ -49,6 +49,30 @@ public enum CorpusContentDigest {
 }
 
 /// One canonical content row as the engine consumes it.
+///
+/// ## Two-text design — dual-text indexing capability
+///
+/// A content provider may optionally supply a DENSE-COMPOSITION TEXT per
+/// content ID that is distinct from the verbatim lexical text:
+///
+///   - `text`                  — The verbatim canonical text. Used for BM25/
+///                               lexical indexing (keyword tokenisation) and as
+///                               the returned/ranked payload. Never changes for
+///                               a given (id, revision, digest).
+///   - `denseCompositionText`  — Optional text used to compose the dense float
+///                               vector lane. nil means "use `text`" — the
+///                               default, so existing consumers see zero
+///                               behavior change. When non-nil the dense lane
+///                               vectors are composed from THIS text while BM25
+///                               continues to index `text` unchanged.
+///
+/// Recomposability rule: any vector produced by the engine must be exactly
+/// recomposable from persisted/reachable canonical text. In standalone mode
+/// `denseCompositionText` is stored in `corpus_documents.dense_text` (NULL =
+/// same as lexical). In attached mode the source adapter supplies it at
+/// record-resolution time from a dense-composition store above CorpusKit. Either way the engine
+/// never needs to keep a separate in-memory copy — it resolves the record,
+/// calls `effectiveDenseText`, and embeds.
 public struct CorpusContentRecord: Sendable, Equatable {
     public let id: CorpusContentID
     /// Monotonic per-ID revision, starting at 1. A changed text bumps the
@@ -56,16 +80,28 @@ public struct CorpusContentRecord: Sendable, Equatable {
     public let revision: Int64
     /// `CorpusContentDigest.digest(text)` — the change-detection anchor.
     public let digest: String
-    /// The verbatim canonical text, resolved BY ID at work time. Records
-    /// are handed to the engine in memory only; the text never rides a
-    /// queue payload or change feed.
+    /// The verbatim canonical text, resolved BY ID at work time. Used for
+    /// BM25 keyword tokenisation and as the returned ranked payload. Never
+    /// rides a queue payload or change feed.
     public let text: String
+    /// Optional dense-composition text for the float vector lane. nil means
+    /// use `text` for both BM25 and dense embedding — the default for all
+    /// consumers that do not supply a separate dense representation.
+    public let denseCompositionText: String?
 
-    public init(id: CorpusContentID, revision: Int64, digest: String, text: String) {
+    /// The text the engine uses when composing the dense float lane vector.
+    /// Returns `denseCompositionText` when set, falls back to `text`.
+    public var effectiveDenseText: String { denseCompositionText ?? text }
+
+    public init(
+        id: CorpusContentID, revision: Int64, digest: String, text: String,
+        denseCompositionText: String? = nil
+    ) {
         self.id = id
         self.revision = revision
         self.digest = digest
         self.text = text
+        self.denseCompositionText = denseCompositionText
     }
 }
 

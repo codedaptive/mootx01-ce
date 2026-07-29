@@ -107,6 +107,44 @@ public enum FloatLaneOutcome: Sendable {
     case storeError(Error)
 }
 
+// MARK: - FloatDiscriminationSignal
+
+/// Per-query discrimination signal from the dense float lane.
+///
+/// Measures how spread the top-K cosine similarity scores are, distinguishing
+/// a contrastive regime (clear semantic winner) from a saturated regime (all
+/// scores near-uniform, as observed with short chat turns dominated by stopword
+/// mass — pairwise document cosines 0.93–0.98 collapse query-to-document cosines
+/// to a similarly narrow band).
+///
+/// **Statistic choice — relative spread:**
+/// `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
+/// - Saturated regime (short-text RI vectors): spread ≈ 0.05 (no clear winner).
+/// - Contrastive regime (meaningful semantic hit): spread ≥ 0.15.
+/// - Only two values needed: the first and last of the already-sorted `.hits`
+///   list — O(1) cost with zero extra store access or embed calls.
+/// - Degrades safely when `maxSim ≤ 0`: returns 0.0 (treat as saturated).
+///
+/// **Design boundary:** CorpusKit computes and reports; GLK (RecallDirector)
+/// decides what to do with the signal. CorpusKit never changes behaviour based
+/// on it — measurement only. Standalone CorpusKit consumers receive the raw
+/// signal for their own fusion decisions.
+public struct FloatDiscriminationSignal: Sendable {
+    /// Relative spread of top-K hit cosines: (max − min) / max (or 0 when max ≤ 0).
+    ///
+    /// 0.0 = perfectly saturated (all scores identical, or max cosine non-positive);
+    /// 1.0 = maximally discriminating (best score, worst near 0).
+    ///
+    /// Threshold guidance for GLK consumers (defined in RecallDirector):
+    ///   < 0.10 → clearly saturated regime — strong discount.
+    ///   0.10–0.15 → transition band — partial discount.
+    ///   ≥ 0.15 → contrastive — no discount (discriminationFactor = 1.0).
+    public let relativeSpread: Float
+
+    /// Hit count K used to compute the spread (top-K hits, after limit truncation).
+    public let hitCount: Int
+}
+
 /// CorpusKit OSLog logger (category "CorpusKit").
 ///
 /// Used by `floatNearest` to log store errors so they are never swallowed.
@@ -2588,6 +2626,30 @@ public actor Corpus {
         return .hits(result)
     }
 
+    /// Compute a `FloatDiscriminationSignal` from a `FloatLaneOutcome`.
+    ///
+    /// Returns non-nil only for `.hits` with at least one result. The relative spread
+    /// `(maxSim − minSim) / max(maxSim, 0.001)` is computed from the FIRST and LAST
+    /// elements of the already-sorted similarity list — O(1), zero extra I/O.
+    ///
+    /// This helper is shared by `floatNearestPerSignalWithDiscrimination` on both
+    /// `Corpus` and `CorpusContentEngine` so the measurement is defined once.
+    nonisolated internal static func discriminationSignal(
+        from outcome: FloatLaneOutcome
+    ) -> FloatDiscriminationSignal? {
+        guard case .hits(let hits) = outcome, !hits.isEmpty else { return nil }
+        // `.hits` is sorted nearest-first (highest cosine first) for nearest recall.
+        // maxSim is hits[0].similarity; minSim is hits.last!.similarity.
+        let maxSim = hits[0].similarity
+        let minSim = hits[hits.endIndex - 1].similarity
+        // Guard against non-positive maxSim: cosines can be negative on an
+        // insufficiently trained basis; treat that regime as saturated (spread = 0).
+        let spread = maxSim > 0.001 ? (maxSim - minSim) / maxSim : 0.0
+        return FloatDiscriminationSignal(
+            relativeSpread: max(0.0, spread),
+            hitCount: hits.count)
+    }
+
     /// Per-signal dense float nearest-neighbour recall (the 6b RRF-fusion seam).
     ///
     /// Runs the dense float lane independently for EVERY held provider slot,
@@ -2703,6 +2765,133 @@ public actor Corpus {
             results.append((modelID: provider.modelID, outcome: outcome))
         }
         return results
+    }
+
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
+    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
+    /// The discrimination signal is non-nil exactly when the outcome is `.hits` with
+    /// at least one result; it is `nil` for all dark-lane outcomes.
+    ///
+    /// **Discrimination computation:**
+    /// For each `.hits` outcome, `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
+    /// where `maxSim` and `minSim` are the first and last cosines of the already-sorted
+    /// ranked list. This is O(1) and adds no store access or embed calls.
+    ///
+    /// **Policy boundary:** CorpusKit computes and exposes; calling code decides.
+    /// No behaviour change inside this method or anywhere in CorpusKit — measurement only.
+    /// RecallDirector (GLK) is the policy consumer: it discounts the dense contribution
+    /// when the lane self-reports degeneracy. Standalone CorpusKit consumers may use
+    /// the signal for their own fusion decisions.
+    ///
+    /// - Parameters:
+    ///   - query: the query text.
+    ///   - limit: maximum number of matches per signal.
+    /// - Returns: `(modelID, outcome, discrimination)` triples, one per held signal,
+    ///   in slot order. `discrimination` is nil for non-`.hits` outcomes.
+    public func floatNearestPerSignalWithDiscrimination(
+        query: String,
+        limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
+        // Delegate to the existing per-signal call, then compute discrimination from
+        // each `.hits` outcome's already-sorted similarity list. The existing function
+        // handles the forced-error test seam and all dark-lane paths, so this wrapper
+        // stays thin and does not duplicate that logic.
+        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
+        return perSignal.map { entry in
+            let discrimination: FloatDiscriminationSignal? = Self.discriminationSignal(from: entry.outcome)
+            return (modelID: entry.modelID, outcome: entry.outcome, discrimination: discrimination)
+        }
+    }
+
+    // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
+
+    /// Score a bounded candidate set at sub-span granularity (transient).
+    ///
+    /// For each source ID in `sourceIDs`, retrieves the ingested chunk text
+    /// via `BundleStore.chunksForSource`, concatenates chunks into a single
+    /// text body, segments it into token-window sub-spans (alphanumeric-run
+    /// rule, cross-port identical), and returns the max-cosine ∈ [0,1] across
+    /// all sub-spans for each source.
+    ///
+    /// Uses the DEFAULT slot's provider. Sub-span vectors are computed on the
+    /// fly and DISCARDED — zero persistence.
+    ///
+    /// For the `CorpusContentEngine` surface (GLK's path), use
+    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)` which resolves
+    /// `effectiveDenseText` via the canonical `CorpusContentSource` protocol
+    /// (supports both standalone and attached modes, including the dual-text
+    /// dense-composition capability from Stream A).
+    ///
+    /// - Parameters:
+    ///   - query: The query text.
+    ///   - sourceIDs: Bounded candidate source IDs (typically ~40).
+    /// - Returns: Max-cosine ∈ [0,1] per source ID. Missing keys → 0.0.
+    public func scoreSubSpans(
+        query: String,
+        sourceIDs: [String]
+    ) async -> [String: Float] {
+        guard !query.isEmpty, !sourceIDs.isEmpty else { return [:] }
+
+        // Embed the query once via the default provider.
+        let queryVec: [Float]
+        do {
+            let result = try await defaultProvider.embedFloat(query)
+            guard !result.isEmpty else { return [:] }
+            queryVec = result
+        } catch {
+            return [:]
+        }
+
+        var out: [String: Float] = [:]
+        out.reserveCapacity(sourceIDs.count)
+        for sourceID in sourceIDs {
+            // Retrieve all chunks for this source and concatenate into one body.
+            let chunks: [Chunk]
+            do {
+                chunks = try await bundleStore.chunksForSource(sourceID)
+            } catch {
+                continue
+            }
+            guard !chunks.isEmpty else { continue }
+            // Concatenate chunk text in chunk order (start-offset ascending).
+            // The full concatenated text is the scoring surface, mirroring what
+            // the ingest path stored.
+            let body = chunks
+                .sorted { $0.startOffset < $1.startOffset }
+                .map(\.text)
+                .joined(separator: " ")
+            guard !body.isEmpty else { continue }
+
+            let ranges = SubSpanScoring.subSpanRanges(
+                text: body,
+                windowTokens: SubSpanScoring.defaultWindowTokens,
+                overlapTokens: SubSpanScoring.defaultOverlapTokens)
+            guard !ranges.isEmpty else { continue }
+
+            var maxNorm: Float = 0.0
+            let utf8 = body.utf8
+            for (spanStart, spanLength) in ranges {
+                guard spanStart >= 0, spanStart + spanLength <= utf8.count else { continue }
+                let lo = utf8.index(utf8.startIndex, offsetBy: spanStart)
+                let hi = utf8.index(lo, offsetBy: spanLength)
+                guard let spanText = String(utf8[lo..<hi]) else { continue }
+                let spanVec: [Float]
+                do {
+                    let result = try await defaultProvider.embedFloat(spanText)
+                    guard !result.isEmpty else { continue }
+                    spanVec = result
+                } catch {
+                    continue
+                }
+                let cosine = SubSpanScoring.cosineSimilarity(queryVec, spanVec)
+                let norm = max(0, min(1, (cosine + 1) / 2))
+                if norm > maxNorm { maxNorm = norm }
+            }
+            if maxNorm > 0 { out[sourceID] = maxNorm }
+        }
+        return out
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane

@@ -388,11 +388,54 @@ Drawer operational (empirical-dominant, 6-bit floor):
                                  bit 16 is_pinned
                                  bit 17 is_keystone (NEW, §7.2)
                                  bit 18 is_locked_zone
-                                 bits 19–23 reserved
+                                 bit 19 has_current_representation (NEW)
+                                 bits 20–23 reserved
   Bit  24     state_extension flag
   Bit  25     lineage_clustering flag
   Bits 26–63  reserved
+```
 
+#### §2.4.1. `has_current_representation` — bit 19 (NEW, 2026-07-28)
+
+**Semantics.** Set iff the four distillation columns (`distilled`,
+`distilled_pipeline_version`, `distilled_token_count`, `distilled_at`)
+are all populated (i.e., the row carries a current distilled
+representation). Clear when those columns are all NULL — either because
+the row was never distilled, was reset by a content edit, or was cleared
+by the expunge scrub.
+
+The §4 invariant ("NULL together or populated together") means the bit
+and the four columns can never skew: **set and clear travel in the same
+SQL UPDATE statement** as the column writes. The bit is not a cache of
+a query; it is a field on the row that moves with the data it reflects.
+
+**Practical win.** Sweep eligibility (`distillItemsSweep`) and drain
+accounting (`countUndistilled`) need not issue per-row `distilled IS NULL`
+scans; a `(operationalBitmap & (1<<19)) == 0` bitmap predicate covers
+all three concerns in a single index-friendly expression.
+
+**Design tenet.** Using open bitmap space for new features eliminates
+migration overhead. 1.0.x rows migrated to 1.1.x carry the bit clear
+because their distillation columns are all-NULL: no schema change,
+no backfill, no migration guard. The first successful distillation
+cycle sets the bit as a natural part of writing the four columns.
+
+**Wire value.** `1 << 19 = 524288 (0x80000)`.
+
+**Invariants.**
+- Set path: `setDistilledRepresentation` / `set_distilled_representation`
+  — read-modify-write within one transaction. Never set outside this path.
+- Clear paths (unconditional, same-statement): `withClearedRepresentation` /
+  `insert_cleared_representation` call sites — content-edit (§7.3),
+  expunge scrub (head + all lineage siblings), gate-reject scrub,
+  `updateDatasetContent` / `patch_dataset_handle_content`.
+- Migrated rows: clear at migration time. Bit enters clean on first
+  distillation cycle. No migration SQL required.
+- Estate-destruction bulk wipe (`wipe_all_content`) does not clear the
+  bit; the estate is destroyed immediately after the wipe, so row state
+  is never read again.
+
+```
 Proposal operational (spatial-dominant, 6-bit floor):
   Bits 0–5    proposal_kind          [spatial, contiguous]
                                       0=new_tunnel 1=mutate_drawer
@@ -634,6 +677,7 @@ table.
 | 22 | Drawer.feature_flags.is_keystone | bit 17 | DrawerOperational.swift | NEW |
 | 23 | Adjective.dreaming_recalc_required | bit 26 | Adjectives.swift `Adjective.dreamingRecalcRequired` | NEW in v0.36 F17; cross-noun |
 | 24 | Adjective.sealed | bit 27 | Adjectives.swift `Adjective.sealed` | NEW in v1.0; integrity-triangle hint |
+| 25 | Drawer.feature_flags.has_current_representation | bit 19 (0x80000) | DrawerOperational.swift | NEW 2026-07-28; set iff distillation columns populated |
 
 Implementations MUST surface this table as an automated conformance
 test that fails when a source constant deviates from spec.

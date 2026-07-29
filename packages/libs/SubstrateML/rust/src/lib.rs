@@ -75,4 +75,9 @@ pub mod distillation_scorer;
 // Rust port of DistillationPipeline.swift (Ds4). Parity to be verified in Dp1.
 pub mod distillation_pipeline;
 
+// The §7.6 token-compaction transform + §6 token estimator
+// (SPEC_DISTILLATION_STORAGE). Rust twin of TokenCompaction.swift;
+// bit-identical output required (token_compaction_conformance.rs).
+pub mod token_compaction;
+
 pub const VERSION: &str = "1.0.0-skeleton";

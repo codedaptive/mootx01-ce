@@ -298,6 +298,11 @@ public actor CorpusContentEngine {
     /// admission critical section without serializing preparation or reindex.
     private var countsAdmissionActive = false
     private var countsAdmissionWaiters: [CheckedContinuation<Void, Never>] = []
+    /// In-memory mirror of corpus_bitmap_generation.basis_generation.
+    /// Loaded from the store at init time and updated on every
+    /// trainTrainableSlots call. Used when writing coverage bitmap bits
+    /// so generation is stamped without a store round-trip per content row.
+    private var currentBasisGeneration: Int64 = 0
 
     // MARK: - Content-reference ingest queue state (GLK shared-content P3)
     //
@@ -411,6 +416,65 @@ public actor CorpusContentEngine {
         // blobs for every Drawer.
         try await reloadCountsFromStorage()
         try await invertedIndex.open()
+        // Load the current basis-generation counter. Default 0 on first open
+        // (no retrain yet). Updated after each trainTrainableSlots call.
+        self.currentBasisGeneration = try await indexState.basisGeneration()
+    }
+
+    // MARK: - Operational bitmap helpers
+
+    /// Build the operational bitmap for a real content checkpoint.
+    /// Sets `lexically_indexed=1`, `has_dense_text=` from the record,
+    /// and stamps the coverage mask + generation for any registered-slot
+    /// providers in `covered`.
+    private func checkpointBitmap(
+        record: CorpusContentRecord,
+        covered: [(contentID: CorpusContentID, modelID: String, basisDigest: String)]
+    ) -> Int64 {
+        var bitmap = freshCheckpointBitmap()
+        if record.denseCompositionText != nil {
+            bitmap |= indexBitHasDenseText
+        }
+        // Fold coverage bits for any registered slots covered in this pass.
+        var coverageBits: Int64 = 0
+        for (cid, modelID, _) in covered where cid == record.id {
+            guard let k = coverageMaskBitOffset(for: modelID) else { continue }
+            coverageBits |= 1 << (indexCoverageMaskShift + k)
+        }
+        if coverageBits != 0 {
+            bitmap |= coverageBits
+            let genField = (currentBasisGeneration & (indexGenerationModulus - 1))
+                << indexGenerationShift
+            bitmap |= genField
+        }
+        return bitmap
+    }
+
+    /// Update the operational_bitmap for every content row in `covered` to
+    /// stamp the newly covered slots and the current basis generation.
+    /// Called AFTER coverageStore.markCovered to keep the bitmap in sync.
+    /// Unregistered providers (no slot in the registry) are silently skipped —
+    /// their coverage is tracked only in corpus_provider_coverage.
+    private func stampCoverageBitmaps(
+        covered: [(contentID: CorpusContentID, modelID: String, basisDigest: String)]
+    ) async throws {
+        // Aggregate coverage additions per contentID.
+        var additions: [CorpusContentID: Int64] = [:]
+        for (contentID, modelID, _) in covered {
+            guard let k = coverageMaskBitOffset(for: modelID) else { continue }
+            additions[contentID, default: 0] |= 1 << (indexCoverageMaskShift + k)
+        }
+        guard !additions.isEmpty else { return }
+        let genField = (currentBasisGeneration & (indexGenerationModulus - 1))
+            << indexGenerationShift
+        for (contentID, coverageBits) in additions {
+            guard let state = try await indexState.state(for: contentID) else { continue }
+            // Clear old generation field and OR in new coverage bits + new generation.
+            let clearedGen = state.operationalBitmap & ~indexGenerationMask
+            let newBitmap = clearedGen | coverageBits | genField
+            guard newBitmap != state.operationalBitmap else { continue }
+            try await indexState.updateBitmap(contentID: contentID, bitmap: newBitmap)
+        }
     }
 
     /// Register this engine's representation claims (idempotent). Called
@@ -572,15 +636,33 @@ public actor CorpusContentEngine {
     /// (`attachedModeViolation`) — removal/authorship authority there is the
     /// GLK/LocusKit verb surface.
     public func ingest(_ text: String, contentID: CorpusContentID, now: Date) async throws {
+        try await ingest(text, denseCompositionText: nil, contentID: contentID, now: now)
+    }
+
+    /// STANDALONE convenience with dual-text support: put canonical text
+    /// plus an optional dense-composition text and index in one call.
+    ///
+    /// `denseCompositionText` is stored in the document store's `dense_text`
+    /// column (NULL when nil) and carried in every subsequent
+    /// `source.record(for:)` call so retrain and reindex paths can recompose
+    /// the dense vector without external input (recomposability rule).
+    ///
+    /// BM25/lexical indexing always uses `text`; the dense float lane uses
+    /// `denseCompositionText` when non-nil, falling back to `text` otherwise.
+    public func ingest(
+        _ text: String, denseCompositionText: String?,
+        contentID: CorpusContentID, now: Date
+    ) async throws {
         guard configuration.allowsContentMutation,
-              let store = source as? any CorpusContentStore else {
+              let store = source as? CorpusDocumentStore else {
             throw CorpusKitError.attachedModeViolation(
                 "content mutation through CorpusKit is standalone-only — attached "
                 + "content changes flow through the canonical store's own verbs")
         }
         try validate(id: contentID)
         guard !text.isEmpty else { return }
-        _ = try await store.put(text, id: contentID, now: now)
+        _ = try await store.put(text, denseCompositionText: denseCompositionText,
+                                id: contentID, now: now)
         try await indexContent(id: contentID, now: now)
     }
 
@@ -602,7 +684,7 @@ public actor CorpusContentEngine {
     public func indexContent(id: CorpusContentID, now: Date) async throws -> Bool {
         try validate(id: id)
         guard let record = try await source.record(for: id) else {
-            try await clearDerivedState(id: id)
+            try await clearDerivedState(id: id, now: now)
             return false
         }
         try await index(record: record, appliedCursor: nil, force: false, now: now)
@@ -617,7 +699,7 @@ public actor CorpusContentEngine {
     public func indexContentStructural(id: CorpusContentID, now: Date) async throws -> Bool {
         try validate(id: id)
         guard let record = try await source.record(for: id) else {
-            try await clearDerivedState(id: id)
+            try await clearDerivedState(id: id, now: now)
             return false
         }
         try await index(
@@ -669,11 +751,12 @@ public actor CorpusContentEngine {
         for id in ids {
             try validate(id: id)
             guard let record = try await source.record(for: id) else {
-                try await clearDerivedState(id: id)
+                try await clearDerivedState(id: id, now: now)
                 continue
             }
             if !force,
                let existing = try await indexState.state(for: id),
+               !existing.isRemoved,
                existing.revision == record.revision,
                existing.digest == record.digest,
                existing.indexVersion == Self.indexVersion {
@@ -693,15 +776,18 @@ public actor CorpusContentEngine {
         }
         let vectorRows = prepared.flatMap(\.vectorRows)
         if !vectorRows.isEmpty { try await vectorStore.addPayloads(vectorRows) }
-        try await coverageStore.markCovered(prepared.flatMap(\.covered), now: now)
+        let allCovered = prepared.flatMap(\.covered)
+        try await coverageStore.markCovered(allCovered, now: now)
         for item in prepared {
+            let bitmap = checkpointBitmap(record: item.record, covered: allCovered)
             try await indexState.advance(CorpusIndexState(
                 contentID: item.record.id,
                 revision: item.record.revision,
                 digest: item.record.digest,
                 indexVersion: Self.indexVersion,
                 appliedCursor: nil,
-                updatedAt: now))
+                updatedAt: now,
+                operationalBitmap: bitmap))
             if force {
                 // The former serial reindex path emitted this metric once per
                 // completed record. Preserve that observability while moving
@@ -806,8 +892,11 @@ public actor CorpusContentEngine {
             rows.reserveCapacity(providers.count * 2)
             var covered: [(CorpusContentID, String, String)] = []
             covered.reserveCapacity(providers.count)
+            // Dense lane uses effectiveDenseText (denseCompositionText when set,
+            // text otherwise). BM25 tokens always use the lexical text.
+            let denseText = record.effectiveDenseText
             for target in providers {
-                let (engram, floats) = try await target.provider.embedPair(record.text)
+                let (engram, floats) = try await target.provider.embedPair(denseText)
                 if target.writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: record.id, vectorIndex: 0,
@@ -826,6 +915,7 @@ public actor CorpusContentEngine {
             }
             return PreparedStructuralRecord(
                 record: record,
+                // BM25 keyword tokens: always lexical text, never dense text.
                 tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
                 vectorRows: rows,
                 covered: covered)
@@ -943,12 +1033,13 @@ public actor CorpusContentEngine {
                 preparedUpserts = preparedUpserts.filter { !$0.hasPrefix(upsertPrefix) }
                 do {
                     try _ingestFailureHook?(payload.contentID)
-                    try await clearDerivedState(id: payload.contentID)
+                    try await clearDerivedState(id: payload.contentID, now: workNow)
                     if let cursor = payload.cursor {
                         result.checkpoints.append(CorpusIndexState(
                             contentID: Self.feedCursorRowID, revision: 0, digest: "",
                             indexVersion: Self.indexVersion, appliedCursor: cursor,
-                            updatedAt: workNow))
+                            updatedAt: workNow,
+                            operationalBitmap: feedCursorBitmap))
                     }
                     result.completions.append((job.id, .done))
                 } catch {
@@ -982,7 +1073,8 @@ public actor CorpusContentEngine {
                         result.checkpoints.append(CorpusIndexState(
                             contentID: Self.feedCursorRowID, revision: 0, digest: "",
                             indexVersion: Self.indexVersion, appliedCursor: cursor,
-                            updatedAt: workNow))
+                            updatedAt: workNow,
+                            operationalBitmap: feedCursorBitmap))
                     }
                     result.completions.append((job.id, .done))
                     continue
@@ -1002,10 +1094,12 @@ public actor CorpusContentEngine {
                 }
 
                 // Durable idempotence: skip records whose checkpoint already covers
-                // this exact (revision, digest, indexVersion). The checkpoint is
-                // advanced LAST, so a complete checkpoint proves all derived rows
-                // are complete — replay is truly a no-op.
+                // this exact (revision, digest, indexVersion) AND are not removed
+                // (a removed row must be re-indexed even when revision/digest match —
+                // the remove path soft-deletes with revision=0 so this guard fires
+                // naturally, but the explicit !existing.isRemoved is belt-and-suspenders).
                 if let existing = try await indexState.state(for: record.id),
+                   !existing.isRemoved,
                    existing.revision == record.revision,
                    existing.digest == record.digest,
                    existing.indexVersion == Self.indexVersion
@@ -1016,7 +1110,8 @@ public actor CorpusContentEngine {
                         result.checkpoints.append(CorpusIndexState(
                             contentID: Self.feedCursorRowID, revision: 0, digest: "",
                             indexVersion: Self.indexVersion, appliedCursor: cursor,
-                            updatedAt: workNow))
+                            updatedAt: workNow,
+                            operationalBitmap: feedCursorBitmap))
                     }
                     result.completions.append((job.id, .done))
                     continue
@@ -1049,19 +1144,23 @@ public actor CorpusContentEngine {
             try await vectorStore.addPayloads(allVectorRows)
         }
         // Coverage — ONE markCovered call for the entire batch (Cause 5 fix).
-        try await coverageStore.markCovered(embedded.flatMap(\.covered), now: batchNow)
+        let batchCovered = embedded.flatMap(\.covered)
+        try await coverageStore.markCovered(batchCovered, now: batchNow)
 
         // Assemble checkpoints and countsUpdates for the embedded records.
         for (work, item) in zip(pendingWork, embedded) {
+            let bitmap = checkpointBitmap(record: item.record, covered: batchCovered)
             result.checkpoints.append(CorpusIndexState(
                 contentID: item.record.id, revision: item.record.revision,
                 digest: item.record.digest, indexVersion: Self.indexVersion,
-                appliedCursor: work.cursor, updatedAt: work.workNow))
+                appliedCursor: work.cursor, updatedAt: work.workNow,
+                operationalBitmap: bitmap))
             if let cursor = work.cursor {
                 result.checkpoints.append(CorpusIndexState(
                     contentID: Self.feedCursorRowID, revision: 0, digest: "",
                     indexVersion: Self.indexVersion, appliedCursor: cursor,
-                    updatedAt: work.workNow))
+                    updatedAt: work.workNow,
+                    operationalBitmap: feedCursorBitmap))
             }
             result.countsUpdates.append((
                 contentID: item.record.id, revision: item.record.revision,
@@ -1154,10 +1253,13 @@ public actor CorpusContentEngine {
             let prepared = try await boundedConcurrentMap(records, cap: cap) { record in
                 var rows: [VectorPayloadInput] = []
                 var covered: [(CorpusContentID, String, String)] = []
+                // Backfill uses the same dense-composition text as initial
+                // indexing — recomposability rule: same input, same vector.
+                let denseText = record.effectiveDenseText
                 for (targetIndex, target) in computeTargets.enumerated()
                     where missingSnapshot[targetSlotIndices[targetIndex]]?.contains(record.id) == true
                 {
-                    let (engram, floats) = try await target.provider.embedPair(record.text)
+                    let (engram, floats) = try await target.provider.embedPair(denseText)
                     if target.writeBinary {
                         rows.append(VectorPayloadInput(
                             itemID: record.id, vectorIndex: 0,
@@ -1183,6 +1285,9 @@ public actor CorpusContentEngine {
             }
             try _backfillFaultHook?(.afterVectors, batchIndex)
             try await coverageStore.markCovered(covered, now: now)
+            // Stamp the bitmap coverage bits for every content row covered in
+            // this backfill batch. Coverage store write is already durable above.
+            try await stampCoverageBitmaps(covered: covered)
             try _backfillFaultHook?(.afterCoverage, batchIndex)
             written += covered.count
             batchIndex += 1
@@ -1255,7 +1360,7 @@ public actor CorpusContentEngine {
             }
             try await index(record: record, appliedCursor: cursor, force: false, now: now)
         case .remove(let id, _):
-            try await clearDerivedState(id: id)
+            try await clearDerivedState(id: id, now: now)
             Intellectus.report(.metric(
                 name: "corpus.content.removed", value: 1.0,
                 tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
@@ -1333,12 +1438,13 @@ public actor CorpusContentEngine {
                 countsUpdate = (record.id, record.revision, record.digest, record.text)
             }
         case .remove:
-            try await clearDerivedState(id: job.contentID)
+            try await clearDerivedState(id: job.contentID, now: now)
         }
         if let cursor = job.cursor {
             checkpoints.append(CorpusIndexState(
                 contentID: Self.feedCursorRowID, revision: 0, digest: "",
-                indexVersion: Self.indexVersion, appliedCursor: cursor, updatedAt: now))
+                indexVersion: Self.indexVersion, appliedCursor: cursor, updatedAt: now,
+                operationalBitmap: feedCursorBitmap))
         }
         return (checkpoints, countsUpdate)
     }
@@ -1564,12 +1670,16 @@ public actor CorpusContentEngine {
         slotScope: SlotScope
     ) async throws -> CorpusIndexState? {
         // Idempotence anchor: when the checkpoint already covers this exact
-        // (revision, digest, indexVersion), the derived rows are complete
-        // (the checkpoint is advanced LAST) — replaying the change writes
-        // NOTHING, so replay changes no derived bytes. `force` (reindex
-        // after a retrain) bypasses the short-circuit deliberately.
+        // (revision, digest, indexVersion) AND the row is not soft-deleted,
+        // the derived rows are complete — replaying the change writes NOTHING.
+        // `force` (reindex after a retrain) bypasses the short-circuit.
+        // !existing.isRemoved: a removed row must always be re-indexed on
+        // re-ingest regardless of revision/digest (the remove path resets
+        // revision to 0, so this guard fires naturally — the explicit check
+        // is belt-and-suspenders for future callers).
         if !force,
            let existing = try await indexState.state(for: record.id),
+           !existing.isRemoved,
            existing.revision == record.revision,
            existing.digest == record.digest,
            existing.indexVersion == Self.indexVersion {
@@ -1615,7 +1725,11 @@ public actor CorpusContentEngine {
             }
             let writeBinary = slotIndex == 0 || configuration.mode == .standalone
             for unit in units {
-                let (engram, floats) = try await slot.provider.embedPair(unit.text)
+                // Dense lane: use effectiveDenseText (denseText when set,
+                // lexical text otherwise). BM25 tokenisation above always
+                // uses unit.text (the lexical surface) — the two paths are
+                // kept independent so a nil denseText is a true no-op.
+                let (engram, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
                 if writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 0,
@@ -1643,20 +1757,38 @@ public actor CorpusContentEngine {
         // overstates coverage).
         try await coverageStore.markCovered(covered, now: now)
 
+        // Build the checkpoint bitmap: lexically_indexed=1, has_dense_text from
+        // record, and coverage bits + generation for any registered-slot providers
+        // covered in this pass. All three facts are included in the initial write
+        // so the checkpoint row is authoritative without a subsequent bitmap update.
+        let bitmap = checkpointBitmap(record: record, covered: covered)
         // The caller publishes this checkpoint LAST.
         let checkpoint = CorpusIndexState(
             contentID: record.id, revision: record.revision, digest: record.digest,
-            indexVersion: Self.indexVersion, appliedCursor: appliedCursor, updatedAt: now)
+            indexVersion: Self.indexVersion, appliedCursor: appliedCursor, updatedAt: now,
+            operationalBitmap: bitmap)
         Intellectus.report(.metric(
             name: "corpus.content.indexed", value: 1.0,
             tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
         return checkpoint
     }
 
-    /// One index unit: its derived-row key and the text it covers.
+    /// One index unit: its derived-row key plus the two text surfaces.
+    ///
+    /// `text` is always the LEXICAL text — used for BM25 keyword tokenisation.
+    /// `denseText` is the dense-composition text for the float vector lane; nil
+    /// means fall back to `text` (default). Separating the two here keeps the
+    /// BM25 / dense-embedding split explicit through every downstream code path
+    /// that receives an `IndexUnit`.
     private struct IndexUnit {
         let key: String
+        /// Lexical text — BM25 tokenisation only.
         let text: String
+        /// Dense-composition text for vector embedding. nil → use `text`.
+        let denseText: String?
+        /// The text the engine passes to `embedPair`. Returns `denseText`
+        /// when set, falls back to `text`.
+        var effectiveDenseText: String { denseText ?? text }
     }
 
     /// Compute the record's index units under the configured policy,
@@ -1671,7 +1803,12 @@ public actor CorpusContentEngine {
         let units: [IndexUnit]
         switch configuration.indexUnit {
         case .wholeContent:
-            units = [IndexUnit(key: record.id, text: record.text)]
+            // Whole-content unit: lexical text for BM25; dense-composition
+            // text (when set) for vector embedding. The two paths stay
+            // independent through replaceUnits and prepareIndex.
+            units = [IndexUnit(
+                key: record.id, text: record.text,
+                denseText: record.denseCompositionText)]
 #if CORPUSKIT_STANDALONE_PASSAGES
         case .tokenWindows(let window, let overlap):
             let ranges = PassageProduction.passageRanges(
@@ -1682,7 +1819,13 @@ public actor CorpusContentEngine {
                     contentID: record.id, revision: record.revision,
                     utf8Start: range.utf8Start, utf8Length: range.utf8Length)
                 let bytes = utf8[range.utf8Start..<(range.utf8Start + range.utf8Length)]
-                return IndexUnit(key: key, text: String(decoding: bytes, as: UTF8.self))
+                // Passage text is a UTF-8 sub-span of the LEXICAL text.
+                // Dense-composition text is whole-document; sub-span
+                // splitting on it is not supported — passages embed the
+                // lexical sub-span only (denseText: nil → falls back to text).
+                return IndexUnit(key: key,
+                                 text: String(decoding: bytes, as: UTF8.self),
+                                 denseText: nil)
             }
             // Replace the durable passage-range rows for this content.
             _ = try await storage.rowStore.delete(
@@ -1774,8 +1917,10 @@ public actor CorpusContentEngine {
     }
 
     /// Clear EVERYTHING derived for `id` (the remove path): BM25, vectors,
-    /// passage rows, and the checkpoint.
-    private func clearDerivedState(id: CorpusContentID) async throws {
+    /// passage rows, and the coverage rows. The corpus_index_state row is
+    /// SOFT-DELETED (removed=1) rather than hard-deleted so the active-content
+    /// filter can distinguish removed from never-indexed content.
+    private func clearDerivedState(id: CorpusContentID, now: Date) async throws {
         let keys = try await unitKeys(for: id)
         try await deleteDerivedRows(unitKeys: keys)
         try await coverageStore.clear(contentID: id)
@@ -1786,13 +1931,17 @@ public actor CorpusContentEngine {
                 where: .eq(Column(table: "corpus_passages", name: "content_id"), .text(id)))
         }
 #endif
-        try await indexState.clear(contentID: id)
+        // Soft-delete: retain the row as a tombstone (removed=1) instead of
+        // hard-deleting so the active-content filter (lexically_indexed=1 AND
+        // removed=0) can exclude it. Re-ingest clears removed and re-indexes.
+        try await indexState.softRemove(contentID: id, now: now)
     }
 
     private func advanceFeedCursor(_ cursor: String, now: Date) async throws {
         try await indexState.advance(CorpusIndexState(
             contentID: Self.feedCursorRowID, revision: 0, digest: "",
-            indexVersion: Self.indexVersion, appliedCursor: cursor, updatedAt: now))
+            indexVersion: Self.indexVersion, appliedCursor: cursor, updatedAt: now,
+            operationalBitmap: feedCursorBitmap))
     }
 
     /// The last applied feed cursor, or nil when no feed change has been
@@ -1801,12 +1950,15 @@ public actor CorpusContentEngine {
         try await indexState.state(for: Self.feedCursorRowID)?.appliedCursor
     }
 
-    /// Content IDs with a live checkpoint — the reconciliation set
-    /// verification compares against `source.activeContentIDs()`.
+    /// Active indexed content IDs — content that is lexically indexed and
+    /// not removed. Excludes the feedCursorRowID sentinel (which carries
+    /// `lexically_indexed=0`) and any soft-deleted rows. This is the
+    /// active-content set used for backfill, batch-train, and reconciliation.
     public func indexedContentIDs() async throws -> [CorpusContentID] {
-        try await indexState.allStates()
-            .map(\.contentID)
-            .filter { $0 != Self.feedCursorRowID }
+        // activeIndexedStates() filters: isLexicallyIndexed && !isRemoved.
+        // The feedCursorRowID sentinel carries operationalBitmap=0 so
+        // isLexicallyIndexed=false — it is already excluded.
+        try await indexState.activeIndexedStates().map(\.contentID)
     }
 
     // MARK: - Training
@@ -2013,7 +2165,16 @@ public actor CorpusContentEngine {
             texts.reserveCapacity(end - cursor)
             for id in allIDs[cursor..<end] {
                 if let record = try await source.record(for: id) {
-                    texts.append(record.text)
+                    // Train the basis on the same text the dense lane uses at
+                    // embed time — effectiveDenseText (denseCompositionText when
+                    // set, lexical text otherwise). This keeps the basis
+                    // vocabulary coherent with the composed vectors: both the
+                    // training corpus and the per-document embed use the same
+                    // text surface, so the basis projects the dense text into
+                    // a geometry that the query (always lexical/short) can match.
+                    // For callers without a dense-composition text the behaviour
+                    // is identical to pre-dual-text code (effectiveDenseText == text).
+                    texts.append(record.effectiveDenseText)
                     let indexed = indexedStates[record.id]
                     if indexed?.revision != record.revision
                         || indexed?.digest != record.digest
@@ -2183,6 +2344,23 @@ public actor CorpusContentEngine {
             }
             start = end
         }
+
+        // Bump the global basis-generation counter after any successful
+        // retrain pass (whether force or first-ingest). This invalidates all
+        // existing coverage bitmap bits via generation mismatch — no estate-wide
+        // write; backfill lazily re-stamps each row under the new generation.
+        // Only bump when at least one slot was (re)trained.
+        if !jobs.isEmpty {
+            let newGeneration = try await indexState.incrementBasisGeneration()
+            if newGeneration == 0 {
+                // Wraparound: the 4-bit counter rolled from 15 back to 0.
+                // Perform a full sweep to clear stale coverage bits from all rows,
+                // then stamp generation=0 as the new baseline.
+                try await indexState.resetGenerationSweep()
+            }
+            currentBasisGeneration = newGeneration
+        }
+
         return digests
     }
 
@@ -2212,7 +2390,7 @@ public actor CorpusContentEngine {
             // keep that mutation path serialized and policy-bound.
             for id in ids {
                 guard let record = try await source.record(for: id) else {
-                    try await clearDerivedState(id: id)
+                    try await clearDerivedState(id: id, now: now)
                     continue
                 }
                 if let checkpoint = try await prepareIndex(
@@ -2549,9 +2727,13 @@ public actor CorpusContentEngine {
     /// Clear one content ID's derived state directly (the expunge/withdraw
     /// verb path — removal authority is the GLK/LocusKit verb; this clears
     /// the derived rows it owns).
-    public func removeContent(id: CorpusContentID) async throws {
+    ///
+    /// `now` defaults to `Date()` so external callers (GeniusLocusKit verb
+    /// surface) do not need to supply a timestamp; internal engine paths pass
+    /// `now` explicitly for determinism and testability.
+    public func removeContent(id: CorpusContentID, now: Date = Date()) async throws {
         try validate(id: id)
-        try await clearDerivedState(id: id)
+        try await clearDerivedState(id: id, now: now)
     }
 
     /// The declared encode speed. The content drain currently processes
@@ -2623,6 +2805,29 @@ public actor CorpusContentEngine {
         await floatPerSignal(query: query, limit: limit, direction: .farthest)
     }
 
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
+    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
+    /// Discrimination is non-nil exactly when the outcome is `.hits` with ≥1 result.
+    ///
+    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
+    /// RecallDirector (GLK) consumes the signal to discount the dense contribution
+    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
+    /// for their own fusion decisions.
+    ///
+    /// See `FloatDiscriminationSignal` for the statistic definition and threshold guidance.
+    public func floatNearestPerSignalWithDiscrimination(
+        query: String, limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
+        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
+        return perSignal.map { entry in
+            (modelID: entry.modelID,
+             outcome: entry.outcome,
+             discrimination: Corpus.discriminationSignal(from: entry.outcome))
+        }
+    }
+
     /// Test-only: when non-nil, the next per-signal float call reports
     /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
     /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane
@@ -2643,6 +2848,33 @@ public actor CorpusContentEngine {
     /// Arm (or clear) the drain failure-injection hook (test seam).
     public func _armIngestFailureHook(_ hook: (@Sendable (String) throws -> Void)?) {
         _ingestFailureHook = hook
+    }
+
+    // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
+
+    /// Score a bounded candidate set at sub-span granularity (transient).
+    ///
+    /// Delegates to `SubSpanScoring.score(query:candidateIDs:source:provider:)`,
+    /// passing the engine's own `source` (the `CorpusContentSource` — works for
+    /// BOTH standalone `CorpusDocumentStore` and GLK's LocusKit-backed adapter)
+    /// and the DEFAULT slot's provider.
+    ///
+    /// Sub-span vectors are computed on the fly and DISCARDED — zero persistence.
+    /// Compute is bounded by `candidateIDs.count`, not corpus size.
+    ///
+    /// - Parameters:
+    ///   - query: The query text to score against.
+    ///   - candidateIDs: Bounded content ID set (typically ~40 from the pool).
+    /// - Returns: Max-cosine ∈ [0,1] per candidate ID. Missing keys → 0.0.
+    public func scoreSubSpans(
+        query: String,
+        candidateIDs: [CorpusContentID]
+    ) async -> [CorpusContentID: Float] {
+        await SubSpanScoring.score(
+            query: query,
+            candidateIDs: candidateIDs,
+            source: source,
+            provider: slots[0].provider)
     }
 
     private func floatPerSignal(

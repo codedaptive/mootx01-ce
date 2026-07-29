@@ -48,8 +48,13 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v10 adds a composite UNIQUE constraint on
-/// associations (sourceWing, sourceRoom, sourceDrawerId, targetWing,
+/// Current schema version. v11 adds `operationalAND INT64 NOT NULL DEFAULT -1`
+/// to `container_fingerprints` — the AND-reduction aggregate used by
+/// `distillItemsSweep` to skip rooms where every active drawer already
+/// has bit 19 (HAS_CURRENT_REPRESENTATION) set. Default -1 is the AND
+/// identity; `rebuildAll` (called at estate open) tightens it to the true
+/// AND. v10 adds a composite UNIQUE constraint on associations
+/// (sourceWing, sourceRoom, sourceDrawerId, targetWing,
 /// targetRoom, targetDrawerId, label) to prevent VectorSimilaritySignal
 /// from accumulating duplicate association edges on every 300-second
 /// pass (FINDING-3). Migration deduplicates existing rows then adds the
@@ -65,7 +70,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
 /// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -98,6 +103,23 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
+            // v10 → v11: add operationalAND to container_fingerprints.
+            // Default -1 (AND identity).  rebuildAll at estate open tightens
+            // the aggregate; no data migration of existing rows needed — the
+            // default is a conservative under-approximation that only widens
+            // the distillation sweep (never skips work falsely).
+            Migration {
+                from_version: 10,
+                to_version: 11,
+                operations: vec![SchemaOperation::AddColumn {
+                    table: "container_fingerprints".to_string(),
+                    column: ColumnDeclaration::new(
+                        "operationalAND",
+                        persistence_kit::types::ColumnType::Bitmap,
+                    )
+                    .with_default(TypedValue::Bitmap(-1)),
+                }],
+            },
             // v9 → v10 (FINDING-3): add natural-key uniqueness to associations.
             // Order matters: dedup FIRST, then CREATE UNIQUE INDEX (the index
             // creation would fail if duplicate rows still exist). Keeps the
@@ -223,6 +245,26 @@ fn drawers_table() -> TableDeclaration {
             // value at read time as a fail-loud LocusKitError, not a
             // silent fallback.
             ColumnDeclaration::blob("content_fingerprint").nullable(),
+            // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
+            // A dense parallel rendering of `content` — a VIEW of this
+            // row, not an item — plus its pipeline contract identifier,
+            // approximate token count, and generation instant. The four
+            // columns are NULL together or populated together (one
+            // atomic UPDATE via `set_distilled_representation`); every
+            // write that touches `content` NULLs all four in the same
+            // statement (§7.3 regeneration trigger + erasure scrub).
+            // NULL `distilled` is the sweep-eligibility predicate.
+            // Landed in the v1 declaration with no migration ladder —
+            // the 1.1.x schema is fluid (no estate data shipped); the
+            // frozen-1.0.x migration is a separate later mission (SPEC
+            // Appendix A). Excluded from the content digest/revision
+            // that feed the index pipeline (§9). Mirrors the Swift
+            // drawersTable declaration.
+            ColumnDeclaration::text("distilled").nullable(),
+            ColumnDeclaration::text("distilled_pipeline_version").nullable(),
+            ColumnDeclaration::int("distilled_token_count").nullable(),
+            // TEXT ISO8601 per the fleet date rule (timestamp column type).
+            ColumnDeclaration::timestamp("distilled_at").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -690,6 +732,13 @@ fn container_fingerprints_table() -> TableDeclaration {
             ColumnDeclaration::bitmap("operationalOR"),
             ColumnDeclaration::bitmap("provenanceOR"),
             ColumnDeclaration::timestamp("updatedAt"),
+            // AND-reduction aggregate for operational bits (v11).
+            // Default -1 is the AND identity; rebuildAll (called at estate
+            // open) tightens it to the true AND of all active drawers in
+            // the room.  Used by distillItemsSweep to skip rooms where
+            // every active drawer already has bit 19 set.
+            ColumnDeclaration::new("operationalAND", persistence_kit::types::ColumnType::Bitmap)
+                .with_default(TypedValue::Bitmap(-1)),
         ],
         primary_key: vec!["wing".to_string(), "room".to_string()],
         unique_constraints: Vec::new(),
@@ -1096,22 +1145,29 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v10 added associations natural-key UNIQUE constraint + v9→v10 migration
-    /// (FINDING-3 duplicate-edge fix). v9 added content_fingerprint BLOB to
-    /// drawers (CRITICAL persist-at-write fix). v8 changed
-    /// nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added content_hash
-    /// BLOB to drawers and snapshot tables (NT-L3). v6 added order_key to
-    /// tunnels (node-tree integrity, NT-L5). v5 added erasure_ledger (NT-L4). v4
-    /// replaced wing/room with parent_node_id (NT-L2).
+    /// v11 adds operationalAND (AND-reduction aggregate) to container_fingerprints
+    /// for distillation-sweep room skipping. v10 added associations natural-key
+    /// UNIQUE constraint + v9→v10 migration (FINDING-3 duplicate-edge fix). v9
+    /// added content_fingerprint BLOB to drawers (CRITICAL persist-at-write fix).
+    /// v8 changed nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added
+    /// content_hash BLOB to drawers and snapshot tables (NT-L3). v6 added
+    /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
+    /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_ten() {
-        assert_eq!(SCHEMA_VERSION, 10);
-        // One migration: v9 → v10 (FINDING-3 dedup + unique index).
+    fn schema_version_is_eleven() {
+        assert_eq!(SCHEMA_VERSION, 11);
+        // Two migrations: v9 → v10 (FINDING-3 dedup + unique index),
+        //                 v10 → v11 (operationalAND on container_fingerprints).
         let m = schema();
-        assert_eq!(m.migrations.len(), 1);
-        assert_eq!(m.migrations[0].from_version, 9);
-        assert_eq!(m.migrations[0].to_version, 10);
-        assert_eq!(m.migrations[0].operations.len(), 2);
+        assert_eq!(m.migrations.len(), 2);
+        // v10 → v11 is listed first.
+        assert_eq!(m.migrations[0].from_version, 10);
+        assert_eq!(m.migrations[0].to_version, 11);
+        assert_eq!(m.migrations[0].operations.len(), 1);
+        // v9 → v10 is listed second.
+        assert_eq!(m.migrations[1].from_version, 9);
+        assert_eq!(m.migrations[1].to_version, 10);
+        assert_eq!(m.migrations[1].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.
@@ -1275,6 +1331,10 @@ mod tests {
                 "keyID",
                 "content_hash",
                 "content_fingerprint",
+                "distilled",
+                "distilled_pipeline_version",
+                "distilled_token_count",
+                "distilled_at",
             ]
         );
     }

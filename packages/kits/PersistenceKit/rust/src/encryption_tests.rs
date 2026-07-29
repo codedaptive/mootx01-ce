@@ -262,3 +262,100 @@ fn aead_provider_swap_ciphertext_is_provider_specific() {
         "ciphertext from test-double provider must not be decryptable by the default provider"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Distilled-column seam coverage (SPEC_DISTILLATION_STORAGE §2).
+// The `distilled` column is content-derived text and carries the same
+// row-level protection class as `content`. Mirrors the Swift
+// DistilledColumnCryptoTests seam cases (twin-parity gate).
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod distilled_seam {
+    use super::*;
+    use crate::sqlite::{
+        assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write,
+    };
+    use crate::types::TypedValue;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn seals_distilled_alongside_content_and_stamps_key_id() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+        values.insert("content".to_string(), TypedValue::Text("original body".to_string()));
+        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        let sealed = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        assert!(matches!(sealed.get("content"), Some(TypedValue::Blob(_))));
+        assert!(matches!(sealed.get("distilled"), Some(TypedValue::Blob(_))));
+        assert_eq!(
+            sealed.get("keyID"),
+            Some(&TypedValue::Text(config.key_identifier.clone().unwrap()))
+        );
+    }
+
+    #[test]
+    fn seals_representation_only_value_map() {
+        // A distillation write is an UPDATE carrying only representation
+        // columns — the seam must still run for it.
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        let sealed = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        assert!(matches!(sealed.get("distilled"), Some(TypedValue::Blob(_))));
+        assert_eq!(
+            sealed.get("keyID"),
+            Some(&TypedValue::Text(config.key_identifier.clone().unwrap()))
+        );
+    }
+
+    #[test]
+    fn opens_sealed_distilled_back_to_text() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("content".to_string(), TypedValue::Text("body".to_string()));
+        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        let sealed = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        let opened = decrypted_for_read(sealed, &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(opened.get("content"), Some(&TypedValue::Text("body".to_string())));
+        assert_eq!(
+            opened.get("distilled"),
+            Some(&TypedValue::Text("dense body".to_string()))
+        );
+    }
+
+    #[test]
+    fn plaintext_mode_passes_distilled_through_unchanged() {
+        let config = EstateEncryptionConfig::plaintext();
+        let mut values = BTreeMap::new();
+        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        let out = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(
+            out.get("distilled"),
+            Some(&TypedValue::Text("dense body".to_string()))
+        );
+        assert!(out.get("keyID").is_none());
+    }
+
+    #[test]
+    fn invariant_refuses_plaintext_distilled_without_key_id() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+        values.insert(
+            "distilled".to_string(),
+            TypedValue::Text("leaked dense body".to_string()),
+        );
+        assert!(assert_content_key_id_invariant(&values, "drawers", &config).is_err());
+        // NULL distilled (the cleared-representation write) is exempt —
+        // clearing carries nothing to encrypt.
+        let mut cleared = BTreeMap::new();
+        cleared.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+        cleared.insert("distilled".to_string(), TypedValue::Null);
+        assert!(assert_content_key_id_invariant(&cleared, "drawers", &config).is_ok());
+        // Empty-string protected text is the erasure-scrub exemption (#76).
+        let mut scrub = BTreeMap::new();
+        scrub.insert("content".to_string(), TypedValue::Text(String::new()));
+        assert!(assert_content_key_id_invariant(&scrub, "drawers", &config).is_ok());
+    }
+}

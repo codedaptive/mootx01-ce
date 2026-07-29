@@ -955,57 +955,11 @@ impl DrawerMapping {
             )
         };
 
-        // Bug N fix — reconstruct _distilled_from provenance tunnels from frontmatter.
-        // On export these tunnels were excluded from `note.links` (which rides into body
-        // text) and encoded as "targetWing/targetRoom" pairs in the `distilled_from_sources`
-        // frontmatter key (semicolon-separated). Reconstruct each pair as a real
-        // TunnelCaptureFrame so the provenance graph survives the round-trip without
-        // injecting any text into the drawer's content field.
-        if let Some(sources_str) = note.frontmatter.get("distilled_from_sources") {
-            if !sources_str.is_empty() {
-                let added_by_val = non_empty(note.frontmatter.get("addedBy"))
-                    .unwrap_or_else(|| self.added_by.clone());
-                for source in sources_str.split(';') {
-                    // Each entry is "targetWing/targetRoom"; split on the FIRST '/'
-                    // only so room paths that contain '/' survive intact.
-                    let mut parts = source.splitn(2, '/');
-                    let target_wing = match parts.next() {
-                        Some(w) if !w.is_empty() => w.to_owned(),
-                        _ => continue,
-                    };
-                    let target_room = match parts.next() {
-                        Some(r) if !r.is_empty() => r.to_owned(),
-                        _ => continue,
-                    };
-                    let sig = Self::tunnel_signature(
-                        &drawer_wing,
-                        &drawer_room,
-                        &target_room,
-                        "_distilled_from",
-                        TunnelKind::References,
-                    );
-                    if existing_tunnel_signatures.contains(&sig) {
-                        continue;
-                    }
-                    let mut tunnel_frame = TunnelCaptureFrame::new(
-                        drawer_wing.clone(),
-                        drawer_room.clone(),
-                        target_wing,
-                        target_room,
-                        "_distilled_from".to_owned(),
-                        added_by_val.clone(),
-                    );
-                    tunnel_frame.source_drawer_id = Some(drawer.id.clone());
-                    tunnel_frame.kind = TunnelKind::References;
-                    tunnel_frame.origin_class = TunnelOriginClass::Imported;
-                    estate
-                        .capture_tunnel(tunnel_frame, now)
-                        .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
-                    existing_tunnel_signatures.insert(sig);
-                    tunnels_created += 1;
-                }
-            }
-        }
+        // `_distilled_from` reconstruction retired (SPEC_DISTILLATION_STORAGE
+        // §11.2/§13.2): the factoid tier no longer exists on 1.1.x and NO
+        // new-write path may create `_distilled_from` tunnels. A
+        // `distilled_from_sources` frontmatter key in an old export is
+        // ignored; representations regenerate from content on sweep (§2).
 
         // Create tunnels for each wikilink, skipping any whose stable
         // endpoint+label signature already exists.
@@ -1479,33 +1433,11 @@ impl DrawerMapping {
         let added_by_val = non_empty(note.frontmatter.get("addedBy"))
             .unwrap_or_else(|| frame.added_by.clone());
 
-        if let Some(sources_str) = note.frontmatter.get("distilled_from_sources") {
-            if !sources_str.is_empty() {
-                for source in sources_str.split(';') {
-                    let mut parts = source.splitn(2, '/');
-                    let target_wing = match parts.next() {
-                        Some(w) if !w.is_empty() => w.to_owned(),
-                        _ => continue,
-                    };
-                    let target_room = match parts.next() {
-                        Some(r) if !r.is_empty() => r.to_owned(),
-                        _ => continue,
-                    };
-                    let sig = Self::tunnel_signature(&drawer_wing, &drawer_room, &target_room, "_distilled_from", TunnelKind::References);
-                    if existing_tunnel_signatures.contains(&sig) { continue; }
-                    let mut tunnel_frame = TunnelCaptureFrame::new(
-                        drawer_wing.clone(), drawer_room.clone(), target_wing, target_room,
-                        "_distilled_from".to_owned(), added_by_val.clone(),
-                    );
-                    tunnel_frame.source_drawer_id = Some(drawer.id.clone());
-                    tunnel_frame.kind = TunnelKind::References;
-                    tunnel_frame.origin_class = TunnelOriginClass::Imported;
-                    estate.capture_tunnel(tunnel_frame, now).map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
-                    existing_tunnel_signatures.insert(sig);
-                    tunnels_created += 1;
-                }
-            }
-        }
+        // `_distilled_from` reconstruction retired (SPEC_DISTILLATION_STORAGE
+        // §11.2/§13.2): the factoid tier no longer exists on 1.1.x and NO
+        // new-write path may create `_distilled_from` tunnels. A
+        // `distilled_from_sources` frontmatter key in an old export is
+        // ignored; representations regenerate from content on sweep (§2).
         for link in &note.links {
             let target_room = if link.target.is_empty() { "unresolved".to_owned() } else { link.target.clone() };
             let sig = Self::tunnel_signature(&drawer_wing, &drawer_room, &target_room, &link.raw, TunnelKind::References);

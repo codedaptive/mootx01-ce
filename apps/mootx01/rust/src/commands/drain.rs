@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use aria_mcp::estate_registry::EstateRegistry;
+use aria_mcp::estate_registry::{DrainStatus, EstateRegistry};
 
 use crate::core::paths;
 use crate::exit;
@@ -61,16 +61,25 @@ pub fn run(db: Option<String>) -> ExitCode {
     };
     let handle = reg.default.handle;
 
-    // Poll the drain status (same surface as moot_drain_status) until every drain
-    // is idle — the queue is empty whether this process drained it (held the T3
-    // lease) or a resident did. Capped so a wedged drain cannot hang forever.
+    // Poll the drain status (same surface as moot_drain_status) until the
+    // ENCODE drain is idle — the queue is empty whether this process drained
+    // it (held the T3 lease) or a resident did. Capped so a wedged drain
+    // cannot hang forever.
+    //
+    // Keyed on the encode drain only via `DrainStatus::encode_settled`
+    // (PERF_W1_DRAIN_RIDER Finding 3): the "distillation" entry can only
+    // settle via a `moot_distill` sweep or the hourly standing signal —
+    // neither of which this command runs — so polling ALL drains would spin
+    // to MAX_WAIT_SECS holding the encode DrainLease and wedge the next serve
+    // session's encode queue. This finisher's contract is the encode queue
+    // and its lease; it exits as soon as that is settled.
     let deadline = Instant::now() + Duration::from_secs(MAX_WAIT_SECS);
     while Instant::now() < deadline {
         let idle = {
             let coord = reg.coord.lock().unwrap();
             coord
                 .drain_statuses(&handle)
-                .map(|d| d.iter().all(|x| !x.is_draining()))
+                .map(|d| DrainStatus::encode_settled(&d))
                 .unwrap_or(true)
         };
         if idle {

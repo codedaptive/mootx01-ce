@@ -1,0 +1,4 @@
+#!/bin/sh
+# Pre-push guard — blocks pushes carrying unsanctioned docs content.
+# Activate once per clone:  git config core.hooksPath .githooks
+exec python3 "$(git rev-parse --show-toplevel)/scripts/prepush_docs_guard.py"

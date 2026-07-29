@@ -138,8 +138,8 @@ enum TeachmeGuides {
         When to use vs siblings:
           - moot_memory_search — when you don't yet have an id, or want a
             ranked set of candidates
-          - moot_recollect — when fanning out from a distilled factoid to
-            its source memories, not a single known id
+          - moot_recall_distilled — when you want the same ranked set with
+            token-economical distilled payloads instead of full bodies
 
         Example:
           { "id": "abc-123" }
@@ -641,8 +641,8 @@ enum TeachmeGuides {
         // Tier 6: 4 Tier-6 recipe tools + all lens tools (moot_list_lenses shows these 27).
         let tier6RecipeCount = 4  // list_lenses, synthesize, recall_precise, recall_shaped
         let tier6 = tier6RecipeCount + LensTools.tools().count
-        // Tier 7: remaining recipe tools (dream, consolidate, distilled, recollect, hunt,
-        //         list_recipes, run_migration, confirm_migration).
+        // Tier 7: remaining recipe tools (dream, distill, recall_distilled,
+        //         hunt, list_recipes, run_migration, confirm_migration).
         let tier7 = RecipeTools.tools().count - tier6RecipeCount
         let tier8 = DatasetTools.tools().count
         let tier9 = VaultTools.vaultToolNames.count  // vault-on only
@@ -687,8 +687,8 @@ enum TeachmeGuides {
               Call moot_list_lenses for the full menu.
 
             Tier 7 — Extended Cognition (\(tier7) tools):
-              moot_dream, moot_consolidate, moot_recall_distilled,
-              moot_recollect, moot_hunt_contradictions, moot_list_recipes,
+              moot_dream, moot_distill, moot_recall_distilled,
+              moot_hunt_contradictions, moot_list_recipes,
               moot_run_migration, moot_confirm_migration
 
             Tier 8 — Dataset (\(tier8) tools):

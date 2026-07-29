@@ -36,11 +36,21 @@ public actor CorpusDocumentStore: CorpusContentStore {
 
     /// The standalone canonical-content schema. Applied via
     /// `storage.migrate(to:)`; part of the STANDALONE profile only
-    /// (`CorpusSchemaProfile.standaloneDeclaration`). Version 1 — this is
-    /// a NEW lane, not an evolution of the legacy `chunks` layout.
+    /// (`CorpusSchemaProfile.standaloneDeclaration`).
+    ///
+    /// Version history:
+    ///   v1 — Initial layout: (content_id, revision, digest, text,
+    ///        created_at, updated_at) + corpus_content_changes journal.
+    ///   v2 — Dual-text indexing (MISSION_11X_RECALL_GAP_01 Stream A):
+    ///        adds `dense_text TEXT NULL` to corpus_documents. NULL means
+    ///        "use the lexical `text` column for dense embedding too" —
+    ///        the default for all standalone consumers that do not supply a
+    ///        separate dense-composition representation. The migration is
+    ///        purely additive; existing rows behave identically (NULL dense
+    ///        text falls back to the lexical text everywhere).
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitDocuments",
-        version: 1,
+        version: 2,
         tables: [
             TableDeclaration(
                 name: "corpus_documents",
@@ -49,6 +59,13 @@ public actor CorpusDocumentStore: CorpusContentStore {
                     .int("revision", nullable: false),
                     .text("digest", nullable: false),
                     .text("text", nullable: false),
+                    // Dense-composition text for the float vector lane. NULL
+                    // means fall back to `text` for both BM25 and dense
+                    // embedding. Non-NULL lets a caller supply a distinct
+                    // representation (e.g. a stopword-stripped or summarised
+                    // form) while keeping the original text for BM25 and
+                    // as the returned ranked payload.
+                    .text("dense_text", nullable: true),
                     .timestamp("created_at", nullable: false),
                     .timestamp("updated_at", nullable: false)
                 ],
@@ -74,6 +91,13 @@ public actor CorpusDocumentStore: CorpusContentStore {
                 table: "corpus_content_changes",
                 columns: ["content_id"]
             )
+        ],
+        migrations: [
+            // v1 → v2: add dense_text column (additive; NULL = use lexical text).
+            Migration(fromVersion: 1, toVersion: 2, operations: [
+                .addColumn(table: "corpus_documents",
+                           column: .text("dense_text", nullable: true))
+            ])
         ]
     )
 
@@ -92,33 +116,58 @@ public actor CorpusDocumentStore: CorpusContentStore {
     public func put(
         _ text: String, id: CorpusContentID, now: Date
     ) async throws -> CorpusContentRecord {
+        try await put(text, denseCompositionText: nil, id: id, now: now)
+    }
+
+    /// Insert or update canonical content with an optional dense-composition
+    /// text for the float vector lane. The `denseCompositionText` is stored
+    /// in `corpus_documents.dense_text` (NULL when nil) and returned in every
+    /// subsequent `record(for:)` call so the engine can recompose the dense
+    /// vector on any retrain or reindex without external input.
+    ///
+    /// Idempotence: if BOTH `text` AND `denseCompositionText` are unchanged
+    /// from the persisted row, the call is a no-op (same record, no revision
+    /// bump, no journal entry). A change to either bumps the revision.
+    @discardableResult
+    public func put(
+        _ text: String, denseCompositionText: String?,
+        id: CorpusContentID, now: Date
+    ) async throws -> CorpusContentRecord {
         let digest = CorpusContentDigest.digest(text)
         if let existing = try await record(for: id) {
-            // Idempotence anchor: identical text (same digest) is a no-op —
-            // same record back, no revision bump, no journal entry.
-            if existing.digest == digest {
+            // Idempotence anchor: both lexical text (same digest) AND dense
+            // text must match for a no-op. A changed dense text without a
+            // changed lexical text still bumps the revision — the dense
+            // vector must be recomposed and the coverage row invalidated.
+            if existing.digest == digest,
+               existing.denseCompositionText == denseCompositionText {
                 return existing
             }
             let bumped = CorpusContentRecord(
-                id: id, revision: existing.revision + 1, digest: digest, text: text)
+                id: id, revision: existing.revision + 1, digest: digest, text: text,
+                denseCompositionText: denseCompositionText)
             _ = try await storage.rowStore.update(
                 table: "corpus_documents",
                 values: [
                     "revision": .int(bumped.revision),
                     "digest": .text(digest),
                     "text": .text(text),
+                    "dense_text": denseCompositionText.map { .text($0) } ?? .null,
                     "updated_at": .timestamp(now)
                 ],
                 where: .eq(Column(table: "corpus_documents", name: "content_id"), .text(id)))
             try await journal(.upsert, id: id, revision: bumped.revision, digest: digest, now: now)
             return bumped
         }
-        let fresh = CorpusContentRecord(id: id, revision: 1, digest: digest, text: text)
+        let fresh = CorpusContentRecord(
+            id: id, revision: 1, digest: digest, text: text,
+            denseCompositionText: denseCompositionText)
         _ = try await storage.rowStore.insert(table: "corpus_documents", values: [
             "content_id": .text(id),
             "revision": .int(fresh.revision),
             "digest": .text(digest),
             "text": .text(text),
+            "dense_text": denseCompositionText.map { .text($0) } ?? .null,
             "created_at": .timestamp(now),
             "updated_at": .timestamp(now)
         ])
@@ -145,7 +194,14 @@ public actor CorpusDocumentStore: CorpusContentStore {
               case let .int(revision)? = row["revision"],
               case let .text(digest)? = row["digest"],
               case let .text(text)? = row["text"] else { return nil }
-        return CorpusContentRecord(id: id, revision: revision, digest: digest, text: text)
+        // dense_text is NULL when not set (existing rows and all puts that
+        // did not supply a dense-composition text). nil → effectiveDenseText
+        // falls back to text, preserving identical behavior for existing callers.
+        let denseText: String?
+        if case let .text(dt)? = row["dense_text"] { denseText = dt } else { denseText = nil }
+        return CorpusContentRecord(
+            id: id, revision: revision, digest: digest, text: text,
+            denseCompositionText: denseText)
     }
 
     /// Optimized batch fetch using a single WHERE…IN query. Overrides the
@@ -163,8 +219,11 @@ public actor CorpusDocumentStore: CorpusContentStore {
                   case let .int(revision)? = row["revision"],
                   case let .text(digest)? = row["digest"],
                   case let .text(text)? = row["text"] else { continue }
+            let denseText: String?
+            if case let .text(dt)? = row["dense_text"] { denseText = dt } else { denseText = nil }
             result[contentID] = CorpusContentRecord(
-                id: contentID, revision: revision, digest: digest, text: text)
+                id: contentID, revision: revision, digest: digest, text: text,
+                denseCompositionText: denseText)
         }
         return result
     }

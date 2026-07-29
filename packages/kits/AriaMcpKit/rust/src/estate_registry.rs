@@ -52,6 +52,11 @@ use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::EstateCoordinator;
+// Re-exported for downstream binaries (mootx01's `drain` command) that consume
+// `EstateCoordinator::drain_statuses` through this registry but do not depend
+// on genius_locus_kit directly. Gives them the type name for the T5 finisher
+// gate `DrainStatus::encode_settled` (PERF_W1_DRAIN_RIDER Finding 3).
+pub use genius_locus_kit::DrainStatus;
 use genius_locus_kit_migrations::SharedContentMigrationExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;

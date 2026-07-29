@@ -13,7 +13,7 @@
 #![cfg(test)]
 
 use crate::adjectives::AdjectiveSensitivity;
-use crate::drawer_operational::CaptureChannel;
+use crate::drawer_operational::{CaptureChannel, DrawerFeatureFlags};
 use crate::drawer_store::DrawerStore;
 use crate::drawer_store_inmemory::InMemoryDrawerStore;
 use crate::estate::Estate;
@@ -165,4 +165,78 @@ fn add_coverage_two_drawers_same_room() {
                "aggregate must cover d1 provenance");
     assert_eq!(room_fp.provenance & d2.provenance, d2.provenance,
                "aggregate must cover d2 provenance");
+}
+
+// -----------------------------------------------------------------------
+// setDistilledRepresentation fingerprint maintenance
+// -----------------------------------------------------------------------
+
+/// `DrawerStoreCore::set_distilled_representation` must OR bit 19
+/// (`HAS_CURRENT_REPRESENTATION`) into the room/wing OR aggregate in the
+/// same logical operation, so a subsequent recall filter on
+/// `HasFeatureFlag(HasCurrentRepresentation)` does not falsely exclude
+/// the container mid-session without requiring an estate reopen.
+/// Mirrors Swift `ContainerFingerprintStoreTests
+/// .setDistilledRepresentationUpdatesFingerprint`.
+#[test]
+fn set_distilled_representation_updates_fingerprint() {
+    let (estate, store) = make_estate();
+
+    // Capture a drawer — bit 19 (HAS_CURRENT_REPRESENTATION) is clear at capture.
+    let frame = CaptureFrame::new(
+        "dist-content",
+        CaptureChannel::Voiced,
+        "r-dist",
+        LatticeAnchor::udc("004"),
+        "t",
+        "m",
+    );
+    let drawer = estate.capture(frame, NOW).unwrap();
+    let bit19 = DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+
+    // Resolve wing/room from the node tree.
+    let names = store
+        .resolve_node_names(&[drawer.parent_node_id.clone()])
+        .unwrap();
+    let (wing, _) = names
+        .get(&drawer.parent_node_id)
+        .expect("node must resolve");
+    let wing = wing.clone();
+
+    // Bit 19 absent from OR aggregate before distillation.
+    let pre_fp = store
+        .get_container_fingerprint(&wing, "r-dist")
+        .unwrap()
+        .expect("room aggregate must exist after capture");
+    assert_eq!(
+        pre_fp.operational & bit19,
+        0,
+        "bit 19 must be absent from the room aggregate before distillation"
+    );
+
+    // Distil the drawer post-capture — no estate reopen.
+    let updated = estate
+        .set_distilled_representation(&drawer.id, "distilled text", "v1", 42, NOW + 1000)
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    // Bit 19 must now appear in both room-level and wing-level OR aggregates.
+    let post_room_fp = store
+        .get_container_fingerprint(&wing, "r-dist")
+        .unwrap()
+        .expect("room aggregate must exist after distillation");
+    assert_eq!(
+        post_room_fp.operational & bit19,
+        bit19,
+        "bit 19 must be set in the room OR aggregate after set_distilled_representation"
+    );
+    let post_wing_fp = store
+        .get_container_fingerprint(&wing, "")
+        .unwrap()
+        .expect("wing aggregate must exist after distillation");
+    assert_eq!(
+        post_wing_fp.operational & bit19,
+        bit19,
+        "bit 19 must be set in the wing OR aggregate after set_distilled_representation"
+    );
 }

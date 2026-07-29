@@ -237,7 +237,10 @@ struct CorpusContentBoundaryTests {
     @Test func attachedProfileContainsNoCanonicalContentTable() {
         let names = Set(CorpusSchemaProfile.attachedDeclaration.tables.map(\.name))
         #expect(names.isDisjoint(with: CorpusSchemaProfile.attachedExcludedTables))
-        #expect(names == ["corpus_index_state", "corpus_provider_coverage",
+        // corpus_bitmap_generation is the global basis-generation singleton
+        // added in CorpusIndexStateStore v2 (bitmap adoption).
+        #expect(names == ["corpus_index_state", "corpus_bitmap_generation",
+                          "corpus_provider_coverage",
                           "corpus_provider_configuration",
                           "iix_termfreqs", "iix_doclens",
                           "corpus_provider_basis", "corpus_provider_counts",

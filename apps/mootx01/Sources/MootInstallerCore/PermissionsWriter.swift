@@ -94,7 +94,7 @@ public enum PermissionsWriter {
         "moot_list_lenses", "moot_list_recipes",
         "moot_vault_status", "moot_vault_job",
         "moot_memory_search", "moot_memory_get", "moot_memory_list",
-        "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled", "moot_recollect",
+        "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled",
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
         "moot_estate_map", "moot_read_journal", "moot_federated_search",
@@ -125,7 +125,7 @@ public enum PermissionsWriter {
     private static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_consolidate", "moot_synthesize",
+        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_consolidate", "moot_synthesize",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Dataset import (MX-TAB-7): creates a backend table and can read a
         // csv_path from the filesystem — same Ask posture as palace/vault import.

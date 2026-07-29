@@ -136,8 +136,9 @@ const FEATURE_FLAG_TABLE: &[(i64, i32, &str)] = &[
     (DrawerFeatureFlags::HAS_IMAGE, 14, "HAS_IMAGE"),
     (DrawerFeatureFlags::HAS_LINKS, 15, "HAS_LINKS"),
     (DrawerFeatureFlags::IS_PINNED, 16, "IS_PINNED"),
-    (DrawerFeatureFlags::IS_KEYSTONE, 17, "IS_KEYSTONE"), // NEW
-    (DrawerFeatureFlags::IS_LOCKED_ZONE, 18, "IS_LOCKED_ZONE"), // NEW
+    (DrawerFeatureFlags::IS_KEYSTONE, 17, "IS_KEYSTONE"),                     // NEW in v0.6
+    (DrawerFeatureFlags::IS_LOCKED_ZONE, 18, "IS_LOCKED_ZONE"),               // NEW in v0.6
+    (DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION, 19, "HAS_CURRENT_REPRESENTATION"), // cookbook §2.4.1
 ];
 
 #[test]

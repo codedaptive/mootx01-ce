@@ -12,7 +12,8 @@
 //             CONVERGENT/MONOTONE sequences.
 // Stage 3: Build PMI coherence graph, select dominant component (F*).
 // Stage 4: Compute structural scores on F*.
-// Stage 5: Compute confidence, format drawer_content, compute feature_fingerprint.
+// Stage 5: Compute confidence, render distilled_text (SPEC §5/§7.4:
+//          §7.6 compaction, core-first ordering), compute feature_fingerprint.
 //
 // Critical: f32::log2 is used in DistillationScorer (not f32::ln) — conformance with Swift.
 // Critical: FEATURE_SIM_HASH_SEED = 0x44495354494C4C41 — "DISTILLA" in ASCII.
@@ -74,10 +75,14 @@ impl DistillationInput {
 /// Mirrors Swift DistillationOutput in DistillationPipeline.swift.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistillationOutput {
-    /// Content string for the "_distilled" drawer capture.
-    /// Format: "[DIST|conf=X.XX|src=N|snr=Y.YY|delta=STATIC] prose text"
+    /// The distilled rendering (SPEC_DISTILLATION_STORAGE §5): the item's
+    /// unit sentences compacted through the §7.6 token-compaction
+    /// transform, dominant-component (core) sentences first in stable
+    /// source order, the episodic tail after. Zero inline metadata —
+    /// every byte is payload. Written into the source drawer's
+    /// `distilled` column by the GLK distillation paths.
     /// Empty string when succeeded == false.
-    pub drawer_content: String,
+    pub distilled_text: String,
     /// Confidence score conf(F*) ∈ [0, 1].
     pub confidence: f32,
     /// True when conf ∈ [0.4, 0.7): signal to inject with additional provenance.
@@ -102,7 +107,7 @@ impl DistillationOutput {
     /// Construct a failure output with zero fingerprint.
     fn failure(snr: f32, reason: impl Into<String>) -> Self {
         Self {
-            drawer_content: String::new(),
+            distilled_text: String::new(),
             confidence: 0.0,
             uncertain: false,
             snr,
@@ -111,97 +116,6 @@ impl DistillationOutput {
             failure_reason: Some(reason.into()),
             feature_fingerprint: Fingerprint256::ZERO,
         }
-    }
-}
-
-// MARK: - DistilledHeader
-
-/// Parser for the DIST header on "_distilled" drawers.
-///
-/// Co-located with the pipeline because the code that writes the format owns the parser.
-/// Consumed by CognitionKit recipes (DistilledRecall, Recollect) and AriaMcpKit
-/// injection-depth post-processing.
-///
-/// Expected content format (from DISTILLATION_DESIGN.md §1):
-///   "[DIST|conf=0.85|src=5|snr=6.2|delta=STATIC] prose text"
-///   "[DIST|conf=0.55|src=3|snr=3.1|delta=CONVERGENT|uncertain] prose"
-///
-/// Mirrors Swift DistilledHeader in DistillationPipeline.swift.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DistilledHeader {
-    /// Factoid prose: everything after "] " in the DIST content string.
-    pub prose: String,
-    /// Confidence score conf(F*) ∈ [0, 1].
-    pub confidence: f32,
-    /// Number of source memories M.
-    pub source_count: usize,
-    /// Cluster SNR at distillation time.
-    pub snr: f32,
-    /// DeltaType of the dominant feature, if non-static.
-    pub delta_type: Option<DeltaType>,
-    /// True when confidence ∈ [0.4, 0.7).
-    pub uncertain: bool,
-}
-
-impl DistilledHeader {
-    /// Parse a "_distilled" drawer's content string.
-    ///
-    /// Returns None if the content does not start with "[DIST|".
-    pub fn parse(content: &str) -> Option<DistilledHeader> {
-        if !content.starts_with("[DIST|") {
-            return None;
-        }
-
-        // Find the closing bracket
-        let bracket_end = content.find(']')?;
-
-        // Header fields are between "[DIST|" and "]"
-        let header_str = &content[6..bracket_end]; // skip "[DIST|"
-
-        // Prose is everything after "] "
-        let after_bracket = bracket_end + 1;
-        let prose = if after_bracket < content.len() && content.as_bytes()[after_bracket] == b' ' {
-            content[after_bracket + 1..].to_string()
-        } else if after_bracket < content.len() {
-            content[after_bracket..].to_string()
-        } else {
-            String::new()
-        };
-
-        let mut conf: f32 = 0.0;
-        let mut src: usize = 0;
-        let mut snr: f32 = 0.0;
-        let mut delta: Option<DeltaType> = None;
-        let mut uncertain = false;
-
-        for part in header_str.split('|') {
-            if part == "uncertain" {
-                uncertain = true;
-                continue;
-            }
-            if let Some(eq_pos) = part.find('=') {
-                let key = &part[..eq_pos];
-                let val = &part[eq_pos + 1..];
-                match key {
-                    "conf" => conf = val.parse().unwrap_or(0.0),
-                    "src"  => src  = val.parse().unwrap_or(0),
-                    "snr"  => snr  = val.parse().unwrap_or(0.0),
-                    "delta" => {
-                        delta = match val {
-                            "STATIC"      => Some(DeltaType::Static),
-                            "CONVERGENT"  => Some(DeltaType::Convergent),
-                            "MONOTONE"    => Some(DeltaType::Monotone),
-                            "OSCILLATING" => Some(DeltaType::Oscillating),
-                            "DIVERGENT"   => Some(DeltaType::Divergent),
-                            _ => None,
-                        };
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Some(DistilledHeader { prose, confidence: conf, source_count: src, snr, delta_type: delta, uncertain })
     }
 }
 
@@ -345,7 +259,7 @@ impl DistillationPipeline {
     ///   behaviour. Swift gives this an `= false` default; Rust has no default
     ///   params, so every call site passes the flag explicitly.
     ///
-    /// Returns DistillationOutput with drawer_content, confidence, feature_fingerprint.
+    /// Returns DistillationOutput with distilled_text, confidence, feature_fingerprint.
     pub fn run(
         input: &DistillationInput,
         extract_features: FeatureExtractor,
@@ -602,31 +516,38 @@ impl DistillationPipeline {
         let confidence = DistillationScorer::compute_confidence(&selected, &passing);
         let uncertain = confidence >= 0.4 && confidence < 0.7;
 
-        // Format drawer_content: "[DIST|conf=X.XX|src=N|snr=Y.YY|delta=Z] prose"
-        let conf_str = format!("{:.2}", confidence);
-        let snr_str  = format!("{:.1}", snr_result.snr);
-        let delta_str = delta_type_for_factoid.as_ref().map(|d| d.as_str()).unwrap_or("STATIC");
-        let uncertain_flag = if uncertain { "|uncertain" } else { "" };
-
-        // Prose: top features by structural score, rendered as readable surface
-        // forms (display), not stems.
-        let mut sorted_selected = selected.clone();
-        sorted_selected.sort_by(|a, b| {
-            b.structural_score.partial_cmp(&a.structural_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let prose: String = sorted_selected.iter().map(|f| f.display.as_str()).collect::<Vec<_>>().join(" ");
-
-        // src= records the number of SOURCE MEMORIES (input.source_ids.len()), NOT the
-        // number of incidence-matrix rows (m = memory_contents.len()). In the cross-memory
-        // cluster model both happen to be equal, but in the intra-item model memory_contents
-        // holds the item's sentences (m ≥ 3) while source_ids holds exactly the one source
-        // drawer ID. src= must equal the number of _distilled_from tunnels written by
-        // captureFactoid, which iterates member_drawers — one per source_id.
-        let source_count = input.source_ids.len();
-        let drawer_content = format!(
-            "[DIST|conf={conf_str}|src={source_count}|snr={snr_str}|delta={delta_str}{uncertain_flag}] {prose}"
-        );
+        // Rendering (SPEC_DISTILLATION_STORAGE §5/§7.4): token-economical
+        // prose built from the item's OWN unit sentences, not from the
+        // feature bag. Sentences carrying a dominant-component (selected)
+        // feature render first in stable source order; the episodic tail
+        // follows in source order. Every unit renders through the ONE §7.6
+        // compaction transform — rule 1 (propositional fidelity, priority 1)
+        // bounds tail compression, so core and tail share the same transform
+        // and "compresses hardest" is realized by ordering, not by a lossier
+        // second transform. Zero inline metadata: confidence/SNR/delta ride
+        // the DistillationOutput fields only, never the text. Mirrors the
+        // Swift Stage 5 exactly (bit-identical rendering required).
+        let selected_values: std::collections::HashSet<&str> =
+            selected.iter().map(|f| f.value.as_str()).collect();
+        let mut core_units: Vec<&str> = Vec::new();
+        let mut tail_units: Vec<&str> = Vec::new();
+        for (i, unit) in input.memory_contents.iter().enumerate() {
+            let carries_core = per_memory_features[i]
+                .iter()
+                .any(|f| selected_values.contains(f.value.as_str()));
+            if carries_core {
+                core_units.push(unit.as_str());
+            } else {
+                tail_units.push(unit.as_str());
+            }
+        }
+        let distilled_text: String = core_units
+            .into_iter()
+            .chain(tail_units)
+            .map(crate::token_compaction::compact)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         // Feature fingerprint: OR-reduce of feature_hash for each selected feature
         let fingerprint = selected.iter().fold(Fingerprint256::ZERO, |acc, feature| {
@@ -634,7 +555,7 @@ impl DistillationPipeline {
         });
 
         DistillationOutput {
-            drawer_content,
+            distilled_text,
             confidence,
             uncertain,
             snr: snr_result.snr,
@@ -735,46 +656,6 @@ mod tests {
         assert_ne!(a, Fingerprint256::ZERO);
     }
 
-    // MARK: - DistilledHeader.parse
-
-    #[test]
-    fn parse_returns_none_for_non_dist_content() {
-        assert!(DistilledHeader::parse("").is_none());
-        assert!(DistilledHeader::parse("some plain text").is_none());
-        assert!(DistilledHeader::parse("[OTHER|conf=0.5] text").is_none());
-    }
-
-    #[test]
-    fn parse_static_dist_header() {
-        let content = "[DIST|conf=0.85|src=5|snr=6.20|delta=STATIC] Alice works at CERN";
-        let h = DistilledHeader::parse(content).expect("should parse");
-        assert_eq!(h.prose, "Alice works at CERN");
-        assert!((h.confidence - 0.85).abs() < 0.001);
-        assert_eq!(h.source_count, 5);
-        assert!((h.snr - 6.20).abs() < 0.01);
-        assert_eq!(h.delta_type, Some(DeltaType::Static));
-        assert!(!h.uncertain);
-    }
-
-    #[test]
-    fn parse_uncertain_convergent_header() {
-        let content = "[DIST|conf=0.55|src=3|snr=3.10|delta=CONVERGENT|uncertain] Bob runs experiments";
-        let h = DistilledHeader::parse(content).expect("should parse");
-        assert_eq!(h.prose, "Bob runs experiments");
-        assert!((h.confidence - 0.55).abs() < 0.001);
-        assert_eq!(h.source_count, 3);
-        assert_eq!(h.delta_type, Some(DeltaType::Convergent));
-        assert!(h.uncertain);
-    }
-
-    #[test]
-    fn parse_header_with_no_delta_field() {
-        let content = "[DIST|conf=0.72|src=4|snr=4.50] Some prose here";
-        let h = DistilledHeader::parse(content).expect("should parse");
-        assert_eq!(h.delta_type, None);
-        assert!((h.confidence - 0.72).abs() < 0.001);
-    }
-
     // MARK: - query_fingerprint
 
     #[test]
@@ -824,38 +705,46 @@ mod tests {
     }
 
     #[test]
-    fn dist_header_format_is_correct() {
+    fn rendering_has_no_inline_metadata() {
+        // SPEC_DISTILLATION_STORAGE §5.2: the [DIST|...] header is retired;
+        // every byte of the rendering is payload. Mirrors Swift
+        // `renderingHasNoInlineMetadata`.
         let input = five_memory_cluster();
         let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
             return;
         }
-        assert!(output.drawer_content.starts_with("[DIST|"), "must start with [DIST|");
-        assert!(output.drawer_content.contains("conf="));
-        assert!(output.drawer_content.contains("src="));
-        assert!(output.drawer_content.contains("snr="));
-        assert!(output.drawer_content.contains("delta="));
-        assert!(output.drawer_content.contains("] "));
+        assert!(!output.distilled_text.starts_with("[DIST|"));
+        assert!(!output.distilled_text.contains("conf="));
+        assert!(!output.distilled_text.contains("snr="));
+        assert!(output.distilled_text.contains("Alice"));
+        assert!(output.distilled_text.contains("CERN"));
+        assert!(!output.distilled_text.contains("  "));
+        // Quality metadata still rides the generation-time fields (§5.2).
+        assert!(output.confidence > 0.0);
+        assert!(output.snr > 0.0);
     }
 
     #[test]
-    fn distilled_header_parse_round_trip() {
+    fn rendering_orders_core_before_episodic_tail() {
+        // §7.4: sentences carrying a dominant-component feature render
+        // first (stable source order); the featureless tail follows.
+        // Mirrors Swift `renderingOrdersCoreFirst`.
         let input = five_memory_cluster();
         let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
             return;
         }
-        let h = DistilledHeader::parse(&output.drawer_content).expect("parse must succeed");
-        assert!((h.confidence - output.confidence).abs() < 0.01);
-        assert_eq!(h.source_count, 5);
-        // SNR tolerance is relative: very large SNR (near-zero episodic noise) loses
-        // f32 precision through the format("{:.1}")/parse round-trip. Use a 0.1% relative
-        // tolerance with a 1.0 absolute floor to handle both normal and large-SNR clusters.
-        let snr_tol = (output.snr * 0.001).max(1.0);
-        assert!((h.snr - output.snr).abs() < snr_tol, "snr round-trip: got {}, expected {}", h.snr, output.snr);
-        let expected_delta = output.delta_type.unwrap_or(DeltaType::Static);
-        assert_eq!(h.delta_type, Some(expected_delta));
-        assert_eq!(h.uncertain, output.uncertain);
+        let text = &output.distilled_text;
+        let core_idx = text.find("Alice").expect("core sentence must render");
+        let tail_idx = text
+            .find("Maintenance")
+            .expect("tail sentence must render (rule 1: it compresses, it does not vanish)");
+        assert!(core_idx < tail_idx, "core must precede tail: {text}");
+        // The compaction transform ran per unit ("The lab where Alice
+        // works is CERN facility" loses its article and copula).
+        assert!(!text.contains("The lab where"));
+        assert!(text.contains("Lab where Alice works CERN facility"));
     }
 
     #[test]
@@ -942,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_output_has_empty_drawer_content() {
+    fn failure_output_has_empty_distilled_text() {
         let input = DistillationInput::new(
             vec!["Hello".into(), "World".into(), "Foo".into()],
             None,
@@ -951,7 +840,7 @@ mod tests {
         );
         let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if !output.succeeded {
-            assert!(output.drawer_content.is_empty());
+            assert!(output.distilled_text.is_empty());
             assert!(output.failure_reason.is_some());
             assert_eq!(output.confidence, 0.0);
         }
@@ -990,7 +879,7 @@ mod tests {
         let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
         if output.succeeded {
             assert!(output.confidence >= 0.4);
-            assert!(!output.drawer_content.is_empty());
+            assert!(!output.distilled_text.is_empty());
         } else {
             assert_eq!(output.confidence, 0.0);
         }
@@ -1051,9 +940,9 @@ mod tests {
         // All four recurring stems must appear in the prose as their display forms.
         for surface in ["database", "tables", "shadow", "migration"] {
             assert!(
-                output.drawer_content.contains(surface),
+                output.distilled_text.contains(surface),
                 "prose must contain '{surface}'; got {}",
-                output.drawer_content
+                output.distilled_text
             );
         }
     }
@@ -1080,7 +969,7 @@ mod tests {
         // The cross-memory path may hold (SNR gate); the intra-item path must not
         // fail for SNR reasons — it produces from the recurring 'spine'.
         assert!(intra.succeeded, "intra-item must not SNR-hold; failure={:?}", intra.failure_reason);
-        assert!(intra.drawer_content.contains("spine"));
+        assert!(intra.distilled_text.contains("spine"));
         // Document the cross-memory behaviour for traceability: it does not crash
         // and is a well-formed output regardless of succeeded.
         let _ = cross.succeeded;
@@ -1112,15 +1001,19 @@ mod tests {
         let output = DistillationPipeline::run(&input, marked_ent_extractor, false);
         assert!(output.succeeded, "ubiquity cluster must succeed; failure={:?}", output.failure_reason);
         assert!(
-            output.drawer_content.contains("spine"),
+            output.distilled_text.contains("spine"),
             "ubiquity re-add must restore the spine feature; got {}",
-            output.drawer_content
+            output.distilled_text
         );
     }
 
     // Prose renders the display surface form, not the stemmed grouping value.
+    /// The rendering is built from the item's SOURCE sentences (compacted),
+    /// never from the feature bag — SPEC_DISTILLATION_STORAGE §5.1/§7.4.
+    /// (Replaces the retired display-vs-stem prose test: features no longer
+    /// render at all; sentences do, so surface forms survive by construction.)
     #[test]
-    fn prose_renders_display_not_stem() {
+    fn rendering_is_source_derived_not_feature_bag() {
         let input = DistillationInput::new(
             vec![
                 "E:migrat/migration".to_string(),
@@ -1133,55 +1026,11 @@ mod tests {
         );
         let output = DistillationPipeline::run(&input, marked_ent_extractor, true);
         assert!(output.succeeded, "failure={:?}", output.failure_reason);
-        // value is the stem "migrat" (one df bit); display is the FIRST surface
-        // form encountered ("migration"). Prose must show the surface, not the stem.
+        // Each unit sentence survives verbatim-compacted into the rendering.
         assert!(
-            output.drawer_content.contains("migration"),
-            "prose must render display surface; got {}",
-            output.drawer_content
-        );
-        assert!(
-            !output.drawer_content.contains("migrat ") && !output.drawer_content.ends_with("migrat"),
-            "prose must not render the bare stem 'migrat'; got {}",
-            output.drawer_content
-        );
-    }
-
-    /// src= in the DIST header must equal source_ids.len(), not memory_contents.len().
-    ///
-    /// In the intra-item model memory_contents holds the item's sentences (m ≥ 3)
-    /// while source_ids holds exactly one entry (the source drawer UUID). The header's
-    /// src= field tracks how many _distilled_from tunnels will be written, which is
-    /// source_ids.len() (= 1), not m. This test guards the regression where src=m
-    /// was used, producing src=3/5/N while only 1 tunnel was actually written.
-    #[test]
-    fn intra_item_src_header_equals_source_ids_count_not_sentence_count() {
-        // Five sentences about Provenance (recurring capitalised entity) — m=5, but
-        // only ONE source memory (source_ids.len()=1). src= must be 1.
-        let input = DistillationInput::new(
-            vec![
-                "Records exist.".to_string(),
-                "The Provenance record confirms zero.".to_string(),
-                "The Provenance record confirms one.".to_string(),
-                "The Provenance record confirms two.".to_string(),
-                "The Provenance record confirms three.".to_string(),
-            ],
-            None,
-            "intra-item-test-cluster",
-            vec!["single-source-drawer-id".to_string()], // one source memory, not five
-        );
-        let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, true);
-        if !output.succeeded {
-            // If the pipeline doesn't produce a factoid on this fixture, the assertion is
-            // vacuously irrelevant — but log for visibility.
-            return;
-        }
-        let header = DistilledHeader::parse(&output.drawer_content)
-            .expect("succeeded output must have a parseable DIST header");
-        assert_eq!(
-            header.source_count, 1,
-            "src= must be source_ids.len()=1, not sentence count m=5; got {}",
-            header.source_count
+            output.distilled_text.contains("E:migrat/migration"),
+            "rendering must carry the source unit; got {}",
+            output.distilled_text
         );
     }
 }

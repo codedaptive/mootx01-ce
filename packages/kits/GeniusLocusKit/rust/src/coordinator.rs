@@ -85,7 +85,7 @@ use locus_kit::recall_trace_item::RecallTraceItem;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::RecallFrame;
-use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame, TunnelCaptureFrame};
+use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame};
 // GLK-level LearnFrame — the public verb boundary type that callers supply.
 // Mapped to LocusLearnFrame at the dispatch boundary (same pattern as
 // ProposeFrame → LocusProposeFrame). Imported here for the `learn` method
@@ -835,14 +835,16 @@ impl Default for EstateCoordinator {
 
 /// A read-only status snapshot of one long-running background drain.
 ///
-/// Today the substrate runs exactly ONE drain: the corpus encode/ingest drain
-/// (the `corpus_ingest_queue` worker, which encodes captured/imported text into
-/// the BM25 + vector lanes asynchronously). `EstateCoordinator::drain_statuses`
-/// returns a `Vec<DrainStatus>` so that when additional drains are added later,
-/// each appends its own entry and the report surfaces all of them with no wire
-/// reshape. There is no speculative drain machinery here — the list is built
-/// from the drains that actually exist, which today is one. Mirrors Swift
-/// `DrainStatus`.
+/// The substrate reports TWO drains: `"corpus_encode"` (the
+/// `corpus_ingest_queue` worker, which encodes captured/imported text into the
+/// BM25 + vector lanes asynchronously) and `"distillation"` (the
+/// SPEC_DISTILLATION_STORAGE §7.1 accounting surface — `pending` is the
+/// row-level eligibility-predicate count, `in_flight` always 0).
+/// `EstateCoordinator::drain_statuses` returns a `Vec<DrainStatus>` so that
+/// when additional drains are added later, each appends its own entry and the
+/// report surfaces all of them with no wire reshape. The list is built from
+/// the drains that actually exist — no speculative drain machinery. Mirrors
+/// Swift `DrainStatus`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrainStatus {
     /// Stable identifier for the drain (e.g. `"corpus_encode"`). Lets a status
@@ -859,10 +861,35 @@ pub struct DrainStatus {
 }
 
 impl DrainStatus {
+    /// Stable name of the corpus encode/ingest drain. The single source of
+    /// truth for the string — `drain_statuses` and `encode_settled` both key
+    /// on it.
+    pub const CORPUS_ENCODE_NAME: &'static str = "corpus_encode";
+
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
     pub fn is_draining(&self) -> bool {
         self.pending + self.in_flight > 0
+    }
+
+    /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
+    /// detached `mootx01 drain` finisher may exit and release the encode
+    /// DrainLease.
+    ///
+    /// Deliberately ignores every drain except "corpus_encode"
+    /// (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3): the "distillation" entry
+    /// counts rows that only a `moot_distill` sweep or the hourly standing
+    /// signal can distill — system-provisioned drawers never transit the
+    /// encode queue, so the drain-stage rider never fires for them and the
+    /// entry does not settle under the drain command. A finisher keyed on ALL
+    /// drains would poll to its full max wait holding the encode lease,
+    /// wedging the next serve session's encode queue. The T5 finisher's
+    /// contract is the encode queue and its lease — nothing else. Mirrors
+    /// Swift `DrainStatus.encodeSettled`.
+    pub fn encode_settled(statuses: &[DrainStatus]) -> bool {
+        !statuses
+            .iter()
+            .any(|s| s.name == Self::CORPUS_ENCODE_NAME && s.is_draining())
     }
 }
 
@@ -1669,12 +1696,37 @@ impl EstateCoordinator {
                 }
             })?;
             statuses.push(DrainStatus {
-                name: "corpus_encode".to_string(),
+                name: DrainStatus::CORPUS_ENCODE_NAME.to_string(),
                 pending,
                 in_flight,
                 detail: Some(format!("encoded_chunks: {encoded_chunks}")),
             });
         }
+
+        // Drain 2 of N: distillation accounting (SPEC_DISTILLATION_STORAGE
+        // §7.1). Present on every estate — distillation is a row-level
+        // obligation, not a corpus feature. `pending` is the §7.1
+        // eligibility-predicate count measured off the rows themselves
+        // (stronger than a queue-depth proxy; also covers lazy
+        // regeneration after a pipeline-version bump). "Fully drained"
+        // therefore cannot read true while any row still owes a
+        // representation (FINDING_11X_MAINTENANCE_WALK constraint 6).
+        // Mirrors the Swift drainStatuses entry.
+        let estate = self.estate_for(handle)?;
+        let undistilled = estate
+            .count_undistilled(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("count_undistilled: {e:?}"),
+            })?;
+        statuses.push(DrainStatus {
+            name: "distillation".to_string(),
+            pending: undistilled,
+            in_flight: 0,
+            detail: Some(format!(
+                "pipeline: {}",
+                substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION
+            )),
+        });
 
         Ok(statuses)
     }
@@ -2458,38 +2510,41 @@ impl EstateCoordinator {
 
     // MARK: - distill_items_sweep
 
-    /// Per-item distillation sweep — distill every active, not-yet-distilled
-    /// item that is long enough to chunk into a usable matrix (≥3 sentences).
+    /// Per-item distillation sweep — SPEC_DISTILLATION_STORAGE §7.1
+    /// (the `moot_distill` tool path).
     ///
-    /// Rust parity of Swift `GeniusLocusKit.distillItemsSweep(handle:distillFn:now:limit:)`.
+    /// Rust parity of Swift `GeniusLocusKit.distillItemsSweep`.
     ///
-    /// For each eligible drawer this method:
-    ///   1. Segments the content into sentences (split on `. ` boundary).
-    ///   2. Skips items with fewer than 3 sentences (`MIN_INTRA_ITEM_UNITS`).
-    ///   3. Runs `DistillationPipeline::run` with `intra_item = true`.
-    ///   4. Captures a factoid drawer in `_distilled` when the pipeline emits a
-    ///      non-zero feature fingerprint (`should_produce_intra_item_factoid`).
-    ///   5. Stores the structural fingerprint in the `distillation-features-v1`
-    ///      VectorKit lane (`add_vector`).
-    ///   6. Writes one `_distilled_from` tunnel from the factoid to the source drawer.
+    /// For each active drawer with non-empty content whose representation
+    /// is NULL or was produced under a different pipeline contract, this
+    /// method performs exactly the two §7.2 writes:
+    ///   1. The four representation columns on the SOURCE drawer row,
+    ///      atomically (`set_distilled_representation`).
+    ///   2. One `distillation-features-v1` lane entry keyed by the SOURCE
+    ///      drawer id (§8) — upsert-replace, only when the structural
+    ///      fingerprint is non-zero (columns and lane independently valid).
     ///
-    /// Idempotent: a factoid's `lineage_id` equals its source drawer's UUID,
-    /// so re-running the sweep skips items whose UUID already appears as a
-    /// `lineage_id` in `_distilled` drawers.
+    /// Rendering paths (p1 contract — `DistillationPipeline::default_extractor`
+    /// on BOTH legs, so renderings are byte-identical Swift/Rust):
+    ///   • ≥3 sentences: intra-item matrix pipeline; Stage 5 renders
+    ///     core-first compacted prose (§7.4).
+    ///   • <3 sentences: the §7.6 token-compaction transform over the
+    ///     content; fingerprint via the query_fingerprint construction
+    ///     (§7.5).
     ///
-    /// `now` is epoch milliseconds — deterministic clock, mirrors
-    /// Swift's `Date` parameter. `limit` caps the number of factoids produced this sweep
-    /// (`None` = all eligible items, matching the Swift `limit: Int? = nil`).
+    /// It captures no drawer, writes no tunnel, and touches no lifecycle
+    /// or lineage field (§11). Idempotent by the NULL predicate — no
+    /// provenance scan.
+    ///
+    /// `now` is epoch milliseconds — deterministic clock, mirrors Swift's
+    /// `Date` parameter (`distilled_at` is audit-only, §4). `limit` caps
+    /// items distilled this sweep (`None` = all eligible).
     ///
     /// # Errors
     ///
-    /// Returns `VerbDispatchError` for stale handles or VectorStore I/O errors.
-    /// Individual item failures (pipeline yields no factoid) are silent — only
-    /// items that actually produce a factoid increment the returned count.
-    /// VectorStore absence is not an error: an estate without a VectorStore
-    /// registered skips the `add_vector` step (structural fingerprints are lost;
-    /// `find_nearest_distilled` queries against nothing and returns empty, which
-    /// is correct behaviour for an estate without the semantic recall tier wired).
+    /// Returns `VerbDispatchError` for stale handles. Individual item
+    /// failures (row vanished mid-sweep) are skipped; VectorStore absence
+    /// is non-fatal (the lane is simply dark).
     pub fn distill_items_sweep(
         &self,
         handle: &EstateHandle,
@@ -2497,182 +2552,138 @@ impl EstateCoordinator {
         limit: Option<usize>,
     ) -> Result<usize, VerbDispatchError> {
         use crate::brain::distillation_cycle::{
-            DISTILLATION_DAEMON_ACTOR, DISTILLATION_LANE_MODEL_ID,
-            DISTILLED_DRAWER_UDC_CODE, DISTILLED_FROM_LABEL, DISTILLED_ROOM,
-            item_is_distillable, should_produce_intra_item_factoid,
+            compaction_rendering, item_is_distillable, DISTILLATION_LANE_MODEL_ID,
         };
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::provenance::SourceType;
-        use locus_kit::tunnel_operational::TunnelOriginClass;
         use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
+        use substrate_ml::token_compaction;
 
-        // Validate handle and collect the full drawer list.
         let estate = self.estate_for_verb(handle)?;
-        let all_drawers: Vec<locus_kit::drawer::Drawer> =
-            estate.all_drawers().map_err(|e| remap("distill_items_sweep", "", e))?;
 
-        // Build a node-name lookup so we can resolve each drawer's room
-        // display name from its parent_node_id (Drawer no longer stores
-        // wing/room strings directly — the node-tree migration).
-        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
-
-        // Build the set of source drawer UUIDs that already have a factoid:
-        // a factoid's lineage_id equals its source item's UUID (see captureFactoid
-        // in DistillationCycle.swift). Skip any candidate whose UUID is in this set.
-        let already_distilled: std::collections::HashSet<String> = all_drawers
-            .iter()
-            .filter(|d| {
-                node_names.get(&d.parent_node_id)
-                    .map(|(_, room)| room.as_str() == DISTILLED_ROOM)
-                    .unwrap_or(false)
-            })
-            .map(|d| d.lineage_id.to_string())
-            .collect();
-
-        // Default wing for factoid capture — wing organization "Agentic Memory" matches Swift.
-        let factoid_wing = locus_kit::default_wings::DEFAULT_WING_NAME;
-
-        // Optional VectorStore reference for fingerprint storage. Absence is non-fatal:
-        // the sweep proceeds and captures factoid drawers; Hamming NN is simply dark.
+        // Optional VectorStore for fingerprint storage. Absence is non-fatal.
         let vector_store_opt = self.vector_store_for(handle);
 
         let mut produced: usize = 0;
 
-        for drawer in &all_drawers {
+        // Rooms-first sweep: enumerate room-level fingerprint entries, skip
+        // rooms whose operationalAND proves every active drawer already carries
+        // bit 19 (HAS_CURRENT_REPRESENTATION), and load the remaining rooms
+        // via drawers_in_wing_room.
+        //
+        // Safety invariant — AND is an under-approximation:
+        //   Falsely-ABSENT bit 19 in operational_and → room scanned
+        //   unnecessarily (harmless over-work).  Falsely-PRESENT bit 19
+        //   would skip a room with eligible work (UNSAFE); rebuildAll at
+        //   estate open prevents this by recomputing the AND from scratch.
+        //   Mid-session, the AND can only worsen in the safe direction
+        //   (capture lowers AND; only rebuildAll raises it).
+        let skip_bit =
+            locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let rooms = estate
+            .room_level_fingerprints()
+            .map_err(|e| remap("distill_items_sweep", "", e))?;
+
+        'rooms: for entry in &rooms {
+            // Skip this room when the AND proves every active drawer already
+            // has bit 19 set.  The AND is an under-approximation so if it
+            // shows 1 for bit 19 the true AND is also 1 — safe to skip.
+            if (entry.fingerprint.operational_and & skip_bit) == skip_bit {
+                continue;
+            }
+
+            let room_drawers = estate
+                .drawers_in_wing_room(&entry.wing, &entry.room)
+                .map_err(|e| remap("distill_items_sweep", &entry.room, e))?;
+
+            for drawer in &room_drawers {
             if let Some(cap) = limit {
                 if produced >= cap {
-                    break;
+                        break 'rooms;
                 }
             }
-            // Skip tombstoned, empty, or already-distilled-source drawers.
-            if drawer.tombstoned_at.is_some() { continue; }
-            if drawer.content.is_empty() { continue; }
-            // Skip restricted and secret source drawers — parity with Swift's
-            // distillItemsSweep which filters candidates through
-            // `getDrawers(ids:matchingFrame:RecallFrame(filterChain:[]))` whose
-            // `insert_defaults` enforces `SensitivityAtMost(Elevated)`.
-            // Elevated raw_value == 16; Restricted == 32, Secret == 48.
-            // A factoid produced from a restricted or secret source would inherit
-            // that tier (secfix/punt-g2 sensitivity floor below), so it could never
-            // be returned via the default recall ceiling anyway — but we exclude the
-            // source here as well so the sweep does not waste pipeline resources and
-            // does not store a vector fingerprint for an unreachable factoid slot.
-            if drawer.adjective_sensitivity().raw_value()
-                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            if drawer.content.is_empty() {
+                continue;
+            }
+            // Eligibility (§7.1): bit 19 (has_current_representation) set
+            // AND pipeline version matches → already distilled, skip. The
+            // bitmap test replaces the previous `distilled.is_some()` column-
+            // presence check (cookbook §2.4.1 / SPEC §7.1). Both are correct
+            // by the §4 invariant, but the bit is the authoritative indicator.
+            if drawer.has_current_representation()
+                && drawer.distilled_pipeline_version.as_deref()
+                    == Some(token_compaction::DISTILLATION_PIPELINE_VERSION)
             {
                 continue;
             }
-            let drawer_room = node_names.get(&drawer.parent_node_id)
-                .map(|(_, r)| r.as_str())
-                .unwrap_or("");
-            if drawer_room == DISTILLED_ROOM { continue; }
-            if already_distilled.contains(&drawer.id) { continue; }
 
             // Sentence segmentation via the canonical cross-leg delimiter
-            // algorithm (eidetic_lib::segmenter::sentences). This is the Rust
-            // counterpart of Swift's EideticLib.sentencesByDelimiter(_:): splits
-            // on `.`, `!`, `?`, and `\n`, preserving the terminator at the end of
-            // each segment and guaranteeing total coverage (segments concatenate
-            // back to the original input with no gaps).
-            //
-            // Previously this used a hand-rolled `split(". ")` approximation
-            // which produced wrong sentence counts for inputs that end with a
-            // bare period (no trailing space) or use `!`/`?`/`\n` as sentence
-            // terminators — causing identical content to yield 0 factoids on Rust
-            // while Swift produced 1 (parity gap fixed by R10, 2026-06-20).
+            // algorithm (eidetic_lib::segmenter::sentences) — the same
+            // segmenter the Swift path and the corpus Chunker use.
             let sentences: Vec<String> = eidetic_lib::segmenter::sentences(&drawer.content);
 
-            if !item_is_distillable(sentences.len()) {
-                continue;
-            }
-
-            let input = DistillationInput::new(
-                sentences,
-                None, // no per-sentence timestamps for intra-item sweep
-                drawer.id.clone(), // clusterID = source drawer UUID (intra-item model)
-                vec![drawer.id.clone()], // single source
-            );
-
-            let output = DistillationPipeline::run(
-                &input,
-                DistillationPipeline::default_extractor,
-                true, // intra_item = true
-            );
-
-            if !should_produce_intra_item_factoid(&output) {
-                continue;
-            }
-
-            // Capture factoid drawer in "_distilled".
-            let lineage_id = Uuid::parse_str(&drawer.id).unwrap_or_else(|_| Uuid::new_v4());
-            let mut factoid_frame = CaptureFrame::new(
-                output.drawer_content.clone(),
-                CaptureChannel::Actuator, // daemon-generated content (cookbook §2.4)
-                DISTILLED_ROOM,
-                LatticeAnchor::udc(DISTILLED_DRAWER_UDC_CODE),
-                DISTILLATION_DAEMON_ACTOR,
-                DISTILLATION_LANE_MODEL_ID,
-            );
-            factoid_frame.source_type = SourceType::Derived;
-            factoid_frame.lineage_id = Some(lineage_id);
-            factoid_frame.wing = Some(factoid_wing.to_string());
-            // Sensitivity floor: a factoid must not be captured at a lower
-            // sensitivity tier than its source drawer. Intra-item distillation
-            // has exactly one source — `drawer`. If the source is above Normal,
-            // the factoid inherits that tier so secret/restricted memories cannot
-            // be downgraded into normal-tier recall. (secfix/punt-g2)
-            let source_sensitivity = drawer.adjective_sensitivity();
-            if source_sensitivity.raw_value()
-                > locus_kit::adjectives::AdjectiveSensitivity::Normal.raw_value()
-            {
-                factoid_frame.sensitivity = source_sensitivity;
-            }
-
-            // estate is the &Estate held from estate_for_verb above. Capture via
-            // the estate directly — all borrows here are shared (&self), so no
-            // re-acquisition is needed and NLL keeps the borrow live through the loop.
-            let factoid_drawer = match estate.capture(factoid_frame, now) {
-                Ok(d) => d,
-                Err(_) => continue, // individual item failure is non-fatal; skip
-            };
-            let factoid_id = factoid_drawer.id.clone();
-
-            // Store structural fingerprint in the distillation VectorKit lane.
-            if let Some(vs) = &vector_store_opt {
-                // add_vector failure is non-fatal — the factoid drawer is captured;
-                // only the Hamming NN lane is affected.
-                let _ = vs.add_vector(
-                    &factoid_id,
-                    &output.feature_fingerprint,
-                    DISTILLATION_LANE_MODEL_ID,
-                    "1",
-                    now,
+            let (rendering, fingerprint) = if item_is_distillable(sentences.len()) {
+                // Matrix path (§7.4).
+                let input = DistillationInput::new(
+                    sentences,
+                    None,
+                    drawer.id.clone(),
+                    vec![drawer.id.clone()],
                 );
+                let output = DistillationPipeline::run(
+                    &input,
+                    DistillationPipeline::default_extractor,
+                    true,
+                );
+                let rendering = if output.distilled_text.is_empty() {
+                    // Degenerate matrix: fall back to the short-item
+                    // transform so §13.1 population holds.
+                    compaction_rendering(&drawer.content)
+                } else {
+                    output.distilled_text
+                };
+                (rendering, output.feature_fingerprint)
+            } else {
+                // Short-item path (§7.5).
+                (
+                    compaction_rendering(&drawer.content),
+                    DistillationPipeline::query_fingerprint(
+                        &drawer.content,
+                        DistillationPipeline::default_extractor,
+                    ),
+                )
+            };
+
+            // Write 1 of 2 (§7.2): the four columns, atomically.
+            let token_count = token_compaction::estimate_token_count(&rendering);
+            match estate.set_distilled_representation(
+                &drawer.id,
+                &rendering,
+                token_compaction::DISTILLATION_PIPELINE_VERSION,
+                token_count,
+                now,
+            ) {
+                Ok(1) => {}
+                _ => continue, // row vanished mid-sweep or write failed: skip
             }
 
-            // Write one _distilled_from tunnel: factoid → source drawer.
-            // Resolve source drawer's wing/room names from the node tree
-            // (Drawer no longer stores wing/room directly — node-tree integrity).
-            let (src_wing, src_room) = node_names.get(&drawer.parent_node_id)
-                .cloned()
-                .unwrap_or_default();
-            let mut tunnel_frame = TunnelCaptureFrame::new(
-                factoid_wing,
-                DISTILLED_ROOM,
-                &src_wing,
-                &src_room,
-                DISTILLED_FROM_LABEL,
-                DISTILLATION_DAEMON_ACTOR,
-            );
-            tunnel_frame.source_drawer_id = Some(factoid_id);
-            tunnel_frame.target_drawer_id = Some(drawer.id.clone());
-            tunnel_frame.origin_class = TunnelOriginClass::Derived;
-            // Tunnel capture failure is non-fatal — the factoid drawer is already
-            // written; the _distilled_from provenance link is advisory.
-            let _ = estate.capture_tunnel(tunnel_frame, now);
+            // Write 2 of 2 (§7.2/§8): the lane entry, keyed by the SOURCE
+            // drawer id. Upsert-replace; zero fingerprint writes nothing.
+            if fingerprint != substrate_types::fingerprint256::Fingerprint256::ZERO {
+                if let Some(vs) = &vector_store_opt {
+                    // add_vector failure is non-fatal — the columns are
+                    // written; only the Hamming NN lane is affected.
+                    let _ = vs.add_vector(
+                        &drawer.id,
+                        &fingerprint,
+                        DISTILLATION_LANE_MODEL_ID,
+                        "1",
+                        now,
+                    );
+                }
+            }
 
             produced += 1;
-        }
+            } // end for drawer in &room_drawers
+        } // end 'rooms: for entry in &rooms
 
         Ok(produced)
     }
@@ -3105,49 +3116,100 @@ impl EstateCoordinator {
         let vector_store = self.vector_store_for(handle);
 
         if corpus.is_some() || vector_store.is_some() {
+            // Resolve the full lineage chain so the cross-kit vector delete
+            // fans out to ALL lineage members, not just the head row.
+            // After the storage expunge (step 1) tombstones and
+            // content-scrubs every lineage member, each member may carry
+            // its own Corpus and VectorStore entries (BM25 postings,
+            // semantic embeddings, distillation-lane fingerprints) that
+            // must also be deleted — otherwise those entries leak
+            // content-derived representations past the destruction
+            // contract (secfix/ws2-coredelete).
+            //
+            // Mirrors Swift VerbSurface.expunge lines 739–780:
+            //   let lineageIds = try await estate.lineageChain(for: frame.rowID)
+            //   let idsToDelete = lineageIds.isEmpty ? [frame.rowID] : lineageIds
+            //   for deleteId in idsToDelete { corpus.removeContent + vs.deleteAll… }
+            //
+            // lineage_chain returns all IDs sharing the lineageID column,
+            // including the head row itself; the loop therefore covers the
+            // head plus every predecessor in one pass. An empty result
+            // (no lineageID or row not found) falls back to [row_id] to
+            // guarantee the head row is always processed.
+            let ids_to_delete: Vec<String> = match estate.lineage_chain(row_id) {
+                Ok(chain) if !chain.is_empty() => chain,
+                _ => vec![row_id.to_string()],
+            };
+
             let step2_result: Result<(), VerbDispatchError> = (|| {
-                if let Some(ref c) = corpus {
-                    // Shared-content 1.1: clear the engine's derived state for
-                    // this Drawer ID by exact key (BM25 postings + Drawer-keyed
-                    // vectors). The canonical text lives only in the Drawer row
-                    // LocusKit just handled — no second copy to scrub.
-                    c.remove_content(row_id).map_err(|e| {
-                        VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
-                            row_id: row_id.to_string(),
-                            reason: format!("{:?}", e),
-                        })
-                    })?;
-                }
-                if let Some(ref vs) = vector_store {
+                for delete_id in &ids_to_delete {
                     if let Some(ref c) = corpus {
-                        // For .glk estates: the standalone VectorStore's resident
-                        // array must also be invalidated (it shares the backing table
-                        // with the corpus's internal VectorStore but maintains a
-                        // separate in-memory live/tombstone bitmap). Derive modelID
-                        // from the corpus.
-                        let model_id = c.model_id();
-                        vs.delete_all_vectors(row_id, &model_id).map_err(|e| {
+                        // Clear the engine's derived state for this lineage
+                        // member by exact key (BM25 postings + Drawer-keyed
+                        // vectors). Each lineage member's canonical text
+                        // lives only in its own Drawer row — no second copy.
+                        c.remove_content(delete_id).map_err(|e| {
                             VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
-                                row_id: row_id.to_string(),
+                                row_id: delete_id.to_string(),
                                 reason: format!("{:?}", e),
                             })
                         })?;
-                    } else {
-                        // Standalone VectorStore registered without a Corpus (not a
-                        // standard provisioning path, but handled defensively). The
-                        // modelID is not available; raise a clear error rather than
-                        // silently leaving an orphan.
-                        return Err(VerbDispatchError::Verb(
-                            VerbError::CrossKitVectorDeleteFailed {
-                                row_id: row_id.to_string(),
-                                reason: format!(
-                                    "standalone VectorStore registered without a Corpus — \
-                                     model_id unavailable for delete_all_vectors; \
-                                     manual cleanup required for estate {}",
-                                    uuid_to_str(&handle.estate_uuid)
-                                ),
-                            },
-                        ));
+                    }
+                    if let Some(ref vs) = vector_store {
+                        // Distillation lane scrub (SPEC_DISTILLATION_STORAGE
+                        // §7.2/§8): the distillation-features-v1 entry is
+                        // keyed by the SOURCE drawer id. Each lineage member
+                        // is a source drawer and may carry its own entry.
+                        // UNCONDITIONAL on the corpus handle — the lane
+                        // exists independently of the semantic embedding lane,
+                        // and an orphaned structural fingerprint would leak a
+                        // content-derived signature past the destruction
+                        // contract. Runs BEFORE the corpus-model delete so the
+                        // lane is scrubbed even when the corpus-less branch
+                        // below would fail the semantic-lane delete. Mirrors
+                        // the Swift VerbSurface.expunge ordering.
+                        vs.delete_all_vectors(
+                            delete_id,
+                            crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                        )
+                        .map_err(|e| {
+                            VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
+                                row_id: delete_id.to_string(),
+                                reason: format!("{:?}", e),
+                            })
+                        })?;
+                        if let Some(ref c) = corpus {
+                            // For .glk estates: the standalone VectorStore's
+                            // resident array must also be invalidated (it
+                            // shares the backing table with the corpus's
+                            // internal VectorStore but maintains a separate
+                            // in-memory live/tombstone bitmap). Derive
+                            // modelID from the corpus.
+                            let model_id = c.model_id();
+                            vs.delete_all_vectors(delete_id, &model_id).map_err(|e| {
+                                VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
+                                    row_id: delete_id.to_string(),
+                                    reason: format!("{:?}", e),
+                                })
+                            })?;
+                        } else {
+                            // Standalone VectorStore registered without a
+                            // Corpus (not a standard provisioning path, but
+                            // handled defensively). The modelID is not
+                            // available; raise a clear error rather than
+                            // silently leaving an orphan.
+                            return Err(VerbDispatchError::Verb(
+                                VerbError::CrossKitVectorDeleteFailed {
+                                    row_id: row_id.to_string(),
+                                    reason: format!(
+                                        "standalone VectorStore registered without a Corpus — \
+                                         model_id unavailable for delete_all_vectors; \
+                                         manual cleanup required for estate {}",
+                                        uuid_to_str(&handle.estate_uuid)
+                                    ),
+                                },
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -3277,7 +3339,12 @@ impl EstateCoordinator {
     ///      re-attempts remediation.
     ///
     /// For each tombstoned row without a "tombstone" or "expungeOrphan" audit:
-    ///   - Re-attempt the cross-kit vector+corpus delete.
+    ///   - Re-attempt the cross-kit vector+corpus delete. This includes:
+    ///       * corpus.remove_content — scrubs BM25 + semantic-embedding index
+    ///       * VectorStore.delete_all_vectors(distillation-features-v1) — scrubs
+    ///         the structural fingerprint lane (unconditional on corpus presence)
+    ///       * VectorStore.delete_all_vectors(corpus model id) — scrubs the
+    ///         semantic embedding lane (requires corpus for model id)
     ///   - On success: seal a "tombstone" success audit (`seal_expunge_audit`).
     ///   - On failure: seal an "expungeOrphan" audit (`seal_expunge_orphan_audit`).
     ///
@@ -3333,8 +3400,16 @@ impl EstateCoordinator {
 
             // Re-attempt the cross-kit vector+corpus delete (step 2 of the
             // original §B-2a expunge). Same logic as the normal expunge step 2:
-            // corpus.expunge scrubs chunk text + clears BM25+vector index entries;
-            // VectorStore.delete_all_vectors clears the resident in-memory bitmap.
+            // corpus.remove_content scrubs chunk text + clears BM25+vector
+            // index entries; VectorStore.delete_all_vectors clears the resident
+            // in-memory bitmap for each lane.
+            //
+            // The distillation-features-v1 lane is scrubbed FIRST, UNCONDITIONAL
+            // on the corpus handle — the structural fingerprint lane is independent
+            // of the semantic embedding lane, and an orphaned fingerprint leaks a
+            // content-derived signature past the destruction contract
+            // (SPEC_DISTILLATION_STORAGE §7.2/§8; Wave-1 parity fix, addendum).
+            // Mirrors the ordering in the main expunge path (coordinator.rs step 2).
             //
             // When neither corpus nor vectorStore is registered (locusOnly estate),
             // no cross-kit cleanup is needed — the audit gap is closed below
@@ -3353,6 +3428,22 @@ impl EstateCoordinator {
                         .map_err(|e| format!("corpus.remove_content failed: {:?}", e))?;
                 }
                 if let Some(ref vs) = vector_store {
+                    // Distillation lane scrub: the distillation-features-v1 entry
+                    // is keyed by the SOURCE drawer id. Unconditional on corpus —
+                    // the lane exists independently of the semantic embedding lane.
+                    // Runs before the corpus-model delete so the fingerprint lane
+                    // is scrubbed even when the corpus-less branch below would
+                    // fail the semantic-lane delete.
+                    vs.delete_all_vectors(
+                        row_id,
+                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "VectorStore.delete_all_vectors(distillation-features-v1) failed: {:?}",
+                            e
+                        )
+                    })?;
                     if let Some(ref c) = corpus {
                         let model_id = c.model_id();
                         vs.delete_all_vectors(row_id, &model_id)
@@ -6701,10 +6792,17 @@ impl EstateCoordinator {
         // contributes no cosine.
         let mut dense_order: Vec<String> = Vec::new();
         let mut dense_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // DISCRIMINATION FACTOR (Item 3, MISSION_11X_RECALL_GAP_01): continuous
+        // discount applied to the dense column in the matrixAware scoring formula.
+        // Declared here (outside the corpus block) so it is in scope for the
+        // scoring loop that follows. Default 1.0 = no discount. Mirrors Swift
+        // RecallDirector's `denseDiscriminationFactor`. See coordinator comments
+        // at the scoring loop for the full mapping.
+        let mut dense_discrimination_factor: f32 = 1.0;
         if include_dense {
             if let Some(ref c) = corpus {
                 if !query_str.is_empty() {
-                    use corpus_kit::FloatLaneOutcome;
+                    use corpus_kit::{FloatDiscriminationSignal, FloatLaneOutcome};
                     let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
                     // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
                     // `dense:<model_id>` key is in `shape.anti_similar_lanes`
@@ -6721,8 +6819,28 @@ impl EstateCoordinator {
                         .as_ref()
                         .map(|s| s.anti_similar_lanes.clone())
                         .unwrap_or_default();
-                    let nearest_per_signal =
-                        c.float_nearest_per_signal(&query_str, plan.frontier_k);
+                    // Use the discrimination-aware call. Discrimination is always
+                    // measured on the standard nearest-similarity pass — it measures
+                    // "are the top-K nearest cosines near-uniform?". The outcomes are
+                    // extracted for the anti-similar substitution logic below.
+                    let nearest_per_signal_with_disc: Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> =
+                        c.float_nearest_per_signal_with_discrimination(&query_str, plan.frontier_k);
+                    // Aggregate discrimination: mean relative spread across .Hits signals.
+                    // Saturation threshold 0.15 mirrors Swift RecallDirector.
+                    // linear ramp: factor = min(1.0, mean_spread / 0.15)
+                    //   spread ≈ 0.05 (saturated, short turns): factor ≈ 0.33
+                    //   spread ≥ 0.15 (contrastive, clear winner): factor = 1.0
+                    let saturation_threshold: f32 = 0.15;
+                    let spreads: Vec<f32> = nearest_per_signal_with_disc.iter()
+                        .filter_map(|(_, _, d)| d.as_ref().map(|s| s.relative_spread))
+                        .collect();
+                    if !spreads.is_empty() {
+                        let mean_spread: f32 = spreads.iter().sum::<f32>() / spreads.len() as f32;
+                        dense_discrimination_factor = (mean_spread / saturation_threshold).min(1.0);
+                    }
+                    // Extract (model_id, outcome) pairs for the anti-similar substitution.
+                    let nearest_per_signal: Vec<(String, FloatLaneOutcome)> =
+                        nearest_per_signal_with_disc.into_iter().map(|(m, o, _)| (m, o)).collect();
                     let per_signal: Vec<(String, FloatLaneOutcome)> = if anti_similar_lanes
                         .is_empty()
                     {
@@ -7241,10 +7359,17 @@ impl EstateCoordinator {
                     sh_co_occur  * weights.matrix * 0.5 * col_co_occur[i]
                         + sh_temporal * weights.matrix * 0.5 * col_temporal[i]
                 };
+                // DISCRIMINATION DISCOUNT (Item 3, MISSION_11X_RECALL_GAP_01):
+                // `dense_discrimination_factor` ∈ [0, 1] (computed above from the
+                // mean relative spread of top-K nearest cosines across all signals).
+                // Saturated: factor ≈ 0.33 (spread ~0.05, short-turn stopword mass).
+                // Contrastive: factor = 1.0 (spread ≥ 0.15, clear semantic winner).
+                // Linear ramp — no cliff. At factor = 1.0 the score is
+                // byte-identical to the pre-discount formula. Mirrors Swift.
                 *v = sh_locus   * weights.locus    * col_locus[i]
                    + sh_bm25    * weights.bm25     * col_bm25[i]
                    + sh_hamming * weights.vector   * col_vector[i]
-                   + sh_dense   * weights.vector   * col_dense[i]     // dense shares vector weight budget
+                   + dense_discrimination_factor * sh_dense * weights.vector * col_dense[i]
                    + sh_field_fit * weights.field_fit * col_field_fit[i]
                    + matrix_term
                    // graph + preference share the `weights.graph` budget slice, exactly
@@ -9179,7 +9304,7 @@ mod tests {
     // be silently skipped, producing zero factoids for their content even when
     // the content is long enough to be distillable (≥3 sentences).
     #[test]
-    fn co_dist_sec1_sweep_skips_restricted_and_secret_source_drawers() {
+    fn co_dist_sec1_sweep_distills_all_sensitivities_on_row(){
         use locus_kit::adjectives::AdjectiveSensitivity;
         use locus_kit::frames::CaptureFrame as LkCaptureFrame;
         use locus_kit::drawer_operational::CaptureChannel;
@@ -9194,17 +9319,15 @@ mod tests {
             .expect("open");
         coord.seed_default_wings(&handle, NOW).expect("seed");
 
-        // Long-enough content (3+ sentences, recurring capitalized entities) so the
-        // drawer qualifies as distillable at Normal sensitivity. The default
-        // capitalization extractor requires named entities that recur across ≥2
-        // of the 3+ segments to produce a non-zero fingerprint.
-        // "Memory" and "Rust" each appear in at least 2 of the 3 segments here.
         let long_content = "Both Memory and Rust implement the same segmenter algorithm. \
                             Memory retains context across Rust sentences. \
                             Rust uses Memory to store recurring entities for distillation.";
 
-        // 1. Normal-tier drawer (must be distilled — control case).
-        let mut frame_normal = LkCaptureFrame::new(
+        // Drawers at three sensitivity tiers. The representation is a VIEW of
+        // the row and lives ON the row whose sensitivity governs it
+        // (SPEC_DISTILLATION_STORAGE §2) — there is no cross-row sensitivity
+        // floor, so restricted and secret rows distill too (§13.1).
+        let mut frame = LkCaptureFrame::new(
             long_content,
             CaptureChannel::Typed,
             "study",
@@ -9212,49 +9335,182 @@ mod tests {
             "tester",
             "test-v1",
         );
-        // AdjectiveSensitivity::Normal is the default — no override needed.
-        let normal_id = coord.capture(&handle, frame_normal.clone(), NOW).expect("capture normal").id;
+        let normal_id = coord.capture(&handle, frame.clone(), NOW).expect("capture normal").id;
+        frame.sensitivity = AdjectiveSensitivity::Restricted;
+        let restricted_id = coord.capture(&handle, frame.clone(), NOW).expect("capture restricted").id;
+        frame.sensitivity = AdjectiveSensitivity::Secret;
+        let secret_id = coord.capture(&handle, frame.clone(), NOW).expect("capture secret").id;
 
-        // 2. Restricted-tier drawer (must NOT be distilled).
-        frame_normal.sensitivity = AdjectiveSensitivity::Restricted;
-        let restricted_id = coord.capture(&handle, frame_normal.clone(), NOW).expect("capture restricted").id;
+        let drawer_count_before = coord
+            .estate_for_verb(&handle).expect("estate")
+            .all_drawers().expect("all_drawers").len();
 
-        // 3. Secret-tier drawer (must NOT be distilled).
-        frame_normal.sensitivity = AdjectiveSensitivity::Secret;
-        let secret_id = coord.capture(&handle, frame_normal.clone(), NOW).expect("capture secret").id;
-
-        // Run the sweep with no VectorStore (fingerprint storage is dark, but
-        // factoid capture still succeeds — parity with production estates where
-        // VectorStore may not be registered at sweep time).
+        // No VectorStore registered: the lane is dark but the column writes
+        // still land (non-fatal absence, parity with the Swift path).
         let produced = coord
             .distill_items_sweep(&handle, NOW, None)
             .expect("sweep must not error");
+        // At least the three fixture drawers distill (seeded system drawers
+        // with non-empty content distill too — §13.1 covers EVERY active item).
+        assert!(produced >= 3, "all three sensitivity tiers must distill; got {produced}");
 
-        // The sweep must produce exactly 1 factoid (for the Normal drawer).
-        // Restricted and Secret drawers must be silently skipped.
-        assert_eq!(
-            produced, 1,
-            "sweep must produce exactly 1 factoid (Normal drawer only); \
-             restricted and secret source drawers must be excluded"
-        );
-
-        // Verify the produced factoid was derived from the Normal source,
-        // not from either of the elevated-sensitivity drawers.
-        // The factoid's lineage_id equals its source drawer's UUID.
         let estate = coord.estate_for_verb(&handle).expect("estate_for_verb");
         let all = estate.all_drawers().expect("all_drawers");
-        assert!(
-            all.iter().any(|d| d.lineage_id.to_string() == normal_id),
-            "factoid for Normal source must exist"
+        // §7.2/§11: no drawer was captured by the sweep — the writes are
+        // on-row column updates only.
+        assert_eq!(all.len(), drawer_count_before, "the sweep must capture no drawers");
+        assert!(all.iter().all(|d| d.added_by != "distillation-daemon"));
+        for id in [&normal_id, &restricted_id, &secret_id] {
+            let row = all.iter().find(|d| &d.id == id).expect("row");
+            assert!(row.distilled.is_some(), "row {id} must carry a representation");
+            assert_eq!(
+                row.distilled_pipeline_version.as_deref(),
+                Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+            );
+            assert!(row.distilled_token_count.is_some());
+            assert!(row.distilled_at.is_some());
+        }
+    }
+
+    // CO-DIST-AND-1: UNSAFE direction — a room with 199 distilled + 1
+    // undistilled drawer must NEVER be skipped by the sweep.  The
+    // operationalAND for the room has bit 19 = 0 (captures lower it) so
+    // the sweep must enter the room and find the 1 undistilled drawer.
+    #[test]
+    fn co_dist_and1_unsafe_direction_room_with_one_undistilled_never_skipped() {
+        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap()
         );
+        let handle = coord.open(store, OwnerCredentials::new("owner"), 0, 100).expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        let long_content = "Each item is three sentences long for matrix path. \
+                            Second sentence provides context. \
+                            Third sentence completes the fixture.";
+
+        // Capture 200 drawers in the same room.
+        let mut ids: Vec<String> = Vec::new();
+        for i in 0..200i64 {
+            let frame = LkCaptureFrame::new(
+                long_content,
+                CaptureChannel::Typed,
+                "lab",
+                LatticeAnchor::udc("0"),
+                "tester",
+                "test-v1",
+            );
+            let drawer = coord.capture(&handle, frame, NOW + i).expect("capture");
+            ids.push(drawer.id);
+        }
+
+        // Distill the first 199 via set_distilled_representation directly
+        // so we control exactly which drawer remains undistilled.
+        let estate = coord.estate_for_verb(&handle).expect("estate");
+        for id in ids.iter().take(199) {
+            estate
+                .set_distilled_representation(
+                    id, "rendered",
+                    substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION,
+                    3, NOW,
+                )
+                .expect("set_distilled_representation");
+        }
+
+        // The 200th drawer (ids[199]) is still undistilled.
+        // The sweep MUST enter the room and distill it.
+        let produced = coord
+            .distill_items_sweep(&handle, NOW, None)
+            .expect("sweep");
         assert!(
-            all.iter().all(|d| d.lineage_id.to_string() != restricted_id),
-            "no factoid must exist for Restricted source; secfix/punt-g2 violated"
+            produced >= 1,
+            "one undistilled drawer must be found regardless of the 199 distilled ones; got {produced}"
         );
-        assert!(
-            all.iter().all(|d| d.lineage_id.to_string() != secret_id),
-            "no factoid must exist for Secret source; secfix/punt-g2 violated"
+    }
+
+    // CO-DIST-AND-2: Win fixture — fully-distilled rooms are skipped after
+    // the estate is reopened (rebuildAll tightens the AND aggregate so
+    // operationalAND bit 19 = 1 for all-distilled rooms, causing the
+    // sweep to skip them).
+    #[test]
+    fn co_dist_and2_win_fixture_fully_distilled_rooms_skipped_after_rebuild() {
+        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+
+        // Open two coordinators backed by the SAME store (simulating close +
+        // reopen which triggers rebuildAll).
+        let storage =
+            Arc::new(locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap())
+                as Arc<dyn DrawerStore>;
+
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(Arc::clone(&storage), OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        let long_content = "First sentence sets context. \
+                            Second sentence adds detail. \
+                            Third sentence is the conclusion.";
+
+        let frame = LkCaptureFrame::new(
+            long_content, CaptureChannel::Typed, "lab",
+            LatticeAnchor::udc("0"), "tester", "test-v1",
         );
+        coord.capture(&handle, frame, NOW).expect("capture");
+
+        // First sweep: distills the one item.
+        let first = coord.distill_items_sweep(&handle, NOW, None).expect("first sweep");
+        assert!(first >= 1, "item must distill on first sweep; got {first}");
+
+        // Mid-session second sweep: room is entered (operationalAND bit 19 is
+        // still 0 from the capture), but nothing to distill.
+        let mid = coord.distill_items_sweep(&handle, NOW, None).expect("mid sweep");
+        assert_eq!(mid, 0, "mid-session sweep must produce 0 (all distilled already)");
+
+        // Check that the AND is still 0 for bit 19 mid-session.
+        let skip_bit =
+            locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let estate1 = coord.estate_for_verb(&handle).expect("estate1");
+        let entries1 = estate1.room_level_fingerprints().expect("entries1");
+        let lab_entry1 = entries1.iter().find(|e| e.room == "lab");
+        if let Some(lab) = lab_entry1 {
+            assert_eq!(
+                lab.fingerprint.operational_and & skip_bit, 0,
+                "mid-session AND must have bit 19 = 0 (rebuildAll not yet called)"
+            );
+        }
+
+        // "Reopen" by opening a second coordinator on the same store.
+        // This triggers rebuild_container_fingerprints (called inside open)
+        // which recomputes the AND from all active drawers.
+        let mut coord2 = EstateCoordinator::new();
+        let handle2 = coord2
+            .open(Arc::clone(&storage), OwnerCredentials::new("owner"), 0, 100)
+            .expect("reopen");
+
+        // After rebuildAll (via reopen) the sweep must skip the
+        // fully-distilled room and produce 0.
+        let post_reopen = coord2.distill_items_sweep(&handle2, NOW, None).expect("post-reopen sweep");
+        assert_eq!(
+            post_reopen, 0,
+            "after rebuildAll (via reopen) the fully-distilled room must be skipped; got {post_reopen}"
+        );
+
+        // Fingerprint sanity: bit 19 must be 1 in operationalAND after rebuildAll.
+        let estate2 = coord2.estate_for_verb(&handle2).expect("estate2");
+        let entries2 = estate2.room_level_fingerprints().expect("entries2");
+        if let Some(lab) = entries2.iter().find(|e| e.room == "lab") {
+            assert_eq!(
+                lab.fingerprint.operational_and & skip_bit, skip_bit,
+                "operationalAND bit 19 must be 1 after rebuildAll when all drawers carry it"
+            );
+        }
     }
 
     // ── Contradiction hunt (mirrors Swift ContradictionHuntTests) ──────

@@ -1,8 +1,10 @@
 // DistillationPipelineTests.swift
 //
-// Tests for DistillationPipeline, DistilledHeader, and supporting math.
-// Coverage: full pipeline runs, DIST header format, SNR gate, delta pre-pass,
-// parse round-trip, queryFingerprint, and featureHash determinism.
+// Tests for DistillationPipeline and supporting math.
+// Coverage: full pipeline runs, the SPEC_DISTILLATION_STORAGE §5/§7.4
+// Stage 5 rendering (token-economical prose, zero inline metadata,
+// core-first ordering), SNR gate, delta pre-pass, queryFingerprint, and
+// featureHash determinism.
 
 import Testing
 import Foundation
@@ -45,50 +47,6 @@ struct FeatureHashTests {
         let a = DistillationPipeline.featureHash("Marie Curie")
         let b = DistillationPipeline.featureHash("Marie Curie")
         #expect(a == b)
-    }
-}
-
-// MARK: - DistilledHeader.parse
-
-@Suite("DistilledHeader.parse")
-struct DistilledHeaderParseTests {
-
-    @Test("parse returns nil for non-DIST content")
-    func parseRejectsNonDist() {
-        #expect(DistilledHeader.parse("") == nil)
-        #expect(DistilledHeader.parse("some plain text") == nil)
-        #expect(DistilledHeader.parse("[OTHER|conf=0.5] text") == nil)
-    }
-
-    @Test("parse static DIST header")
-    func parseStatic() throws {
-        let content = "[DIST|conf=0.85|src=5|snr=6.20|delta=STATIC] Alice works at CERN"
-        let h = try #require(DistilledHeader.parse(content))
-        #expect(h.prose == "Alice works at CERN")
-        #expect(abs(h.confidence - 0.85) < 0.001)
-        #expect(h.sourceCount == 5)
-        #expect(abs(h.snr - 6.20) < 0.01)
-        #expect(h.deltaType == .static)
-        #expect(h.uncertain == false)
-    }
-
-    @Test("parse uncertain CONVERGENT header")
-    func parseUncertainConvergent() throws {
-        let content = "[DIST|conf=0.55|src=3|snr=3.10|delta=CONVERGENT|uncertain] Bob runs experiments"
-        let h = try #require(DistilledHeader.parse(content))
-        #expect(h.prose == "Bob runs experiments")
-        #expect(abs(h.confidence - 0.55) < 0.001)
-        #expect(h.sourceCount == 3)
-        #expect(h.deltaType == .convergent)
-        #expect(h.uncertain == true)
-    }
-
-    @Test("parse header with no delta field")
-    func parseNoDelta() throws {
-        let content = "[DIST|conf=0.72|src=4|snr=4.50] Some prose here"
-        let h = try #require(DistilledHeader.parse(content))
-        #expect(h.deltaType == nil)
-        #expect(abs(h.confidence - 0.72) < 0.001)
     }
 }
 
@@ -217,8 +175,8 @@ struct DistillationPipelineRunTests {
         #expect(output.featureFingerprint != .zero)
     }
 
-    @Test("DIST header format is correct")
-    func distHeaderFormat() {
+    @Test("rendering is token-economical prose with zero inline metadata (§5.2)")
+    func renderingHasNoInlineMetadata() {
         let input = DistillationInput(
             memoryContents: memories,
             clusterID: "test-cluster-02",
@@ -226,19 +184,22 @@ struct DistillationPipelineRunTests {
         )
         let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         guard output.succeeded else { return }
-        // Must begin with [DIST|
-        #expect(output.drawerContent.hasPrefix("[DIST|"))
-        // Must contain conf=, src=, snr=, delta=
-        #expect(output.drawerContent.contains("conf="))
-        #expect(output.drawerContent.contains("src="))
-        #expect(output.drawerContent.contains("snr="))
-        #expect(output.drawerContent.contains("delta="))
-        // Prose after the "]" separator
-        #expect(output.drawerContent.contains("] "))
+        // The [DIST|...] header format is retired: every byte is payload.
+        #expect(!output.distilledText.hasPrefix("[DIST|"))
+        #expect(!output.distilledText.contains("conf="))
+        #expect(!output.distilledText.contains("snr="))
+        // The rendering carries the entities of the source (propositional
+        // fidelity, rule 1) and no doubled spaces (rule 5).
+        #expect(output.distilledText.contains("Alice"))
+        #expect(output.distilledText.contains("CERN"))
+        #expect(!output.distilledText.contains("  "))
+        // Quality metadata still rides the generation-time fields (§5.2).
+        #expect(output.confidence > 0)
+        #expect(output.snr > 0)
     }
 
-    @Test("DistilledHeader.parse round-trip reproduces conf, src, snr, delta")
-    func parseRoundTrip() throws {
+    @Test("rendering orders dominant-component (core) sentences before the episodic tail (§7.4)")
+    func renderingOrdersCoreFirst() {
         let input = DistillationInput(
             memoryContents: memories,
             clusterID: "test-cluster-03",
@@ -246,18 +207,34 @@ struct DistillationPipelineRunTests {
         )
         let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         guard output.succeeded else { return }
+        // memories[4]/[5] carry no selected feature (the episodic tail) —
+        // their compacted renderings must appear AFTER the Alice/CERN core.
+        let text = output.distilledText
+        let coreIdx = text.range(of: "Alice")?.lowerBound
+        let tailIdx = text.range(of: "Quarterly review")?.lowerBound
+        #expect(coreIdx != nil)
+        #expect(tailIdx != nil)
+        if let c = coreIdx, let t = tailIdx {
+            #expect(c < t)
+        }
+        // Every unit survives into the rendering (rule 1: propositional
+        // fidelity — the tail compresses, it does not vanish).
+        #expect(text.contains("archived"))
+    }
 
-        let h = try #require(DistilledHeader.parse(output.drawerContent))
-        // conf round-trips to 2 decimal places (formatted as %.2f)
-        #expect(abs(h.confidence - output.confidence) < 0.01)
-        #expect(h.sourceCount == memories.count)
-        #expect(abs(h.snr - output.snr) < 0.01)
-        // Static clusters write delta=STATIC in the header but output.deltaType is nil
-        // (nil means "no non-static delta feature dominated"). The header uses STATIC as
-        // a sentinel; the parse will return .static. Both represent the same state.
-        let expectedDelta = output.deltaType ?? .static
-        #expect(h.deltaType == expectedDelta)
-        #expect(h.uncertain == output.uncertain)
+    @Test("rendering compacts each unit through the §7.6 transform")
+    func renderingUsesCompaction() {
+        let input = DistillationInput(
+            memoryContents: memories,
+            clusterID: "test-cluster-compact",
+            sourceIDs: memories.indices.map { "src-\($0)" }
+        )
+        let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
+        guard output.succeeded else { return }
+        // "The lab where Alice works is CERN in Switzerland" compacts its
+        // article and copula away — the raw phrase must not survive.
+        #expect(!output.distilledText.contains("The lab where"))
+        #expect(output.distilledText.contains("Lab where Alice works CERN"))
     }
 
     @Test("SNR gate: cluster with no shared features returns succeeded=false")
@@ -345,7 +322,7 @@ struct DistillationPipelineRunTests {
         #expect(output.featureFingerprint != .zero)
     }
 
-    @Test("succeeded=false output has nil drawerContent prose")
+    @Test("succeeded=false output has empty distilledText")
     func failureOutputHasEmptyContent() {
         let input = DistillationInput(
             memoryContents: ["Hello", "World", "Foo"],
@@ -354,7 +331,7 @@ struct DistillationPipelineRunTests {
         )
         let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         if !output.succeeded {
-            #expect(output.drawerContent == "")
+            #expect(output.distilledText == "")
             #expect(output.failureReason != nil)
             #expect(output.confidence == 0)
         }
@@ -391,7 +368,7 @@ struct DistillationPipelineRunTests {
         // Verify struct is coherent
         if output.succeeded {
             #expect(output.confidence >= 0.4)
-            #expect(!output.drawerContent.isEmpty)
+            #expect(!output.distilledText.isEmpty)
         } else {
             #expect(output.confidence == 0)
         }

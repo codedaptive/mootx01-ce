@@ -38,6 +38,7 @@ use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use engram_lib::Engram;
 use substrate_types::merkle_root::MerkleRoot;
 use intellectus_lib::{report, StatSample};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use substrate_ml::float_simhash;
 use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
@@ -117,6 +118,72 @@ pub enum FloatLaneOutcome {
     /// counted via `corpus.float_lane.store_error` so dashboards surface it.
     /// The query continues on other lanes — this degrades, never fails.
     StoreError(String),
+}
+
+// MARK: - FloatDiscriminationSignal
+
+/// Per-query discrimination signal from the dense float lane.
+///
+/// Mirrors Swift `FloatDiscriminationSignal`. Measures how spread the top-K
+/// cosine similarity scores are, distinguishing a contrastive regime (clear
+/// semantic winner) from a saturated regime (all scores near-uniform, as
+/// observed with short chat turns dominated by stopword mass —
+/// pairwise document cosines 0.93–0.98 collapse query-to-document cosines
+/// to a similarly narrow band).
+///
+/// **Statistic:** `relative_spread = (max_sim − min_sim) / max(max_sim, 0.001)`
+/// - Saturated: spread ≈ 0.05 (no clear winner).
+/// - Contrastive: spread ≥ 0.15.
+/// - O(1) from the already-sorted `.Hits` list (first and last elements).
+/// - Degrades safely when `max_sim ≤ 0`: returns 0.0 (treat as saturated).
+///
+/// **Design boundary:** CorpusKit measures; GLK (coordinator) applies policy.
+/// No behaviour change inside CorpusKit — measurement only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatDiscriminationSignal {
+    /// Relative spread of top-K hit cosines: (max − min) / max (or 0 when max ≤ 0).
+    ///
+    /// 0.0 = perfectly saturated; 1.0 = maximally discriminating.
+    ///
+    /// Threshold guidance for GLK consumers (defined in coordinator.rs):
+    ///   < 0.10 → clearly saturated — strong discount.
+    ///   0.10–0.15 → transition band — partial discount.
+    ///   ≥ 0.15 → contrastive — no discount (discrimination_factor = 1.0).
+    pub relative_spread: f32,
+    /// Hit count K used to compute the spread (top-K hits, after limit truncation).
+    pub hit_count: usize,
+}
+
+/// Compute a `FloatDiscriminationSignal` from a `FloatLaneOutcome`.
+///
+/// Returns `Some` only for `Hits` with at least one result. The `relative_spread`
+/// `(max_sim − min_sim) / max(max_sim, 0.001)` is computed from the first and last
+/// elements of the already-sorted similarity list — O(1), zero extra I/O.
+///
+/// This function is `pub(crate)` so both `Corpus` and `CorpusContentEngine` use
+/// it without duplicating the measurement logic.
+pub(crate) fn discrimination_signal_from_outcome(
+    outcome: &FloatLaneOutcome,
+) -> Option<FloatDiscriminationSignal> {
+    if let FloatLaneOutcome::Hits(hits) = outcome {
+        if hits.is_empty() {
+            return None;
+        }
+        // `hits` is sorted nearest-first (highest cosine first).
+        let max_sim = hits[0].1;
+        let min_sim = hits[hits.len() - 1].1;
+        let spread = if max_sim > 0.001 {
+            (max_sim - min_sim) / max_sim
+        } else {
+            0.0
+        };
+        Some(FloatDiscriminationSignal {
+            relative_spread: spread.max(0.0),
+            hit_count: hits.len(),
+        })
+    } else {
+        None
+    }
 }
 
 // MARK: - EmbeddingModelConfig
@@ -2971,6 +3038,138 @@ impl Corpus {
             results.push((slot.model_id.clone(), outcome));
         }
         results
+    }
+
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Mirrors Swift `Corpus.floatNearestPerSignalWithDiscrimination`. Same semantics
+    /// and return shape as `float_nearest_per_signal`, but each entry carries an
+    /// optional `FloatDiscriminationSignal` alongside the outcome. Discrimination is
+    /// `Some` exactly when the outcome is `Hits` with at least one result.
+    ///
+    /// **Measurement only:** no behaviour change inside `Corpus`.
+    /// The coordinator (GLK) consumes the signal to discount the dense contribution
+    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
+    /// for their own fusion decisions.
+    ///
+    /// See `FloatDiscriminationSignal` for the statistic definition.
+    pub fn float_nearest_per_signal_with_discrimination(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> {
+        // Delegate to the existing per-signal call, then compute discrimination from
+        // each `Hits` outcome's already-sorted similarity list. The existing function
+        // handles the forced-error seam and all dark-lane paths.
+        self.float_nearest_per_signal(query, limit)
+            .into_iter()
+            .map(|(model_id, outcome)| {
+                let disc = discrimination_signal_from_outcome(&outcome);
+                (model_id, outcome, disc)
+            })
+            .collect()
+    }
+
+    /// Compute sub-span max-cosine scores for a bounded source ID set.
+    ///
+    /// Rust twin of Swift `Corpus.scoreSubSpans(query:sourceIDs:)`. Uses the
+    /// chunk-based path: for each source ID, fetches all chunks from
+    /// `bundle_store`, concatenates their text in `start_offset` order, then
+    /// delegates sub-span scoring to `sub_span_scoring::score` via a temporary
+    /// in-memory `CorpusContentSource`-like computation.
+    ///
+    /// This is the older chunk-based Corpus path. The `CorpusContentEngine`
+    /// path (`score_sub_spans` on the engine) is preferred for GLK usage and
+    /// gets `effective_dense_text` (dual-text capability). The Corpus path
+    /// uses raw chunk text.
+    ///
+    /// Candidates absent from the bundle store, providers that return Err on
+    /// `embed_float`, and sources with no alphanumeric tokens are not included
+    /// in the returned map.
+    ///
+    /// Mission: MISSION_11X_RECALL_GAP_01 Item 1 — transient sub-span scoring.
+    pub fn score_sub_spans(
+        &self,
+        query: &str,
+        source_ids: &[&str],
+    ) -> HashMap<String, f32> {
+        if query.is_empty() || source_ids.is_empty() {
+            return HashMap::new();
+        }
+
+        // Embed the query once. If the provider has no float lane, return empty.
+        let default_slot = self.default_slot();
+        let guard = match default_slot.handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let query_vec = match guard.provider().embed_float(query) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return HashMap::new(),
+        };
+
+        let mut out: HashMap<String, f32> = HashMap::with_capacity(source_ids.len());
+        for &source_id in source_ids {
+            // Fetch chunks, sort by start_offset (the natural ingest order).
+            let mut chunks = match self.bundle_store.chunks_for_source(source_id, None) {
+                Ok(cs) => cs,
+                Err(_) => continue,
+            };
+            if chunks.is_empty() {
+                continue;
+            }
+            chunks.sort_by_key(|c| c.start_offset);
+
+            // Concatenate chunk texts. Each chunk already contributes its own
+            // text boundary; separate with a single space so sub-spans don't
+            // run across chunk junctions unexpectedly. The Swift twin uses
+            // the same concatenation-in-offset-order approach.
+            let combined: String = chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if combined.is_empty() {
+                continue;
+            }
+
+            let ranges = crate::sub_span_scoring::sub_span_ranges(
+                &combined,
+                crate::sub_span_scoring::DEFAULT_WINDOW_TOKENS,
+                crate::sub_span_scoring::DEFAULT_OVERLAP_TOKENS,
+            );
+            if ranges.is_empty() {
+                continue;
+            }
+
+            let combined_bytes = combined.as_bytes();
+            let mut max_norm: f32 = 0.0;
+            for (span_start, span_length) in &ranges {
+                let lo = *span_start;
+                let hi = lo + span_length;
+                if hi > combined_bytes.len() {
+                    continue;
+                }
+                let span_text = match std::str::from_utf8(&combined_bytes[lo..hi]) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let span_vec = match guard.provider().embed_float(span_text) {
+                    Ok(v) if !v.is_empty() => v,
+                    _ => continue,
+                };
+                let cosine = crate::sub_span_scoring::cosine_similarity(&query_vec, &span_vec);
+                let norm = f32::max(0.0, f32::min(1.0, (cosine + 1.0) / 2.0));
+                if norm > max_norm {
+                    max_norm = norm;
+                }
+            }
+            if max_norm > 0.0 {
+                out.insert(source_id.to_string(), max_norm);
+            }
+        }
+        out
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane

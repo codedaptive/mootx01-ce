@@ -182,12 +182,12 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // arguments; no mode field is surfaced here.
     tools.push(dream_tool());
     // Distillation tools — Rust parity with Swift RecipeTools.swift.
-    // moot_consolidate: run one intra-item distillation sweep across the estate.
-    // moot_recall_distilled: query the _distilled room via Hamming NN search.
-    // moot_recollect: fan-out from a distilled factoid back to its source drawers.
-    tools.push(consolidate_tool());
+    // moot_distill: run one per-item distillation sweep (SPEC §3;
+    //   moot_consolidate is an unlisted dispatch alias).
+    // moot_recall_distilled: exact-search geometry + distilled hydration (§10.3).
+    // (moot_recollect retired with the factoid tier, §11.)
+    tools.push(distill_tool());
     tools.push(recall_distilled_tool());
-    tools.push(recollect_tool());
     // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
     // same core pass that runs inside moot_dream and the resident scout
     // signal, surfaced as its own tool per Bob's ruling ("it also has to be
@@ -868,59 +868,47 @@ fn hunt_contradictions_tool() -> serde_json::Value {
     })
 }
 
-/// Distillation consolidation tool — mirrors Swift `RecipeTools.consolidateTool()`.
-/// Runs one intra-item distillation sweep across the estate: for each drawer
-/// that has ≥3 sentences and has not yet been distilled, produces a `[DIST|…]`
-/// factoid in the `_distilled` room and links it back via a `_distilled_from`
-/// tunnel. Optional `cluster_id` scopes the sweep to one cluster. Idempotent:
-/// already-distilled drawers are skipped.
-fn consolidate_tool() -> serde_json::Value {
+/// Distillation sweep tool — mirrors Swift `RecipeTools.distillTool()`
+/// (SPEC_DISTILLATION_STORAGE §3/§7.1). Populates the on-row distilled
+/// representation of every eligible drawer; no factoid drawers, no
+/// tunnels. Idempotent by the NULL predicate. `moot_consolidate` is
+/// accepted at dispatch as a compatibility alias but not listed.
+fn distill_tool() -> serde_json::Value {
     json!({
-        "name": "moot_consolidate",
-        "description": "Run one intra-item distillation sweep. Produces distilled factoids ([DIST|…] format) in the _distilled room for each eligible drawer (≥3 sentences, not already distilled). Optional cluster_id scopes to one cluster. Returns the count of factoids produced.",
+        "name": "moot_distill",
+        "description": "Distill working memory: populate the on-row distilled representation (token-economical prose) of every active item whose representation is missing or stale. Idempotent — already-distilled items are skipped. Returns the count of items distilled this sweep. (moot_consolidate is accepted as a compatibility alias.)",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "cluster_id": string_schema("Optional cluster UUID to scope the sweep to a single cluster. Omit to sweep all clusters."),
-                "include_held": boolean_schema("When true, also distil drawers that are currently held (withdrawn). Default false.")
+                "cluster_id": string_schema("Accepted for API stability; not used by the per-item sweep model."),
+                "include_held": boolean_schema("Accepted for API stability; not used by the per-item sweep model. Default false.")
             }),
             json!([])
         )))
     })
 }
 
-/// Distilled recall tool — mirrors Swift `RecipeTools.recallDistilledTool()`.
-/// Queries the `_distilled` room via Hamming nearest-neighbour search using the
-/// `distillation-features-v1` VectorKit lane. Returns factoids sorted by
-/// Hamming distance from the query fingerprint. Includes a discrimination
-/// signal.
+/// Distilled recall tool — mirrors Swift `RecipeTools.recallDistilledTool()`
+/// (SPEC §10.3): the exact-search recall path with the hydration selector
+/// pinned to `distilled`. Identical ranking to moot_memory_search; smaller
+/// payloads; per-hit token counts.
+/// Distilled-payload recall descriptor.
+///
+/// ACK-GATED: Wave 1 changed the contract (v2 semantics — exact-search geometry
+/// + distilled hydration, not a separate distilled tier). Calls without
+/// ack: "recall_distilled/v2" return a CONTRACT CHANGE NOTICE and do not execute.
 fn recall_distilled_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_distilled",
-        "description": "Query the distilled factoid layer via Hamming NN search on the distillation-features-v1 vector lane. Returns [DIST|conf=…|src=N|snr=…|delta=TYPE] factoids ranked by relevance. Use after moot_consolidate has run to populate the distilled layer.",
+        "description": "Distilled recall (v2): normal search over originals, hydrated with each hit's DISTILLED representation (token-economical prose) instead of the full content — identical ranking to moot_memory_search, smaller payloads, per-hit token counts for context budgeting. Hits are the source memories themselves; call moot_memory_get with a returned id for the full verbatim body. Rows not yet distilled fall back to full content and are marked served_from_content (run moot_distill to populate them). CONTRACT CHANGE (Wave 1): v2 no longer queries a separate distilled tier; pass ack: \"recall_distilled/v2\" to confirm you want the new behavior.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "query": string_schema("Natural-language query to recall distilled factoids for."),
-                "limit": integer_schema("Max factoids to return (default 10)."),
+                "query": string_schema("The search query text — drives BM25 + vector recall (same geometry as moot_memory_search)."),
+                "limit": integer_schema("Max results to return (default 20)."),
                 "filter": filter_schema(),
-                "echo_query": boolean_schema("Optional. When true, appends the query text to the response header (e.g. 'found N distilled factoid(s) for: {query}'). Default false — the AI already knows what it queried. Omit to use the default; null is invalid.")
+                "echo_query": boolean_schema("Optional. When true, appends the query text to the response header. Default false. Omit to use the default; null is invalid."),
+                "ack": string_schema("Contract-change acknowledgment token. This tool's behavior changed in Wave 1 (v2 semantics). Pass ack: \"recall_distilled/v2\" to confirm you want v2 behavior (normal exact-search geometry + distilled hydration). Without this token the call returns a CONTRACT CHANGE NOTICE and does not execute.")
             }),
             json!(["query"])
-        )))
-    })
-}
-
-/// Recollect tool — mirrors Swift `RecipeTools.recollectTool()`.
-/// Given a distilled factoid drawer UUID, fans out to the source drawers
-/// (via `_distilled_from` tunnels) and returns full episodic content.
-fn recollect_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_recollect",
-        "description": "Recollect: fan-out from a distilled factoid to its source drawers. Given a factoid drawer UUID (from moot_recall_distilled), returns the factoid text plus the IDs and full content of the N source drawers that were distilled into it.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(
-            json!({
-                "drawer_id": string_schema("UUID of the distilled factoid drawer to expand.")
-            }),
-            json!(["drawer_id"])
         )))
     })
 }

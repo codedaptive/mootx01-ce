@@ -42,9 +42,13 @@ struct ContainerFingerprintStoreTests {
         try await store.orIn(wing: "w", room: "r2", adjective: 0b1000, operational: 0b0000, provenance: 0b0000)
 
         let r1 = try await store.get(wing: "w", room: "r1")
-        #expect(r1 == ContainerFingerprint(adjective: 0b0001, operational: 0b0010, provenance: 0b0100))
+        // operationalAnd for r1 = -1 (identity) & 0b0010 = 0b0010.
+        #expect(r1 == ContainerFingerprint(adjective: 0b0001, operational: 0b0010, provenance: 0b0100,
+                                           operationalAnd: 0b0010))
         let wing = try await store.get(wing: "w", room: "")
-        #expect(wing == ContainerFingerprint(adjective: 0b1001, operational: 0b0010, provenance: 0b0100))
+        // Wing AND = r1.operationalAnd & r2.operationalAnd = 0b0010 & 0b0000 = 0.
+        #expect(wing == ContainerFingerprint(adjective: 0b1001, operational: 0b0010, provenance: 0b0100,
+                                             operationalAnd: 0b0000))
     }
 
     @Test("orIn into the same room accumulates by OR")
@@ -123,13 +127,17 @@ struct ContainerFingerprintStoreTests {
         let d1Wing = names[d1.parentNodeId]!.wing
 
         let room1 = try await estate.containerFP.get(wing: d1Wing, room: "r1")
+        // operationalAnd for room1 = -1 & d1.operationalBitmap = d1.operationalBitmap.
         #expect(room1 == ContainerFingerprint(adjective: d1.adjectiveBitmap,
                                               operational: d1.operationalBitmap,
-                                              provenance: d1.provenance))
+                                              provenance: d1.provenance,
+                                              operationalAnd: d1.operationalBitmap))
         let wing = try await estate.containerFP.get(wing: d1Wing, room: "")
+        // Wing AND = d1.operationalBitmap & d2.operationalBitmap (AND of all room ANDs).
         #expect(wing == ContainerFingerprint(adjective: d1.adjectiveBitmap | d2.adjectiveBitmap,
                                              operational: d1.operationalBitmap | d2.operationalBitmap,
-                                             provenance: d1.provenance | d2.provenance))
+                                             provenance: d1.provenance | d2.provenance,
+                                             operationalAnd: d1.operationalBitmap & d2.operationalBitmap))
     }
 
     // MARK: - §11.5 Option B: add-coverage conformance
@@ -222,6 +230,61 @@ struct ContainerFingerprintStoreTests {
         #expect(fp.operational & d2.operationalBitmap == d2.operationalBitmap)
         #expect(fp.provenance & d1.provenance == d1.provenance)
         #expect(fp.provenance & d2.provenance == d2.provenance)
+    }
+
+    // MARK: - setDistilledRepresentation fingerprint maintenance
+
+    /// `Estate.setDistilledRepresentation` must OR bit 19
+    /// (`hasCurrentRepresentation`) into the room/wing OR aggregate in the
+    /// same logical operation, so a subsequent recall filter on
+    /// `.hasFeatureFlag(.hasCurrentRepresentation)` does not falsely exclude
+    /// the container mid-session without requiring an estate reopen.
+    @Test("setDistilledRepresentation ORs bit 19 into the room and wing fingerprint without reopen")
+    func setDistilledRepresentationUpdatesFingerprint() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let estate = try await Estate.create(
+            storage: TestStorage.sqlite(url),
+            owner: OwnerCredentials(ownerIdentifier: "dist-fp"))
+
+        // Capture a drawer — bit 19 (hasCurrentRepresentation) is clear at capture.
+        let frame = CaptureFrame(content: "content to distil",
+                                 channel: .voiced,
+                                 room: "r-dist",
+                                 latticeAnchor: LatticeAnchor(udcCode: "004"),
+                                 addedBy: "t",
+                                 embeddingModelID: "m",
+                                 kind: .prose)
+        let dr = try await estate.capture(frame)
+
+        // Resolve wing name from the node tree.
+        let names = try await estate.resolveNodeNames(parentNodeIds: [dr.parentNodeId])
+        let wing = names[dr.parentNodeId]!.wing
+        let bit19: Int64 = 1 << 19
+
+        // Bit 19 is absent from the OR aggregate before distillation.
+        let preFP = try await estate.containerFP.get(wing: wing, room: "r-dist")
+        #expect((preFP?.operational ?? 0) & bit19 == 0,
+                "bit 19 must be absent from the room aggregate before distillation")
+
+        // Distil the drawer post-capture — no estate reopen.
+        let count = try await estate.setDistilledRepresentation(
+            drawerId: dr.id,
+            distilled: "distilled text",
+            pipelineVersion: "v1",
+            tokenCount: 42,
+            at: Date(timeIntervalSince1970: 1_700_001_000))
+        #expect(count == 1)
+
+        // Bit 19 must now appear in both the room-level and wing-level OR aggregates.
+        let postRoomFP = try await estate.containerFP.get(wing: wing, room: "r-dist")
+        let roomFP = try #require(postRoomFP, "room aggregate must exist after distillation")
+        #expect(roomFP.operational & bit19 == bit19,
+                "bit 19 must be set in the room OR aggregate after setDistilledRepresentation")
+        let postWingFP = try await estate.containerFP.get(wing: wing, room: "")
+        let wingFP = try #require(postWingFP, "wing aggregate must exist after distillation")
+        #expect(wingFP.operational & bit19 == bit19,
+                "bit 19 must be set in the wing OR aggregate after setDistilledRepresentation")
     }
 
     @Test("Estate.open backfills the aggregate from existing rows")
