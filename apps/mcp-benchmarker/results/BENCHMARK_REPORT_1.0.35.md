@@ -62,8 +62,7 @@ the change-blind chunked corpus index keeps originals searchable. The
 - `20260726-official-quietrun/` — companion quiet-run grid.
 - `FINDINGS-2026-07-26-token-efficiency.md` — token-efficiency two-arm
   findings (byte-ratio artifact analysis).
-- Diagnostic smoke reports (`*_DIAGNOSTIC_SMOKE_*.md`) and per-mission
-  completion notes (`COMPLETION_LME-*.md`).
+- Diagnostic smoke reports (`*_DIAGNOSTIC_SMOKE_*.md`).
 
 Reproduce: `apps/mcp-benchmarker` — fetch scripts download the public
 datasets from their original sources (never redistributed); one command
