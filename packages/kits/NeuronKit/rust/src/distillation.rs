@@ -26,8 +26,9 @@ use crate::hmm_feature_extractor::hmm_feature_extractor;
 /// Mirrors Swift DistillationLensResult in Distillation.swift (Dn1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistillationLensResult {
-    /// Pass-through from DistillationOutput.drawer_content.
-    pub drawer_content: String,
+    /// Pass-through from DistillationOutput.distilled_text — the SPEC §5
+    /// token-economical rendering (zero inline metadata).
+    pub distilled_text: String,
     /// Confidence score conf(F*) ∈ [0, 1].
     pub confidence: f32,
     /// True when conf ∈ [0.4, 0.7): signal to inject with additional provenance.
@@ -99,7 +100,7 @@ pub fn distill_cluster(
     let injection_depth = InjectionDepth::from_confidence(output.confidence);
 
     DistillationLensResult {
-        drawer_content: output.drawer_content,
+        distilled_text: output.distilled_text,
         confidence: output.confidence,
         uncertain: output.uncertain,
         snr: output.snr,
@@ -134,7 +135,7 @@ mod tests {
         )
     }
 
-    // pass-through: drawer_content from output reaches lens result unchanged.
+    // pass-through: distilled_text from output reaches lens result unchanged.
     // Uses the no-op extractor explicitly so the pipeline produces a failure
     // output (no features → no factoid). Verifies the lens pass-through contract.
     #[test]
@@ -145,7 +146,7 @@ mod tests {
         let result = distill_cluster(&input, Some(noop_extractor));
         // No-op extractor produces no features → pipeline fails.
         assert!(!result.succeeded);
-        assert_eq!(result.drawer_content, "");
+        assert_eq!(result.distilled_text, "");
         assert_eq!(result.confidence, 0.0);
     }
 

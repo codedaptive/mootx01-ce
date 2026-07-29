@@ -33,7 +33,7 @@ use persistence_kit::{
     Column, ColumnDeclaration, SchemaDeclaration, Storage, StoragePredicate, StorageRow,
     TableDeclaration, TypedValue,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -396,6 +396,57 @@ impl CorpusProviderCountsStore {
             )
             .map_err(|error| CorpusKitError::StoreUnavailable(error.to_string()))?;
         Ok(rows.first().and_then(decode_reference))
+    }
+
+    /// Batch-fetch pending references for a set of canonical identities.
+    /// Returns a HashMap keyed by content_id so callers can replace
+    /// O(N) individual reference_for calls with a single WHERE…IN query.
+    /// Empty input returns immediately without hitting the store.
+    pub fn references_for(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        content_ids: &[&str],
+    ) -> CorpusKitResult<HashMap<String, PersistedCountsReference>> {
+        if content_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let values: Vec<TypedValue> = content_ids
+            .iter()
+            .map(|id| TypedValue::Text(id.to_string()))
+            .collect();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+            StoragePredicate::In(
+                Column::new("corpus_provider_count_references", "content_id"),
+                values,
+            ),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "corpus_provider_count_references",
+                Some(&predicate),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|error| CorpusKitError::StoreUnavailable(error.to_string()))?;
+        let mut result = HashMap::new();
+        for row in &rows {
+            if let Some(reference) = decode_reference(row) {
+                result.insert(reference.content_id.clone(), reference);
+            }
+        }
+        Ok(result)
     }
 
     /// Persist the maintained-count anchors (document count + vocabulary) on

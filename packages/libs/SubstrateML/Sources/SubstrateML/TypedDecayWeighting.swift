@@ -23,8 +23,8 @@ import Foundation
 
 /// Feature type classification for distillation scoring.
 ///
-/// Raw values are the canonical type tags in the DIST content header
-/// (e.g. "[DIST|conf=0.85|src=5|snr=6.2|delta=STATIC]").
+/// Raw values are the canonical on-wire type tags shared with the Rust
+/// twin's conformance vectors.
 ///
 /// Decay rates mirror diffusion noise schedules: high-frequency features
 /// (numerical, e.g. version numbers) become stale quickly; low-frequency

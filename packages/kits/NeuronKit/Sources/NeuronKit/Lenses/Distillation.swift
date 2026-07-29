@@ -19,8 +19,9 @@ import SubstrateML
 /// InjectionDepth, which governs how much provenance context the ARIA
 /// layer appends alongside factoid prose.
 public struct DistillationLensResult: Sendable {
-    /// Pass-through from DistillationOutput.drawerContent.
-    public let drawerContent: String
+    /// Pass-through from DistillationOutput.distilledText — the §5
+    /// token-economical rendering (zero inline metadata).
+    public let distilledText: String
     /// Confidence score conf(F*) ∈ [0, 1].
     public let confidence: Float32
     /// True when conf ∈ [0.4, 0.7): signal to inject with additional provenance.
@@ -76,7 +77,7 @@ extension NeuronKit {
         let output = DistillationPipeline.run(input: input, extractFeatures: extractor)
         let depth = injectionDepth(from: output.confidence)
         return DistillationLensResult(
-            drawerContent: output.drawerContent,
+            distilledText: output.distilledText,
             confidence: output.confidence,
             uncertain: output.uncertain,
             snr: output.snr,

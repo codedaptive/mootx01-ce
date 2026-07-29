@@ -5,8 +5,8 @@
 // These tests serve as a single committed anchor that all Sprint DX
 // deliverables landed correctly:
 //
-//   • RecipeCatalog.all.count == 30 (baseline 26 + 3 distillation recipes
-//     from Dc4: consolidate, distilled_recall, recollect; + node_motion
+//   • RecipeCatalog.all.count == 29 (baseline 26 + 2 distillation recipes:
+//     distill, distilled_recall; + node_motion
 //     diffusion node-layer lens).
 //
 //   • GeniusLocusKit.defaultStandingSignalNames.count == 10 — 7 baseline
@@ -27,13 +27,14 @@ struct SprintDXAssertionTests {
 
     /// CK-DX-1: RecipeCatalog carries all 30 Sprint DX recipes.
     ///
-    /// Baseline 26 + 3 distillation-family recipes (consolidate,
-    /// distilled_recall, recollect) registered by Dc4; + 1 diffusion
+    /// Baseline 26 + 2 distillation-family recipes (distill,
+    /// distilled_recall — recollect retired with the factoid tier,
+    /// SPEC_DISTILLATION_STORAGE §11); + 1 diffusion
     /// node-layer lens (node_motion, node motion modeling).
-    @Test("CK-DX-1: RecipeCatalog.all.count == 30 (26 baseline + 3 distillation + node_motion)")
+    @Test("CK-DX-1: RecipeCatalog.all.count == 29 (26 baseline + 2 distillation + node_motion)")
     func recipeCatalogCountIncludesDistillationTriple() {
-        #expect(RecipeCatalog.all.count == 30,
-            "RecipeCatalog must contain exactly 30 recipes: 26 baseline + 3 distillation (Dc4) + node_motion")
+        #expect(RecipeCatalog.all.count == 29,
+            "RecipeCatalog must contain exactly 29 recipes: 26 baseline + 2 distillation + node_motion")
     }
 
     /// CK-DX-2: defaultStandingSignalNames contains all 10 standing signals.

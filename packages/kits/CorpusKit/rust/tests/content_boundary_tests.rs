@@ -105,6 +105,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
                 revision: existing.revision + 1,
                 digest: digest.clone(),
                 text: text.to_string(),
+                dense_composition_text: None,
             };
             state.records.insert(id.to_string(), bumped.clone());
             let seq = state.next_seq;
@@ -124,6 +125,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
             revision: 1,
             digest: digest.clone(),
             text: text.to_string(),
+            dense_composition_text: None,
         };
         state.records.insert(id.to_string(), fresh.clone());
         let seq = state.next_seq;
@@ -401,8 +403,11 @@ fn attached_profile_contains_no_canonical_content_table() {
             "attached profile leaks {excluded}"
         );
     }
+    // corpus_bitmap_generation is the global basis-generation singleton
+    // added in CorpusIndexStateStore v2 (bitmap adoption).
     let expected: std::collections::BTreeSet<&str> = [
         "corpus_index_state",
+        "corpus_bitmap_generation",
         "corpus_provider_coverage",
         "iix_termfreqs",
         "iix_doclens",
@@ -485,6 +490,7 @@ fn index_state_advance_read_clear_round_trip() {
         index_version: 1,
         applied_cursor: Some("42".into()),
         updated_at_millis: NOW,
+        operational_bitmap: 0,
     };
     store.advance(&state).expect("advance");
     store.advance(&state).expect("idempotent advance");
@@ -498,6 +504,7 @@ fn index_state_advance_read_clear_round_trip() {
             index_version: 1,
             applied_cursor: None,
             updated_at_millis: NOW,
+            operational_bitmap: 0,
         })
         .expect("advance 2");
     assert_eq!(
@@ -529,6 +536,7 @@ fn index_state_survives_reopen_on_sqlite() {
         index_version: 1,
         applied_cursor: None,
         updated_at_millis: NOW,
+        operational_bitmap: 0,
     };
     {
         let config = EstateConfiguration::new(

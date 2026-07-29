@@ -1,14 +1,28 @@
+<div align="center">
+
 # MOOTx01
 
-**Long-term memory for AI.**
+### The memory layer that survives every model, agent, and device.
 
-Local-first, governed memory for your AI clients and agents. One personal MOOT across your devices.
+</div>
 
-Research with ChatGPT. Implement with Claude. Monitor with Grok. Test and critique with Codex. Hand the result to OpenClaw.
+Private, on-device intelligence has finally become practical. MOOTx01 supplies
+the durable memory that local runtimes, and every other AI client, still need,
+on terms set by the estate's owner rather than by a model vendor, cloud
+platform, or operating-system assistant.
 
-Different models. Different harnesses. Different roles. One durable memory. Securely stored and locally controlled.
+The Community Edition puts that ownership in the hands of one person, ready to
+run: one local-first MOOT of your own, available across your devices.
 
-> The frontier intelligence is rented. The memory is yours.
+<div align="center">
+
+<img src="docs/assets/role-chain.svg" alt="Research with ChatGPT. Implement with Claude. Monitor with Grok. Test and critique with Codex. Hand the result to OpenClaw to communicate. Different models, different harnesses, different roles: one durable memory." width="92%">
+
+Recall arrives distilled: compact, ranked memory in place of pages of pasted context.
+
+**The frontier intelligence is rented. The memory is yours.**
+
+</div>
 
 <img src="docs/assets/mootx01-live-twice.webp" alt="MOOTx01 live — one personal MOOT shared across AI clients" width="100%">
 

@@ -346,8 +346,14 @@ struct ServeCommand: AsyncParsableCommand {
             // still pending, hand it to a detached `drain` finisher that outlives
             // us (it takes the T3 lease and drains to empty, or stands by if a
             // resident has since taken over). Skip when nothing is pending.
+            //
+            // Keyed on the ENCODE drain only via `DrainStatus.encodeSettled`
+            // (PERF_W1_DRAIN_RIDER Finding 3): the "distillation" entry does
+            // not settle under the drain command — spawning on it would hand
+            // the finisher a wait it can never win while it holds the encode
+            // lease. Rationale on the helper.
             let remaining = (try? await kit.drainStatuses(handle)) ?? []
-            if remaining.contains(where: { $0.isDraining }) {
+            if !DrainStatus.encodeSettled(remaining) {
                 Logging.stderr.log("mootx01 serve: encode work still pending at stdio exit — spawning a detached drainer to finish (T5)")
                 Self.spawnDetachedDrain(estateName: estateName, environment: environment)
             }

@@ -7,7 +7,7 @@
 // agent reads what recipes exist and triggers them, and the human-in-the-
 // loop confirms the migration promotion.
 //
-// Eleven recipe tools ship here:
+// Ten listed recipe tools ship here; two are dispatch-only (alias/stub):
 //   - moot_list_lenses           → ProjectedTool descriptor enumeration
 //                                   (LensTools + Tier 6 RecipeTools — read)
 //   - moot_list_recipes          → RecipeCatalog descriptor enumeration
@@ -19,8 +19,11 @@
 //                                   promotion — B-3)
 //   - moot_confirm_migration     → MigrationBenchmark.confirmPromotion
 //                                   by branch id (the human-gated write)
-//   - moot_dream, moot_consolidate, moot_recall_distilled, moot_recollect
-//                                 → distillation-family and Brain-layer tools
+//   - moot_dream, moot_distill, moot_recall_distilled
+//                                 → Brain-layer and distillation tools
+//   - moot_consolidate           → dispatch alias for moot_distill;
+//                                   ACK-gated (contract change); not listed
+//   - moot_recollect             → notice-only stub; tool removed; not listed
 //
 // The 23 lens tools (16 reasoning/federated, 4 temporal/information-theoretic,
 // 3 analytics: moot_lens_associations, moot_lens_concepts, moot_lens_apriori)
@@ -71,18 +74,41 @@ enum RecipeTools {
     /// this runs — the reason the matrix-driven precise compositions score zero
     /// on an undreamt estate.
     static let dreamToolName = "moot_dream"
-    /// On-demand distillation sweep: compact working memory by distilling active
-    /// items into factoids. Delegates to GeniusLocusKit.distillItemsSweep,
-    /// which processes all eligible not-yet-distilled items.
+    /// On-demand distillation sweep (SPEC_DISTILLATION_STORAGE §3): populate
+    /// the on-row distilled representation of every eligible item. Delegates
+    /// to the Distill recipe → GeniusLocusKit.distillItemsSweep.
+    static let distillToolName = "moot_distill"
+    /// Compatibility alias for `moot_distill` (SPEC §3): resolves to the
+    /// identical handler after ACK validation; NOT listed in tools/list
+    /// (moot_distill is the primary name). ACK token: "moot_distill/p1".
     static let consolidateToolName = "moot_consolidate"
-    /// Dense distilled-tier recall: Hamming NN over the distillation-features-v1
-    /// VectorKit lane — no embedding model inference. Returns factoid prose
-    /// (~10 tokens/hit) + confidence metadata. Full spec: DISTILLATION_ARIA_TOOLS.md §2.
+    /// Distilled-payload recall (SPEC §10.3): exact-search geometry over
+    /// originals with the hydration selector pinned to `distilled` —
+    /// identical ranking to exact search, smaller payloads, per-hit token
+    /// counts. ACK-gated (contract changed in Wave 1); token: "recall_distilled/v2".
     static let recallDistilledToolName = "moot_recall_distilled"
-    /// Fan-out from a distilled factoid to its source memories by following the
-    /// _distilled_from tunnel graph. Returns full episodic content from the M
-    /// source memories that produced the factoid. Full spec: DISTILLATION_ARIA_TOOLS.md §3.
+    /// Removed tool: its substrate (factoid drawers) was retired with the
+    /// factoid tier. Reinstated as a dispatch-only notice stub so stale
+    /// clients receive a clear explanation rather than a methodNotFound error.
+    /// Never listed in tools/list; never executes regardless of arguments.
     static let recollectToolName = "moot_recollect"
+
+    // MARK: - Contract-change notice texts
+    //
+    // These strings are wire text: they must be byte-identical between Swift
+    // and Rust (see packages/kits/AriaMcpKit/rust/src/recipe_tools.rs).
+
+    /// Notice returned when moot_consolidate is called without the correct ack
+    /// token. Instructs the caller to reissue with ack: "moot_distill/p1".
+    static let consolidateContractNotice = #"CONTRACT CHANGE NOTICE: you called moot_consolidate. Its behavior changed: renamed to moot_distill; now writes on-row distilled representations; factoid drawers and the distilled tier no longer exist. If the new behavior is what you want, reissue with ack: "moot_distill/p1"."#
+
+    /// Notice returned when moot_recall_distilled is called without the correct
+    /// ack token. Instructs the caller to reissue with ack: "recall_distilled/v2".
+    static let recallDistilledContractNotice = #"CONTRACT CHANGE NOTICE: you called moot_recall_distilled. Its behavior changed: v2 returns normal exact-search results hydrated with distilled representations; it no longer queries a separate distilled tier; run moot_distill first if rows are undistilled. If the new behavior is what you want, reissue with ack: "recall_distilled/v2"."#
+
+    /// Notice returned for every call to the removed moot_recollect tool.
+    /// Returned regardless of any argument the caller supplies.
+    static let recollectRemovedNotice = "moot_recollect was removed: its substrate (factoid drawers) was retired; recall hits now ARE source drawers; use moot_memory_search or moot_recall_distilled."
     /// On-demand contradiction hunt: one bounded sweep of the content-driven
     /// contradiction detector (BM25 lexical candidates + ConflictCue screen). Strong
     /// findings persist as proposed contradicts tunnels; borderline pairs are
@@ -90,6 +116,9 @@ enum RecipeTools {
     static let huntContradictionsToolName = "moot_hunt_contradictions"
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
+    ///
+    /// Includes `moot_consolidate` (ACK-gated alias), `moot_recollect`
+    /// (notice-only stub — never executes), and the ten listed recipe tools.
     static func isRecipeTool(_ name: String) -> Bool {
         name == listRecipesToolName
             || name == listRecipesCatalogToolName
@@ -99,6 +128,7 @@ enum RecipeTools {
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
+            || name == distillToolName
             || name == consolidateToolName
             || name == recallDistilledToolName
             || name == recollectToolName
@@ -120,9 +150,8 @@ enum RecipeTools {
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
             dreamTool(),
-            consolidateTool(),
+            distillTool(),
             recallDistilledTool(),
-            recollectTool(),
             huntContradictionsTool(),
         ]
     }
@@ -336,21 +365,23 @@ enum RecipeTools {
             provenance: .recipe)
     }
 
-    // MARK: - consolidate descriptor
+    // MARK: - distill descriptor
 
-    /// On-demand per-item distillation sweep. Delegates all work to
-    /// GeniusLocusKit.distillItemsSweep — processes all active not-yet-distilled
-    /// items and persists each factoid as a drawer in room `_distilled`.
-    /// The `cluster_id` and `include_held` args are accepted for API stability
-    /// but are not used by the per-item sweep model.
-    private static func consolidateTool() -> ProjectedTool {
+    /// On-demand per-item distillation sweep (SPEC §3/§7.1). Delegates all
+    /// work to the Distill recipe → GeniusLocusKit.distillItemsSweep, which
+    /// populates the four representation columns on every eligible SOURCE
+    /// drawer row (matrix path for ≥3 sentences, token compaction for
+    /// shorter items). No factoid drawers, no tunnels. The `cluster_id` and
+    /// `include_held` args are accepted for API stability but are not used
+    /// by the per-item sweep model.
+    private static func distillTool() -> ProjectedTool {
         ProjectedTool(
-            name: consolidateToolName,
-            description: "Compact working memory by distilling active items into factoids. "
-                + "Calls the GLK per-item distillation sweep, which processes all "
-                + "eligible not-yet-distilled items and persists each factoid as a "
-                + "drawer in room `_distilled`. Returns the count of factoids produced "
-                + "this sweep.",
+            name: distillToolName,
+            description: "Distill working memory: populate the on-row distilled "
+                + "representation (token-economical prose) of every active item whose "
+                + "representation is missing or stale. Idempotent — already-distilled "
+                + "items are skipped. Returns the count of items distilled this sweep. "
+                + "(moot_consolidate is accepted as a compatibility alias.)",
             inputSchema: objectSchema(
                 properties: [
                     "cluster_id": stringSchema(
@@ -370,62 +401,54 @@ enum RecipeTools {
 
     // MARK: - recall_distilled descriptor
 
-    /// Dense distilled-tier recall. Structural fingerprint Hamming NN over the
-    /// distillation-features-v1 VectorKit lane — no embedding model inference.
-    /// Returns factoid prose (~10 tokens/hit) + confidence metadata.
+    /// Distilled-payload recall (SPEC §10.3): the exact-search recall path
+    /// with the hydration selector pinned to `distilled`. Ranking is
+    /// identical to moot_memory_search by construction; only payloads
+    /// differ (smaller), with per-hit token counts for context budgeting.
+    ///
+    /// ACK-GATED: this tool's contract changed in Wave 1 (v2 semantics — exact-
+    /// search geometry + distilled hydration, not a separate distilled tier).
+    /// Calls without ack: "recall_distilled/v2" return a CONTRACT CHANGE NOTICE
+    /// and do not execute. Pass ack: "recall_distilled/v2" to proceed.
     private static func recallDistilledTool() -> ProjectedTool {
         ProjectedTool(
             name: recallDistilledToolName,
-            description: "Dense recall: search the distilled memory tier and return factoid "
-                + "prose (~10 tokens/hit) for AI reasoning. Uses structural fingerprint "
-                + "Hamming NN — no embedding model inference, no full corpus scan. Factoids "
-                + "carry confidence scores and source counts. For full episodic detail on a "
-                + "specific factoid call moot_recollect with the returned drawer_id. "
-                + "Returns a discrimination signal over confidence scores.",
+            description: "Distilled recall (v2): normal search over originals, hydrated with "
+                + "each hit's DISTILLED representation (token-economical prose) instead of "
+                + "the full content — identical ranking to moot_memory_search, smaller "
+                + "payloads, per-hit token counts for context budgeting. Hits are the "
+                + "source memories themselves; call moot_memory_get with a returned id for "
+                + "the full verbatim body. Rows not yet distilled fall back to full "
+                + "content and are marked served_from_content (run moot_distill to "
+                + "populate them). CONTRACT CHANGE (Wave 1): v2 no longer queries a "
+                + "separate distilled tier; pass ack: \"recall_distilled/v2\" to confirm "
+                + "you want the new behavior.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema(
-                        "Query text — feature-extracted and fingerprinted for Hamming NN "
-                            + "against the distillation-features-v1 lane. No embedding inference."),
+                        "Query text — drives BM25 + vector recall (same geometry as moot_memory_search)."),
                     "limit": integerSchema(
-                        "Max factoids to return. Default 20. Omit to use the default; "
+                        "Max results to return. Default 20. Omit to use the default; "
                             + "null is invalid."),
                     "filter": stringSchema(
                         "Filter kind: unconfirmed, userConfirmed, exportable, contained, "
                             + "currentlyBelieve. Omit for ordinary recall across any confirmation "
                             + "state. null is invalid."),
+                    "echo_query": ToolProjection.booleanSchema(
+                        "Optional. When true, appends the query text to the response header. "
+                            + "Default false — the AI already knows what it queried. "
+                            + "Omit to use the default; null is invalid."),
+                    "ack": stringSchema(
+                        "Contract-change acknowledgment token. This tool's behavior changed "
+                            + "in Wave 1 (v2 semantics). Pass ack: \"recall_distilled/v2\" to "
+                            + "confirm you want v2 behavior (normal exact-search geometry + "
+                            + "distilled hydration). Without this token the call returns a "
+                            + "CONTRACT CHANGE NOTICE and does not execute."),
                     "estateID": stringSchema(
                         "Optional UUID of the open estate to target. Omit for the default estate; "
                             + "null is invalid."),
                 ],
                 required: ["query"]),
-            provenance: .recipe)
-    }
-
-    // MARK: - recollect descriptor
-
-    /// Fan-out from a distilled factoid to its M source memories by following the
-    /// _distilled_from tunnel graph. Returns full episodic content for the AI
-    /// to synthesize into a user-facing narrative.
-    private static func recollectTool() -> ProjectedTool {
-        ProjectedTool(
-            name: recollectToolName,
-            description: "Recollect: fan-out from a distilled factoid to its source memories. "
-                + "Follows the _distilled_from tunnel graph from a _distilled drawer and returns the "
-                + "full episodic content of the M source memories that produced it. Use "
-                + "when the user needs the full explanation behind a dense factoid returned "
-                + "by moot_recall_distilled. You synthesize the sources into a narrative — "
-                + "MOOTx01 provides the evidence chain.",
-            inputSchema: objectSchema(
-                properties: [
-                    "drawer_id": stringSchema(
-                        "UUID of the _distilled drawer to expand. Obtain from "
-                            + "moot_recall_distilled results."),
-                    "estateID": stringSchema(
-                        "Optional UUID of the open estate to target. Omit for the default estate; "
-                            + "null is invalid."),
-                ],
-                required: ["drawer_id"]),
             provenance: .recipe)
     }
 
@@ -452,6 +475,34 @@ enum RecipeTools {
         if name == listRecipesCatalogToolName {
             return runListRecipesCatalog()
         }
+
+        // MARK: ACK gates and notice-only stubs
+        // These checks must come BEFORE resolveHandle() to guarantee zero
+        // side effects when a caller hits a contract-change notice.
+
+        // moot_recollect — notice-only stub. The tool was removed in Wave 1;
+        // its substrate (factoid drawers) was retired. Never executes regardless
+        // of what parameters are passed.
+        if name == recollectToolName {
+            return ToolDispatcher.textResult(recollectRemovedNotice)
+        }
+
+        // moot_consolidate — ACK-gated alias. Renamed to moot_distill in Wave 1;
+        // factoid drawers and the distilled tier no longer exist. Callers must
+        // pass ack: "moot_distill/p1" to confirm they want the new behavior.
+        if name == consolidateToolName,
+           args["ack"]?.stringValue != "moot_distill/p1" {
+            return ToolDispatcher.textResult(consolidateContractNotice)
+        }
+
+        // moot_recall_distilled — ACK-gated (v2 contract). Now performs normal
+        // exact-search geometry + distilled hydration; no longer queries a
+        // separate distilled tier. Callers must pass ack: "recall_distilled/v2".
+        if name == recallDistilledToolName,
+           args["ack"]?.stringValue != "recall_distilled/v2" {
+            return ToolDispatcher.textResult(recallDistilledContractNotice)
+        }
+
         let handle = try resolveHandle(args)
         switch name {
         case groundedSynthesisToolName:
@@ -466,12 +517,13 @@ enum RecipeTools {
             return try await runConfirmPromotion(args, kit: kit, handle: handle)
         case dreamToolName:
             return try await runDream(args, kit: kit, handle: handle)
-        case consolidateToolName:
-            return try await runConsolidate(args, kit: kit, handle: handle)
+        case distillToolName, consolidateToolName:
+            // moot_consolidate reaches here only when ack: "moot_distill/p1"
+            // was present (ACK gate above). Runs the same handler as moot_distill.
+            return try await runDistill(args, kit: kit, handle: handle)
         case recallDistilledToolName:
+            // Reaches here only when ack: "recall_distilled/v2" was present.
             return try await runRecallDistilled(args, kit: kit, handle: handle)
-        case recollectToolName:
-            return try await runRecollect(args, kit: kit, handle: handle)
         case huntContradictionsToolName:
             return try await runHuntContradictions(args, kit: kit, handle: handle)
         default:
@@ -1033,15 +1085,17 @@ enum RecipeTools {
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
-    // MARK: - consolidate
+    // MARK: - distill
 
-    /// Run `moot_consolidate`: trigger a per-item distillation sweep on demand.
+    /// Run `moot_distill` (or its `moot_consolidate` alias): trigger a
+    /// per-item distillation sweep on demand.
     ///
-    /// Decodes the optional `cluster_id` and `include_held` args (accepted for
-    /// API stability, not used by the per-item model) and delegates to the
-    /// Consolidate recipe, which calls GLK.distillItemsSweep. Returns a
-    /// plain-text summary of factoids produced this sweep.
-    private static func runConsolidate(
+    /// Decodes the optional `cluster_id` and `include_held` args (accepted
+    /// for API stability, not used by the per-item model) and delegates to
+    /// the Distill recipe, which calls GLK.distillItemsSweep. Returns a
+    /// plain-text summary of items distilled this sweep (drawer rows whose
+    /// representation columns were populated — SPEC §3).
+    private static func runDistill(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle
@@ -1061,29 +1115,32 @@ enum RecipeTools {
             includeHeld = false
         }
 
-        let out = try await Consolidate().run(
+        let out = try await Distill().run(
             input: .init(clusterID: clusterID, includeHeld: includeHeld),
             estate: handle, kit: kit)
 
         let body = """
-        moot_consolidate: sweep complete
-        factoidsProduced: \(out.factoidsProduced)
+        moot_distill: sweep complete
+        itemsDistilled: \(out.itemsDistilled)
         """
         return ToolDispatcher.textResult(body)
     }
 
     // MARK: - recall_distilled
 
-    /// Run `moot_recall_distilled`: dense Hamming NN recall over the distilled tier.
+    /// Run `moot_recall_distilled`: exact-search geometry + distilled
+    /// hydration (SPEC §10.3).
     ///
-    /// Decodes query, limit, filter, and estateID, runs the DistilledRecall recipe,
-    /// and formats output as:
-    ///   found N distilled factoid(s) for: {query}
-    ///   [1] drawer_id: {uuid}
-    ///       {prose}
-    ///       confidence: X | sources: N | snr: X | delta: TYPE [uncertain]
-    ///   ...
+    /// Output format:
+    ///   found N memory(s) [distilled]
+    ///   {id}  [{room}]  {distilled text or content fallback}
+    ///       tokens: N | source: distilled            (per-hit metadata)
+    ///       tokens: — | source: content (run moot_distill)   (fallback rows)
     ///   discrimination: {level} — {description}
+    ///
+    /// Ranking is identical to moot_memory_search by construction; only the
+    /// payloads differ. Fallback rows (§10.2) still return results — served
+    /// from content, with a hint to run moot_distill.
     private static func runRecallDistilled(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -1095,54 +1152,51 @@ enum RecipeTools {
         let limit = try ToolDispatcher.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         let filter = try decodeSingleFilter(args["filter"])
-
-        let out: DistilledRecall.Output
-        do {
-            out = try await DistilledRecall().run(
-                input: .init(query: query, filter: filter, limit: limit),
-                estate: handle, kit: kit)
-        } catch {
-            // Any error from DistilledRecall().run — including a missing
-            // distillation-features-v1 VectorKit lane — returns "found 0"
-            // and suggests moot_consolidate to build the distilled tier.
-            let body = """
-            found 0 distilled factoid(s) for: \(query)
-
-            discrimination: single — only one result.
-            hint: distilled tier not yet available for this estate. \
-            Run moot_consolidate to build the distilled tier from accumulated memories.
-            """
-            return ToolDispatcher.textResult(body)
+        // echo_query: opt-in to append the query text to the response header.
+        // Default false — the AI client already knows what it queried.
+        // Parity: Rust run_recall_distilled_tool uses the same flag.
+        let echoQuery: Bool
+        if let raw = args["echo_query"] {
+            guard let b = raw.boolValue else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "echo_query must be a boolean; omit it to use the default (false)")
+            }
+            echoQuery = b
+        } else {
+            echoQuery = false
         }
 
-        var lines: [String] = [
-            "found \(out.matches.count) distilled factoid(s) for: \(query)",
-        ]
+        let out = try await DistilledRecall().run(
+            input: .init(query: query, filter: filter, limit: limit),
+            estate: handle, kit: kit)
 
-        for (idx, match) in out.matches.enumerated() {
-            lines.append("")
-            lines.append("[\(idx + 1)] drawer_id: \(match.id)")
-            // Preview cap: distilled prose can be arbitrarily long; cap at 300 chars
-            // to prevent context-window overflow in the LLM caller.
-            // Parity: Rust run_recall_distilled_tool uses DISTILLED_PROSE_PREVIEW_CAP.
-            let prose = String(match.prose.prefix(ToolDispatcher.distilledProseCap))
-            lines.append("    \(prose)")
+        // Resolve room display names via the node tree, matching
+        // moot_memory_search's resolution path.
+        let estate = try await kit.estate(for: handle)
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: out.matches.map(\.parentNodeId))
 
-            // Metadata line — delta and uncertain are optional.
-            var meta = "confidence: \(String(format: "%.2f", match.confidence))"
-                + " | sources: \(match.sourceCount)"
-                + " | snr: \(String(format: "%.1f", match.snr))"
-            if let delta = match.deltaType {
-                meta += " | delta: \(delta)"
+        let header = echoQuery
+            ? "found \(out.matches.count) memory(s) [distilled] for: \(query)"
+            : "found \(out.matches.count) memory(s) [distilled]"
+        var lines: [String] = [header]
+        var anyFallback = false
+        for match in out.matches.prefix(50) {
+            let room = nodeNames[match.parentNodeId]?.room
+                ?? (match.parentNodeId.isEmpty ? "?" : match.parentNodeId)
+            lines.append("\(match.id)  [\(room)]  \(match.text)")
+            // Per-hit metadata: token count (§6 budgeting) and the §10.2
+            // served-from marker so clients can distinguish "distilled
+            // representation" from "fallback".
+            if match.servedFromContent {
+                anyFallback = true
+                lines.append("    tokens: — | source: content (not yet distilled)")
+            } else {
+                lines.append("    tokens: \(match.tokenCount.map(String.init) ?? "—") | source: distilled")
             }
-            if match.uncertain {
-                meta += " [uncertain]"
-            }
-            lines.append("    \(meta)")
         }
-
-        lines.append("")
-        // Discrimination signal mirrors moot_memory_search format (RecallDiscrimination.resultLine).
+        // Discrimination signal mirrors moot_memory_search phrasing.
         let discLevel: String
         switch out.discrimination {
         case .high:   discLevel = "discrimination: high — clear top result."
@@ -1151,72 +1205,12 @@ enum RecipeTools {
         case .single: discLevel = "discrimination: single — only one result."
         }
         lines.append(discLevel)
-
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
-    }
-
-    // MARK: - recollect
-
-    /// Run `moot_recollect`: fan-out from a distilled factoid to its source memories.
-    ///
-    /// Decodes `drawer_id` and estateID, runs the Recollect recipe, and formats
-    /// output as:
-    ///   expand: {drawer_id}
-    ///   factoid: {prose}
-    ///   confidence: X | sources: N | delta: TYPE
-    ///
-    ///   source [1] — room: {room} | id: {uuid}
-    ///   {full content}
-    ///   ...
-    ///
-    /// RecollectError cases map to errorResult with guidance for the caller.
-    private static func runRecollect(
-        _ args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        let drawerID = try requireString(args, "drawer_id")
-
-        let out: Recollect.Output
-        do {
-            out = try await Recollect().run(
-                input: .init(factoidDrawerID: drawerID),
-                estate: handle, kit: kit)
-        } catch let err as RecollectError {
-            switch err {
-            case .notADistilledDrawer(let id):
-                return ToolDispatcher.errorResult(
-                    "drawer \(id) is not a distilled factoid. "
-                        + "Use moot_recall_distilled to find distilled drawers.")
-            case .factoidNotFound(let id):
-                return ToolDispatcher.errorResult(
-                    "drawer \(id) not found — it may have been expunged from the estate.")
-            case .noSourceTunnels(let id):
-                return ToolDispatcher.errorResult(
-                    "drawer \(id) has no _distilled_from tunnels. "
-                        + "The factoid may predate tunnel wiring — "
-                        + "fall back to lineage_id query to locate source drawers.")
-            }
+        if anyFallback {
+            // The SPEC §10.3 fallback notice: results still return, served
+            // from content, with a hint to populate the representations.
+            lines.append("hint: some results are not yet distilled and were served from full "
+                + "content. Run moot_distill to populate distilled representations.")
         }
-
-        var lines: [String] = [
-            "expand: \(out.factoidID)",
-            "factoid: \(out.prose)",
-        ]
-        var meta = "confidence: \(String(format: "%.2f", out.confidence))"
-            + " | sources: \(out.sourceCount)"
-        if let delta = out.deltaType {
-            meta += " | delta: \(delta)"
-        }
-        lines.append(meta)
-
-        // node-tree integrity bridge consumer: source.room is a display name for provenance.
-        for (idx, source) in out.sources.enumerated() {
-            lines.append("")
-            lines.append("source [\(idx + 1)] — room: \(source.room) | id: \(source.id)")
-            lines.append(source.content)
-        }
-
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
@@ -1356,9 +1350,9 @@ enum RecipeTools {
 
     // MARK: - JSON schema helpers
     //
-    // ToolProjection's schema helpers are private to that type, so the
-    // recipe surface carries its own minimal copies. Identical shapes —
-    // a future refactor could promote one shared set.
+    // `booleanSchema` is internal on ToolProjection and called directly from
+    // this type. `objectSchema`, `stringSchema`, and `integerSchema` below
+    // are RecipeTools-local helpers; ToolProjection has no equivalents.
 
     private static func objectSchema(
         properties: [String: JSONValue], required: [String]

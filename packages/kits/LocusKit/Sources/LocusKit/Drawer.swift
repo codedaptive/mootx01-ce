@@ -176,6 +176,38 @@ public struct Drawer: Equatable, Hashable, Sendable {
     /// internal whitespace (e.g., `Q41487,Q170978`).
     public let wikidataQidsSecondary: String?
 
+    /// The distilled representation of this drawer's content — a dense
+    /// parallel rendering (token-economical prose) of the same content
+    /// per SPEC_DISTILLATION_STORAGE §4/§5. A representation is a VIEW
+    /// of this one item: no independent identity, lifecycle, or
+    /// provenance. NULL means "no representation exists yet" and is the
+    /// sweep-eligibility predicate — there is no separate staleness flag
+    /// and no Bool accessor; callers test `distilled != nil`. The four
+    /// `distilled*` fields are NULL together or populated together (one
+    /// atomic column write, `DrawerStore.setDistilledRepresentation`),
+    /// and every write that touches `content` NULLs all four in the
+    /// same statement (the §7.3 regeneration trigger and the erasure
+    /// scrub — derived text must not outlive erased content).
+    public let distilled: String?
+
+    /// Identifier of the format + pipeline contract that produced
+    /// `distilled` (Phase 1 value: "p1", see
+    /// `SubstrateML.DistillationPipelineVersion`). A row whose value
+    /// differs from the current build's contract identifier is a
+    /// regeneration candidate for the sweep. Nil iff `distilled` is nil.
+    public let distilledPipelineVersion: String?
+
+    /// Approximate token count of `distilled` (SPEC §6): deterministic,
+    /// vendor-neutral estimate so AI clients can budget context before
+    /// hydrating. Advisory only — never load-bearing (no truncation or
+    /// gating decisions hang on it). Nil iff `distilled` is nil.
+    public let distilledTokenCount: Int64?
+
+    /// When the representation was generated. Audit and sweep-
+    /// observability only; carries no behavioral weight. Stored as TEXT
+    /// ISO8601 per the fleet date rule. Nil iff `distilled` is nil.
+    public let distilledAt: Date?
+
     /// Designated initializer.
     public init(
         id: String = UUID().uuidString,
@@ -200,7 +232,11 @@ public struct Drawer: Equatable, Hashable, Sendable {
         udcCode: String = "",
         udcFacets: String? = nil,
         wikidataQID: String? = nil,
-        wikidataQidsSecondary: String? = nil
+        wikidataQidsSecondary: String? = nil,
+        distilled: String? = nil,
+        distilledPipelineVersion: String? = nil,
+        distilledTokenCount: Int64? = nil,
+        distilledAt: Date? = nil
     ) {
         self.id = id
         self.lineageID = lineageID
@@ -221,6 +257,10 @@ public struct Drawer: Equatable, Hashable, Sendable {
         self.udcFacets = udcFacets
         self.wikidataQID = wikidataQID
         self.wikidataQidsSecondary = wikidataQidsSecondary
+        self.distilled = distilled
+        self.distilledPipelineVersion = distilledPipelineVersion
+        self.distilledTokenCount = distilledTokenCount
+        self.distilledAt = distilledAt
     }
 }
 
@@ -235,6 +275,7 @@ extension Drawer: Codable {
         case embeddingModelID, tombstonedAt, removedByBatch
         case provenance, adjectiveBitmap, operationalBitmap
         case udcCode, udcFacets, wikidataQID, wikidataQidsSecondary
+        case distilled, distilledPipelineVersion, distilledTokenCount, distilledAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -258,6 +299,10 @@ extension Drawer: Codable {
         udcFacets = try c.decodeIfPresent(String.self, forKey: .udcFacets)
         wikidataQID = try c.decodeIfPresent(String.self, forKey: .wikidataQID)
         wikidataQidsSecondary = try c.decodeIfPresent(String.self, forKey: .wikidataQidsSecondary)
+        distilled = try c.decodeIfPresent(String.self, forKey: .distilled)
+        distilledPipelineVersion = try c.decodeIfPresent(String.self, forKey: .distilledPipelineVersion)
+        distilledTokenCount = try c.decodeIfPresent(Int64.self, forKey: .distilledTokenCount)
+        distilledAt = try c.decodeIfPresent(Date.self, forKey: .distilledAt)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -281,5 +326,9 @@ extension Drawer: Codable {
         try c.encodeIfPresent(udcFacets, forKey: .udcFacets)
         try c.encodeIfPresent(wikidataQID, forKey: .wikidataQID)
         try c.encodeIfPresent(wikidataQidsSecondary, forKey: .wikidataQidsSecondary)
+        try c.encodeIfPresent(distilled, forKey: .distilled)
+        try c.encodeIfPresent(distilledPipelineVersion, forKey: .distilledPipelineVersion)
+        try c.encodeIfPresent(distilledTokenCount, forKey: .distilledTokenCount)
+        try c.encodeIfPresent(distilledAt, forKey: .distilledAt)
     }
 }

@@ -48,19 +48,19 @@ struct DistillationLensTests {
         )
     }
 
-    // Pass-through: LensResult.drawerContent == DistillationOutput.drawerContent.
+    // Pass-through: LensResult.distilledText == DistillationOutput.distilledText.
     // Verifies the lens projection contract: same extractor, same result shape.
     // Uses the capitalization-heuristic stub so the test does not depend on the
     // HMM model artifact; the lens pass-through contract is extractor-independent.
-    @Test("pass-through: drawerContent equals pipeline output")
-    func drawerContentPassThrough() {
+    @Test("pass-through: distilledText equals pipeline output")
+    func distilledTextPassThrough() {
         let input = makeSuccessInput()
         let pipelineOutput = DistillationPipeline.run(
             input: input, extractFeatures: DistillationPipeline.defaultExtractor)
         // Pass the stub explicitly so both sides use the same extractor.
         let lensResult = NeuronKit.distillCluster(
             input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        #expect(lensResult.drawerContent == pipelineOutput.drawerContent)
+        #expect(lensResult.distilledText == pipelineOutput.distilledText)
     }
 
     // Pass-through: LensResult.confidence == DistillationOutput.confidence.

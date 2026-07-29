@@ -207,6 +207,7 @@ public extension GeniusLocusKit {
             await corpusKits[handle]?.dropIngestQueue()
             corpusKits[handle] = nil
             vectorStores[handle] = nil
+            distillFunctions[handle] = nil
             mountStates[handle] = nil
             // Drop the sync engine so no engine reference outlives the estate.
             syncEngines[handle] = nil
@@ -239,6 +240,7 @@ public extension GeniusLocusKit {
         await corpusKits[handle]?.dropIngestQueue()
         corpusKits[handle] = nil
         vectorStores[handle] = nil
+        distillFunctions[handle] = nil
         mountStates[handle] = nil
         // Drop the sync engine so no engine reference outlives the estate.
         syncEngines[handle] = nil

@@ -200,6 +200,10 @@ fn sample_drawer(label: &str) -> Drawer {
         udc_facets: None,
         wikidata_qid: None,
         wikidata_qids_secondary: None,
+        distilled: None,
+        distilled_pipeline_version: None,
+        distilled_token_count: None,
+        distilled_at: None,
     }
 }
 

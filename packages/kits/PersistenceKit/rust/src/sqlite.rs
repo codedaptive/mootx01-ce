@@ -1518,16 +1518,27 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
 // ─────────────────────────────────────────────────────────────────────
 
 /// The column names the encryption seam intercepts.
-/// Both names match the Swift SQLiteBackend design verbatim.
+/// All names match the Swift RowCrypto seam design verbatim.
+/// `distilled` is protected because it is content-DERIVED text
+/// (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
+/// row-level protection class as the content it renders).
 pub(crate) const CONTENT_COL: &str = "content";
 pub(crate) const KEY_ID_COL:  &str = "keyID";
+pub(crate) const PROTECTED_COLS: &[&str] = &["content", "distilled"];
 
-/// Encrypt the `content` column and stamp `keyID` when the estate
-/// is in an encrypting mode (RowEncryption or FullDatabase). Returns
-/// `values` unchanged for Plaintext mode or for rows that carry no
-/// `content` column.
+/// Encrypt the protected text columns ("content", "distilled") and stamp
+/// `keyID` when the estate uses per-row encryption (RowEncryption).
+/// Returns `values` unchanged for Plaintext mode or for rows that carry
+/// no protected text.
 ///
-/// Mirrors Swift's `encryptedForWrite` on `SQLiteBackend`.
+/// Empty-string text is passed through unsealed: the only empty-text
+/// write in the schema is the expunge/zeroization scrub (`content = ""`),
+/// which must stay a plaintext-empty erasure marker — the same exemption
+/// `assert_content_key_id_invariant` documents (#76). A
+/// representation-only UPDATE (a value map with "distilled" but no
+/// "content") is sealed and keyID-stamped exactly like a content write.
+///
+/// Mirrors Swift's `encryptedForWrite`.
 pub(crate) fn encrypted_for_write(
     values: BTreeMap<String, TypedValue>,
     config: &EstateEncryptionConfig,
@@ -1535,7 +1546,7 @@ pub(crate) fn encrypted_for_write(
 ) -> StorageResult<BTreeMap<String, TypedValue>> {
     // No per-row crypto for Plaintext (no key) or FullDatabase (the whole file
     // is SQLCipher-encrypted at the connection layer). Only RowEncryption seals
-    // the content column here.
+    // the protected columns here.
     if !config.uses_row_crypto() {
         return Ok(values);
     }
@@ -1545,17 +1556,22 @@ pub(crate) fn encrypted_for_write(
         // pass through rather than panic so the issue surfaces at write.
         _ => return Ok(values),
     };
-    // Only rows that carry a text `content` column are encrypted.
-    let plaintext = match values.get(CONTENT_COL) {
-        Some(TypedValue::Text(t)) => t.as_bytes().to_vec(),
-        _ => return Ok(values),
-    };
-    let envelope = provider
-        .encrypt(&plaintext, key)
-        .map_err(|e| StorageError::BackendError { underlying: e })?;
     let mut out = values;
-    out.insert(CONTENT_COL.to_string(), TypedValue::Blob(envelope));
-    out.insert(KEY_ID_COL.to_string(), TypedValue::Text(key_id.clone()));
+    let mut sealed_any = false;
+    for column in PROTECTED_COLS {
+        let plaintext = match out.get(*column) {
+            Some(TypedValue::Text(t)) if !t.is_empty() => t.as_bytes().to_vec(),
+            _ => continue,
+        };
+        let envelope = provider
+            .encrypt(&plaintext, key)
+            .map_err(|e| StorageError::BackendError { underlying: e })?;
+        out.insert((*column).to_string(), TypedValue::Blob(envelope));
+        sealed_any = true;
+    }
+    if sealed_any {
+        out.insert(KEY_ID_COL.to_string(), TypedValue::Text(key_id.clone()));
+    }
     Ok(out)
 }
 
@@ -1592,19 +1608,23 @@ pub(crate) fn decrypted_for_read(
         // Row sealed under a different key; pass through (ciphertext stays).
         return Ok(values);
     }
-    // Content must be a blob envelope produced by `encrypted_for_write`.
-    let envelope = match values.get(CONTENT_COL) {
-        Some(TypedValue::Blob(b)) => b.clone(),
-        _ => return Ok(values),
-    };
-    let plaintext_bytes = provider
-        .decrypt(&envelope, key)
-        .map_err(|e| StorageError::BackendError { underlying: e })?;
-    let plaintext = String::from_utf8(plaintext_bytes).map_err(|e| StorageError::BackendError {
-        underlying: format!("decrypted_for_read: UTF-8 decode failed: {e}"),
-    })?;
+    // Each protected column must be a blob envelope produced by
+    // `encrypted_for_write`; non-blob values pass through unchanged.
     let mut out = values;
-    out.insert(CONTENT_COL.to_string(), TypedValue::Text(plaintext));
+    for column in PROTECTED_COLS {
+        let envelope = match out.get(*column) {
+            Some(TypedValue::Blob(b)) => b.clone(),
+            _ => continue,
+        };
+        let plaintext_bytes = provider
+            .decrypt(&envelope, key)
+            .map_err(|e| StorageError::BackendError { underlying: e })?;
+        let plaintext =
+            String::from_utf8(plaintext_bytes).map_err(|e| StorageError::BackendError {
+                underlying: format!("decrypted_for_read: UTF-8 decode failed: {e}"),
+            })?;
+        out.insert((*column).to_string(), TypedValue::Text(plaintext));
+    }
     Ok(out)
 }
 
@@ -1638,22 +1658,29 @@ pub(crate) fn assert_content_key_id_invariant(
     if !config.uses_row_crypto() {
         return Ok(());
     }
-    // Only fire if the row carries a text `content` — .blob is already
-    // encrypted, .null / absent is not a content-bearing row.
-    if let Some(TypedValue::Text(_)) = values.get(CONTENT_COL) {
-        // A keyID is present only when content is ciphertext (.blob); .text
-        // content with no keyID is an unencrypted write the seam missed.
+    // Only fire if the row carries non-empty text in a protected column —
+    // .blob is already encrypted, .null / absent is not a protected-text
+    // row, and empty text is the erasure-scrub exemption (#76). Covers
+    // "content" and the content-derived "distilled"
+    // (SPEC_DISTILLATION_STORAGE §2).
+    let violating = PROTECTED_COLS.iter().find(|column| {
+        matches!(values.get(**column), Some(TypedValue::Text(t)) if !t.is_empty())
+    });
+    if let Some(violating) = violating {
+        // A keyID is present only when the protected text is ciphertext
+        // (.blob); .text with no keyID is an unencrypted write the seam
+        // missed.
         if let Some(TypedValue::Text(id)) = values.get(KEY_ID_COL) {
             if !id.is_empty() {
-                return Ok(()); // keyID present — content is already encrypted
+                return Ok(()); // keyID present — text is already encrypted
             }
         }
         return Err(StorageError::ConstraintViolation {
             detail: format!(
                 "content/keyID invariant: table '{}' on an encrypting estate received \
-                 plaintext content with no keyID; the encryption seam did not run, so \
+                 plaintext '{}' with no keyID; the encryption seam did not run, so \
                  this row would be unreadable",
-                table
+                table, violating
             ),
         });
     }
@@ -2033,11 +2060,16 @@ impl RowStore for SqliteRowStore {
         values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
-        // The at-rest encryption seam is NOT wired to update. All current
-        // callers update only bitmap/timestamp columns, not the content column.
-        // The invariant guard is the structural safety net: a content update
-        // on an encrypting estate throws rather than silently writing plaintext.
-        // Mirrors Swift `updateRows` design.
+        // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
+        // path since the distilled-representation columns landed (a
+        // distillation write is an UPDATE carrying "distilled" text —
+        // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals non-empty
+        // protected text and stamps keyID; it is a no-op for bitmap/timestamp
+        // updates and for the expunge scrub (empty text is exempt). The
+        // invariant guard then confirms the seam ran. Mirrors Swift
+        // `updateRows`.
+        let values =
+            encrypted_for_write(values, &self.encryption_config, self.aead_provider.as_ref())?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (CAND-047): validate the table name
         // and all caller-supplied SET column names before interpolating into SQL.

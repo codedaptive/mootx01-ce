@@ -655,4 +655,25 @@ public enum ToolProjection {
             "description": .string(description),
         ])
     }
+
+    // MARK: - Accepted arg key extraction (used by dispatch layer for unknown-arg hint)
+
+    /// Returns the set of argument key names declared in `toolName`'s inputSchema
+    /// `properties` dict. Includes `estateID` and `teachme` for tools that
+    /// advertise them (all tools get `teachme`; interface/recipe/lens tools get
+    /// `estateID`). Returns nil when the tool name is unknown — the dispatch layer
+    /// skips the unrecognized-arg check when the tool is unrecognized (it will
+    /// fail with methodNotFound before the hint logic runs).
+    static func acceptedArgKeys(for toolName: String) -> Set<String>? {
+        // Uses the default environment (reads MOOTX01_VAULT / MOOTX01_MEMORY_TOOL
+        // from ProcessInfo). Vault tools only appear in the list when vault is
+        // enabled, so their schemas are only checked when vault is on — matching
+        // the dispatch gate that gates vault tool calls the same way.
+        guard let tool = tools().first(where: { $0.name == toolName }) else { return nil }
+        guard case .object(let schema) = tool.inputSchema,
+              case .object(let properties)? = schema["properties"] else {
+            return []
+        }
+        return Set(properties.keys)
+    }
 }

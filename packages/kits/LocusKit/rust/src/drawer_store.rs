@@ -618,6 +618,44 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Write the distilled representation of one drawer — all four columns
+    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
+    /// together or populated together).
+    ///
+    /// A representation is a deterministic, regenerable function of
+    /// (content, pipeline version) — a view, not a belief-state change —
+    /// so this is a direct column write: no audit event, no supersession
+    /// cascade, no lifecycle or lineage field touched, and no content
+    /// digest/revision bump (search isolation §9: a representation-only
+    /// write emits no index job). `generated_at` is epoch millis
+    /// (deterministic clock — passed in, never read here).
+    ///
+    /// Returns the count of rows updated (0 = drawer not found;
+    /// 1 = success). Mirrors Swift `DrawerStore.setDistilledRepresentation`.
+    fn set_distilled_representation(
+        &self,
+        _drawer_id: &str,
+        _distilled: &str,
+        _pipeline_version: &str,
+        _token_count: i64,
+        _generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_distilled_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Count of active drawers still awaiting distillation — the §7.1
+    /// eligibility predicate as an aggregate (not tombstoned, non-empty
+    /// content, `distilled` NULL or stale pipeline version). The
+    /// distillation drain-accounting observable reported by the GLK
+    /// coordinator's `drain_statuses`. Mirrors Swift `countUndistilled`.
+    fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_undistilled not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Append a previously-produced expunge audit event to the audit log.
     ///
     /// Called by the GLK orchestration path after step 2 (cross-kit vector
@@ -1714,6 +1752,26 @@ pub trait DrawerStore: Send + Sync {
         Ok(())
     }
 
+    /// AND an operational bitmap into the `operationalAND` column for the
+    /// room and wing fingerprint rows, leaving the three OR columns unchanged.
+    ///
+    /// Use this after a bit-CLEAR event on a LIVE (non-tombstoned) drawer to
+    /// prevent the distillation sweep from falsely skipping the container.
+    /// Lowering the AND is always safe (under-approximation → safe direction).
+    ///
+    /// Default is a no-op for backends without a container aggregate. The
+    /// storage-backed core overrides to AND into the room and wing rows.
+    fn and_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        operational: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        let _ = (wing, room, operational, now);
+        Ok(())
+    }
+
     /// Rebuild the entire container-fingerprint aggregate from the active
     /// drawer set so it covers every active container (spec § 11.5
     /// soundness: the aggregate must cover every active row or pruning is
@@ -1887,6 +1945,25 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         seal_audit: bool,
     ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+    }
+    fn set_distilled_representation(
+        &self,
+        drawer_id: &str,
+        distilled: &str,
+        pipeline_version: &str,
+        token_count: i64,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.as_ref().set_distilled_representation(
+            drawer_id,
+            distilled,
+            pipeline_version,
+            token_count,
+            generated_at,
+        )
+    }
+    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().count_undistilled(pipeline_version)
     }
     fn seal_expunge_audit(
         &self,

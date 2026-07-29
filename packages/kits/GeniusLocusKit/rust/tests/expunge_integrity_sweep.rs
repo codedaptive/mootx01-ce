@@ -18,6 +18,11 @@
 //        VectorStore registered. Re-delete is a no-op (nothing to delete);
 //        the row is sealed as expungeOrphan with remediated_count == 1
 //        (the audit gap is closed, even though no vector was ever written).
+//   S4 — sweep re-delete removes orphaned distillation-features-v1 lane
+//        entry: crash-window after distillation leaves a structural
+//        fingerprint entry in the VectorStore; sweep re-delete must scrub
+//        the distillation lane as well as the corpus-model lane.
+//        Parity with Swift S4: sweepRemediatesOrphanedDistillationLaneEntry.
 
 use std::sync::Arc;
 
@@ -33,6 +38,7 @@ use locus_kit::{
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use persistence_kit::{inmemory::InMemoryStorage, BackendConfiguration, EstateConfiguration, Storage};
+use vectorkit::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 const NOW2: i64 = 1_700_000_001;
@@ -40,6 +46,10 @@ const NOW2: i64 = 1_700_000_001;
 fn make_storage() -> Arc<dyn Storage> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     Arc::new(InMemoryStorage::new(config))
+}
+
+fn make_vector_store() -> Arc<VectorStore> {
+    Arc::new(VectorStore::open(make_storage()).expect("VectorStore::open"))
 }
 
 fn open_one() -> (EstateCoordinator, genius_locus_kit::handle::EstateHandle) {
@@ -266,5 +276,120 @@ fn s3_sweep_locusonly_closes_audit_gap_with_no_vector_store() {
         orphan_count, 1,
         "exactly one expungeOrphan audit must exist after locusOnly sweep; trail verbs: {:?}",
         trail.iter().map(|e| &e.verb).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// S4: sweep re-delete scrubs orphaned distillation-features-v1 lane entry
+// ---------------------------------------------------------------------------
+
+/// Three-sentence content is distilled (writes a distillation-features-v1
+/// lane entry in the VectorStore), then the process crashes between step 1
+/// (LocusKit tombstone) and step 2 (cross-kit delete). The lane entry
+/// survives the crash window. The integrity sweep's re-delete must now
+/// scrub the distillation lane in addition to the corpus-model lane.
+///
+/// Parity: Swift `sweepRemediatesOrphanedDistillationLaneEntry`.
+#[test]
+fn s4_sweep_remediates_orphaned_distillation_lane_entry() {
+    let (mut coord, h) = open_one();
+
+    // Three-sentence content with repeated named entity ("Rhenium") so the
+    // matrix distillation path (≥3 sentences) produces a non-zero structural
+    // fingerprint — which causes distill_items_sweep to write a
+    // distillation-features-v1 lane entry in the VectorStore. Same content
+    // style as E10 (known to produce non-zero fingerprints via the default
+    // extractor).
+    let content = "Batch S4 used Rhenium wire. Tests on Rhenium passed. Labs shipped Rhenium early.";
+    let drawer = coord
+        .capture(&h, cap_frame(content), NOW)
+        .expect("capture");
+
+    // Register Corpus + VectorStore so the sweep's delete closure can
+    // complete without hitting the standalone-VectorStore branch.
+    // Corpus content ingest is not required: remove_content is a no-op
+    // for unknown ids, matching the pattern used in E10.
+    let corpus = make_corpus();
+    let vs = make_vector_store();
+    let vs_ref = Arc::clone(&vs);
+    coord.register_corpus(&h, corpus);
+    coord.register_vector_store(&h, vs);
+
+    // Distill the item — writes the distillation-features-v1 lane entry
+    // when the structural fingerprint is non-zero.
+    let distilled = coord
+        .distill_items_sweep(&h, NOW + 100, None)
+        .expect("distill_items_sweep");
+    assert!(
+        distilled >= 1,
+        "distill must produce at least 1 item; got {distilled}"
+    );
+
+    // Confirm the lane entry exists before the crash window.
+    // Use vectors_for_item (raw table query) rather than find_nearest so
+    // the check is fingerprint-independent.
+    let distill_lane = genius_locus_kit::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+    let before_vecs = vs_ref
+        .vectors_for_item(&drawer.id)
+        .expect("vectors_for_item before crash-window");
+    let has_distill_before = before_vecs.iter().any(|v| v.model_id == distill_lane);
+    assert!(
+        has_distill_before,
+        "distillation lane entry must exist after distillation; got model_ids {:?}",
+        before_vecs.iter().map(|v| &v.model_id).collect::<Vec<_>>()
+    );
+
+    // Crash-window: tombstone the row WITHOUT sealing any audit event.
+    // `seal_audit: false` means step 1 (LocusKit storage expunge) ran but
+    // step 2 (cross-kit delete) and step 3 (audit seal) never executed.
+    // The VectorStore lane entry survives.
+    let estate = coord.estate_for(&h).expect("estate for crash-window");
+    let _unsealed = estate
+        .expunge(&drawer.id, "crash-window-sim-s4", true, NOW2, false)
+        .expect("estate expunge (no seal) for crash-window seed");
+
+    // Lane entry must STILL exist after the crash-window (step 2 never ran).
+    let mid_vecs = vs_ref
+        .vectors_for_item(&drawer.id)
+        .expect("vectors_for_item after crash-window");
+    let has_distill_mid = mid_vecs.iter().any(|v| v.model_id == distill_lane);
+    assert!(
+        has_distill_mid,
+        "lane entry must survive the crash-window (step 2 never ran); got model_ids {:?}",
+        mid_vecs.iter().map(|v| &v.model_id).collect::<Vec<_>>()
+    );
+
+    // Run the sweep. With the fix, the re-delete block now scrubs the
+    // distillation lane BEFORE attempting the corpus-model lane delete.
+    let sweep_now = NOW2 + 1;
+    let result = coord
+        .run_expunge_integrity_sweep(&h, sweep_now)
+        .expect("sweep must not fail fatally");
+
+    assert_eq!(
+        result.remediated_count, 1,
+        "sweep must remediate the crash-window row; got {:?}",
+        result
+    );
+    assert_eq!(
+        result.orphaned_count, 0,
+        "no rows should remain un-remediated; got {:?}",
+        result
+    );
+    assert!(
+        result.per_row_errors.is_empty(),
+        "no per-row errors expected; got {:?}",
+        result.per_row_errors
+    );
+
+    // Distillation lane entry must be gone after the sweep's re-delete.
+    let after_vecs = vs_ref
+        .vectors_for_item(&drawer.id)
+        .expect("vectors_for_item after sweep");
+    let has_distill_after = after_vecs.iter().any(|v| v.model_id == distill_lane);
+    assert!(
+        !has_distill_after,
+        "distillation lane entry must be scrubbed by the sweep re-delete; got model_ids {:?}",
+        after_vecs.iter().map(|v| &v.model_id).collect::<Vec<_>>()
     );
 }

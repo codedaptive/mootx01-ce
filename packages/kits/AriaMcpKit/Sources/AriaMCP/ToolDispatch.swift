@@ -386,7 +386,7 @@ public struct ToolDispatcher: Sendable {
             }
             // Route to the appropriate runner and capture the result so
             // the coaching engine can inspect it before it is returned.
-            let runnerResult: JSONValue
+            var runnerResult: JSONValue
             if name == Self.federatedSearchToolName {
                 // Federation tool above the interface tier — matched by name.
                 runnerResult = try await runFederatedSearch(args)
@@ -433,6 +433,10 @@ public struct ToolDispatcher: Sendable {
                     message: "Unknown tool: \(name)"
                 )
             }
+            // Append a hint for any argument keys the tool schema does not declare.
+            // Non-error results only. Also mirrors the hint to stderr so daemon logs
+            // capture the ignored arg without the LLM client having to relay it.
+            runnerResult = appendUnknownArgsHint(name: name, args: args, to: runnerResult)
             // Append a coaching hint to non-error results when a trigger fires.
             return applyHint(name: name, args: args, to: runnerResult)
         } catch let error as JSONRPCError {
@@ -459,6 +463,35 @@ public struct ToolDispatcher: Sendable {
     }
 
     // MARK: - Hint injection
+
+    /// Append a hint line when the caller sent argument keys not declared in the
+    /// tool's inputSchema. Returns the result unchanged on error results or when
+    /// all keys are recognized. Also logs unrecognized keys to stderr for the
+    /// daemon log — callers (LLM clients) may not relay warnings.
+    ///
+    /// Accepted keys are extracted from `ToolProjection.acceptedArgKeys(for:)`,
+    /// which reads the live tool schema (post-`withEstateID`/`withTeachme`
+    /// wrappers), so `estateID` and `teachme` are always recognized.
+    /// Returns nil from `acceptedArgKeys` for unknown tool names — no check runs.
+    ///
+    /// Hint format: `hint: unrecognized argument(s) ignored: <sorted, comma-joined>`
+    private func appendUnknownArgsHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
+        guard let accepted = ToolProjection.acceptedArgKeys(for: name) else {
+            return result
+        }
+        let unknown = Set(args.keys).subtracting(accepted)
+        guard !unknown.isEmpty else { return result }
+        let sorted = unknown.sorted().joined(separator: ", ")
+        fputs("aria-mcp: \(name): unrecognized argument(s) ignored: \(sorted)\n", stderr)
+        // Append hint to non-error results only — error results carry their own
+        // message and must not be silently augmented.
+        guard let obj = result.objectValue,
+              obj["isError"]?.boolValue == false,
+              let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue else {
+            return result
+        }
+        return Self.textResult(text + "\nhint: unrecognized argument(s) ignored: \(sorted)")
+    }
 
     /// Append a coaching hint to a successful tool result when `CoachingEngine`
     /// detects a suboptimal call pattern. Returns the result unchanged when
@@ -1455,16 +1488,11 @@ extension ToolDispatcher {
             case .secret:
                 preview = "[sensitivity: secret — content access requires explicit grant]"
             case .normal, .elevated, .none:
-                // For _distilled drawers, apply injection-depth formatting so the LLM
-                // caller sees factoid prose with calibrated provenance annotations rather
-                // than a raw [DIST|…] header string (DISTILLATION_DESIGN.md §2.5).
-                if room == "_distilled",
-                   let content = hit.drawer?.content,
-                   let header = DistilledHeader.parse(content) {
-                    preview = Self.injectionDepthFormatted(header: header, drawerID: hit.id)
-                } else {
-                    preview = hit.drawer.map { String($0.content.prefix(120)) } ?? "(not hydrated)"
-                }
+                // Plain 120-char content preview. (The `_distilled`-room
+                // factoid formatting retired with the factoid tier —
+                // SPEC_DISTILLATION_STORAGE §11.3; distilled payloads are
+                // served by moot_recall_distilled, not by search previews.)
+                preview = hit.drawer.map { String($0.content.prefix(120)) } ?? "(not hydrated)"
             }
             lines.append("\(hit.id)  [\(room)]  \(preview)")
             if explain {
@@ -3233,41 +3261,6 @@ private extension ToolDispatcher {
     // `serverIdentity` instance property, injected at construction so the
     // shared dispatcher correctly stamps provenance for whichever binary
     // is hosting it (aria-mcp-server, mootx01 serve, etc.).
-}
-
-// MARK: - Injection depth formatting
-
-extension ToolDispatcher {
-    /// Format a parsed `_distilled` drawer hit for injection into the LLM context.
-    ///
-    /// Three cases per DISTILLATION_DESIGN.md §2.5 and the InjectionDepth thresholds:
-    ///   conf >= 0.7  (factoidOnly):           prose only — confidence is high; no annotation needed.
-    ///   conf ∈ [0.4, 0.7) (factoidWithMeta):  prose + source memory count and confidence.
-    ///   conf < 0.4  (factoidWithProvenance):  prose + confidence and source drawer ID for full audit trail.
-    /// Preview cap for distilled prose injected into the LLM context.
-    ///
-    /// Distilled factoids are compressed by definition, but `m.prose` can still
-    /// be arbitrarily long. Cap at 300 chars to prevent a single high-confidence
-    /// factoid from overwhelming the context window. 300 chars is generous for
-    /// compressed factoid prose; normal drawers use 120 chars.
-    /// Parity: mirrors `DISTILLED_PROSE_PREVIEW_CAP` in Rust `recipe_tools.rs`.
-    static let distilledProseCap = 300
-
-    static func injectionDepthFormatted(header: DistilledHeader, drawerID: RowID) -> String {
-        let confStr = String(format: "%.2f", header.confidence)
-        // Preview cap: applied before injection to bound context-window consumption.
-        let prose = String(header.prose.prefix(Self.distilledProseCap))
-        if header.confidence >= 0.7 {
-            // factoidOnly: prose only; confidence is high enough to trust without annotation
-            return prose
-        } else if header.confidence >= 0.4 {
-            // factoidWithMeta: append memory count and confidence so the caller can weigh certainty
-            return "\(prose)\n[distilled from \(header.sourceCount) memories, conf=\(confStr)]"
-        } else {
-            // factoidWithProvenance: append confidence and source drawer ID for full traceability
-            return "\(prose)\n[distilled, conf=\(confStr), sources: \(drawerID)]"
-        }
-    }
 }
 
 // MARK: - ClassificationScheme

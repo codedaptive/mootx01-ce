@@ -13,10 +13,10 @@ use crate::content::{
 };
 use crate::error::CorpusKitError;
 use persistence_kit::{
-    Column, ColumnDeclaration, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration,
-    Storage, StoragePredicate, TableDeclaration, TypedValue,
+    Column, ColumnDeclaration, IndexDeclaration, Migration, OrderClause, OrderDirection,
+    SchemaDeclaration, SchemaOperation, Storage, StoragePredicate, TableDeclaration, TypedValue,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 const CHANGE_KIND_UPSERT: i64 = 0;
@@ -31,13 +31,28 @@ pub struct CorpusDocumentStore {
 }
 
 impl CorpusDocumentStore {
-    /// The standalone canonical-content schema — the STANDALONE profile
-    /// only. Version 1: a NEW lane, not an evolution of the legacy
-    /// `chunks` layout. Mirrors Swift `CorpusDocumentStore.schemaDeclaration`.
+    /// The standalone canonical-content schema — the STANDALONE profile only.
+    /// Mirrors Swift `CorpusDocumentStore.schemaDeclaration`.
+    ///
+    /// Version history:
+    ///   v1 — Initial layout: (content_id, revision, digest, text,
+    ///        created_at, updated_at) + corpus_content_changes journal.
+    ///   v2 — Dual-text indexing (MISSION_11X_RECALL_GAP_01 Stream A):
+    ///        adds `dense_text TEXT NULL` to corpus_documents. NULL means
+    ///        "use the lexical `text` column for dense embedding too" —
+    ///        the default for all standalone consumers that do not supply a
+    ///        separate dense-composition representation. The migration is
+    ///        purely additive; existing rows behave identically (NULL dense
+    ///        text falls back to the lexical text everywhere).
+    ///
+    /// NOTE: the SQLite backend creates every table at the latest schema on
+    /// open (CREATE TABLE IF NOT EXISTS) and does not replay Migration.operations
+    /// for fresh DBs — the InMemory backend replays them (idempotently).
+    /// Migration entries mirror the Swift declaration for cross-port parity.
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitDocuments",
-            1,
+            2,
             vec![
                 TableDeclaration::new(
                     "corpus_documents",
@@ -46,6 +61,12 @@ impl CorpusDocumentStore {
                         ColumnDeclaration::int("revision"),
                         ColumnDeclaration::text("digest"),
                         ColumnDeclaration::text("text"),
+                        // Dense-composition text for the float vector lane. NULL
+                        // means fall back to `text` for both BM25 and dense
+                        // embedding. Non-NULL lets a caller supply a distinct
+                        // representation while keeping the original text for
+                        // BM25 and as the returned ranked payload.
+                        ColumnDeclaration::text("dense_text").nullable(),
                         ColumnDeclaration::timestamp("created_at"),
                         ColumnDeclaration::timestamp("updated_at"),
                     ],
@@ -71,6 +92,20 @@ impl CorpusDocumentStore {
             "corpus_content_changes",
             vec!["content_id".to_string()],
         )])
+        .with_migrations(vec![
+            // v1 → v2: add dense_text column (additive; NULL = use lexical text).
+            // Existing rows see NULL for dense_text, which falls back to the
+            // lexical `text` column in effective_dense_text() — zero behavior change
+            // for all pre-dual-text content.
+            Migration {
+                from_version: 1,
+                to_version: 2,
+                operations: vec![SchemaOperation::AddColumn {
+                    table: "corpus_documents".to_string(),
+                    column: ColumnDeclaration::text("dense_text").nullable(),
+                }],
+            },
+        ])
     }
 
     pub fn new(storage: Arc<dyn Storage>) -> Self {
@@ -161,12 +196,81 @@ impl CorpusContentSource for CorpusDocumentStore {
         else {
             return Ok(None);
         };
+        // dense_text is NULL when not set (existing rows and all puts that did not
+        // supply a dense-composition text). None → effective_dense_text() falls back
+        // to text, preserving identical behavior for existing callers.
+        let dense_composition_text = match row.get("dense_text") {
+            Some(TypedValue::Text(dt)) => Some(dt.clone()),
+            _ => None,
+        };
         Ok(Some(CorpusContentRecord {
             id: id.to_string(),
             revision: *revision,
             digest: digest.clone(),
             text: text.clone(),
+            dense_composition_text,
         }))
+    }
+
+    /// Optimized batch fetch using a single WHERE…IN query. Overrides the
+    /// trait default (N serial reads) for the standalone store path.
+    fn records_for(
+        &self,
+        ids: &[&str],
+    ) -> Result<HashMap<String, CorpusContentRecord>, CorpusKitError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let values: Vec<TypedValue> = ids
+            .iter()
+            .map(|id| TypedValue::Text(id.to_string()))
+            .collect();
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "corpus_documents",
+                Some(&StoragePredicate::In(
+                    Column::new("corpus_documents", "content_id"),
+                    values,
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        let mut result = HashMap::new();
+        for row in &rows {
+            let (
+                Some(TypedValue::Text(content_id)),
+                Some(TypedValue::Int(revision)),
+                Some(TypedValue::Text(digest)),
+                Some(TypedValue::Text(text)),
+            ) = (
+                row.get("content_id"),
+                row.get("revision"),
+                row.get("digest"),
+                row.get("text"),
+            )
+            else {
+                continue;
+            };
+            let dense_composition_text = match row.get("dense_text") {
+                Some(TypedValue::Text(dt)) => Some(dt.clone()),
+                _ => None,
+            };
+            result.insert(
+                content_id.clone(),
+                CorpusContentRecord {
+                    id: content_id.clone(),
+                    revision: *revision,
+                    digest: digest.clone(),
+                    text: text.clone(),
+                    dense_composition_text,
+                },
+            );
+        }
+        Ok(result)
     }
 
     fn changes(
@@ -260,17 +364,32 @@ impl CorpusContentSource for CorpusDocumentStore {
     }
 }
 
-impl CorpusContentStore for CorpusDocumentStore {
-    fn put(
+impl CorpusDocumentStore {
+    /// Insert or update canonical content with an optional dense-composition
+    /// text for the float vector lane. The `dense_composition_text` is stored
+    /// in `corpus_documents.dense_text` (NULL when None) and returned in every
+    /// subsequent `record()` call so the engine can recompose the dense vector
+    /// on any retrain or reindex without external input.
+    ///
+    /// Idempotence: if BOTH `text` AND `dense_composition_text` are unchanged
+    /// from the persisted row, the call is a no-op (same record, no revision
+    /// bump, no journal entry). A change to either bumps the revision.
+    pub fn put_with_dense_text(
         &self,
         text: &str,
+        dense_composition_text: Option<&str>,
         id: &str,
         now_millis: i64,
     ) -> Result<CorpusContentRecord, CorpusKitError> {
         let digest = content_digest(text);
         if let Some(existing) = self.record(id)? {
-            // Idempotence anchor: identical text is a no-op.
-            if existing.digest == digest {
+            // Idempotence anchor: both lexical text (same digest) AND dense text
+            // must match for a no-op. A changed dense text without a changed lexical
+            // text still bumps the revision — the dense vector must be recomposed
+            // and the coverage row invalidated.
+            if existing.digest == digest
+                && existing.dense_composition_text.as_deref() == dense_composition_text
+            {
                 return Ok(existing);
             }
             let bumped = CorpusContentRecord {
@@ -278,11 +397,19 @@ impl CorpusContentStore for CorpusDocumentStore {
                 revision: existing.revision + 1,
                 digest: digest.clone(),
                 text: text.to_string(),
+                dense_composition_text: dense_composition_text.map(|s| s.to_string()),
             };
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
             values.insert("revision".into(), TypedValue::Int(bumped.revision));
             values.insert("digest".into(), TypedValue::Text(digest.clone()));
             values.insert("text".into(), TypedValue::Text(text.to_string()));
+            values.insert(
+                "dense_text".into(),
+                match dense_composition_text {
+                    Some(d) => TypedValue::Text(d.to_string()),
+                    None => TypedValue::Null,
+                },
+            );
             values.insert("updated_at".into(), TypedValue::Timestamp(now_millis));
             self.storage
                 .row_store()
@@ -303,12 +430,20 @@ impl CorpusContentStore for CorpusDocumentStore {
             revision: 1,
             digest: digest.clone(),
             text: text.to_string(),
+            dense_composition_text: dense_composition_text.map(|s| s.to_string()),
         };
         let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
         values.insert("content_id".into(), TypedValue::Text(id.to_string()));
         values.insert("revision".into(), TypedValue::Int(1));
         values.insert("digest".into(), TypedValue::Text(digest.clone()));
         values.insert("text".into(), TypedValue::Text(text.to_string()));
+        values.insert(
+            "dense_text".into(),
+            match dense_composition_text {
+                Some(d) => TypedValue::Text(d.to_string()),
+                None => TypedValue::Null,
+            },
+        );
         values.insert("created_at".into(), TypedValue::Timestamp(now_millis));
         values.insert("updated_at".into(), TypedValue::Timestamp(now_millis));
         self.storage
@@ -317,6 +452,20 @@ impl CorpusContentStore for CorpusDocumentStore {
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         self.journal(CHANGE_KIND_UPSERT, id, 1, Some(&digest), now_millis)?;
         Ok(fresh)
+    }
+}
+
+impl CorpusContentStore for CorpusDocumentStore {
+    fn put(
+        &self,
+        text: &str,
+        id: &str,
+        now_millis: i64,
+    ) -> Result<CorpusContentRecord, CorpusKitError> {
+        // Delegate to put_with_dense_text with None — no dense-composition text.
+        // Existing callers see zero behavior change: dense_text is NULL, and
+        // effective_dense_text() falls back to text for both BM25 and embedding.
+        self.put_with_dense_text(text, None, id, now_millis)
     }
 
     fn remove(&self, id: &str, now_millis: i64) -> Result<(), CorpusKitError> {

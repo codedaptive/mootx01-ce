@@ -34,3 +34,34 @@ Findings closed by the CE 1.0.35 work, prepared on `develop/1.0.x` at
 
 Rust counts are unchanged from the baseline and serve as the cross-language
 parity check.
+
+---
+
+# Addendum — July 25, 2026 (second wave)
+
+Findings closed on `develop/1.0.x` at `95493f61`. Reported-in names the
+commit that introduced the condition.
+
+## Closed
+
+| # | Severity | Issue | Reported in | Fix commits |
+|---:|---|---|---|---|
+| 1 | High | Encrypted-copy verifier was insufficient to protect the plaintext original before the migration swap moved it to Trash | `c0180731` | `1aa9fe02` |
+| 2 | Medium | A stale no-encrypt marker could downgrade a later estate creation to plaintext | `3714d29f` | `1aa9fe02` |
+| 3 | Medium | The Rust upgrade leg minted the estate key before quiescing the daemon and left it beside the plaintext estate on failure, making later opens fail while the failure message claimed the estate remained usable | `8a7953d8` | `8bdbf1e8` |
+| 4 | Medium | The stable-release preflight warned and shipped unsigned Windows binaries when signing credentials were missing | not reported | `95493f61` |
+| 5 | Low | The estate fixture tool ran cleanup before its production-path guard, so pointing it at the real data directory deleted the estate before the guard could refuse | `4b0ab955` | `253cebf1` |
+| 6 | Informational | A candidate build could be labeled with a version that did not match its source tree | not reported | `b885c060` |
+
+## Suite counts
+
+| Suite | Count |
+|---|---:|
+| `apps/mootx01` Swift | 296 |
+| `LocusKit` Swift | 818 |
+| `mootx01` Rust | 225 |
+| `PersistenceKit` Rust | 323 |
+| `AriaMcpKit` Rust | 454 |
+
+Rust counts are unchanged from the prior record and serve as the
+cross-language parity check.

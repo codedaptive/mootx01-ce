@@ -187,6 +187,13 @@ let package = Package(
                 "AriaMCP",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                // GeniusLocusKitMigrations: test helpers that replicate the serve open
+                // path must call GLKMigrationCatalog.prepare between kit.open and
+                // kit.wireGLKSubstores, exactly as ServeCommand does. Fresh estates need
+                // prepare to stamp the GLK 1.1 format before the semantic substore gate
+                // (requireCurrent) will pass. This dep is test-only — production callers
+                // already go through prepare before wiring.
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 .product(name: "CognitionKit", package: "CognitionKit"),
                 .product(name: "LocusKit", package: "LocusKit"),

@@ -272,6 +272,36 @@ impl CorpusContentEngine {
         // One resident-index rebuild per burst.
         self.begin_deferred_vector_index()?;
 
+        // Three-state auto-train (Kinsta-fix): once per batch, before per-document
+        // work. Mirrors Swift `drainIndexBatch` Phase 0 `batchTrainIfNeeded`.
+        // Prevents a degenerate rank-1 basis from freezing when the queue drain
+        // fires per-document (impatient inline encoding path).
+        let batch_now_millis = (drain_now() * 1000.0) as i64;
+        self.batch_train_if_needed(batch_now_millis)?;
+
+        // Pre-scan upsert jobs and batch-fetch all source records in one WHERE…IN
+        // query instead of N serial source.record calls (Cause 4 fix). Over-
+        // fetching (stale/deduped jobs) is harmless — unused entries are ignored.
+        let mut seen_pre_ids = std::collections::HashSet::new();
+        let upsert_ids: Vec<String> = batch
+            .iter()
+            .filter_map(|job| {
+                let Ok(payload) = serde_json::from_slice::<ContentIndexJob>(&job.payload) else {
+                    return None;
+                };
+                if payload.kind == ContentIndexJobKind::Upsert
+                    && seen_pre_ids.insert(payload.content_id.clone())
+                {
+                    Some(payload.content_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Convert owned Strings to &str slices for the batch fetch.
+        let upsert_id_refs: Vec<&str> = upsert_ids.iter().map(|s| s.as_ref()).collect();
+        let source_records = self.source_records_for(&upsert_id_refs)?;
+
         let mut encoded_ids: Vec<String> = Vec::new();
         let mut completions: Vec<(JobId, ObservationStatus)> = Vec::with_capacity(batch.len());
         let mut counts_updates: Vec<(String, i64, String, String)> = Vec::new();
@@ -302,7 +332,8 @@ impl CorpusContentEngine {
                     .as_ref()
                     .map(|key| prepared_upserts.contains(key))
                     .unwrap_or(false);
-                match self.prepare_queue_job(&payload, work_now, content_already_prepared) {
+                let prefetched = source_records.get(payload.content_id.as_str()).cloned();
+                match self.prepare_queue_job(&payload, work_now, content_already_prepared, prefetched) {
                     Ok((job_checkpoints, job_counts_update)) => {
                         if payload.kind == ContentIndexJobKind::Upsert {
                             encoded_ids.push(payload.content_id.clone());
@@ -362,6 +393,18 @@ impl CorpusContentEngine {
                 )),
             });
         }
+        // Post-encode coordination fires BEFORE the terminal queue reply so
+        // the callback's work is covered by drain-completion accounting:
+        // await-drain waits for pending+in_flight == 0, and jobs stay
+        // in-flight until the reply below. GLK wires room rollup AND
+        // drain-stage distillation into this callback
+        // (SPEC_DISTILLATION_STORAGE §7.1) — this ordering is what makes
+        // "a fully drained estate is a fully distilled estate" a real
+        // barrier instead of a race. Mirrors the Swift
+        // drainContentQueueOnce ordering.
+        if !encoded_ids.is_empty() {
+            self.fire_on_encoded(&encoded_ids);
+        }
         if let Err(error) = queue.reply_batch(&completions) {
             let error = CorpusKitError::StoreUnavailable(format!("content reply batch: {error:?}"));
             return Err(match self.publish_vector_index() {
@@ -371,9 +414,6 @@ impl CorpusContentEngine {
                      {publication_error:?}"
                 )),
             });
-        }
-        if !encoded_ids.is_empty() {
-            self.fire_on_encoded(&encoded_ids);
         }
         Ok(batch.len())
     }
@@ -725,7 +765,7 @@ mod tests {
             Some("retry-cursor".to_string()),
         );
         let (first_checkpoints, first_counts) = engine
-            .prepare_queue_job(&job, 11, false)
+            .prepare_queue_job(&job, 11, false, None)
             .expect("prepare first attempt");
         let first_counts = vec![first_counts.expect("first counts update")];
 
@@ -744,7 +784,7 @@ mod tests {
             .expect("release writer lock");
 
         let (retry_checkpoints, retry_counts) = engine
-            .prepare_queue_job(&job, 12, false)
+            .prepare_queue_job(&job, 12, false, None)
             .expect("prepare retry");
         let retry_counts = vec![retry_counts.expect("retry counts update")];
         engine

@@ -577,6 +577,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
         revision: 1,
         digest: content_digest(anchor_text),
         text: anchor_text.into(),
+        dense_composition_text: None,
     };
     let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -614,6 +615,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
         revision: 1,
         digest: content_digest(late_text),
         text: late_text.into(),
+        dense_composition_text: None,
     };
     source.add(late.clone());
     let admission_engine = Arc::clone(&engine);
@@ -661,6 +663,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         revision: 1,
         digest: content_digest(anchor_text),
         text: anchor_text.into(),
+        dense_composition_text: None,
     };
     let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -700,6 +703,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         revision: 1,
         digest: content_digest(pending_text),
         text: pending_text.into(),
+        dense_composition_text: None,
     };
     source.add(pending.clone());
 
@@ -774,6 +778,7 @@ fn provider_publication_marker_survives_reopen_before_admission() {
         revision: 1,
         digest: content_digest(text),
         text: text.into(),
+        dense_composition_text: None,
     };
     let source = Arc::new(PublicationRaceSource::new(vec![pending.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -1140,12 +1145,14 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
                 revision: 1,
                 digest: content_digest(text_a),
                 text: text_a.into(),
+                dense_composition_text: None,
             },
             CorpusContentRecord {
                 id: "drawer-b".into(),
                 revision: 1,
                 digest: content_digest(text_b),
                 text: text_b.into(),
+                dense_composition_text: None,
             },
         ],
     });
@@ -1189,12 +1196,14 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 revision: 1,
                 digest: content_digest("alpha provider coverage"),
                 text: "alpha provider coverage".into(),
+                dense_composition_text: None,
             },
             CorpusContentRecord {
                 id: "drawer-b".into(),
                 revision: 1,
                 digest: content_digest("beta provider coverage"),
                 text: "beta provider coverage".into(),
+                dense_composition_text: None,
             },
         ],
     });

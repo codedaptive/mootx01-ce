@@ -107,6 +107,44 @@ public enum FloatLaneOutcome: Sendable {
     case storeError(Error)
 }
 
+// MARK: - FloatDiscriminationSignal
+
+/// Per-query discrimination signal from the dense float lane.
+///
+/// Measures how spread the top-K cosine similarity scores are, distinguishing
+/// a contrastive regime (clear semantic winner) from a saturated regime (all
+/// scores near-uniform, as observed with short chat turns dominated by stopword
+/// mass — pairwise document cosines 0.93–0.98 collapse query-to-document cosines
+/// to a similarly narrow band).
+///
+/// **Statistic choice — relative spread:**
+/// `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
+/// - Saturated regime (short-text RI vectors): spread ≈ 0.05 (no clear winner).
+/// - Contrastive regime (meaningful semantic hit): spread ≥ 0.15.
+/// - Only two values needed: the first and last of the already-sorted `.hits`
+///   list — O(1) cost with zero extra store access or embed calls.
+/// - Degrades safely when `maxSim ≤ 0`: returns 0.0 (treat as saturated).
+///
+/// **Design boundary:** CorpusKit computes and reports; GLK (RecallDirector)
+/// decides what to do with the signal. CorpusKit never changes behaviour based
+/// on it — measurement only. Standalone CorpusKit consumers receive the raw
+/// signal for their own fusion decisions.
+public struct FloatDiscriminationSignal: Sendable {
+    /// Relative spread of top-K hit cosines: (max − min) / max (or 0 when max ≤ 0).
+    ///
+    /// 0.0 = perfectly saturated (all scores identical, or max cosine non-positive);
+    /// 1.0 = maximally discriminating (best score, worst near 0).
+    ///
+    /// Threshold guidance for GLK consumers (defined in RecallDirector):
+    ///   < 0.10 → clearly saturated regime — strong discount.
+    ///   0.10–0.15 → transition band — partial discount.
+    ///   ≥ 0.15 → contrastive — no discount (discriminationFactor = 1.0).
+    public let relativeSpread: Float
+
+    /// Hit count K used to compute the spread (top-K hits, after limit truncation).
+    public let hitCount: Int
+}
+
 /// CorpusKit OSLog logger (category "CorpusKit").
 ///
 /// Used by `floatNearest` to log store errors so they are never swallowed.
@@ -1080,57 +1118,112 @@ public actor Corpus {
         // serially. For N=1 this is byte-identical to the single-provider ingest.
         // Each slot embeds independently under its own modelID; the
         // VectorStore/BasisStore keys keep the N providers' rows apart.
-        // `allChunks` is loaded lazily and shared across slots that take the
-        // first-ingest train path (the corpus snapshot is the same for every
-        // provider).
+        // `allChunks` is loaded lazily and shared across slots that need it for
+        // either first-ingest train or growth retrain (the corpus snapshot is the
+        // same for every provider in the same ingest call).
+        //
+        // Minimum chunk count the per-doc auto-train grows toward before this
+        // slot's basis is considered stable. Below this count a 2× corpus growth
+        // triggers a retrain, mirroring Phase 1b's full-corpus-first strategy for
+        // the impatient encode path.
+        //
+        // Failure mode prevented: a single-document first ingest produces a
+        // rank-1 LSA SVD (degenerate basis). Without growth retrains, every
+        // subsequent per-doc ingest folds onto this 1-doc basis, collapsing all
+        // query vectors to ~zero cosine — the Kinsta-verified regression where
+        // any@5 recall fell from 0.853 to 0.56 on LongMemEval 50q.
+        //
+        // Growth retrains stop once trainedChunkCount reaches this threshold;
+        // above it only explicit reindex(now:) retrains (same contract as before
+        // for a mature corpus). The constant matches Phase 1b's design intent and
+        // produces at most log₂(50) ≈ 6 retrains before the basis is stable.
+        let perDocAutoRetrainStableChunkThreshold = 50
+
         var cachedAllChunks: [Chunk]?
         var foldInSlotIndices: [Int] = []
         for index in slots.indices {
-            // First-ingest auto-train (mission 6a-ii-β): when this slot has a
-            // fresh-basis blob (trainable provider) AND no basis has been
-            // persisted yet, train a fresh basis on the CURRENT corpus snapshot
-            // (which now includes the just-inserted chunks) and re-embed every
-            // chunk under the trained basis. This is the ONLY implicit train
-            // trigger. Subsequent ingests (once a basis exists) take the fold-in
-            // path: `embedFloat` projects new chunks onto the FROZEN basis
-            // without retraining — LSA/NMF cannot incrementally refactor a basis,
-            // so a per-ingest retrain would be both wrong and wasteful. Explicit
-            // `reindex(now:)` retrains on growth. The auto-train gate is the
-            // `!hasBasis` check below, NOT the presence of the factory blob: a
-            // reopened-from-basis corpus keeps its factory blob (the frozen-after-
-            // restart fix) but already has a persisted basis, so it falls through
-            // to the fold-in path here and does not auto-train on ingest. Training
-            // stays SERIAL — it mutates the slot's basis and re-embeds the whole
-            // corpus; only the fold-in compute (phase 2) is parallelised.
+            // Three-state basis decision (mission fix for Kinsta-verified bug):
+            //
+            // (1) First-ingest: no persisted basis yet → train from scratch on
+            //     the full CURRENT corpus snapshot (which includes just-inserted
+            //     chunks) and re-embed. Same as the original first-ingest path.
+            //
+            // (2) Growth retrain: a basis exists but was trained on too few
+            //     chunks (< stableThreshold) AND the live corpus has grown to
+            //     ≥ 2× that count → retrain on the full corpus. This prevents
+            //     a rank-1 LSA SVD trained on doc-1-only from persisting as the
+            //     frozen basis for the entire early-growth phase. Retrains thin
+            //     out exponentially (1→2→4→8→…) and stop at the threshold.
+            //     Each retrain starts from freshBasisBlob (the empty-basis
+            //     factory) so the result is from-scratch, not additive.
+            //
+            //     NOTE: "per-ingest retrain would be both wrong and wasteful"
+            //     (the original comment) refers to retraining on EVERY ingest
+            //     after the basis is stable — that still does not happen. Growth
+            //     retrains are capped at log₂(stableThreshold) total.
+            //
+            // (3) Fold-in: basis is stable (≥ stableThreshold) or hasn't grown
+            //     2× → project new chunks onto the frozen basis without retrain.
+            //     Explicit reindex(now:) retrains on demand.
+            //
+            // The auto-train gate is the persistedBasis check below, NOT the
+            // factory blob's presence: a reopened-from-basis corpus keeps its
+            // factory blob (frozen-after-restart fix) and already has a persisted
+            // basis with trainedChunkCount ≥ stableThreshold (after reindex), so
+            // it falls through to fold-in and does not auto-train. Training stays
+            // SERIAL — it mutates the slot's basis and re-embeds the whole corpus;
+            // only the fold-in compute (phase 2) is parallelised. Mirrors Phase 1b.
             if slots[index].freshBasisBlob != nil {
                 let slotProvider = slots[index].provider
-                let hasBasis = try await basisStore.load(
+                let persistedBasis = try await basisStore.load(
                     modelID: slotProvider.modelID,
                     modelVersion: slotProvider.modelVersion
-                ) != nil
-                if !hasBasis {
+                )
+
+                let needsRetrain: Bool
+                if persistedBasis == nil {
+                    // Case (1): no basis yet — first-ingest train.
+                    needsRetrain = true
+                } else if let basis = persistedBasis,
+                          basis.trainedChunkCount < perDocAutoRetrainStableChunkThreshold {
+                    // Case (2): young basis — load corpus (lazily) and check 2× growth.
+                    // Active chunks only: a removed source must not resurface.
                     let allChunks: [Chunk]
                     if let cached = cachedAllChunks {
                         allChunks = cached
                     } else {
-                        // Active chunks only — a removed source must not be
-                        // re-trained/re-embedded back into recall.
+                        allChunks = try await activeChunks()
+                        cachedAllChunks = allChunks
+                    }
+                    needsRetrain = allChunks.count >= basis.trainedChunkCount * 2
+                } else {
+                    needsRetrain = false
+                }
+
+                if needsRetrain {
+                    // Load corpus snapshot if not already loaded above (case 1
+                    // skips the young-basis check). Cached so the second slot in
+                    // a multi-slot corpus pays zero extra I/O.
+                    let allChunks: [Chunk]
+                    if let cached = cachedAllChunks {
+                        allChunks = cached
+                    } else {
                         allChunks = try await activeChunks()
                         cachedAllChunks = allChunks
                     }
                     try await trainAndPersistBasis(slotIndex: index, chunks: allChunks, now: now)
                     // Re-embed the whole corpus under the freshly-trained basis
-                    // so the chunks ingested before this first-ingest train (if
-                    // any) are embedded on the same basis as the new ones.
-                    // reembedChunks is delete-first, so no duplicate rows.
+                    // so chunks ingested before this retrain fold onto the new,
+                    // non-degenerate basis. reembedChunks is delete-first, so no
+                    // duplicate rows accumulate.
                     try await reembedChunks(slotIndex: index, allChunks, now: now)
                     continue
                 }
             }
 
-            // Fold-in path: a basis already exists (or the provider is not
-            // trainable). Embed only the NEW chunks; for a trainable provider
-            // `embedFloat` projects them onto the frozen basis (no retrain).
+            // Fold-in path: basis is stable or provider is not trainable. Embed
+            // only the NEW chunks; for a trainable provider `embedFloat` projects
+            // them onto the frozen basis (no retrain).
             foldInSlotIndices.append(index)
         }
 
@@ -1744,14 +1837,17 @@ public actor Corpus {
     /// provider's fixed seeds (the seam contract), so the persisted basis and
     /// the resulting vectors are reproducible and cross-port identical.
     ///
-    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger
-    /// is the first-ingest auto-train inside `ingest` (when a trainable provider
-    /// has no basis yet). A growth-threshold auto-retrain — retraining once the
-    /// live chunk count grows materially past `trained_chunk_count` — is a
-    /// DOCUMENTED FOLLOW-UP KNOB, deliberately NOT wired here: LSA/NMF cannot
-    /// incrementally refactor a frozen basis, so an automatic mid-stream retrain
-    /// policy needs its own decision. The staleness anchor (`trained_chunk_count`)
-    /// is persisted so that future policy can compute the delta.
+    /// `reindex` is the EXPLICIT retrain trigger. Implicit train triggers in
+    /// `ingest` are:
+    ///   (a) first-ingest: no basis persisted yet → train on the current corpus.
+    ///   (b) growth retrain (Kinsta-fix): basis is young (trainedChunkCount below
+    ///       `perDocAutoRetrainStableChunkThreshold`) AND corpus has grown to ≥ 2×
+    ///       trainedChunkCount → retrain on the full corpus. Stops once the basis
+    ///       is stable. Prevents a rank-1 LSA SVD from persisting on a 1-doc
+    ///       first-ingest corpus.
+    ///
+    /// Above the stability threshold, `ingest` only folds new chunks onto the
+    /// frozen basis; this method is the only way to retrain for a mature corpus.
     ///
     /// - Parameter now: wall-clock time for the basis `trained_at` stamp and the
     ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;
@@ -2530,6 +2626,30 @@ public actor Corpus {
         return .hits(result)
     }
 
+    /// Compute a `FloatDiscriminationSignal` from a `FloatLaneOutcome`.
+    ///
+    /// Returns non-nil only for `.hits` with at least one result. The relative spread
+    /// `(maxSim − minSim) / max(maxSim, 0.001)` is computed from the FIRST and LAST
+    /// elements of the already-sorted similarity list — O(1), zero extra I/O.
+    ///
+    /// This helper is shared by `floatNearestPerSignalWithDiscrimination` on both
+    /// `Corpus` and `CorpusContentEngine` so the measurement is defined once.
+    nonisolated internal static func discriminationSignal(
+        from outcome: FloatLaneOutcome
+    ) -> FloatDiscriminationSignal? {
+        guard case .hits(let hits) = outcome, !hits.isEmpty else { return nil }
+        // `.hits` is sorted nearest-first (highest cosine first) for nearest recall.
+        // maxSim is hits[0].similarity; minSim is hits.last!.similarity.
+        let maxSim = hits[0].similarity
+        let minSim = hits[hits.endIndex - 1].similarity
+        // Guard against non-positive maxSim: cosines can be negative on an
+        // insufficiently trained basis; treat that regime as saturated (spread = 0).
+        let spread = maxSim > 0.001 ? (maxSim - minSim) / maxSim : 0.0
+        return FloatDiscriminationSignal(
+            relativeSpread: max(0.0, spread),
+            hitCount: hits.count)
+    }
+
     /// Per-signal dense float nearest-neighbour recall (the 6b RRF-fusion seam).
     ///
     /// Runs the dense float lane independently for EVERY held provider slot,
@@ -2645,6 +2765,133 @@ public actor Corpus {
             results.append((modelID: provider.modelID, outcome: outcome))
         }
         return results
+    }
+
+    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
+    ///
+    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
+    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
+    /// The discrimination signal is non-nil exactly when the outcome is `.hits` with
+    /// at least one result; it is `nil` for all dark-lane outcomes.
+    ///
+    /// **Discrimination computation:**
+    /// For each `.hits` outcome, `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
+    /// where `maxSim` and `minSim` are the first and last cosines of the already-sorted
+    /// ranked list. This is O(1) and adds no store access or embed calls.
+    ///
+    /// **Policy boundary:** CorpusKit computes and exposes; calling code decides.
+    /// No behaviour change inside this method or anywhere in CorpusKit — measurement only.
+    /// RecallDirector (GLK) is the policy consumer: it discounts the dense contribution
+    /// when the lane self-reports degeneracy. Standalone CorpusKit consumers may use
+    /// the signal for their own fusion decisions.
+    ///
+    /// - Parameters:
+    ///   - query: the query text.
+    ///   - limit: maximum number of matches per signal.
+    /// - Returns: `(modelID, outcome, discrimination)` triples, one per held signal,
+    ///   in slot order. `discrimination` is nil for non-`.hits` outcomes.
+    public func floatNearestPerSignalWithDiscrimination(
+        query: String,
+        limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
+        // Delegate to the existing per-signal call, then compute discrimination from
+        // each `.hits` outcome's already-sorted similarity list. The existing function
+        // handles the forced-error test seam and all dark-lane paths, so this wrapper
+        // stays thin and does not duplicate that logic.
+        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
+        return perSignal.map { entry in
+            let discrimination: FloatDiscriminationSignal? = Self.discriminationSignal(from: entry.outcome)
+            return (modelID: entry.modelID, outcome: entry.outcome, discrimination: discrimination)
+        }
+    }
+
+    // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
+
+    /// Score a bounded candidate set at sub-span granularity (transient).
+    ///
+    /// For each source ID in `sourceIDs`, retrieves the ingested chunk text
+    /// via `BundleStore.chunksForSource`, concatenates chunks into a single
+    /// text body, segments it into token-window sub-spans (alphanumeric-run
+    /// rule, cross-port identical), and returns the max-cosine ∈ [0,1] across
+    /// all sub-spans for each source.
+    ///
+    /// Uses the DEFAULT slot's provider. Sub-span vectors are computed on the
+    /// fly and DISCARDED — zero persistence.
+    ///
+    /// For the `CorpusContentEngine` surface (GLK's path), use
+    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)` which resolves
+    /// `effectiveDenseText` via the canonical `CorpusContentSource` protocol
+    /// (supports both standalone and attached modes, including the dual-text
+    /// dense-composition capability from Stream A).
+    ///
+    /// - Parameters:
+    ///   - query: The query text.
+    ///   - sourceIDs: Bounded candidate source IDs (typically ~40).
+    /// - Returns: Max-cosine ∈ [0,1] per source ID. Missing keys → 0.0.
+    public func scoreSubSpans(
+        query: String,
+        sourceIDs: [String]
+    ) async -> [String: Float] {
+        guard !query.isEmpty, !sourceIDs.isEmpty else { return [:] }
+
+        // Embed the query once via the default provider.
+        let queryVec: [Float]
+        do {
+            let result = try await defaultProvider.embedFloat(query)
+            guard !result.isEmpty else { return [:] }
+            queryVec = result
+        } catch {
+            return [:]
+        }
+
+        var out: [String: Float] = [:]
+        out.reserveCapacity(sourceIDs.count)
+        for sourceID in sourceIDs {
+            // Retrieve all chunks for this source and concatenate into one body.
+            let chunks: [Chunk]
+            do {
+                chunks = try await bundleStore.chunksForSource(sourceID)
+            } catch {
+                continue
+            }
+            guard !chunks.isEmpty else { continue }
+            // Concatenate chunk text in chunk order (start-offset ascending).
+            // The full concatenated text is the scoring surface, mirroring what
+            // the ingest path stored.
+            let body = chunks
+                .sorted { $0.startOffset < $1.startOffset }
+                .map(\.text)
+                .joined(separator: " ")
+            guard !body.isEmpty else { continue }
+
+            let ranges = SubSpanScoring.subSpanRanges(
+                text: body,
+                windowTokens: SubSpanScoring.defaultWindowTokens,
+                overlapTokens: SubSpanScoring.defaultOverlapTokens)
+            guard !ranges.isEmpty else { continue }
+
+            var maxNorm: Float = 0.0
+            let utf8 = body.utf8
+            for (spanStart, spanLength) in ranges {
+                guard spanStart >= 0, spanStart + spanLength <= utf8.count else { continue }
+                let lo = utf8.index(utf8.startIndex, offsetBy: spanStart)
+                let hi = utf8.index(lo, offsetBy: spanLength)
+                guard let spanText = String(utf8[lo..<hi]) else { continue }
+                let spanVec: [Float]
+                do {
+                    let result = try await defaultProvider.embedFloat(spanText)
+                    guard !result.isEmpty else { continue }
+                    spanVec = result
+                } catch {
+                    continue
+                }
+                let cosine = SubSpanScoring.cosineSimilarity(queryVec, spanVec)
+                let norm = max(0, min(1, (cosine + 1) / 2))
+                if norm > maxNorm { maxNorm = norm }
+            }
+            if maxNorm > 0 { out[sourceID] = maxNorm }
+        }
+        return out
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane

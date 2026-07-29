@@ -51,11 +51,13 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 34 total: 11 recipe tools + 23 lens tools (moot_lens_node_motion added by
-        // node motion modeling diffusion node-layer lens).
+        // 33 total: 10 recipe tools + 23 lens tools. moot_distill replaced the
+        // listed moot_consolidate (which survives as an unlisted dispatch
+        // alias) and moot_recollect retired with the factoid tier
+        // (SPEC_DISTILLATION_STORAGE §3/§11).
         #expect(recipeNames == [
             "moot_confirm_migration",
-            "moot_consolidate",
+            "moot_distill",
             "moot_dream",
             "moot_hunt_contradictions",
             "moot_lens_anticipate",
@@ -86,7 +88,6 @@ struct RecipeToolsTests {
             "moot_recall_distilled",
             "moot_recall_precise",
             "moot_recall_shaped",
-            "moot_recollect",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -659,58 +660,74 @@ struct RecipeToolsTests {
 
     // MARK: - isRecipeTool
 
-    @Test func testIsRecipeToolReturnsTrueForAllThreeDistillationTools() {
+    @Test func testIsRecipeToolCoversDistillationToolsAndAlias() {
+        #expect(RecipeTools.isRecipeTool("moot_distill"))
+        // moot_consolidate is the ACK-gated dispatch alias — accepted, unlisted.
         #expect(RecipeTools.isRecipeTool("moot_consolidate"))
         #expect(RecipeTools.isRecipeTool("moot_recall_distilled"))
+        // moot_recollect is in the routing set as a notice-only stub (Wave 1 ACK
+        // gate): it must reach dispatch to return the removal notice. Not listed.
         #expect(RecipeTools.isRecipeTool("moot_recollect"))
     }
 
     // MARK: - tools() count
 
     @Test func testRecipeToolsCount() {
-        // 12 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
+        // 11 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
         // preciseRecall, shapedRecall, runMigration, confirmMigration, dream,
-        // consolidate, recallDistilled, recollect, huntContradictions.
-        #expect(RecipeTools.tools().count == 12)
+        // distill, recallDistilled, huntContradictions. (moot_consolidate is a
+        // dispatch alias, deliberately NOT listed.)
+        #expect(RecipeTools.tools().count == 11)
+        let names = RecipeTools.tools().map(\.name)
+        #expect(names.contains("moot_distill"))
+        #expect(!names.contains("moot_consolidate"))
+        #expect(!names.contains("moot_recollect"))
     }
 
-    // MARK: - moot_consolidate dispatch
+    // MARK: - moot_distill dispatch (and its moot_consolidate alias)
 
-    @Test func testConsolidateDispatchRoutesToRunConsolidate() async throws {
+    @Test func testDistillDispatchRoutesToRunDistill() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-dispatch"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "distill-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Empty estate has no open clusters — sweep completes with 0 factoids.
+        // Empty estate has no eligible items — sweep completes with 0.
         let result = try await dispatcher.dispatch(
-            name: "moot_consolidate",
+            name: "moot_distill",
             arguments: .object([:]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("moot_consolidate: sweep complete"))
-        #expect(text.contains("factoidsProduced: 0"))
+        #expect(text.contains("moot_distill: sweep complete"))
+        #expect(text.contains("itemsDistilled: 0"))
     }
 
-    @Test func testConsolidateDispatchAcceptsIncludeHeld() async throws {
+    @Test func testConsolidateAliasResolvesToIdenticalHandler() async throws {
+        // moot_consolidate is the ACK-gated alias for moot_distill (Wave 1 rename).
+        // With ack: "moot_distill/p1" it resolves to the same handler with identical
+        // results (and identical output text).
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-held"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-alias"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // include_held = true is accepted without error.
         let result = try await dispatcher.dispatch(
             name: "moot_consolidate",
-            arguments: .object(["include_held": .bool(true)]))
+            arguments: .object([
+                "include_held": .bool(true),
+                "ack": .string("moot_distill/p1"),
+            ]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("moot_consolidate: sweep complete"))
+        #expect(text.contains("moot_distill: sweep complete"),
+                "the alias runs the identical moot_distill handler")
+        #expect(text.contains("itemsDistilled: 0"))
     }
 
     // MARK: - moot_recall_distilled dispatch
@@ -721,20 +738,27 @@ struct RecipeToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Empty distilled tier returns 0 matches — format starts correctly.
+        // Empty estate returns 0 matches — format starts correctly.
+        // ack: "recall_distilled/v2" passes the ACK gate (Wave 1 contract change).
         let result = try await dispatcher.dispatch(
             name: "moot_recall_distilled",
-            arguments: .object(["query": .string("any query")]))
+            arguments: .object([
+                "query": .string("any query"),
+                "ack": .string("recall_distilled/v2"),
+            ]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Output starts with "found N distilled factoid(s) for: {query}" per spec §2.3.
+        // Default output starts with "found N memory(s) [distilled]" — no
+        // query echo. (echo_query:true opt-in restores the "for:" suffix.)
         #expect(text.hasPrefix("found "),
-                "moot_recall_distilled output must start with 'found N distilled factoid(s)'")
-        #expect(text.contains("distilled factoid(s) for:"),
-                "output header must include 'distilled factoid(s) for:' per spec §2.3")
+                "moot_recall_distilled output must start with 'found N memory(s) [distilled]'")
+        #expect(text.contains("memory(s) [distilled]"),
+                "output header must include 'memory(s) [distilled]'")
+        #expect(!text.contains("] for:"),
+                "default response must NOT echo the query in the header")
     }
 
     @Test func testRecallDistilledOutputFormatStartsWithFoundN() async throws {
@@ -748,6 +772,7 @@ struct RecipeToolsTests {
             arguments: .object([
                 "query": .string("knowledge synthesis"),
                 "limit": .integer(5),
+                "ack": .string("recall_distilled/v2"),
             ]))
 
         let obj = try #require(result.objectValue)
@@ -757,101 +782,235 @@ struct RecipeToolsTests {
         // First line must start with "found" per mission test requirements.
         let firstLine = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
         #expect(firstLine.hasPrefix("found "),
-                "first line must start with 'found N distilled factoid(s) for:'")
+                "first line must start with 'found N memory(s) [distilled]'")
     }
 
-    // MARK: - moot_recollect dispatch
-
-    @Test func testRecollectNonDistilledDrawerReturnsErrorResult() async throws {
+    @Test func testRecallDistilledEchoQueryOptIn() async throws {
+        // echo_query:true restores the "for: {query}" suffix that is OFF by default.
+        // This test also proves echo_query is DECODED — if it were silently ignored
+        // the header would stay short and the assertion at line 2 would fail.
+        // If it were treated as unrecognized, the unknown-arg hint mechanism would
+        // append "hint: unrecognized argument(s) ignored: echo_query" — line 3 catches that.
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-non-distilled"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-optin"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // File a regular (non-distilled) memory and get its drawer id.
-        let fileResult = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "ordinary memory content"))
-        let fileText = try #require(
-            fileResult.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Extract the drawer id from the response.
-        let drawerID = try #require(
-            Self.uuids(in: fileText).first?.uuidString,
-            "file result must contain a UUID for the captured drawer")
-
-        // Recollecting from a non-distilled drawer must return errorResult, not throw.
         let result = try await dispatcher.dispatch(
-            name: "moot_recollect",
-            arguments: .object(["drawer_id": .string(drawerID)]))
+            name: "moot_recall_distilled",
+            arguments: .object([
+                "query": .string("test echo query"),
+                "echo_query": .bool(true),
+                "ack": .string("recall_distilled/v2"),
+            ]))
 
         let obj = try #require(result.objectValue)
-        // RecollectError.notADistilledDrawer surfaces as a tool error (isError: true),
-        // not as a JSONRPC throw — matching the recipe-level refusal discipline.
-        #expect(obj["isError"]?.boolValue == true,
-                "recollecting a non-distilled drawer must return a tool error")
+        #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("not a distilled factoid"),
-                "error message must indicate the drawer is not a distilled factoid")
+        // With echo_query:true, header must echo the query.
+        #expect(text.hasPrefix("found 0 memory(s) [distilled] for: test echo query"),
+                "echo_query:true must restore 'for: {query}' suffix in header")
+        // echo_query is a declared arg — no unrecognized-arg hint must appear.
+        #expect(!text.contains("hint: unrecognized argument(s) ignored"),
+                "echo_query is declared — must NOT trigger the unrecognized-arg hint")
     }
 
-    @Test func testRecollectDispatchRoutesToRunRecollect() async throws {
+    @Test func testRecallDistilledEchoQueryDefaultOff() async throws {
+        // Without echo_query (or echo_query:false), header must NOT contain the query.
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-dispatch"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-off"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Unknown drawer id returns factoidNotFound errorResult.
-        let unknownID = UUID().uuidString
         let result = try await dispatcher.dispatch(
-            name: "moot_recollect",
-            arguments: .object(["drawer_id": .string(unknownID)]))
+            name: "moot_recall_distilled",
+            arguments: .object([
+                "query": .string("silent query test"),
+                "ack": .string("recall_distilled/v2"),
+            ]))
 
         let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true,
-                "unknown drawer_id must return a tool error (factoidNotFound)")
+        #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // factoidNotFound path: "not found — it may have been expunged"
-        #expect(text.contains("not found"),
-                "error must say the drawer was not found")
+        // Default (no echo_query) must omit the query from the header.
+        #expect(!text.contains("] for:"),
+                "default response must NOT echo the query in the header")
+        #expect(text.contains("found 0 memory(s) [distilled]"),
+                "header must still contain the count line")
     }
 
-    @Test func testRecollectOutputStartsWithExpand() async throws {
-        // Verify the output format prefix when a valid distilled drawer is supplied.
-        // We can't easily produce a full distilled drawer in a unit test without
-        // running the distillation pipeline — instead we verify the dispatch route
-        // is correctly wired by checking that a known-non-distilled drawer produces
-        // the expected errorResult shape (tested above), and verify the output FORMAT
-        // by checking the error result doesn't start with "expand:" (routing worked).
+    // MARK: - ACK gate and notice-only stub tests (Wave 1)
+
+    // moot_recollect — always returns the removed notice; no estate access.
+    @Test func testRecollectStubReturnsNoticeNeverExecutes() async throws {
+        // The tool must return the removal notice regardless of what args are
+        // passed — even with ack or arbitrary extra parameters. No estate is
+        // opened (notice fires before resolveHandle).
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-fmt"))
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-stub"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // The spec says success output starts with "expand: {drawer_id}".
-        // We verify this indirectly: a non-distilled drawer error does NOT start
-        // with "expand:", confirming the format is gated by a successful run path.
-        let fileResult = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "test content for format check"))
-        let fileText = try #require(
-            fileResult.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        let drawerID = try #require(Self.uuids(in: fileText).first?.uuidString)
 
         let result = try await dispatcher.dispatch(
             name: "moot_recollect",
-            arguments: .object(["drawer_id": .string(drawerID)]))
+            arguments: .object(["ack": .string("anything"), "query": .string("test")]))
+
         let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text == RecipeTools.recollectRemovedNotice,
+                "moot_recollect must return the exact removal notice, no more")
+        // Confirm the notice does NOT start with "CONTRACT CHANGE NOTICE:" (it
+        // is a removal statement, not a change gate — different wording).
+        #expect(!text.hasPrefix("CONTRACT CHANGE NOTICE:"),
+                "removal stub notice must be a removal statement, not a contract-change gate")
+        #expect(text.contains("moot_recollect was removed"),
+                "notice must state the tool was removed")
+    }
 
-        // A non-distilled drawer returns an error — it does NOT start with "expand:".
-        // This confirms dispatch() routes correctly to runRecollect (not to some
-        // default path that could accidentally produce "expand:"-prefixed output).
-        #expect(obj["isError"]?.boolValue == true)
-        #expect(!text.hasPrefix("expand:"),
-                "error result must not start with 'expand:' — only success output does")
+    // moot_consolidate — notice when ack absent.
+    @Test func testConsolidateWithoutAckReturnsContractNotice() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-no-ack"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_consolidate",
+            arguments: .object([:]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text == RecipeTools.consolidateContractNotice,
+                "absent ack must return the exact CONTRACT CHANGE NOTICE text")
+        #expect(text.hasPrefix("CONTRACT CHANGE NOTICE:"),
+                "notice must start with CONTRACT CHANGE NOTICE:")
+        #expect(text.contains(#"ack: "moot_distill/p1""#),
+                "notice must quote the current token")
+        // Side-effect check: no distill output in the response (estate untouched).
+        #expect(!text.contains("moot_distill: sweep complete"),
+                "no distill must have run — estate must be untouched")
+    }
+
+    // moot_consolidate — notice when ack is wrong/stale token.
+    @Test func testConsolidateWithWrongAckReturnsContractNotice() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-wrong-ack"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_consolidate",
+            arguments: .object(["ack": .string("moot_consolidate/v1")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text == RecipeTools.consolidateContractNotice,
+                "wrong ack token must return the same CONTRACT CHANGE NOTICE")
+        #expect(text.contains(#"ack: "moot_distill/p1""#),
+                "notice must always quote the current (not caller's) token")
+    }
+
+    // moot_consolidate — executes when correct ack provided.
+    @Test func testConsolidateWithCorrectAckExecutes() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "consolidate-ack-ok"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_consolidate",
+            arguments: .object(["ack": .string("moot_distill/p1")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // Correct ack passes the gate and the distill handler runs.
+        #expect(text.contains("moot_distill: sweep complete"),
+                "correct ack must pass the gate and run the distill handler")
+        // Must NOT return a contract notice.
+        #expect(!text.hasPrefix("CONTRACT CHANGE NOTICE:"),
+                "correct ack must not return a contract notice")
+    }
+
+    // moot_recall_distilled — notice when ack absent.
+    @Test func testRecallDistilledWithoutAckReturnsContractNotice() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-no-ack"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_distilled",
+            arguments: .object(["query": .string("any query")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text == RecipeTools.recallDistilledContractNotice,
+                "absent ack must return the exact CONTRACT CHANGE NOTICE text")
+        #expect(text.hasPrefix("CONTRACT CHANGE NOTICE:"),
+                "notice must start with CONTRACT CHANGE NOTICE:")
+        #expect(text.contains(#"ack: "recall_distilled/v2""#),
+                "notice must quote the current token")
+        // Side-effect check: notice fires before estate access.
+        #expect(!text.contains("found "),
+                "no recall must have run — estate must be untouched")
+    }
+
+    // moot_recall_distilled — notice when ack is wrong/stale token.
+    @Test func testRecallDistilledWithWrongAckReturnsContractNotice() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-wrong-ack"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_distilled",
+            arguments: .object([
+                "query": .string("any query"),
+                "ack": .string("recall_distilled/v1"),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text == RecipeTools.recallDistilledContractNotice,
+                "wrong ack token must return the same CONTRACT CHANGE NOTICE")
+        #expect(text.contains(#"ack: "recall_distilled/v2""#),
+                "notice must always quote the current token, not the caller's stale one")
+    }
+
+    // Schema: moot_recall_distilled exposes ack parameter.
+    @Test func testRecallDistilledSchemaExposesAckParam() throws {
+        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_distilled" })
+        let tool_ = try #require(tool, "moot_recall_distilled must appear in tools()")
+        let props = tool_.inputSchema.objectValue?["properties"]?.objectValue
+        let props_ = try #require(props, "moot_recall_distilled schema must have properties")
+        #expect(props_["ack"] != nil,
+                "moot_recall_distilled schema must expose 'ack' parameter")
+        // The ack property must be a string type.
+        let ackType = props_["ack"]?.objectValue?["type"]?.stringValue
+        #expect(ackType == "string",
+                "ack param must be type: string")
+    }
+
+    // Description: moot_recall_distilled description documents the current token.
+    @Test func testRecallDistilledDescriptionContainsToken() throws {
+        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_distilled" })
+        let tool_ = try #require(tool)
+        #expect(tool_.description.contains("recall_distilled/v2"),
+                "moot_recall_distilled description must document the current ack token")
     }
 
     // MARK: - helpers
@@ -992,12 +1151,15 @@ struct RecipeToolsSecurityTests {
         let handle = try await openEstate(in: kit)
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
+        // ack: "recall_distilled/v2" passes the ACK gate (Wave 1 contract change)
+        // so the call reaches the limit-validation guard, which must still throw.
         await #expect(throws: JSONRPCError.self) {
             _ = try await dispatcher.dispatch(
                 name: "moot_recall_distilled",
                 arguments: .object([
                     "query": .string("test"),
                     "limit": .integer(0),
+                    "ack": .string("recall_distilled/v2"),
                 ]))
         }
     }

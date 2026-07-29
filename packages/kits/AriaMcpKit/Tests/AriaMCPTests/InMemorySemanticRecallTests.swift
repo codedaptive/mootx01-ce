@@ -36,6 +36,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
 import VectorKit
@@ -72,6 +73,13 @@ private func openInMemoryEstateWithSemanticRecall()
     // Idempotent estate create + open — mirrors AriaMCPMain's create/open pattern.
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+    // Stamp the GLK 1.1 estate format, mirroring ServeCommand's GLKMigrationCatalog.prepare
+    // call that sits between kit.open and kit.wireGLKSubstores in production. On a fresh
+    // estate this is a fast path: no legacy chunks table detected, .current stamped
+    // immediately. Without this call, wireGLKSubstores throws "estate migration required
+    // before GLK 1.1 can open semantic substores".
+    _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
 
     // Shared-content 1.1: the canonical wiring seam constructs the
     // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter on
@@ -232,6 +240,8 @@ struct InMemorySemanticRecallTests {
             let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
             defer { Task { try? await kit.close(handle) } }
 
+            // Stamp the GLK 1.1 estate format before wiring. Fresh-estate fast path.
+            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
             // Shared-content 1.1: canonical wiring seam on the same PG
             // storage handle — storage-agnostic, same as in-memory and SQLite.
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
