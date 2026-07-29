@@ -448,6 +448,21 @@ public extension Estate {
         guard let refreshed = try await store.getDrawer(id: rowID) else {
             throw LocusKitError.drawerNotFound(id: rowID)
         }
+
+        // AND-in the cleared operational bitmap to lower the room/wing
+        // operationalAND aggregate. updateDatasetContent clears bit 19
+        // (hasCurrentRepresentation) on a live (non-tombstoned) drawer;
+        // if the room AND previously showed bit 19 = 1 (all drawers
+        // distilled), the sweep would otherwise falsely skip the room.
+        // Lowering is always safe (under-approximation). Tombstone/expunge
+        // paths need no AND-in — the sweep only visits active drawers.
+        let nodeNames = try await store.resolveNodeNames(parentNodeIds: [refreshed.parentNodeId])
+        let resolved = nodeNames[refreshed.parentNodeId] ?? (wing: "", room: "")
+        try await containerFP.andInOperational(
+            wing: resolved.wing, room: resolved.room,
+            operational: refreshed.operationalBitmap,
+            now: now)
+
         return refreshed
     }
 

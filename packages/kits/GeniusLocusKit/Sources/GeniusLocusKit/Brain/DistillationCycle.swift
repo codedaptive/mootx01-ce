@@ -186,22 +186,41 @@ public extension GeniusLocusKit {
     ) async throws -> Int {
         let estate = try estate(for: handle)
         var produced = 0
-        // Page the drawers table in bounded, id-ordered pages so no single
-        // storage call materializes the whole estate (same cursor the
-        // reindex backfill uses). activeDrawersAfter already excludes
-        // tombstoned rows.
-        var cursor: String?
-        let pageSize = 500
-        pages: while true {
-            let page = try await estate.activeDrawersAfter(id: cursor, limit: pageSize)
-            if page.isEmpty { break }
-            cursor = page.last?.id
-            for drawer in page {
-                if let cap = limit, produced >= cap { break pages }
+
+        // Rooms-first sweep: enumerate room-level fingerprint entries, skip
+        // rooms whose operationalAND proves every active drawer already carries
+        // bit 19 (hasCurrentRepresentation), and load the remaining rooms via
+        // drawersIn(wing:room:).
+        //
+        // Safety invariant — AND is an under-approximation:
+        //   Falsely-ABSENT bit 19 in operationalAND → room scanned unnecessarily
+        //   (harmless over-work).  Falsely-PRESENT bit 19 in operationalAND
+        //   would skip a room with eligible work (UNSAFE); rebuildAll at estate
+        //   open prevents this by recomputing the AND from scratch.
+        //   Mid-session, the AND can only worsen in the safe direction (capture
+        //   lowers AND; only rebuildAll raises it).
+        let rooms = try await estate.roomLevelFingerprints()
+        let skipBit = DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+
+        rooms: for entry in rooms {
+            // Skip this room when the AND proves every active drawer already
+            // has bit 19 set.  The AND is an under-approximation so if it
+            // shows 1 for bit 19 the true AND is also 1 — safe to skip.
+            if (entry.fingerprint.operationalAnd & skipBit) == skipBit { continue }
+
+            let drawers = try await estate.drawersIn(wing: entry.wing, room: entry.room)
+            for drawer in drawers {
+                if let cap = limit, produced >= cap { break rooms }
                 guard !drawer.content.isEmpty else { continue }
-                // Eligibility (§7.1): never distilled, or distilled under a
-                // different (older/newer) pipeline contract.
-                guard drawer.distilled == nil
+                // Eligibility (§7.1): bit 19 (has_current_representation)
+                // clear means the row has no representation yet; OR the
+                // representation was produced under a different pipeline
+                // contract (cookbook §2.4.1 / SPEC §7.1). The bitmap test
+                // replaces the previous `distilled == nil` column-presence
+                // check — both are correct (§4 invariant), but the bit is
+                // the authoritative indicator and avoids materializing the
+                // text column for the eligibility read.
+                guard !drawer.hasCurrentRepresentation
                     || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
                 else { continue }
                 if try await distillItem(
@@ -210,7 +229,6 @@ public extension GeniusLocusKit {
                     produced += 1
                 }
             }
-            if page.count < pageSize { break }
         }
         return produced
     }

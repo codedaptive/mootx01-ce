@@ -447,6 +447,15 @@ public actor Estate {
     /// involvement). This is the seam GLK's distillation paths (drain-stage
     /// and `moot_distill` sweep) write through.
     ///
+    /// After a successful write, OR bit 19 (`hasCurrentRepresentation`)
+    /// into the room/wing container-fingerprint aggregate so that any
+    /// subsequent recall filter on `.hasFeatureFlag(.hasCurrentRepresentation)`
+    /// does not falsely exclude this container mid-session without requiring
+    /// an estate reopen. The OR aggregate is monotone — ORing a set bit is
+    /// always safe. Clear paths need no rollup change: stale set bits are a
+    /// harmless over-approximation (spec § 11.5); `rebuildAll` at estate open
+    /// tightens. Mirrors the `addDrawerCovered` pattern.
+    ///
     /// - Returns: Count of rows updated (0 = drawer not found).
     @discardableResult
     public func setDistilledRepresentation(
@@ -456,12 +465,24 @@ public actor Estate {
         tokenCount: Int64,
         at generatedAt: Date
     ) async throws -> Int {
-        try await store.setDistilledRepresentation(
+        let count = try await store.setDistilledRepresentation(
             drawerId: drawerId,
             distilled: distilled,
             pipelineVersion: pipelineVersion,
             tokenCount: tokenCount,
             at: generatedAt)
+        if count == 1, let drawer = try await store.getDrawer(id: drawerId) {
+            let names = try await store.resolveNodeNames(
+                parentNodeIds: [drawer.parentNodeId])
+            let resolved = names[drawer.parentNodeId] ?? (wing: "", room: "")
+            try await containerFP.orIn(
+                wing: resolved.wing, room: resolved.room,
+                adjective: drawer.adjectiveBitmap,
+                operational: drawer.operationalBitmap,
+                provenance: drawer.provenance,
+                now: generatedAt)
+        }
+        return count
     }
 
     /// Count of active drawers still awaiting distillation (the §7.1
@@ -560,6 +581,19 @@ public actor Estate {
     public func roomLevelFingerprints() async throws
         -> [(wing: String, room: String, fingerprint: ContainerFingerprint)] {
         try await containerFP.roomLevelEntries()
+    }
+
+    /// All non-tombstoned drawers in a room, ordered by `filedAt` ascending.
+    ///
+    /// Used by `distillItemsSweep` (GeniusLocusKit) to load drawers for
+    /// rooms that survived the `operationalAND` skip-gate: rooms where
+    /// `(operationalAND & (1<<19)) == (1<<19)` are skipped entirely; for
+    /// surviving rooms this call loads all candidates in one indexed query.
+    ///
+    /// Returns an empty array when the room node does not exist.
+    /// Delegates to `store.drawersIn(wing:room:)`.
+    public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
+        try await store.drawersIn(wing: wing, room: room)
     }
 
     /// Batch by-id drawer load. Returns the drawers matching `ids` in

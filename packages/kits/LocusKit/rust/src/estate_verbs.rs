@@ -1426,6 +1426,20 @@ impl Estate {
         self.store.room_level_fingerprints()
     }
 
+    /// All non-tombstoned drawers in a room, ordered by `filedAt` ascending.
+    ///
+    /// Used by `distill_items_sweep` (GeniusLocusKit coordinator) for the
+    /// rooms-first sweep: rooms that pass the `operationalAND` skip-gate
+    /// are loaded via this call rather than a full `all_drawers` scan.
+    /// Delegates to `store.drawers_in_wing_room(wing, room)`.
+    pub fn drawers_in_wing_room(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.store.drawers_in_wing_room(wing, room)
+    }
+
     /// Time-bucketed fingerprint bit-activity series for `bit` over the most
     /// recent `bucket_count` buckets of width `bucket_seconds` (a SECONDS width;
     /// the store scales it to ms internally), ending at `ending_at` (epoch

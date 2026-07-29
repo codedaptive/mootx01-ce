@@ -79,26 +79,26 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v10 adds a UNIQUE constraint on the
-    /// associations table natural key (sourceWing, sourceRoom,
-    /// sourceDrawerId, targetWing, targetRoom, targetDrawerId, label)
-    /// — FINDING-3 duplicate-edge fix. The migration from v9 first
-    /// de-duplicates existing rows, then adds a unique index so the
-    /// constraint is enforced on upgrade paths. Fresh installs carry
-    /// the constraint inline in the table declaration. v9 added
-    /// content_fingerprint BLOB nullable to drawers (CRITICAL fix —
-    /// `fingerprintsCaptured`/`fingerprintBitSeries` previously
-    /// recomputed every drawer's Fingerprint256 from scratch on every
-    /// call; the value is now computed once at write time and read back
-    /// from this column). v8 changes nodes.merkle_root from TEXT to
-    /// BLOB (NT-Q1). v7 added content_hash BLOB nullable to drawers
-    /// (NT-L3) and snapshot_registry + snapshot_attestations tables.
-    /// v6 added order_key REAL nullable to tunnels (NT-L5). v5 added
-    /// erasure_ledger (NT-L4). v4 replaced wing/room with
-    /// parent_node_id (NT-L2). v3 added nodes (NT-L1). v2 added
-    /// keys.ext. No migration ladder beyond v8→v9 and
-    /// v9→v10 — no estate data has shipped.
-    public static let version = 10
+    /// Current schema version. v11 adds `operationalAND INT64 NOT NULL
+    /// DEFAULT -1` to `container_fingerprints`. The AND aggregate is the
+    /// per-container AND (not OR) of every active drawer's
+    /// `operationalBitmap`; its AND-identity default (-1, all bits set)
+    /// means an empty container does not falsely satisfy any AND-check.
+    /// The distillation sweep checks `(operationalAND & (1<<19)) != 0`
+    /// to skip rooms whose every drawer carries bit 19
+    /// (`hasCurrentRepresentation`). The column is an UNDER-approximation
+    /// by design: a false-absent bit is safe (room scanned unnecessarily),
+    /// while a false-present bit is UNSAFE (room skipped with eligible
+    /// work). `rebuildAll` at estate open recomputes the column from
+    /// scratch for accuracy. v10 adds a UNIQUE constraint on the
+    /// associations table natural key — FINDING-3 duplicate-edge fix.
+    /// v9 added content_fingerprint BLOB nullable to drawers. v8 changes
+    /// nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added
+    /// content_hash BLOB nullable to drawers (NT-L3). v6 added order_key
+    /// REAL nullable to tunnels (NT-L5). v5 added erasure_ledger (NT-L4).
+    /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
+    /// (NT-L1). v2 added keys.ext. No estate data has shipped.
+    public static let version = 11
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -166,6 +166,17 @@ public enum LocusKitSchema {
                                   "targetWing", "targetRoom", "targetDrawerId", "label"],
                         unique: true
                     )),
+                ]),
+                // v10 → v11: add AND-aggregate column to container_fingerprints.
+                // Default -1 (AND-identity, all bits set) so existing rows do not
+                // falsely satisfy any AND-check before the first rebuildAll. The
+                // table is derived and always recomputed at estate open, so the
+                // default value is corrected on the next open without a backfill
+                // migration. No estate data has shipped, but the migration is
+                // correct and harmless for in-development estates.
+                Migration(fromVersion: 10, toVersion: 11, operations: [
+                    .addColumn(table: "container_fingerprints",
+                               column: .bitmap("operationalAND", default: Int64(-1)))
                 ]),
             ]
         )
@@ -394,16 +405,28 @@ public enum LocusKitSchema {
     // operational / provenance axes, same headroom convention.
     // MARK: - container fingerprints (recall-pruning OR-reductions)
 
-    /// Per-container OR-reductions of the three bitmap fields, the
-    /// pruning fingerprints of spec section 11.5 that recall filter
-    /// ordering (section 7.9.4 step 1) tests before any per-row scan.
-    /// A room-level row (room non-empty) holds the OR of every active
-    /// drawer's bitmaps in that room; a wing-level row (room == "") is
-    /// the OR of its rooms. The OR is monotone, so a capture ORs the
-    /// new row's bits in incrementally; bit-clearing mutations leave
-    /// the row a sound over-approximation until a periodic rebuild
-    /// tightens it (extra set bits never prune a container that holds
-    /// a match, they only forgo a prune). Not append-only.
+    /// Per-container bitmap aggregates used by two independent pruning
+    /// mechanisms (spec § 11.5).
+    ///
+    /// **OR columns** (`adjectiveOR`, `operationalOR`, `provenanceOR`)
+    /// hold the bitwise OR of every active drawer's bitmaps in that
+    /// container. The OR is an over-approximation (a sound upper bound):
+    /// a capture ORs the new row's bits in incrementally; bit-clearing
+    /// mutations leave the row a harmless over-approximation until a
+    /// periodic rebuild tightens it. Recall filter ordering (§ 7.9.4
+    /// step 1) uses these to prune containers that cannot hold a match.
+    ///
+    /// **AND column** (`operationalAND`) holds the bitwise AND of every
+    /// active drawer's `operationalBitmap`. The AND is an
+    /// under-approximation (a sound lower bound): a false-absent bit
+    /// merely prevents a prune (safe); a false-present bit would
+    /// incorrectly skip a container with eligible work (UNSAFE). The
+    /// default is -1 (AND-identity, all bits set) so an empty container
+    /// does not falsely satisfy an AND-check. The distillation sweep
+    /// uses `(operationalAND & (1<<19)) != 0` to skip rooms whose every
+    /// drawer carries bit 19 (`hasCurrentRepresentation`). `rebuildAll`
+    /// at estate open recomputes the AND from scratch to raise any stale
+    /// under-approximation. Not append-only.
     static let containerFingerprintsTable = TableDeclaration(
         name: "container_fingerprints",
         columns: [
@@ -412,7 +435,13 @@ public enum LocusKitSchema {
             .bitmap("adjectiveOR"),
             .bitmap("operationalOR"),
             .bitmap("provenanceOR"),
-            .timestamp("updatedAt")
+            .timestamp("updatedAt"),
+            // AND-aggregate: under-approximation (lower bound). Default
+            // -1 = AND-identity (all bits set) so fresh/empty rows do
+            // not falsely suppress skipping. See v11 comment above.
+            // Column order matches Rust schema.rs to keep cross-port
+            // layout signatures byte-identical (composite fixture gate).
+            .bitmap("operationalAND", default: Int64(-1))
         ],
         primaryKey: ["wing", "room"]
     )

@@ -2558,29 +2558,57 @@ impl EstateCoordinator {
         use substrate_ml::token_compaction;
 
         let estate = self.estate_for_verb(handle)?;
-        let all_drawers: Vec<locus_kit::drawer::Drawer> =
-            estate.all_drawers().map_err(|e| remap("distill_items_sweep", "", e))?;
 
         // Optional VectorStore for fingerprint storage. Absence is non-fatal.
         let vector_store_opt = self.vector_store_for(handle);
 
         let mut produced: usize = 0;
 
-        for drawer in &all_drawers {
+        // Rooms-first sweep: enumerate room-level fingerprint entries, skip
+        // rooms whose operationalAND proves every active drawer already carries
+        // bit 19 (HAS_CURRENT_REPRESENTATION), and load the remaining rooms
+        // via drawers_in_wing_room.
+        //
+        // Safety invariant — AND is an under-approximation:
+        //   Falsely-ABSENT bit 19 in operational_and → room scanned
+        //   unnecessarily (harmless over-work).  Falsely-PRESENT bit 19
+        //   would skip a room with eligible work (UNSAFE); rebuildAll at
+        //   estate open prevents this by recomputing the AND from scratch.
+        //   Mid-session, the AND can only worsen in the safe direction
+        //   (capture lowers AND; only rebuildAll raises it).
+        let skip_bit =
+            locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let rooms = estate
+            .room_level_fingerprints()
+            .map_err(|e| remap("distill_items_sweep", "", e))?;
+
+        'rooms: for entry in &rooms {
+            // Skip this room when the AND proves every active drawer already
+            // has bit 19 set.  The AND is an under-approximation so if it
+            // shows 1 for bit 19 the true AND is also 1 — safe to skip.
+            if (entry.fingerprint.operational_and & skip_bit) == skip_bit {
+                continue;
+            }
+
+            let room_drawers = estate
+                .drawers_in_wing_room(&entry.wing, &entry.room)
+                .map_err(|e| remap("distill_items_sweep", &entry.room, e))?;
+
+            for drawer in &room_drawers {
             if let Some(cap) = limit {
                 if produced >= cap {
-                    break;
+                        break 'rooms;
                 }
-            }
-            if drawer.tombstoned_at.is_some() {
-                continue;
             }
             if drawer.content.is_empty() {
                 continue;
             }
-            // Eligibility (§7.1): never distilled, or distilled under a
-            // different (older/newer) pipeline contract.
-            if drawer.distilled.is_some()
+            // Eligibility (§7.1): bit 19 (has_current_representation) set
+            // AND pipeline version matches → already distilled, skip. The
+            // bitmap test replaces the previous `distilled.is_some()` column-
+            // presence check (cookbook §2.4.1 / SPEC §7.1). Both are correct
+            // by the §4 invariant, but the bit is the authoritative indicator.
+            if drawer.has_current_representation()
                 && drawer.distilled_pipeline_version.as_deref()
                     == Some(token_compaction::DISTILLATION_PIPELINE_VERSION)
             {
@@ -2654,7 +2682,8 @@ impl EstateCoordinator {
             }
 
             produced += 1;
-        }
+            } // end for drawer in &room_drawers
+        } // end 'rooms: for entry in &rooms
 
         Ok(produced)
     }
@@ -9306,6 +9335,147 @@ mod tests {
             );
             assert!(row.distilled_token_count.is_some());
             assert!(row.distilled_at.is_some());
+        }
+    }
+
+    // CO-DIST-AND-1: UNSAFE direction — a room with 199 distilled + 1
+    // undistilled drawer must NEVER be skipped by the sweep.  The
+    // operationalAND for the room has bit 19 = 0 (captures lower it) so
+    // the sweep must enter the room and find the 1 undistilled drawer.
+    #[test]
+    fn co_dist_and1_unsafe_direction_room_with_one_undistilled_never_skipped() {
+        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+
+        let mut coord = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap()
+        );
+        let handle = coord.open(store, OwnerCredentials::new("owner"), 0, 100).expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        let long_content = "Each item is three sentences long for matrix path. \
+                            Second sentence provides context. \
+                            Third sentence completes the fixture.";
+
+        // Capture 200 drawers in the same room.
+        let mut ids: Vec<String> = Vec::new();
+        for i in 0..200i64 {
+            let frame = LkCaptureFrame::new(
+                long_content,
+                CaptureChannel::Typed,
+                "lab",
+                LatticeAnchor::udc("0"),
+                "tester",
+                "test-v1",
+            );
+            let drawer = coord.capture(&handle, frame, NOW + i).expect("capture");
+            ids.push(drawer.id);
+        }
+
+        // Distill the first 199 via set_distilled_representation directly
+        // so we control exactly which drawer remains undistilled.
+        let estate = coord.estate_for_verb(&handle).expect("estate");
+        for id in ids.iter().take(199) {
+            estate
+                .set_distilled_representation(
+                    id, "rendered",
+                    substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION,
+                    3, NOW,
+                )
+                .expect("set_distilled_representation");
+        }
+
+        // The 200th drawer (ids[199]) is still undistilled.
+        // The sweep MUST enter the room and distill it.
+        let produced = coord
+            .distill_items_sweep(&handle, NOW, None)
+            .expect("sweep");
+        assert!(
+            produced >= 1,
+            "one undistilled drawer must be found regardless of the 199 distilled ones; got {produced}"
+        );
+    }
+
+    // CO-DIST-AND-2: Win fixture — fully-distilled rooms are skipped after
+    // the estate is reopened (rebuildAll tightens the AND aggregate so
+    // operationalAND bit 19 = 1 for all-distilled rooms, causing the
+    // sweep to skip them).
+    #[test]
+    fn co_dist_and2_win_fixture_fully_distilled_rooms_skipped_after_rebuild() {
+        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+
+        // Open two coordinators backed by the SAME store (simulating close +
+        // reopen which triggers rebuildAll).
+        let storage =
+            Arc::new(locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap())
+                as Arc<dyn DrawerStore>;
+
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(Arc::clone(&storage), OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        coord.seed_default_wings(&handle, NOW).expect("seed");
+
+        let long_content = "First sentence sets context. \
+                            Second sentence adds detail. \
+                            Third sentence is the conclusion.";
+
+        let frame = LkCaptureFrame::new(
+            long_content, CaptureChannel::Typed, "lab",
+            LatticeAnchor::udc("0"), "tester", "test-v1",
+        );
+        coord.capture(&handle, frame, NOW).expect("capture");
+
+        // First sweep: distills the one item.
+        let first = coord.distill_items_sweep(&handle, NOW, None).expect("first sweep");
+        assert!(first >= 1, "item must distill on first sweep; got {first}");
+
+        // Mid-session second sweep: room is entered (operationalAND bit 19 is
+        // still 0 from the capture), but nothing to distill.
+        let mid = coord.distill_items_sweep(&handle, NOW, None).expect("mid sweep");
+        assert_eq!(mid, 0, "mid-session sweep must produce 0 (all distilled already)");
+
+        // Check that the AND is still 0 for bit 19 mid-session.
+        let skip_bit =
+            locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let estate1 = coord.estate_for_verb(&handle).expect("estate1");
+        let entries1 = estate1.room_level_fingerprints().expect("entries1");
+        let lab_entry1 = entries1.iter().find(|e| e.room == "lab");
+        if let Some(lab) = lab_entry1 {
+            assert_eq!(
+                lab.fingerprint.operational_and & skip_bit, 0,
+                "mid-session AND must have bit 19 = 0 (rebuildAll not yet called)"
+            );
+        }
+
+        // "Reopen" by opening a second coordinator on the same store.
+        // This triggers rebuild_container_fingerprints (called inside open)
+        // which recomputes the AND from all active drawers.
+        let mut coord2 = EstateCoordinator::new();
+        let handle2 = coord2
+            .open(Arc::clone(&storage), OwnerCredentials::new("owner"), 0, 100)
+            .expect("reopen");
+
+        // After rebuildAll (via reopen) the sweep must skip the
+        // fully-distilled room and produce 0.
+        let post_reopen = coord2.distill_items_sweep(&handle2, NOW, None).expect("post-reopen sweep");
+        assert_eq!(
+            post_reopen, 0,
+            "after rebuildAll (via reopen) the fully-distilled room must be skipped; got {post_reopen}"
+        );
+
+        // Fingerprint sanity: bit 19 must be 1 in operationalAND after rebuildAll.
+        let estate2 = coord2.estate_for_verb(&handle2).expect("estate2");
+        let entries2 = estate2.room_level_fingerprints().expect("entries2");
+        if let Some(lab) = entries2.iter().find(|e| e.room == "lab") {
+            assert_eq!(
+                lab.fingerprint.operational_and & skip_bit, skip_bit,
+                "operationalAND bit 19 must be 1 after rebuildAll when all drawers carry it"
+            );
         }
     }
 

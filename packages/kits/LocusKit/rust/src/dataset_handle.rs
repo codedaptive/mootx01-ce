@@ -173,8 +173,25 @@ impl Estate {
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
         );
+        // Pre-read the current operationalBitmap so the
+        // has_current_representation bit (cookbook §2.4.1) can be cleared
+        // in the same UPDATE as the four distillation columns (§4 invariant).
+        let current_op: i64 = row_store
+            .query(T_DRAWERS, Some(&pred), &[], Some(1), None)
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?
+            .first()
+            .and_then(|r| r.get("operationalBitmap"))
+            .and_then(|v| match v {
+                TypedValue::Bitmap(n) => Some(*n),
+                TypedValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let cleared_op = current_op
+            & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(content.to_string()));
+        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(cleared_op));
         // Content changed in place → the distilled representation (a view of
         // the OLD content) is stale. NULL-on-edit in the same statement is
         // the SPEC §7.3 regeneration trigger. Mirrors Swift
@@ -232,6 +249,33 @@ impl Estate {
             .encode()
             .map_err(LocusKitError::InvalidContent)?;
         self.patch_dataset_handle_content(drawer_id, &new_json)?;
+
+        // Clear path: content changed in place so patch_dataset_handle_content
+        // already cleared bit 19 (HAS_CURRENT_REPRESENTATION) on the drawer row.
+        // AND the post-clear bitmap into the room fingerprint so the distillation
+        // sweep does not falsely skip this room.
+        //
+        // OR is monotone (safe to defer to rebuildAll); AND must be immediate to
+        // preserve the under-approximation invariant — a falsely-present bit 19
+        // in operationalAND would cause the sweep to skip a room that contains
+        // eligible work (cookbook §8.2).
+        //
+        // `and_into_operational` is a no-op when no fingerprint row exists for
+        // the room yet (returns Ok(()) silently), so this is safe to call
+        // unconditionally.
+        let cleared_op = existing.operational_bitmap
+            & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let resolved = self.store.resolve_node_names(&[existing.parent_node_id.clone()])?;
+        let (wing, room) = resolved
+            .get(&existing.parent_node_id)
+            .map(|(w, r)| (w.as_str(), r.as_str()))
+            .unwrap_or(("", ""));
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.store
+            .and_in_container_fingerprint(wing, room, cleared_op, now_secs)?;
 
         // Read back the drawer so the caller has the current storage state.
         self.store
