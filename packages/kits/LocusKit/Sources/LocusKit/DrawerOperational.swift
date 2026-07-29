@@ -33,7 +33,7 @@ import SubstrateLib
 /// ```
 /// bits 0–5    capture_channel        (contiguous, 6 cases at raw 0…5)
 /// bits 6–11   content_kind           (contiguous, 8 cases at raw 0…7)
-/// bits 12–23  feature_flags          (bitset, 8 named bits 12…19)
+/// bits 12–23  feature_flags          (bitset, 11 named bits 12…23)
 /// bit  24     state_extension flag
 /// bit  25     lineage_clustering flag (NEW in v0.6)
 /// bits 26–63  reserved
@@ -90,13 +90,16 @@ public enum ContentKind: Int, Sendable, Codable {
 
 /// Feature flags — non-exclusive set of properties a drawer may carry.
 /// Lives in bits 12–23 of `Drawer.operationalBitmap` (12-bit bitset;
-/// 8 named bits 12…19, bits 20–23 reserved). Per cookbook §2.4.
+/// 11 named bits 12…23). Per cookbook §2.4.
 ///
 /// F12 cascade (2026-05-27): field shifted from v0.35 bits 8–15 to
 /// v0.6 bits 12–23. NEW flags: `isKeystone` (bit 17, cookbook §7.2),
 /// `isLockedZone` (bit 18). 2026-07-28: `hasCurrentRepresentation`
-/// (bit 19, cookbook §2.4.1) assigned — first of the formerly reserved
-/// bits 19–23.
+/// (bit 19, cookbook §2.4.1) assigned. 2026-07-29: Wave-2 vague tier
+/// bits 20–23 assigned per cookbook §2.4.2 — `isVague` (bit 20),
+/// `representedByVague` (bit 21), `vagueLevel` 2-bit sub-field
+/// (bits 22–23, accessed via `BitField.extractField` rather than an
+/// OptionSet member because it is a contiguous integer, not a flag).
 ///
 /// Bitset encoding (one bit per value), so this is an `OptionSet`
 /// rather than an enum. `rawValue` is `Int64` so members compose
@@ -153,6 +156,43 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     ///
     /// Wire value: 1 << 19 = 524288 (0x80000).
     public static let hasCurrentRepresentation = DrawerFeatureFlags(rawValue: 1 << 19)
+
+    // ── Wave-2 vague tier bits (cookbook §2.4.2, 2026-07-29) ──────────────
+
+    /// Bit 20 — this drawer is a Wave-2 consolidated vague item.
+    ///
+    /// Set iff this drawer was synthesised by `consolidateTransactionally`
+    /// from N ≥ 3 constituent episodic drawers. Clear for every ordinary
+    /// drawer and every constituent (which carries `representedByVague`
+    /// instead).
+    ///
+    /// Invariant: set only by `consolidateTransactionally` / the Rust twin,
+    /// never outside that path. The default recall tier
+    /// (`.recallTier(.currentAndVague)`) includes vague items because
+    /// this bit does NOT imply `representedByVague`.
+    ///
+    /// Wire value: 1 << 20 = 0x100000.
+    public static let isVague = DrawerFeatureFlags(rawValue: 1 << 20)
+
+    /// Bit 21 — this drawer has been absorbed into a vague item.
+    ///
+    /// Set on each constituent when `consolidateTransactionally` runs.
+    /// The default recall tier (`.recallTier(.currentAndVague)`) excludes
+    /// drawers carrying this bit — callers widening to constituents must
+    /// pass `.recallTier(.all)` or `.recallTier(.currentOnly)`.
+    ///
+    /// Clear path (§5.3): when a vague item is expunged, `expungeGated`
+    /// clears this bit on all its constituents in the same transaction.
+    ///
+    /// Wire value: 1 << 21 = 0x200000.
+    public static let representedByVague = DrawerFeatureFlags(rawValue: 1 << 21)
+
+    // Note: bits 22–23 hold the `vague_level` 2-bit integer sub-field.
+    // That sub-field is NOT represented as an OptionSet member because
+    // it is a contiguous integer (0–2), not a flag.  It is accessed via
+    // the `Drawer.vagueLevel` computed property using
+    // `BitField.extractField(operationalBitmap, shift: 22, width: 2)`.
+    // Mask for the entire sub-field: 0xC00000.
 }
 
 // MARK: - Drawer accessors
@@ -212,6 +252,47 @@ public extension Drawer {
     var hasCurrentRepresentation: Bool {
         // Cookbook §2.4.1: has_current_representation at bit 19.
         featureFlags.contains(.hasCurrentRepresentation)
+    }
+
+    // ── Wave-2 vague tier accessors (cookbook §2.4.2) ─────────────────────
+
+    /// True when bit 20 of `operationalBitmap` is set, indicating this
+    /// drawer is a Wave-2 consolidated vague item (cookbook §2.4.2).
+    ///
+    /// Vague items are returned by the default recall tier
+    /// (`.recallTier(.currentAndVague)`) alongside ordinary drawers.
+    /// Use `vagueRecall` to retrieve their constituents.
+    var isVague: Bool {
+        // Cookbook §2.4.2: is_vague at bit 20.
+        featureFlags.contains(.isVague)
+    }
+
+    /// True when bit 21 of `operationalBitmap` is set, indicating this
+    /// drawer has been absorbed into a vague item (cookbook §2.4.2).
+    ///
+    /// Drawers with this flag are excluded from the default recall tier
+    /// (`.recallTier(.currentAndVague)`). They are reachable via the
+    /// `vague_recall` two-hop verb or by passing `.recallTier(.all)`.
+    var representedByVague: Bool {
+        // Cookbook §2.4.2: represented_by_vague at bit 21.
+        featureFlags.contains(.representedByVague)
+    }
+
+    /// The nesting depth of this drawer in the vague hierarchy,
+    /// decoded from bits 22–23 of `operationalBitmap` (cookbook §2.4.2).
+    ///
+    /// - `0` — not a vague item (ordinary episodic drawer, or clear).
+    /// - `1` — first-level vague item; constituents are ordinary drawers.
+    /// - `2` — second-level vague item; at least one constituent is itself
+    ///   a vague item. The spec caps depth at 2 — level-3 consolidation
+    ///   is rejected.
+    ///
+    /// Wire: mask 0xC00000, shift 22, width 2. Value `0b11` (3) is
+    /// reserved and treated as level 2 at read time.
+    var vagueLevel: UInt8 {
+        // Cookbook §2.4.2: vague_level at bits 22–23 (2-bit sub-field).
+        let raw = UInt8(BitField.extractField(operationalBitmap, shift: 22, width: 2))
+        return min(raw, 2)  // cap at 2: value 3 is reserved, treat as 2
     }
 
     /// True when bit 24 of `operationalBitmap` is set, indicating the
