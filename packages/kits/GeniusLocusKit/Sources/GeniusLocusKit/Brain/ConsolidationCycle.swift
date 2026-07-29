@@ -92,14 +92,26 @@ public struct ConsolidationConfig: Sendable {
 
 // MARK: - Sweep
 
+/// What one consolidation sweep did (§3.2 acts + §5.1 fold-ins) and the
+/// D10 drift evidence it observed (fold-in candidates whose nearest vague
+/// item sat beyond the D4 ceiling — the rejection counter that feeds the
+/// defrag trigger).
+public struct ConsolidationSweepReport: Sendable {
+    public let newVagueItems: Int
+    public let foldIns: Int
+    public let foldInRejections: Int
+    public var totalActs: Int { newVagueItems + foldIns }
+}
+
 extension GeniusLocusKit {
 
-    /// One bounded consolidation sweep (§3.1 + §3.2). Returns the number of
-    /// vague items captured this sweep.
+    /// One bounded consolidation sweep (§3.1 + §3.2 + §5.1). Returns the
+    /// count of consolidation acts (new vague items + fold-ins).
     ///
     /// Invoked from DreamingDaemon maintenance windows only (D9) — never
     /// from any capture path. Idempotent across re-runs: consolidated
     /// constituents carry `representedByVague` and drop out of the pool.
+    @discardableResult
     public func consolidationSweep(
         handle: EstateHandle,
         distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
@@ -107,8 +119,24 @@ extension GeniusLocusKit {
         config: ConsolidationConfig = ConsolidationConfig(),
         limit: Int? = nil
     ) async throws -> Int {
+        try await consolidationSweepReport(
+            handle: handle, distillFn: distillFn, now: now,
+            config: config, limit: limit
+        ).totalActs
+    }
+
+    /// Sweep with the full report (metrics surface for the D10/D11 defrag
+    /// policy and the maintenance diagnostics).
+    public func consolidationSweepReport(
+        handle: EstateHandle,
+        distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
+        now: Date,
+        config: ConsolidationConfig = ConsolidationConfig(),
+        limit: Int? = nil
+    ) async throws -> ConsolidationSweepReport {
+        let none = ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0)
         let estate = try estate(for: handle)
-        guard let vectorStore = vectorStores[handle] else { return 0 }
+        guard let vectorStore = vectorStores[handle] else { return none }
 
         // ── §3.1 step 1: candidate pool ────────────────────────────────
         // Aged (D1/D2), recall-quiet (D3), not already represented, and not
@@ -136,7 +164,7 @@ extension GeniusLocusKit {
                 pool.append(drawer)
             }
         }
-        guard pool.count >= config.minimumClusterSize else { return 0 }
+        guard !pool.isEmpty else { return none }
 
         // Fingerprints for the pool from the distillation-features-v1 lane.
         // Items without a lane entry (never distilled / zero-feature short
@@ -150,7 +178,7 @@ extension GeniusLocusKit {
             }
         }
         let clusterable = pool.filter { engrams[$0.id] != nil }
-        guard clusterable.count >= config.minimumClusterSize else { return 0 }
+        guard !clusterable.isEmpty else { return none }
 
         // ── D4: resolve the Hamming ceiling ────────────────────────────
         // Configured value wins; otherwise derive from the measured pairwise
@@ -169,7 +197,7 @@ extension GeniusLocusKit {
                     distances.append(EngramLib.distance(sample[i], sample[j]))
                 }
             }
-            guard !distances.isEmpty else { return 0 }
+            guard !distances.isEmpty else { return none }
             distances.sort()
             ceiling = distances[max(0, distances.count / 10 - 1)]
         }
@@ -189,6 +217,20 @@ extension GeniusLocusKit {
             let ra = find(a), rb = find(b)
             if ra != rb { parent[ra] = rb }
         }
+        // Edge typing (§3.1 vs §5.1 vs §5.4):
+        //   non-vague ↔ non-vague  → union edge (new-cluster formation, §3.1)
+        //   non-vague ↔ vague      → fold-in candidate (§5.1) — REGARDLESS of
+        //                            whether the vague item is itself pool-aged;
+        //                            an existing vague item absorbs its
+        //                            newly-aged neighbors, it never seeds a
+        //                            fresh cluster with them.
+        //   vague     ↔ vague      → union edge (vague-of-vague, §5.4).
+        // The nearest vague neighbor decides fold-in: within the ceiling it
+        // folds, beyond it the rejection feeds the D10 drift counter.
+        var nearestVague: [String: (vagueID: String, distance: Int)] = [:]
+        var offPoolMatches: [String: [(id: String, distance: Int)]] = [:]
+        var offPoolMatchIDs = Set<String>()
+        let poolDrawerByID = Dictionary(uniqueKeysWithValues: clusterable.map { ($0.id, $0) })
         for drawer in clusterable {
             parent[drawer.id] = parent[drawer.id] ?? drawer.id
             guard let probe = engrams[drawer.id] else { continue }
@@ -196,12 +238,53 @@ extension GeniusLocusKit {
                 probe: probe,
                 modelID: Self.distillationLaneModelID,
                 limit: config.neighborProbeLimit)
-            for match in matches
-            where match.itemID != drawer.id
-                && match.distance <= ceiling
-                && poolIDs.contains(match.itemID) {
-                parent[match.itemID] = parent[match.itemID] ?? match.itemID
-                union(drawer.id, match.itemID)
+            for match in matches where match.itemID != drawer.id {
+                if let mate = poolDrawerByID[match.itemID] {
+                    switch (drawer.isVague, mate.isVague) {
+                    case (false, false), (true, true):
+                        if match.distance <= ceiling {
+                            parent[mate.id] = parent[mate.id] ?? mate.id
+                            union(drawer.id, mate.id)
+                        }
+                    case (false, true):
+                        if nearestVague[drawer.id].map({ match.distance < $0.distance }) ?? true {
+                            nearestVague[drawer.id] = (mate.id, match.distance)
+                        }
+                    case (true, false):
+                        if nearestVague[mate.id].map({ match.distance < $0.distance }) ?? true {
+                            nearestVague[mate.id] = (drawer.id, match.distance)
+                        }
+                    }
+                } else {
+                    // Off-pool matches include constituents' per-item
+                    // fingerprints (bit-21 rows keep lane entries) — which of
+                    // these are VAGUE resolves after the loop; selection of
+                    // the nearest vague neighbor happens then.
+                    offPoolMatchIDs.insert(match.itemID)
+                    if !drawer.isVague {
+                        offPoolMatches[drawer.id, default: []]
+                            .append((match.itemID, match.distance))
+                    }
+                }
+            }
+        }
+        // Resolve off-pool matches once; fold-in targets must be ACTIVE vague
+        // items (a superseded vague v1's lingering lane entry must never
+        // attract new fold-ins). Pool-resident vague items are added directly.
+        let offPool = try await estate.getDrawers(ids: Array(offPoolMatchIDs))
+        var activeVagueByID = Dictionary(uniqueKeysWithValues: offPool
+            .filter { $0.isVague && $0.state != .superseded }
+            .map { ($0.id, $0) })
+        for drawer in clusterable where drawer.isVague && drawer.state != .superseded {
+            activeVagueByID[drawer.id] = drawer
+        }
+        // Nearest VAGUE off-pool neighbor per drawer (in-pool vague neighbors
+        // were selected inline above; keep whichever is nearer).
+        for (drawerID, matches) in offPoolMatches {
+            for match in matches where activeVagueByID[match.id] != nil {
+                if nearestVague[drawerID].map({ match.distance < $0.distance }) ?? true {
+                    nearestVague[drawerID] = (match.id, match.distance)
+                }
             }
         }
         var components: [String: [Drawer]] = [:]
@@ -209,17 +292,87 @@ extension GeniusLocusKit {
             components[find(drawer.id), default: []].append(drawer)
         }
 
-        // ── §3.2: the consolidation act, one cluster at a time ─────────
+        // ── §5.1: fold-ins first — items whose nearest vague neighbor is
+        // within the ceiling join that vague item's enlarged set rather than
+        // seeding a new cluster. Rejections (nearest vague beyond ceiling)
+        // count toward D10 drift.
+        var foldGroups: [String: [Drawer]] = [:]
+        var foldInRejections = 0
+        var foldedIDs = Set<String>()
+        for drawer in clusterable {
+            guard let candidate = nearestVague[drawer.id],
+                  let vagueItem = activeVagueByID[candidate.vagueID] else { continue }
+            if candidate.distance <= ceiling {
+                // A vague-of-vague constituent at the cap cannot fold higher.
+                let foldedLevel = drawer.isVague ? drawer.vagueLevel : 0
+                guard max(vagueItem.vagueLevel, foldedLevel + 1) <= config.vagueLevelCap
+                else { continue }
+                foldGroups[vagueItem.id, default: []].append(drawer)
+                foldedIDs.insert(drawer.id)
+            } else {
+                foldInRejections += 1
+            }
+        }
+        var foldIns = 0
+        for (vagueID, folded) in foldGroups {
+            if let cap = limit, foldIns >= cap { break }
+            guard let vagueItem = activeVagueByID[vagueID] else { continue }
+            let existingIDs = try await estate.vagueConstituents(of: vagueID)
+            let enlargedIDs = existingIDs + folded.map(\.id).filter { !existingIDs.contains($0) }
+            guard enlargedIDs.count >= config.minimumClusterSize else { continue }
+            let enlargedByID = Dictionary(
+                uniqueKeysWithValues: try await estate.getDrawers(ids: enlargedIDs)
+                    .map { ($0.id, $0) })
+            let enlarged = enlargedIDs.compactMap { enlargedByID[$0] }
+                .sorted { ($0.filedAt, $0.id) < ($1.filedAt, $1.id) }
+            guard let regen = composeAndDistill(
+                constituents: enlarged, config: config, distillFn: distillFn)
+            else { continue }
+            let level = max(
+                vagueItem.vagueLevel,
+                1 + (enlarged.map { $0.isVague ? $0.vagueLevel : 0 }.max() ?? 0))
+            guard level <= config.vagueLevelCap else { continue }
+            let v2 = Drawer(
+                id: UUID().uuidString,
+                content: regen.rendering,
+                parentNodeId: vagueItem.parentNodeId,
+                addedBy: "consolidation-daemon",
+                filedAt: now,
+                embeddingModelID: vagueItem.embeddingModelID,
+                operationalBitmap: DrawerFeatureFlags.isVague.rawValue
+                    | ((Int64(level) & 0b11) << 22),
+                lineageID: vagueItem.lineageID
+            )
+            try await estate.foldInTransactionally(
+                vagueV2: v2,
+                priorVagueID: vagueID,
+                enlargedConstituentIDs: enlargedIDs,
+                addedBy: "consolidation-daemon",
+                now: now)
+            if regen.fingerprint != .zero {
+                try await vectorStore.addVector(
+                    itemID: v2.id,
+                    engram: regen.fingerprint,
+                    modelID: Self.distillationLaneModelID,
+                    modelVersion: "1",
+                    filedAt: now)
+            }
+            foldIns += 1
+        }
+
+        // ── §3.2: the consolidation act, one NEW cluster at a time ─────
         var produced = 0
         let byID = Dictionary(uniqueKeysWithValues: clusterable.map { ($0.id, $0) })
-        clusters: for member in components.values
-        where member.count >= config.minimumClusterSize {
-            if let cap = limit, produced >= cap { break clusters }
+        clusters: for member in components.values {
+            if let cap = limit, produced + foldIns >= cap { break clusters }
 
-            // Capture order (D6: concatenate in capture order).
+            // Capture order (D6: concatenate in capture order); members that
+            // already folded into an existing vague item this sweep are out.
             let constituents = member
+                .filter { !foldedIDs.contains($0.id) }
                 .compactMap { byID[$0.id] }
                 .sorted { ($0.filedAt, $0.id) < ($1.filedAt, $1.id) }
+            guard constituents.count >= config.minimumClusterSize else { continue clusters }
 
             // D8: the product's level is 1 + max(constituent levels); a
             // cluster whose product would exceed the cap is rejected whole
@@ -227,39 +380,12 @@ extension GeniusLocusKit {
             let productLevel = 1 + (constituents.map { $0.isVague ? $0.vagueLevel : 0 }.max() ?? 0)
             guard productLevel <= config.vagueLevelCap else { continue clusters }
 
-            // §3.2 step 1 — compose input. Preferred path (D6): combine the
-            // original contents and distill the combination. Fallback (D7):
-            // for oversized clusters merge the constituents' EXISTING
-            // distillates (cheap — no matrix over a huge combined text);
-            // rows not yet distilled contribute their content unchanged.
-            let combined: String
-            if constituents.count > config.largeClusterFallback {
-                combined = constituents
-                    .map { $0.distilled ?? $0.content }
-                    .joined(separator: "\n")
-            } else {
-                combined = constituents.map(\.content).joined(separator: "\n\n")
-            }
-            let sentences = EideticLib.sentences(combined).map(String.init)
-            let rendering: String
-            let fingerprint: Fingerprint256
-            if sentences.count >= 3 {
-                let output = distillFn(DistillationInput(
-                    memoryContents: sentences,
-                    memoryTimestamps: nil,
-                    clusterID: constituents[0].id,
-                    sourceIDs: constituents.map(\.id)))
-                rendering = output.distilledText.isEmpty
-                    ? Self.compactionRendering(of: combined)
-                    : output.distilledText
-                fingerprint = output.featureFingerprint
-            } else {
-                rendering = Self.compactionRendering(of: combined)
-                fingerprint = DistillationPipeline.queryFingerprint(
-                    query: combined,
-                    extractFeatures: DistillationPipeline.defaultExtractor)
-            }
-            guard !rendering.isEmpty else { continue clusters }
+            // §3.2 step 1 — compose input (shared D6/D7 helper).
+            guard let regen = composeAndDistill(
+                constituents: constituents, config: config, distillFn: distillFn)
+            else { continue clusters }
+            let rendering = regen.rendering
+            let fingerprint = regen.fingerprint
 
             // §3.2 step 2 — construct the vague drawer: fresh identity and
             // FRESH lineageID (never a constituent's — §3.3/§6.3), placed in
@@ -301,6 +427,75 @@ extension GeniusLocusKit {
             }
             produced += 1
         }
-        return produced
+        return ConsolidationSweepReport(
+            newVagueItems: produced,
+            foldIns: foldIns,
+            foldInRejections: foldInRejections)
+    }
+
+    /// D6/D7 composition + distillation shared by the consolidation act and
+    /// fold-in regeneration. Returns nil only for pathological all-empty
+    /// input (a cluster of blank rows).
+    private func composeAndDistill(
+        constituents: [Drawer],
+        config: ConsolidationConfig,
+        distillFn: @Sendable (DistillationInput) -> DistillationOutput
+    ) -> (rendering: String, fingerprint: Fingerprint256)? {
+        // Preferred path (D6): combine the original contents and distill the
+        // combination. Fallback (D7): oversized clusters merge the EXISTING
+        // distillates (cheap — no matrix over a huge combined text); rows not
+        // yet distilled contribute their content unchanged.
+        let combined: String
+        if constituents.count > config.largeClusterFallback {
+            combined = constituents
+                .map { $0.distilled ?? $0.content }
+                .joined(separator: "\n")
+        } else {
+            combined = constituents.map(\.content).joined(separator: "\n\n")
+        }
+        let sentences = EideticLib.sentences(combined).map(String.init)
+        let rendering: String
+        let fingerprint: Fingerprint256
+        if sentences.count >= 3 {
+            let output = distillFn(DistillationInput(
+                memoryContents: sentences,
+                memoryTimestamps: nil,
+                clusterID: constituents[0].id,
+                sourceIDs: constituents.map(\.id)))
+            rendering = output.distilledText.isEmpty
+                ? Self.compactionRendering(of: combined)
+                : output.distilledText
+            fingerprint = output.featureFingerprint
+        } else {
+            rendering = Self.compactionRendering(of: combined)
+            fingerprint = DistillationPipeline.queryFingerprint(
+                query: combined,
+                extractFeatures: DistillationPipeline.defaultExtractor)
+        }
+        guard !rendering.isEmpty else { return nil }
+        return (rendering, fingerprint)
+    }
+
+    /// §5.2 defrag — compositionally cascade + re-consolidate; no third
+    /// mechanism exists. Expunges the drifted vague item (the Part-3
+    /// deletion cascade reverts every constituent to current-searchable in
+    /// the same transaction), then re-runs one bounded sweep over the
+    /// reverted pool. Rare-cadence policy (D10 trigger evaluation, D11
+    /// scheduling) belongs to the maintenance caller; the verb itself is
+    /// unconditional.
+    @discardableResult
+    public func defragVagueItem(
+        handle: EstateHandle,
+        vagueDrawerID: String,
+        distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
+        now: Date,
+        config: ConsolidationConfig = ConsolidationConfig()
+    ) async throws -> ConsolidationSweepReport {
+        try await expunge(handle, ExpungeFrame(
+            rowID: vagueDrawerID,
+            reason: "wave-2 defrag: cluster drift exceeded the D10 threshold",
+            confirmation: true), now: now)
+        return try await consolidationSweepReport(
+            handle: handle, distillFn: distillFn, now: now, config: config)
     }
 }

@@ -83,9 +83,12 @@ extension GeniusLocusKit {
             uniqueKeysWithValues: try await estate.getDrawers(ids: matchedIDs)
                 .map { ($0.id, $0) })
         // Preserve lane order (distance ASC per the oracle contract).
+        // Active vague items only: a fold-in supersedes the prior version in
+        // the same lineage, and its lane entry lingers until the maintenance
+        // sweep — a superseded vague version must never surface as a hit.
         let vagueHits = matchedIDs
             .compactMap { byID[$0] }
-            .filter(\.isVague)
+            .filter { $0.isVague && $0.state != .superseded }
             .prefix(hitLimit)
 
         // Hop 2: bounded hydration through _consolidated_from tunnels.

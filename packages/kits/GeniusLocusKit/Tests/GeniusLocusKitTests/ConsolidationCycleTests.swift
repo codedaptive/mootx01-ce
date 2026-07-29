@@ -17,6 +17,7 @@
 // by trace absence — the ratified semantics.
 
 import Testing
+import EngramLib
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -31,21 +32,26 @@ struct ConsolidationCycleTests {
 
     private let modelID = "test-model-v1"
 
-    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle, VectorStore) {
+    /// Provision a full GLK estate (Corpus + VectorStore mounted) — the
+    /// production shape; the expunge-based defrag path requires the corpus
+    /// registration for its cross-kit vector deletes.
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle, Void) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-consolidation-tests")
-        let estateStorage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(), backend: .inMemory))
-        _ = try await LocusKit.Estate.create(storage: estateStorage, owner: owner)
-        try await estateStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
-        let handle = try await kit.open(storage: estateStorage, owner: owner)
-
-        let vsStorage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(), backend: .inMemory))
-        try await vsStorage.open(schema: VectorStore.schemaDeclaration)
-        let vectorStore = VectorStore(storage: vsStorage)
-        await kit.registerVectorStore(vectorStore, for: handle)
-        return (kit, handle, vectorStore)
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        let params = EstateProvisionParams(
+            estateName: "Consolidation Test Estate",
+            kind: .glk,
+            zoomWindowLow: 1,
+            zoomWindowHigh: 10,
+            frameworkProfile: "KnowledgeWork",
+            syncMode: .none
+        )
+        let handle = try await kit.provision(
+            storage: storage, owner: owner, params: params,
+            embeddingModels: [.deterministic])
+        return (kit, handle, ())
     }
 
     @discardableResult
@@ -204,9 +210,82 @@ struct ConsolidationCycleTests {
         }
         let hasVague = recalled.contains(where: \.isVague)
         #expect(hasVague, "the vague item participates in Fast Recall")
-        // Shrinkage arithmetic: pool was 6 originals; default recall returns
-        // the 2 distinct items + 1 vague item — exactly the constituents gone.
-        #expect(recalled.count == distinctBodies.count + 1)
+        // Shrinkage arithmetic (AC-2): default recall is exactly the .all
+        // tier minus the represented constituents — no more, no fewer.
+        // (Count difference, not absolute count: provisioned estates carry
+        // system seed drawers, which are ordinary drawers and stay.)
+        let everything = try await kit.recall(handle, RecallFrame(
+            filterChain: [.recallTier(.all)],
+            hydrationLevel: .full,
+            ordering: .byCaptureTimeDesc
+        ))
+        #expect(everything.count - recalled.count == clusterIDs.count)
+    }
+
+    // MARK: - §5.1 fold-in
+
+    @Test("fold-in: a newly-aged neighbor joins the existing vague item's own lineage")
+    func foldInReconsolidation() async throws {
+        let (kit, handle, clusterIDs, aged, produced) = try await consolidatedEstate()
+        #expect(produced == 1)
+
+        // A fifth similar item arrives after the first consolidation…
+        let fifthID = try await captureItem(
+            body: "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria still owns the Falcon rollout checklist.",
+            kit: kit, handle: handle)
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn,
+            now: aged.addingTimeInterval(3_600), limit: nil)
+
+        // …and ages past the gate before the next maintenance window.
+        let aged2 = aged.addingTimeInterval(92 * 86_400)
+        // Explicit D4 ceiling (configured wins — the ratified alternative to
+        // per-sweep derivation): the combined-distillate fingerprint sits ~59
+        // bits from a member's per-item fingerprint on this fixture, while the
+        // provisioned system seeds tighten the DERIVED p10 ceiling below that.
+        // Production tunes D4 from real aged estates; this test pins the
+        // fold MECHANICS under a configured ceiling.
+        var foldConfig = ConsolidationConfig()
+        foldConfig.hammingCeiling = 64
+        let report = try await kit.consolidationSweepReport(
+            handle: handle,
+            distillFn: GeniusLocusKit.defaultDistillFn,
+            now: aged2,
+            config: foldConfig)
+        #expect(report.foldIns == 1, "the neighbor folds into the existing vague item")
+
+        // The active vague version carries the ENLARGED constituent set; the
+        // prior version is superseded in the SAME lineage (§3.3 containment).
+        let v2 = try await kit.vagueRecall(handle, query: "Project Falcon rollout checklist")
+        #expect(v2.vagueHits.count == 1, "exactly one ACTIVE vague version")
+        let enlarged = try await (try await kit.estate(for: handle))
+            .vagueConstituents(of: v2.vagueHits[0].id)
+        #expect(Set(enlarged) == Set(clusterIDs + [fifthID]))
+        let folded = try await (try await kit.estate(for: handle)).getDrawers(ids: [fifthID])
+        #expect(folded.first?.representedByVague == true)
+    }
+
+    @Test("§5.2 defrag = cascade + re-consolidate; constituents never orphaned")
+    func defragRecomposes() async throws {
+        let (kit, handle, clusterIDs, aged, produced) = try await consolidatedEstate()
+        #expect(produced == 1)
+        let hit = try await kit.vagueRecall(handle, query: "Project Falcon rollout checklist")
+        let vagueID = try #require(hit.vagueHits.first?.id)
+
+        let report = try await kit.defragVagueItem(
+            handle: handle,
+            vagueDrawerID: vagueID,
+            distillFn: GeniusLocusKit.defaultDistillFn,
+            now: aged.addingTimeInterval(86_400))
+        #expect(report.newVagueItems == 1, "the reverted pool re-consolidates")
+
+        let estate = try await kit.estate(for: handle)
+        let constituents = try await estate.getDrawers(ids: clusterIDs)
+        let allRepresented = constituents.allSatisfy(\.representedByVague)
+        #expect(allRepresented, "constituents are represented by the REBUILT vague item")
+        let rebuilt = try await kit.vagueRecall(handle, query: "Project Falcon rollout checklist")
+        #expect(rebuilt.vagueHits.count == 1)
+        #expect(rebuilt.vagueHits[0].id != vagueID, "the drifted vague item was expunged")
     }
 
     // MARK: - AC-3: bounded two-hop

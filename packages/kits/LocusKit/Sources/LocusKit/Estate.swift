@@ -771,6 +771,26 @@ public actor Estate {
         try await store.constituentIDsForVagueItem(vagueDrawerID: vagueDrawerID)
     }
 
+    /// Wave-2 §5.1: fold-in reconsolidation — capture the regenerated vague
+    /// version in the prior's OWN lineage (the one legitimate supersession),
+    /// with tunnels to the enlarged constituent set and bit-21 marks, then
+    /// the gate-validated predecessor flip. Delegates to
+    /// `DrawerStore.foldInTransactionally`.
+    public func foldInTransactionally(
+        vagueV2: Drawer,
+        priorVagueID: String,
+        enlargedConstituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        try await store.foldInTransactionally(
+            vagueV2: vagueV2,
+            priorVagueID: priorVagueID,
+            enlargedConstituentIDs: enlargedConstituentIDs,
+            addedBy: addedBy,
+            now: now)
+    }
+
     /// All non-tombstoned tunnels across all wings, in filed-at order.
     /// Used by the dreaming daemon to suppress candidate proposals that
     /// already have a Tunnel. Delegates to `DrawerStore.allTunnels`.

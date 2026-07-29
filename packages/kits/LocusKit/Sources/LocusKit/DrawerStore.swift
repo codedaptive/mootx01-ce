@@ -4442,6 +4442,139 @@ public actor DrawerStore {
         }
     }
 
+    /// Wave-2 §5.1 fold-in reconsolidation: capture a regenerated vague
+    /// version in the SAME lineage as the prior vague item, superseding it —
+    /// the ONE legitimate supersession in the consolidation design (§3.3:
+    /// supersession applies to vague items' own lineages, exclusively).
+    ///
+    /// One serializable transaction carries: the v2 capture, the
+    /// `supersedes` tunnel (v2 → prior), the `_consolidated_from` tunnels to
+    /// the FULL enlarged constituent set, and the `representedByVague` bit
+    /// on every constituent (idempotent OR — existing constituents already
+    /// carry it). The predecessor's state flip (`active → superseded`) then
+    /// runs through the gate via `mutateState` — the same composition
+    /// `addDrawerWithCascade` uses (the automaton must validate the
+    /// transition independently; PersistenceKit v1.0 has no nested
+    /// transactions), so fold-in's atomicity exactly matches every other
+    /// supersession in the system.
+    ///
+    /// Preconditions (thrown, not trapped): `vagueV2` carries `isVague`,
+    /// shares `priorVagueID`'s lineage (the caller regenerates content and
+    /// levels), and the enlarged set still meets D5.
+    ///
+    /// Mirrors Rust `fold_in_transactionally`.
+    public func foldInTransactionally(
+        vagueV2: Drawer,
+        priorVagueID: String,
+        enlargedConstituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        guard (vagueV2.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent(
+                "vagueV2 must have isVague (bit 20) set before foldInTransactionally")
+        }
+        guard enlargedConstituentIDs.count >= 3 else {
+            throw LocusKitError.invalidContent(
+                "fold-in requires at least 3 constituents (D5); got \(enlargedConstituentIDs.count)")
+        }
+        // Prior vague row: must exist, must be vague, must share the lineage.
+        let priorRows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(priorVagueID)),
+            orderBy: [], limit: 1, offset: nil
+        )
+        guard let priorRow = priorRows.first else {
+            throw LocusKitError.drawerNotFound(id: priorVagueID)
+        }
+        let prior = try Self.drawerFromRow(priorRow)
+        guard (prior.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent("fold-in prior \(priorVagueID) is not a vague item")
+        }
+        guard prior.lineageID == vagueV2.lineageID else {
+            throw LocusKitError.invalidContent(
+                "fold-in v2 must share the prior vague item's lineage (§3.3 containment)")
+        }
+
+        // ── Pre-transaction reads (actor-isolated values resolved here) ──
+        var constituentParentNodeIds: [String] = []
+        var constituentOpBitmaps: [Int64] = []
+        for cid in enlargedConstituentIDs {
+            let rows = try await storage.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(cid)),
+                orderBy: [], limit: 1, offset: nil,
+                columns: ["operationalBitmap", "parent_node_id"]
+            )
+            guard let row = rows.first else {
+                throw LocusKitError.drawerNotFound(id: cid)
+            }
+            constituentParentNodeIds.append(Self.string(row["parent_node_id"]))
+            constituentOpBitmaps.append(Self.int64(row["operationalBitmap"]))
+        }
+        let allParents = [vagueV2.parentNodeId, prior.parentNodeId] + constituentParentNodeIds
+        let nodeNames = try await resolveNodeNames(parentNodeIds: allParents)
+        let v2Names = nodeNames[vagueV2.parentNodeId] ?? (wing: "", room: "")
+        let priorNames = nodeNames[prior.parentNodeId] ?? (wing: "", room: "")
+
+        let supersedesTunnel = Tunnel(
+            id: "supersedes:\(vagueV2.id):\(priorVagueID)",
+            sourceWing: v2Names.wing, sourceRoom: v2Names.room, sourceDrawerId: vagueV2.id,
+            targetWing: priorNames.wing, targetRoom: priorNames.room, targetDrawerId: priorVagueID,
+            label: "supersedes", kind: .supersedes,
+            addedBy: addedBy, filedAt: now
+        )
+        let supersedesValues = Self.tunnelValues(supersedesTunnel)
+        let tunnelValuesList: [[String: TypedValue]] = zip(enlargedConstituentIDs, constituentParentNodeIds)
+            .map { (cid, pNodeId) in
+                let cNames = nodeNames[pNodeId] ?? (wing: "", room: "")
+                let t = Tunnel(
+                    id: "_consolidated_from:\(vagueV2.id):\(cid)",
+                    sourceWing: v2Names.wing, sourceRoom: v2Names.room,
+                    sourceDrawerId: vagueV2.id,
+                    targetWing: cNames.wing, targetRoom: cNames.room,
+                    targetDrawerId: cid,
+                    label: "_consolidated_from",
+                    kind: .references,
+                    addedBy: addedBy,
+                    filedAt: now
+                )
+                return Self.tunnelValues(t)
+            }
+        let constituentUpdates: [(id: String, newOpBitmap: Int64)] =
+            zip(enlargedConstituentIDs, constituentOpBitmaps).map { (cid, priorOp) in
+                (id: cid,
+                 newOpBitmap: priorOp | DrawerFeatureFlags.representedByVague.rawValue)
+            }
+        let captureBody = try gatedCaptureBody(vagueV2, now: now)
+
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await captureBody(txn)
+            _ = try await txn.rowStore.insert(table: "tunnels", values: supersedesValues)
+            for tv in tunnelValuesList {
+                _ = try await txn.rowStore.insert(table: "tunnels", values: tv)
+            }
+            for update in constituentUpdates {
+                _ = try await txn.rowStore.update(
+                    table: "drawers",
+                    values: ["operationalBitmap": .bitmap(update.newOpBitmap)],
+                    where: .eq(Column(table: "drawers", name: "id"), .text(update.id))
+                )
+            }
+        }
+
+        // Gate-validated predecessor flip — same post-transaction composition
+        // as addDrawerWithCascade (automaton §9.2).
+        try await mutateState(
+            drawerId: priorVagueID,
+            to: .superseded,
+            via: .supersede,
+            changedBy: addedBy,
+            reason: "fold-in reconsolidation, vague lineage \(vagueV2.lineageID.uuidString)",
+            now: now
+        )
+    }
+
     /// Return a bounded slice of drawers eligible for consolidation —
     /// active, non-vague, non-absorbed, with recall clock older than `olderThan`
     /// (per D3: recall clock = max(RecallTraceItem.recalledAt) for the drawer).
