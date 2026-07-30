@@ -242,11 +242,11 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 68 tools exact
+// 1. tools/list surface assertions — 71 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_68() {
+fn tools_list_count_is_71() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -260,9 +260,10 @@ fn tools_list_count_is_68() {
     // moot_hunt_contradictions recipe tool):
     //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
     //    1  federation tool (moot_federated_search)
-    //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
-    //                     confirm_migration, recall_precise, recall_shaped, dream,
-    //                     distill, recall_distilled, hunt_contradictions —
+    //   12  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //                     confirm_migration, recall_precise, recall_shaped,
+    //                     recall_vague, dream, distill, recall_distilled,
+    //                     hunt_contradictions —
     //                     moot_consolidate no longer dispatches (SPEC §3 Phase 2)
     //                     and moot_recollect retired with the factoid tier, §3/§11)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
@@ -272,10 +273,10 @@ fn tools_list_count_is_68() {
     // ----
     //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   70  total (memory adapter excluded — opt-in, off by default)
+    //   71  total (memory adapter excluded — opt-in, off by default)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 71.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
     assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());

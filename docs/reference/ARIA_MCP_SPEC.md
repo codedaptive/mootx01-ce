@@ -249,6 +249,7 @@ provenance.
 
 Twelve CognitionKit recipe tools (`moot_list_lenses`, `moot_list_recipes`,
 `moot_synthesize`, `moot_recall_precise`, `moot_recall_shaped`,
+`moot_recall_vague`,
 `moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_distill`,
 `moot_recall_distilled`,
 `moot_hunt_contradictions`),

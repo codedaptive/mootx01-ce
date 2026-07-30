@@ -51,7 +51,7 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 34 total: 11 recipe tools + 23 lens tools. moot_distill is the sole
+        // 35 total: 12 recipe tools + 23 lens tools. moot_distill is the sole
         // distillation-sweep name (its compatibility alias is gone — Phase 2 of
         // SPEC_DISTILLATION_STORAGE §3) and moot_recollect retired with the
         // factoid tier (§3/§11).
