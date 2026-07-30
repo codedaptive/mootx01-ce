@@ -8,17 +8,25 @@
 //   same construction stored vague items use (queryFingerprint over the
 //   default extractor — "p1" pins one extractor, so probe and stored
 //   fingerprints are structurally comparable) and probed against the
-//   distillation-features-v1 Hamming lane; only `isVague` rows count as
-//   hits. Vague content never blends into the base episodic index's
-//   ranking lanes (§3.3/§6.1) — this lane-probe IS its search surface.
+//   distillation-features-v1 Hamming lane; only `isVague` rows that are
+//   at most `.elevated` sensitivity are surfaced as hits. This ceiling
+//   mirrors ContradictionHunt's hardcoded posture and matches the default
+//   BitmapEvaluator ceiling injected for no-grant recall (cookbook §2.3,
+//   §D.3); it keeps restricted/secret vague items invisible without a live
+//   sensitivity grant. No grant plumbing is wired here — per ruling §D.6.
+//   Vague content never blends into the base episodic index's ranking lanes
+//   (§3.3/§6.1) — this lane-probe IS its search surface.
 //
 //   Hop 2 — bounded constituent hydration: each vague hit hydrates its
 //   constituents through `_consolidated_from` tunnels — at most K per hit
 //   and M total (D12) — into a second-pass answer set. Hydration is direct
 //   by-ID fetch (tier filters do not apply to explicit hydration; the
-//   evaluator's exclusion is a DEFAULT-search effect only). For a
-//   vague-of-vague hit, hop 2 returns its direct constituents (which are
-//   vague items); it does not auto-recurse past the D12 bounds.
+//   evaluator's exclusion is a DEFAULT-search effect only). Because a
+//   stamped vague item carries MAX(constituent tiers), gating hop 1 on
+//   ≤ .elevated also bounds constituent tiers by construction — hop-2
+//   hydration stays by-ID. For a vague-of-vague hit, hop 2 returns its
+//   direct constituents (which are vague items); it does not auto-recurse
+//   past the D12 bounds.
 
 import Foundation
 import LocusKit
@@ -86,9 +94,13 @@ extension GeniusLocusKit {
         // Active vague items only: a fold-in supersedes the prior version in
         // the same lineage, and its lane entry lingers until the maintenance
         // sweep — a superseded vague version must never surface as a hit.
+        // Sensitivity ceiling: only vague items at ≤ .elevated are surfaced
+        // without a grant (§D.3). Because a vague drawer carries MAX(constituent
+        // tiers) after stamping, gating here also bounds hop-2 constituent tiers
+        // by construction. Mirrors ContradictionHunt's hardcoded .elevated posture.
         let vagueHits = matchedIDs
             .compactMap { byID[$0] }
-            .filter { $0.isVague && $0.state != .superseded }
+            .filter { $0.isVague && $0.state != .superseded && $0.adjectiveSensitivity.isBulkExportable }
             .prefix(hitLimit)
 
         // Hop 2: bounded hydration through _consolidated_from tunnels.
