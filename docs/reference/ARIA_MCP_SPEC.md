@@ -249,9 +249,8 @@ provenance.
 
 Twelve CognitionKit recipe tools (`moot_list_lenses`, `moot_list_recipes`,
 `moot_synthesize`, `moot_recall_precise`, `moot_recall_shaped`,
-`moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_distill`
-(with `moot_consolidate` accepted as an unlisted compatibility alias —
-SPEC_DISTILLATION_STORAGE §3), `moot_recall_distilled`,
+`moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_distill`,
+`moot_recall_distilled`,
 `moot_hunt_contradictions`),
 twenty-three reasoning-lens tools (`moot_lens_*`), and five vault control tools
 (`moot_vault_export`, `moot_vault_import`, `moot_vault_status`,

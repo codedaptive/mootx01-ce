@@ -126,7 +126,7 @@ public enum PermissionsWriter {
     private static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_consolidate", "moot_synthesize",
+        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Dataset import (MX-TAB-7): creates a backend table and can read a
         // csv_path from the filesystem — same Ask posture as palace/vault import.

@@ -195,8 +195,7 @@ and write a cycle diary.
 
 Use `moot_distill` to run one distillation sweep. This populates on-row
 distilled representations of eligible memories. Run periodically or after
-significant memory growth. (`moot_consolidate` is accepted as an ACK-gated
-compatibility alias.)
+significant memory growth.
 
 Use `moot_recall_distilled` to search the distilled tier. Use
 `moot_recollect` to follow a factoid back to its source memories.

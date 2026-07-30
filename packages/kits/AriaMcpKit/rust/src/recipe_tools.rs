@@ -110,9 +110,6 @@ const DREAM: &str = "moot_dream";
 /// Per-item distillation sweep (SPEC_DISTILLATION_STORAGE §3) — mirrors
 /// Swift `RecipeTools.distillToolName`.
 const DISTILL: &str = "moot_distill";
-/// Compatibility alias for moot_distill (SPEC §3): identical handler; NOT
-/// listed in tools/list. Mirrors Swift `RecipeTools.consolidateToolName`.
-const CONSOLIDATE: &str = "moot_consolidate";
 /// Distilled-payload recall (§10.3): exact-search geometry + distilled
 /// hydration — mirrors Swift `RecipeTools.recallDistilledToolName`.
 /// ACK-GATED: requires ack: "recall_distilled/v2" (Wave 1 contract change).
@@ -130,15 +127,6 @@ const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 // Both twins must produce the exact same wire text for any given notice so
 // callers cannot observe which server port handled the request.
 // ---------------------------------------------------------------------------
-
-/// Notice returned when moot_consolidate is called without ack: "moot_distill/p1".
-/// Byte-identical to Swift `RecipeTools.consolidateContractNotice`.
-const CONSOLIDATE_CONTRACT_NOTICE: &str = concat!(
-    "CONTRACT CHANGE NOTICE: you called moot_consolidate. Its behavior changed: ",
-    "renamed to moot_distill; now writes on-row distilled representations; ",
-    "factoid drawers and the distilled tier no longer exist. ",
-    r#"If the new behavior is what you want, reissue with ack: "moot_distill/p1"."#,
-);
 
 /// Notice returned when moot_recall_distilled is called without ack: "recall_distilled/v2".
 /// Byte-identical to Swift `RecipeTools.recallDistilledContractNotice`.
@@ -173,7 +161,6 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RECALL_SHAPED
             | DREAM
             | DISTILL
-            | CONSOLIDATE
             | RECALL_DISTILLED
             | RECOLLECT
             | HUNT_CONTRADICTIONS
@@ -196,12 +183,6 @@ pub fn dispatch(
         return Ok(text_result(RECOLLECT_REMOVED_NOTICE));
     }
 
-    // moot_consolidate — ACK-gated alias. Renamed to moot_distill in Wave 1.
-    // Callers must pass ack: "moot_distill/p1" to confirm new behavior.
-    if name == CONSOLIDATE && args.get("ack").and_then(|v| v.as_str()) != Some("moot_distill/p1") {
-        return Ok(text_result(CONSOLIDATE_CONTRACT_NOTICE));
-    }
-
     // moot_recall_distilled — ACK-gated (v2 contract). Normal exact-search
     // geometry + distilled hydration; no separate distilled tier.
     if name == RECALL_DISTILLED
@@ -220,9 +201,7 @@ pub fn dispatch(
         RECALL_VAGUE => run_vague_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
-        // moot_consolidate reaches here only when ack: "moot_distill/p1" was
-        // present (ACK gate above). Runs the same handler as moot_distill.
-        DISTILL | CONSOLIDATE => run_distill_tool(args, registry),
+        DISTILL => run_distill_tool(args, registry),
         // moot_recall_distilled reaches here only when ack: "recall_distilled/v2"
         // was present (ACK gate above).
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
@@ -1213,12 +1192,11 @@ fn parse_uuid_array(
 }
 
 // ---------------------------------------------------------------------------
-// moot_consolidate
+// moot_distill
 // ---------------------------------------------------------------------------
 
 /// Run one per-item distillation sweep via the CognitionKit `run_distill`
-/// recipe body (SPEC_DISTILLATION_STORAGE §3/§7.1). Handles both
-/// `moot_distill` and its `moot_consolidate` compatibility alias.
+/// recipe body (SPEC_DISTILLATION_STORAGE §3/§7.1). Handles `moot_distill`.
 ///
 /// Mirrors Swift `RecipeTools.runDistill`. Routes through the CognitionKit
 /// library recipe surface (`cognition_kit::run_distill`) rather than calling

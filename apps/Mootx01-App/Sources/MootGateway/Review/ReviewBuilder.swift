@@ -386,7 +386,7 @@ public struct EndOfDayReviewBuilder: ReviewBuilder {
 /// contradicts, and what is retire-ready.
 ///
 /// The mission also asks for "duplicate". No surface answers it: the cohesion
-/// lens finds odd-ones-out (the opposite of duplicates), and `moot_consolidate`
+/// lens finds odd-ones-out (the opposite of duplicates), and `moot_distill`
 /// distills individual memories rather than detecting redundant pairs — and
 /// mutates the estate besides, which this module never does. That facet ships as
 /// a named gap section rather than a near-miss mapping. Closing it needs a
@@ -400,7 +400,7 @@ public struct WeeklyReviewBuilder: ReviewBuilder {
     /// copy — it names the missing surface so a consumer can report it honestly.
     static let duplicateGapNotice = """
         No read-only duplicate-detection surface exists yet: moot_lens_cohesion \
-        reports lexical outliers (the opposite of duplicates) and moot_consolidate \
+        reports lexical outliers (the opposite of duplicates) and moot_distill \
         distills single memories rather than finding redundant pairs, besides \
         mutating the estate, which reviews never do.
         """

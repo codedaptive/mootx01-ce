@@ -38,7 +38,7 @@ When new durable knowledge appears:
 3. If the estate was just bulk-imported, poll `moot_drain_status` until the encode queue settles. Imports index themselves; do not run `moot_reindex` as a routine step.
 4. Verify with `moot_estate_map`.
 5. Run `moot_dream`.
-6. Optionally run `moot_distill` to populate the distilled tier (`moot_consolidate` accepted as an ACK-gated alias).
+6. Optionally run `moot_distill` to populate the distilled tier.
 7. Search or synthesize only after the estate has been indexed and dreamt.
 
 ## End
