@@ -100,7 +100,7 @@ const ADDITIVE_WRITE_TOOLS: &[&str] =
 const MUTATION_TOOLS: &[&str] = &[
     "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
     "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-    "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_consolidate", "moot_synthesize",
+    "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
     "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
     // Dataset import (MX-TAB-7): creates a backend table and can read a
     // csv_path from the filesystem — same Ask posture as palace/vault import.
@@ -653,16 +653,9 @@ mod tests {
         let untriaged: Vec<&String> = real_tools.iter().filter(|t| !classified.contains(t.as_str())).collect();
         assert!(untriaged.is_empty(), "real tool(s) with no explicit tier classification: {untriaged:?}");
 
-        // Dispatch aliases are accepted at tools/call but deliberately NOT
-        // listed in tools/list (SPEC_DISTILLATION_STORAGE §3). They must
-        // stay classified — an unclassified alias would land in the default
-        // tier on install (FINDING_11X_PROMISE_SWEEP constraint 4) — so the
-        // staleness check exempts them.
-        let dispatch_aliases: std::collections::HashSet<&str> =
-            ["moot_consolidate"].into_iter().collect();
         let stale: Vec<&&str> = classified
             .iter()
-            .filter(|c| !real_tools.contains(**c) && !dispatch_aliases.contains(**c))
+            .filter(|c| !real_tools.contains(**c))
             .collect();
         assert!(stale.is_empty(), "classification table names tool(s) no longer in the real surface: {stale:?}");
     }

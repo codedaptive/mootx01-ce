@@ -201,7 +201,7 @@ struct ReviewActionRoutingTests {
         // The Review Center may retire, settle, and confirm. It must never be
         // able to reach moot_erase_memory or moot_withdraw_memory — a review is
         // housekeeping, not deletion.
-        let forbidden = ["moot_erase_memory", "moot_withdraw_memory", "moot_consolidate"]
+        let forbidden = ["moot_erase_memory", "moot_withdraw_memory", "moot_distill"]
         for action in ReviewActionTestFixtures.everyAction {
             #expect(!forbidden.contains(action.tool))
         }

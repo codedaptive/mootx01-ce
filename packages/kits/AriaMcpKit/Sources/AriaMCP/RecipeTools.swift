@@ -21,8 +21,6 @@
 //                                   by branch id (the human-gated write)
 //   - moot_dream, moot_distill, moot_recall_distilled
 //                                 → Brain-layer and distillation tools
-//   - moot_consolidate           → dispatch alias for moot_distill;
-//                                   ACK-gated (contract change); not listed
 //   - moot_recollect             → notice-only stub; tool removed; not listed
 //
 // The 23 lens tools (16 reasoning/federated, 4 temporal/information-theoretic,
@@ -79,10 +77,6 @@ enum RecipeTools {
     /// the on-row distilled representation of every eligible item. Delegates
     /// to the Distill recipe → GeniusLocusKit.distillItemsSweep.
     static let distillToolName = "moot_distill"
-    /// Compatibility alias for `moot_distill` (SPEC §3): resolves to the
-    /// identical handler after ACK validation; NOT listed in tools/list
-    /// (moot_distill is the primary name). ACK token: "moot_distill/p1".
-    static let consolidateToolName = "moot_consolidate"
     /// Distilled-payload recall (SPEC §10.3): exact-search geometry over
     /// originals with the hydration selector pinned to `distilled` —
     /// identical ranking to exact search, smaller payloads, per-hit token
@@ -99,10 +93,6 @@ enum RecipeTools {
     // These strings are wire text: they must be byte-identical between Swift
     // and Rust (see packages/kits/AriaMcpKit/rust/src/recipe_tools.rs).
 
-    /// Notice returned when moot_consolidate is called without the correct ack
-    /// token. Instructs the caller to reissue with ack: "moot_distill/p1".
-    static let consolidateContractNotice = #"CONTRACT CHANGE NOTICE: you called moot_consolidate. Its behavior changed: renamed to moot_distill; now writes on-row distilled representations; factoid drawers and the distilled tier no longer exist. If the new behavior is what you want, reissue with ack: "moot_distill/p1"."#
-
     /// Notice returned when moot_recall_distilled is called without the correct
     /// ack token. Instructs the caller to reissue with ack: "recall_distilled/v2".
     static let recallDistilledContractNotice = #"CONTRACT CHANGE NOTICE: you called moot_recall_distilled. Its behavior changed: v2 returns normal exact-search results hydrated with distilled representations; it no longer queries a separate distilled tier; run moot_distill first if rows are undistilled. If the new behavior is what you want, reissue with ack: "recall_distilled/v2"."#
@@ -118,8 +108,8 @@ enum RecipeTools {
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     ///
-    /// Includes `moot_consolidate` (ACK-gated alias), `moot_recollect`
-    /// (notice-only stub — never executes), and the ten listed recipe tools.
+    /// Includes `moot_recollect` (notice-only stub — never executes) and the
+    /// listed recipe tools.
     static func isRecipeTool(_ name: String) -> Bool {
         name == listRecipesToolName
             || name == listRecipesCatalogToolName
@@ -131,7 +121,6 @@ enum RecipeTools {
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
             || name == distillToolName
-            || name == consolidateToolName
             || name == recallDistilledToolName
             || name == recollectToolName
             || name == huntContradictionsToolName
@@ -399,8 +388,7 @@ enum RecipeTools {
             description: "Distill working memory: populate the on-row distilled "
                 + "representation (token-economical prose) of every active item whose "
                 + "representation is missing or stale. Idempotent — already-distilled "
-                + "items are skipped. Returns the count of items distilled this sweep. "
-                + "(moot_consolidate is accepted as a compatibility alias.)",
+                + "items are skipped. Returns the count of items distilled this sweep.",
             inputSchema: objectSchema(
                 properties: [
                     "cluster_id": stringSchema(
@@ -506,14 +494,6 @@ enum RecipeTools {
             return ToolDispatcher.textResult(recollectRemovedNotice)
         }
 
-        // moot_consolidate — ACK-gated alias. Renamed to moot_distill in Wave 1;
-        // factoid drawers and the distilled tier no longer exist. Callers must
-        // pass ack: "moot_distill/p1" to confirm they want the new behavior.
-        if name == consolidateToolName,
-           args["ack"]?.stringValue != "moot_distill/p1" {
-            return ToolDispatcher.textResult(consolidateContractNotice)
-        }
-
         // moot_recall_distilled — ACK-gated (v2 contract). Now performs normal
         // exact-search geometry + distilled hydration; no longer queries a
         // separate distilled tier. Callers must pass ack: "recall_distilled/v2".
@@ -538,9 +518,7 @@ enum RecipeTools {
             return try await runConfirmPromotion(args, kit: kit, handle: handle)
         case dreamToolName:
             return try await runDream(args, kit: kit, handle: handle)
-        case distillToolName, consolidateToolName:
-            // moot_consolidate reaches here only when ack: "moot_distill/p1"
-            // was present (ACK gate above). Runs the same handler as moot_distill.
+        case distillToolName:
             return try await runDistill(args, kit: kit, handle: handle)
         case recallDistilledToolName:
             // Reaches here only when ack: "recall_distilled/v2" was present.
@@ -1108,7 +1086,7 @@ enum RecipeTools {
 
     // MARK: - distill
 
-    /// Run `moot_distill` (or its `moot_consolidate` alias): trigger a
+    /// Run `moot_distill`: trigger a
     /// per-item distillation sweep on demand.
     ///
     /// Decodes the optional `cluster_id` and `include_held` args (accepted

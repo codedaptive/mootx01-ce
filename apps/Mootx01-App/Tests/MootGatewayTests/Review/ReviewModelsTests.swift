@@ -134,7 +134,7 @@ struct ReviewModelsTests {
             "moot_file_memory", "moot_file_fact", "moot_update_memory",
             "moot_retire_fact", "moot_withdraw_memory", "moot_move_memory",
             "moot_link_memories", "moot_write_journal", "moot_review_tunnel",
-            "moot_consolidate", "moot_reindex", "moot_run_migration",
+            "moot_distill", "moot_reindex", "moot_run_migration",
         ]
         for surface in ReviewSurface.allCases {
             #expect(!mutationVerbs.contains(surface.rawValue))

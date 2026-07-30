@@ -3,7 +3,8 @@
 //! Tests the 70-tool surface: 23 interface tools (Tier 1–5 + moot_monitoring_status,
 //! including moot_memory_get and moot_review_tunnel), 1 federation tool,
 //! 11 recipe tools (Wave 1: moot_distill replaced moot_consolidate+moot_recollect;
-//! moot_consolidate is an unlisted ACK-gated alias; moot_recollect is a notice-only stub),
+//! moot_consolidate no longer dispatches — SPEC §3 Phase 2 removed its alias;
+//! moot_recollect is a notice-only stub),
 //! 23 lens tools (including moot_lens_cohesion and moot_lens_contradiction),
 //! 5 vault tools, 4 maintenance tools, and 3 dataset tools (MX-TAB-7).
 //! Exercises dispatch routing, argument validation, and result shapes through
@@ -241,11 +242,11 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 68 tools exact
+// 1. tools/list surface assertions — 71 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_68() {
+fn tools_list_count_is_71() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -259,11 +260,12 @@ fn tools_list_count_is_68() {
     // moot_hunt_contradictions recipe tool):
     //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
     //    1  federation tool (moot_federated_search)
-    //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
-    //                     confirm_migration, recall_precise, recall_shaped, dream,
-    //                     distill, recall_distilled, hunt_contradictions —
-    //                     moot_consolidate is an unlisted dispatch alias and
-    //                     moot_recollect retired with the factoid tier, SPEC §3/§11)
+    //   12  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //                     confirm_migration, recall_precise, recall_shaped,
+    //                     recall_vague, dream, distill, recall_distilled,
+    //                     hunt_contradictions —
+    //                     moot_consolidate no longer dispatches (SPEC §3 Phase 2)
+    //                     and moot_recollect retired with the factoid tier, §3/§11)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
@@ -271,10 +273,10 @@ fn tools_list_count_is_68() {
     // ----
     //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   70  total (memory adapter excluded — opt-in, off by default)
+    //   71  total (memory adapter excluded — opt-in, off by default)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 71.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
     assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
@@ -290,8 +292,8 @@ fn tools_list_name_set_matches_expected_71_names() {
     // parity matters even when the Rust backend is synchronous).
     // moot_recall_shaped is the named RecallShape preset surface.
     // moot_distill + moot_recall_distilled are the distillation tools
-    // (SPEC_DISTILLATION_STORAGE §3/§10.3; moot_consolidate survives only as
-    // an unlisted dispatch alias, moot_recollect retired with the factoid tier).
+    // (SPEC_DISTILLATION_STORAGE §3/§10.3; moot_consolidate no longer
+    // dispatches — §3 Phase 2 — and moot_recollect retired with the factoid tier).
     // moot_memory_get fetches a full drawer by id (fetch-drawer-by-ID gap,
     // shipped in the 1.0.x train per Bob's build-now ruling).
     let expected: std::collections::HashSet<&str> = [
@@ -329,8 +331,8 @@ fn tools_list_name_set_matches_expected_71_names() {
         // Recipe (11) — list_lenses + list_recipes + synthesize + run_migration
         //               + confirm_migration + recall_precise + recall_shaped + dream
         //               + distill + recall_distilled + hunt_contradictions
-        //               (moot_consolidate is an unlisted ACK-gated alias;
-        //                moot_recollect is a notice-only stub; neither is listed)
+        //               (moot_consolidate no longer dispatches — SPEC §3 Phase 2;
+        //                moot_recollect is a notice-only stub, not listed)
         "moot_list_lenses",
         "moot_list_recipes",
         "moot_synthesize",
@@ -7875,69 +7877,25 @@ fn recollect_stub_returns_notice_never_executes() {
         "removal notice is not a contract-change gate — different wording");
 }
 
-/// moot_consolidate without ack returns the contract change notice.
+/// moot_consolidate no longer dispatches anywhere — not to distill (its
+/// former alias target), not to anything else. The name is reserved for the
+/// multi-item consolidation feature (SPEC_DISTILLATION_STORAGE §3 Phase 2);
+/// until that claims it, calls fail with METHOD_NOT_FOUND like any
+/// unregistered name, even with the old ack token.
+/// Parity: Swift `testConsolidateNameIsUnknownTool`.
 #[test]
-fn consolidate_without_ack_returns_contract_notice() {
+fn consolidate_name_is_unknown_tool() {
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
-    let result = dispatch_tool(
-        "moot_consolidate",
-        &args![],
-        &registry,
-        &ledger,
-    ).expect("ACK gate must return Ok(notice), not Err");
-
-    assert!(!is_error_result(&result));
-    let text = text_from_result(&result);
-    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"),
-        "notice must start with CONTRACT CHANGE NOTICE:");
-    assert!(text.contains(r#"ack: "moot_distill/p1""#),
-        "notice must quote the current token");
-    assert!(!text.contains("moot_distill: sweep complete"),
-        "no distill must have run — estate untouched");
-}
-
-/// moot_consolidate with a wrong/stale ack returns the same notice.
-#[test]
-fn consolidate_wrong_ack_returns_contract_notice() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-
-    let result = dispatch_tool(
-        "moot_consolidate",
-        &args!["ack" => "moot_consolidate/v1"],
-        &registry,
-        &ledger,
-    ).expect("wrong ack must return Ok(notice)");
-
-    assert!(!is_error_result(&result));
-    let text = text_from_result(&result);
-    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"));
-    assert!(text.contains(r#"ack: "moot_distill/p1""#),
-        "notice must always show the current token, not the caller's stale one");
-}
-
-/// moot_consolidate with correct ack executes (runs the distill handler).
-#[test]
-fn consolidate_correct_ack_executes() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-
-    let result = dispatch_tool(
+    let err = dispatch_tool(
         "moot_consolidate",
         &args!["ack" => "moot_distill/p1"],
         &registry,
         &ledger,
-    ).expect("correct ack must execute and return Ok");
+    ).expect_err("moot_consolidate must be an unknown tool");
 
-    assert!(!is_error_result(&result));
-    let text = text_from_result(&result);
-    // The distill handler runs and reports a sweep on the empty estate.
-    assert!(text.contains("moot_distill: sweep complete"),
-        "correct ack must run the distill handler: {:?}", text);
-    assert!(!text.starts_with("CONTRACT CHANGE NOTICE:"),
-        "correct ack must not return a contract notice");
+    assert_eq!(err.code, JSONRPCErrorCode::METHOD_NOT_FOUND);
 }
 
 /// moot_recall_distilled without ack returns the contract change notice.

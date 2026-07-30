@@ -55,7 +55,8 @@ struct ToolProjectionTests {
     /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
     /// node motion modeling) added alongside moot_lens_contradiction.
     /// The 11th recipe tool is moot_hunt_contradictions (Wave 1: moot_recollect
-    /// was removed; moot_consolidate is an unlisted dispatch alias). The three
+    /// was removed; moot_consolidate no longer dispatches — its alias era ended
+    /// with SPEC_DISTILLATION_STORAGE §3 Phase 2). The three
     /// maintenance tools are moot_reindex (corpus/vector backfill),
     /// moot_drain_status (background drain progress), moot_reclassify_fdc
     /// (FDC anchor repair/reset), and moot_palace_import (PAR-PB-1,
