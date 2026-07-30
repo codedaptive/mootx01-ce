@@ -4375,18 +4375,24 @@ public actor DrawerStore {
 
         var constituentParentNodeIds: [String] = []
         var constituentOpBitmaps: [Int64] = []
+        // Sensitivity inheritance (#57, §D.1): adjectiveBitmap is read here
+        // so max(vague, constituent) sensitivity can be stamped into each
+        // _consolidated_from tunnel pre-transaction (addTunnel's #57 stamp
+        // cannot run inside the @Sendable closure — no nested async reads).
+        var constituentAdjBitmaps: [Int64] = []
         for cid in constituentIDs {
             let rows = try await storage.rowStore.query(
                 table: "drawers",
                 where: .eq(Column(table: "drawers", name: "id"), .text(cid)),
                 orderBy: [], limit: 1, offset: nil,
-                columns: ["operationalBitmap", "parent_node_id"]
+                columns: ["operationalBitmap", "parent_node_id", "adjectiveBitmap"]
             )
             guard let row = rows.first else {
                 throw LocusKitError.drawerNotFound(id: cid)
             }
             constituentParentNodeIds.append(Self.string(row["parent_node_id"]))
             constituentOpBitmaps.append(Self.int64(row["operationalBitmap"]))
+            constituentAdjBitmaps.append(Self.int64(row["adjectiveBitmap"]))
         }
 
         let allParentNodeIds = [vagueDrawer.parentNodeId] + constituentParentNodeIds
@@ -4394,9 +4400,20 @@ public actor DrawerStore {
         let vagueNames = nodeNames[vagueDrawer.parentNodeId] ?? (wing: "", room: "")
 
         // Build tunnel insert value dictionaries (one per constituent).
-        let tunnelValuesList: [[String: TypedValue]] = zip(constituentIDs, constituentParentNodeIds)
-            .map { (cid, pNodeId) in
+        // Each _consolidated_from tunnel carries max(vague, constituent) adjective
+        // sensitivity in bits 6–11 of its adjectiveBitmap — same semantics as
+        // addTunnel's #57 stamp but computed pre-transaction (cookbook §2.3).
+        let vagueAdjSens = vagueDrawer.adjectiveSensitivity
+        let tunnelValuesList: [[String: TypedValue]] = zip(constituentIDs, zip(constituentParentNodeIds, constituentAdjBitmaps))
+            .map { (cid, pair) in
+                let (pNodeId, adjBm) = pair
                 let cNames = nodeNames[pNodeId] ?? (wing: "", room: "")
+                let constituentSens = AdjectiveSensitivity(
+                    rawValue: Int(BitField.extractField(adjBm, shift: 6, width: 6))) ?? .normal
+                let maxSens = constituentSens.rawValue > vagueAdjSens.rawValue
+                    ? constituentSens : vagueAdjSens
+                let stampedAdjBitmap = BitField.writeField(
+                    Int64(maxSens.rawValue), into: 0, shift: 6, width: 6)
                 let t = Tunnel(
                     id: "_consolidated_from:\(vagueDrawer.id):\(cid)",
                     sourceWing: vagueNames.wing, sourceRoom: vagueNames.room,
@@ -4405,6 +4422,7 @@ public actor DrawerStore {
                     targetDrawerId: cid,
                     label: "_consolidated_from",
                     kind: .references,
+                    adjectiveBitmap: stampedAdjBitmap,
                     addedBy: addedBy,
                     filedAt: now
                 )
@@ -4499,35 +4517,56 @@ public actor DrawerStore {
         // ── Pre-transaction reads (actor-isolated values resolved here) ──
         var constituentParentNodeIds: [String] = []
         var constituentOpBitmaps: [Int64] = []
+        // Sensitivity inheritance (#57, §D.1): adjectiveBitmap is read here
+        // so max(v2, constituent) sensitivity can be stamped into each tunnel
+        // pre-transaction (no nested async reads inside @Sendable closures).
+        var constituentAdjBitmaps: [Int64] = []
         for cid in enlargedConstituentIDs {
             let rows = try await storage.rowStore.query(
                 table: "drawers",
                 where: .eq(Column(table: "drawers", name: "id"), .text(cid)),
                 orderBy: [], limit: 1, offset: nil,
-                columns: ["operationalBitmap", "parent_node_id"]
+                columns: ["operationalBitmap", "parent_node_id", "adjectiveBitmap"]
             )
             guard let row = rows.first else {
                 throw LocusKitError.drawerNotFound(id: cid)
             }
             constituentParentNodeIds.append(Self.string(row["parent_node_id"]))
             constituentOpBitmaps.append(Self.int64(row["operationalBitmap"]))
+            constituentAdjBitmaps.append(Self.int64(row["adjectiveBitmap"]))
         }
         let allParents = [vagueV2.parentNodeId, prior.parentNodeId] + constituentParentNodeIds
         let nodeNames = try await resolveNodeNames(parentNodeIds: allParents)
         let v2Names = nodeNames[vagueV2.parentNodeId] ?? (wing: "", room: "")
         let priorNames = nodeNames[prior.parentNodeId] ?? (wing: "", room: "")
 
+        // Supersedes tunnel: both endpoints are vague items in the same lineage
+        // → stamp = v2's own adjective sensitivity tier (cookbook §2.3 bits 6–11).
+        let v2AdjSens = vagueV2.adjectiveSensitivity
+        let supersedesStampedAdj = BitField.writeField(
+            Int64(v2AdjSens.rawValue), into: 0, shift: 6, width: 6)
         let supersedesTunnel = Tunnel(
             id: "supersedes:\(vagueV2.id):\(priorVagueID)",
             sourceWing: v2Names.wing, sourceRoom: v2Names.room, sourceDrawerId: vagueV2.id,
             targetWing: priorNames.wing, targetRoom: priorNames.room, targetDrawerId: priorVagueID,
             label: "supersedes", kind: .supersedes,
+            adjectiveBitmap: supersedesStampedAdj,
             addedBy: addedBy, filedAt: now
         )
         let supersedesValues = Self.tunnelValues(supersedesTunnel)
-        let tunnelValuesList: [[String: TypedValue]] = zip(enlargedConstituentIDs, constituentParentNodeIds)
-            .map { (cid, pNodeId) in
+
+        // _consolidated_from tunnels: stamp each with max(v2, constituent) adjective
+        // sensitivity — same semantics as addTunnel's #57 stamp (cookbook §2.3).
+        let tunnelValuesList: [[String: TypedValue]] = zip(enlargedConstituentIDs, zip(constituentParentNodeIds, constituentAdjBitmaps))
+            .map { (cid, pair) in
+                let (pNodeId, adjBm) = pair
                 let cNames = nodeNames[pNodeId] ?? (wing: "", room: "")
+                let constituentSens = AdjectiveSensitivity(
+                    rawValue: Int(BitField.extractField(adjBm, shift: 6, width: 6))) ?? .normal
+                let maxSens = constituentSens.rawValue > v2AdjSens.rawValue
+                    ? constituentSens : v2AdjSens
+                let stampedAdjBitmap = BitField.writeField(
+                    Int64(maxSens.rawValue), into: 0, shift: 6, width: 6)
                 let t = Tunnel(
                     id: "_consolidated_from:\(vagueV2.id):\(cid)",
                     sourceWing: v2Names.wing, sourceRoom: v2Names.room,
@@ -4536,6 +4575,7 @@ public actor DrawerStore {
                     targetDrawerId: cid,
                     label: "_consolidated_from",
                     kind: .references,
+                    adjectiveBitmap: stampedAdjBitmap,
                     addedBy: addedBy,
                     filedAt: now
                 )
