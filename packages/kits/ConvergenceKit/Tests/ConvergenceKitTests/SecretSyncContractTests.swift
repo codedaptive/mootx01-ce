@@ -666,6 +666,20 @@ struct SecretSyncContractTests {
                 candidate: [replayedOldTrust]
             )
         }
+        let pendingAfterRevocation = try DeviceTrustRecord(
+            recordDigest: digest(0x5C),
+            credentialDigest: revokedRecord.credentialDigest,
+            deviceID: revokedRecord.deviceID,
+            credentialID: revokedRecord.credentialID,
+            trustState: .pendingEnrollment,
+            effectivePolicyEpoch: 3
+        )
+        expectPolicyError(.revokedCredentialReplay) {
+            try SecretPolicyValidator.validateTrustRecordTransition(
+                current: [revokedRecord],
+                candidate: [pendingAfterRevocation]
+            )
+        }
     }
 
     @Test("audience contraction requires exact transition-bound purge evidence")

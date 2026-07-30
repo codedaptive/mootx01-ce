@@ -1183,6 +1183,12 @@ public enum SecretPolicyValidator {
                 continue
             }
             guard
+                candidateRecord.deviceID == currentRecord.deviceID,
+                candidateRecord.credentialDigest == currentRecord.credentialDigest
+            else {
+                throw SecretPolicyValidationError.trustedDeviceMismatch
+            }
+            guard
                 candidateRecord.effectivePolicyEpoch
                     >= currentRecord.effectivePolicyEpoch
             else {
@@ -1196,8 +1202,7 @@ public enum SecretPolicyValidator {
                 }
             }
             if currentRecord.trustState == .revoked,
-               candidateRecord.trustState == .trusted
-            {
+               candidateRecord.trustState != .revoked {
                 throw SecretPolicyValidationError.revokedCredentialReplay
             }
         }
