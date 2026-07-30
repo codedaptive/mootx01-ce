@@ -2897,7 +2897,6 @@ impl EstateCoordinator {
         // ── §3.1 steps 2–3 + §5.1 edge typing (mirrors Swift exactly):
         //   non-vague↔non-vague → union; non-vague↔vague → fold candidate
         //   (regardless of pool membership); vague↔vague → union (§5.4).
-        let pool_ids: BTreeSet<String> = clusterable.iter().map(|d| d.id.clone()).collect();
         let pool_by_id: BTreeMap<String, &locus_kit::drawer::Drawer> =
             clusterable.iter().map(|d| (d.id.clone(), *d)).collect();
         let mut parent: BTreeMap<String, String> = BTreeMap::new();
@@ -5298,6 +5297,33 @@ impl EstateCoordinator {
     /// to build the reward map for one cycle tick (B-1 compliance). Mirrors
     /// the Swift `GeniusLocusKit.recentRecallTraces(in:since:now:)`. Delegates
     /// to `Estate::recent_recall_traces`.
+    /// Batch drawer fetch by id — direct hydration (tier filters are a
+    /// DEFAULT-search effect only). Parity of Swift `Estate.getDrawers(ids:)`
+    /// reached through the coordinator surface (B-1).
+    pub fn get_drawers(
+        &self,
+        handle: &EstateHandle,
+        ids: &[&str],
+    ) -> Result<Vec<locus_kit::drawer::Drawer>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .get_drawers(ids)
+            .map_err(|e| remap("get_drawers", "", e).into())
+    }
+
+    /// Insert recall-trace rows directly — maintenance/test seeding for the
+    /// Wave-2 D3 quiet clock. Parity of Swift `Estate.insertRecallTraces`.
+    pub fn insert_recall_traces(
+        &self,
+        handle: &EstateHandle,
+        items: &[locus_kit::recall_trace_item::RecallTraceItem],
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .insert_recall_traces(items)
+            .map_err(|e| remap("insert_recall_traces", "", e).into())
+    }
+
     pub fn recent_recall_traces(
         &self,
         handle: &EstateHandle,

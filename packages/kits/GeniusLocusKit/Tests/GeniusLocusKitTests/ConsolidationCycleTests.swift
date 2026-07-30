@@ -240,13 +240,13 @@ struct ConsolidationCycleTests {
         // …and ages past the gate before the next maintenance window.
         let aged2 = aged.addingTimeInterval(92 * 86_400)
         // Explicit D4 ceiling (configured wins — the ratified alternative to
-        // per-sweep derivation): the combined-distillate fingerprint sits ~59
-        // bits from a member's per-item fingerprint on this fixture, while the
-        // provisioned system seeds tighten the DERIVED p10 ceiling below that.
-        // Production tunes D4 from real aged estates; this test pins the
-        // fold MECHANICS under a configured ceiling.
+        // per-sweep derivation): the combined-distillate fingerprint sits
+        // at ~59 (Swift) / ~106 (Rust) bits of a member's per-item fingerprint across the
+        // two ports on this fixture (the provisioned system seeds also
+        // tighten the DERIVED p10 below it). 112 pins the fold MECHANICS with
+        // margin on both sides, twin-aligned with the Rust suite.
         var foldConfig = ConsolidationConfig()
-        foldConfig.hammingCeiling = 64
+        foldConfig.hammingCeiling = 112
         let report = try await kit.consolidationSweepReport(
             handle: handle,
             distillFn: GeniusLocusKit.defaultDistillFn,
