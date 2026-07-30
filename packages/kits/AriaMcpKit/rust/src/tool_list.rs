@@ -188,6 +188,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // (moot_recollect retired with the factoid tier, §11.)
     tools.push(distill_tool());
     tools.push(recall_distilled_tool());
+    tools.push(recall_vague_tool());
     // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
     // same core pass that runs inside moot_dream and the resident scout
     // signal, surfaced as its own tool per Bob's ruling ("it also has to be
@@ -802,6 +803,24 @@ fn recall_precise_tool() -> serde_json::Value {
 /// and picks a preset by intent. Mirrors Swift `RecipeTools.shapedRecallTool()`.
 /// The four ARIA filtering adjectives compose orthogonally: the preset RANKS,
 /// the `filter` arg FILTERS.
+/// The two-hop vague-recall tool (Wave-2 §4.4). Mirrors Swift
+/// `RecipeTools.vagueRecallTool()` — description parity is intentional.
+fn recall_vague_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_recall_vague",
+        "description": "Vague recall (two-hop): ponder what the estate vaguely remembers. Hop 1 probes the consolidated vague tier's own fingerprint lane for VAGUE summary items; hop 2 hydrates each hit's original constituent memories through _consolidated_from tunnels (bounded per hit and in total). Use when normal recall is thin and the question is old — aged, similar memories may have consolidated into a vague summary whose originals remain fully preserved. Returns the vague summaries first, then the hydrated originals.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The recall query text — fingerprinted for the vague-tier lane probe."),
+                "hit_limit": integer_schema("Max vague summary items from hop 1. Default 8."),
+                "constituents_per_hit": integer_schema("Max original memories hydrated per vague hit (bound K). Default 8."),
+                "total_constituents": integer_schema("Max original memories hydrated overall (bound M). Default 32.")
+            }),
+            json!(["query"])
+        )))
+    })
+}
+
 fn recall_shaped_tool() -> serde_json::Value {
     use genius_locus_kit::recall::RecallShape;
     // The roster listing: one `name — description` line per preset, built from
