@@ -3,7 +3,14 @@ name: Release
 on:
   push:
     tags:
+      # Stable release tags only. Pre-release tags (any 'v*' with a qualifier,
+      # e.g. v1.1.0-beta-03) are excluded: winget and the Homebrew tap are
+      # stable-only channels that auto-upgrade every installed user, so a beta
+      # published through this workflow would be force-fed to the stable
+      # audience. Betas ship exclusively via candidate.yml as GitHub
+      # pre-releases from candidate/1.1.x.
       - 'v*'
+      - '!v*-*'
   # Manual debug trigger: COMPILE-ONLY. Builds a chosen platform from a branch
   # to catch build breaks fast, without tagging or the slow legs. It NEVER
   # signs, notarizes, uploads artifacts, or publishes: every Apple Developer ID
