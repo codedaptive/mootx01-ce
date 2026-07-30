@@ -2957,7 +2957,12 @@ impl EstateCoordinator {
             }
         }
         if pool.is_empty() {
-            return Ok(none);
+            return Ok(ConsolidationSweepReport {
+                new_vague_items: 0,
+                fold_ins: 0,
+                fold_in_rejections: 0,
+                repaired_items,
+            });
         }
 
         // Fingerprints from the distillation-features-v1 lane; items without
@@ -2974,7 +2979,12 @@ impl EstateCoordinator {
         let clusterable: Vec<&locus_kit::drawer::Drawer> =
             pool.iter().filter(|d| engrams.contains_key(&d.id)).collect();
         if clusterable.is_empty() {
-            return Ok(none);
+            return Ok(ConsolidationSweepReport {
+                new_vague_items: 0,
+                fold_ins: 0,
+                fold_in_rejections: 0,
+                repaired_items,
+            });
         }
 
         // ── D4: configured ceiling wins; otherwise derive p10 of the
@@ -2996,7 +3006,12 @@ impl EstateCoordinator {
                     }
                 }
                 if distances.is_empty() {
-                    return Ok(none);
+                    return Ok(ConsolidationSweepReport {
+                        new_vague_items: 0,
+                        fold_ins: 0,
+                        fold_in_rejections: 0,
+                        repaired_items,
+                    });
                 }
                 distances.sort_unstable();
                 // p10 index, floor-clamped (mirrors Swift max(0, n/10 - 1)).

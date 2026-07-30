@@ -291,3 +291,101 @@ fn consolidated_from_tunnels_carry_max_sensitivity() {
         "_consolidated_from tunnel to restricted constituent must carry .restricted tier"
     );
 }
+
+// ── 6. Repair prologue (§D.6 #4): under-tiered vague row is repaired ──────
+//
+// Scenario: a vague drawer whose adjective bitmap was zeroed (simulating a
+// row consolidated before sensitivity inheritance shipped) is detected and
+// promoted by the repair prologue on the NEXT sweep. A second sweep is
+// idempotent (repaired_items == 0).
+
+#[test]
+fn repair_prologue_under_tiered_vague_is_repaired() {
+    let (coord, handle) = open_one();
+    let aged = NOW + 91 * DAY;
+
+    // Step 1: produce a correctly-stamped restricted vague item.
+    for body in CLUSTER_BODIES.iter().take(3) {
+        capture_with_sensitivity(&coord, &handle, body, AdjectiveSensitivity::Normal, NOW);
+    }
+    capture_with_sensitivity(
+        &coord, &handle, CLUSTER_BODIES[3], AdjectiveSensitivity::Restricted, NOW + 1);
+
+    let produced = sweep(&coord, &handle, aged, &ConsolidationConfig::default());
+    assert_eq!(produced, 1, "setup: cluster must consolidate to one vague item");
+
+    // Capture the vague drawer's ID before corrupting it.
+    let vague_id = {
+        let all = coord.all_drawers(&handle).expect("all drawers");
+        all.iter()
+            .find(|d| (d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0)
+            .expect("vague drawer must exist after setup")
+            .id.clone()
+    };
+
+    // Step 2: zero the adjective bitmap to simulate a pre-inheritance-era row.
+    // adjective_sensitivity() reads bits 6–11; zeroing the full bitmap drops
+    // the vague drawer's tier to Normal while constituents remain Restricted.
+    {
+        let estate = coord.estate_for(&handle).expect("estate");
+        estate.repair_adjective_bitmap(&vague_id, 0, aged)
+            .expect("corrupt vague drawer adjective bitmap");
+    }
+
+    // Confirm the corruption: the drawer must now appear as Normal.
+    let corrupted = coord.all_drawers(&handle).expect("all drawers after corrupt");
+    let vd_corrupt = corrupted.iter()
+        .find(|d| d.id == vague_id)
+        .expect("vague drawer still present");
+    assert_eq!(
+        vd_corrupt.adjective_sensitivity(),
+        AdjectiveSensitivity::Normal,
+        "zeroed bitmap must make the vague drawer appear Normal (under-tiered)"
+    );
+
+    // Step 3: sweep 1 — repair prologue must detect and promote the vague drawer.
+    let report1 = coord
+        .consolidation_sweep_report(
+            &handle, aged + DAY, &ConsolidationConfig::default(), None)
+        .expect("sweep 1 consolidation_sweep_report");
+    assert_eq!(
+        report1.repaired_items, 1,
+        "sweep 1: repair prologue must report exactly one repaired vague drawer"
+    );
+
+    // The vague drawer must now carry Restricted (max over its constituents).
+    let after_repair = coord.all_drawers(&handle).expect("all drawers after repair");
+    let vd_repaired = after_repair.iter()
+        .find(|d| d.id == vague_id)
+        .expect("vague drawer still present after repair");
+    assert_eq!(
+        vd_repaired.adjective_sensitivity(),
+        AdjectiveSensitivity::Restricted,
+        "after repair: vague drawer must carry Restricted (max over constituents)"
+    );
+
+    // All _consolidated_from tunnels for this vague item must also carry Restricted.
+    let all_tunnels = coord.all_tunnels(&handle).expect("all tunnels");
+    let cf_tunnels: Vec<_> = all_tunnels.iter()
+        .filter(|t| {
+            t.label == "_consolidated_from"
+                && t.source_drawer_id.as_deref() == Some(vague_id.as_str())
+        })
+        .collect();
+    assert!(!cf_tunnels.is_empty(),
+        "_consolidated_from tunnels must exist for the repaired vague item");
+    assert!(
+        cf_tunnels.iter().all(|t| t.adjective_sensitivity() == AdjectiveSensitivity::Restricted),
+        "all _consolidated_from tunnels must carry Restricted after repair"
+    );
+
+    // Step 4: sweep 2 — idempotent; the estate is now correctly stamped.
+    let report2 = coord
+        .consolidation_sweep_report(
+            &handle, aged + 2 * DAY, &ConsolidationConfig::default(), None)
+        .expect("sweep 2 consolidation_sweep_report");
+    assert_eq!(
+        report2.repaired_items, 0,
+        "sweep 2: repair prologue must be idempotent (zero repairs on correctly-stamped estate)"
+    );
+}
