@@ -1,4 +1,4 @@
-// brain/signals/default_set.rs — registration helper for the ten
+// brain/signals/default_set.rs — registration helper for the eleven
 // standing signals. Mirrors `DefaultStandingSignals.swift`.
 //
 // Signal history:
@@ -10,13 +10,16 @@
 //                previously orphaned — zero production callers before this wire).
 //   Signal 10    Contradiction hunter / 2026-07-12: ContradictionScoutSignal
 //                (hourly content-conflict pass; the hunter's background half).
+//   Signal 11    Consolidation sweep / 2026-07-30: ConsolidationSignal
+//                (daily Wave-2 consolidation, D9 cadence class). Rust twin of
+//                ConsolidationSignal.swift.
 //
 // The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
-// real row embeddings on each fire). Signals 7–9 use their `default_spec()`
+// real row embeddings on each fire). Signals 7–11 use their `default_spec()`
 // no-op variants here because the helper cannot supply estate-specific context
-// (audit log, mutable MatrixTier, daemon instance) without breaking its
-// generic signature. Production callers that want live closures register the
-// signals individually via `SerialLaneScheduler::register` with the
+// (audit log, mutable MatrixTier, daemon instance, consolidation cycle) without
+// breaking its generic signature. Production callers that want live closures
+// register the signals individually via `SerialLaneScheduler::register` with the
 // appropriate `spec(…)` factory.
 //
 // The Rust port returns the specs as a Vec; the conformance gate inspects the
@@ -30,14 +33,14 @@ use vectorkit::VectorStore;
 
 use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
-    ByReferenceValiditySignal, ContradictionScoutSignal, DecaySweepSignal, DistillationSignal,
-    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal,
-    TrainingSignal, VectorSimilaritySignal,
+    ByReferenceValiditySignal, ConsolidationSignal, ContradictionScoutSignal, DecaySweepSignal,
+    DistillationSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
+    TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
 
-/// Stable names of the ten standing signals, in registration
+/// Stable names of the eleven standing signals, in registration
 /// order. Mirrors Swift's `GeniusLocusKit.defaultStandingSignalNames`.
-pub fn default_standing_signal_names() -> [&'static str; 10] {
+pub fn default_standing_signal_names() -> [&'static str; 11] {
     [
         DreamingSignal::SIGNAL_NAME,
         MaintenanceSignal::SIGNAL_NAME,
@@ -49,6 +52,7 @@ pub fn default_standing_signal_names() -> [&'static str; 10] {
         TemporalCausalitySignal::SIGNAL_NAME,
         DistillationSignal::SIGNAL_NAME,
         TrainingSignal::SIGNAL_NAME,
+        ConsolidationSignal::SIGNAL_NAME,
     ]
 }
 
@@ -58,12 +62,13 @@ pub fn default_standing_signal_names() -> [&'static str; 10] {
 /// `VectorSimilaritySignal::spec` so the signal can query real row
 /// embeddings on each five-minute fire.
 ///
-/// Signals 7–9 (TemporalCausalitySignal, DistillationSignal,
-/// TrainingSignal) use their `default_spec()` no-op variants because
-/// this helper cannot supply estate-specific closures (fold cycle,
-/// distillation cycle, training daemon) without breaking its generic
-/// signature. Production callers wire live closures via the individual
-/// `spec(…)` factories.
+/// Signals 7–11 (TemporalCausalitySignal, DistillationSignal,
+/// TrainingSignal, ContradictionScoutSignal, ConsolidationSignal) use
+/// their `default_spec()` no-op variants because this helper cannot
+/// supply estate-specific closures (fold cycle, distillation cycle,
+/// training daemon, contradiction hunt cycle, consolidation cycle)
+/// without breaking its generic signature. Production callers wire live
+/// closures via the individual `spec(…)` factories.
 ///
 /// Each call mints new `Arc<dyn Fn>` closures so the conformance gate
 /// can register them against multiple scheduler instances independently.
@@ -108,13 +113,19 @@ pub fn default_standing_signal_specs(
         // DistillationSignal::spec(distillation_cycle) to run the per-item
         // distillation sweep on each hourly fire.
         DistillationSignal::default_spec(),
-        // Signal 9: TrainingSignal registered with its diagnostic no-op spec
-        //. Production callers wire a live training_cycle closure
+        // Signal 9: TrainingSignal registered with its diagnostic no-op spec.
+        // Production callers wire a live training_cycle closure
         // via TrainingSignal::spec(training_cycle) to invoke
         // TrainingDaemon::run_once against the estate's audit log, matrix tier,
         // and calibration registry. The daemon's threshold gate handles the
         // dormant/active decision; below the threshold the gate short-circuits
         // and no matrix work occurs.
         TrainingSignal::default_spec(),
+        // Signal 11: ConsolidationSignal registered with its diagnostic no-op
+        // spec. Production callers wire a live consolidation_cycle closure via
+        // ConsolidationSignal::spec(consolidation_cycle) to invoke
+        // EstateCoordinator::consolidation_sweep_report on each daily fire
+        // (Wave-2 D9 cadence).
+        ConsolidationSignal::default_spec(),
     ]
 }
