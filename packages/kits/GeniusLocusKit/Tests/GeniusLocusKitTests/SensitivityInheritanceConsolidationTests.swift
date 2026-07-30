@@ -255,5 +255,89 @@ struct SensitivityInheritanceConsolidationTests {
         #expect(hasElevatedHit,
                 "vagueRecall hop-1 must surface .elevated vague items (≤ .elevated ceiling allows it)")
     }
+
+    // MARK: - Repair prologue (§D.6 #4)
+
+    /// Under-tiered vague drawer is promoted by the repair prologue on the
+    /// next sweep; a second sweep is idempotent (repairedItems == 0).
+    ///
+    /// Scenario: after normal consolidation produces a .restricted vague row,
+    /// the test zeroes the row's adjective bitmap (simulating consolidation
+    /// that ran before sensitivity inheritance shipped). The next
+    /// consolidationSweepReport call must detect the under-tiered row and
+    /// promote it — repairedItems == 1, drawer at .restricted, lineage
+    /// tunnels at .restricted. A second sweep must be a no-op: repairedItems
+    /// == 0.
+    @Test("repair prologue: under-tiered vague drawer is promoted on next sweep (§D.6 #4)")
+    func repairPrologue_underTieredVagueIsRestamped() async throws {
+        let (kit, handle) = try await openEstate()
+        let now = Date()
+        let aged = now.addingTimeInterval(91 * 86_400)
+
+        // Step 1: produce a correctly-stamped restricted vague item.
+        for body in clusterBodies.prefix(3) {
+            _ = try await captureItem(body: body, sensitivity: .normal, kit: kit, handle: handle)
+        }
+        _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted,
+                                  kit: kit, handle: handle)
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        let produced = try await kit.consolidationSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: aged)
+        #expect(produced == 1, "setup: cluster must consolidate to one vague item")
+
+        // Step 2: locate the vague drawer and zero its adjective bitmap,
+        // simulating a row that was consolidated before sensitivity inheritance
+        // shipped. repairVagueAdjectiveBitmap with newAdjective=0 drops the
+        // sensitivity field (bits 6–11) to Normal while constituents remain
+        // Restricted.
+        let estate = try await kit.estate(for: handle)
+        let allBefore = try await estate.allDrawers()
+        let vd = try #require(allBefore.first { $0.isVague },
+                              "vague drawer must exist after setup consolidation")
+
+        try await estate.repairVagueAdjectiveBitmap(
+            drawerId: vd.id, newAdjective: 0, now: aged)
+
+        // Confirm the corruption: the row must appear under-tiered.
+        let corrupted = try await estate.allDrawers()
+        let vdCorrupted = try #require(corrupted.first { $0.id == vd.id })
+        #expect(vdCorrupted.adjectiveSensitivity == .normal,
+                "zeroed adjective bitmap must make vague drawer appear .normal (under-tiered)")
+
+        // Step 3: sweep 1 — repair prologue must detect and promote.
+        let report1 = try await kit.consolidationSweepReport(
+            handle: handle,
+            distillFn: GeniusLocusKit.defaultDistillFn,
+            now: aged.addingTimeInterval(86_400))
+        #expect(report1.repairedItems == 1,
+                "sweep 1: repair prologue must report exactly one repaired vague drawer")
+
+        // The vague drawer must carry .restricted after repair.
+        let afterRepair = try await estate.allDrawers()
+        let vdRepaired = try #require(afterRepair.first { $0.id == vd.id })
+        #expect(vdRepaired.adjectiveSensitivity == .restricted,
+                "after repair: vague drawer must carry .restricted (max over constituents)")
+
+        // All _consolidated_from tunnels for this vague item must also carry
+        // .restricted. The repair prologue restamps tunnels even when only the
+        // vague drawer's bitmap was zeroed.
+        let allTunnels = try await estate.allTunnels()
+        let cfTunnels = allTunnels.filter {
+            $0.label == "_consolidated_from" && $0.sourceDrawerId == vd.id
+        }
+        #expect(!cfTunnels.isEmpty,
+                "_consolidated_from tunnels must exist for the repaired vague item")
+        #expect(cfTunnels.allSatisfy { $0.adjectiveSensitivity == .restricted },
+                "all _consolidated_from tunnels must carry .restricted after repair")
+
+        // Step 4: sweep 2 — idempotent; estate is now correctly stamped.
+        let report2 = try await kit.consolidationSweepReport(
+            handle: handle,
+            distillFn: GeniusLocusKit.defaultDistillFn,
+            now: aged.addingTimeInterval(2 * 86_400))
+        #expect(report2.repairedItems == 0,
+                "sweep 2: repair prologue must be idempotent on a correctly-stamped estate")
+    }
 }
 

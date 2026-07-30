@@ -1011,6 +1011,9 @@ impl DreamingDaemon {
         self.cycle_count += 1;
         let entry = DreamingDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
+            // keep-in-sync: sensitivity_inheritance_diary_guard_tests.rs mirrors this format
+            // string exactly to verify the counts-only invariant (§D.4). If you change this
+            // format (add drawer content, IDs, or non-count fields), update the guard test.
             entry: format!(
                 "theta cycle {}: window 24h, used-set {}, pairs {}, proposed {}, suppressed {}, below-threshold {}",
                 self.cycle_count,
@@ -1216,6 +1219,9 @@ impl DreamingDaemon {
         let reinforced_count = candidates.len() - retired_count;
         let entry = DreamingDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
+            // keep-in-sync: sensitivity_inheritance_diary_guard_tests.rs mirrors this format
+            // string exactly to verify the counts-only invariant (§D.4). If you change this
+            // format (add drawer content, IDs, or non-count fields), update the guard test.
             entry: format!(
                 "omega cycle {}: window 14d, dreamed-active {}, reinforced {}, retired {}",
                 self.cycle_count,
@@ -1490,6 +1496,9 @@ impl DreamingDaemon {
 
         let entry = DreamingDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
+            // keep-in-sync: sensitivity_inheritance_diary_guard_tests.rs mirrors this format
+            // string exactly to verify the counts-only invariant (§D.4). If you change this
+            // format (add drawer content, IDs, or non-count fields), update the guard test.
             entry: format!(
                 "dreaming cycle {}: considered {}, proposed {}, suppressed {}, below-threshold {}",
                 self.cycle_count,
