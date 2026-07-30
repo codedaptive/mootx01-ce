@@ -146,6 +146,21 @@ impl Proposal {
         // Cookbook §2.3: state at bits 0–5.
         State::from_raw(bit_field::extract_field(self.adjective_bitmap, 0, 6))
     }
+
+    /// Decode bits 6–11 of `adjective_bitmap` as an `AdjectiveSensitivity`.
+    /// Returns `AdjectiveSensitivity::Normal` for unrecognised raw values,
+    /// the fail-closed baseline matching `AdjectiveSensitivity::from_raw`.
+    ///
+    /// A proposal inherits its target drawer's sensitivity tier at creation
+    /// (§D.2): the `propose` path stamps these bits from `target_drawer.
+    /// adjective_sensitivity()`. Mirrors `Drawer.adjectiveSensitivity` and
+    /// `Tunnel.adjectiveSensitivity`. Cookbook §2.3 6-bit field.
+    pub fn adjective_sensitivity(&self) -> crate::adjectives::AdjectiveSensitivity {
+        // Cookbook §2.3: adjective sensitivity at bits 6–11 of adjective_bitmap.
+        crate::adjectives::AdjectiveSensitivity::from_raw(
+            bit_field::extract_field(self.adjective_bitmap, 6, 6),
+        )
+    }
 }
 
 #[cfg(test)]

@@ -3123,6 +3123,31 @@ impl EstateCoordinator {
             v2.lineage_id = vague_item.lineage_id;
             v2.operational_bitmap = DrawerFeatureFlags::IS_VAGUE
                 | (((level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
+            // Sensitivity inheritance (§D.1 monotone ceiling): fold-in v2 carries the MAX
+            // adjective and provenance sensitivity over the enlarged constituent set and the
+            // prior vague item. A fold-in must never lower the tier — cookbook §2.3 bits 6–11
+            // (adjective) and §2.5 bits 30–35 (provenance at capture).
+            {
+                use substrate_kernel::bit_field;
+                use locus_kit::adjectives::AdjectiveSensitivity;
+                use locus_kit::provenance::Sensitivity;
+                let prior_adj_raw = vague_item.adjective_sensitivity().raw_value();
+                let prior_prov_raw = vague_item.sensitivity().raw_value();
+                let max_adj_raw = constituents.iter().fold(prior_adj_raw, |best, d| {
+                    let r = d.adjective_sensitivity().raw_value();
+                    if r > best { r } else { best }
+                });
+                let max_prov_raw = constituents.iter().fold(prior_prov_raw, |best, d| {
+                    let r = d.sensitivity().raw_value();
+                    if r > best { r } else { best }
+                });
+                // Verify the values are recognised by their enums (safe fallback to Normal if
+                // a stale intermediate value slips through, matching Swift's `?? .normal`).
+                let max_adj = AdjectiveSensitivity::from_raw(max_adj_raw);
+                let max_prov = Sensitivity::from_raw(max_prov_raw);
+                v2.adjective_bitmap = bit_field::write_field(max_adj.raw_value(), 0i64, 6, 6);
+                v2.provenance = bit_field::write_field(max_prov.raw_value(), 0i64, 30, 6);
+            }
             estate
                 .fold_in_transactionally(
                     &v2,
@@ -3193,6 +3218,27 @@ impl EstateCoordinator {
                 constituents[0].embedding_model_id.clone(),
             );
             vague.operational_bitmap = vague_bitmap;
+            // Sensitivity inheritance (§D.1): the new vague drawer carries the MAX adjective
+            // and provenance sensitivity over all constituents — cookbook §2.3 bits 6–11
+            // (adjective) and §2.5 bits 30–35 (provenance at capture). Source tier flows to
+            // derived artifact; no constituent's sensitivity is ever silently downgraded.
+            {
+                use substrate_kernel::bit_field;
+                use locus_kit::adjectives::AdjectiveSensitivity;
+                use locus_kit::provenance::Sensitivity;
+                let max_adj_raw = constituents.iter().fold(0i64, |best, d| {
+                    let r = d.adjective_sensitivity().raw_value();
+                    if r > best { r } else { best }
+                });
+                let max_prov_raw = constituents.iter().fold(0i64, |best, d| {
+                    let r = d.sensitivity().raw_value();
+                    if r > best { r } else { best }
+                });
+                let max_adj = AdjectiveSensitivity::from_raw(max_adj_raw);
+                let max_prov = Sensitivity::from_raw(max_prov_raw);
+                vague.adjective_bitmap = bit_field::write_field(max_adj.raw_value(), 0i64, 6, 6);
+                vague.provenance = bit_field::write_field(max_prov.raw_value(), 0i64, 30, 6);
+            }
             let constituent_refs: Vec<&str> =
                 constituents.iter().map(|c| c.id.as_str()).collect();
             estate
@@ -3325,6 +3371,10 @@ impl EstateCoordinator {
             fetched.into_iter().map(|d| (d.id.clone(), d)).collect();
         // Lane order preserved; ACTIVE vague items only (a superseded fold-in
         // predecessor's lane entry lingers and must never surface).
+        // Hop-1 sensitivity ceiling (§D.3): only vague items at ≤ .elevated
+        // sensitivity are surfaced as hits. Restricted and Secret vague drawers
+        // are silently excluded — their content must not ride a bulk-retrieval
+        // path without an explicit elevated-privilege scope (cookbook §2.3).
         let mut vague_hits: Vec<locus_kit::drawer::Drawer> = Vec::new();
         for m in &matches {
             if vague_hits.len() >= hit_limit {
@@ -3333,6 +3383,7 @@ impl EstateCoordinator {
             if let Some(d) = by_id.get(&m.item_id) {
                 if (d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0
                     && d.state() != State::Superseded
+                    && d.adjective_sensitivity().is_bulk_exportable()
                 {
                     vague_hits.push(d.clone());
                 }

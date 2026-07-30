@@ -2771,6 +2771,16 @@ impl Estate {
             0,
             6,
         );
+        // Sensitivity inheritance (§D.2): stamp proposal's adjective sensitivity
+        // in bits 6–11 with the target drawer's sensitivity tier. A proposal IS a
+        // derived artifact of its target — it must never be less sensitive than what
+        // it acts on. Mirrors Swift `EstateVerbs.propose` (lines 1700-1718).
+        let adj_bitmap = bit_field::write_field(
+            target_drawer.adjective_sensitivity().raw_value(),
+            adj_bitmap,
+            6,
+            6,
+        );
 
         // Candidate state derives from the target drawer's current adjective_bitmap —
         // the accept path applies this to the target if confirmed.
