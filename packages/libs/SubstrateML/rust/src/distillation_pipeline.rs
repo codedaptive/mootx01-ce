@@ -207,7 +207,15 @@ impl DistillationPipeline {
             return Vec::new();
         }
         let mut results = Vec::new();
-        let words: Vec<&str> = text.split(' ').collect();
+        // Split on space ONLY, dropping empty segments — exact parity with the
+        // Swift twin's `text.split(separator: " ")`, which omits empty
+        // subsequences but does NOT split on newlines/tabs. A bare split(' ')
+        // kept leading empties, shifting word indices so the i == 0
+        // sentence-initial guard skipped the empty slot instead of the first
+        // word; on multi-item combined text (space-prefixed segments) that let
+        // sentence-initial capitalized words leak into the entity features and
+        // diverge the cross-port combined fingerprints.
+        let words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
         for (i, word) in words.iter().enumerate() {
             if i == 0 {
                 continue;
