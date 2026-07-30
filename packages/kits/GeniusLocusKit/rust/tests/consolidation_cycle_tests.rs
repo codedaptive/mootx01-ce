@@ -217,17 +217,16 @@ fn fold_in_enlarges_the_vague_lineage() {
         .distill_items_sweep(&handle, aged + 3_600, None)
         .expect("distill fifth");
 
-    // Explicit D4 ceiling (configured wins), mirroring the Swift test: the
-    // combined-distillate fingerprint sits ~59 bits from a member's
-    // per-item fingerprint on this fixture.
     // Explicit D4 ceiling (configured wins — the ratified alternative to the
-    // per-sweep derivation): the combined-distillate fingerprint sits within
-    // ~59 (Swift) / ~106 (Rust) bits of a member's per-item fingerprint across the two ports on
-    // this fixture (the compaction renderings differ slightly), while
-    // unrelated items sit near the ~128-bit random expectation. 112 pins the
-    // fold MECHANICS with margin on both sides in BOTH ports.
+    // per-sweep derivation), mirroring the Swift test: the combined-distillate
+    // fingerprint sits ~59 bits from a member's per-item fingerprint on this
+    // fixture in BOTH ports (word segmentation is space-only with empties
+    // dropped in both twins — see SubstrateML distillation_pipeline.rs
+    // default_extractor), while unrelated items sit near the ~128-bit random
+    // expectation. 90 pins the fold MECHANICS with margin AND fails if the
+    // ports' combined renderings ever diverge again.
     let mut config = ConsolidationConfig::default();
-    config.hamming_ceiling = Some(112);
+    config.hamming_ceiling = Some(90);
     let report = coord
         .consolidation_sweep_report(&handle, aged + 92 * DAY, &config, None)
         .expect("fold sweep");
