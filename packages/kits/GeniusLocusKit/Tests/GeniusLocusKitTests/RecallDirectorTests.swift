@@ -1184,6 +1184,7 @@ struct RecallDirector004Tests {
             queryText: "test query content",
             queryTokens: ["test", "query", "content"],
             queryEngram: nil,
+            queryFingerprint: nil,
             latticeAnchor: nil
         )
         let plan = RecallPlan(effectiveMode: .unionBest, frontierK: 64, weights: .uniform)
@@ -1863,6 +1864,7 @@ struct RecallDirectorAdaptiveLambdaTests {
             queryText: nil,
             queryTokens: [],
             queryEngram: nil,
+            queryFingerprint: nil,
             latticeAnchor: nil
         )
     }

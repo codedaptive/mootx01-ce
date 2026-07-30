@@ -381,12 +381,20 @@ public extension GeniusLocusKit {
         }
 
         // Vector lane: top-frontierK Hamming nearest-neighbour hits.
-        let vectorList: [(id: String, score: Float)]
+        //
+        // Lane A ("random-indexing-v1", RI binary) and Lane B
+        // ("distillation-features-v1", structural fingerprint) both contribute
+        // to vectorList. Results are merged by max-score deduplication: a drawer
+        // hit by both lanes keeps the higher Hamming similarity score.
+        var vectorList: [(id: String, score: Float)] = []
         // Raw integer Hamming distance per drawer id (0…256), preserved alongside
         // the normalized score so the returned hit can expose it. The normalized
         // score still drives RRF ranking; this map is additive enrichment.
+        // Lane A distances are stored here; Lane B distances are not separately
+        // tracked (Lane B's role is contrastive ranking, not raw-distance reporting).
         var hammingByID: [String: Int] = [:]
         if let engram = sketch.queryEngram, let store = vectorStores[handle] {
+            // Lane A — RI binary Hamming search.
             let modelID = await corpus.modelID
             // Consume the test seam (single-use: the seam error is taken once
             // and the property is cleared so subsequent calls behave normally).
@@ -412,8 +420,8 @@ public extension GeniusLocusKit {
                     (id: m.itemID, score: Float(256 - m.distance) / 256.0)
                 }
             case .failure(let error):
-                // Hamming vector lane DEGRADED — the query survives on BM25 only.
-                // Log + telemetry so estate dashboards surface the failure.
+                // Lane A DEGRADED — query survives on BM25 only (Lane B may still
+                // contribute below if fingerprint entries exist).
                 Self.recallLog.error(
                     "RecallDirector corpusOnly: vectorHamming.findNearest degraded: \(error, privacy: .public)")
                 glkEmit(
@@ -423,10 +431,45 @@ public extension GeniusLocusKit {
                     now: Date()
                 )
                 degradedStages.append("vectorHamming.findNearest")
-                vectorList = []
+                // vectorList stays []
             }
-        } else {
-            vectorList = []
+            // else: vectorList stays []
+        }
+        // Lane B — structural fingerprint ("distillation-features-v1").
+        // Queries per-drawer distillation fingerprints written by DistillationCycle.
+        // Undistilled drawers have no lane entry and are absent from fpMatches —
+        // they contribute zero candidates, never a penalty (dark-lane safety).
+        // nil queryFingerprint (query had no structural features) skips this block.
+        if let fp = sketch.queryFingerprint, let store = vectorStores[handle] {
+            do {
+                let fpMatches = try await store.findNearest(
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                // Merge by max-score: a drawer already in Lane A keeps the higher
+                // of the two Hamming similarity scores. Lane B-only drawers append.
+                var vectorByID: [String: Float] = [:]
+                vectorByID.reserveCapacity(vectorList.count)
+                for item in vectorList { vectorByID[item.id] = item.score }
+                var laneAItems = vectorList  // preserve Lane A order
+                for m in fpMatches {
+                    let score = Float(256 - m.distance) / 256.0
+                    if let existing = vectorByID[m.itemID] {
+                        if score > existing {
+                            vectorByID[m.itemID] = score
+                        }
+                    } else {
+                        vectorByID[m.itemID] = score
+                        laneAItems.append((id: m.itemID, score: score))
+                    }
+                }
+                // Rebuild with updated scores for any Lane A items improved by Lane B.
+                vectorList = laneAItems.map { (id: $0.id, score: vectorByID[$0.id] ?? $0.score) }
+            } catch {
+                // Lane B DEGRADED — expected on estates with no distillation entries.
+                // No telemetry: a dark Lane B is a normal operating state for any
+                // corpus whose content has not yet been distilled.
+                Self.recallLog.debug(
+                    "RecallDirector corpusOnly: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
+            }
         }
 
         // Build the candidate list according to the requested scoring strategy.
@@ -556,16 +599,23 @@ public extension GeniusLocusKit {
 
         // Corpus and vector lanes — only if corpus is registered.
         var bm25List: [(id: String, score: Float)] = []
+        // vectorList accumulates Lane A (RI binary) and Lane B (structural
+        // fingerprint) hits with max-score deduplication per drawer id.
         var vectorList: [(id: String, score: Float)] = []
-        // Raw integer Hamming distance per drawer id (0…256) from the vector lane,
+        // Raw integer Hamming distance per drawer id (0…256) from Lane A,
         // preserved for the returned hit. Ranking still uses the normalized score.
         var hammingByID: [String: Int] = [:]
+        // sketch is hoisted so Lane B can read queryFingerprint after the BM25/
+        // Lane A block that already compiled it (avoids re-computing the fingerprint).
+        var hybridSketch: RecallQuerySketch? = nil
         if let corpus = corpusKits[handle], let text = request.queryText, !text.isEmpty {
             let sketch = await compileSketch(
                 from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
+            hybridSketch = sketch
             let bm25Hits = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25List = bm25Hits.map { (id: $0.sourceID, score: $0.score) }
 
+            // Lane A — RI binary Hamming search.
             if let engram = sketch.queryEngram, let store = vectorStores[handle] {
                 let modelID = await corpus.modelID
                 // Consume the test seam (single-use).
@@ -589,7 +639,8 @@ public extension GeniusLocusKit {
                         (id: m.itemID, score: Float(256 - m.distance) / 256.0)
                     }
                 case .failure(let error):
-                    // Hamming vector lane DEGRADED — query survives on locus + BM25.
+                    // Lane A DEGRADED — query survives on locus + BM25.
+                    // Lane B fingerprint may still contribute below.
                     Self.recallLog.error(
                         "RecallDirector hybrid: vectorHamming.findNearest degraded: \(error, privacy: .public)")
                     glkEmit(
@@ -599,8 +650,38 @@ public extension GeniusLocusKit {
                         now: Date()
                     )
                     degradedStages.append("vectorHamming.findNearest")
-                    vectorList = []
+                    // vectorList stays []
                 }
+            }
+        }
+        // Lane B — structural fingerprint ("distillation-features-v1").
+        // Fires independently of Lane A and independently of the BM25/corpus block:
+        // if a vector store is registered but no corpus is registered (or the query
+        // is empty), hybridSketch will be nil and this block is skipped. When
+        // hybridSketch is present, the fingerprint is merged into vectorList.
+        if let sketch = hybridSketch,
+           let fp = sketch.queryFingerprint,
+           let store = vectorStores[handle] {
+            do {
+                let fpMatches = try await store.findNearest(
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                var vectorByID: [String: Float] = [:]
+                vectorByID.reserveCapacity(vectorList.count)
+                for item in vectorList { vectorByID[item.id] = item.score }
+                var merged = vectorList
+                for m in fpMatches {
+                    let score = Float(256 - m.distance) / 256.0
+                    if let existing = vectorByID[m.itemID] {
+                        if score > existing { vectorByID[m.itemID] = score }
+                    } else {
+                        vectorByID[m.itemID] = score
+                        merged.append((id: m.itemID, score: score))
+                    }
+                }
+                vectorList = merged.map { (id: $0.id, score: vectorByID[$0.id] ?? $0.score) }
+            } catch {
+                Self.recallLog.debug(
+                    "RecallDirector hybrid: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
             }
         }
 
@@ -771,13 +852,21 @@ public extension GeniusLocusKit {
 
     /// Compile a `RecallQuerySketch` from the request and a registered corpus.
     ///
-    /// Embeds `request.queryText` into `queryEngram` via the corpus's provider.
-    /// If embedding fails, `queryEngram` is nil and the vector lane returns an
-    /// empty candidate set; the failure is recorded in `degradedStages` so the
-    /// caller can surface the degradation in `GLKRecallResult.degradedStages`.
+    /// Embeds `request.queryText` into `queryEngram` via the corpus's provider
+    /// (Lane A, "random-indexing-v1"). If embedding fails, `queryEngram` is nil
+    /// and the RI Hamming lane returns an empty candidate set; the failure is
+    /// recorded in `degradedStages` so the caller can surface it.
+    ///
+    /// Also computes `queryFingerprint` for Lane B ("distillation-features-v1")
+    /// via `DistillationPipeline.queryFingerprint` using the capitalization-
+    /// heuristic `defaultExtractor`. This is pure computation (no I/O) and
+    /// cannot fail; a zero result (no structural features in the query) is
+    /// stored as nil so the Lane B search is skipped rather than producing
+    /// a meaningless all-zero probe.
     ///
     /// The `_testForceEmbedError` seam (single-use) allows tests to inject an
-    /// embed failure without a real corpus error.
+    /// embed failure without a real corpus error. It affects Lane A only; Lane B
+    /// fingerprint computation is unaffected by the embed seam.
     private func compileSketch(
         from request: GLKRecallRequest,
         corpus: CorpusContentEngine,
@@ -791,7 +880,7 @@ public extension GeniusLocusKit {
             let forcedEmbedError = _testForceEmbedError
             _testForceEmbedError = nil
             if let forcedError = forcedEmbedError {
-                // Embedding DEGRADED via test seam — vector lane will be dark.
+                // Embedding DEGRADED via test seam — Lane A will be dark.
                 Self.recallLog.error(
                     "RecallDirector compileSketch: corpus.embed degraded (forced): \(forcedError, privacy: .public)")
                 glkEmit(
@@ -805,7 +894,7 @@ public extension GeniusLocusKit {
                 do {
                     engram = try await corpus.embed(t)
                 } catch {
-                    // Embedding DEGRADED — vector lane will be dark for this query.
+                    // Embedding DEGRADED — Lane A will be dark for this query.
                     // The query continues on BM25/locus signals.
                     Self.recallLog.error(
                         "RecallDirector compileSketch: corpus.embed degraded: \(error, privacy: .public)")
@@ -828,12 +917,30 @@ public extension GeniusLocusKit {
         } else {
             tokens = []
         }
+        // Lane B fingerprint: computed from query text via defaultExtractor (pure,
+        // no I/O). defaultExtractor matches the extractor used when writing
+        // "distillation-features-v1" entries in DistillationCycle, so stored and
+        // query fingerprints are self-consistent. A zero result means the query
+        // has no structural features; nil is stored so Lane B is skipped rather
+        // than executing a zero-probe search (which would return meaningless ranks).
+        let queryFingerprint: Engram?
+        if let t = text, !t.isEmpty {
+            let fp = DistillationPipeline.queryFingerprint(
+                query: t,
+                extractFeatures: DistillationPipeline.defaultExtractor)
+            // Fingerprint256.zero means no features were extracted.
+            // Treat as dark lane: nil → Lane B skipped, zero candidates, no penalty.
+            queryFingerprint = (fp == .zero) ? nil : fp
+        } else {
+            queryFingerprint = nil
+        }
         return RecallQuerySketch(
             frame: request.frame,
             bitmapPredicates: request.frame.filterChain,
             queryText: text,
             queryTokens: tokens,
             queryEngram: engram,
+            queryFingerprint: queryFingerprint,
             latticeAnchor: nil
         )
     }
@@ -976,13 +1083,27 @@ public extension GeniusLocusKit {
             sketch = await compileSketch(
                 from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
         } else {
-            // No corpus — sketch has no tokens or engram; locus lane still runs.
+            // No corpus — sketch has no tokens or Lane A engram; locus lane still
+            // runs. Lane B fingerprint is still computed: it only requires the
+            // query text and the vector store (which may be registered independently
+            // of the corpus). If there is no vector store either, the fingerprint
+            // will not be queried and nil is an acceptable placeholder.
+            let noCorpusFingerprint: Engram?
+            if let t = request.queryText, !t.isEmpty {
+                let fp = DistillationPipeline.queryFingerprint(
+                    query: t,
+                    extractFeatures: DistillationPipeline.defaultExtractor)
+                noCorpusFingerprint = (fp == .zero) ? nil : fp
+            } else {
+                noCorpusFingerprint = nil
+            }
             sketch = RecallQuerySketch(
                 frame: request.frame,
                 bitmapPredicates: request.frame.filterChain,
                 queryText: request.queryText,
                 queryTokens: [],
                 queryEngram: nil,
+                queryFingerprint: noCorpusFingerprint,
                 latticeAnchor: nil
             )
         }
@@ -1074,6 +1195,48 @@ public extension GeniusLocusKit {
                 )
                 degradedStages.append("vectorHamming.findNearest")
                 vectorHits = []
+            }
+        }
+
+        // Step 4.25 — structural fingerprint lane ("distillation-features-v1", Lane B).
+        //
+        // Fires independently of Lane A (RI binary). The probe is
+        // `sketch.queryFingerprint`, computed in compileSketch via
+        // `DistillationPipeline.queryFingerprint` with the capitalization-heuristic
+        // `defaultExtractor` — the same extractor used at distillation write time, so
+        // stored and query fingerprints are self-consistent.
+        //
+        // Dark-lane safety: drawers without a Lane B entry are absent from fpMatches
+        // and contribute zero candidates — no penalty relative to distilled drawers.
+        // A nil queryFingerprint (query had no structural features, or blank query)
+        // skips this block entirely — same zero-contribution outcome.
+        //
+        // Hits are merged into `vectorHits` with `.vectorHamming` source and
+        // `buffer.vector` score. The buffer.merge max-score rule resolves collisions:
+        // a drawer also returned by Lane A keeps the higher Hamming similarity score.
+        // Lane B results therefore only improve, never worsen, any candidate already
+        // present from Lane A.
+        if let fp = sketch.queryFingerprint, let store = vectorStores[handle] {
+            do {
+                let fpMatches = try await store.findNearest(
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                let fpHits: [RecallHit] = fpMatches.map { m in
+                    let sim = Float(256 - m.distance) / 256.0
+                    let sv = RecallScoreVector(
+                        locus: 0, bm25: 0, vector: sim,
+                        fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+                        redundancyPenalty: 0, final: sim, hammingDistance: m.distance
+                    )
+                    return RecallHit(id: m.itemID, drawer: nil, sources: [.vectorHamming],
+                                     score: sv, explanation: ["vectorHamming"])
+                }
+                vectorHits.append(contentsOf: fpHits)
+            } catch {
+                // Lane B dark — expected for estates with no distilled entries.
+                // No telemetry: this is a normal operating state during the organic
+                // testmark window (before distillation has run).
+                Self.recallLog.debug(
+                    "RecallDirector unionBest: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
             }
         }
 
@@ -1685,31 +1848,45 @@ public extension GeniusLocusKit {
                         shapeCoOccurrence * weights.matrix * 0.5 * buffer.coOccurrence[i] +
                         shapeTemporal     * weights.matrix * 0.5 * buffer.temporal[i]
                 }
-                // The dense float lane shares the `vector` weight budget with
-                // the Hamming lane (both are vector-similarity signals), so
-                // adding dense does not inflate the vector lane's overall share.
+                // Budget split: the structural fingerprint (Lane B,
+                // "distillation-features-v1", buffer.vector) and the dense float
+                // (Lane D, buffer.dense) each receive HALF the `weights.vector`
+                // budget. Combined they sum to at most weights.vector — eliminating
+                // the 2× inflation that occurred when each received the full budget
+                // (FINDING_11X_HAMMING_LANE_2026-07-28 §facts 9-10).
+                //
                 // Each lane — retrieval AND matrix/graph/preference — is scaled by its
                 // RecallShape weight on top of the adaptive RecallWeights budget.
                 //
                 // DISCRIMINATION DISCOUNT (Item 3, MISSION_11X_RECALL_GAP_01):
                 // `denseDiscriminationFactor` ∈ [0, 1] is computed above from the
                 // mean relative spread of top-K nearest cosines across all signals.
-                // When the lane is saturated (spread ≈ 0.05, short-turn stopword mass),
-                // factor ≈ 0.33, reducing the dense column contribution by ~67%.
-                // When the lane is contrastive (spread ≥ 0.15), factor = 1.0 — no
-                // change. This is a continuous linear ramp; no cliff at the boundary.
-                // Back-compat: at factor = 1.0 (contrastive / no .hits signal) the
-                // score is BYTE-IDENTICAL to the pre-discount formula.
+                // When the dense lane is saturated (spread ≈ 0.05, short-turn
+                // stopword mass), factor ≈ 0.33, reducing its contribution by ~67%.
+                // When contrastive (spread ≥ 0.15), factor = 1.0 — no change.
+                // This is a continuous linear ramp; no cliff at the boundary.
+                // The Hamming column (buffer.vector) does not carry the saturation
+                // discount: it is already structurally contrastive (feature-OR
+                // fingerprints, not centroid-collapsed float projections).
+                // isPinned bias: user-pinned drawers receive a small retrieval
+                // priority bonus capped at the signal-agreement bonus magnitude
+                // (0.05). The cap prevents over-weighting in small estates
+                // where many drawers are pinned. Feature-flag adoption bit 16;
+                // flag-adoptions §1.
+                let pinnedBonus: Float =
+                    drawerIndex[buffer.ids[i]]?.hasFeatureFlag(.isPinned) == true
+                        ? agreementBonus : 0
                 scores[i] =
-                    shapeLocus      * weights.locus    * buffer.locus[i] +
-                    shapeBM25       * weights.bm25     * buffer.bm25[i] +
-                    shapeHamming    * weights.vector   * buffer.vector[i] +
-                    denseDiscriminationFactor * shapeDense * weights.vector * buffer.dense[i] +
-                    shapeFieldFit   * weights.fieldFit * buffer.fieldFit[i] +
+                    shapeLocus      * weights.locus          * buffer.locus[i] +
+                    shapeBM25       * weights.bm25           * buffer.bm25[i] +
+                    shapeHamming    * weights.vector * 0.5   * buffer.vector[i] +
+                    denseDiscriminationFactor * shapeDense * weights.vector * 0.5 * buffer.dense[i] +
+                    shapeFieldFit   * weights.fieldFit       * buffer.fieldFit[i] +
                     matrixTerm +
-                    shapeGraph      * weights.graph    * buffer.graph[i] +
-                    shapePreference * weights.graph    * buffer.preference[i] +
-                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0
+                    shapeGraph      * weights.graph          * buffer.graph[i] +
+                    shapePreference * weights.graph          * buffer.preference[i] +
+                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0 +
+                    pinnedBonus
             }
         case .raw, .rrf:
             // .raw: use the normalised lane-rank score directly — no matrix signals,

@@ -1,19 +1,22 @@
 // DistillationDrainStageTests.swift
 //
-// SPEC_DISTILLATION_STORAGE §7.1 (drain-stage integration) and §9/§13.3
-// (search isolation — the geometry probe).
+// SPEC_DISTILLATION_STORAGE §7.1 (drain-stage integration) and §9/§13.1/§13.5.
 //
 //  • Drain-stage: capture of an eligible drawer rides the encode drain;
 //    when `awaitEncodeDrain` returns, the drawer carries its distilled
 //    representation — "a fully drained estate is a fully distilled
 //    estate". The onEncoded callback fires BEFORE the terminal queue
 //    reply (CorpusKit ordering), so the barrier is real, not a race.
-//  • Geometry probe (Stream F amendment): §9 BM25 isolation holds — the
-//    BM25 lane is invariant after distillation (content and digest
-//    unchanged). The dense float lane changes: distillItemsSweep now calls
-//    recomposeDenseVector for each swept item, so dense vectors are
-//    distillate-composed post-sweep ("settled" state). The probe verifies
-//    both invariants: BM25 byte-identical; dense scores differ.
+//  • Geometry probe (Stream F amendment + Item 4 supersession): §9 BM25
+//    isolation holds — the BM25 lane is invariant after distillation
+//    (content and digest unchanged). The dense float lane changes:
+//    distillItemsSweep calls recomposeDenseVector for each swept item, so
+//    dense vectors are distillate-composed post-sweep ("settled" state).
+//    §13.3's whole-fusion byte-identity is superseded twice over: Lane B
+//    ("distillation-features-v1") now feeds RecallDirector (Item 4) and
+//    the dense lane recomposes (Stream F) — so the probe asserts PER-LANE
+//    invariants (BM25 byte-identical; dense scores differ) rather than
+//    fused finals. Lane B's non-degradation lives in FingerprintLaneTests.
 //    Representation-only writes emit no ContentIndexJob (queue stays drained).
 //
 // Rust twin: coordinator.rs distillation tests cover the sweep; the
@@ -124,6 +127,32 @@ struct DistillationDrainStageTests {
         return lines.joined(separator: "\n")
     }
 
+    /// Score map for geometry non-degradation assertions (MISSION_11X_RECALL_GAP_01
+    /// Item 4 update). Returns ["\(query)|\(hitID)": score.final] across all
+    /// queries. Used to verify that distillation never lowers a hit score: Lane B
+    /// ("distillation-features-v1") can only raise scores via max-score merge.
+    private func searchScoreMap(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle, queries: [String]
+    ) async throws -> [String: Float] {
+        var result: [String: Float] = [:]
+        for query in queries {
+            let request = GLKRecallRequest(
+                frame: RecallFrame(filterChain: [], hydrationLevel: .full, limit: 20),
+                mode: .unionBest,
+                scoring: .matrixAware,
+                limit: 20,
+                fallback: .allowDegraded,
+                queryText: query,
+                origin: .external
+            )
+            let response = try await kit.recall(handle, request)
+            for hit in response.hits {
+                result["\(query)|\(hit.id)"] = hit.score.final
+            }
+        }
+        return result
+    }
+
     // MARK: - §7.1 drain-stage
 
     @Test("a fully drained estate is a fully distilled estate")
@@ -173,6 +202,9 @@ struct DistillationDrainStageTests {
 
     // MARK: - §9/§13.3 geometry probe
 
+    // §13.3 whole-fusion byte-identity superseded (Item 4 Lane B + Stream F
+    // dense recompose) — per-lane assertions below; Lane B non-degradation
+    // is verified in FingerprintLaneTests.
     @Test("BM25 invariant after distillation sweep; dense scores change when distillate lands")
     func geometryInvarianceProbe() async throws {
         let (kit, handle) = try await provisionGLKEstate()
@@ -187,7 +219,6 @@ struct DistillationDrainStageTests {
         for body in bodies {
             _ = try await kit.capture(handle, captureFrame(body), mode: .impatient)
         }
-        let queries = ["reactor maintenance Geneva", "vendor contract", "travel policy"]
 
         // Pre-sweep: verify the estate is undistilled.
         let estate = try await kit.estate(for: handle)
