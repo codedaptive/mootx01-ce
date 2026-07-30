@@ -37,14 +37,14 @@ struct SprintDXAssertionTests {
             "RecipeCatalog must contain exactly 29 recipes: 26 baseline + 2 distillation + node_motion")
     }
 
-    /// CK-DX-2: defaultStandingSignalNames contains all 10 standing signals.
+    /// CK-DX-2: defaultStandingSignalNames contains all 11 standing signals.
     ///
-    /// Ten signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
+    /// Eleven signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
     /// + ContradictionScoutSignal (contradiction hunter).
     /// The signal inventory table in GENIUSLOCUSKIT_SPEC.md defines the set.
     @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 11 (includes ContradictionScoutSignal)")
-    func defaultStandingSignalNamesCountIsTen() {
+    func defaultStandingSignalNamesCountIsEleven() {
         #expect(GeniusLocusKit.defaultStandingSignalNames.count == 11,
-            "defaultStandingSignalNames must contain exactly 10 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal + ContradictionScoutSignal")
+            "defaultStandingSignalNames must contain exactly 11 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal + ContradictionScoutSignal")
     }
 }

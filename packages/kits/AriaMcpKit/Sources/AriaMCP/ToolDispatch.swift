@@ -1375,7 +1375,7 @@ extension ToolDispatcher {
         // optional `media_type` argument: constrains recall to drawers that
         // carry a specific media capture type. "voice" → hasVoice (bit 13),
         // "image" → hasImage (bit 14). Composable with `filter` and `wing`.
-        // Re-homed from the removed moot_recollect tool (Wave 1); see completion
+        // Re-homed from moot_recollect (retired Wave 1); see completion
         // report §Re-homing hasVoice/hasImage. Feature-flag adoption §4.
         if let mediaType = try optionalString(args["media_type"], argument: "media_type") {
             switch mediaType {

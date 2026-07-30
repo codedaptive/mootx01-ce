@@ -666,7 +666,7 @@ fn run_memory_search(
     // optional `media_type` argument: constrains recall to drawers that
     // carry a specific media capture type. "voice" → HasVoice (bit 13),
     // "image" → HasImage (bit 14). Composable with `filter` and `wing`.
-    // Re-homed from the removed moot_recollect tool (Wave 1).
+    // Re-homed from moot_recollect (retired Wave 1).
     // Feature-flag adoption §4. Mirrors Swift runMemorySearch.
     if let Some(media_type) = optional_string(args, "media_type")? {
         use locus_kit::drawer_operational::DrawerFeatureFlags;
