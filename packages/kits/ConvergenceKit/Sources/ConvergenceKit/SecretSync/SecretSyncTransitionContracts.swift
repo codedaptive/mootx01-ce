@@ -725,16 +725,19 @@ public struct SecretControlSnapshot: Sendable, Hashable {
     public var state: SecretTransitionState { .committed }
     public let commit: SecretTransitionCommit
     public let records: SecretControlRecords
+    public let trustedDeviceRecords: [DeviceTrustRecord]
 
     init(
         commit: SecretTransitionCommit,
-        records: SecretControlRecords
+        records: SecretControlRecords,
+        trustedDeviceRecords: [DeviceTrustRecord]
     ) throws {
         guard records.state == .committed else {
             throw SecretPolicyValidationError.currentHeadNotCommitted
         }
         self.commit = commit
         self.records = records
+        self.trustedDeviceRecords = trustedDeviceRecords
     }
 }
 
@@ -831,6 +834,9 @@ public enum SecretPolicyValidationError: Error, Sendable, Equatable {
     case duplicateTrustRecord
     case trustedDeviceMismatch
     case trustRecordNotEffective
+    case trustRecordSetMismatch
+    case staleTrustRecord
+    case revokedCredentialReplay
     case recipientNotTrusted
     case signatureRejected
     case digestMismatch(domain: SecretSyncCanonicalDomain)
@@ -933,6 +939,30 @@ public enum SecretPolicyValidator {
         }
     }
 
+    /// Rejects rollback, equivocation, and re-trust of a revoked credential
+    /// across two already-authenticated trust-record snapshots.
+    public static func validateTrustRecordTransition(
+        current: [DeviceTrustRecord],
+        candidate: [DeviceTrustRecord]
+    ) throws {
+        func indexed(
+            _ records: [DeviceTrustRecord]
+        ) throws -> [DeviceCredentialID: DeviceTrustRecord] {
+            var result: [DeviceCredentialID: DeviceTrustRecord] = [:]
+            for record in records {
+                guard result[record.credentialID] == nil else {
+                    throw SecretPolicyValidationError.duplicateTrustRecord
+                }
+                result[record.credentialID] = record
+            }
+            return result
+        }
+        try validateTrustMonotonicity(
+            current: indexed(current),
+            candidate: indexed(candidate)
+        )
+    }
+
     public static func validateTransition(
         currentSnapshot: SecretControlSnapshot?,
         stagedRecords: SecretControlRecords,
@@ -957,11 +987,6 @@ public enum SecretPolicyValidator {
             throw SecretPolicyValidationError.stagedStateRequired
         }
 
-        try validateContentAddresses(
-            records: stagedRecords,
-            commit: commit,
-            digester: digester
-        )
         var credentialsByID: [
             DeviceCredentialID: TrustedDeviceCredential
         ] = [:]
@@ -971,18 +996,43 @@ public enum SecretPolicyValidator {
             }
             credentialsByID[credential.credentialID] = credential
         }
-        var trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord] = [:]
-        for record in trustedDeviceRecords {
-            guard trustRecordsByID[record.credentialID] == nil else {
-                throw SecretPolicyValidationError.duplicateTrustRecord
-            }
-            trustRecordsByID[record.credentialID] = record
+        try validateContentAddresses(
+            records: stagedRecords,
+            commit: commit,
+            digester: digester
+        )
+        let trustRecordsByID = try validateTrustBindings(
+            trustedDeviceRecords,
+            expectedDigests: stagedRecords.signedPolicy.policy
+                .trustedDeviceRecordDigests,
+            at: commit.policyEpoch,
+            credentialsByID: credentialsByID,
+            digester: digester
+        )
+        let authorityTrustRecordsByID: [
+            DeviceCredentialID: DeviceTrustRecord
+        ]
+        if let currentSnapshot {
+            authorityTrustRecordsByID = try validateTrustBindings(
+                currentSnapshot.trustedDeviceRecords,
+                expectedDigests: currentSnapshot.records.signedPolicy.policy
+                    .trustedDeviceRecordDigests,
+                at: currentSnapshot.commit.policyEpoch,
+                credentialsByID: credentialsByID,
+                digester: digester
+            )
+            try validateTrustMonotonicity(
+                current: authorityTrustRecordsByID,
+                candidate: trustRecordsByID
+            )
+        } else {
+            authorityTrustRecordsByID = trustRecordsByID
         }
         try validateSignatures(
             records: stagedRecords,
             commit: commit,
             credentialsByID: credentialsByID,
-            trustRecordsByID: trustRecordsByID,
+            authorityTrustRecordsByID: authorityTrustRecordsByID,
             signatureVerifier: signatureVerifier
         )
         try validateReferences(
@@ -995,7 +1045,8 @@ public enum SecretPolicyValidator {
 
         return try SecretControlSnapshot(
             commit: commit,
-            records: stagedRecords.committedCopy()
+            records: stagedRecords.committedCopy(),
+            trustedDeviceRecords: trustedDeviceRecords
         )
     }
 
@@ -1073,11 +1124,90 @@ public enum SecretPolicyValidator {
         }
     }
 
+    private static func validateTrustBindings(
+        _ records: [DeviceTrustRecord],
+        expectedDigests: [SecretRecordDigest],
+        at policyEpoch: UInt64,
+        credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
+        digester: any SecretSyncDigesting
+    ) throws -> [DeviceCredentialID: DeviceTrustRecord] {
+        let suppliedDigests = records.map(\.recordDigest).sorted {
+            $0.bytes.lexicographicallyPrecedes($1.bytes)
+        }
+        guard suppliedDigests == expectedDigests else {
+            throw SecretPolicyValidationError.trustRecordSetMismatch
+        }
+
+        var recordsByID: [DeviceCredentialID: DeviceTrustRecord] = [:]
+        for record in records {
+            guard record.effectivePolicyEpoch <= policyEpoch else {
+                throw SecretPolicyValidationError.trustRecordNotEffective
+            }
+            guard recordsByID[record.credentialID] == nil else {
+                throw SecretPolicyValidationError.duplicateTrustRecord
+            }
+            try requireDigest(
+                record,
+                expected: record.recordDigest,
+                domain: .deviceTrustRecord,
+                digester: digester
+            )
+            if let credential = credentialsByID[record.credentialID] {
+                guard credential.deviceID == record.deviceID else {
+                    throw SecretPolicyValidationError.trustedDeviceMismatch
+                }
+                if credential.status == .active {
+                    guard
+                        try digester.digest(
+                            canonicalBytes: credential.canonicalBytes()
+                        ) == record.credentialDigest
+                    else {
+                        throw SecretPolicyValidationError.trustedDeviceMismatch
+                    }
+                }
+            }
+            recordsByID[record.credentialID] = record
+        }
+        return recordsByID
+    }
+
+    private static func validateTrustMonotonicity(
+        current: [DeviceCredentialID: DeviceTrustRecord],
+        candidate: [DeviceCredentialID: DeviceTrustRecord]
+    ) throws {
+        guard Set(current.keys).isSubset(of: Set(candidate.keys)) else {
+            throw SecretPolicyValidationError.staleTrustRecord
+        }
+        for (credentialID, candidateRecord) in candidate {
+            guard let currentRecord = current[credentialID] else {
+                continue
+            }
+            guard
+                candidateRecord.effectivePolicyEpoch
+                    >= currentRecord.effectivePolicyEpoch
+            else {
+                throw SecretPolicyValidationError.staleTrustRecord
+            }
+            if candidateRecord.effectivePolicyEpoch
+                == currentRecord.effectivePolicyEpoch
+            {
+                guard candidateRecord.recordDigest == currentRecord.recordDigest else {
+                    throw SecretPolicyValidationError.staleTrustRecord
+                }
+            }
+            if currentRecord.trustState == .revoked,
+               candidateRecord.trustState == .trusted
+            {
+                throw SecretPolicyValidationError.revokedCredentialReplay
+            }
+        }
+    }
+
     private static func validateSignatures(
         records: SecretControlRecords,
         commit: SecretTransitionCommit,
         credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
-        trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord],
+        authorityTrustRecordsByID: [DeviceCredentialID: DeviceTrustRecord],
         signatureVerifier: any SecretSignatureVerifying
     ) throws {
         let policy = records.signedPolicy
@@ -1085,7 +1215,7 @@ public enum SecretPolicyValidator {
             policy.policy.signerCredentialID,
             at: commit.policyEpoch,
             credentialsByID: credentialsByID,
-            trustRecordsByID: trustRecordsByID
+            trustRecordsByID: authorityTrustRecordsByID
         )
         guard try signatureVerifier.verify(
             signature: policy.signature,
@@ -1100,7 +1230,7 @@ public enum SecretPolicyValidator {
                 receipt.signerCredentialID,
                 at: commit.policyEpoch,
                 credentialsByID: credentialsByID,
-                trustRecordsByID: trustRecordsByID
+                trustRecordsByID: authorityTrustRecordsByID
             )
             guard try signatureVerifier.verify(
                 signature: receipt.signature,
@@ -1115,7 +1245,7 @@ public enum SecretPolicyValidator {
             commit.signerCredentialID,
             at: commit.policyEpoch,
             credentialsByID: credentialsByID,
-            trustRecordsByID: trustRecordsByID
+            trustRecordsByID: authorityTrustRecordsByID
         )
         guard try signatureVerifier.verify(
             signature: commit.signature,

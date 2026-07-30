@@ -446,6 +446,7 @@ public struct DeviceTrustRecord:
     SecretSyncCanonicalEncodable
 {
     public let recordDigest: SecretRecordDigest
+    public let credentialDigest: SecretRecordDigest
     public let deviceID: TrustedDeviceID
     public let credentialID: DeviceCredentialID
     public let trustState: DeviceTrustState
@@ -453,6 +454,7 @@ public struct DeviceTrustRecord:
 
     public init(
         recordDigest: SecretRecordDigest,
+        credentialDigest: SecretRecordDigest,
         deviceID: TrustedDeviceID,
         credentialID: DeviceCredentialID,
         trustState: DeviceTrustState,
@@ -462,6 +464,7 @@ public struct DeviceTrustRecord:
             throw SecretSyncContractError.invalidPolicyEpoch
         }
         self.recordDigest = recordDigest
+        self.credentialDigest = credentialDigest
         self.deviceID = deviceID
         self.credentialID = credentialID
         self.trustState = trustState
@@ -476,18 +479,22 @@ public struct DeviceTrustRecord:
         [
             SecretSyncCanonicalField(
                 tag: 1,
-                value: SecretSyncCanonicalValue.uuid(deviceID.rawValue)
+                value: credentialDigest.bytes
             ),
             SecretSyncCanonicalField(
                 tag: 2,
-                value: SecretSyncCanonicalValue.uuid(credentialID.rawValue)
+                value: SecretSyncCanonicalValue.uuid(deviceID.rawValue)
             ),
             SecretSyncCanonicalField(
                 tag: 3,
-                value: SecretSyncCanonicalValue.string(trustState.rawValue)
+                value: SecretSyncCanonicalValue.uuid(credentialID.rawValue)
             ),
             SecretSyncCanonicalField(
                 tag: 4,
+                value: SecretSyncCanonicalValue.string(trustState.rawValue)
+            ),
+            SecretSyncCanonicalField(
+                tag: 5,
                 value: SecretSyncCanonicalValue.uint64(effectivePolicyEpoch)
             ),
         ]
@@ -495,6 +502,7 @@ public struct DeviceTrustRecord:
 
     private enum CodingKeys: String, CodingKey {
         case recordDigest
+        case credentialDigest
         case deviceID
         case credentialID
         case trustState
@@ -507,6 +515,10 @@ public struct DeviceTrustRecord:
             recordDigest: container.decode(
                 SecretRecordDigest.self,
                 forKey: .recordDigest
+            ),
+            credentialDigest: container.decode(
+                SecretRecordDigest.self,
+                forKey: .credentialDigest
             ),
             deviceID: container.decode(TrustedDeviceID.self, forKey: .deviceID),
             credentialID: container.decode(

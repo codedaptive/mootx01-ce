@@ -115,6 +115,7 @@ public struct SecretPolicyEpoch:
     public let scopeSnapshot: SecretScopeSnapshot
     public let generationID: SecretGenerationID
     public let authorizedRecipientCredentialIDs: [DeviceCredentialID]
+    public let trustedDeviceRecordDigests: [SecretRecordDigest]
     public let recoveryRecipient: RecoveryRecipientDescriptor?
     public let signerCredentialID: DeviceCredentialID
 
@@ -125,6 +126,7 @@ public struct SecretPolicyEpoch:
         scopeSnapshot: SecretScopeSnapshot,
         generationID: SecretGenerationID,
         authorizedRecipientCredentialIDs: [DeviceCredentialID],
+        trustedDeviceRecordDigests: [SecretRecordDigest],
         recoveryRecipient: RecoveryRecipientDescriptor?,
         signerCredentialID: DeviceCredentialID
     ) throws {
@@ -159,6 +161,9 @@ public struct SecretPolicyEpoch:
         self.authorizedRecipientCredentialIDs = sortedRecipientUUIDs.map {
             DeviceCredentialID($0)
         }
+        self.trustedDeviceRecordDigests = try sortedUniquePolicyDigests(
+            trustedDeviceRecordDigests
+        )
         self.recoveryRecipient = recoveryRecipient
         self.signerCredentialID = signerCredentialID
     }
@@ -198,7 +203,13 @@ public struct SecretPolicyEpoch:
                 )
             ),
             SecretSyncCanonicalField(
-                tag: 9,
+                tag: 8,
+                value: try SecretSyncCanonicalValue.sequence(
+                    trustedDeviceRecordDigests.map(\.bytes)
+                )
+            ),
+            SecretSyncCanonicalField(
+                tag: 10,
                 value: SecretSyncCanonicalValue.uuid(signerCredentialID.rawValue)
             ),
         ]
@@ -213,7 +224,7 @@ public struct SecretPolicyEpoch:
         if let recoveryRecipient {
             fields.append(
                 SecretSyncCanonicalField(
-                    tag: 8,
+                    tag: 9,
                     value: try recoveryRecipient.canonicalValue()
                 )
             )
@@ -228,6 +239,7 @@ public struct SecretPolicyEpoch:
         case scopeSnapshot
         case generationID
         case authorizedRecipientCredentialIDs
+        case trustedDeviceRecordDigests
         case recoveryRecipient
         case signerCredentialID
     }
@@ -253,6 +265,10 @@ public struct SecretPolicyEpoch:
                 [DeviceCredentialID].self,
                 forKey: .authorizedRecipientCredentialIDs
             ),
+            trustedDeviceRecordDigests: container.decode(
+                [SecretRecordDigest].self,
+                forKey: .trustedDeviceRecordDigests
+            ),
             recoveryRecipient: container.decodeIfPresent(
                 RecoveryRecipientDescriptor.self,
                 forKey: .recoveryRecipient
@@ -263,6 +279,25 @@ public struct SecretPolicyEpoch:
             )
         )
     }
+}
+
+private func sortedUniquePolicyDigests(
+    _ values: [SecretRecordDigest]
+) throws -> [SecretRecordDigest] {
+    guard !values.isEmpty else {
+        throw SecretSyncContractError.emptySet(
+            field: "trustedDeviceRecordDigests"
+        )
+    }
+    let sorted = values.sorted {
+        $0.bytes.lexicographicallyPrecedes($1.bytes)
+    }
+    for index in sorted.indices.dropFirst() where sorted[index] == sorted[index - 1] {
+        throw SecretSyncContractError.duplicateIdentifier(
+            field: "trustedDeviceRecordDigests"
+        )
+    }
+    return sorted
 }
 
 /// Signature-verification seam for later audited implementations.
