@@ -1,6 +1,6 @@
 {
   "mcpServers" : {
-    "mootx01" : {
+    "memory" : {
       "type" : "http",
       "url" : "http://127.0.0.1:4242"
     }
