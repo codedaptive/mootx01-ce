@@ -8,16 +8,16 @@
 //! so the calling AI can interpret low-discrimination results correctly (treat
 //! as effectively unranked, prefer lexical modes) rather than acting on noise.
 //!
-//! ## Dense-lane dark cap
+//! ## Dense-lane dark cap (saturation discount)
 //!
 //! When the semantic vector lane (Lane D) is dark — i.e. the recall result
 //! carried `dense_lane_status = Some(reason)` — the ranking is lexical/BM25
 //! only. A pure-lexical ranking CAN produce a high score-gap (e.g. one memory
-//! contains the exact query token, others do not), but reporting
-//! "high — clear top result" while the semantic lane was unavailable violates
-//! the discrimination signal's own contract. When the dense lane is dark the
-//! result is capped at `Medium` and a caveat is appended to the result line.
-//! Apply via `result_line_with_dense_dark(level, dense_lane_dark)`.
+//! contains the exact query token, others do not), but the relative-gap
+//! classification alone overstates the signal when the semantic lane did not
+//! contribute — the saturation discount is missing. When the dense lane is
+//! dark the result is capped at `Medium` and a caveat is appended to the
+//! result line. Apply via `result_line_with_dense_dark(level, dense_lane_dark)`.
 //! Parity with Swift `RecallDiscrimination.resultLine(for:denseLaneDark:)`.
 //!
 //! ## Parity contract
@@ -144,10 +144,10 @@ fn result_line_base(level: DiscriminationLevel) -> &'static str {
         DiscriminationLevel::Single => "discrimination: n/a — single/zero results.",
         DiscriminationLevel::High => "discrimination: high — clear top result.",
         DiscriminationLevel::Medium => "discrimination: medium — partial separation.",
-        // For small corpora the semantic/associative modes (conceptual shaped-recall,
-        // partial_cue) produce near-flat scores until the embedding encoder (v1.1)
-        // lands — this is expected, not an error. Direct the AI toward lexical/precise
-        // modes when it needs ranking it can trust on small estates.
+        // For small estates the semantic/associative modes (conceptual shaped-recall,
+        // partial_cue) produce narrower relative score gaps — low discrimination is
+        // expected here, not an error. Direct the AI toward lexical/precise modes
+        // for precision retrieval.
         DiscriminationLevel::Low => {
             "discrimination: low — top results are within epsilon; treat as effectively unranked. \
              Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for \

@@ -266,6 +266,16 @@ impl BitmapEvaluator {
                 Filter::SensitivityAtMost(crate::adjectives::AdjectiveSensitivity::Elevated),
             );
         }
+        if !chain.iter().any(Self::is_recall_tier_filter) {
+            // Recall tier default (Wave 2, SPEC_CONSOLIDATION_VAGUE_RECALL §4.2).
+            // `CurrentAndVague` includes ordinary drawers and vague items but
+            // excludes absorbed constituents (`represented_by_vague = 1`, bit 21).
+            // For all pre-Wave-2 drawers (bit 21 = 0), this is a no-op predicate —
+            // the default is behaviourally identical to "no tier filter" until the
+            // first vague item is created. Conditional on absence so an explicit
+            // tier from the caller suppresses this default.
+            result.insert(0, Filter::RecallTier(crate::filter::RecallTier::CurrentAndVague));
+        }
         result
     }
 
@@ -299,6 +309,19 @@ impl BitmapEvaluator {
             Filter::Sensitivity(_) | Filter::SensitivityAtMost(_) => true,
             Filter::All(fs) | Filter::Any(fs) => fs.iter().any(Self::is_bitmap_sensitivity_filter),
             Filter::Not(inner) => Self::is_bitmap_sensitivity_filter(inner),
+            _ => false,
+        }
+    }
+
+    /// Classifier for the recall tier default axis (Wave 2, §4.2).
+    /// Returns true when `f` is — or contains (recursively in All/Any/Not)
+    /// — a `RecallTier` filter. Mirrors the `is_bitmap_sensitivity_filter`
+    /// pattern exactly (AC-6 parity).
+    fn is_recall_tier_filter(f: &Filter) -> bool {
+        match f {
+            Filter::RecallTier(_) => true,
+            Filter::All(fs) | Filter::Any(fs) => fs.iter().any(Self::is_recall_tier_filter),
+            Filter::Not(inner) => Self::is_recall_tier_filter(inner),
             _ => false,
         }
     }
@@ -508,6 +531,36 @@ impl BitmapEvaluator {
                 // intersection means at least one requested flag is set.
                 // Matches the Swift `(op & f.rawValue) != 0` semantics.
                 (op & *flag) != 0
+            }
+
+            // Recall tier gate (Wave 2, SPEC_CONSOLIDATION_VAGUE_RECALL §4.2,
+            // cookbook §2.4.2). Evaluates against the operational bitmap bits
+            // 20–21: is_vague (bit 20) and represented_by_vague (bit 21).
+            Filter::RecallTier(tier) => {
+                use crate::drawer_operational::DrawerFeatureFlags;
+                use crate::filter::RecallTier;
+                match tier {
+                    RecallTier::CurrentAndVague => {
+                        // Default: include ordinary drawers (bit 21 = 0) and vague
+                        // items (bit 20 = 1, bit 21 = 0). Exclude absorbed constituents
+                        // (bit 21 = 1). Predicate: (op & 0x200000) == 0
+                        (op & DrawerFeatureFlags::REPRESENTED_BY_VAGUE) == 0
+                    }
+                    RecallTier::All => {
+                        // No bitmap gate — include everything.
+                        true
+                    }
+                    RecallTier::VagueOnly => {
+                        // Only vague items: bit 20 must be set.
+                        (op & DrawerFeatureFlags::IS_VAGUE) != 0
+                    }
+                    RecallTier::CurrentOnly => {
+                        // Only ordinary episodic drawers: neither bit 20 nor bit 21.
+                        (op & (DrawerFeatureFlags::IS_VAGUE
+                            | DrawerFeatureFlags::REPRESENTED_BY_VAGUE))
+                            == 0
+                    }
+                }
             }
 
             // Composition — bitmap-tier portion. Structured / content

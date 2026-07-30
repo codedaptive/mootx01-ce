@@ -870,6 +870,12 @@ public struct ToolDispatcher: Sendable {
         case "userConfirmed": return [.userConfirmed]
         case "exportable": return [.exportable]
         case "contained": return [.contained]
+        // isPinned filter: constrains recall to user-pinned drawers (bit 16).
+        // Activates the container-fingerprint pruning path for the first
+        // time in production (.hasFeatureFlag is the only prunable filter
+        // case; containers whose OR-fingerprint lacks bit 16 are pruned).
+        // Feature-flag adoption §1.
+        case "pinned": return [.hasFeatureFlag(.isPinned)]
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
@@ -1365,6 +1371,22 @@ extension ToolDispatcher {
         // Appended to the filter chain so it composes with any explicit filter.
         if let wingName = try optionalString(args["wing"], argument: "wing") {
             filterChain.append(.inWing(wingName))
+        }
+        // optional `media_type` argument: constrains recall to drawers that
+        // carry a specific media capture type. "voice" → hasVoice (bit 13),
+        // "image" → hasImage (bit 14). Composable with `filter` and `wing`.
+        // Re-homed from moot_recollect (retired Wave 1); see completion
+        // report §Re-homing hasVoice/hasImage. Feature-flag adoption §4.
+        if let mediaType = try optionalString(args["media_type"], argument: "media_type") {
+            switch mediaType {
+            case "voice": filterChain.append(.hasFeatureFlag(.hasVoice))
+            case "image": filterChain.append(.hasFeatureFlag(.hasImage))
+            default:
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "Unknown media_type: \(mediaType). Valid: voice, image"
+                )
+            }
         }
         let explain = try optionalBool(args["explain"], argument: "explain") ?? false
         // Decode optional `scoring`. Absent keeps the documented default

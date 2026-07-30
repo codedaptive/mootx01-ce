@@ -663,6 +663,22 @@ fn run_memory_search(
     if let Some(wing_name) = optional_string(args, "wing")? {
         filter_chain.push(locus_kit::filter::Filter::InWing(wing_name.to_string()));
     }
+    // optional `media_type` argument: constrains recall to drawers that
+    // carry a specific media capture type. "voice" → HasVoice (bit 13),
+    // "image" → HasImage (bit 14). Composable with `filter` and `wing`.
+    // Re-homed from moot_recollect (retired Wave 1).
+    // Feature-flag adoption §4. Mirrors Swift runMemorySearch.
+    if let Some(media_type) = optional_string(args, "media_type")? {
+        use locus_kit::drawer_operational::DrawerFeatureFlags;
+        match media_type {
+            "voice" => filter_chain.push(locus_kit::filter::Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE)),
+            "image" => filter_chain.push(locus_kit::filter::Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_IMAGE)),
+            unknown => return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("Unknown media_type: {unknown}. Valid: voice, image"),
+            )),
+        }
+    }
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 

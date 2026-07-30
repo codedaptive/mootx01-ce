@@ -137,10 +137,19 @@ actor SQLiteBackend {
     /// writes never reach incremental replication sessions (SECFIX-WS2-PK F3).
     private var pendingBlobNotifications: [BlobChange] = []
     let observerRegistry: SQLiteObserverRegistry?
-    /// Retained on openSchema so queryRows can resolve declared
-    /// column types (bool, uuid, timestamp, bitmap, hlc, generated)
-    /// and decode each column to its proper TypedValue case.
-    private var schemaDeclaration: SchemaDeclaration?
+    /// All table declarations applied to this storage instance, keyed by table
+    /// name so schemas owned by multiple kits can share one estate.
+    ///
+    /// SQLite stores UUIDs and timestamps with TEXT affinity. The declaration
+    /// registry is therefore required at read time to recover their semantic
+    /// `TypedValue` cases. A single retained `SchemaDeclaration` is insufficient:
+    /// opening the application schema and later migrating ConvergenceKit's side
+    /// schema would otherwise leave `_ck_outbox.id` decoded as `.text`.
+    private struct RegisteredTableDeclaration {
+        let kitID: String
+        let table: TableDeclaration
+    }
+    private var tableDeclarations: [String: RegisteredTableDeclaration] = [:]
     /// At-rest encryption config for this estate (Mission ENC-01).
     /// `.plaintext` makes the crypto seam in insertRow/queryRows a no-op.
     let encryptionConfig: EstateEncryptionConfig
@@ -188,7 +197,7 @@ actor SQLiteBackend {
     // MARK: - Schema and migrations
 
     func openSchema(_ schema: SchemaDeclaration) throws {
-        self.schemaDeclaration = schema
+        try registerTableDeclarations(from: schema)
         // Internal tables first.
         try connection.exec(SQLiteSchema.migrationsTableSQL)
         try connection.exec(SQLiteSchema.auditTableSQL)
@@ -242,13 +251,11 @@ actor SQLiteBackend {
     }
 
     func applyMigrations(_ schema: SchemaDeclaration) throws {
-        // Retain the schema declaration so queryRows can resolve declared column
-        // types (bool, uuid, timestamp, bitmap, hlc) when migrate(to:) is called
-        // directly without a prior openSchema call. openSchema also sets this;
-        // keeping both sites in sync ensures the hint is always present.
-        if schemaDeclaration == nil {
-            schemaDeclaration = schema
-        }
+        // Register every schema package before its tables are queried. Distinct
+        // kits accumulate declarations; a later version from the same kit
+        // replaces its prior full declaration so newly-added typed columns are
+        // decoded correctly.
+        try registerTableDeclarations(from: schema)
 
         // Ensure the migrations bookkeeping table and all user-declared tables
         // exist before running pending migration steps. This matches the Rust
@@ -303,6 +310,57 @@ actor SQLiteBackend {
         let final = try currentSchemaVersion(kitID: schema.kitID)
         if final < schema.version {
             try recordSchemaVersion(kitID: schema.kitID, version: schema.version)
+        }
+    }
+
+    /// Add a schema package's tables to the read-time type registry.
+    ///
+    /// Different kits may intentionally share an identical declaration, but a
+    /// differing layout under the same SQLite table name is ambiguous and must
+    /// fail before DDL or data access. The same kit may replace its declaration
+    /// during a forward schema migration because the incoming declaration is the
+    /// authoritative full layout at the target version.
+    private func registerTableDeclarations(from schema: SchemaDeclaration) throws {
+        for table in schema.tables {
+            if let existing = tableDeclarations[table.name] {
+                if existing.kitID == schema.kitID {
+                    tableDeclarations[table.name] = RegisteredTableDeclaration(
+                        kitID: schema.kitID,
+                        table: table
+                    )
+                } else if !tableLayoutsMatch(existing.table, table) {
+                    throw StorageError.constraintViolation(
+                        detail: "table \(table.name) has conflicting declarations from "
+                            + "\(existing.kitID) and \(schema.kitID)"
+                    )
+                }
+            } else {
+                tableDeclarations[table.name] = RegisteredTableDeclaration(
+                    kitID: schema.kitID,
+                    table: table
+                )
+            }
+        }
+    }
+
+    /// Compare the complete persisted layout used by SQLite DDL and decoding.
+    private func tableLayoutsMatch(_ lhs: TableDeclaration, _ rhs: TableDeclaration) -> Bool {
+        guard
+            lhs.name == rhs.name,
+            lhs.primaryKey == rhs.primaryKey,
+            lhs.uniqueConstraints == rhs.uniqueConstraints,
+            lhs.generatedColumns == rhs.generatedColumns,
+            lhs.appendOnly == rhs.appendOnly,
+            lhs.hashable == rhs.hashable,
+            lhs.columns.count == rhs.columns.count
+        else { return false }
+
+        return zip(lhs.columns, rhs.columns).allSatisfy { left, right in
+            left.name == right.name
+                && left.type == right.type
+                && left.nullable == right.nullable
+                && left.defaultValue == right.defaultValue
+                && left.role == right.role
         }
     }
 
@@ -698,8 +756,7 @@ actor SQLiteBackend {
         // Resolve declared types from the retained schema so typed
         // columns decode to their proper TypedValue case. An explicit
         // tableSchema argument overrides the retained lookup.
-        let resolvedSchema = tableSchema
-            ?? schemaDeclaration?.tables.first(where: { $0.name == table })
+        let resolvedSchema = tableSchema ?? tableDeclarations[table]?.table
         // Column projection (no-blob read): a non-nil `columns` list emits an
         // explicit SELECT of exactly those columns, so an unnamed column (e.g.
         // "content") is never read out of SQLite. A nil projection is the
@@ -794,7 +851,7 @@ actor SQLiteBackend {
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name before it is interpolated. Mirrors queryRows and all write paths.
         try validateSQLIdentifier(table)
-        let resolvedSchema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        let resolvedSchema = tableDeclarations[table]?.table
         // SQL-identifier injection guard (SECFIX-WS2-PK F10): validate the
         // projected column names here, just as queryRows does for its projection
         // path. queryRowsSkipCorrupt shares the same SELECT construction, so the
@@ -1005,14 +1062,14 @@ actor SQLiteBackend {
     /// Derive the outbound `RowKey` for a just-written row from its column
     /// values, using the schema-declared primary key for `table` — the same
     /// resolution `fetchMatchingRowKeys`/`fetchMatchingRowValues` already use
-    /// (`schemaDeclaration?.tables…primaryKey.first ?? "row_id"`). Before this
+    /// (`tableDeclarations[table]?.table.primaryKey.first ?? "row_id"`). Before this
     /// fix the lookup was hardcoded to a literal `"row_id"` column and fell
     /// back to a freshly-minted random `UUID()` for any table whose PK is
     /// named something else (e.g. `"id"`). That random fallback silently
     /// forked row identity on the outbound sync path: the row inserted with
     /// key K was announced to observers/replication under a random key K',
     /// so the send-side identity never matched the row actually persisted.
-    /// The `pkCol = schemaDeclaration?...primaryKey.first ?? "row_id"`
+    /// The `pkCol = tableDeclarations[table]?.table.primaryKey.first ?? "row_id"`
     /// resolution above is UNCHANGED by gap 5: it still applies to the
     /// `.uuid` fast path and the UUID-parseable-`.text` case regardless of
     /// composite-PK shape, exactly as before.
@@ -1028,7 +1085,7 @@ actor SQLiteBackend {
     /// on this SQLite backend. See RowKeyDerivation.swift for the full
     /// rationale.
     private func extractRowKey(table: String, values: [String: TypedValue]) -> RowKey {
-        let pkColumns = schemaDeclaration?.tables.first(where: { $0.name == table })?.primaryKey ?? []
+        let pkColumns = tableDeclarations[table]?.table.primaryKey ?? []
         let pkCol = pkColumns.first ?? "row_id"
         if let v = values[pkCol] {
             if case .uuid(let u) = v { return u }
@@ -1050,9 +1107,7 @@ actor SQLiteBackend {
     /// The primary-key column name is read from the retained schema; "row_id"
     /// is the fallback for tables whose schema has no single-UUID PK.
     private func fetchMatchingRowKeys(table: String, predicate: StoragePredicate) throws -> [RowKey] {
-        let pkCol = schemaDeclaration?
-            .tables.first(where: { $0.name == table })?
-            .primaryKey.first ?? "row_id"
+        let pkCol = tableDeclarations[table]?.table.primaryKey.first ?? "row_id"
         // compile is now `throws` — predicate column names are validated inside
         // the compiler (SECFIX-WS2-PK F7).
         let compiled = try SQLitePredicateCompiler.compile(predicate)
@@ -1092,7 +1147,7 @@ actor SQLiteBackend {
         table: String,
         predicate: StoragePredicate
     ) throws -> [RowKey: [String: TypedValue]] {
-        let schema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        let schema = tableDeclarations[table]?.table
         let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "SELECT * FROM \"\(table)\" WHERE \(compiled.sql)"
         let stmt = try connection.prepareCached(sql)
@@ -1131,7 +1186,7 @@ actor SQLiteBackend {
         conflictColumns: [String]
     ) throws -> [String: TypedValue]? {
         guard !conflictColumns.isEmpty else { return nil }
-        let schema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        let schema = tableDeclarations[table]?.table
         // Build WHERE clause from conflict columns that have a value in `values`.
         let pairs = conflictColumns.compactMap { col -> (String, TypedValue)? in
             guard let v = values[col] else { return nil }

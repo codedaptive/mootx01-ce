@@ -112,9 +112,9 @@ public enum SyncDirection: String, Sendable, Codable {
 }
 
 public enum ConflictPolicy: String, Sendable, Codable {
-    // default; incoming HLC vs local _syncHLC. Stale inbound (incoming HLC <
-    // stored _syncHLC) is silently dropped for both upserts and deletes.
-    // Every winning apply writes _syncHLC so the next comparison has durable
+    // default; incoming HLC vs durable local side metadata. Stale inbound
+    // (incoming HLC < stored HLC) is silently dropped for both upserts and deletes.
+    // Every winning apply writes the side metadata so the next comparison has durable
     // state. Delete path: stale delete leaves the row intact; newer delete
     // hard-deletes it. Both CloudKit and Federation implement identical semantics.
     case lastWriterWinsByHLC
@@ -149,7 +149,7 @@ public struct SyncManifest: Sendable {
     /// Columns to route through `CKRecord.encryptedValues` (CloudKit backend only).
     /// Key: table name. Value: set of column names to encrypt. Default `[:]` →
     /// byte-identical to pre-encryption behavior. Not wire-carried (local CloudKit
-    /// encoding directive only). `_sync*` columns and `_ck_*` tables are rejected
+    /// encoding directive only). `moot_sync_*` columns and `_ck_*` tables are rejected
     /// by `validateEncryptedColumns()`. Registry records always stay plaintext.
     public let encryptedContentColumns: [String: Set<String>]
     /// Optional hook run after each inbound pull batch applies;
@@ -161,7 +161,8 @@ public struct SyncManifest: Sendable {
                 encryptedContentColumns: [String: Set<String>] = [:],
                 postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil)
     public func table(named name: String) -> SyncedTable?
-    /// Validate `encryptedContentColumns`: rejects `_sync*` columns and `_ck_*` tables.
+    /// Validate `encryptedContentColumns`: rejects the entire `moot_sync_`
+    /// namespace and `_ck_*` tables.
     public func validateEncryptedColumns() throws
 }
 ```
@@ -511,8 +512,8 @@ public enum CKRecordMapping {
     public static func decode(_ record: CKRecord) throws -> DecodedRecord
 }
 
-/// Sync metadata extracted from the `_sync*` reserved fields of a CKRecord.
-/// Carried separately from `values` so `values` remains clean (no `_sync*` keys)
+/// Sync metadata extracted from the `moot_sync_*` reserved fields of a CKRecord.
+/// Carried separately from `values` so `values` remains clean (no `moot_sync_*` keys)
 /// while the engine retains what it needs for conflict resolution and HLC
 /// persistence.
 public struct SyncMeta: Sendable {
@@ -526,7 +527,7 @@ public struct SyncMeta: Sendable {
 public struct DecodedRecord: Sendable {
     public let table: String
     public let rowKey: UUID
-    /// App-data values. Contains no `_sync*` keys.
+    /// App-data values. Contains no `moot_sync_*` keys.
     public let values: [String: TypedValue]
     /// Sync metadata extracted during decode.
     public let syncMeta: SyncMeta

@@ -17,7 +17,7 @@
 //! ```text
 //! bits 0–5    capture_channel        (contiguous, 6 cases at raw 0..5)
 //! bits 6–11   content_kind           (contiguous, 8 cases at raw 0..7)
-//! bits 12–23  feature_flags          (bitset, 8 named bits 12..19)
+//! bits 12–23  feature_flags          (bitset, 11 named bits 12..23)
 //! bit  24     state_extension flag
 //! bit  25     lineage_clustering flag (NEW in v0.6)
 //! bits 26–63  reserved
@@ -137,14 +137,14 @@ impl ContentKind {
 // MARK: - DrawerFeatureFlags
 
 /// Feature-flag bitset constants. Lives in bits 12–23 of
-/// `Drawer::operational_bitmap` (12-bit bitset; 8 named bits 12..19,
-/// bits 20..23 reserved). Per cookbook §2.4.
+/// `Drawer::operational_bitmap` (12-bit bitset; 11 named bits 12..23).
+/// Per cookbook §2.4.
 ///
 /// F12 cascade (2026-05-27): shifted from v0.35 bits 8–15 to v0.6
 /// bits 12–23. NEW flags: `IS_KEYSTONE` (bit 17, cookbook §7.2),
 /// `IS_LOCKED_ZONE` (bit 18). 2026-07-28: `HAS_CURRENT_REPRESENTATION`
-/// (bit 19, cookbook §2.4.1) assigned — first of the formerly reserved
-/// bits 19–23.
+/// (bit 19, cookbook §2.4.1) assigned. 2026-07-29: Wave-2 vague tier
+/// bits 20–23 assigned per cookbook §2.4.2.
 ///
 /// Bit positions match `DrawerFeatureFlags` OptionSet members in
 /// `DrawerOperational.swift`. The Swift OptionSet's `rawValue` and
@@ -193,6 +193,37 @@ impl DrawerFeatureFlags {
     ///
     /// Mirrors Swift `DrawerFeatureFlags.hasCurrentRepresentation`.
     pub const HAS_CURRENT_REPRESENTATION: i64 = 1 << 19;
+
+    // ── Wave-2 vague tier bits (cookbook §2.4.2, 2026-07-29) ──────────────
+
+    /// Bit 20 — this drawer is a Wave-2 consolidated vague item.
+    ///
+    /// Set iff this drawer was synthesised by `consolidate_transactionally`
+    /// from N ≥ 3 constituent episodic drawers. Clear for every ordinary
+    /// drawer and every constituent (which carries `REPRESENTED_BY_VAGUE`
+    /// instead).
+    ///
+    /// Wire value: 1 << 20 = 0x100000.
+    /// Mirrors Swift `DrawerFeatureFlags.isVague`.
+    pub const IS_VAGUE: i64 = 1 << 20;
+
+    /// Bit 21 — this drawer has been absorbed into a vague item.
+    ///
+    /// Set on each constituent when `consolidate_transactionally` runs.
+    /// The default recall tier excludes drawers carrying this bit.
+    ///
+    /// Wire value: 1 << 21 = 0x200000.
+    /// Mirrors Swift `DrawerFeatureFlags.representedByVague`.
+    pub const REPRESENTED_BY_VAGUE: i64 = 1 << 21;
+
+    /// Mask for the `vague_level` 2-bit sub-field (bits 22–23).
+    /// Use `VAGUE_LEVEL_SHIFT` to extract. Cap: values 0–2 are defined;
+    /// value 3 (0b11) is reserved and treated as 2 at read time.
+    /// Wire mask: 0xC00000. Mirrors the §2.4.2 field description.
+    pub const VAGUE_LEVEL_MASK: i64 = 0xC00000;
+
+    /// Shift for the `vague_level` 2-bit sub-field (bits 22–23).
+    pub const VAGUE_LEVEL_SHIFT: i64 = 22;
 
     /// Mask covering the 12-bit feature region (bits 12–23). Matches
     /// the Swift `featureFlags` accessor's `0xFFF000` mask.
@@ -270,6 +301,39 @@ impl Drawer {
         // Cookbook §2.4.1: has_current_representation at bit 19.
         (self.operational_bitmap & DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION)
             == DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION
+    }
+
+    // ── Wave-2 vague tier accessors (cookbook §2.4.2) ─────────────────────
+
+    /// True when bit 20 of `operational_bitmap` is set, indicating this
+    /// drawer is a Wave-2 consolidated vague item (cookbook §2.4.2).
+    ///
+    /// Mirrors Swift `Drawer.isVague`.
+    pub fn is_vague(&self) -> bool {
+        // Cookbook §2.4.2: is_vague at bit 20.
+        (self.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0
+    }
+
+    /// True when bit 21 of `operational_bitmap` is set, indicating this
+    /// drawer has been absorbed into a vague item (cookbook §2.4.2).
+    ///
+    /// Mirrors Swift `Drawer.representedByVague`.
+    pub fn represented_by_vague(&self) -> bool {
+        // Cookbook §2.4.2: represented_by_vague at bit 21.
+        (self.operational_bitmap & DrawerFeatureFlags::REPRESENTED_BY_VAGUE) != 0
+    }
+
+    /// Nesting depth of this drawer in the vague hierarchy, decoded from
+    /// bits 22–23 of `operational_bitmap` (cookbook §2.4.2).
+    ///
+    /// Returns `0`–`2`. Value `3` (reserved) is clamped to `2`.
+    ///
+    /// Mirrors Swift `Drawer.vagueLevel`.
+    pub fn vague_level(&self) -> u8 {
+        // Cookbook §2.4.2: vague_level at bits 22–23 (2-bit sub-field).
+        let raw = ((self.operational_bitmap & DrawerFeatureFlags::VAGUE_LEVEL_MASK)
+            >> DrawerFeatureFlags::VAGUE_LEVEL_SHIFT) as u8;
+        raw.min(2) // cap at 2: value 3 is reserved, treat as 2
     }
 
     /// True when bit 24 of `operational_bitmap` is set, indicating the
@@ -787,6 +851,93 @@ mod tests {
         assert!(!d.sealed());
         d.adjective_bitmap = 1i64 << 28;
         assert!(!d.sealed());
+    }
+
+    // ── Wave-2 vague tier tests (cookbook §2.4.2) ─────────────────────────
+
+    #[test]
+    fn is_vague_is_bit_20() {
+        // Cookbook §2.4.2: is_vague at bit 20 (wire value 0x100000).
+        assert_eq!(DrawerFeatureFlags::IS_VAGUE, 1 << 20);
+        assert_eq!(DrawerFeatureFlags::IS_VAGUE, 0x100000);
+        let mut d = sample();
+        assert!(!d.is_vague());
+        d.operational_bitmap = DrawerFeatureFlags::IS_VAGUE;
+        assert!(d.is_vague());
+        // Adjacent bits must not trigger.
+        d.operational_bitmap = 1 << 19;
+        assert!(!d.is_vague());
+        d.operational_bitmap = 1 << 21;
+        assert!(!d.is_vague());
+    }
+
+    #[test]
+    fn represented_by_vague_is_bit_21() {
+        // Cookbook §2.4.2: represented_by_vague at bit 21 (wire value 0x200000).
+        assert_eq!(DrawerFeatureFlags::REPRESENTED_BY_VAGUE, 1 << 21);
+        assert_eq!(DrawerFeatureFlags::REPRESENTED_BY_VAGUE, 0x200000);
+        let mut d = sample();
+        assert!(!d.represented_by_vague());
+        d.operational_bitmap = DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
+        assert!(d.represented_by_vague());
+        // Adjacent bits must not trigger.
+        d.operational_bitmap = 1 << 20;
+        assert!(!d.represented_by_vague());
+        d.operational_bitmap = 1 << 22;
+        assert!(!d.represented_by_vague());
+    }
+
+    #[test]
+    fn vague_level_decodes_bits_22_23() {
+        // Cookbook §2.4.2: vague_level at bits 22–23 (mask 0xC00000, shift 22).
+        assert_eq!(DrawerFeatureFlags::VAGUE_LEVEL_MASK, 0xC00000);
+        assert_eq!(DrawerFeatureFlags::VAGUE_LEVEL_SHIFT, 22);
+
+        let mut d = sample();
+        // Default: level 0.
+        assert_eq!(d.vague_level(), 0);
+        // Level 1: bit 22 set.
+        d.operational_bitmap = 1 << 22;
+        assert_eq!(d.vague_level(), 1);
+        // Level 2: both bits 22 and 23 set.
+        d.operational_bitmap = 3 << 22;
+        assert_eq!(d.vague_level(), 2);
+        // Level 0 again: clear.
+        d.operational_bitmap = 0;
+        assert_eq!(d.vague_level(), 0);
+    }
+
+    #[test]
+    fn vague_level_reserved_value_clamped_to_2() {
+        // Value 0b11 (3) at bits 22–23 is reserved; must be clamped to 2.
+        let mut d = sample();
+        d.operational_bitmap = 3 << 22; // 0b11 = 3 = reserved, clamped to 2
+        assert_eq!(d.vague_level(), 2);
+    }
+
+    #[test]
+    fn vague_tier_bits_independent() {
+        // is_vague, represented_by_vague, and vague_level decode independently.
+        let mut d = sample();
+        d.operational_bitmap = DrawerFeatureFlags::IS_VAGUE
+            | (1 << 22); // is_vague=1, vague_level=1, represented_by_vague=0
+        assert!(d.is_vague());
+        assert!(!d.represented_by_vague());
+        assert_eq!(d.vague_level(), 1);
+
+        d.operational_bitmap = DrawerFeatureFlags::REPRESENTED_BY_VAGUE;
+        assert!(!d.is_vague());
+        assert!(d.represented_by_vague());
+        assert_eq!(d.vague_level(), 0);
+    }
+
+    #[test]
+    fn wave2_bit_constants_in_conformance_table() {
+        // Cookbook §2.8 table rows 26–28: verify wire values.
+        assert_eq!(DrawerFeatureFlags::IS_VAGUE, 0x100000); // row 26
+        assert_eq!(DrawerFeatureFlags::REPRESENTED_BY_VAGUE, 0x200000); // row 27
+        assert_eq!(DrawerFeatureFlags::VAGUE_LEVEL_MASK, 0xC00000); // row 28
+        assert_eq!(DrawerFeatureFlags::VAGUE_LEVEL_SHIFT, 22);
     }
 
     #[test]

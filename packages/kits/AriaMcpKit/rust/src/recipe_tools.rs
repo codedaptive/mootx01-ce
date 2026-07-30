@@ -101,6 +101,7 @@ const RUN_MIGRATION: &str = "moot_run_migration";
 const CONFIRM_MIGRATION: &str = "moot_confirm_migration";
 /// Precise-recall tool — mirrors Swift `RecipeTools.preciseRecallToolName`.
 const RECALL_PRECISE: &str = "moot_recall_precise";
+const RECALL_VAGUE: &str = "moot_recall_vague";
 /// Shaped-recall tool (named RecallShape preset) — mirrors Swift
 /// `RecipeTools.shapedRecallToolName`.
 const RECALL_SHAPED: &str = "moot_recall_shaped";
@@ -168,6 +169,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RUN_MIGRATION
             | CONFIRM_MIGRATION
             | RECALL_PRECISE
+            | RECALL_VAGUE
             | RECALL_SHAPED
             | DREAM
             | DISTILL
@@ -215,6 +217,7 @@ pub fn dispatch(
         RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
         CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
+        RECALL_VAGUE => run_vague_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
         // moot_consolidate reaches here only when ack: "moot_distill/p1" was
@@ -391,6 +394,68 @@ fn run_grounded_synthesis_tool(
 /// `error_result`) rather than silently degrading to `text` — the access
 /// surface rejects a malformed ablation selector instead of returning
 /// surprising results under a name the caller does not realize was ignored.
+/// moot_recall_vague — two-hop vague recall (Wave-2 §4.4). Mirrors Swift
+/// `RecipeTools.runVagueRecall`: D12 bounds clamped at the boundary, vague
+/// summaries first with level tags, hydrated originals after, no-hits hint.
+fn run_vague_recall_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let query = require_string(args, "query")?;
+    let hit_limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "hit_limit")?, "hit_limit", 8, crate::dispatch::LIMIT_HARD_CEILING)?;
+    let per_hit = crate::dispatch::clamp_limit(
+        optional_integer(args, "constituents_per_hit")?,
+        "constituents_per_hit", 8, crate::dispatch::LIMIT_HARD_CEILING)?;
+    let total = crate::dispatch::clamp_limit(
+        optional_integer(args, "total_constituents")?,
+        "total_constituents", 32, crate::dispatch::LIMIT_HARD_CEILING)?;
+
+    let coord = estate.coord.lock().unwrap();
+    let out = coord
+        .vague_recall(&estate.handle, &query, hit_limit, per_hit, total)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!("vague_recall failed: {}", crate::interface_tools::describe_verb_dispatch_error(&e)),
+            )
+        })?;
+
+    let parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        out.vague_hits.iter().chain(out.constituents.iter())
+            .filter(|d| seen.insert(d.parent_node_id.clone()))
+            .map(|d| d.parent_node_id.clone())
+            .collect()
+    };
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
+    let room = |parent: &str| -> String {
+        node_names.get(parent)
+            .map(|(w, r)| format!("{w}/{r}"))
+            .unwrap_or_else(|| if parent.is_empty() { "?".to_string() } else { parent.to_string() })
+    };
+
+    let mut lines: Vec<String> = vec![format!(
+        "found {} vague summary(ies), {} hydrated original(s)",
+        out.vague_hits.len(), out.constituents.len())];
+    for hit in &out.vague_hits {
+        lines.push(format!(
+            "{}  [{}]  [vague L{}]  {}",
+            hit.id, room(&hit.parent_node_id), hit.vague_level(), hit.content));
+    }
+    if !out.constituents.is_empty() {
+        lines.push("originals:".to_string());
+        for c in &out.constituents {
+            lines.push(format!("{}  [{}]  {}", c.id, room(&c.parent_node_id), c.content));
+        }
+    }
+    if out.vague_hits.is_empty() {
+        lines.push("hint: no vague tier hits — the estate has no consolidated summaries matching this query. Normal recall (moot_memory_search / moot_recall_precise) covers current memories.".to_string());
+    }
+    Ok(text_result(&lines.join("\n")))
+}
+
 fn run_precise_recall_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -1271,16 +1336,20 @@ fn run_recall_distilled_tool(
             lines.push(format!("    tokens: {tokens} | source: distilled"));
         }
     }
-    // Discrimination signal mirrors moot_memory_search phrasing.
+    // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
+    // geometry over originals). Wire prefix matches moot_memory_search phrasing;
+    // wording unified with the recall_discrimination main ladder.
     let discrimination_line = match out.discrimination {
         cognition_kit::DistilledDiscriminationLevel::Single =>
-            "discrimination: single — only one result.",
+            "discrimination: n/a — single/zero results.",
         cognition_kit::DistilledDiscriminationLevel::High =>
             "discrimination: high — clear top result.",
         cognition_kit::DistilledDiscriminationLevel::Medium =>
-            "discrimination: medium — some separation.",
+            "discrimination: medium — partial separation.",
         cognition_kit::DistilledDiscriminationLevel::Low =>
-            "discrimination: low — results are effectively unranked.",
+            "discrimination: low — top results are within epsilon; treat as effectively unranked. \
+             Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for \
+             precision, or widen the query.",
     };
     lines.push(discrimination_line.to_owned());
     if any_fallback {

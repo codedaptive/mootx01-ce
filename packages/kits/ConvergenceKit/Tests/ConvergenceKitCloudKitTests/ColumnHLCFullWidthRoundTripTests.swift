@@ -14,7 +14,7 @@
 // representative of real 2026 wall-clock time.
 //
 // This is the PERSIST half of gap 6's regression coverage; the WIRE half
-// (JSON round-trip through the actual `_syncColumnHLCs` CKRecord field) is
+// (JSON round-trip through the actual `moot_sync_column_hlcs` CKRecord field) is
 // covered by `CKRecordMappingTests.columnHLCsRealMagnitudeWireRoundTrip`.
 
 import Testing

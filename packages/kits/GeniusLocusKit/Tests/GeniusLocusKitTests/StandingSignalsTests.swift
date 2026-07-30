@@ -446,12 +446,12 @@ struct StandingSignalsTests {
         // brain-layer governor ownership  added TrainingSignal as signal 9; the contradiction
         // scout (hunter background half) is signal 10. Any future addition
         // must update this count and extend defaultStandingSignalNames.
-        #expect(registered.count == 10, "all ten standing signals register")
+        #expect(registered.count == 11, "all ten standing signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 10)
+        #expect(reports.count == 11)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")

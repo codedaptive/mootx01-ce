@@ -245,10 +245,11 @@ as the final line of the text payload. The line carries two space-separated toke
   `GLKRecallResult.denseLaneStatus` vocabulary: `providerOptOut`, `noFloatRows`,
   `storeError`, `emptyQuery`). The default provider is `deterministic` (FNV-1a
   tokenization + FloatSimHash projection — permanent federation-grade vector,
-  surface/lexical signal). The v1.1 learned semantic lane (MiniLM/MPNet/Gemma)
-  is additive; when wired it contributes a richer signal but does not replace
-  the deterministic lane. Callers use `dense_lane` to distinguish a result that
-  included vector scoring from a structural/BM25-only result.
+  surface/lexical signal). An optional host-supplied learned semantic lane
+  (MiniLM/MPNet/Gemma, per CORPUSKIT_SPEC §9.2) is additive; when wired it
+  contributes a richer signal but does not replace the deterministic lane.
+  Callers use `dense_lane` to distinguish a result that included vector scoring
+  from a structural/BM25-only result.
 
 - `degraded_stages:<list>` — pipeline stages that encountered a recoverable error
   and were skipped. `degraded_stages:none` means every stage succeeded (happy
@@ -323,7 +324,7 @@ the 23 reasoning-lens tools below.
 
 - `moot_list_lenses`, `moot_list_recipes`, `moot_synthesize`, `moot_recall_precise`,
   `moot_recall_shaped`, `moot_run_migration`, `moot_confirm_migration`, `moot_dream`,
-  `moot_consolidate`, `moot_recall_distilled`, `moot_recollect`,
+  `moot_distill` (alias: `moot_consolidate`), `moot_recall_distilled`, `moot_recollect`,
   `moot_hunt_contradictions`
   (12 CognitionKit recipe tools)
   - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
@@ -797,11 +798,20 @@ public struct StderrLogger: Sendable { public init(); public func log(_ message:
 
 ### Recall discrimination — `DiscriminationLevel` / `RecallDiscrimination`
 
-A pure confidence heuristic appended to ranked recall results. Classifies how
-well the top hit separates from the rest of the list using a relative gap
-ratio (scale-independent). Applied by `moot_memory_search` and `moot_recall_precise`.
-Swift and Rust thresholds are named constants mirrored verbatim; any change
-must update both ports simultaneously.
+A relative-gap confidence estimate appended to ranked recall results. Classifies
+how well the top hit separates from the rest of the list using a relative gap
+ratio (scale-independent), composed with a saturation discount when the semantic
+vector lane is dark (dense-lane-dark cap). Applied by `moot_memory_search`,
+`moot_recall_precise`, and `moot_recall_shaped`. This is a confidence estimate
+of relative separation — it says nothing about whether the leading result is
+the correct answer. Swift and Rust thresholds are named constants mirrored
+verbatim; any change must update both ports simultaneously.
+
+A second signal, `DistilledDiscriminationLevel`, is used by `moot_recall_distilled`
+and maps to the same wire prefix (`discrimination: `) — both signals share the
+`high/medium/low/n/a` ladder but classify different rank geometry (exact-search
+originals vs distilled representations). See `moot_recall_distilled` output
+format for the distilled variant.
 
 ```swift
 public enum DiscriminationLevel: Sendable, Equatable {
@@ -814,7 +824,8 @@ public enum DiscriminationLevel: Sendable, Equatable {
 public enum RecallDiscrimination {
     public static func classify(_ scores: [Double]) -> DiscriminationLevel
     // Returns a result-line string for the given level. When denseLaneDark is
-    // true the classification is capped at .medium and a caveat is appended.
+    // true the classification is capped at .medium (saturation discount applied)
+    // and a caveat is appended.
     public static func resultLine(for level: DiscriminationLevel, denseLaneDark: Bool = false) -> String
 }
 ```

@@ -188,6 +188,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // (moot_recollect retired with the factoid tier, §11.)
     tools.push(distill_tool());
     tools.push(recall_distilled_tool());
+    tools.push(recall_vague_tool());
     // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
     // same core pass that runs inside moot_dream and the resident scout
     // signal, surfaced as its own tool per Bob's ruling ("it also has to be
@@ -291,7 +292,7 @@ fn file_memory_tool() -> serde_json::Value {
 fn memory_search_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_search",
-        "description": "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) indicating whether the ranking is trustworthy. Low discrimination on small corpora is expected until the embedding encoder lands (v1.1 planned feature) — in that case prefer moot_recall_precise for precision retrieval.",
+        "description": "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) — a relative-gap confidence estimate of how clearly the top result separates from the rest, with a saturation discount when the semantic lane is dark. Low discrimination on small estates is expected for broad or associative searches; prefer moot_recall_precise for precision retrieval.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("Natural-language search query."),
@@ -802,6 +803,24 @@ fn recall_precise_tool() -> serde_json::Value {
 /// and picks a preset by intent. Mirrors Swift `RecipeTools.shapedRecallTool()`.
 /// The four ARIA filtering adjectives compose orthogonally: the preset RANKS,
 /// the `filter` arg FILTERS.
+/// The two-hop vague-recall tool (Wave-2 §4.4). Mirrors Swift
+/// `RecipeTools.vagueRecallTool()` — description parity is intentional.
+fn recall_vague_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_recall_vague",
+        "description": "Vague recall (two-hop): ponder what the estate vaguely remembers. Hop 1 probes the consolidated vague tier's own fingerprint lane for VAGUE summary items; hop 2 hydrates each hit's original constituent memories through _consolidated_from tunnels (bounded per hit and in total). Use when normal recall is thin and the question is old — aged, similar memories may have consolidated into a vague summary whose originals remain fully preserved. Returns the vague summaries first, then the hydrated originals.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The recall query text — fingerprinted for the vague-tier lane probe."),
+                "hit_limit": integer_schema("Max vague summary items from hop 1. Default 8."),
+                "constituents_per_hit": integer_schema("Max original memories hydrated per vague hit (bound K). Default 8."),
+                "total_constituents": integer_schema("Max original memories hydrated overall (bound M). Default 32.")
+            }),
+            json!(["query"])
+        )))
+    })
+}
+
 fn recall_shaped_tool() -> serde_json::Value {
     use genius_locus_kit::recall::RecallShape;
     // The roster listing: one `name — description` line per preset, built from
@@ -818,7 +837,7 @@ fn recall_shaped_tool() -> serde_json::Value {
         .collect();
     json!({
         "name": "moot_recall_shaped",
-        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that are weaker on small corpora until the embedding encoder lands (v1.1 planned), so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision."),
+        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that produce narrower relative score gaps on small estates, so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision."),
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("The search query text — drives BM25 + vector recall."),
@@ -958,7 +977,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_cohesion" => "Reasoning lens: flag recalled memories whose content cohesion with peers is anomalously low (lexical odd-ones-out), or detect column-value anomalies in a dataset when dataset_id is supplied.",
         "moot_lens_contradiction" => "Reasoning lens: surface recorded contradictions — drawer pairs connected by a contradicts tunnel (confirmed edges plus PROPOSED agent-derived findings from the contradiction hunter, flagged unreviewed), and KG facts with conflicting objects for the same subject+predicate. Reports recorded links only; to scan memory CONTENT for new conflicts run moot_hunt_contradictions (or moot_dream, which includes a hunt sweep). Settle proposed edges with moot_review_tunnel.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
-        "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
+        "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores produce narrower relative gaps on small estates (the discrimination signal classifies relative gap — low discrimination here is expected, not an error). For keyword/exact retrieval use moot_recall_precise instead.",
         "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
         "moot_lens_successors" => "Reasoning lens: suggest probable successor drawers via tunnel traversal.",
         "moot_lens_overlap" => "Reasoning lens: compute thematic overlap between two estates.",

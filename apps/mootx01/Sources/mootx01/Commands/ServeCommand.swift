@@ -13,6 +13,7 @@
 
 #if os(macOS)
 import Foundation
+import Security
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
@@ -141,11 +142,37 @@ struct ServeCommand: AsyncParsableCommand {
         // check pre-existence to decide whether to call create (first-run only).
         let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path)
 
+        // Estate key-material lifetime (estate-key-lifetime fix, 2026-07-29).
+        // MOOTX01_ESTATE_LIFETIME=ephemeral is the DECLARED throwaway posture for
+        // agent/test loops that provision and destroy estates in bulk: the db key
+        // is generated in process memory (file still SQLCipher-encrypted, key
+        // never persisted — unrecoverable after process exit, which is correct
+        // for a throwaway estate) and the Ed25519 identity key lives in an
+        // in-memory store. NOTHING touches the Keychain. Declaration, never
+        // path inference: absent the variable, behavior is exactly the durable
+        // posture below. An ephemeral estate is single-process by design —
+        // drain/dream cannot reopen it (no recoverable key).
+        let lifetimeIsEphemeral =
+            (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                .lowercased() == "ephemeral"
+        let identityKeyStore: (any EstateIdentityKeyStore)? =
+            lifetimeIsEphemeral ? InMemoryEstateIdentityKeyStore() : nil
+
         // At-rest posture. A new estate is created encrypted; an already-encrypted
         // estate loads its existing key; a plaintext estate keeps opening as
         // plaintext. serve runs under launchd with NO TTY, so this must never
         // prompt and never migrate — migration is `mootx01 upgrade` only.
         let encryption: EstateEncryptionConfig
+        if lifetimeIsEphemeral {
+            var keyBytes = [UInt8](repeating: 0, count: 32)
+            guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
+                Logging.stderr.log("mootx01 serve fatal: cannot generate ephemeral db key")
+                throw ExitCode.failure
+            }
+            encryption = .fullDatabase(key: Data(keyBytes))
+            Logging.stderr.log(
+                "mootx01 serve: EPHEMERAL estate lifetime declared (MOOTX01_ESTATE_LIFETIME) — keys are in-memory only, no Keychain writes; estate is unrecoverable after this process exits.")
+        } else {
         do {
             let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
             encryption = resolved.encryption
@@ -164,6 +191,7 @@ struct ServeCommand: AsyncParsableCommand {
             // the estate had vanished.
             Logging.stderr.log("mootx01 serve fatal: estate encryption key unavailable: \(error)")
             throw ExitCode.failure
+        }
         }
 
         let configuration = EstateConfiguration(
@@ -189,7 +217,11 @@ struct ServeCommand: AsyncParsableCommand {
                 Logging.stderr.log("first-run: creating estate '\(estateName)' at \(estateURL.path)")
                 _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             }
-            handle = try await kit.open(storage: storage, owner: owner)
+            // identityKeyStore is nil for durable estates (resolved per storage
+            // backend — Keychain for SQLite) and the in-memory store under the
+            // declared ephemeral lifetime, so the Ed25519 signing key never
+            // touches the Keychain.
+            handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
             _ = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
             // `open` admits a BARE estate — it does not register a Corpus or

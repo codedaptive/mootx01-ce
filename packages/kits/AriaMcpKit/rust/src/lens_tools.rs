@@ -48,8 +48,8 @@ use crate::dataset_tools::{
     LensDatasetResolutionError, DATASET_LENS_ROW_CAP,
 };
 use crate::dispatch::{
-    clamp_limit, error_result, opt_float, opt_integer, optional_integer, optional_string,
-    recall_frame, require_string, text_result, wall_now, LIMIT_HARD_CEILING,
+    clamp_limit, error_result, opt_float, opt_integer, optional_bool, optional_integer,
+    optional_string, recall_frame, require_string, text_result, wall_now, LIMIT_HARD_CEILING,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::interface_tools::epoch_to_iso8601;
@@ -127,9 +127,33 @@ pub fn dispatch(
             // ms-timestamp lenses depend on.
             let ranked = run_keystones(&coord, &estate.handle, wing, top_k, now as f64 / 1000.0)
                 .map_err(lens_error)?;
+            // isKeystone post-filter: when keystoneOnly is true, restrict the
+            // returned candidate set to drawers that carry the isKeystone bit
+            // (bit 17). Eigenvector centrality is computed over the full tunnel
+            // graph (preserving rank ordering); only the surfaced candidates are
+            // filtered. Feature-flag adoption §3.
+            // Mirrors Swift LensTools keystones dispatch.
+            let keystone_only = optional_bool(args, "keystoneOnly")?.unwrap_or(false);
+            let filtered: Vec<_> = if keystone_only {
+                use locus_kit::drawer_operational::DrawerFeatureFlags;
+                ranked
+                    .iter()
+                    .filter(|k| {
+                        estate
+                            .store
+                            .get_drawer(&k.id)
+                            .ok()
+                            .flatten()
+                            .map(|d| d.has_feature_flag(DrawerFeatureFlags::IS_KEYSTONE))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            } else {
+                ranked.iter().collect()
+            };
             Ok(list(
                 "keystones",
-                ranked
+                filtered
                     .iter()
                     .map(|k| format!("{} centrality={}", k.id, k.centrality))
                     .collect(),
@@ -478,9 +502,19 @@ pub fn dispatch(
             // ceiling. Non-drawer strings (wing fallbacks) are never in the
             // store and pass through. Parity with the fact_search/timeline
             // source gating and the Swift contradiction lens.
-            let hidden_tunnel_endpoint_ids: std::collections::HashSet<String> = {
+            // isKeystone contradiction weighting: build the set of keystone
+            // endpoint IDs so the emitted slice can be sorted keystone-first.
+            // The same get_drawer calls that build the hidden-endpoint set also
+            // check the isKeystone flag. Feature-flag adoption §3.
+            // Mirrors Swift LensTools contradiction dispatch.
+            let (hidden_tunnel_endpoint_ids, keystone_endpoint_ids): (
+                std::collections::HashSet<String>,
+                std::collections::HashSet<String>,
+            ) = {
+                use locus_kit::drawer_operational::DrawerFeatureFlags;
                 let mut seen = std::collections::HashSet::new();
                 let mut hidden = std::collections::HashSet::new();
+                let mut keystones = std::collections::HashSet::new();
                 for id in contradicts_tunnels
                     .iter()
                     .take(50)
@@ -492,10 +526,27 @@ pub fn dispatch(
                         if !drawer.adjective_sensitivity().is_bulk_exportable() {
                             hidden.insert(id.clone());
                         }
+                        if drawer.has_feature_flag(DrawerFeatureFlags::IS_KEYSTONE) {
+                            keystones.insert(id.clone());
+                        }
                     }
                 }
-                hidden
+                (hidden, keystones)
             };
+            // Sort the emitted slice so keystone-involving contradictions surface
+            // first. Stable: pairs within each group retain their original order.
+            let mut emitted: Vec<_> = contradicts_tunnels.iter().take(50).collect();
+            emitted.sort_by(|a, b| {
+                let a_has = [a.source_drawer_id.as_ref(), a.target_drawer_id.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|id| keystone_endpoint_ids.contains(id));
+                let b_has = [b.source_drawer_id.as_ref(), b.target_drawer_id.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|id| keystone_endpoint_ids.contains(id));
+                b_has.cmp(&a_has) // true > false → keystone pairs first
+            });
 
             let mut lines: Vec<String> = Vec::new();
             if contradicts_tunnels.is_empty() {
@@ -504,7 +555,7 @@ pub fn dispatch(
                 lines.push(format!("contradicts_tunnels: {}", contradicts_tunnels.len()));
                 // node-tree integrity bridge consumer: source_wing/target_wing used as
                 // display fallback when drawer IDs are absent on tunnel metadata.
-                for t in contradicts_tunnels.iter().take(50) {
+                for t in emitted.iter() {
                     let src = match t.source_drawer_id.as_deref() {
                         Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>",
                         Some(id) => id,

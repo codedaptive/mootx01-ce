@@ -67,7 +67,12 @@ extension CloudKitStateActor {
             // CloudKitZoneChanges.modifiedRecords is a [CKRecord] direct list
             // (already unwrapped from the per-record Result in the CKDatabase
             // conformance). Only successful modification results are included.
-            pulledRecords = result.modifiedRecords
+            // Slot-registry records share the application zone so their changes
+            // arrive on the same feed. They are engine metadata, not application
+            // rows, and therefore must never enter CKRecordMapping.decode().
+            pulledRecords = result.modifiedRecords.filter {
+                $0.recordType != SlotRecordMapping.recordType
+            }
 
             // CloudKitZoneChanges.deletedRecordIDs mirrors CKDatabase.RecordZoneChanges
             // deletions as [CKRecord.ID]. These are legacy external deletions (the

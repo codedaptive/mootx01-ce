@@ -189,13 +189,14 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_memory_search",
-                description: "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) indicating whether the ranking is trustworthy. Low discrimination on small corpora is expected until the embedding encoder lands (v1.1 planned feature) — in that case prefer moot_recall_precise for precision retrieval.",
+                description: "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) — a relative-gap confidence estimate of how clearly the top result separates from the rest, with a saturation discount when the semantic lane is dark. Low discrimination on small estates is expected for broad or associative searches; prefer moot_recall_precise for precision retrieval.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "query": stringSchema("Natural-language search query."),
                         "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
-                        "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. null is invalid."),
+                        "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained, pinned. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. \"pinned\" constrains to user-pinned drawers (rooms without a pinned drawer are pruned from the search). null is invalid."),
                         "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                        "media_type": stringSchema("Optional media type filter: voice (drawers captured with voice audio, bit 13), image (drawers from or carrying an image, bit 14). Composable with filter and wing. Omit to search all media types. null is invalid."),
                         "explain": booleanSchema("Return per-hit explanation blocks when true. Omit to use the default; null is invalid."),
                         "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),

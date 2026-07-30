@@ -734,6 +734,7 @@ pub fn opt_float(
 pub fn decode_filter_chain(
     args: &BTreeMap<String, JsonValue>,
 ) -> Result<Vec<locus_kit::filter::Filter>, JSONRPCError> {
+    use locus_kit::drawer_operational::DrawerFeatureFlags;
     use locus_kit::filter::Filter;
     match optional_string(args, "filter")? {
         None => Ok(vec![]),
@@ -742,6 +743,16 @@ pub fn decode_filter_chain(
         Some("exportable") => Ok(vec![Filter::Exportable]),
         Some("contained") => Ok(vec![Filter::Contained]),
         Some("currentlyBelieve") => Ok(vec![Filter::CurrentlyBelieve]),
+        // isPinned filter: constrains recall to user-pinned drawers (bit 16).
+        // Activates the container-fingerprint pruning path for the first
+        // time in production (.HasFeatureFlag is the only prunable filter
+        // case; containers whose OR-fingerprint lacks bit 16 are pruned).
+        // Feature-flag adoption §1. Mirrors Swift ToolDispatch.decodeFilterChain.
+        Some("pinned") => Ok(vec![Filter::HasFeatureFlag(DrawerFeatureFlags::IS_PINNED)]),
+        // hasLinks filter: constrains recall to drawers with links/citations
+        // (bit 15). Used by grounded synthesis for citation-scoped synthesis.
+        // Feature-flag adoption §2. Mirrors Swift RecipeTools.decodeFilterChain.
+        Some("hasLinks") => Ok(vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_LINKS)]),
         Some(unknown) => Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
             format!("Unknown filter: {unknown}"),

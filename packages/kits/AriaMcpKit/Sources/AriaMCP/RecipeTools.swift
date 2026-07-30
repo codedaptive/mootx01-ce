@@ -59,6 +59,7 @@ enum RecipeTools {
     static let listRecipesCatalogToolName = "moot_list_recipes"
     static let groundedSynthesisToolName = "moot_synthesize"
     static let preciseRecallToolName = "moot_recall_precise"
+    static let vagueRecallToolName = "moot_recall_vague"
     /// Shaped-recall tool: a single recall tool with a discoverable `preset` enum
     /// param selecting one named RecallShape from the GLK roster. Preferable to ~20
     /// tools (one per shape) — the AI picks a deterministic recipe by name instead
@@ -124,6 +125,7 @@ enum RecipeTools {
             || name == listRecipesCatalogToolName
             || name == groundedSynthesisToolName
             || name == preciseRecallToolName
+            || name == vagueRecallToolName
             || name == shapedRecallToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
@@ -152,6 +154,7 @@ enum RecipeTools {
             dreamTool(),
             distillTool(),
             recallDistilledTool(),
+            vagueRecallTool(),
             huntContradictionsTool(),
         ]
     }
@@ -175,7 +178,7 @@ enum RecipeTools {
     private static func shapedRecallTool() -> ProjectedTool {
         ProjectedTool(
             name: shapedRecallToolName,
-            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that are weaker on small corpora until the embedding encoder lands (v1.1 planned), so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision.",
+            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that produce narrower relative score gaps on small estates, so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema("The search query text — drives BM25 + vector recall."),
@@ -225,7 +228,7 @@ enum RecipeTools {
             description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary recall across any confirmation state. null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve, hasLinks. Omit for ordinary recall across any confirmation state. \"hasLinks\" scopes synthesis to drawers with links/citations — citation-scoped synthesis. null is invalid."),
                     "limit": integerSchema("Max drawers to recall. Omit for no explicit cap; null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
@@ -252,6 +255,22 @@ enum RecipeTools {
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe)
+    }
+
+    private static func vagueRecallTool() -> ProjectedTool {
+        ProjectedTool(
+            name: vagueRecallToolName,
+            description: "Vague recall (two-hop): ponder what the estate vaguely remembers. Hop 1 probes the consolidated vague tier's own fingerprint lane for VAGUE summary items; hop 2 hydrates each hit's original constituent memories through _consolidated_from tunnels (bounded per hit and in total). Use when normal recall is thin and the question is old — aged, similar memories may have consolidated into a vague summary whose originals remain fully preserved. Returns the vague summaries first, then the hydrated originals.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema("The recall query text — fingerprinted for the vague-tier lane probe."),
+                    "hit_limit": integerSchema("Max vague summary items from hop 1. Default 8. Omit for the default; null is invalid."),
+                    "constituents_per_hit": integerSchema("Max original memories hydrated per vague hit (bound K). Default 8. Omit for the default; null is invalid."),
+                    "total_constituents": integerSchema("Max original memories hydrated overall (bound M). Default 32. Omit for the default; null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -509,6 +528,8 @@ enum RecipeTools {
             return try await runGroundedSynthesis(args, kit: kit, handle: handle)
         case preciseRecallToolName:
             return try await runPreciseRecall(args, kit: kit, handle: handle)
+        case vagueRecallToolName:
+            return try await runVagueRecall(args, kit: kit, handle: handle)
         case shapedRecallToolName:
             return try await runShapedRecall(args, kit: kit, handle: handle)
         case runMigrationBenchmarkToolName:
@@ -1141,6 +1162,56 @@ enum RecipeTools {
     /// Ranking is identical to moot_memory_search by construction; only the
     /// payloads differ. Fallback rows (§10.2) still return results — served
     /// from content, with a hint to run moot_distill.
+    private static func runVagueRecall(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        // Clamp all three bounds at the MCP boundary (DoS prevention),
+        // mirroring runPreciseRecall's posture; the verb re-applies D12.
+        let hitLimit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["hit_limit"], argument: "hit_limit"),
+            argument: "hit_limit", default: 8)
+        let perHit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["constituents_per_hit"], argument: "constituents_per_hit"),
+            argument: "constituents_per_hit", default: 8)
+        let total = try ToolDispatcher.clampLimit(
+            try optionalInt(args["total_constituents"], argument: "total_constituents"),
+            argument: "total_constituents", default: 32)
+
+        let out = try await kit.vagueRecall(
+            handle, query: query,
+            hitLimit: hitLimit,
+            constituentsPerHit: perHit,
+            totalConstituents: total)
+
+        let estate = try await kit.estate(for: handle)
+        let allParents = (out.vagueHits + out.constituents).map(\.parentNodeId)
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: allParents)
+        func room(_ parent: String) -> String {
+            nodeNames[parent].map { "\($0.wing)/\($0.room)" }
+                ?? (parent.isEmpty ? "?" : parent)
+        }
+
+        var lines: [String] = [
+            "found \(out.vagueHits.count) vague summary(ies), \(out.constituents.count) hydrated original(s)"
+        ]
+        for hit in out.vagueHits {
+            lines.append("\(hit.id)  [\(room(hit.parentNodeId))]  [vague L\(hit.vagueLevel)]  \(hit.content)")
+        }
+        if !out.constituents.isEmpty {
+            lines.append("originals:")
+            for c in out.constituents {
+                lines.append("\(c.id)  [\(room(c.parentNodeId))]  \(c.content)")
+            }
+        }
+        if out.vagueHits.isEmpty {
+            lines.append("hint: no vague tier hits — the estate has no consolidated summaries matching this query. Normal recall (moot_memory_search / moot_recall_precise) covers current memories.")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
     private static func runRecallDistilled(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -1196,13 +1267,17 @@ enum RecipeTools {
                 lines.append("    tokens: \(match.tokenCount.map(String.init) ?? "—") | source: distilled")
             }
         }
-        // Discrimination signal mirrors moot_memory_search phrasing.
+        // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
+        // geometry over originals). Wire prefix matches moot_memory_search phrasing;
+        // wording unified with the RecallDiscrimination main ladder.
         let discLevel: String
         switch out.discrimination {
         case .high:   discLevel = "discrimination: high — clear top result."
-        case .medium: discLevel = "discrimination: medium — some separation."
-        case .low:    discLevel = "discrimination: low — results are effectively unranked."
-        case .single: discLevel = "discrimination: single — only one result."
+        case .medium: discLevel = "discrimination: medium — partial separation."
+        case .low:    discLevel = "discrimination: low — top results are within epsilon; treat as effectively unranked. "
+                                + "Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for "
+                                + "precision, or widen the query."
+        case .single: discLevel = "discrimination: n/a — single/zero results."
         }
         lines.append(discLevel)
         if anyFallback {
@@ -1309,6 +1384,11 @@ enum RecipeTools {
         case "exportable": return [.exportable]
         case "contained": return [.contained]
         case "currentlyBelieve": return [.currentlyBelieve]
+        // hasLinks filter: constrains grounded synthesis recall to drawers
+        // that contain links/citations (bit 15). Enables citation-scoped
+        // synthesis — the synthesizer receives only link-bearing sources.
+        // Feature-flag adoption §2.
+        case "hasLinks": return [.hasFeatureFlag(.hasLinks)]
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,

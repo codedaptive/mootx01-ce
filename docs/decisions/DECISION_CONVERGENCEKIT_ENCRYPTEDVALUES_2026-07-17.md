@@ -61,7 +61,7 @@ The CVK-ICLOUD program shipped a zone-change-feed pull path (`fetchZoneChanges`)
 
 **Complete type compatibility. No case requires a new encoding strategy.**
 
-**Metadata fields must stay plaintext.** `_syncHLC`, `_syncSchemaVersion`, `_syncKitID`, `_syncColumnHLCs`, `_syncTypeTags`, and `_syncDeleted` are routing and conflict-resolution metadata — they contain no user PII and encrypting them adds zero security value while any decryption failure would silently corrupt sync routing (wrong table, wrong LWW gate outcome, wrong tombstone detection). All `_sync*` fields must always use `record[key]`, never `record.encryptedValues[key]`.
+**Metadata fields must stay plaintext.** `moot_sync_hlc`, `moot_sync_schema_version`, `moot_sync_kit_id`, `moot_sync_column_hlcs`, `moot_sync_type_tags`, and `moot_sync_deleted` are routing and conflict-resolution metadata — they contain no user PII and encrypting them adds zero security value while any decryption failure would silently corrupt sync routing (wrong table, wrong LWW gate outcome, wrong tombstone detection). The entire `moot_sync_` namespace is reserved for ConvergenceKit metadata and must always use `record[key]`, never `record.encryptedValues[key]`. Letter-leading names are required because CloudKit rejects leading-underscore fields as unprivileged attempts to insert system fields.
 
 ### 2. Server-side query restriction — impact on our pull path
 
@@ -84,7 +84,7 @@ The zone-feed architecture means the server-side query restriction is completely
 
 ### 3. Tombstone, slot-registry, and side-table records
 
-**Tombstone records** (`CKRecordMapping.tombstoneRecord()`): carry only `_syncDeleted`, `_syncHLC`, `_syncSchemaVersion`, `_syncKitID`. No content fields. Entirely unaffected by encryption choice.
+**Tombstone records** (`CKRecordMapping.tombstoneRecord()`): carry only `moot_sync_deleted`, `moot_sync_hlc`, `moot_sync_schema_version`, and `moot_sync_kit_id`. No content fields. Entirely unaffected by encryption choice.
 
 **Slot-registry records** (`SlotRecordMapping`): carry `device_uuid`, `epoch`, `last_active_hlc`, `claimed_at`. These are device coordination metadata, not user content. They are fetched via `fetch(withRecordIDs:)` during sync initialization (before the main pull loop). Encrypting slot records would mean a decryption failure during slot registry bootstrap blocks the entire sync initialization — a disproportionate failure mode for metadata that contains no diary content. Slot records should remain plaintext.
 
@@ -100,7 +100,7 @@ This sketch uses `CKSideSchema`/`SyncManifest` as the existing machinery to exte
 
 **Step 1 — Opt-in flag in SyncManifest.** Add `encryptedContentColumns: Set<String>?` to `SyncManifest` (or per `SyncedTable`). Default `nil` = current behavior, no change. This mirrors how `excludedColumns` was added — additive, backward-compatible, nil means empty.
 
-**Step 2 — Dual-write CKRecordMapping.** In `CKRecordMapping.record(from:)`, columns whose names appear in `encryptedContentColumns` go to `record.encryptedValues[key] = value`; all others go to `record[key] = value`. The `_sync*` metadata fields always use `record[key]`.
+**Step 2 — Dual-write CKRecordMapping.** In `CKRecordMapping.record(from:)`, columns whose names appear in `encryptedContentColumns` go to `record.encryptedValues[key] = value`; all others go to `record[key] = value`. The `moot_sync_*` metadata fields always use `record[key]`.
 
 **Step 3 — Dual-read CKRecordMapping.** In `CKRecordMapping.decode()`, for each key in `record.allKeys()` plus `record.encryptedValues.keys`, prefer the encrypted value when both are present. This handles: (a) old plaintext records from unupgraded peers, (b) own old records written before the flag was set, (c) records from a peer that rolled back the flag.
 
@@ -158,7 +158,7 @@ Changes confined to `CKRecordMapping.swift` and a `SyncManifest` struct extensio
 // SyncManifest extension (additive, backward-compatible):
 // encryptedContentColumns: columns to route through record.encryptedValues.
 // nil or empty = current behavior (no encryption).
-// _sync* keys are always excluded from this set at the call site.
+// moot_sync_* keys are always excluded from this set at the call site.
 public struct SyncManifest {
     // ... existing fields ...
     public var encryptedContentColumns: Set<String>?
@@ -176,7 +176,7 @@ if let encryptedSet = encryptedContentColumns, encryptedSet.contains(key) {
 // CKRecordMapping.decode() — pull path change:
 // After the existing for key in record.allKeys() loop, add:
 for key in record.encryptedValues.keys {
-    if key.hasPrefix("_sync") { continue }
+    if SyncMetadataField.isReserved(key) { continue }
     if let any = record.encryptedValues[key] {
         values[key] = try typedValue(from: any)
     }

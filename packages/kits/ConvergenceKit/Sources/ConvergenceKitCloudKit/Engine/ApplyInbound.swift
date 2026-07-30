@@ -200,12 +200,12 @@ extension CloudKitStateActor {
         }
 
         // Primary-key type coercion (belt-and-braces after P4-M2 tag-map fix):
-        // CKRecordMapping now writes a _syncTypeTags map that restores .uuid
+        // CKRecordMapping now writes a moot_sync_type_tags map that restores .uuid
         // discriminators for ALL columns — including the primary key — during
         // decode (P4-M2). This coercion retains the PK specifically because the
         // rowKey is authoritative (derived from the CKRecord.ID, not from the
         // decoded column value), making the coerce exact and not heuristic.
-        // Without this line, records from older peers that lack _syncTypeTags
+        // Without this line, records from older peers that lack moot_sync_type_tags
         // would still land with a .text PK and fail upsert deduplication.
         // Belt-and-braces: keep this coercion even when the tag map is present
         // so the PK is always correct regardless of peer encoder version.

@@ -70,7 +70,7 @@ Use this skill for prompts containing or implying:
    - `moot_write_journal` for session continuity.
 
 5. Dream:
-   - Run `moot_reindex` after batch import, then `moot_dream` after bulk import, major filing, or substantial memory growth. `moot_dream` builds the association matrix that matrix-aware recall scores against; its consolidation proposals are usage-driven and accrue as the estate is recalled against, so 0 proposals on a freshly imported estate is expected.
+   - Run `moot_reindex` after batch import, then `moot_dream` after bulk import, major filing, or substantial memory growth. `moot_dream` builds the association matrix that matrix-aware recall scores against; its latent-alignment proposals are usage-driven and accrue as the estate is recalled against, so 0 proposals on a freshly imported estate is expected.
 
 ## Cost Rule
 

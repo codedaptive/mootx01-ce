@@ -95,6 +95,7 @@ public enum PermissionsWriter {
         "moot_vault_status", "moot_vault_job",
         "moot_memory_search", "moot_memory_get", "moot_memory_list",
         "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled",
+        "moot_recall_vague",
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
         "moot_estate_map", "moot_read_journal", "moot_federated_search",

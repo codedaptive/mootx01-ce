@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use corpus_kit::corpus::EmbeddingModelConfig;
 use genius_locus_kit::coordinator::{
-    EstateCoordinator, EstateKind, EstateMountState, EstateProvisionParams,
+    EstateCoordinator, EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams,
     GeniusLocusKitError, SyncMode,
 };
 use genius_locus_kit::EstateHandle;
@@ -112,6 +112,7 @@ fn glk_params(name: &str) -> EstateProvisionParams {
         zoom_window_high: 10,
         framework_profile: "KnowledgeWork".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     }
 }
 
@@ -123,6 +124,7 @@ fn corpus_only_params(name: &str) -> EstateProvisionParams {
         zoom_window_high: 8,
         framework_profile: "CorpusTest".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     }
 }
 
@@ -134,6 +136,7 @@ fn locus_only_params(name: &str) -> EstateProvisionParams {
         zoom_window_high: 5,
         framework_profile: "MinimalProfile".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     }
 }
 
@@ -201,6 +204,7 @@ fn t1d_provision_glk_stores_zoom_window() {
         zoom_window_high: 12,
         framework_profile: "ZoomProfile".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     };
 
     let handle = coord
@@ -965,6 +969,7 @@ fn all_estate_kinds_seed_default_wings() {
             zoom_window_high: 10,
             framework_profile: "TestProfile".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
         let handle = coord
             .provision(

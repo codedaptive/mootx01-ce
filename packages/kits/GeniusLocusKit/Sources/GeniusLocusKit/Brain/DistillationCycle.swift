@@ -227,6 +227,18 @@ public extension GeniusLocusKit {
                     handle: handle, drawerID: drawer.id, content: drawer.content,
                     distillFn: distillFn, now: now) {
                     produced += 1
+                    // Dense-over-distillate (Stream F): recompose the dense float
+                    // vector from the newly-written distillate. The idempotence gate
+                    // in CorpusContentEngine keys on content digest (not on
+                    // denseCompositionText), so a normal index() call would be
+                    // silently skipped — force=true is required. recomposeDenseVector
+                    // encapsulates this and routes through the CCE actor so counts-
+                    // admission serialization is preserved.
+                    // Best-effort: non-fatal when the engine is absent (non-corpus
+                    // estate) or when the record resolves nil (expunged between
+                    // distillation and here).
+                    try? await corpusKits[handle]?.recomposeDenseVector(
+                        id: drawer.id, now: now)
                 }
             }
         }
@@ -236,13 +248,13 @@ public extension GeniusLocusKit {
 
 // MARK: - Private helpers
 
-private extension GeniusLocusKit {
+extension GeniusLocusKit {
 
     /// The §7.5 short-item rendering: the §7.6 compaction transform, with
     /// the content itself as the last-resort rendering when compaction
     /// eliminates everything (pathological all-stopword content) — §13.1
     /// requires every non-empty item to carry a representation.
-    static func compactionRendering(of content: String) -> String {
+    internal static func compactionRendering(of content: String) -> String {
         let compacted = TokenCompaction.compact(content)
         return compacted.isEmpty ? content : compacted
     }

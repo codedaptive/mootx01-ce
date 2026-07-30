@@ -302,6 +302,34 @@ impl SyncMode {
     }
 }
 
+/// Key-material lifetime for a provisioned estate.
+///
+/// Mirrors Swift `EstateLifetime`. The distinction matters on Apple platforms
+/// where the Ed25519 identity key is written to the Apple Keychain on
+/// `.durable` estates. On Linux/non-Darwin targets the Rust coordinator does
+/// not interact with a system Keychain; `dispose_estate_keys` is therefore a
+/// no-op regardless of lifetime. The field exists for parity so callers that
+/// round-trip params across the Swift/Rust boundary do not need conditional
+/// logic.
+///
+/// ## .durable (default)
+/// Identity and db-key material live in the system Keychain (Apple platforms)
+/// or process-local secure storage (other targets). Correct for all
+/// production/user-owned estates.
+///
+/// ## .ephemeral
+/// Identity material lives only in process memory. No Keychain writes at any
+/// point. Use for test loops and agent-driven harnesses that need SQLite
+/// persistence semantics without accumulating Keychain items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EstateLifetime {
+    /// Keychain-backed identity and db-key material. Correct for production. (default)
+    #[default]
+    Durable,
+    /// In-memory identity only. No Keychain writes. For test loops.
+    Ephemeral,
+}
+
 /// Provisioning parameters for `EstateCoordinator::provision`.
 /// Mirrors Swift `EstateProvisionParams`.
 #[derive(Debug, Clone)]
@@ -312,6 +340,11 @@ pub struct EstateProvisionParams {
     pub zoom_window_high: i64,
     pub framework_profile: String,
     pub sync_mode: SyncMode,
+    /// Key-material lifetime declaration. Defaults to `EstateLifetime::Durable`.
+    /// All existing call sites are unaffected (struct literal construction on the
+    /// Rust side must add this field; callers using `..Default::default()` inherit
+    /// Durable automatically).
+    pub lifetime: EstateLifetime,
 }
 
 /// Lifecycle state for an open estate. Mirrors Swift `EstateMountState`.
@@ -401,6 +434,35 @@ impl From<VerbError> for VerbDispatchError {
 /// metric through IntellectusLib (GLK_ROLLUPS_001). Mirrors the Swift
 /// `remap(verb:estateID:error:)` signature extension; callers that cannot
 /// provide an estate id pass `""` (no metric emitted).
+
+/// Epoch-seconds → ISO8601 UTC string for the recall-trace window reads.
+/// Hand-rolled (no chrono dependency) — same construction the NeuronKit
+/// governor uses; correct for the 2001–2100 range.
+fn epoch_secs_to_iso8601(epoch_secs: i64) -> String {
+    let secs = epoch_secs.max(0) as u64;
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Proleptic Gregorian from days since 1970-01-01 (era algorithm).
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError {
     // NotSupported is the canonical fail-loud path for a verb whose
     // dependency is unavailable. Mapped to NotSupportedByEstate so ARIA
@@ -2682,6 +2744,17 @@ impl EstateCoordinator {
             }
 
             produced += 1;
+            // Dense-over-distillate (Stream F): recompose the dense float
+            // vector from the newly-written distillate. The idempotence gate
+            // keys on content digest (not on dense_composition_text), so a
+            // normal index call would be silently skipped —
+            // recompose_dense_vector passes force=true to bypass the gate.
+            // Best-effort: non-fatal when corpus is absent (LocusOnly estate)
+            // or when the record resolves None (expunged mid-sweep).
+            // Swift parity: DistillationCycle.distillItemsSweep.
+            if let Some(corpus) = self.corpus_kits.get(handle) {
+                let _ = corpus.recompose_dense_vector(&drawer.id, now);
+            }
             } // end for drawer in &room_drawers
         } // end 'rooms: for entry in &rooms
 
@@ -2715,6 +2788,608 @@ impl EstateCoordinator {
     ///
     /// `filed_after` (epoch ms) is the incremental watermark: when set, a
     /// pair is screened only if at least one side was filed after it.
+
+    // MARK: - Wave-2 consolidation (SPEC_CONSOLIDATION_VAGUE_RECALL §3, §5)
+
+    /// One bounded consolidation sweep (§3.1 + §3.2 + §5.1). Returns the
+    /// count of consolidation acts. Mirrors Swift
+    /// `GeniusLocusKit.consolidationSweep`.
+    pub fn consolidation_sweep(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+        config: &crate::brain::consolidation_cycle::ConsolidationConfig,
+        limit: Option<usize>,
+    ) -> Result<usize, VerbDispatchError> {
+        Ok(self
+            .consolidation_sweep_report(handle, now, config, limit)?
+            .total_acts())
+    }
+
+    /// Sweep with the full report (metrics for the D10/D11 defrag policy).
+    /// Mirrors Swift `GeniusLocusKit.consolidationSweepReport` /
+    /// `ConsolidationCycle.swift` — see that file for the design narrative;
+    /// the numbered sections here match it one for one.
+    pub fn consolidation_sweep_report(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+        config: &crate::brain::consolidation_cycle::ConsolidationConfig,
+        limit: Option<usize>,
+    ) -> Result<crate::brain::consolidation_cycle::ConsolidationSweepReport, VerbDispatchError>
+    {
+        use crate::brain::consolidation_cycle::ConsolidationSweepReport;
+        use crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+        use locus_kit::adjectives::State;
+        use locus_kit::drawer_operational::DrawerFeatureFlags;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let none = ConsolidationSweepReport {
+            new_vague_items: 0,
+            fold_ins: 0,
+            fold_in_rejections: 0,
+        };
+        let estate = self.estate_for_verb(handle)?;
+        let vector_store = match self.vector_store_for(handle) {
+            Some(vs) => vs,
+            None => return Ok(none),
+        };
+
+        // ── §3.1 step 1: candidate pool — aged (D1/D2), recall-quiet (D3),
+        // not represented, not vague-at-cap. Bounded page walk (D9).
+        let age_cutoff = now - config.minimum_age_seconds;
+        let recall_cutoff_iso = epoch_secs_to_iso8601(now - config.recall_quiet_seconds);
+        let now_iso = epoch_secs_to_iso8601(now);
+        let recently_recalled: BTreeSet<String> = estate
+            .recent_recall_traces(&recall_cutoff_iso, &now_iso)
+            .map_err(|e| remap("consolidation_sweep", "", e))?
+            .into_iter()
+            .map(|t| t.target)
+            .collect();
+
+        let mut pool: Vec<locus_kit::drawer::Drawer> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut examined: usize = 0;
+        while examined < config.max_candidates_per_sweep {
+            let page_limit = std::cmp::min(500, config.max_candidates_per_sweep - examined);
+            let page = estate
+                .active_drawers_after(cursor.as_deref(), page_limit)
+                .map_err(|e| remap("consolidation_sweep", "", e))?;
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|d| d.id.clone());
+            examined += page.len();
+            for drawer in page {
+                if drawer.filed_at > age_cutoff {
+                    continue;
+                }
+                if (drawer.operational_bitmap & DrawerFeatureFlags::REPRESENTED_BY_VAGUE) != 0 {
+                    continue;
+                }
+                let is_vague =
+                    (drawer.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0;
+                if is_vague && drawer.vague_level() >= config.vague_level_cap {
+                    continue;
+                }
+                if recently_recalled.contains(&drawer.id) {
+                    continue;
+                }
+                pool.push(drawer);
+            }
+        }
+        if pool.is_empty() {
+            return Ok(none);
+        }
+
+        // Fingerprints from the distillation-features-v1 lane; items without
+        // one re-enter the pool after the next distillation sweep.
+        let mut engrams: BTreeMap<String, substrate_types::Fingerprint256> = BTreeMap::new();
+        for drawer in &pool {
+            let stored = vector_store
+                .vectors_for_item(&drawer.id)
+                .map_err(|e| VerbDispatchError::RecallLaneUnavailable { reason: format!("vectors_for_item: {e:?}") })?;
+            if let Some(fp) = stored.iter().find(|v| v.model_id == DISTILLATION_LANE_MODEL_ID) {
+                engrams.insert(drawer.id.clone(), fp.engram.clone());
+            }
+        }
+        let clusterable: Vec<&locus_kit::drawer::Drawer> =
+            pool.iter().filter(|d| engrams.contains_key(&d.id)).collect();
+        if clusterable.is_empty() {
+            return Ok(none);
+        }
+
+        // ── D4: configured ceiling wins; otherwise derive p10 of the
+        // measured pairwise distribution over a bounded sample.
+        let ceiling: u32 = match config.hamming_ceiling {
+            Some(c) => c,
+            None => {
+                let sample: Vec<&substrate_types::Fingerprint256> = clusterable
+                    .iter()
+                    .take(64)
+                    .filter_map(|d| engrams.get(&d.id))
+                    .collect();
+                let mut distances: Vec<u32> = Vec::new();
+                for i in 0..sample.len() {
+                    for j in (i + 1)..sample.len() {
+                        distances.push(substrate_types::hamming::distance(
+                            sample[i], sample[j], 4,
+                        ));
+                    }
+                }
+                if distances.is_empty() {
+                    return Ok(none);
+                }
+                distances.sort_unstable();
+                // p10 index, floor-clamped (mirrors Swift max(0, n/10 - 1)).
+                let idx = (distances.len() / 10).saturating_sub(1);
+                distances[idx.min(distances.len() - 1)]
+            }
+        };
+
+        // ── §3.1 steps 2–3 + §5.1 edge typing (mirrors Swift exactly):
+        //   non-vague↔non-vague → union; non-vague↔vague → fold candidate
+        //   (regardless of pool membership); vague↔vague → union (§5.4).
+        let pool_by_id: BTreeMap<String, &locus_kit::drawer::Drawer> =
+            clusterable.iter().map(|d| (d.id.clone(), *d)).collect();
+        let mut parent: BTreeMap<String, String> = BTreeMap::new();
+        fn find(parent: &mut BTreeMap<String, String>, x: &str) -> String {
+            let mut root = x.to_string();
+            while let Some(p) = parent.get(&root) {
+                if *p == root {
+                    break;
+                }
+                root = p.clone();
+            }
+            parent.insert(x.to_string(), root.clone());
+            root
+        }
+        let mut nearest_vague: BTreeMap<String, (String, u32)> = BTreeMap::new();
+        let mut off_pool_matches: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+        let mut off_pool_ids: BTreeSet<String> = BTreeSet::new();
+        for drawer in &clusterable {
+            parent.entry(drawer.id.clone()).or_insert_with(|| drawer.id.clone());
+            let probe = match engrams.get(&drawer.id) {
+                Some(e) => e,
+                None => continue,
+            };
+            let d_vague = (drawer.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0;
+            let matches = vector_store
+                .find_nearest(probe, DISTILLATION_LANE_MODEL_ID, config.neighbor_probe_limit)
+                .map_err(|e| VerbDispatchError::RecallLaneUnavailable { reason: format!("find_nearest: {e:?}") })?;
+            for m in matches {
+                if m.item_id == drawer.id {
+                    continue;
+                }
+                let dist = m.distance as u32;
+                if let Some(mate) = pool_by_id.get(&m.item_id) {
+                    let m_vague =
+                        (mate.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0;
+                    match (d_vague, m_vague) {
+                        (false, false) | (true, true) => {
+                            if dist <= ceiling {
+                                parent
+                                    .entry(mate.id.clone())
+                                    .or_insert_with(|| mate.id.clone());
+                                let ra = find(&mut parent, &drawer.id);
+                                let rb = find(&mut parent, &mate.id);
+                                if ra != rb {
+                                    parent.insert(ra, rb);
+                                }
+                            }
+                        }
+                        (false, true) => {
+                            let e = nearest_vague.get(&drawer.id);
+                            if e.map(|(_, d0)| dist < *d0).unwrap_or(true) {
+                                nearest_vague.insert(drawer.id.clone(), (mate.id.clone(), dist));
+                            }
+                        }
+                        (true, false) => {
+                            let e = nearest_vague.get(&mate.id);
+                            if e.map(|(_, d0)| dist < *d0).unwrap_or(true) {
+                                nearest_vague.insert(mate.id.clone(), (drawer.id.clone(), dist));
+                            }
+                        }
+                    }
+                } else {
+                    off_pool_ids.insert(m.item_id.clone());
+                    if !d_vague {
+                        off_pool_matches
+                            .entry(drawer.id.clone())
+                            .or_default()
+                            .push((m.item_id.clone(), dist));
+                    }
+                }
+            }
+        }
+        // Resolve off-pool matches; fold targets must be ACTIVE vague items.
+        let off_pool_vec: Vec<&str> = off_pool_ids.iter().map(|s| s.as_str()).collect();
+        let off_pool = estate
+            .get_drawers(&off_pool_vec)
+            .map_err(|e| remap("consolidation_sweep", "", e))?;
+        let mut active_vague_by_id: BTreeMap<String, locus_kit::drawer::Drawer> = off_pool
+            .into_iter()
+            .filter(|d| {
+                (d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0
+                    && d.state() != State::Superseded
+            })
+            .map(|d| (d.id.clone(), d))
+            .collect();
+        for drawer in &clusterable {
+            if (drawer.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0
+                && drawer.state() != State::Superseded
+            {
+                active_vague_by_id.insert(drawer.id.clone(), (*drawer).clone());
+            }
+        }
+        for (drawer_id, matches) in &off_pool_matches {
+            for (mid, dist) in matches {
+                if active_vague_by_id.contains_key(mid) {
+                    let e = nearest_vague.get(drawer_id);
+                    if e.map(|(_, d0)| dist < d0).unwrap_or(true) {
+                        nearest_vague.insert(drawer_id.clone(), (mid.clone(), *dist));
+                    }
+                }
+            }
+        }
+
+        // ── §5.1 fold-ins first; rejections feed D10.
+        let mut fold_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut fold_in_rejections: usize = 0;
+        let mut folded_ids: BTreeSet<String> = BTreeSet::new();
+        for drawer in &clusterable {
+            let (vid, dist) = match nearest_vague.get(&drawer.id) {
+                Some(c) => c,
+                None => continue,
+            };
+            let vague_item = match active_vague_by_id.get(vid) {
+                Some(v) => v,
+                None => continue,
+            };
+            if *dist <= ceiling {
+                let folded_level =
+                    if (drawer.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0 {
+                        drawer.vague_level()
+                    } else {
+                        0
+                    };
+                if std::cmp::max(vague_item.vague_level(), folded_level + 1)
+                    > config.vague_level_cap
+                {
+                    continue;
+                }
+                fold_groups.entry(vid.clone()).or_default().push(drawer.id.clone());
+                folded_ids.insert(drawer.id.clone());
+            } else {
+                fold_in_rejections += 1;
+            }
+        }
+        let mut fold_ins: usize = 0;
+        for (vague_id, folded) in &fold_groups {
+            if let Some(cap) = limit {
+                if fold_ins >= cap {
+                    break;
+                }
+            }
+            let vague_item = match active_vague_by_id.get(vague_id) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            let existing = estate
+                .constituent_ids_for_vague_item(vague_id)
+                .map_err(|e| remap("consolidation_sweep", "", e))?;
+            let mut enlarged: Vec<String> = existing.clone();
+            for fid in folded {
+                if !enlarged.contains(fid) {
+                    enlarged.push(fid.clone());
+                }
+            }
+            if enlarged.len() < config.minimum_cluster_size {
+                continue;
+            }
+            let enlarged_refs: Vec<&str> = enlarged.iter().map(|s| s.as_str()).collect();
+            let mut constituents = estate
+                .get_drawers(&enlarged_refs)
+                .map_err(|e| remap("consolidation_sweep", "", e))?;
+            constituents.sort_by(|a, b| (a.filed_at, &a.id).cmp(&(b.filed_at, &b.id)));
+            let (rendering, fingerprint) =
+                match Self::compose_and_distill(&constituents, config) {
+                    Some(r) => r,
+                    None => continue,
+                };
+            let max_constituent_level = constituents
+                .iter()
+                .map(|c| {
+                    if (c.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0 {
+                        c.vague_level()
+                    } else {
+                        0
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            let level = std::cmp::max(vague_item.vague_level(), 1 + max_constituent_level);
+            if level > config.vague_level_cap {
+                continue;
+            }
+            let mut v2 = locus_kit::drawer::Drawer::new(
+                uuid::Uuid::new_v4().to_string(),
+                rendering,
+                vague_item.parent_node_id.clone(),
+                "consolidation-daemon",
+                now,
+                vague_item.embedding_model_id.clone(),
+            );
+            v2.lineage_id = vague_item.lineage_id;
+            v2.operational_bitmap = DrawerFeatureFlags::IS_VAGUE
+                | (((level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
+            estate
+                .fold_in_transactionally(
+                    &v2,
+                    vague_id,
+                    &enlarged_refs,
+                    "consolidation-daemon",
+                    now,
+                )
+                .map_err(|e| remap("consolidation_sweep", "", e))?;
+            if fingerprint != substrate_types::Fingerprint256::ZERO {
+                vector_store
+                    .add_vector(&v2.id, &fingerprint, DISTILLATION_LANE_MODEL_ID, "1", now)
+                    .map_err(|e| VerbDispatchError::RecallLaneUnavailable { reason: format!("add_vector: {e:?}") })?;
+            }
+            fold_ins += 1;
+        }
+
+        // ── §3.2: new clusters from the remaining components.
+        let mut components: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let ids: Vec<String> = clusterable.iter().map(|d| d.id.clone()).collect();
+        for id in &ids {
+            let root = find(&mut parent, id);
+            components.entry(root).or_default().push(id.clone());
+        }
+        let mut produced: usize = 0;
+        for member_ids in components.values() {
+            if let Some(cap) = limit {
+                if produced + fold_ins >= cap {
+                    break;
+                }
+            }
+            let mut constituents: Vec<locus_kit::drawer::Drawer> = member_ids
+                .iter()
+                .filter(|id| !folded_ids.contains(*id))
+                .filter_map(|id| pool_by_id.get(id).map(|d| (*d).clone()))
+                .collect();
+            if constituents.len() < config.minimum_cluster_size {
+                continue;
+            }
+            constituents.sort_by(|a, b| (a.filed_at, &a.id).cmp(&(b.filed_at, &b.id)));
+            let product_level = 1 + constituents
+                .iter()
+                .map(|c| {
+                    if (c.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0 {
+                        c.vague_level()
+                    } else {
+                        0
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            if product_level > config.vague_level_cap {
+                continue;
+            }
+            let (rendering, fingerprint) =
+                match Self::compose_and_distill(&constituents, config) {
+                    Some(r) => r,
+                    None => continue,
+                };
+            let vague_bitmap: i64 = DrawerFeatureFlags::IS_VAGUE
+                | (((product_level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
+            let mut vague = locus_kit::drawer::Drawer::new(
+                uuid::Uuid::new_v4().to_string(),
+                rendering,
+                constituents[0].parent_node_id.clone(),
+                "consolidation-daemon",
+                now,
+                constituents[0].embedding_model_id.clone(),
+            );
+            vague.operational_bitmap = vague_bitmap;
+            let constituent_refs: Vec<&str> =
+                constituents.iter().map(|c| c.id.as_str()).collect();
+            estate
+                .consolidate_transactionally(
+                    &vague,
+                    &constituent_refs,
+                    "consolidation-daemon",
+                    now,
+                )
+                .map_err(|e| remap("consolidation_sweep", "", e))?;
+            if fingerprint != substrate_types::Fingerprint256::ZERO {
+                vector_store
+                    .add_vector(&vague.id, &fingerprint, DISTILLATION_LANE_MODEL_ID, "1", now)
+                    .map_err(|e| VerbDispatchError::RecallLaneUnavailable { reason: format!("add_vector: {e:?}") })?;
+            }
+            produced += 1;
+        }
+        Ok(ConsolidationSweepReport {
+            new_vague_items: produced,
+            fold_ins,
+            fold_in_rejections,
+        })
+    }
+
+    /// D6/D7 composition + distillation shared by the consolidation act and
+    /// fold-in regeneration. Mirrors Swift `composeAndDistill`.
+    fn compose_and_distill(
+        constituents: &[locus_kit::drawer::Drawer],
+        config: &crate::brain::consolidation_cycle::ConsolidationConfig,
+    ) -> Option<(String, substrate_types::Fingerprint256)> {
+        use crate::brain::distillation_cycle::{compaction_rendering, item_is_distillable};
+        use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
+
+        let combined: String = if constituents.len() > config.large_cluster_fallback {
+            constituents
+                .iter()
+                .map(|c| c.distilled.clone().unwrap_or_else(|| c.content.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            constituents
+                .iter()
+                .map(|c| c.content.clone())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        let sentences: Vec<String> = eidetic_lib::segmenter::sentences(&combined);
+        let (rendering, fingerprint) = if item_is_distillable(sentences.len()) {
+            let input = DistillationInput::new(
+                sentences,
+                None,
+                constituents[0].id.clone(),
+                constituents.iter().map(|c| c.id.clone()).collect(),
+            );
+            let output = DistillationPipeline::run(
+                &input,
+                DistillationPipeline::default_extractor,
+                true,
+            );
+            let rendering = if output.distilled_text.is_empty() {
+                compaction_rendering(&combined)
+            } else {
+                output.distilled_text
+            };
+            (rendering, output.feature_fingerprint)
+        } else {
+            (
+                compaction_rendering(&combined),
+                DistillationPipeline::query_fingerprint(&combined, DistillationPipeline::default_extractor),
+            )
+        };
+        if rendering.is_empty() {
+            return None;
+        }
+        Some((rendering, fingerprint))
+    }
+
+    /// Two-hop vague recall (§4.4). Mirrors Swift
+    /// `GeniusLocusKit.vagueRecall` — hop 1 probes the lane and keeps ACTIVE
+    /// vague items; hop 2 hydrates constituents bounded by D12 K/M.
+    pub fn vague_recall(
+        &self,
+        handle: &EstateHandle,
+        query: &str,
+        hit_limit: usize,
+        constituents_per_hit: usize,
+        total_constituents: usize,
+    ) -> Result<crate::brain::consolidation_cycle::VagueRecallResult, VerbDispatchError> {
+        use crate::brain::consolidation_cycle::VagueRecallResult;
+        use crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+        use locus_kit::adjectives::State;
+        use locus_kit::drawer_operational::DrawerFeatureFlags;
+        use substrate_ml::distillation_pipeline::DistillationPipeline;
+
+        let empty = VagueRecallResult {
+            vague_hits: Vec::new(),
+            constituents: Vec::new(),
+        };
+        let estate = self.estate_for_verb(handle)?;
+        let vector_store = match self.vector_store_for(handle) {
+            Some(vs) => vs,
+            None => return Ok(empty),
+        };
+        let trimmed = query.trim();
+        if trimmed.is_empty() || hit_limit == 0 {
+            return Ok(empty);
+        }
+        let probe = DistillationPipeline::query_fingerprint(
+            trimmed,
+            DistillationPipeline::default_extractor,
+        );
+        if probe == substrate_types::Fingerprint256::ZERO {
+            return Ok(empty);
+        }
+        let matches = vector_store
+            .find_nearest(
+                &probe,
+                DISTILLATION_LANE_MODEL_ID,
+                std::cmp::max(hit_limit * 4, hit_limit),
+            )
+            .map_err(|e| VerbDispatchError::RecallLaneUnavailable { reason: format!("find_nearest: {e:?}") })?;
+        if matches.is_empty() {
+            return Ok(empty);
+        }
+        let match_ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
+        let fetched = estate
+            .get_drawers(&match_ids)
+            .map_err(|e| remap("vague_recall", "", e))?;
+        let by_id: std::collections::BTreeMap<String, locus_kit::drawer::Drawer> =
+            fetched.into_iter().map(|d| (d.id.clone(), d)).collect();
+        // Lane order preserved; ACTIVE vague items only (a superseded fold-in
+        // predecessor's lane entry lingers and must never surface).
+        let mut vague_hits: Vec<locus_kit::drawer::Drawer> = Vec::new();
+        for m in &matches {
+            if vague_hits.len() >= hit_limit {
+                break;
+            }
+            if let Some(d) = by_id.get(&m.item_id) {
+                if (d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0
+                    && d.state() != State::Superseded
+                {
+                    vague_hits.push(d.clone());
+                }
+            }
+        }
+        // Hop 2: bounded hydration.
+        let mut constituent_ids: Vec<String> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        'hydration: for hit in &vague_hits {
+            let ids = estate
+                .constituent_ids_for_vague_item(&hit.id)
+                .map_err(|e| remap("vague_recall", "", e))?;
+            for id in ids.into_iter().take(constituents_per_hit) {
+                if constituent_ids.len() >= total_constituents {
+                    break 'hydration;
+                }
+                if seen.insert(id.clone()) {
+                    constituent_ids.push(id);
+                }
+            }
+        }
+        let cid_refs: Vec<&str> = constituent_ids.iter().map(|s| s.as_str()).collect();
+        let fetched_constituents = estate
+            .get_drawers(&cid_refs)
+            .map_err(|e| remap("vague_recall", "", e))?;
+        let cby: std::collections::BTreeMap<String, locus_kit::drawer::Drawer> =
+            fetched_constituents.into_iter().map(|d| (d.id.clone(), d)).collect();
+        let constituents: Vec<locus_kit::drawer::Drawer> = constituent_ids
+            .iter()
+            .filter_map(|id| cby.get(id).cloned())
+            .collect();
+        Ok(VagueRecallResult {
+            vague_hits,
+            constituents,
+        })
+    }
+
+    /// §5.2 defrag — compositionally cascade + re-consolidate (no third
+    /// mechanism). Mirrors Swift `defragVagueItem`.
+    pub fn defrag_vague_item(
+        &self,
+        handle: &EstateHandle,
+        vague_drawer_id: &str,
+        now: i64,
+        config: &crate::brain::consolidation_cycle::ConsolidationConfig,
+    ) -> Result<crate::brain::consolidation_cycle::ConsolidationSweepReport, VerbDispatchError>
+    {
+        self.expunge(
+            handle,
+            vague_drawer_id,
+            "wave-2 defrag: cluster drift exceeded the D10 threshold",
+            true,
+            now,
+        )?;
+        self.consolidation_sweep_report(handle, now, config, None)
+    }
+
     pub fn hunt_contradictions(
         &self,
         handle: &EstateHandle,
@@ -4655,6 +5330,33 @@ impl EstateCoordinator {
     /// to build the reward map for one cycle tick (B-1 compliance). Mirrors
     /// the Swift `GeniusLocusKit.recentRecallTraces(in:since:now:)`. Delegates
     /// to `Estate::recent_recall_traces`.
+    /// Batch drawer fetch by id — direct hydration (tier filters are a
+    /// DEFAULT-search effect only). Parity of Swift `Estate.getDrawers(ids:)`
+    /// reached through the coordinator surface (B-1).
+    pub fn get_drawers(
+        &self,
+        handle: &EstateHandle,
+        ids: &[&str],
+    ) -> Result<Vec<locus_kit::drawer::Drawer>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .get_drawers(ids)
+            .map_err(|e| remap("get_drawers", "", e).into())
+    }
+
+    /// Insert recall-trace rows directly — maintenance/test seeding for the
+    /// Wave-2 D3 quiet clock. Parity of Swift `Estate.insertRecallTraces`.
+    pub fn insert_recall_traces(
+        &self,
+        handle: &EstateHandle,
+        items: &[locus_kit::recall_trace_item::RecallTraceItem],
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .insert_recall_traces(items)
+            .map_err(|e| remap("insert_recall_traces", "", e).into())
+    }
+
     pub fn recent_recall_traces(
         &self,
         handle: &EstateHandle,
@@ -5971,15 +6673,134 @@ impl EstateCoordinator {
                             reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
                         }
                     })?;
-                    // Capture a cheap clone of the estate (Arc-backed, Send+Sync)
-                    // so the Corpus drain worker's callback can roll up rooms
-                    // without reaching back into the coordinator. Best-effort: a
-                    // rollup failure is non-fatal — the next reindex full-tree
-                    // pass reconciles the Merkle tree. Mirrors Swift's
-                    // wireCorpusRoomRollup setting corpus.onEncoded.
+                    // Capture cheap clones (Arc-backed, Send+Sync) so the
+                    // Corpus drain worker's callback can (1) roll up rooms,
+                    // (2) distill each newly-encoded drawer that is still
+                    // eligible (SPEC_DISTILLATION_STORAGE §7.1 drain path —
+                    // Wave 1 Rust parity gap now closed), and (3) recompose
+                    // the dense float vector from the new distillate
+                    // (MISSION_11X_RECALL_GAP_01 Stream F). Mirrors Swift's
+                    // wireCorpusRoomRollup on_encoded callback. Best-effort:
+                    // all steps are non-fatal — the next distill sweep and
+                    // retrain recover any misses.
                     if let Some(estate) = self.registry.get(&handle).cloned() {
+                        let corpus_for_callback = corpus.clone();
+                        // VectorStore for fingerprint lane (§8); may be absent.
+                        let vector_store_for_callback =
+                            self.vector_stores.get(&handle).cloned();
                         corpus.set_on_encoded(move |drawer_ids| {
+                            use crate::brain::distillation_cycle::{
+                                compaction_rendering, item_is_distillable,
+                                DISTILLATION_LANE_MODEL_ID,
+                            };
+                            use substrate_ml::distillation_pipeline::{
+                                DistillationInput, DistillationPipeline,
+                            };
+                            use substrate_ml::token_compaction;
+
+                            // (1) Room-rollup — always best-effort.
                             let _ = estate.rollup_rooms_for_drawers(drawer_ids);
+
+                            // (2) Drain-stage distillation + (3) dense recompose.
+                            // The wall clock at drain time is the process boundary
+                            // where `now` legitimately enters; `distilled_at` is
+                            // audit-only (§4), so the epoch-millis timestamp here
+                            // carries no behavioral weight. Mirrors Swift's use of
+                            // `Date()` at the head of the on_encoded loop.
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+
+                            for drawer_id in drawer_ids {
+                                // Fetch the current drawer row.
+                                let drawer = match estate.drawer_by_id(drawer_id) {
+                                    Ok(Some(d)) => d,
+                                    _ => continue,
+                                };
+                                if drawer.content.is_empty() {
+                                    continue;
+                                }
+                                // Eligibility: bit 19 (has_current_representation)
+                                // clear, OR pipeline version mismatch.
+                                if drawer.has_current_representation()
+                                    && drawer.distilled_pipeline_version.as_deref()
+                                        == Some(
+                                            token_compaction::DISTILLATION_PIPELINE_VERSION,
+                                        )
+                                {
+                                    continue;
+                                }
+
+                                // Distillation: same matrix / short-item logic
+                                // as distill_items_sweep.
+                                let sentences: Vec<String> =
+                                    eidetic_lib::segmenter::sentences(&drawer.content);
+                                let (rendering, fingerprint) =
+                                    if item_is_distillable(sentences.len()) {
+                                        let input = DistillationInput::new(
+                                            sentences,
+                                            None,
+                                            drawer.id.clone(),
+                                            vec![drawer.id.clone()],
+                                        );
+                                        let output = DistillationPipeline::run(
+                                            &input,
+                                            DistillationPipeline::default_extractor,
+                                            true,
+                                        );
+                                        let r = if output.distilled_text.is_empty() {
+                                            compaction_rendering(&drawer.content)
+                                        } else {
+                                            output.distilled_text
+                                        };
+                                        (r, output.feature_fingerprint)
+                                    } else {
+                                        (
+                                            compaction_rendering(&drawer.content),
+                                            DistillationPipeline::query_fingerprint(
+                                                &drawer.content,
+                                                DistillationPipeline::default_extractor,
+                                            ),
+                                        )
+                                    };
+
+                                // Write 1 of 2 (§7.2): the four distillation columns.
+                                let token_count =
+                                    token_compaction::estimate_token_count(&rendering);
+                                let wrote = estate.set_distilled_representation(
+                                    &drawer.id,
+                                    &rendering,
+                                    token_compaction::DISTILLATION_PIPELINE_VERSION,
+                                    token_count,
+                                    now_ms,
+                                );
+                                if let Ok(1) = wrote {
+                                    // Write 2 of 2 (§7.2/§8): fingerprint lane.
+                                    if fingerprint
+                                        != substrate_types::fingerprint256::Fingerprint256::ZERO
+                                    {
+                                        if let Some(vs) = &vector_store_for_callback {
+                                            let _ = vs.add_vector(
+                                                &drawer.id,
+                                                &fingerprint,
+                                                DISTILLATION_LANE_MODEL_ID,
+                                                "1",
+                                                now_ms,
+                                            );
+                                        }
+                                    }
+                                    // (3) Dense-over-distillate (Stream F): recompose
+                                    // the dense float vector from the new distillate.
+                                    // The idempotence gate keys on content digest (not
+                                    // on dense_composition_text), so a normal index
+                                    // call would be skipped — recompose_dense_vector
+                                    // passes force=true to bypass it.
+                                    // Swift parity: on_encoded in wireCorpusRoomRollup.
+                                    let _ = corpus_for_callback
+                                        .recompose_dense_vector(&drawer.id, now_ms);
+                                }
+                            }
                         });
                     }
                 }
@@ -6159,14 +6980,47 @@ impl EstateCoordinator {
                 })?;
         }
 
-        // Step 4: Close the estate (drops registry, grant store, corpus/vector
-        // refs, and storage Arc). Sub-store teardown (steps 1–3) must complete
+        // Step 4: Dispose key material (estate-key-lifetime fix, 2026-07-29).
+        //
+        // On Apple platforms the Swift coordinator deletes the Ed25519 identity
+        // key and the SQLCipher db key from the Apple Keychain here. The Rust
+        // coordinator does not interact with a system Keychain; estate files
+        // are managed by the application layer (moot-mgr Cluster F). This call
+        // is therefore a no-op on all Rust targets, but it exists for parity
+        // so that the overall destroy() contract ("dispose key material before
+        // close") is visible and testable on both legs.
+        self.dispose_estate_keys(handle);
+
+        // Step 5: Close the estate (drops registry, grant store, corpus/vector
+        // refs, and storage Arc). Sub-store teardown (steps 1–4) must complete
         // before this call, matching the Swift ordering.
         if self.registry.contains_key(handle) {
             self.close(handle)?;
         }
 
         Ok(())
+    }
+
+    /// Dispose key material for an estate being permanently retired.
+    ///
+    /// On Apple platforms (Swift coordinator) this deletes the Ed25519 identity
+    /// key from the Keychain (`com.mootx01.estate.identity` service) and the
+    /// SQLCipher whole-file db key (`com.codedaptive.mootx01` service). On
+    /// Linux and other non-Keychain targets, estate file keys are managed by
+    /// the application layer (file deletion) rather than a system Keychain,
+    /// so this method is a documented no-op here.
+    ///
+    /// It exists for API parity with the Swift coordinator so that `destroy()`
+    /// explicitly names the disposal step on both legs and the parity tests
+    /// can verify the calling contract.
+    ///
+    /// Idempotent: calling on a handle whose keys were already disposed
+    /// (or were never written to a Keychain) is always safe.
+    pub fn dispose_estate_keys(&self, _handle: &EstateHandle) {
+        // No-op on Rust targets. File-based key material (SQLCipher key) is
+        // part of the estate file itself and is removed when the application
+        // layer deletes the backing file after destroy() returns. No separate
+        // Keychain clean-up is needed.
     }
 
     // MARK: - recall_scored
@@ -6678,9 +7532,14 @@ impl EstateCoordinator {
             Vec::new()
         };
 
-        // --- Lane 3: Vector (active when corpus+vector both registered and query non-empty) ---
+        // --- Lane 3a: Vector Hamming (Lane A, "random-indexing-v1") ---
         // Requires corpus for embed(); vector store for find_nearest().
         // Score = (256 - hamming_distance) / 256.0, matching Swift's hamming→score mapping.
+        //
+        // Lane B ("distillation-features-v1", structural fingerprint) is merged into
+        // vector_list below using max-score deduplication — a drawer in both lanes
+        // keeps the higher Hamming similarity score. Combined, Lane A + Lane B share
+        // the weights.vector * 0.5 budget slice (FINDING_11X_HAMMING_LANE_2026-07-28).
         //
         // P1 fail-loud contract (SPEC §P1_FAIL_LOUD):
         //   embed failure        → degrade "corpus.embed" (query survives on locus + BM25)
@@ -6688,7 +7547,7 @@ impl EstateCoordinator {
         //   Both are RECOVERABLE: the query returns with fewer signals, not an error throw.
         //   "stage failed" (degraded_stages non-empty) is DISTINGUISHABLE from
         //   "absent evidence" (empty Vec, no matching docs) per gate criterion (3).
-        let vector_list: Vec<(String, f32)> = if let (Some(ref c), Some(ref vs)) = (&corpus, &vector) {
+        let mut vector_list: Vec<(String, f32)> = if let (Some(ref c), Some(ref vs)) = (&corpus, &vector) {
             if !query_str.is_empty() {
                 // embed stage — may be forced by a test seam (single-use, already taken
                 // from the cfg(any(test, feature = "test-seams")) RefCell by the dispatcher).
@@ -6755,6 +7614,76 @@ impl EstateCoordinator {
         } else {
             Vec::new()
         };
+
+        // --- Lane 3b: Structural fingerprint (Lane B, "distillation-features-v1") ---
+        //
+        // Queries per-drawer distillation fingerprints written by DistillationCycle.
+        // The probe is computed via DistillationPipeline::query_fingerprint with the
+        // capitalization-heuristic default_extractor — the same extractor used at
+        // distillation write time, so stored and query fingerprints are self-consistent.
+        //
+        // Dark-lane safety: drawers without a Lane B entry are absent from fp_matches
+        // and contribute zero candidates — no penalty relative to distilled drawers.
+        // A zero query_fingerprint (query had no structural features) skips this block
+        // entirely — same zero-contribution outcome.
+        //
+        // Hits are merged into vector_list with max-score deduplication: a drawer
+        // already returned by Lane A keeps the higher Hamming similarity score.
+        // Lane B results therefore only improve, never worsen, any candidate already
+        // present from Lane A.
+        //
+        // Unlike Lane A, Lane B is never covered by the _testForceVectorHammingError
+        // seam (that seam is single-use and consumed by Lane A). Lane B uses a plain
+        // match — degraded silently (no telemetry), matching Swift's debug-log-only behavior.
+        if !query_str.is_empty() {
+            if let Some(ref vs) = vector {
+                use substrate_ml::distillation_pipeline::DistillationPipeline;
+                let fp = DistillationPipeline::query_fingerprint(
+                    &query_str,
+                    DistillationPipeline::default_extractor,
+                );
+                if fp != Engram::ZERO {
+                    if let Ok(fp_matches) = vs.find_nearest(
+                        &fp,
+                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                        plan.frontier_k,
+                    ) {
+                        // Max-score merge: build id→score from Lane A, then walk Lane B.
+                        let mut score_by_id: HashMap<String, f32> = vector_list
+                            .iter()
+                            .map(|(id, s)| (id.clone(), *s))
+                            .collect();
+                        // Ordered id list: Lane A order first, Lane B-only appended.
+                        let mut ordered_ids: Vec<String> =
+                            vector_list.iter().map(|(id, _)| id.clone()).collect();
+                        for m in fp_matches {
+                            let score =
+                                (256 - m.distance.clamp(0, 256)) as f32 / 256.0;
+                            if let Some(existing) = score_by_id.get_mut(&m.item_id) {
+                                // Already in Lane A — keep higher score.
+                                if score > *existing {
+                                    *existing = score;
+                                }
+                            } else {
+                                // Lane B only — append to both structures.
+                                score_by_id.insert(m.item_id.clone(), score);
+                                ordered_ids.push(m.item_id.clone());
+                            }
+                        }
+                        // Rebuild vector_list with updated scores, preserving order.
+                        vector_list = ordered_ids
+                            .into_iter()
+                            .map(|id| {
+                                let s = score_by_id.get(&id).copied().unwrap_or(0.0);
+                                (id, s)
+                            })
+                            .collect();
+                    }
+                    // else: Lane B dark — expected for estates with no distilled entries.
+                    // No telemetry: a dark Lane B is a normal operating state.
+                }
+            }
+        }
 
         // --- Lane 4: Dense float (Lane D), PER-SIGNAL — UnionBest mode only ---
         // Cosine over the pooled float vector via Corpus.float_nearest_per_signal,
@@ -7366,10 +8295,18 @@ impl EstateCoordinator {
                 // Contrastive: factor = 1.0 (spread ≥ 0.15, clear semantic winner).
                 // Linear ramp — no cliff. At factor = 1.0 the score is
                 // byte-identical to the pre-discount formula. Mirrors Swift.
-                *v = sh_locus   * weights.locus    * col_locus[i]
-                   + sh_bm25    * weights.bm25     * col_bm25[i]
-                   + sh_hamming * weights.vector   * col_vector[i]
-                   + dense_discrimination_factor * sh_dense * weights.vector * col_dense[i]
+                // Budget split: Lane A+B Hamming (col_vector) and Dense float (col_dense)
+                // each receive HALF the weights.vector budget. Combined they sum to at most
+                // weights.vector — eliminating the 2× inflation that occurred when each
+                // received the full budget (FINDING_11X_HAMMING_LANE_2026-07-28 §facts 9-10).
+                // Mirrors Swift RecallDirector matrixAware scoring formula.
+                // The Hamming column does not carry the saturation discount (structural
+                // fingerprints are contrastive by design). dense_discrimination_factor applies
+                // to col_dense only, not col_vector — parity with Swift.
+                *v = sh_locus   * weights.locus              * col_locus[i]
+                   + sh_bm25    * weights.bm25               * col_bm25[i]
+                   + sh_hamming * weights.vector * 0.5       * col_vector[i]
+                   + dense_discrimination_factor * sh_dense * weights.vector * 0.5 * col_dense[i]
                    + sh_field_fit * weights.field_fit * col_field_fit[i]
                    + matrix_term
                    // graph + preference share the `weights.graph` budget slice, exactly
@@ -8275,6 +9212,7 @@ mod tests {
             zoom_window_high: 10,
             framework_profile: "KnowledgeWork".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         }
     }
 
@@ -8286,6 +9224,7 @@ mod tests {
             zoom_window_high: 5,
             framework_profile: "MinimalProfile".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         }
     }
 
@@ -8337,6 +9276,7 @@ mod tests {
             zoom_window_high: 5,
             framework_profile: "KnowledgeWork".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let handle = coord
@@ -8363,6 +9303,7 @@ mod tests {
             zoom_window_high: 12,
             framework_profile: "ZoomProfile".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let handle = coord
@@ -8419,6 +9360,7 @@ mod tests {
             zoom_window_high: 5,
             framework_profile: "P".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let err = coord
@@ -8444,6 +9386,7 @@ mod tests {
             zoom_window_high: 3, // inverted
             framework_profile: "P".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let err = coord
@@ -8588,6 +9531,7 @@ mod tests {
             zoom_window_high: 8,
             framework_profile: "CorpusTest".to_string(),
             sync_mode: SyncMode::None,
+            lifetime: EstateLifetime::Durable,
         };
 
         let handle = coord

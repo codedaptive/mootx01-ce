@@ -389,7 +389,9 @@ Drawer operational (empirical-dominant, 6-bit floor):
                                  bit 17 is_keystone (NEW, §7.2)
                                  bit 18 is_locked_zone
                                  bit 19 has_current_representation (NEW)
-                                 bits 20–23 reserved
+                                 bit 20 is_vague (NEW §2.4.2)
+                                 bit 21 represented_by_vague (NEW §2.4.2)
+                                 bits 22–23 vague_level [2-bit field] (NEW §2.4.2)
   Bit  24     state_extension flag
   Bit  25     lineage_clustering flag
   Bits 26–63  reserved
@@ -434,6 +436,89 @@ cycle sets the bit as a natural part of writing the four columns.
 - Estate-destruction bulk wipe (`wipe_all_content`) does not clear the
   bit; the estate is destroyed immediately after the wipe, so row state
   is never read again.
+
+#### §2.4.2. Vague tier bits — bits 20–23 (Wave 2, 2026-07-29)
+
+Three fields carved from the four reserved bits above bit 19. They
+encode whether a drawer is a consolidated "vague" item, whether it
+has been subsumed into one, and how deeply it is nested in the
+vague hierarchy.
+
+**Bit 20 — `is_vague`**
+
+Set iff this drawer is a Wave-2 consolidated vague item: it was
+synthesised from N ≥ 3 constituent episodic drawers by the
+`consolidateTransactionally` path. Clear for every ordinary drawer.
+
+Wire value: `1 << 20 = 0x100000`.
+
+**Bit 21 — `represented_by_vague`**
+
+Set iff this drawer is a constituent that has been absorbed into a
+vague item. A drawer with this bit set is excluded from default
+recall (`.recallTier(.currentAndVague)`) — callers must opt in with
+`.recallTier(.all)` or `.recallTier(.currentOnly)` to retrieve it
+directly.
+
+Wire value: `1 << 21 = 0x200000`.
+
+**Bits 22–23 — `vague_level` (2-bit field)**
+
+Encodes nesting depth in the vague hierarchy:
+- `0b00 = 0` — not vague (ordinary episodic drawer or unset).
+- `0b01 = 1` — first-level vague item (constituents are ordinary
+  drawers, `represented_by_vague = 1`).
+- `0b10 = 2` — second-level vague item (at least one constituent is
+  itself a vague item). The spec caps depth at 2 — vague items
+  cannot consolidate into a level-3 item.
+- `0b11` — reserved; never written; if read, treat as level 2.
+
+Mask: `0xC00000`. Shift: 22. Decoded by
+`BitField.extractField(operationalBitmap, shift: 22, width: 2)`.
+
+**Invariants for all three fields.**
+
+1. **Set path (is_vague + represented_by_vague):** Only
+   `consolidateTransactionally` / `consolidate_transactionally` sets
+   these bits. The write is atomic: vague capture + N `_consolidated_from`
+   tunnels + N constituent `representedByVague` bit-OR updates occur in
+   one `storage.transaction(.serializable)`. Never set outside this path.
+
+2. **Clear path (represented_by_vague):** `expungeGated` / `expunge_gated`
+   — when expunging a vague item (`is_vague = 1`), the same transaction
+   that tombstones the vague row clears `represented_by_vague` on all
+   constituent rows discovered via `_consolidated_from` tunnels. One
+   level per death; does not recurse into nested vague hierarchies.
+
+3. **Fold-in (§5.1):** `foldIn` / `fold_in` is the ONLY mechanism that
+   adds a new constituent to an existing vague item. It sets
+   `represented_by_vague` on the new constituent and optionally updates
+   `vague_level` on the vague item, all in one transaction.
+
+4. **vague_level sync:** `vague_level` is set once at consolidation time
+   (from the maximum `vague_level` of any constituent, plus 1). It does
+   not update dynamically as constituents are added via fold-in.
+
+5. **Level cap:** `consolidateTransactionally` rejects a cluster if any
+   constituent has `vague_level = 2`. The rejection is logged (D10
+   rejection counter) but does not crash.
+
+6. **Migration:** 1.0.x rows carry `0` for all three fields — the bitmap
+   bits are clear, which decodes as not-vague / not-represented /
+   level-0. No backfill, no migration guard.
+
+**Practical win.** The Fast Recall tier default (§4.2 — fourth
+`insertDefaults` axis) inserts `.recallTier(.currentAndVague)` when no
+tier filter is present. This predicate evaluates to:
+
+```
+include row iff: (operationalBitmap & 0x200000) == 0
+```
+
+i.e. exclude any row with `represented_by_vague = 1`. Vague items
+themselves (`is_vague = 1`) pass because bit 21 is clear on them.
+Ordinary drawers pass because neither bit is set. Only absorbed
+constituents (bit 21 = 1) are excluded by the default.
 
 ```
 Proposal operational (spatial-dominant, 6-bit floor):
@@ -678,6 +763,9 @@ table.
 | 23 | Adjective.dreaming_recalc_required | bit 26 | Adjectives.swift `Adjective.dreamingRecalcRequired` | NEW in v0.36 F17; cross-noun |
 | 24 | Adjective.sealed | bit 27 | Adjectives.swift `Adjective.sealed` | NEW in v1.0; integrity-triangle hint |
 | 25 | Drawer.feature_flags.has_current_representation | bit 19 (0x80000) | DrawerOperational.swift | NEW 2026-07-28; set iff distillation columns populated |
+| 26 | Drawer.feature_flags.is_vague | bit 20 (0x100000) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; set iff this drawer is a Wave-2 consolidated vague item |
+| 27 | Drawer.feature_flags.represented_by_vague | bit 21 (0x200000) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; set iff absorbed into a vague item |
+| 28 | Drawer.feature_flags.vague_level | bits 22–23 (mask 0xC00000, shift 22, width 2) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; nesting depth 0–2 |
 
 Implementations MUST surface this table as an automated conformance
 test that fails when a source constant deviates from spec.

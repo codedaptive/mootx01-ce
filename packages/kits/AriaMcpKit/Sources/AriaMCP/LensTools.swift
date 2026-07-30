@@ -74,6 +74,7 @@ enum LensTools {
                     properties: [
                         "wing": stringSchema("The wing whose tunnel graph to read."),
                         "topK": integerSchema("How many keystones to return (default 5)."),
+                        "keystoneOnly": booleanSchema("When true, restrict returned candidates to drawers carrying the isKeystone flag (bit 17). Eigenvector centrality is computed over the full tunnel graph; only the surfaced results are filtered. Default false. Omit to use the default; null is invalid."),
                         "estateID": estateIDSchema,
                     ],
                     required: ["wing"]),
@@ -197,7 +198,7 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_partial_cue",
-                description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination from this lens is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
+                description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching. Results include a discrimination signal. Fingerprint-based scores produce narrower relative gaps on small estates (the discrimination signal classifies relative gap — low discrimination here is expected, not an error). For keyword/exact retrieval use moot_recall_precise instead.",
                 inputSchema: objectSchema(
                     properties: [
                         "anchorID": stringSchema("The anchor drawer id (the cue)."),
@@ -394,7 +395,29 @@ enum LensTools {
                 topK: try ToolDispatcher.clampLimit(
                     try integer(args, "topK", default: 5), argument: "topK"),
                 now: Date())
-            return list("keystones", ranked.map { "\($0.id) centrality=\($0.centrality)" })
+            // isKeystone post-filter: when keystoneOnly is true, restrict the
+            // returned candidate set to drawers that carry the isKeystone bit
+            // (bit 17). Eigenvector centrality is computed over the full tunnel
+            // graph (preserving rank ordering); only the surfaced candidates are
+            // filtered. Drawers are loaded bitmapOnly — the bitmap check is the
+            // only requirement; content is not needed.
+            // Feature-flag adoption §3.
+            let keystoneOnly = try optionalBool(args["keystoneOnly"], argument: "keystoneOnly") ?? false
+            let filtered: [Keystone]
+            if keystoneOnly && !ranked.isEmpty {
+                let estate = try await kit.estate(for: handle)
+                let loadResult = try await estate.getDrawers(
+                    ids: ranked.map(\.id),
+                    matchingFrame: RecallFrame(filterChain: []),
+                    hydrationLevel: .bitmapOnly)
+                let keystoneIDs = Set(loadResult.admissible
+                    .filter { $0.hasFeatureFlag(.isKeystone) }
+                    .map(\.id))
+                filtered = ranked.filter { keystoneIDs.contains($0.id) }
+            } else {
+                filtered = ranked
+            }
+            return list("keystones", filtered.map { "\($0.id) centrality=\($0.centrality)" })
 
         case "moot_lens_constellation":
             // Date() is permitted here: this is the ARIA MCP boundary, not a kit.
@@ -577,8 +600,15 @@ enum LensTools {
                 [$0.sourceDrawerId, $0.targetDrawerId].compactMap { $0 }
             })
             let hiddenTunnelEndpointIDs: Set<String>
+            // isKeystone contradiction weighting: sort emitted tunnels so pairs
+            // where either endpoint carries the isKeystone bit surface first.
+            // Drawers are loaded bitmapOnly alongside the existing admissibility
+            // check; the sort uses those same loaded rows.
+            // Feature-flag adoption §3.
+            let keystoneEndpointIDs: Set<String>
             if endpointIDs.isEmpty {
                 hiddenTunnelEndpointIDs = []
+                keystoneEndpointIDs = []
             } else {
                 let result = try await estate.getDrawers(
                     ids: Array(endpointIDs),
@@ -586,13 +616,27 @@ enum LensTools {
                     hydrationLevel: .structured)
                 let admissibleIDs = Set(result.admissible.map { $0.id })
                 hiddenTunnelEndpointIDs = result.loadedIDs.subtracting(admissibleIDs)
+                keystoneEndpointIDs = Set(result.admissible
+                    .filter { $0.hasFeatureFlag(.isKeystone) }
+                    .map(\.id))
+            }
+            // Stable sort: keystone-involving contradictions first, then original
+            // order. `.stable` is not needed (sort is applied to the prefix slice
+            // rather than the full list; the relative order within each group is
+            // preserved because Swift's sort is stable per se since Swift 5).
+            let keystoneFirst = emittedTunnels.sorted { lhs, rhs in
+                let lhsHas = [lhs.sourceDrawerId, lhs.targetDrawerId]
+                    .compactMap { $0 }.contains { keystoneEndpointIDs.contains($0) }
+                let rhsHas = [rhs.sourceDrawerId, rhs.targetDrawerId]
+                    .compactMap { $0 }.contains { keystoneEndpointIDs.contains($0) }
+                return lhsHas && !rhsHas
             }
             var lines: [String] = []
             if contradictsTunnels.isEmpty {
                 lines.append("contradicts_tunnels: none")
             } else {
                 lines.append("contradicts_tunnels: \(contradictsTunnels.count)")
-                for t in emittedTunnels {
+                for t in keystoneFirst {
                     let src = t.sourceDrawerId.map {
                         hiddenTunnelEndpointIDs.contains($0) ? "<hidden>" : $0
                     } ?? "\(t.sourceWing)/\(t.sourceRoom)"
@@ -1567,5 +1611,22 @@ enum LensTools {
 
     private static func numberSchema(_ description: String) -> JSONValue {
         .object(["type": .string("number"), "description": .string(description)])
+    }
+
+    private static func booleanSchema(_ description: String) -> JSONValue {
+        .object(["type": .string("boolean"), "description": .string(description)])
+    }
+
+    // Validates that a JSONValue, if present, is a bool. Returns nil for absent,
+    // throws invalidParams for a non-bool value. Mirrors ToolDispatch.optionalBool.
+    private static func optionalBool(_ value: JSONValue?, argument: String) throws -> Bool? {
+        guard let value else { return nil }
+        guard let flag = value.boolValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a boolean; omit it to use the default"
+            )
+        }
+        return flag
     }
 }

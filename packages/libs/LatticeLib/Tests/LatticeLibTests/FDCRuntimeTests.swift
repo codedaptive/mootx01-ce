@@ -54,8 +54,8 @@ struct FDCRuntimeTests {
     //     that coincidentally appears in the 974.x US-history signatures.
     //     This is a classifier quality limit: the v1.0 frame has no
     //     software-domain vocabulary, so coincidental biology/anatomy Q-IDs
-    //     bleed through. The embedding encoder (when added) will handle
-    //     these cases.
+    //     bleed through. A host-supplied learned semantic lane (per CORPUSKIT_SPEC §9.2)
+    //     would handle these cases.
     //
     // Tests here prove the guard works for its intended class of inputs,
     // not that every software phrase returns UNRESOLVED.
