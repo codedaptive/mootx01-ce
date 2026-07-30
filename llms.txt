@@ -63,7 +63,7 @@ package in the MOOTx01 product repository belongs to a standalone SDK.
 
 ## Version note
 
-This branch is `develop/1.1.x`, currently versioned `1.1.0-beta-04`. It is the
+This branch is `develop/1.1.x`, currently versioned `1.1.0-beta-05`. It is the
 fast-moving beta for 1.1 feature updates, not the supported product release.
 Stable install links resolve to the current 1.0 release; beta evaluation builds
 this checkout and records both the beta version and tested commit. The `04`
