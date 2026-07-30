@@ -406,7 +406,11 @@ struct SecretSyncContractTests {
     func signedEnrollmentFailsClosed() throws {
         let candidate = try enrolledCredential()
         let authority = try authorityCredential()
-        let verifier = TestSignatureVerifier(acceptedSignatures: [Data([0x33])])
+        let verifier = BindingSignatureVerifier(
+            acceptedBytesBySignature: [
+                Data([0x33]): try candidate.enrollmentSigningBytes(),
+            ]
+        )
 
         try SecretPolicyValidator.validateEnrollment(
             candidate,
@@ -428,9 +432,32 @@ struct SecretSyncContractTests {
                 candidate,
                 expectedChallengeID: candidate.enrollmentProof.challengeID,
                 authorityCredential: authority,
-                signatureVerifier: TestSignatureVerifier(
-                    acceptedSignatures: []
+                signatureVerifier: BindingSignatureVerifier(
+                    acceptedBytesBySignature: [:]
                 )
+            )
+        }
+
+        let substituted = try TrustedDeviceCredential(
+            deviceID: TrustedDeviceID(UUID()),
+            credentialID: candidate.credentialID,
+            credentialVersion: candidate.credentialVersion,
+            status: candidate.status,
+            signingPublicKey: SigningPublicKeyDescriptor(
+                algorithmIdentifier: candidate.signingPublicKey
+                    .algorithmIdentifier,
+                keyIdentifier: Data([0xD1]),
+                publicKeyBytes: Data([0xD2])
+            ),
+            keyAgreementPublicKey: candidate.keyAgreementPublicKey,
+            enrollmentProof: candidate.enrollmentProof
+        )
+        expectPolicyError(.signatureRejected) {
+            try SecretPolicyValidator.validateEnrollment(
+                substituted,
+                expectedChallengeID: substituted.enrollmentProof.challengeID,
+                authorityCredential: authority,
+                signatureVerifier: verifier
             )
         }
     }
@@ -443,7 +470,8 @@ struct SecretSyncContractTests {
             currentSnapshot: fixture.currentSnapshot,
             stagedRecords: fixture.records,
             commit: fixture.commit,
-            trustedCredentials: [fixture.signerCredential],
+            trustedCredentials: fixture.trustedCredentials,
+            trustedDeviceRecords: fixture.trustRecords,
             knownCompetingChildDigests: [],
             externalFreshness: fixture.externalFreshness,
             digester: fixture.digester,
@@ -453,7 +481,8 @@ struct SecretSyncContractTests {
         )
 
         #expect(snapshot.commit.recordDigest == fixture.commit.recordDigest)
-        #expect(snapshot.records == fixture.records)
+        #expect(snapshot.records.state == .committed)
+        #expect(snapshot.records.signedPolicy == fixture.records.signedPolicy)
         #expect(snapshot.state == .committed)
     }
 
@@ -513,13 +542,269 @@ struct SecretSyncContractTests {
                 currentSnapshot: fixture.currentSnapshot,
                 stagedRecords: missingReceiptRecords,
                 commit: fixture.commit,
-                trustedCredentials: [fixture.signerCredential],
+                trustedCredentials: fixture.trustedCredentials,
+                trustedDeviceRecords: fixture.trustRecords,
                 knownCompetingChildDigests: [],
                 externalFreshness: fixture.externalFreshness,
                 digester: fixture.digester,
                 signatureVerifier: TestSignatureVerifier(
                     acceptedSignatures: fixture.acceptedSignatures
                 )
+            )
+        }
+    }
+
+    @Test("routine recipients require active epoch-valid matching trust")
+    func recipientTrustFailsClosed() throws {
+        let fixture = try TransitionFixture()
+
+        expectPolicyError(.recipientNotTrusted) {
+            _ = try fixture.validate(
+                trustedCredentials: [
+                    fixture.signerCredential,
+                    fixture.removedCredential,
+                ]
+            )
+        }
+
+        let revoked = try fixtureCredential(
+            deviceUUID: fixture.recipientCredential.deviceID.rawValue.uuidString,
+            credentialUUID: fixture.recipientCredential.credentialID.rawValue
+                .uuidString,
+            byte: 0xC0,
+            status: .revoked
+        )
+        expectPolicyError(.recipientNotTrusted) {
+            _ = try fixture.validate(
+                trustedCredentials: [
+                    fixture.signerCredential,
+                    revoked,
+                    fixture.removedCredential,
+                ]
+            )
+        }
+
+        var wrongDeviceRecords = fixture.trustRecords.filter {
+            $0.credentialID != fixture.recipientCredential.credentialID
+        }
+        wrongDeviceRecords.append(
+            try DeviceTrustRecord(
+                recordDigest: digest(0x59),
+                deviceID: TrustedDeviceID(UUID()),
+                credentialID: fixture.recipientCredential.credentialID,
+                trustState: .trusted,
+                effectivePolicyEpoch: 1
+            )
+        )
+        expectPolicyError(.trustedDeviceMismatch) {
+            _ = try fixture.validate(trustedDeviceRecords: wrongDeviceRecords)
+        }
+
+        var futureRecords = fixture.trustRecords.filter {
+            $0.credentialID != fixture.recipientCredential.credentialID
+        }
+        futureRecords.append(
+            try DeviceTrustRecord(
+                recordDigest: digest(0x5A),
+                deviceID: fixture.recipientCredential.deviceID,
+                credentialID: fixture.recipientCredential.credentialID,
+                trustState: .trusted,
+                effectivePolicyEpoch: 3
+            )
+        )
+        expectPolicyError(.trustRecordNotEffective) {
+            _ = try fixture.validate(trustedDeviceRecords: futureRecords)
+        }
+    }
+
+    @Test("audience contraction requires exact transition-bound purge evidence")
+    func purgeBindingFailsClosed() throws {
+        let fixture = try TransitionFixture()
+        let emptyRecords = try SecretControlRecords(
+            state: .staged,
+            signedPolicy: fixture.records.signedPolicy,
+            sealedPayload: fixture.records.sealedPayload,
+            recipientEnvelopes: fixture.records.recipientEnvelopes,
+            recoveryEnvelope: fixture.records.recoveryEnvelope,
+            purgeRequirements: [],
+            purgeReceipts: []
+        )
+        let emptyCommit = try fixture.commitReplacingPurge(
+            requirementDigests: [],
+            receiptDigests: []
+        )
+        expectPolicyError(.purgeCoverageMismatch) {
+            _ = try fixture.validate(records: emptyRecords, commit: emptyCommit)
+        }
+
+        let original = try #require(fixture.records.purgeRequirements.first)
+        let wrongRequirements = try [
+            PurgeRequirement(
+                recordDigest: original.recordDigest,
+                scopeID: SecretScopeID(UUID()),
+                policyEpoch: original.policyEpoch,
+                policyDigest: original.policyDigest,
+                supersededGenerationID: original.supersededGenerationID,
+                replacementGenerationID: original.replacementGenerationID,
+                targetCredentialID: original.targetCredentialID,
+                requiredCategories: original.requiredCategories
+            ),
+            PurgeRequirement(
+                recordDigest: original.recordDigest,
+                scopeID: original.scopeID,
+                policyEpoch: 3,
+                policyDigest: original.policyDigest,
+                supersededGenerationID: original.supersededGenerationID,
+                replacementGenerationID: original.replacementGenerationID,
+                targetCredentialID: original.targetCredentialID,
+                requiredCategories: original.requiredCategories
+            ),
+            PurgeRequirement(
+                recordDigest: original.recordDigest,
+                scopeID: original.scopeID,
+                policyEpoch: original.policyEpoch,
+                policyDigest: digest(0xEE),
+                supersededGenerationID: original.supersededGenerationID,
+                replacementGenerationID: original.replacementGenerationID,
+                targetCredentialID: original.targetCredentialID,
+                requiredCategories: original.requiredCategories
+            ),
+            PurgeRequirement(
+                recordDigest: original.recordDigest,
+                scopeID: original.scopeID,
+                policyEpoch: original.policyEpoch,
+                policyDigest: original.policyDigest,
+                supersededGenerationID: SecretGenerationID(UUID()),
+                replacementGenerationID: original.replacementGenerationID,
+                targetCredentialID: original.targetCredentialID,
+                requiredCategories: original.requiredCategories
+            ),
+            PurgeRequirement(
+                recordDigest: original.recordDigest,
+                scopeID: original.scopeID,
+                policyEpoch: original.policyEpoch,
+                policyDigest: original.policyDigest,
+                supersededGenerationID: original.supersededGenerationID,
+                replacementGenerationID: SecretGenerationID(UUID()),
+                targetCredentialID: original.targetCredentialID,
+                requiredCategories: original.requiredCategories
+            ),
+        ]
+        for wrongRequirement in wrongRequirements {
+            let wrongRecords = try SecretControlRecords(
+                state: .staged,
+                signedPolicy: fixture.records.signedPolicy,
+                sealedPayload: fixture.records.sealedPayload,
+                recipientEnvelopes: fixture.records.recipientEnvelopes,
+                recoveryEnvelope: fixture.records.recoveryEnvelope,
+                purgeRequirements: [wrongRequirement],
+                purgeReceipts: fixture.records.purgeReceipts
+            )
+            expectPolicyError(.purgeCoverageMismatch) {
+                _ = try fixture.validate(records: wrongRecords)
+            }
+        }
+    }
+
+    @Test("current head must be committed, same-scope, and rotate generation")
+    func currentHeadBoundaryFailsClosed() throws {
+        let fixture = try TransitionFixture()
+
+        expectPolicyError(.scopeMismatch) {
+            try SecretPolicyValidator.validateMonotonicTransition(
+                currentHead: fixture.currentSnapshot.commit,
+                candidate: fixture.commitWith(
+                    epoch: 2,
+                    digestByte: 0x90,
+                    scopeID: SecretScopeID(UUID())
+                ),
+                knownCompetingChildDigests: []
+            )
+        }
+        expectPolicyError(.generationNotRotated) {
+            try SecretPolicyValidator.validateMonotonicTransition(
+                currentHead: fixture.currentSnapshot.commit,
+                candidate: fixture.commitWith(
+                    epoch: 2,
+                    digestByte: 0x91,
+                    generationID: fixture.currentSnapshot.commit.generationID
+                ),
+                knownCompetingChildDigests: []
+            )
+        }
+        expectPolicyError(.currentHeadNotCommitted) {
+            _ = try SecretControlSnapshot(
+                commit: fixture.currentSnapshot.commit,
+                records: fixture.records
+            )
+        }
+    }
+
+    @Test("decode bounds, canonical order, and envelope versions fail closed")
+    func adversarialCanonicalAndVersionMatrix() throws {
+        let duplicate = rawCanonicalFrame(
+            domain: .trustedDeviceCredential,
+            fields: [(1, Data([0x01])), (1, Data([0x02]))]
+        )
+        expectContractError(.duplicateField(tag: 1)) {
+            _ = try SecretSyncCanonicalEncoding.decode(
+                duplicate,
+                expectedDomain: .trustedDeviceCredential
+            )
+        }
+        let outOfOrder = rawCanonicalFrame(
+            domain: .trustedDeviceCredential,
+            fields: [(2, Data([0x02])), (1, Data([0x01]))]
+        )
+        expectContractError(.nonCanonicalFieldOrder) {
+            _ = try SecretSyncCanonicalEncoding.decode(
+                outOfOrder,
+                expectedDomain: .trustedDeviceCredential
+            )
+        }
+        let oversizedLength = rawCanonicalFrame(
+            domain: .trustedDeviceCredential,
+            fields: [(1, Data())],
+            declaredLengths: [
+                UInt32(SecretSyncCanonicalEncoding.maximumFieldByteCount + 1),
+            ]
+        )
+        expectContractError(.fieldTooLarge) {
+            _ = try SecretSyncCanonicalEncoding.decode(
+                oversizedLength,
+                expectedDomain: .trustedDeviceCredential
+            )
+        }
+        expectContractError(.messageTooLarge) {
+            _ = try SecretSyncCanonicalEncoding.decode(
+                Data(
+                    repeating: 0,
+                    count:
+                        SecretSyncCanonicalEncoding.maximumMessageByteCount + 1
+                ),
+                expectedDomain: .trustedDeviceCredential
+            )
+        }
+        expectContractError(.tooManyFields) {
+            _ = try SecretSyncCanonicalValue.sequence(
+                Array(
+                    repeating: Data(),
+                    count:
+                        SecretSyncCanonicalEncoding
+                        .maximumCollectionElementCount + 1
+                )
+            )
+        }
+        expectContractError(.unsupportedSchemaVersion(2)) {
+            _ = try SealedPayload(
+                recordDigest: digest(0x92),
+                scopeID: scopeID,
+                scopeSnapshotDigest: digest(0x93),
+                policyEpoch: 2,
+                policyDigest: digest(0x94),
+                generationID: generationID,
+                formatVersion: 2,
+                ciphertextBytes: Data([0x01])
             )
         }
     }
@@ -566,7 +851,8 @@ struct SecretSyncContractTests {
                 currentSnapshot: fixture.currentSnapshot,
                 stagedRecords: fixture.records,
                 commit: fixture.commit,
-                trustedCredentials: [fixture.signerCredential],
+                trustedCredentials: fixture.trustedCredentials,
+                trustedDeviceRecords: fixture.trustRecords,
                 knownCompetingChildDigests: [],
                 externalFreshness: fixture.externalFreshness,
                 digester: ConstantDigesting(value: digest(0xFF)),
@@ -581,7 +867,8 @@ struct SecretSyncContractTests {
                 currentSnapshot: fixture.currentSnapshot,
                 stagedRecords: fixture.records,
                 commit: fixture.commit,
-                trustedCredentials: [fixture.signerCredential],
+                trustedCredentials: fixture.trustedCredentials,
+                trustedDeviceRecords: fixture.trustRecords,
                 knownCompetingChildDigests: [],
                 externalFreshness: fixture.externalFreshness,
                 digester: fixture.digester,
@@ -648,8 +935,8 @@ struct SecretSyncContractTests {
             "payload": "U1NDUAABABpzZWNyZXQtc3luYy9zZWFsZWQtcGF5bG9hZAAHAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGAAAwAAAAgAAAAAAAAAAgAEAAAAIGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkAAUAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAYAAAACAAEABwAAAAGi",
             "recipient": "U1NDUAABACJzZWNyZXQtc3luYy9yZWNpcGllbnQta2V5LWVudmVsb3BlAAgAAQAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEAAgAAACBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYAADAAAACAAAAAAAAAACAAQAAAAgZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQABQAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMABgAAAAIAAQAHAAAAJDEwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAIAAAAAaM=",
             "recovery": "U1NDUAABAB1zZWNyZXQtc3luYy9yZWNvdmVyeS1lbnZlbG9wZQAJAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGAAAwAAAAgAAAAAAAAAAgAEAAAAIGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkAAUAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAYAAAACAAEABwAAACQyMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEACAAAABZicmVha0dsYXNzUmVjb3ZlcnlPbmx5AAkAAAABpA==",
-            "purgeRequirement": "U1NDUAABAB1zZWNyZXQtc3luYy9wdXJnZS1yZXF1aXJlbWVudAAGAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAIAAAAAAAAAAIAAwAAACBkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAEAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMwAFAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNAAGAAAAMwADAAAAEWRlcml2ZWRQcm9qZWN0aW9uAAAACXBsYWludGV4dAAAAAtzZWFyY2hJbmRleA==",
-            "purgeReceipt": "U1NDUAABABlzZWNyZXQtc3luYy9wdXJnZS1yZWNlaXB0AAkAAQAAACBoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaAACAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQADAAAACAAAAAAAAAACAAQAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAUAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDA0AAYAAAAzAAMAAAARZGVyaXZlZFByb2plY3Rpb24AAAAJcGxhaW50ZXh0AAAAC3NlYXJjaEluZGV4AAcAAAAJY29tcGxldGVkAAgAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDA0AAkAAAABpQ==",
+            "purgeRequirement": "U1NDUAABAB1zZWNyZXQtc3luYy9wdXJnZS1yZXF1aXJlbWVudAAHAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAIAAAAAAAAAAIAAwAAACBkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAEAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDA5OQAFAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMwAGAAAAJDEwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMgAHAAAAMwADAAAAEWRlcml2ZWRQcm9qZWN0aW9uAAAACXBsYWludGV4dAAAAAtzZWFyY2hJbmRleA==",
+            "purgeReceipt": "U1NDUAABABlzZWNyZXQtc3luYy9wdXJnZS1yZWNlaXB0AAsAAQAAACBoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaAACAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQADAAAACAAAAAAAAAACAAQAAAAgZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQABQAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwOTkABgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMABwAAACQxMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIACAAAADMAAwAAABFkZXJpdmVkUHJvamVjdGlvbgAAAAlwbGFpbnRleHQAAAALc2VhcmNoSW5kZXgACQAAAAljb21wbGV0ZWQACgAAACQxMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIACwAAAAGl",
             "commit": "U1NDUAABACRzZWNyZXQtc3luYy9zZWNyZXQtdHJhbnNpdGlvbi1jb21taXQADQABAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQACAAAACAAAAAAAAAACAAMAAAAgcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAABAAAACBkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAAFAAAAIGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgAAYAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAcAAAAgZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWUACAAAACYAAQAAACBmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZgAJAAAAIGdnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnAAoAAAAmAAEAAAAgaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGgACwAAACYAAQAAACBpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaQAMAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNAAOAAAAAac=",
             "records": "U1NDUAABACJzZWNyZXQtc3luYy9zZWNyZXQtY29udHJvbC1yZWNvcmRzAAcAAQAAAAZzdGFnZWQAAgAAACBkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZAADAAAAIGVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlAAQAAAAmAAEAAAAgZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYABQAAACBnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZwAGAAAAJgABAAAAIGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoAAcAAAAmAAEAAAAgaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWk=",
             "freshness": "U1NDUAABACpzZWNyZXQtc3luYy9ib290c3RyYXAtZnJlc2huZXNzLWNvbW1pdG1lbnQABAABAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQACAAAACAAAAAAAAAACAAMAAAAgampqampqampqampqampqampqampqampqampqampqamoABAAAACBkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZA==",
@@ -664,6 +951,39 @@ private extension Data {
     var hexString: String {
         map { String(format: "%02x", $0) }.joined()
     }
+}
+
+private func rawCanonicalFrame(
+    domain: SecretSyncCanonicalDomain,
+    fields: [(UInt16, Data)],
+    declaredLengths: [UInt32]? = nil
+) -> Data {
+    var output = Data([0x53, 0x53, 0x43, 0x50, 0x00, 0x01])
+    let domainBytes = Data(domain.rawValue.utf8)
+    output.append(contentsOf: [
+        UInt8(truncatingIfNeeded: domainBytes.count >> 8),
+        UInt8(truncatingIfNeeded: domainBytes.count),
+    ])
+    output.append(domainBytes)
+    output.append(contentsOf: [
+        UInt8(truncatingIfNeeded: fields.count >> 8),
+        UInt8(truncatingIfNeeded: fields.count),
+    ])
+    for (index, field) in fields.enumerated() {
+        output.append(contentsOf: [
+            UInt8(truncatingIfNeeded: field.0 >> 8),
+            UInt8(truncatingIfNeeded: field.0),
+        ])
+        let length = declaredLengths?[index] ?? UInt32(field.1.count)
+        output.append(contentsOf: [
+            UInt8(truncatingIfNeeded: length >> 24),
+            UInt8(truncatingIfNeeded: length >> 16),
+            UInt8(truncatingIfNeeded: length >> 8),
+            UInt8(truncatingIfNeeded: length),
+        ])
+        output.append(field.1)
+    }
+    return output
 }
 
 private func expectContractError(
@@ -762,6 +1082,19 @@ private struct TestSignatureVerifier: SecretSignatureVerifying {
     ) throws -> Bool {
         acceptedSignatures.contains(signature)
             && !canonicalBytes.isEmpty
+            && !signingPublicKey.publicKeyBytes.isEmpty
+    }
+}
+
+private struct BindingSignatureVerifier: SecretSignatureVerifying {
+    let acceptedBytesBySignature: [Data: Data]
+
+    func verify(
+        signature: Data,
+        canonicalBytes: Data,
+        signingPublicKey: SigningPublicKeyDescriptor
+    ) throws -> Bool {
+        acceptedBytesBySignature[signature] == canonicalBytes
             && !signingPublicKey.publicKeyBytes.isEmpty
     }
 }
@@ -887,8 +1220,48 @@ private func transitionSignerCredential() throws -> TrustedDeviceCredential {
     )
 }
 
+private func fixtureCredential(
+    deviceUUID: String,
+    credentialUUID: String,
+    byte: UInt8,
+    status: TrustedDeviceCredentialStatus = .active
+) throws -> TrustedDeviceCredential {
+    try TrustedDeviceCredential(
+        deviceID: TrustedDeviceID(UUID(uuidString: deviceUUID)!),
+        credentialID: DeviceCredentialID(UUID(uuidString: credentialUUID)!),
+        credentialVersion: 1,
+        status: status,
+        signingPublicKey: SigningPublicKeyDescriptor(
+            algorithmIdentifier: "opaque-fixture-signature-suite",
+            keyIdentifier: Data([byte]),
+            publicKeyBytes: Data([byte &+ 1])
+        ),
+        keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+            algorithmIdentifier: "opaque-fixture-agreement-suite",
+            keyIdentifier: Data([byte &+ 2]),
+            publicKeyBytes: Data([byte &+ 3])
+        ),
+        enrollmentProof: DeviceCredentialEnrollmentProof(
+            challengeID: UUID(
+                uuidString: "4EEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE"
+            )!,
+            challengeBytes: Data([byte &+ 4]),
+            signingProofBytes: Data([byte &+ 5]),
+            keyAgreementProofBytes: Data([byte &+ 6]),
+            authorityCredentialID: DeviceCredentialID(
+                UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
+            ),
+            authoritySignature: Data([byte &+ 7])
+        )
+    )
+}
+
 private struct TransitionFixture {
     let signerCredential: TrustedDeviceCredential
+    let recipientCredential: TrustedDeviceCredential
+    let removedCredential: TrustedDeviceCredential
+    let trustedCredentials: [TrustedDeviceCredential]
+    let trustRecords: [DeviceTrustRecord]
     let records: SecretControlRecords
     let commit: SecretTransitionCommit
     let currentSnapshot: SecretControlSnapshot
@@ -898,6 +1271,30 @@ private struct TransitionFixture {
 
     init() throws {
         signerCredential = try transitionSignerCredential()
+        recipientCredential = try fixtureCredential(
+            deviceUUID: "1AAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+            credentialUUID: "10000000-0000-0000-0000-000000000001",
+            byte: 0xC0
+        )
+        removedCredential = try fixtureCredential(
+            deviceUUID: "1BBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            credentialUUID: "10000000-0000-0000-0000-000000000002",
+            byte: 0xD0
+        )
+        trustedCredentials = [
+            signerCredential,
+            recipientCredential,
+            removedCredential,
+        ]
+        trustRecords = try trustedCredentials.enumerated().map { index, credential in
+            try DeviceTrustRecord(
+                recordDigest: digest(UInt8(0x50 + index)),
+                deviceID: credential.deviceID,
+                credentialID: credential.credentialID,
+                trustState: .trusted,
+                effectivePolicyEpoch: 1
+            )
+        }
         let snapshot = try scopeSnapshot()
         let signedPolicy = try SignedSecretPolicyEpoch(
             recordDigest: digest(0x64),
@@ -944,8 +1341,11 @@ private struct TransitionFixture {
             scopeID: scopeID,
             policyEpoch: 2,
             policyDigest: signedPolicy.recordDigest,
-            generationID: generationID,
-            targetCredentialID: signerCredential.credentialID,
+            supersededGenerationID: SecretGenerationID(
+                UUID(uuidString: "30000000-0000-0000-0000-000000000099")!
+            ),
+            replacementGenerationID: generationID,
+            targetCredentialID: removedCredential.credentialID,
             requiredCategories: [.plaintext, .searchIndex, .derivedProjection]
         )
         let receipt = try SignedPurgeReceipt(
@@ -953,11 +1353,13 @@ private struct TransitionFixture {
             requirementDigest: requirement.recordDigest,
             scopeID: scopeID,
             policyEpoch: 2,
-            generationID: generationID,
-            respondingCredentialID: signerCredential.credentialID,
+            policyDigest: signedPolicy.recordDigest,
+            supersededGenerationID: requirement.supersededGenerationID,
+            replacementGenerationID: requirement.replacementGenerationID,
+            respondingCredentialID: removedCredential.credentialID,
             coveredCategories: requirement.requiredCategories,
             status: .completed,
-            signerCredentialID: signerCredential.credentialID,
+            signerCredentialID: removedCredential.credentialID,
             signature: Data([0xA5])
         )
         records = try SecretControlRecords(
@@ -988,10 +1390,34 @@ private struct TransitionFixture {
             signerCredentialID: signerCredential.credentialID,
             signature: Data([0xA6])
         )
-        currentSnapshot = SecretControlSnapshot(
+        let previousPolicy = try SecretPolicyEpoch(
+            epoch: 1,
+            predecessorPolicyDigest: nil,
+            scopeSnapshot: snapshot,
+            generationID: previousCommit.generationID,
+            authorizedRecipientCredentialIDs: [
+                recipientCredential.credentialID,
+                removedCredential.credentialID,
+            ],
+            recoveryRecipient: nil,
+            signerCredentialID: signerCredential.credentialID
+        )
+        let previousRecords = try SecretControlRecords(
             state: .committed,
+            signedPolicy: SignedSecretPolicyEpoch(
+                recordDigest: previousCommit.policyDigest,
+                policy: previousPolicy,
+                signature: Data([0xA0])
+            ),
+            sealedPayload: payload,
+            recipientEnvelopes: [recipient],
+            recoveryEnvelope: nil,
+            purgeRequirements: [],
+            purgeReceipts: []
+        )
+        currentSnapshot = try SecretControlSnapshot(
             commit: previousCommit,
-            records: records
+            records: previousRecords
         )
 
         commit = try SecretTransitionCommit(
@@ -1038,17 +1464,19 @@ private struct TransitionFixture {
     func commitWith(
         epoch: UInt64,
         digestByte: UInt8,
-        predecessorDigest: SecretRecordDigest? = nil
+        predecessorDigest: SecretRecordDigest? = nil,
+        scopeID: SecretScopeID? = nil,
+        generationID: SecretGenerationID? = nil
     ) throws -> SecretTransitionCommit {
         try SecretTransitionCommit(
             recordDigest: digest(digestByte),
-            scopeID: commit.scopeID,
+            scopeID: scopeID ?? commit.scopeID,
             policyEpoch: epoch,
             predecessorCommitDigest: predecessorDigest
                 ?? commit.predecessorCommitDigest,
             policyDigest: commit.policyDigest,
             scopeSnapshotDigest: commit.scopeSnapshotDigest,
-            generationID: commit.generationID,
+            generationID: generationID ?? commit.generationID,
             sealedPayloadDigest: commit.sealedPayloadDigest,
             recipientEnvelopeDigests: commit.recipientEnvelopeDigests,
             recoveryEnvelopeDigest: commit.recoveryEnvelopeDigest,
@@ -1057,5 +1485,85 @@ private struct TransitionFixture {
             signerCredentialID: commit.signerCredentialID,
             signature: commit.signature
         )
+    }
+
+    func commitReplacingPurge(
+        requirementDigests: [SecretRecordDigest],
+        receiptDigests: [SecretRecordDigest]
+    ) throws -> SecretTransitionCommit {
+        try SecretTransitionCommit(
+            recordDigest: commit.recordDigest,
+            scopeID: commit.scopeID,
+            policyEpoch: commit.policyEpoch,
+            predecessorCommitDigest: commit.predecessorCommitDigest,
+            policyDigest: commit.policyDigest,
+            scopeSnapshotDigest: commit.scopeSnapshotDigest,
+            generationID: commit.generationID,
+            sealedPayloadDigest: commit.sealedPayloadDigest,
+            recipientEnvelopeDigests: commit.recipientEnvelopeDigests,
+            recoveryEnvelopeDigest: commit.recoveryEnvelopeDigest,
+            purgeRequirementDigests: requirementDigests,
+            purgeReceiptDigests: receiptDigests,
+            signerCredentialID: commit.signerCredentialID,
+            signature: commit.signature
+        )
+    }
+
+    func validate(
+        records: SecretControlRecords? = nil,
+        commit candidateCommit: SecretTransitionCommit? = nil,
+        trustedCredentials candidateCredentials: [TrustedDeviceCredential]? = nil,
+        trustedDeviceRecords candidateTrustRecords: [DeviceTrustRecord]? = nil
+    ) throws -> SecretControlSnapshot {
+        let records = records ?? self.records
+        let commit = candidateCommit ?? self.commit
+        return try SecretPolicyValidator.validateTransition(
+            currentSnapshot: currentSnapshot,
+            stagedRecords: records,
+            commit: commit,
+            trustedCredentials: candidateCredentials ?? trustedCredentials,
+            trustedDeviceRecords: candidateTrustRecords ?? trustRecords,
+            knownCompetingChildDigests: [],
+            externalFreshness: externalFreshness,
+            digester: digester(for: records, commit: commit),
+            signatureVerifier: TestSignatureVerifier(
+                acceptedSignatures: acceptedSignatures
+            )
+        )
+    }
+
+    private func digester(
+        for records: SecretControlRecords,
+        commit: SecretTransitionCommit
+    ) -> TestDigesting {
+        var mappings: [Data: SecretRecordDigest] = [:]
+        func add<T: SecretSyncCanonicalEncodable>(
+            _ value: T,
+            digest: SecretRecordDigest
+        ) {
+            if let bytes = try? value.canonicalBytes() {
+                mappings[bytes] = digest
+            }
+        }
+        add(
+            records.signedPolicy.policy.scopeSnapshot,
+            digest: records.signedPolicy.policy.scopeSnapshot.snapshotDigest
+        )
+        add(records.signedPolicy, digest: records.signedPolicy.recordDigest)
+        add(records.sealedPayload, digest: records.sealedPayload.recordDigest)
+        for envelope in records.recipientEnvelopes {
+            add(envelope, digest: envelope.recordDigest)
+        }
+        if let recovery = records.recoveryEnvelope {
+            add(recovery, digest: recovery.recordDigest)
+        }
+        for requirement in records.purgeRequirements {
+            add(requirement, digest: requirement.recordDigest)
+        }
+        for receipt in records.purgeReceipts {
+            add(receipt, digest: receipt.recordDigest)
+        }
+        add(commit, digest: commit.recordDigest)
+        return TestDigesting(mappings: mappings)
     }
 }

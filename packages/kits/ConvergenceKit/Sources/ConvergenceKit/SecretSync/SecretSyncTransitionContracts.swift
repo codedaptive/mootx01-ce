@@ -26,7 +26,8 @@ public struct PurgeRequirement:
     public let scopeID: SecretScopeID
     public let policyEpoch: UInt64
     public let policyDigest: SecretRecordDigest
-    public let generationID: SecretGenerationID
+    public let supersededGenerationID: SecretGenerationID
+    public let replacementGenerationID: SecretGenerationID
     public let targetCredentialID: DeviceCredentialID
     public let requiredCategories: [PurgeArtifactCategory]
 
@@ -35,7 +36,8 @@ public struct PurgeRequirement:
         scopeID: SecretScopeID,
         policyEpoch: UInt64,
         policyDigest: SecretRecordDigest,
-        generationID: SecretGenerationID,
+        supersededGenerationID: SecretGenerationID,
+        replacementGenerationID: SecretGenerationID,
         targetCredentialID: DeviceCredentialID,
         requiredCategories: [PurgeArtifactCategory]
     ) throws {
@@ -46,7 +48,8 @@ public struct PurgeRequirement:
         self.scopeID = scopeID
         self.policyEpoch = policyEpoch
         self.policyDigest = policyDigest
-        self.generationID = generationID
+        self.supersededGenerationID = supersededGenerationID
+        self.replacementGenerationID = replacementGenerationID
         self.targetCredentialID = targetCredentialID
         self.requiredCategories = try sortedUniqueCategories(
             requiredCategories,
@@ -71,14 +74,22 @@ public struct PurgeRequirement:
             SecretSyncCanonicalField(tag: 3, value: policyDigest.bytes),
             SecretSyncCanonicalField(
                 tag: 4,
-                value: SecretSyncCanonicalValue.uuid(generationID.rawValue)
+                value: SecretSyncCanonicalValue.uuid(
+                    supersededGenerationID.rawValue
+                )
             ),
             SecretSyncCanonicalField(
                 tag: 5,
-                value: SecretSyncCanonicalValue.uuid(targetCredentialID.rawValue)
+                value: SecretSyncCanonicalValue.uuid(
+                    replacementGenerationID.rawValue
+                )
             ),
             SecretSyncCanonicalField(
                 tag: 6,
+                value: SecretSyncCanonicalValue.uuid(targetCredentialID.rawValue)
+            ),
+            SecretSyncCanonicalField(
+                tag: 7,
                 value: try SecretSyncCanonicalValue.sequence(
                     requiredCategories.map {
                         SecretSyncCanonicalValue.string($0.rawValue)
@@ -93,7 +104,8 @@ public struct PurgeRequirement:
         case scopeID
         case policyEpoch
         case policyDigest
-        case generationID
+        case supersededGenerationID
+        case replacementGenerationID
         case targetCredentialID
         case requiredCategories
     }
@@ -111,9 +123,13 @@ public struct PurgeRequirement:
                 SecretRecordDigest.self,
                 forKey: .policyDigest
             ),
-            generationID: container.decode(
+            supersededGenerationID: container.decode(
                 SecretGenerationID.self,
-                forKey: .generationID
+                forKey: .supersededGenerationID
+            ),
+            replacementGenerationID: container.decode(
+                SecretGenerationID.self,
+                forKey: .replacementGenerationID
             ),
             targetCredentialID: container.decode(
                 DeviceCredentialID.self,
@@ -145,7 +161,9 @@ public struct SignedPurgeReceipt:
     public let requirementDigest: SecretRecordDigest
     public let scopeID: SecretScopeID
     public let policyEpoch: UInt64
-    public let generationID: SecretGenerationID
+    public let policyDigest: SecretRecordDigest
+    public let supersededGenerationID: SecretGenerationID
+    public let replacementGenerationID: SecretGenerationID
     public let respondingCredentialID: DeviceCredentialID
     public let coveredCategories: [PurgeArtifactCategory]
     public let status: PurgeReceiptStatus
@@ -157,7 +175,9 @@ public struct SignedPurgeReceipt:
         requirementDigest: SecretRecordDigest,
         scopeID: SecretScopeID,
         policyEpoch: UInt64,
-        generationID: SecretGenerationID,
+        policyDigest: SecretRecordDigest,
+        supersededGenerationID: SecretGenerationID,
+        replacementGenerationID: SecretGenerationID,
         respondingCredentialID: DeviceCredentialID,
         coveredCategories: [PurgeArtifactCategory],
         status: PurgeReceiptStatus,
@@ -175,7 +195,9 @@ public struct SignedPurgeReceipt:
         self.requirementDigest = requirementDigest
         self.scopeID = scopeID
         self.policyEpoch = policyEpoch
-        self.generationID = generationID
+        self.policyDigest = policyDigest
+        self.supersededGenerationID = supersededGenerationID
+        self.replacementGenerationID = replacementGenerationID
         self.respondingCredentialID = respondingCredentialID
         self.coveredCategories = try sortedUniqueCategories(
             coveredCategories,
@@ -192,7 +214,7 @@ public struct SignedPurgeReceipt:
 
     public func canonicalFields() throws -> [SecretSyncCanonicalField] {
         try unsignedFields()
-            + [SecretSyncCanonicalField(tag: 9, value: signature)]
+            + [SecretSyncCanonicalField(tag: 11, value: signature)]
     }
 
     public func signingBytes() throws -> Data {
@@ -215,16 +237,28 @@ public struct SignedPurgeReceipt:
             ),
             SecretSyncCanonicalField(
                 tag: 4,
-                value: SecretSyncCanonicalValue.uuid(generationID.rawValue)
+                value: policyDigest.bytes
             ),
             SecretSyncCanonicalField(
                 tag: 5,
+                value: SecretSyncCanonicalValue.uuid(
+                    supersededGenerationID.rawValue
+                )
+            ),
+            SecretSyncCanonicalField(
+                tag: 6,
+                value: SecretSyncCanonicalValue.uuid(
+                    replacementGenerationID.rawValue
+                )
+            ),
+            SecretSyncCanonicalField(
+                tag: 7,
                 value: SecretSyncCanonicalValue.uuid(
                     respondingCredentialID.rawValue
                 )
             ),
             SecretSyncCanonicalField(
-                tag: 6,
+                tag: 8,
                 value: try SecretSyncCanonicalValue.sequence(
                     coveredCategories.map {
                         SecretSyncCanonicalValue.string($0.rawValue)
@@ -232,11 +266,11 @@ public struct SignedPurgeReceipt:
                 )
             ),
             SecretSyncCanonicalField(
-                tag: 7,
+                tag: 9,
                 value: SecretSyncCanonicalValue.string(status.rawValue)
             ),
             SecretSyncCanonicalField(
-                tag: 8,
+                tag: 10,
                 value: SecretSyncCanonicalValue.uuid(signerCredentialID.rawValue)
             ),
         ]
@@ -247,7 +281,9 @@ public struct SignedPurgeReceipt:
         case requirementDigest
         case scopeID
         case policyEpoch
-        case generationID
+        case policyDigest
+        case supersededGenerationID
+        case replacementGenerationID
         case respondingCredentialID
         case coveredCategories
         case status
@@ -268,9 +304,17 @@ public struct SignedPurgeReceipt:
             ),
             scopeID: container.decode(SecretScopeID.self, forKey: .scopeID),
             policyEpoch: container.decode(UInt64.self, forKey: .policyEpoch),
-            generationID: container.decode(
+            policyDigest: container.decode(
+                SecretRecordDigest.self,
+                forKey: .policyDigest
+            ),
+            supersededGenerationID: container.decode(
                 SecretGenerationID.self,
-                forKey: .generationID
+                forKey: .supersededGenerationID
+            ),
+            replacementGenerationID: container.decode(
+                SecretGenerationID.self,
+                forKey: .replacementGenerationID
             ),
             respondingCredentialID: container.decode(
                 DeviceCredentialID.self,
@@ -659,20 +703,36 @@ public struct SecretControlRecords:
             )
         )
     }
+
+    func committedCopy() throws -> SecretControlRecords {
+        try SecretControlRecords(
+            state: .committed,
+            signedPolicy: signedPolicy,
+            sealedPayload: sealedPayload,
+            recipientEnvelopes: recipientEnvelopes,
+            recoveryEnvelope: recoveryEnvelope,
+            purgeRequirements: purgeRequirements,
+            purgeReceipts: purgeReceipts
+        )
+    }
 }
 
 /// Validated view of one authoritative committed head and its exact records.
-public struct SecretControlSnapshot: Sendable, Codable, Hashable {
-    public let state: SecretTransitionState
+///
+/// Construction is module-internal so external callers cannot manufacture an
+/// authoritative head without passing `SecretPolicyValidator`.
+public struct SecretControlSnapshot: Sendable, Hashable {
+    public var state: SecretTransitionState { .committed }
     public let commit: SecretTransitionCommit
     public let records: SecretControlRecords
 
-    public init(
-        state: SecretTransitionState,
+    init(
         commit: SecretTransitionCommit,
         records: SecretControlRecords
-    ) {
-        self.state = state
+    ) throws {
+        guard records.state == .committed else {
+            throw SecretPolicyValidationError.currentHeadNotCommitted
+        }
         self.commit = commit
         self.records = records
     }
@@ -768,6 +828,10 @@ public enum SecretPolicyValidationError: Error, Sendable, Equatable {
     case enrollmentAuthorityMismatch
     case signerNotTrusted
     case duplicateTrustedCredential
+    case duplicateTrustRecord
+    case trustedDeviceMismatch
+    case trustRecordNotEffective
+    case recipientNotTrusted
     case signatureRejected
     case digestMismatch(domain: SecretSyncCanonicalDomain)
     case lowerEpoch
@@ -777,12 +841,14 @@ public enum SecretPolicyValidationError: Error, Sendable, Equatable {
     case samePredecessorForkDecisionRequired
     case scopeMismatch
     case generationMismatch
+    case generationNotRotated
     case policyMismatch
     case recipientSetMismatch
     case recoveryMismatch
     case incompletePurgeReceipts
     case purgeCoverageMismatch
     case stagedStateRequired
+    case currentHeadNotCommitted
     case staleExternalFreshness
     case externalFreshnessFork
     case referenceMismatch(field: String)
@@ -808,7 +874,7 @@ public enum SecretPolicyValidator {
         }
         guard try signatureVerifier.verify(
             signature: candidate.enrollmentProof.authoritySignature,
-            canonicalBytes: candidate.enrollmentProof.canonicalBytes(),
+            canonicalBytes: candidate.enrollmentSigningBytes(),
             signingPublicKey: authorityCredential.signingPublicKey
         ) else {
             throw SecretPolicyValidationError.signatureRejected
@@ -821,6 +887,9 @@ public enum SecretPolicyValidator {
         knownCompetingChildDigests: [SecretRecordDigest]
     ) throws {
         if let currentHead {
+            guard candidate.scopeID == currentHead.scopeID else {
+                throw SecretPolicyValidationError.scopeMismatch
+            }
             if candidate.policyEpoch < currentHead.policyEpoch {
                 throw SecretPolicyValidationError.lowerEpoch
             }
@@ -832,6 +901,9 @@ public enum SecretPolicyValidator {
             }
             guard candidate.predecessorCommitDigest == currentHead.recordDigest else {
                 throw SecretPolicyValidationError.wrongPredecessor
+            }
+            guard candidate.generationID != currentHead.generationID else {
+                throw SecretPolicyValidationError.generationNotRotated
             }
         }
 
@@ -866,6 +938,7 @@ public enum SecretPolicyValidator {
         stagedRecords: SecretControlRecords,
         commit: SecretTransitionCommit,
         trustedCredentials: [TrustedDeviceCredential],
+        trustedDeviceRecords: [DeviceTrustRecord],
         knownCompetingChildDigests: [SecretRecordDigest],
         externalFreshness: SecretBootstrapFreshnessCommitment,
         digester: any SecretSyncDigesting,
@@ -898,22 +971,31 @@ public enum SecretPolicyValidator {
             }
             credentialsByID[credential.credentialID] = credential
         }
+        var trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord] = [:]
+        for record in trustedDeviceRecords {
+            guard trustRecordsByID[record.credentialID] == nil else {
+                throw SecretPolicyValidationError.duplicateTrustRecord
+            }
+            trustRecordsByID[record.credentialID] = record
+        }
         try validateSignatures(
             records: stagedRecords,
             commit: commit,
             credentialsByID: credentialsByID,
+            trustRecordsByID: trustRecordsByID,
             signatureVerifier: signatureVerifier
         )
         try validateReferences(
             records: stagedRecords,
             commit: commit,
-            currentSnapshot: currentSnapshot
+            currentSnapshot: currentSnapshot,
+            credentialsByID: credentialsByID,
+            trustRecordsByID: trustRecordsByID
         )
 
-        return SecretControlSnapshot(
-            state: .committed,
+        return try SecretControlSnapshot(
             commit: commit,
-            records: stagedRecords
+            records: stagedRecords.committedCopy()
         )
     }
 
@@ -995,12 +1077,15 @@ public enum SecretPolicyValidator {
         records: SecretControlRecords,
         commit: SecretTransitionCommit,
         credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
+        trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord],
         signatureVerifier: any SecretSignatureVerifying
     ) throws {
         let policy = records.signedPolicy
         let policySigner = try activeCredential(
             policy.policy.signerCredentialID,
-            credentialsByID: credentialsByID
+            at: commit.policyEpoch,
+            credentialsByID: credentialsByID,
+            trustRecordsByID: trustRecordsByID
         )
         guard try signatureVerifier.verify(
             signature: policy.signature,
@@ -1013,7 +1098,9 @@ public enum SecretPolicyValidator {
         for receipt in records.purgeReceipts {
             let receiptSigner = try activeCredential(
                 receipt.signerCredentialID,
-                credentialsByID: credentialsByID
+                at: commit.policyEpoch,
+                credentialsByID: credentialsByID,
+                trustRecordsByID: trustRecordsByID
             )
             guard try signatureVerifier.verify(
                 signature: receipt.signature,
@@ -1026,7 +1113,9 @@ public enum SecretPolicyValidator {
 
         let commitSigner = try activeCredential(
             commit.signerCredentialID,
-            credentialsByID: credentialsByID
+            at: commit.policyEpoch,
+            credentialsByID: credentialsByID,
+            trustRecordsByID: trustRecordsByID
         )
         guard try signatureVerifier.verify(
             signature: commit.signature,
@@ -1039,7 +1128,9 @@ public enum SecretPolicyValidator {
 
     private static func activeCredential(
         _ id: DeviceCredentialID,
-        credentialsByID: [DeviceCredentialID: TrustedDeviceCredential]
+        at policyEpoch: UInt64,
+        credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
+        trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord]
     ) throws -> TrustedDeviceCredential {
         guard
             let credential = credentialsByID[id],
@@ -1047,13 +1138,27 @@ public enum SecretPolicyValidator {
         else {
             throw SecretPolicyValidationError.signerNotTrusted
         }
+        guard let trustRecord = trustRecordsByID[id] else {
+            throw SecretPolicyValidationError.signerNotTrusted
+        }
+        guard trustRecord.deviceID == credential.deviceID else {
+            throw SecretPolicyValidationError.trustedDeviceMismatch
+        }
+        guard trustRecord.trustState == .trusted else {
+            throw SecretPolicyValidationError.signerNotTrusted
+        }
+        guard trustRecord.effectivePolicyEpoch <= policyEpoch else {
+            throw SecretPolicyValidationError.trustRecordNotEffective
+        }
         return credential
     }
 
     private static func validateReferences(
         records: SecretControlRecords,
         commit: SecretTransitionCommit,
-        currentSnapshot: SecretControlSnapshot?
+        currentSnapshot: SecretControlSnapshot?,
+        credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
+        trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord]
     ) throws {
         let policy = records.signedPolicy.policy
         guard
@@ -1112,6 +1217,12 @@ public enum SecretPolicyValidator {
             )
         }
         for envelope in records.recipientEnvelopes {
+            try validateRecipientTrust(
+                envelope.recipientCredentialID,
+                at: commit.policyEpoch,
+                credentialsByID: credentialsByID,
+                trustRecordsByID: trustRecordsByID
+            )
             guard
                 envelope.scopeID == commit.scopeID,
                 envelope.scopeSnapshotDigest == commit.scopeSnapshotDigest,
@@ -1126,7 +1237,33 @@ public enum SecretPolicyValidator {
         }
 
         try validateRecovery(records: records, commit: commit)
-        try validatePurge(records: records, commit: commit)
+        try validatePurge(
+            records: records,
+            commit: commit,
+            currentSnapshot: currentSnapshot
+        )
+    }
+
+    private static func validateRecipientTrust(
+        _ id: DeviceCredentialID,
+        at policyEpoch: UInt64,
+        credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
+        trustRecordsByID: [DeviceCredentialID: DeviceTrustRecord]
+    ) throws {
+        guard
+            let credential = credentialsByID[id],
+            credential.status == .active,
+            let trustRecord = trustRecordsByID[id],
+            trustRecord.trustState == .trusted
+        else {
+            throw SecretPolicyValidationError.recipientNotTrusted
+        }
+        guard trustRecord.deviceID == credential.deviceID else {
+            throw SecretPolicyValidationError.trustedDeviceMismatch
+        }
+        guard trustRecord.effectivePolicyEpoch <= policyEpoch else {
+            throw SecretPolicyValidationError.trustRecordNotEffective
+        }
     }
 
     private static func validateRecovery(
@@ -1160,7 +1297,8 @@ public enum SecretPolicyValidator {
 
     private static func validatePurge(
         records: SecretControlRecords,
-        commit: SecretTransitionCommit
+        commit: SecretTransitionCommit,
+        currentSnapshot: SecretControlSnapshot?
     ) throws {
         let requirementDigests = records.purgeRequirements.map(\.recordDigest)
         guard requirementDigests == commit.purgeRequirementDigests else {
@@ -1181,6 +1319,25 @@ public enum SecretPolicyValidator {
         var receiptsByRequirement: [
             SecretRecordDigest: SignedPurgeReceipt
         ] = [:]
+        if let currentSnapshot {
+            let priorRecipients = Set(
+                currentSnapshot.records.signedPolicy.policy
+                    .authorizedRecipientCredentialIDs
+            )
+            let candidateRecipients = Set(
+                records.signedPolicy.policy.authorizedRecipientCredentialIDs
+            )
+            let removedRecipients = priorRecipients.subtracting(candidateRecipients)
+            let requiredTargets = Set(
+                records.purgeRequirements.map(\.targetCredentialID)
+            )
+            guard
+                requiredTargets == removedRecipients,
+                records.purgeRequirements.count == removedRecipients.count
+            else {
+                throw SecretPolicyValidationError.purgeCoverageMismatch
+            }
+        }
         for receipt in records.purgeReceipts {
             guard receiptsByRequirement[receipt.requirementDigest] == nil else {
                 throw SecretPolicyValidationError.purgeCoverageMismatch
@@ -1188,6 +1345,16 @@ public enum SecretPolicyValidator {
             receiptsByRequirement[receipt.requirementDigest] = receipt
         }
         for requirement in records.purgeRequirements {
+            guard
+                requirement.scopeID == commit.scopeID,
+                requirement.policyEpoch == commit.policyEpoch,
+                requirement.policyDigest == commit.policyDigest,
+                requirement.replacementGenerationID == commit.generationID,
+                requirement.supersededGenerationID
+                    == currentSnapshot?.commit.generationID
+            else {
+                throw SecretPolicyValidationError.purgeCoverageMismatch
+            }
             guard let receipt = receiptsByRequirement[requirement.recordDigest] else {
                 throw SecretPolicyValidationError.incompletePurgeReceipts
             }
@@ -1196,7 +1363,11 @@ public enum SecretPolicyValidator {
                 receipt.coveredCategories == requirement.requiredCategories,
                 receipt.scopeID == requirement.scopeID,
                 receipt.policyEpoch == requirement.policyEpoch,
-                receipt.generationID == requirement.generationID,
+                receipt.policyDigest == requirement.policyDigest,
+                receipt.supersededGenerationID
+                    == requirement.supersededGenerationID,
+                receipt.replacementGenerationID
+                    == requirement.replacementGenerationID,
                 receipt.respondingCredentialID == requirement.targetCredentialID,
                 receipt.signerCredentialID == receipt.respondingCredentialID
             else {

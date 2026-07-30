@@ -343,7 +343,7 @@ private func validateBoundOpaqueRecord(
     guard policyEpoch > 0 else {
         throw SecretSyncContractError.invalidPolicyEpoch
     }
-    guard formatVersion > 0 else {
+    guard formatVersion == 1 else {
         throw SecretSyncContractError.unsupportedSchemaVersion(formatVersion)
     }
     try SecretSyncContractBounds.requireOpaqueBytes(bytes, field: field)

@@ -82,9 +82,6 @@ extension SecretRecordDigest: Codable {
     }
 }
 
-/// Compatibility vocabulary for the mission's general digest seam.
-public typealias SecretSyncDigest = SecretRecordDigest
-
 /// Public signing-key descriptor. The bytes are opaque to this contract layer.
 public struct SigningPublicKeyDescriptor: Sendable, Codable, Hashable {
     public let algorithmIdentifier: String
@@ -327,6 +324,25 @@ public struct TrustedDeviceCredential:
     }
 
     public func canonicalFields() throws -> [SecretSyncCanonicalField] {
+        try enrollmentFields()
+            + [
+                SecretSyncCanonicalField(
+                    tag: 12,
+                    value: enrollmentProof.authoritySignature
+                ),
+            ]
+    }
+
+    /// Bytes an enrollment authority signs to bind the candidate identity,
+    /// lifecycle state, both public-key roles, and proof-of-possession.
+    public func enrollmentSigningBytes() throws -> Data {
+        try SecretSyncCanonicalEncoding.encode(
+            domain: .trustedDeviceCredential,
+            fields: enrollmentFields()
+        )
+    }
+
+    private func enrollmentFields() throws -> [SecretSyncCanonicalField] {
         [
             SecretSyncCanonicalField(
                 tag: 1,
@@ -369,10 +385,6 @@ public struct TrustedDeviceCredential:
             SecretSyncCanonicalField(
                 tag: 11,
                 value: try enrollmentProof.canonicalBytes()
-            ),
-            SecretSyncCanonicalField(
-                tag: 12,
-                value: enrollmentProof.authoritySignature
             ),
         ]
     }
