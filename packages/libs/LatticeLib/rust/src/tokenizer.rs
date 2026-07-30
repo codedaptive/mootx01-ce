@@ -18,8 +18,16 @@ use unicode_segmentation::UnicodeSegmentation;
 /// input order. Mirrors `Tokenizer.tokenize` in Swift.
 pub fn tokenize(text: &str) -> Vec<String> {
     text.unicode_words()
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_owned())
+        // UAX #29 classifies ASCII ':' as MidLetter, so `unicode-segmentation`
+        // keeps `TASK:VERIFY` as ONE word. Foundation's `.byWords` splits it
+        // into `TASK` and `VERIFY`. Without this split the two ports diverge:
+        // colon-joined tokens miss the word-class table and lexicon, take the
+        // HMM `NonAlpha` path, and are dropped from the concept bag — so
+        // colon-delimited input classifies as `000` in Rust and correctly in
+        // Swift. Split restores byte-identical output across ports.
+        .flat_map(|word| word.split(':'))
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
         .collect()
 }
 

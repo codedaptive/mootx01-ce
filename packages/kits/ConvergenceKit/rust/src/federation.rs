@@ -27,7 +27,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use persistence_kit::{Column, RowStore, Storage, StorageEvent, StoragePredicate, TableChange, TypedValue};
+use persistence_kit::{
+    Column, ColumnDeclaration, RowStore, SchemaDeclaration, Storage, StorageEvent,
+    StoragePredicate, TableChange, TableDeclaration, TypedValue,
+};
 
 // ----- identity -----
 
@@ -520,6 +523,9 @@ impl SyncEngine for FederationSyncEngine {
         }
         let inbox = self.relay.register(self.peer_identity.clone());
         self.state.inbox = Some(inbox);
+        // Declare the tombstone side table before any inbound record can be
+        // applied — the LWW gate reads it on every apply.
+        ensure_fed_sync_meta_table(&*storage)?;
         // Subscribe the observer workers BEFORE marking enabled so the
         // write-capture path is live the moment the engine reports enabled.
         self.start_observers(&manifest, &storage)?;
@@ -790,9 +796,13 @@ fn apply_record(
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::LastWriterWinsByHLC => {
-                    // Compare HLC; only apply if remote >= local.
-                    // Mirrors Swift CloudKitStateActor.applyInbound exactly.
-                    if let Some(local_hlc) = read_sync_hlc(&row_store, &record.table, &predicate) {
+                    // Compare HLC against the durable baseline (live row OR
+                    // tombstone); only apply if remote >= local. Consulting the
+                    // tombstone is what stops a replayed older envelope from
+                    // resurrecting a row a newer delete already removed.
+                    if let Some(local_hlc) =
+                        lww_baseline_hlc(&row_store, &record.table, &record.row_key, &predicate)
+                    {
                         let incoming: HLC = record.hlc.into();
                         if incoming < local_hlc {
                             // Stale inbound: silently drop.
@@ -805,6 +815,7 @@ fn apply_record(
                     row_store
                         .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    write_fed_sync_hlc(&row_store, &record.table, &record.row_key, record.hlc.into())?;
                 }
                 ConflictPolicy::RemoteWins => {
                     row_store
@@ -832,13 +843,19 @@ fn apply_record(
                     // HLC gate on the delete path: a stale delete (incoming HLC <
                     // local _syncHLC) must not remove a newer local row. A newer
                     // delete (incoming HLC >= local _syncHLC) proceeds.
-                    if let Some(local_hlc) = read_sync_hlc(&row_store, &record.table, &predicate) {
+                    if let Some(local_hlc) =
+                        lww_baseline_hlc(&row_store, &record.table, &record.row_key, &predicate)
+                    {
                         let incoming: HLC = record.hlc.into();
                         if incoming < local_hlc {
                             // Stale delete: silently drop.
                             return Ok(());
                         }
                     }
+                    // Record the winning delete BEFORE removing the live row.
+                    // The side-table entry outlives the hard delete and is the
+                    // tombstone a later stale replay is measured against.
+                    write_fed_sync_hlc(&row_store, &record.table, &record.row_key, record.hlc.into())?;
                     row_store
                         .delete(&record.table, &predicate)
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
@@ -931,4 +948,115 @@ fn read_sync_hlc(
         Some(TypedValue::Int(i)) => Some(HLC::from_packed((*i) as u64)),
         _ => None,
     }
+}
+
+// ─── Durable LWW ordering state (tombstones) ─────────────────────────────────
+
+/// Side table carrying the last winning HLC per (table, row). Unlike the
+/// `_syncHLC` column on the application row, an entry here SURVIVES a hard
+/// delete, so it doubles as the delete tombstone.
+///
+/// Without it the LWW ordering state dies with the row: a newer delete removes
+/// the row and its `_syncHLC`, and a later replay of an older — but validly
+/// signed — envelope from the same paired peer finds no baseline to compare
+/// against and resurrects the deleted data. An untrusted relay only has to
+/// re-send a message it already saw; no signature forgery is involved.
+const FED_SYNC_META_TABLE: &str = "_fed_sync_meta";
+
+/// Declare the tombstone side table. Called from `enable` and idempotent, so
+/// repeated enables (and direct `apply_record` callers in tests) converge on
+/// the same schema.
+fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> SyncResult<()> {
+    let table = TableDeclaration::new(
+        FED_SYNC_META_TABLE,
+        vec![
+            ColumnDeclaration::text("table_name"),
+            ColumnDeclaration::text("primary_key"),
+            ColumnDeclaration::blob("sync_hlc_wire"),
+        ],
+        vec!["table_name".to_string(), "primary_key".to_string()],
+    );
+    storage
+        .migrate(&SchemaDeclaration::new("ConvergenceKitFederation", 1, vec![table]))
+        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })
+}
+
+/// Predicate selecting one (table, row) tombstone entry.
+fn fed_sync_meta_predicate(table: &str, row_key: &uuid::Uuid) -> StoragePredicate {
+    StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE, "table_name"),
+            TypedValue::Text(table.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE, "primary_key"),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ])
+}
+
+/// Read the durable ordering HLC for a row, if one was ever recorded.
+///
+/// Stored full-width (16 wire bytes) rather than as a packed i64 so the
+/// tombstone does not lose precision the live-row `_syncHLC` column would.
+fn read_fed_sync_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+) -> Option<HLC> {
+    let predicate = fed_sync_meta_predicate(table, row_key);
+    let rows = row_store
+        .query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None)
+        .ok()?;
+    let first = rows.into_iter().next()?;
+    match first.get("sync_hlc_wire") {
+        Some(TypedValue::Blob(wire)) => HLC::from_wire_bytes(wire).ok(),
+        _ => None,
+    }
+}
+
+/// The LWW baseline for a row: the newer of the live row's `_syncHLC` and the
+/// durable tombstone entry.
+///
+/// Both are consulted, not just the tombstone, so an estate that synced before
+/// this side table existed keeps the ordering already recorded on its live rows
+/// instead of treating every row as having no baseline.
+fn lww_baseline_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+    predicate: &StoragePredicate,
+) -> Option<HLC> {
+    let live = read_sync_hlc(row_store, table, predicate);
+    let durable = read_fed_sync_hlc(row_store, table, row_key);
+    match (live, durable) {
+        (Some(a), Some(b)) => Some(if a >= b { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// Record the winning HLC for a row in the durable side table.
+fn write_fed_sync_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+    hlc: HLC,
+) -> SyncResult<()> {
+    let mut values = BTreeMap::new();
+    values.insert("table_name".to_string(), TypedValue::Text(table.to_string()));
+    values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
+    values.insert(
+        "sync_hlc_wire".to_string(),
+        TypedValue::Blob(hlc.wire_bytes().to_vec()),
+    );
+    row_store
+        .upsert(
+            FED_SYNC_META_TABLE,
+            values,
+            &["table_name".to_string(), "primary_key".to_string()],
+        )
+        .map(|_| ())
+        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })
 }

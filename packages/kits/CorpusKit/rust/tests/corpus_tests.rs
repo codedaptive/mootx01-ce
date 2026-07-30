@@ -811,3 +811,45 @@ fn named_providers_construct_for_all_three_models() {
         assert_eq!(corpus.count().expect("count must succeed"), 1);
     }
 }
+
+// MARK: - Lifecycle scoping
+
+/// `destroy_recall_index` is corpus-scoped and must not delete vector rows
+/// another lane wrote to the same shared storage.
+///
+/// The vectors table is keyed by (item_id, vector_index, model_id) with no
+/// corpus/tenant ownership column, so a whole-table teardown here would erase
+/// every other consumer's embeddings on shared storage.
+#[test]
+fn destroy_recall_index_does_not_delete_other_lanes_vectors() {
+    use substrate_types::fingerprint256::Fingerprint256;
+    use vectorkit::VectorStore;
+
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+
+    let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
+    let corpus = Corpus::open(Arc::clone(&storage), EmbeddingModelConfig::Deterministic)
+        .expect("Corpus::open must succeed with InMemory storage");
+    corpus
+        .ingest("Actors serialise access to mutable state.", "doc-a", NOW_MILLIS)
+        .expect("ingest must succeed");
+
+    // A vector another lane owns, in the SAME storage the corpus uses.
+    let victim_store = VectorStore::open(Arc::clone(&storage)).expect("VectorStore::open");
+    let victim = Fingerprint256::from_bits(&[true; 256]);
+    victim_store
+        .add_vector("victim-from-other-lane", &victim, "victim-model", "v1", NOW_MILLIS / 1000)
+        .expect("victim vector must insert");
+
+    corpus.destroy_recall_index().expect("destroy_recall_index must succeed");
+
+    let survived = victim_store
+        .get_vector("victim-from-other-lane", "victim-model")
+        .expect("get_vector must succeed");
+    assert!(
+        survived.is_some(),
+        "destroy_recall_index must not delete vector rows owned by another lane"
+    );
+}
