@@ -59,6 +59,7 @@ enum RecipeTools {
     static let listRecipesCatalogToolName = "moot_list_recipes"
     static let groundedSynthesisToolName = "moot_synthesize"
     static let preciseRecallToolName = "moot_recall_precise"
+    static let vagueRecallToolName = "moot_recall_vague"
     /// Shaped-recall tool: a single recall tool with a discoverable `preset` enum
     /// param selecting one named RecallShape from the GLK roster. Preferable to ~20
     /// tools (one per shape) — the AI picks a deterministic recipe by name instead
@@ -124,6 +125,7 @@ enum RecipeTools {
             || name == listRecipesCatalogToolName
             || name == groundedSynthesisToolName
             || name == preciseRecallToolName
+            || name == vagueRecallToolName
             || name == shapedRecallToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
@@ -152,6 +154,7 @@ enum RecipeTools {
             dreamTool(),
             distillTool(),
             recallDistilledTool(),
+            vagueRecallTool(),
             huntContradictionsTool(),
         ]
     }
@@ -252,6 +255,22 @@ enum RecipeTools {
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe)
+    }
+
+    private static func vagueRecallTool() -> ProjectedTool {
+        ProjectedTool(
+            name: vagueRecallToolName,
+            description: "Vague recall (two-hop): ponder what the estate vaguely remembers. Hop 1 probes the consolidated vague tier's own fingerprint lane for VAGUE summary items; hop 2 hydrates each hit's original constituent memories through _consolidated_from tunnels (bounded per hit and in total). Use when normal recall is thin and the question is old — aged, similar memories may have consolidated into a vague summary whose originals remain fully preserved. Returns the vague summaries first, then the hydrated originals.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema("The recall query text — fingerprinted for the vague-tier lane probe."),
+                    "hit_limit": integerSchema("Max vague summary items from hop 1. Default 8. Omit for the default; null is invalid."),
+                    "constituents_per_hit": integerSchema("Max original memories hydrated per vague hit (bound K). Default 8. Omit for the default; null is invalid."),
+                    "total_constituents": integerSchema("Max original memories hydrated overall (bound M). Default 32. Omit for the default; null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -509,6 +528,8 @@ enum RecipeTools {
             return try await runGroundedSynthesis(args, kit: kit, handle: handle)
         case preciseRecallToolName:
             return try await runPreciseRecall(args, kit: kit, handle: handle)
+        case vagueRecallToolName:
+            return try await runVagueRecall(args, kit: kit, handle: handle)
         case shapedRecallToolName:
             return try await runShapedRecall(args, kit: kit, handle: handle)
         case runMigrationBenchmarkToolName:
@@ -1141,6 +1162,56 @@ enum RecipeTools {
     /// Ranking is identical to moot_memory_search by construction; only the
     /// payloads differ. Fallback rows (§10.2) still return results — served
     /// from content, with a hint to run moot_distill.
+    private static func runVagueRecall(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        // Clamp all three bounds at the MCP boundary (DoS prevention),
+        // mirroring runPreciseRecall's posture; the verb re-applies D12.
+        let hitLimit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["hit_limit"], argument: "hit_limit"),
+            argument: "hit_limit", default: 8)
+        let perHit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["constituents_per_hit"], argument: "constituents_per_hit"),
+            argument: "constituents_per_hit", default: 8)
+        let total = try ToolDispatcher.clampLimit(
+            try optionalInt(args["total_constituents"], argument: "total_constituents"),
+            argument: "total_constituents", default: 32)
+
+        let out = try await kit.vagueRecall(
+            handle, query: query,
+            hitLimit: hitLimit,
+            constituentsPerHit: perHit,
+            totalConstituents: total)
+
+        let estate = try await kit.estate(for: handle)
+        let allParents = (out.vagueHits + out.constituents).map(\.parentNodeId)
+        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: allParents)
+        func room(_ parent: String) -> String {
+            nodeNames[parent].map { "\($0.wing)/\($0.room)" }
+                ?? (parent.isEmpty ? "?" : parent)
+        }
+
+        var lines: [String] = [
+            "found \(out.vagueHits.count) vague summary(ies), \(out.constituents.count) hydrated original(s)"
+        ]
+        for hit in out.vagueHits {
+            lines.append("\(hit.id)  [\(room(hit.parentNodeId))]  [vague L\(hit.vagueLevel)]  \(hit.content)")
+        }
+        if !out.constituents.isEmpty {
+            lines.append("originals:")
+            for c in out.constituents {
+                lines.append("\(c.id)  [\(room(c.parentNodeId))]  \(c.content)")
+            }
+        }
+        if out.vagueHits.isEmpty {
+            lines.append("hint: no vague tier hits — the estate has no consolidated summaries matching this query. Normal recall (moot_memory_search / moot_recall_precise) covers current memories.")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
     private static func runRecallDistilled(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
