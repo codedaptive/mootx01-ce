@@ -116,9 +116,9 @@ pub use brain::scheduler::{
 pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
     default_standing_signal_names, default_standing_signal_specs, AssociationEdgeChecker,
-    ByReferenceValiditySignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
-    EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal, TrainingSignal,
-    VectorSimilaritySignal,
+    ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal, DistillationSignal,
+    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal,
+    TrainingSignal, VectorSimilaritySignal,
 };
 pub use migration::{
     run_parallel, verify_migration, ExternalCorpus, ExternalEntry, MigrationDivergence,
