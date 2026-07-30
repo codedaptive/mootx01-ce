@@ -63,11 +63,16 @@ impl ConsolidationSignal {
                     // only (single-write invariant).
                     let diagnostic = DiagnosticReport {
                         title: "consolidation-sweep.complete".into(),
+                        // repaired= counts under-tiered vague items corrected by
+                        // the sensitivity repair prologue (§D.6 #4). Zero on a
+                        // correctly-stamped estate; positive on an estate consolidated
+                        // before sensitivity inheritance shipped.
                         detail: format!(
-                            "new={} foldIns={} foldInRejections={}; signal={}",
+                            "new={} foldIns={} foldInRejections={} repaired={}; signal={}",
                             report.new_vague_items,
                             report.fold_ins,
                             report.fold_in_rejections,
+                            report.repaired_items,
                             context.signal_id.0
                         ),
                         observed_at_nanos: context.now_nanos,

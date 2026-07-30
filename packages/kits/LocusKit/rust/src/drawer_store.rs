@@ -975,6 +975,26 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Overwrite `adjective_bitmap` on a tunnel directly (bits 6–11 carry the
+    /// sensitivity tier per cookbook §2.3). Used by the consolidation repair
+    /// prologue (§D.6 #4) to restamp pre-existing `_consolidated_from` and
+    /// `supersedes` tunnels that were written before sensitivity inheritance
+    /// shipped. No audit event — this is a correction write, not a lifecycle
+    /// transition.
+    ///
+    /// Returns `TunnelNotFound` if no tunnel with `tunnel_id` exists.
+    ///
+    /// Mirrors Swift `DrawerStore.updateTunnelAdjBitmap(id:adjBitmap:)`.
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        _tunnel_id: &str,
+        _adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "stamp_tunnel_adjective_bitmap not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------
     // Outline helpers (node-tree integrity, NT-L5)
     // -----------------------------------------------------------------
@@ -2390,5 +2410,12 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     ) -> Result<(), LocusKitError> {
         self.as_ref()
             .fold_in_transactionally(vague_v2, prior_vague_id, enlarged_constituent_ids, added_by, now)
+    }
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
     }
 }

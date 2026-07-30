@@ -100,6 +100,10 @@ public struct ConsolidationSweepReport: Sendable {
     public let newVagueItems: Int
     public let foldIns: Int
     public let foldInRejections: Int
+    /// Items whose adjective or provenance sensitivity bitmap was promoted
+    /// during the repair prologue (§D.6 #4). Zero when no under-tiered vague
+    /// drawers are found.
+    public let repairedItems: Int
     public var totalActs: Int { newVagueItems + foldIns }
 }
 
@@ -134,10 +138,67 @@ extension GeniusLocusKit {
         config: ConsolidationConfig = ConsolidationConfig(),
         limit: Int? = nil
     ) async throws -> ConsolidationSweepReport {
-        let none = ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0)
+        let none = ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0, repairedItems: 0)
         let estate = try estate(for: handle)
         guard let vectorStore = vectorStores[handle] else { return none }
 
+
+        // ── §D.6 #4 repair prologue: restamp under-tiered vague drawers ──────
+        // Scan all active vague drawers. For each, compare the vague drawer's
+        // stored sensitivity to the MAX of its constituents' sensitivity. If the
+        // vague drawer is under-tiered (constituent MAX > vague), restamp the
+        // adjective and provenance bitmaps and overwrite the adjective bitmap on
+        // all _consolidated_from tunnels for that vague item. Uses
+        // "consolidation-repair" as the changedBy actor so these writes are
+        // distinct from normal mutation paths in the audit trail.
+        var repairedItems = 0
+        var repairCursor: String? = nil
+        var repairExamined = 0
+        repairing: while repairExamined < config.maxCandidatesPerSweep {
+            let repPage = try await estate.activeDrawersAfter(
+                id: repairCursor, limit: min(500, config.maxCandidatesPerSweep - repairExamined))
+            if repPage.isEmpty { break repairing }
+            repairCursor = repPage.last?.id
+            repairExamined += repPage.count
+            for vague in repPage where vague.isVague {
+                let constituentIDs = try await estate.vagueConstituents(of: vague.id)
+                guard !constituentIDs.isEmpty else { continue }
+                let vagueAdjRaw = Int(vague.adjectiveSensitivity.rawValue)
+                let vagueProvRaw = Int(vague.sensitivity.rawValue)
+                var maxAdjRaw = vagueAdjRaw
+                var maxProvRaw = vagueProvRaw
+                let constituents = try await estate.getDrawers(ids: constituentIDs)
+                for constituent in constituents {
+                    let cAdj = Int(constituent.adjectiveSensitivity.rawValue)
+                    let cProv = Int(constituent.sensitivity.rawValue)
+                    if cAdj > maxAdjRaw { maxAdjRaw = cAdj }
+                    if cProv > maxProvRaw { maxProvRaw = cProv }
+                }
+                guard maxAdjRaw != vagueAdjRaw || maxProvRaw != vagueProvRaw else { continue }
+                if maxAdjRaw != vagueAdjRaw {
+                    let newAdj = BitField.writeField(
+                        Int64(maxAdjRaw), into: vague.adjectiveBitmap, shift: 6, width: 6)
+                    try await estate.repairVagueAdjectiveBitmap(
+                        drawerId: vague.id, newAdjective: newAdj, now: now)
+                }
+                if maxProvRaw != vagueProvRaw {
+                    let newProv = BitField.writeField(
+                        Int64(maxProvRaw), into: vague.provenance, shift: 30, width: 6)
+                    try await estate.repairVagueProvenance(
+                        drawerId: vague.id, newProvenance: newProv, now: now)
+                }
+                // Restamp all _consolidated_from tunnels for this vague item.
+                // Tunnel adjective bitmap carries the sensitivity tier at bits
+                // 6–11 (cookbook §2.3) so tunnel readers see the promoted tier.
+                let stampedAdjBitmap = BitField.writeField(
+                    Int64(maxAdjRaw), into: 0, shift: 6, width: 6)
+                for cid in constituentIDs {
+                    let tid = "_consolidated_from:\(vague.id):\(cid)"
+                    try await estate.updateTunnelAdjBitmap(id: tid, adjBitmap: stampedAdjBitmap)
+                }
+                repairedItems += 1
+            }
+        }
         // ── §3.1 step 1: candidate pool ────────────────────────────────
         // Aged (D1/D2), recall-quiet (D3), not already represented, and not
         // a vague item at the D8 cap. Bounded page walk (D9).
@@ -164,7 +225,7 @@ extension GeniusLocusKit {
                 pool.append(drawer)
             }
         }
-        guard !pool.isEmpty else { return none }
+        guard !pool.isEmpty else { return ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0, repairedItems: repairedItems) }
 
         // Fingerprints for the pool from the distillation-features-v1 lane.
         // Items without a lane entry (never distilled / zero-feature short
@@ -178,7 +239,7 @@ extension GeniusLocusKit {
             }
         }
         let clusterable = pool.filter { engrams[$0.id] != nil }
-        guard !clusterable.isEmpty else { return none }
+        guard !clusterable.isEmpty else { return ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0, repairedItems: repairedItems) }
 
         // ── D4: resolve the Hamming ceiling ────────────────────────────
         // Configured value wins; otherwise derive from the measured pairwise
@@ -197,7 +258,7 @@ extension GeniusLocusKit {
                     distances.append(EngramLib.distance(sample[i], sample[j]))
                 }
             }
-            guard !distances.isEmpty else { return none }
+            guard !distances.isEmpty else { return ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0, repairedItems: repairedItems) }
             distances.sort()
             ceiling = distances[max(0, distances.count / 10 - 1)]
         }
@@ -466,7 +527,8 @@ extension GeniusLocusKit {
         return ConsolidationSweepReport(
             newVagueItems: produced,
             foldIns: foldIns,
-            foldInRejections: foldInRejections)
+            foldInRejections: foldInRejections,
+            repairedItems: repairedItems)
     }
 
     /// D6/D7 composition + distillation shared by the consolidation act and

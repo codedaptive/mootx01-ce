@@ -467,6 +467,14 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
     }
 
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
+    }
+
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.0.outline_children(parent_drawer_id)
     }

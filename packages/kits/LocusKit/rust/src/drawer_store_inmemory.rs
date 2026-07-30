@@ -3029,6 +3029,35 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    /// Overwrite `adjective_bitmap` on a tunnel directly (bits 6–11 carry
+    /// the sensitivity tier per cookbook §2.3). Used by the consolidation
+    /// repair prologue (§D.6 #4) to restamp pre-existing `_consolidated_from`
+    /// and `supersedes` tunnels written before sensitivity inheritance shipped.
+    /// No audit event — this is a correction write, not a lifecycle transition.
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        // Verify the tunnel exists first so we can return TunnelNotFound.
+        let _ = self.get_tunnel(tunnel_id)?
+            .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("adjectiveBitmap".to_string(), TypedValue::Bitmap(adj_bitmap));
+        self.storage
+            .row_store()
+            .update(
+                T_TUNNELS,
+                vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "id"),
+                    TypedValue::Text(tunnel_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------
     // Outline helpers (node-tree integrity, NT-L5)
     // -----------------------------------------------------------------
@@ -4611,10 +4640,14 @@ impl DrawerStore for DrawerStoreCore {
 
         let row_store = self.storage.row_store();
 
-        // Read constituent parent_node_ids and current operational bitmaps
-        // before any writes (mirrors Swift pre-transaction read block).
+        // Read constituent parent_node_ids, current operational bitmaps, and adjective
+        // bitmaps before any writes (mirrors Swift pre-transaction read block). The
+        // adjective bitmap is needed for sensitivity inheritance (#57, §D.1): each
+        // _consolidated_from tunnel is stamped with max(vague, constituent) sensitivity
+        // in bits 6–11 so the tunnel inherits the highest tier it touches.
         let mut constituent_parent_ids: Vec<String> = Vec::with_capacity(constituent_ids.len());
         let mut constituent_op_bitmaps: Vec<i64> = Vec::with_capacity(constituent_ids.len());
+        let mut constituent_adj_bitmaps: Vec<i64> = Vec::with_capacity(constituent_ids.len());
         for &cid in constituent_ids {
             let rows = row_store
                 .query(
@@ -4633,6 +4666,7 @@ impl DrawerStore for DrawerStoreCore {
             })?;
             constituent_parent_ids.push(string_value_of(cr.get("parent_node_id")));
             constituent_op_bitmaps.push(i64_value_of(cr.get("operationalBitmap")));
+            constituent_adj_bitmaps.push(i64_value_of(cr.get("adjectiveBitmap")));
         }
 
         // Resolve node display names for tunnel endpoint labeling.
@@ -4650,9 +4684,21 @@ impl DrawerStore for DrawerStoreCore {
 
         // Step 3: Insert one _consolidated_from tunnel per constituent.
         // kind = References (raw 1); label discriminates from other references.
+        // Sensitivity inheritance (#57, §D.1): each tunnel is stamped with
+        // max(vague, constituent) adjective sensitivity in bits 6–11 (cookbook §2.3),
+        // matching Swift's pre-transaction stamp in consolidateTransactionally.
+        let vague_adj_sens_raw = bit_field::extract_field(vague_drawer.adjective_bitmap, 6, 6);
         for (i, &cid) in constituent_ids.iter().enumerate() {
             let c_parent_id = &constituent_parent_ids[i];
             let (c_wing, c_room) = node_names.get(c_parent_id).cloned().unwrap_or_default();
+            let constituent_adj_sens_raw =
+                bit_field::extract_field(constituent_adj_bitmaps[i], 6, 6);
+            let max_adj_sens_raw = if constituent_adj_sens_raw > vague_adj_sens_raw {
+                constituent_adj_sens_raw
+            } else {
+                vague_adj_sens_raw
+            };
+            let stamped_adj_bitmap = bit_field::write_field(max_adj_sens_raw, 0i64, 6, 6);
             let mut tunnel = Tunnel::new(
                 format!("_consolidated_from:{}:{}", vague_drawer.id, cid),
                 vague_wing.clone(),
@@ -4666,6 +4712,8 @@ impl DrawerStore for DrawerStoreCore {
             tunnel.kind = TunnelKind::References;
             tunnel.source_drawer_id = Some(vague_drawer.id.clone());
             tunnel.target_drawer_id = Some(cid.to_string());
+            // Stamp the tunnel with max(vague, constituent) sensitivity (§D.1).
+            tunnel.adjective_bitmap = stamped_adj_bitmap;
             row_store
                 .insert(T_TUNNELS, tunnel_values(&tunnel))
                 .map_err(map_storage_err)?;
@@ -4830,10 +4878,14 @@ impl DrawerStore for DrawerStoreCore {
             ));
         }
 
-        // Pre-read constituents (parents + bitmaps) before any writes.
+        // Pre-read constituents (parents + bitmaps + adjective bitmaps) before any writes.
+        // The adjective bitmap is needed for sensitivity inheritance (#57, §D.1): each
+        // _consolidated_from tunnel is stamped with max(v2, constituent) sensitivity.
         let mut constituent_parent_ids: Vec<String> =
             Vec::with_capacity(enlarged_constituent_ids.len());
         let mut constituent_op_bitmaps: Vec<i64> =
+            Vec::with_capacity(enlarged_constituent_ids.len());
+        let mut constituent_adj_bitmaps: Vec<i64> =
             Vec::with_capacity(enlarged_constituent_ids.len());
         for &cid in enlarged_constituent_ids {
             let rows = row_store
@@ -4853,6 +4905,7 @@ impl DrawerStore for DrawerStoreCore {
             })?;
             constituent_parent_ids.push(string_value_of(cr.get("parent_node_id")));
             constituent_op_bitmaps.push(i64_value_of(cr.get("operationalBitmap")));
+            constituent_adj_bitmaps.push(i64_value_of(cr.get("adjectiveBitmap")));
         }
         let mut all_parent_ids: Vec<String> =
             Vec::with_capacity(enlarged_constituent_ids.len() + 1);
@@ -4870,10 +4923,50 @@ impl DrawerStore for DrawerStoreCore {
         // legitimate supersession in the consolidation design (§3.3).
         self.add_drawer(vague_v2, now)?;
 
+        // Sensitivity inheritance (§D.1): stamp the supersedes tunnel (v2 → prior)
+        // with v2's adjective sensitivity in bits 6–11. The supersession cascade inside
+        // add_drawer inserts the tunnel without a sensitivity stamp; this UPDATE mirrors
+        // Swift's explicit per-tunnel construction in foldInTransactionally (line 4543-4555
+        // of DrawerStore.swift), where the supersedes tunnel is built with a stamped
+        // adjectiveBitmap before insertion. Rust's cascade path doesn't accept per-call
+        // adjective overrides, so we correct the bitmap in the same logical step.
+        {
+            let v2_adj_sens_raw = bit_field::extract_field(vague_v2.adjective_bitmap, 6, 6);
+            let supersedes_adj_bitmap = bit_field::write_field(v2_adj_sens_raw, 0i64, 6, 6);
+            let supersedes_tunnel_id = format!("supersedes:{}:{}", vague_v2.id, prior_vague_id);
+            let mut uv = BTreeMap::new();
+            uv.insert(
+                "adjectiveBitmap".to_string(),
+                TypedValue::Bitmap(supersedes_adj_bitmap),
+            );
+            row_store
+                .update(
+                    T_TUNNELS,
+                    uv,
+                    &StoragePredicate::Eq(
+                        Column::new(T_TUNNELS, "id"),
+                        TypedValue::Text(supersedes_tunnel_id),
+                    ),
+                )
+                .map_err(map_storage_err)?;
+        }
+
         // Step 3: _consolidated_from tunnels to the FULL enlarged set.
+        // Sensitivity inheritance (#57, §D.1): each tunnel is stamped with
+        // max(v2, constituent) adjective sensitivity in bits 6–11 (cookbook §2.3),
+        // matching Swift's pre-transaction stamp in foldInTransactionally.
+        let v2_adj_sens_raw = bit_field::extract_field(vague_v2.adjective_bitmap, 6, 6);
         for (i, &cid) in enlarged_constituent_ids.iter().enumerate() {
             let c_parent_id = &constituent_parent_ids[i];
             let (c_wing, c_room) = node_names.get(c_parent_id).cloned().unwrap_or_default();
+            let constituent_adj_sens_raw =
+                bit_field::extract_field(constituent_adj_bitmaps[i], 6, 6);
+            let max_adj_sens_raw = if constituent_adj_sens_raw > v2_adj_sens_raw {
+                constituent_adj_sens_raw
+            } else {
+                v2_adj_sens_raw
+            };
+            let stamped_adj_bitmap = bit_field::write_field(max_adj_sens_raw, 0i64, 6, 6);
             let mut tunnel = Tunnel::new(
                 format!("_consolidated_from:{}:{}", vague_v2.id, cid),
                 vague_wing.clone(),
@@ -4887,6 +4980,8 @@ impl DrawerStore for DrawerStoreCore {
             tunnel.kind = TunnelKind::References;
             tunnel.source_drawer_id = Some(vague_v2.id.clone());
             tunnel.target_drawer_id = Some(cid.to_string());
+            // Stamp the tunnel with max(v2, constituent) sensitivity (§D.1).
+            tunnel.adjective_bitmap = stamped_adj_bitmap;
             row_store
                 .insert(T_TUNNELS, tunnel_values(&tunnel))
                 .map_err(map_storage_err)?;
@@ -5217,6 +5312,13 @@ impl DrawerStore for InMemoryDrawerStore {
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.inner.respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
+    }
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
     }
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.outline_children(parent_drawer_id)

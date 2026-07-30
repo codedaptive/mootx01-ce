@@ -533,6 +533,7 @@ fn consolidation_signal_live_spec_emits_complete_diagnostic_on_ok() {
             new_vague_items: 3,
             fold_ins: 1,
             fold_in_rejections: 0,
+            repaired_items: 0,
         })
     }));
     let report = fire(spec);
@@ -554,6 +555,10 @@ fn consolidation_signal_live_spec_emits_complete_diagnostic_on_ok() {
     assert!(
         detail.contains("foldInRejections=0"),
         "detail must include fold_in_rejections count"
+    );
+    assert!(
+        detail.contains("repaired=0"),
+        "detail must include repaired_items count (§D.6 #4 repair prologue)"
     );
 }
 
