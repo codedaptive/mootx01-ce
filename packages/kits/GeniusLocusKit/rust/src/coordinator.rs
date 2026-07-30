@@ -2828,12 +2828,90 @@ impl EstateCoordinator {
             new_vague_items: 0,
             fold_ins: 0,
             fold_in_rejections: 0,
+            repaired_items: 0,
         };
         let estate = self.estate_for_verb(handle)?;
         let vector_store = match self.vector_store_for(handle) {
             Some(vs) => vs,
             None => return Ok(none),
         };
+
+        // ── §D.6 #4 repair prologue: restamp under-tiered vague drawers ───
+        // Before the candidate pool is built, scan all vague drawers and
+        // promote any whose sensitivity tier is below the MAX of their
+        // constituents. This repairs rows that were consolidated before
+        // sensitivity inheritance shipped. Bounded by all_drawers_bounded(None)
+        // — the same corpus budget as distillation health scans. Idempotent:
+        // a correctly-stamped drawer is not touched (max == current). A
+        // positive repaired_items count in the report signals the estate
+        // contained pre-existing under-tiered rows (§D.6 #4 piggyback ruling).
+        let mut repaired_items: usize = 0;
+        {
+            use substrate_kernel::bit_field;
+
+            let all = estate
+                .all_drawers_bounded(None)
+                .map_err(|e| remap("consolidation_sweep_repair_prologue", "", e))?;
+
+            for vague in all.iter().filter(|d| (d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0) {
+                // Look up constituent IDs via the _consolidated_from tunnels.
+                let constituent_ids = estate
+                    .constituent_ids_for_vague_item(&vague.id)
+                    .map_err(|e| remap("consolidation_sweep_repair_prologue", "", e))?;
+                if constituent_ids.is_empty() {
+                    continue;
+                }
+
+                // Compute max adjective and provenance sensitivity over constituents
+                // AND the vague item itself (monotone ceiling: only ever promote).
+                let vague_adj_raw = vague.adjective_sensitivity().raw_value();
+                let vague_prov_raw = vague.sensitivity().raw_value();
+                let mut max_adj_raw = vague_adj_raw;
+                let mut max_prov_raw = vague_prov_raw;
+                for cid in &constituent_ids {
+                    if let Ok(Some(constituent)) = estate.get_drawer(cid) {
+                        let c_adj = constituent.adjective_sensitivity().raw_value();
+                        let c_prov = constituent.sensitivity().raw_value();
+                        if c_adj > max_adj_raw { max_adj_raw = c_adj; }
+                        if c_prov > max_prov_raw { max_prov_raw = c_prov; }
+                    }
+                }
+
+                // If the vague drawer is already at or above the max tier, skip.
+                if max_adj_raw == vague_adj_raw && max_prov_raw == vague_prov_raw {
+                    continue;
+                }
+
+                // Promote the vague drawer's adjective and provenance bitmaps.
+                // Preserve all other adjective and provenance bits unchanged.
+                let new_adj = bit_field::write_field(max_adj_raw, vague.adjective_bitmap, 6, 6);
+                let new_prov = bit_field::write_field(max_prov_raw, vague.provenance, 30, 6);
+                if new_adj != vague.adjective_bitmap {
+                    estate
+                        .repair_adjective_bitmap(&vague.id, new_adj, now)
+                        .map_err(|e| remap("consolidation_sweep_repair_prologue", "", e))?;
+                }
+                if new_prov != vague.provenance {
+                    estate
+                        .repair_provenance_bitmap(&vague.id, new_prov, now)
+                        .map_err(|e| remap("consolidation_sweep_repair_prologue", "", e))?;
+                }
+
+                // Restamp every _consolidated_from tunnel for this vague drawer
+                // with max(vague, constituent) sensitivity in bits 6–11. The
+                // max_adj_raw now equals the vague's promoted value, so every
+                // tunnel is floored at max_adj_raw.
+                let stamped_adj_bitmap = bit_field::write_field(max_adj_raw, 0i64, 6, 6);
+                for cid in &constituent_ids {
+                    let tid = format!("_consolidated_from:{}:{}", vague.id, cid);
+                    // stamp_tunnel_adjective_bitmap is idempotent: writing the
+                    // same value again on a correctly-stamped tunnel is harmless.
+                    let _ = estate.stamp_tunnel_adjective_bitmap(&tid, stamped_adj_bitmap);
+                }
+
+                repaired_items += 1;
+            }
+        }
 
         // ── §3.1 step 1: candidate pool — aged (D1/D2), recall-quiet (D3),
         // not represented, not vague-at-cap. Bounded page walk (D9).
@@ -3260,6 +3338,7 @@ impl EstateCoordinator {
             new_vague_items: produced,
             fold_ins,
             fold_in_rejections,
+            repaired_items,
         })
     }
 

@@ -2078,4 +2078,51 @@ public extension Estate {
         // is maintained — same structural guarantee as ordinary capture.
         try await addDrawerCovered(drawer, now: now)
     }
+    // -------------------------------------------------------------------------
+    // §D.6 #4 sensitivity repair prologue helpers
+    //
+    // Called by ConsolidationCycle's repair prologue to restamp under-tiered
+    // vague drawers and their _consolidated_from tunnels. These are correction
+    // writes; "consolidation-repair" is the changedBy actor so they appear in
+    // audit as a distinct repair operation rather than a user-driven mutation.
+    // -------------------------------------------------------------------------
+
+    /// Repair prologue helper (§D.6 #4): promotes a vague drawer's adjective
+    /// bitmap to `newAdjective`. Records a "consolidation-repair" audit entry.
+    ///
+    /// Adjective sensitivity lives at bits 6–11 (shift 6, width 6) per
+    /// cookbook §2.3. The caller uses BitField.writeField to compute the
+    /// promoted value before calling this method.
+    public func repairVagueAdjectiveBitmap(drawerId: String, newAdjective: Int64, now: Date) async throws {
+        try await store.mutateAdjective(
+            drawerId: drawerId,
+            newAdjective: newAdjective,
+            changedBy: "consolidation-repair",
+            reason: "sensitivity repair prologue §D.6 #4 — promoting under-tiered vague drawer",
+            now: now
+        )
+    }
+
+    /// Repair prologue helper (§D.6 #4): promotes a vague drawer's provenance
+    /// bitmap to `newProvenance`. Records a "consolidation-repair" audit entry.
+    ///
+    /// Provenance sensitivity lives at bits 30–35 (shift 30, width 6) per
+    /// cookbook §2.5. The caller uses BitField.writeField to compute the
+    /// promoted value before calling this method.
+    public func repairVagueProvenance(drawerId: String, newProvenance: Int64, now: Date) async throws {
+        try await store.mutateProvenance(
+            drawerId: drawerId,
+            newProvenance: newProvenance,
+            changedBy: "consolidation-repair",
+            reason: "sensitivity repair prologue §D.6 #4 — promoting under-tiered vague drawer",
+            now: now
+        )
+    }
+
+    /// Repair prologue helper (§D.6 #4): overwrites the adjective bitmap on a
+    /// tunnel. Delegates to DrawerStore.updateTunnelAdjBitmap. No audit event.
+    public func updateTunnelAdjBitmap(id tunnelId: String, adjBitmap: Int64) async throws {
+        try await store.updateTunnelAdjBitmap(id: tunnelId, adjBitmap: adjBitmap)
+    }
+
 }

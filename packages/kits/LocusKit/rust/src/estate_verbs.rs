@@ -1614,6 +1614,61 @@ impl Estate {
     }
 
     // -----------------------------------------------------------------------
+    // Repair helpers — sensitivity inheritance repair prologue (§D.6 #4)
+    // -----------------------------------------------------------------------
+
+    /// Promote a drawer's adjective bitmap (full i64) via the store's
+    /// audit-trail mutation path. Used by the consolidation repair prologue
+    /// (§D.6 #4) to restamp under-tiered vague drawers. Callers must
+    /// compute the new full bitmap (preserving all non-sensitivity bits)
+    /// before invoking. Mirrors Swift `Estate.repairVagueAdjectiveBitmap`.
+    pub fn repair_adjective_bitmap(
+        &self,
+        drawer_id: &str,
+        new_adjective: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.mutate_adjective(
+            drawer_id,
+            new_adjective,
+            "consolidation-repair",
+            Some("sensitivity repair prologue §D.6 #4 — promoting under-tiered vague drawer"),
+            now,
+        )
+    }
+
+    /// Promote a drawer's provenance bitmap (full i64) via the store's
+    /// mutation path. Used by the consolidation repair prologue (§D.6 #4).
+    /// Callers compute the new full bitmap before invoking.
+    /// Mirrors Swift `Estate.repairVagueProvenance`.
+    pub fn repair_provenance_bitmap(
+        &self,
+        drawer_id: &str,
+        new_provenance: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.mutate_provenance(
+            drawer_id,
+            new_provenance,
+            "consolidation-repair",
+            Some("sensitivity repair prologue §D.6 #4 — promoting under-tiered vague drawer"),
+            now,
+        )
+    }
+
+    /// Overwrite `adjective_bitmap` on a tunnel directly. Used by the
+    /// consolidation repair prologue (§D.6 #4) to restamp pre-existing
+    /// lineage tunnels. No audit event — correction write only.
+    /// Mirrors Swift `Estate.updateTunnelAdjBitmap(id:adjBitmap:)`.
+    pub fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
+    }
+
+    // -----------------------------------------------------------------------
     // withdraw
     // -----------------------------------------------------------------------
 
@@ -2986,6 +3041,7 @@ impl Estate {
         self.store.add_learned_reference(&reference)?;
         Ok(reference)
     }
+
 }
 
 // ---------------------------------------------------------------------------

@@ -56,11 +56,21 @@ impl Default for ConsolidationConfig {
 
 /// What one consolidation sweep did (§3.2 acts + §5.1 fold-ins) and the D10
 /// drift evidence it observed. Mirrors Swift `ConsolidationSweepReport`.
+///
+/// `repaired_items` counts vague drawers whose sensitivity tier was promoted
+/// by the repair-sweep prologue (§D.6 #4). A positive count means the estate
+/// contained pre-existing under-tiered vague rows that were corrected before
+/// the candidate pool was built. Zero on a correctly-stamped estate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConsolidationSweepReport {
     pub new_vague_items: usize,
     pub fold_ins: usize,
     pub fold_in_rejections: usize,
+    /// Count of vague drawers whose sensitivity was promoted by the repair
+    /// prologue (§D.6 #4 — piggyback, no separate sweep verb). Zero on a
+    /// correctly-stamped estate; positive on an estate that was consolidated
+    /// before sensitivity inheritance was deployed.
+    pub repaired_items: usize,
 }
 
 impl ConsolidationSweepReport {

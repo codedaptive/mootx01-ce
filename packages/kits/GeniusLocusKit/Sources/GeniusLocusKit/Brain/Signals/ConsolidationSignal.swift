@@ -51,6 +51,7 @@ public enum ConsolidationSignal {
                         title: "consolidation-sweep.complete",
                         detail: "new=\(report.newVagueItems) foldIns=\(report.foldIns) "
                             + "foldInRejections=\(report.foldInRejections) "
+                            + "repaired=\(report.repairedItems) "
                             + "at \(context.now.ISO8601Format())",
                         observedAt: context.now))]
                 } catch {

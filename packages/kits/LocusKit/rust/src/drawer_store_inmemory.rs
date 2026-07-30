@@ -3029,6 +3029,35 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    /// Overwrite `adjective_bitmap` on a tunnel directly (bits 6–11 carry
+    /// the sensitivity tier per cookbook §2.3). Used by the consolidation
+    /// repair prologue (§D.6 #4) to restamp pre-existing `_consolidated_from`
+    /// and `supersedes` tunnels written before sensitivity inheritance shipped.
+    /// No audit event — this is a correction write, not a lifecycle transition.
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        // Verify the tunnel exists first so we can return TunnelNotFound.
+        let _ = self.get_tunnel(tunnel_id)?
+            .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("adjectiveBitmap".to_string(), TypedValue::Bitmap(adj_bitmap));
+        self.storage
+            .row_store()
+            .update(
+                T_TUNNELS,
+                vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "id"),
+                    TypedValue::Text(tunnel_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------
     // Outline helpers (node-tree integrity, NT-L5)
     // -----------------------------------------------------------------
@@ -5283,6 +5312,13 @@ impl DrawerStore for InMemoryDrawerStore {
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.inner.respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
+    }
+    fn stamp_tunnel_adjective_bitmap(
+        &self,
+        tunnel_id: &str,
+        adj_bitmap: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
     }
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.outline_children(parent_drawer_id)
