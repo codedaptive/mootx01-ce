@@ -9,7 +9,7 @@
 //     distill, distilled_recall; + node_motion
 //     diffusion node-layer lens).
 //
-//   • GeniusLocusKit.defaultStandingSignalNames.count == 10 — 7 baseline
+//   • GeniusLocusKit.defaultStandingSignalNames.count == 11 — 7 baseline
 //     + DistillationSignal (Dg4) + TrainingSignal
 //     + ContradictionScoutSignal (contradiction hunter).
 //
@@ -42,9 +42,9 @@ struct SprintDXAssertionTests {
     /// Ten signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
     /// + ContradictionScoutSignal (contradiction hunter).
     /// The signal inventory table in GENIUSLOCUSKIT_SPEC.md defines the set.
-    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 10 (includes ContradictionScoutSignal)")
+    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 11 (includes ContradictionScoutSignal)")
     func defaultStandingSignalNamesCountIsTen() {
-        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 10,
+        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 11,
             "defaultStandingSignalNames must contain exactly 10 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal + ContradictionScoutSignal")
     }
 }
