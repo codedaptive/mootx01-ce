@@ -66,11 +66,12 @@ public enum SecretPolicyAdvanceResult: Sendable, Hashable {
     )
 }
 
-/// Immutable policy-store value retaining every input needed for validation.
+/// Immutable policy-store value retaining one commit and its referenced records.
 ///
 /// The entry keeps the signed transition certificate beside its complete
-/// records so a caller can reconstruct and validate persisted state without
-/// relying on an implementation-specific side channel.
+/// record set. Full transition validation separately requires the current
+/// snapshot, trust inputs, competing-child knowledge, external freshness,
+/// a digester, and a signature verifier.
 public struct SecretPolicyStoreEntry: Sendable, Hashable {
     public let commit: SecretTransitionCommit
     public let records: SecretControlRecords
