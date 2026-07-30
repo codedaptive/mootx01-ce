@@ -4,10 +4,12 @@ import Foundation
 public struct ApprovedDeviceTrustSnapshot: Sendable, Hashable {
     public let policyEpoch: UInt64
     public let credentials: [TrustedDeviceCredential]
+    public let trustRecords: [DeviceTrustRecord]
 
     public init(
         policyEpoch: UInt64,
-        credentials: [TrustedDeviceCredential]
+        credentials: [TrustedDeviceCredential],
+        trustRecords: [DeviceTrustRecord]
     ) throws {
         guard policyEpoch > 0 else {
             throw SecretSyncInterfaceError.invalidPolicyEpoch
@@ -23,8 +25,32 @@ public struct ApprovedDeviceTrustSnapshot: Sendable, Hashable {
         guard sorted.allSatisfy({ $0.status == .active }) else {
             throw SecretSyncInterfaceError.unapprovedCredentialStatus
         }
+        let sortedTrustRecords = trustRecords.sorted {
+            $0.credentialID.rawValue.uuidString.lowercased()
+                < $1.credentialID.rawValue.uuidString.lowercased()
+        }
+        guard sortedTrustRecords.count == sorted.count else {
+            throw SecretSyncInterfaceError.trustRecordMismatch
+        }
+        for index in sortedTrustRecords.indices.dropFirst()
+        where sortedTrustRecords[index].credentialID
+            == sortedTrustRecords[index - 1].credentialID
+        {
+            throw SecretSyncInterfaceError.trustRecordMismatch
+        }
+        for (credential, trustRecord) in zip(sorted, sortedTrustRecords) {
+            guard
+                trustRecord.credentialID == credential.credentialID,
+                trustRecord.deviceID == credential.deviceID,
+                trustRecord.trustState == .trusted,
+                trustRecord.effectivePolicyEpoch <= policyEpoch
+            else {
+                throw SecretSyncInterfaceError.trustRecordMismatch
+            }
+        }
         self.policyEpoch = policyEpoch
         self.credentials = sorted
+        self.trustRecords = sortedTrustRecords
     }
 
     /// Return the exact credential in this snapshot, if present.
@@ -32,6 +58,13 @@ public struct ApprovedDeviceTrustSnapshot: Sendable, Hashable {
         for credentialID: DeviceCredentialID
     ) -> TrustedDeviceCredential? {
         credentials.first { $0.credentialID == credentialID }
+    }
+
+    /// Return the exact trust record paired with a credential, if present.
+    public func trustRecord(
+        for credentialID: DeviceCredentialID
+    ) -> DeviceTrustRecord? {
+        trustRecords.first { $0.credentialID == credentialID }
     }
 }
 

@@ -17,29 +17,42 @@ public struct PurgeArtifactReceiptKey: Sendable, Hashable {
     }
 }
 
-/// Validated category-specific view of a signed purge receipt.
+/// Structurally bound category-specific view of a signed purge receipt.
+///
+/// Construction proves exact record-field bindings only. A later validator
+/// must still verify the receipt signature against the responding credential.
 public struct PurgeArtifactCategoryReceipt: Sendable, Hashable {
     public let key: PurgeArtifactReceiptKey
     public let signedReceipt: SignedPurgeReceipt
 
     public init(
-        requirementDigest: SecretRecordDigest,
+        requirement: PurgeRequirement,
         category: PurgeArtifactCategory,
-        respondingCredentialID: DeviceCredentialID,
         signedReceipt: SignedPurgeReceipt
     ) throws {
         guard
-            signedReceipt.requirementDigest == requirementDigest,
-            signedReceipt.respondingCredentialID == respondingCredentialID,
-            signedReceipt.coveredCategories.contains(category),
+            signedReceipt.requirementDigest == requirement.recordDigest,
+            signedReceipt.scopeID == requirement.scopeID,
+            signedReceipt.policyEpoch == requirement.policyEpoch,
+            signedReceipt.policyDigest == requirement.policyDigest,
+            signedReceipt.supersededGenerationID
+                == requirement.supersededGenerationID,
+            signedReceipt.replacementGenerationID
+                == requirement.replacementGenerationID,
+            signedReceipt.respondingCredentialID
+                == requirement.targetCredentialID,
+            signedReceipt.signerCredentialID
+                == requirement.targetCredentialID,
+            requirement.requiredCategories.contains(category),
+            signedReceipt.coveredCategories == requirement.requiredCategories,
             signedReceipt.status == .completed
         else {
             throw SecretSyncInterfaceError.invalidPurgeReceipt
         }
         self.key = PurgeArtifactReceiptKey(
-            requirementDigest: requirementDigest,
+            requirementDigest: requirement.recordDigest,
             category: category,
-            respondingCredentialID: respondingCredentialID
+            respondingCredentialID: requirement.targetCredentialID
         )
         self.signedReceipt = signedReceipt
     }

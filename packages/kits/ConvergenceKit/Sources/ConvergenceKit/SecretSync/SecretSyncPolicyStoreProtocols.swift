@@ -66,24 +66,62 @@ public enum SecretPolicyAdvanceResult: Sendable, Hashable {
     )
 }
 
-/// Append-only storage seam for immutable staged and committed policy records.
+/// Immutable policy-store value retaining every input needed for validation.
+///
+/// The entry keeps the signed transition certificate beside its complete
+/// records so a caller can reconstruct and validate persisted state without
+/// relying on an implementation-specific side channel.
+public struct SecretPolicyStoreEntry: Sendable, Hashable {
+    public let commit: SecretTransitionCommit
+    public let records: SecretControlRecords
+
+    public init(
+        commit: SecretTransitionCommit,
+        records: SecretControlRecords
+    ) throws {
+        let policy = records.signedPolicy.policy
+        guard
+            records.state != .rejected,
+            commit.scopeID == policy.scopeSnapshot.scopeID,
+            commit.policyEpoch == policy.epoch,
+            commit.policyDigest == records.signedPolicy.recordDigest,
+            commit.scopeSnapshotDigest == policy.scopeSnapshot.snapshotDigest,
+            commit.generationID == policy.generationID,
+            commit.sealedPayloadDigest == records.sealedPayload.recordDigest,
+            commit.recipientEnvelopeDigests
+                == records.recipientEnvelopes.map(\.recordDigest),
+            commit.recoveryEnvelopeDigest
+                == records.recoveryEnvelope?.recordDigest,
+            commit.purgeRequirementDigests
+                == records.purgeRequirements.map(\.recordDigest),
+            commit.purgeReceiptDigests
+                == records.purgeReceipts.map(\.recordDigest)
+        else {
+            throw SecretSyncInterfaceError.invalidPolicyStoreEntry
+        }
+        self.commit = commit
+        self.records = records
+    }
+}
+
+/// Append-only storage seam for immutable staged and committed policy entries.
 public protocol SecretSyncPolicyStore: Sendable {
     func stagedPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
-    ) async throws -> SecretControlRecords?
+    ) async throws -> SecretPolicyStoreEntry?
 
     func committedPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
-    ) async throws -> SecretControlRecords?
+    ) async throws -> SecretPolicyStoreEntry?
 
     func policyHead(
         for scopeID: SecretScopeID
     ) async throws -> SecretPolicyStoreHead?
 
     func appendStagedPolicy(
-        _ records: SecretControlRecords
+        _ entry: SecretPolicyStoreEntry
     ) async throws
 
     func compareAndAdvance(

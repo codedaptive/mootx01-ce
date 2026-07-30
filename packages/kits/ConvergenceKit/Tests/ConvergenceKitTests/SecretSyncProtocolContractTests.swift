@@ -6,170 +6,87 @@ import Testing
 struct SecretSyncProtocolContractTests {
     @Test("signing and key-agreement custody remain type-distinct")
     func keyCustodyRolesRemainSeparated() async throws {
-        let credentialID = fixtureCredentialID(1)
-        let signingHandle = SigningPrivateKeyHandle(
-            UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
-        )
-        let agreementHandle = KeyAgreementPrivateKeyHandle(
-            UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
-        )
-        let signing = SigningCustodyFake(
-            credentialID: credentialID,
-            handle: signingHandle,
-            publicKey: try signingDescriptor(1)
-        )
-        let agreement = AgreementCustodyFake(
-            credentialID: credentialID,
-            handle: agreementHandle,
-            publicKey: try agreementDescriptor(1)
-        )
-
-        #expect(
-            try await signing.signingPublicCredential(for: credentialID)
-                == signingDescriptor(1)
-        )
-        #expect(
-            try await agreement.keyAgreementPublicCredential(for: credentialID)
-                == agreementDescriptor(1)
-        )
-        #expect(
-            try await signing.signingPrivateKeyHandle(for: credentialID)
-                == signingHandle
-        )
-        #expect(
-            try await agreement.keyAgreementPrivateKeyHandle(for: credentialID)
-                == agreementHandle
-        )
-
-        let signingRequest = try SigningProofOfPossessionRequest(
-            credentialID: credentialID,
-            privateKeyHandle: signingHandle,
-            challengeID: fixtureUUID(11),
-            challengeBytes: Data([0xA1])
-        )
-        let agreementRequest = try KeyAgreementProofOfPossessionRequest(
-            credentialID: credentialID,
-            privateKeyHandle: agreementHandle,
-            challengeID: fixtureUUID(12),
-            challengeBytes: Data([0xA2])
-        )
-
-        #expect(
-            try await signing.proveSigningKeyPossession(signingRequest)
-                == SigningProofOfPossessionResult(
-                    credentialID: credentialID,
-                    challengeID: signingRequest.challengeID,
-                    proofBytes: Data([0xB1])
-                )
-        )
-        #expect(
-            try await agreement.proveKeyAgreementKeyPossession(agreementRequest)
-                == KeyAgreementProofOfPossessionResult(
-                    credentialID: credentialID,
-                    challengeID: agreementRequest.challengeID,
-                    proofBytes: Data([0xB2])
-                )
-        )
+        let fixture = try keyCustodyFixture()
+        try await expectKeyCustodyLookups(fixture)
+        try await expectKeyCustodyProofs(fixture)
     }
 
     @Test("approved-device and global-group snapshots preserve exact membership")
     func trustSnapshotsAreExactAndGloballyScoped() async throws {
-        let first = try trustedCredential(1)
-        let second = try trustedCredential(2)
-        let snapshot = try ApprovedDeviceTrustSnapshot(
-            policyEpoch: 7,
-            credentials: [second, first]
-        )
-        let group = try GlobalTrustedGroupSnapshot(
-            policyEpoch: 7,
-            memberCredentialIDs: [second.credentialID, first.credentialID]
-        )
-        let trustSnapshot = try SecretSyncTrustSnapshot(
-            approvedDevices: snapshot,
-            globalTrustedGroup: group
-        )
-        let store = TrustStoreFake(snapshot: trustSnapshot)
-
-        #expect(snapshot.credentials.map(\.credentialID) == [
-            first.credentialID,
-            second.credentialID,
-        ])
-        #expect(snapshot.credential(for: first.credentialID) == first)
-        #expect(
-            try await store.trustSnapshot().approvedDevices.credentials
-                == snapshot.credentials
-        )
-        #expect(
-            try await store.trustSnapshot()
-                .globalTrustedGroup.memberCredentialIDs
-                == [first.credentialID, second.credentialID]
-        )
-
+        let fixture = try trustSnapshotFixture()
+        try await expectExactTrustSnapshot(fixture)
         let futureCredential = try trustedCredential(3)
-        #expect(snapshot.credential(for: futureCredential.credentialID) == nil)
         #expect(
-            group.memberCredentialIDs.contains(futureCredential.credentialID)
+            fixture.snapshot.credential(for: futureCredential.credentialID)
+                == nil
+        )
+        #expect(
+            fixture.group.memberCredentialIDs.contains(
+                futureCredential.credentialID
+            )
                 == false
         )
-        do {
-            _ = try SecretSyncTrustSnapshot(
-                approvedDevices: snapshot,
-                globalTrustedGroup: GlobalTrustedGroupSnapshot(
-                    policyEpoch: 7,
-                    memberCredentialIDs: [futureCredential.credentialID]
-                )
+        expectFutureCredentialRejected(
+            snapshot: fixture.snapshot,
+            futureCredential: futureCredential
+        )
+        expectMismatchedTrustRecordRejected(
+            credential: fixture.first,
+            otherDevice: fixture.second.deviceID
+        )
+    }
+
+    @Test("policy entries retain signed commits required for rehydration")
+    func policyEntriesRetainCommits() async throws {
+        let entry = try policyStoreEntry()
+        let head = try SecretPolicyStoreHead(
+            scopeID: entry.commit.scopeID,
+            policyEpoch: entry.commit.policyEpoch,
+            commitDigest: entry.commit.recordDigest,
+            policyDigest: entry.commit.policyDigest
+        )
+        let store = PolicyStoreFake(head: head, stagedEntry: entry)
+
+        let hydrated = try #require(
+            try await store.stagedPolicy(
+                for: entry.commit.scopeID,
+                epoch: entry.commit.policyEpoch
             )
-            Issue.record("trusted group accepted an unapproved future credential")
-        } catch let error as SecretSyncInterfaceError {
-            #expect(error == .trustedGroupContainsUnapprovedCredential)
-        }
+        )
+        #expect(hydrated.commit == entry.commit)
+        #expect(hydrated.records == entry.records)
     }
 
     @Test("policy compare-and-advance reports forks without overwriting the head")
     func policyCompareAndAdvanceIsMonotonic() async throws {
-        let scopeID = SecretScopeID(fixtureUUID(20))
-        let head = try SecretPolicyStoreHead(
-            scopeID: scopeID,
-            policyEpoch: 3,
-            commitDigest: digest(0x31),
-            policyDigest: digest(0x32)
-        )
-        let store = PolicyStoreFake(head: head)
-        let next = try SecretPolicyStoreHead(
-            scopeID: scopeID,
-            policyEpoch: 4,
-            commitDigest: digest(0x41),
-            policyDigest: digest(0x42)
-        )
+        let fixture = try policyAdvanceFixture()
         let precondition = try SecretPolicyAdvancePrecondition(
-            expectedHead: head,
-            candidateHead: next,
-            predecessorCommitDigest: head.commitDigest
+            expectedHead: fixture.head,
+            candidateHead: fixture.next,
+            predecessorCommitDigest: fixture.head.commitDigest
         )
-
         #expect(
-            try await store.compareAndAdvance(precondition) == .advanced(next)
-        )
-
-        let sibling = try SecretPolicyStoreHead(
-            scopeID: scopeID,
-            policyEpoch: 4,
-            commitDigest: digest(0x51),
-            policyDigest: digest(0x52)
+            try await fixture.store.compareAndAdvance(precondition)
+                == .advanced(fixture.next)
         )
         let siblingPrecondition = try SecretPolicyAdvancePrecondition(
-            expectedHead: head,
-            candidateHead: sibling,
-            predecessorCommitDigest: head.commitDigest
+            expectedHead: fixture.head,
+            candidateHead: fixture.sibling,
+            predecessorCommitDigest: fixture.head.commitDigest
         )
-        let result = try await store.compareAndAdvance(siblingPrecondition)
+        let result = try await fixture.store.compareAndAdvance(
+            siblingPrecondition
+        )
         #expect(
             result == .forkDetected(
-                currentHead: next,
-                competingCommitDigest: sibling.commitDigest
+                currentHead: fixture.next,
+                competingCommitDigest: fixture.sibling.commitDigest
             )
         )
-        #expect(try await store.policyHead(for: scopeID) == next)
+        #expect(
+            try await fixture.store.policyHead(for: fixture.head.scopeID)
+                == fixture.next
+        )
     }
 
     @Test("purge receipts are category-idempotent and admission defaults closed")
@@ -177,35 +94,18 @@ struct SecretSyncProtocolContractTests {
         let requirement = try purgeRequirement()
         let receipt = try purgeReceipt(for: requirement)
         let categoryReceipt = try PurgeArtifactCategoryReceipt(
-            requirementDigest: requirement.recordDigest,
+            requirement: requirement,
             category: .plaintext,
-            respondingCredentialID: requirement.targetCredentialID,
             signedReceipt: receipt
         )
         let store = PurgeStoreFake(requirement: requirement)
-
-        #expect(
-            try await store.admissionSnapshot(
-                for: requirement.targetCredentialID
-            ).status == .blocked
+        try await expectIdempotentPurgeRecording(
+            store: store,
+            requirement: requirement,
+            categoryReceipt: categoryReceipt
         )
-        #expect(
-            try await store.recordArtifactReceipt(categoryReceipt) == .recorded
-        )
-        #expect(
-            try await store.recordArtifactReceipt(categoryReceipt)
-                == .alreadyRecorded(categoryReceipt)
-        )
-        do {
-            _ = try PurgeAdmissionSnapshot(
-                status: .admitted,
-                pendingRequirementDigests: [requirement.recordDigest]
-            )
-            Issue.record("admission accepted a pending purge requirement")
-        } catch let error as SecretSyncInterfaceError {
-            #expect(error == .admissionWouldBypassPendingPurge)
-        }
-
+        expectPendingPurgeBlocksAdmission(requirement)
+        try expectMismatchedPurgeBindingsRejected(requirement)
         let unreachable = NeverReconnectedPurgeFact(
             requirementDigest: requirement.recordDigest,
             targetCredentialID: requirement.targetCredentialID
@@ -216,80 +116,453 @@ struct SecretSyncProtocolContractTests {
 
     @Test("recovery is global break-glass and rotation requires a new generation")
     func recoveryContractsRequireFreshGenerationAndExternalAnchor() async throws {
-        let recipient = try recoveryRecipient(1)
-        let confirmation = try BlindRecoveryConfirmationEvidence(
-            recoveryRecipientID: recipient.recoveryRecipientID,
-            challengeID: fixtureUUID(61),
-            evidenceBytes: Data([0x61])
-        )
-        let enrollment = try RecoveryEnrollmentRequest(
-            requestID: fixtureUUID(62),
-            recoveryRecipient: recipient,
-            blindConfirmation: confirmation
-        )
-        let currentGeneration = SecretGenerationID(fixtureUUID(63))
-        let replacementGeneration = SecretGenerationID(fixtureUUID(64))
-        let anchorCommitment = try SecretBootstrapFreshnessCommitment(
-            scopeID: SecretScopeID(fixtureUUID(66)),
-            latestPolicyEpoch: 9,
-            headCommitDigest: digest(0x66),
-            policyDigest: digest(0x67)
-        )
-        let rotation = try RecoveryRotationRequest(
-            requestID: fixtureUUID(65),
-            scopeID: anchorCommitment.scopeID,
-            currentRecoveryRecipientID: recipient.recoveryRecipientID,
-            replacementRecoveryRecipient: recipient,
-            currentGenerationID: currentGeneration,
-            replacementGenerationID: replacementGeneration,
-            expectedFreshnessCommitment: anchorCommitment,
-            blindConfirmation: confirmation
-        )
-        let anchor = FreshnessAnchorFake(commitment: anchorCommitment)
-        let custody = RecoveryCustodyFake(recipient: recipient)
-        let breakGlass = try BreakGlassRecoveryRequest(
-            requestID: fixtureUUID(68),
-            scopeID: anchorCommitment.scopeID,
-            recoveryRecipientID: recipient.recoveryRecipientID,
-            sealedGenerationID: replacementGeneration,
-            expectedFreshnessCommitment: anchorCommitment,
-            blindConfirmation: confirmation
-        )
+        let fixture = try recoveryContractFixture()
+        try await expectRecoveryOperations(fixture)
+        expectRecoveryGenerationReuseRejected(fixture)
+    }
+}
 
-        #expect(try await custody.globalRecoveryRecipient() == recipient)
-        #expect(
-            try await custody.stageEnrollment(enrollment).requestID
-                == enrollment.requestID
-        )
-        #expect(
-            try await custody.stageRotation(
-                rotation,
-                freshnessAnchor: anchor
-            ).requestID == rotation.requestID
-        )
-        #expect(
-            try await custody.stageBreakGlass(
-                breakGlass,
-                freshnessAnchor: anchor
-            ).requestID == breakGlass.requestID
-        )
-        #expect(enrollment.recoveryRecipient == recipient)
+private struct KeyCustodyFixture {
+    let credentialID: DeviceCredentialID
+    let signingHandle: SigningPrivateKeyHandle
+    let agreementHandle: KeyAgreementPrivateKeyHandle
+    let signing: SigningCustodyFake
+    let agreement: AgreementCustodyFake
+}
 
-        do {
-            _ = try RecoveryRotationRequest(
-                requestID: fixtureUUID(67),
-                scopeID: anchorCommitment.scopeID,
-                currentRecoveryRecipientID: recipient.recoveryRecipientID,
-                replacementRecoveryRecipient: recipient,
-                currentGenerationID: currentGeneration,
-                replacementGenerationID: currentGeneration,
-                expectedFreshnessCommitment: anchorCommitment,
-                blindConfirmation: confirmation
+private func keyCustodyFixture() throws -> KeyCustodyFixture {
+    let credentialID = fixtureCredentialID(1)
+    let signingHandle = SigningPrivateKeyHandle(
+        UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
+    )
+    let agreementHandle = KeyAgreementPrivateKeyHandle(
+        UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
+    )
+    return KeyCustodyFixture(
+        credentialID: credentialID,
+        signingHandle: signingHandle,
+        agreementHandle: agreementHandle,
+        signing: SigningCustodyFake(
+            credentialID: credentialID,
+            handle: signingHandle,
+            publicKey: try signingDescriptor(1)
+        ),
+        agreement: AgreementCustodyFake(
+            credentialID: credentialID,
+            handle: agreementHandle,
+            publicKey: try agreementDescriptor(1)
+        )
+    )
+}
+
+private func expectKeyCustodyLookups(
+    _ fixture: KeyCustodyFixture
+) async throws {
+    #expect(
+        try await fixture.signing.signingPublicCredential(
+            for: fixture.credentialID
+        ) == signingDescriptor(1)
+    )
+    #expect(
+        try await fixture.agreement.keyAgreementPublicCredential(
+            for: fixture.credentialID
+        ) == agreementDescriptor(1)
+    )
+    #expect(
+        try await fixture.signing.signingPrivateKeyHandle(
+            for: fixture.credentialID
+        ) == fixture.signingHandle
+    )
+    #expect(
+        try await fixture.agreement.keyAgreementPrivateKeyHandle(
+            for: fixture.credentialID
+        ) == fixture.agreementHandle
+    )
+}
+
+private func expectKeyCustodyProofs(
+    _ fixture: KeyCustodyFixture
+) async throws {
+    let signingRequest = try SigningProofOfPossessionRequest(
+        credentialID: fixture.credentialID,
+        privateKeyHandle: fixture.signingHandle,
+        challengeID: fixtureUUID(11),
+        challengeBytes: Data([0xA1])
+    )
+    let agreementRequest = try KeyAgreementProofOfPossessionRequest(
+        credentialID: fixture.credentialID,
+        privateKeyHandle: fixture.agreementHandle,
+        challengeID: fixtureUUID(12),
+        challengeBytes: Data([0xA2])
+    )
+    #expect(
+        try await fixture.signing.proveSigningKeyPossession(signingRequest)
+            == SigningProofOfPossessionResult(
+                credentialID: fixture.credentialID,
+                challengeID: signingRequest.challengeID,
+                proofBytes: Data([0xB1])
             )
-            Issue.record("rotation accepted generation reuse")
-        } catch let error as SecretSyncInterfaceError {
-            #expect(error == .generationReuse)
-        }
+    )
+    #expect(
+        try await fixture.agreement.proveKeyAgreementKeyPossession(
+            agreementRequest
+        ) == KeyAgreementProofOfPossessionResult(
+            credentialID: fixture.credentialID,
+            challengeID: agreementRequest.challengeID,
+            proofBytes: Data([0xB2])
+        )
+    )
+}
+
+private struct TrustSnapshotFixture {
+    let first: TrustedDeviceCredential
+    let second: TrustedDeviceCredential
+    let firstTrust: DeviceTrustRecord
+    let snapshot: ApprovedDeviceTrustSnapshot
+    let group: GlobalTrustedGroupSnapshot
+    let store: TrustStoreFake
+}
+
+private func trustSnapshotFixture() throws -> TrustSnapshotFixture {
+    let first = try trustedCredential(1)
+    let second = try trustedCredential(2)
+    let firstTrust = try trustRecord(for: first, byte: 0x21, epoch: 7)
+    let secondTrust = try trustRecord(for: second, byte: 0x22, epoch: 7)
+    let snapshot = try ApprovedDeviceTrustSnapshot(
+        policyEpoch: 7,
+        credentials: [second, first],
+        trustRecords: [secondTrust, firstTrust]
+    )
+    let group = try GlobalTrustedGroupSnapshot(
+        policyEpoch: 7,
+        memberCredentialIDs: [second.credentialID, first.credentialID]
+    )
+    let trustSnapshot = try SecretSyncTrustSnapshot(
+        approvedDevices: snapshot,
+        globalTrustedGroup: group
+    )
+    return TrustSnapshotFixture(
+        first: first,
+        second: second,
+        firstTrust: firstTrust,
+        snapshot: snapshot,
+        group: group,
+        store: TrustStoreFake(snapshot: trustSnapshot)
+    )
+}
+
+private func expectExactTrustSnapshot(
+    _ fixture: TrustSnapshotFixture
+) async throws {
+    #expect(fixture.snapshot.credentials.map(\.credentialID) == [
+        fixture.first.credentialID,
+        fixture.second.credentialID,
+    ])
+    #expect(
+        fixture.snapshot.credential(for: fixture.first.credentialID)
+            == fixture.first
+    )
+    #expect(
+        fixture.snapshot.trustRecord(for: fixture.first.credentialID)
+            == fixture.firstTrust
+    )
+    #expect(
+        try await fixture.store.trustSnapshot().approvedDevices.credentials
+            == fixture.snapshot.credentials
+    )
+    #expect(
+        try await fixture.store.trustSnapshot()
+            .globalTrustedGroup.memberCredentialIDs
+            == [fixture.first.credentialID, fixture.second.credentialID]
+    )
+}
+
+private func expectFutureCredentialRejected(
+    snapshot: ApprovedDeviceTrustSnapshot,
+    futureCredential: TrustedDeviceCredential
+) {
+    do {
+        _ = try SecretSyncTrustSnapshot(
+            approvedDevices: snapshot,
+            globalTrustedGroup: GlobalTrustedGroupSnapshot(
+                policyEpoch: snapshot.policyEpoch,
+                memberCredentialIDs: [futureCredential.credentialID]
+            )
+        )
+        Issue.record("trusted group accepted an unapproved future credential")
+    } catch let error as SecretSyncInterfaceError {
+        #expect(error == .trustedGroupContainsUnapprovedCredential)
+    } catch {
+        Issue.record("unexpected trust snapshot error: \(error)")
+    }
+}
+
+private struct PolicyAdvanceFixture {
+    let head: SecretPolicyStoreHead
+    let next: SecretPolicyStoreHead
+    let sibling: SecretPolicyStoreHead
+    let store: PolicyStoreFake
+}
+
+private func policyAdvanceFixture() throws -> PolicyAdvanceFixture {
+    let scopeID = SecretScopeID(fixtureUUID(20))
+    let head = try SecretPolicyStoreHead(
+        scopeID: scopeID,
+        policyEpoch: 3,
+        commitDigest: digest(0x31),
+        policyDigest: digest(0x32)
+    )
+    let next = try SecretPolicyStoreHead(
+        scopeID: scopeID,
+        policyEpoch: 4,
+        commitDigest: digest(0x41),
+        policyDigest: digest(0x42)
+    )
+    let sibling = try SecretPolicyStoreHead(
+        scopeID: scopeID,
+        policyEpoch: 4,
+        commitDigest: digest(0x51),
+        policyDigest: digest(0x52)
+    )
+    return PolicyAdvanceFixture(
+        head: head,
+        next: next,
+        sibling: sibling,
+        store: PolicyStoreFake(head: head)
+    )
+}
+
+private func expectIdempotentPurgeRecording(
+    store: PurgeStoreFake,
+    requirement: PurgeRequirement,
+    categoryReceipt: PurgeArtifactCategoryReceipt
+) async throws {
+    #expect(
+        try await store.admissionSnapshot(
+            for: requirement.targetCredentialID
+        ).status == .blocked
+    )
+    #expect(
+        try await store.recordArtifactReceipt(categoryReceipt) == .recorded
+    )
+    #expect(
+        try await store.recordArtifactReceipt(categoryReceipt)
+            == .alreadyRecorded(categoryReceipt)
+    )
+}
+
+private func expectPendingPurgeBlocksAdmission(
+    _ requirement: PurgeRequirement
+) {
+    do {
+        _ = try PurgeAdmissionSnapshot(
+            status: .admitted,
+            pendingRequirementDigests: [requirement.recordDigest]
+        )
+        Issue.record("admission accepted a pending purge requirement")
+    } catch let error as SecretSyncInterfaceError {
+        #expect(error == .admissionWouldBypassPendingPurge)
+    } catch {
+        Issue.record("unexpected purge admission error: \(error)")
+    }
+}
+
+private func expectMismatchedTrustRecordRejected(
+    credential: TrustedDeviceCredential,
+    otherDevice: TrustedDeviceID
+) {
+    do {
+        let mismatched = try DeviceTrustRecord(
+            recordDigest: digest(0x29),
+            credentialDigest: digest(0x49),
+            deviceID: otherDevice,
+            credentialID: credential.credentialID,
+            trustState: .trusted,
+            effectivePolicyEpoch: 7
+        )
+        _ = try ApprovedDeviceTrustSnapshot(
+            policyEpoch: 7,
+            credentials: [credential],
+            trustRecords: [mismatched]
+        )
+        Issue.record("trust snapshot accepted a mismatched device binding")
+    } catch let error as SecretSyncInterfaceError {
+        #expect(error == .trustRecordMismatch)
+    } catch {
+        Issue.record("unexpected trust-record error: \(error)")
+    }
+}
+
+private func expectMismatchedPurgeBindingsRejected(
+    _ requirement: PurgeRequirement
+) throws {
+    try expectInvalidPurgeReceipt {
+        _ = try PurgeArtifactCategoryReceipt(
+            requirement: requirement,
+            category: .plaintext,
+            signedReceipt: purgeReceipt(
+                for: requirement,
+                signerCredentialID: fixtureCredentialID(999)
+            )
+        )
+    }
+    let otherGeneration = try PurgeRequirement(
+        recordDigest: requirement.recordDigest,
+        scopeID: requirement.scopeID,
+        policyEpoch: requirement.policyEpoch,
+        policyDigest: requirement.policyDigest,
+        supersededGenerationID: requirement.supersededGenerationID,
+        replacementGenerationID: SecretGenerationID(fixtureUUID(999)),
+        targetCredentialID: requirement.targetCredentialID,
+        requiredCategories: requirement.requiredCategories
+    )
+    try expectInvalidPurgeReceipt {
+        _ = try PurgeArtifactCategoryReceipt(
+            requirement: otherGeneration,
+            category: .plaintext,
+            signedReceipt: purgeReceipt(for: requirement)
+        )
+    }
+    try expectInvalidPurgeReceipt {
+        _ = try PurgeArtifactCategoryReceipt(
+            requirement: requirement,
+            category: .embedding,
+            signedReceipt: purgeReceipt(for: requirement)
+        )
+    }
+    try expectInvalidPurgeReceipt {
+        _ = try PurgeArtifactCategoryReceipt(
+            requirement: requirement,
+            category: .plaintext,
+            signedReceipt: purgeReceipt(
+                for: requirement,
+                coveredCategories: [.plaintext]
+            )
+        )
+    }
+}
+
+private func expectInvalidPurgeReceipt(
+    _ operation: () throws -> Void
+) throws {
+    do {
+        try operation()
+        Issue.record("purge receipt accepted mismatched requirement bindings")
+    } catch let error as SecretSyncInterfaceError {
+        #expect(error == .invalidPurgeReceipt)
+    }
+}
+
+private struct RecoveryContractFixture {
+    let recipient: RecoveryRecipientDescriptor
+    let confirmation: BlindRecoveryConfirmationEvidence
+    let enrollment: RecoveryEnrollmentRequest
+    let currentGeneration: SecretGenerationID
+    let replacementGeneration: SecretGenerationID
+    let anchorCommitment: SecretBootstrapFreshnessCommitment
+    let rotation: RecoveryRotationRequest
+    let breakGlass: BreakGlassRecoveryRequest
+    let anchor: FreshnessAnchorFake
+    let custody: RecoveryCustodyFake
+}
+
+private func recoveryContractFixture() throws -> RecoveryContractFixture {
+    let recipient = try recoveryRecipient(1)
+    let confirmation = try BlindRecoveryConfirmationEvidence(
+        recoveryRecipientID: recipient.recoveryRecipientID,
+        challengeID: fixtureUUID(61),
+        evidenceBytes: Data([0x61])
+    )
+    let enrollment = try RecoveryEnrollmentRequest(
+        requestID: fixtureUUID(62),
+        recoveryRecipient: recipient,
+        blindConfirmation: confirmation
+    )
+    let currentGeneration = SecretGenerationID(fixtureUUID(63))
+    let replacementGeneration = SecretGenerationID(fixtureUUID(64))
+    let commitment = try SecretBootstrapFreshnessCommitment(
+        scopeID: SecretScopeID(fixtureUUID(66)),
+        latestPolicyEpoch: 9,
+        headCommitDigest: digest(0x66),
+        policyDigest: digest(0x67)
+    )
+    let rotation = try RecoveryRotationRequest(
+        requestID: fixtureUUID(65),
+        scopeID: commitment.scopeID,
+        currentRecoveryRecipientID: recipient.recoveryRecipientID,
+        replacementRecoveryRecipient: recipient,
+        currentGenerationID: currentGeneration,
+        replacementGenerationID: replacementGeneration,
+        expectedFreshnessCommitment: commitment,
+        blindConfirmation: confirmation
+    )
+    let breakGlass = try BreakGlassRecoveryRequest(
+        requestID: fixtureUUID(68),
+        scopeID: commitment.scopeID,
+        recoveryRecipientID: recipient.recoveryRecipientID,
+        sealedGenerationID: replacementGeneration,
+        expectedFreshnessCommitment: commitment,
+        blindConfirmation: confirmation
+    )
+    return RecoveryContractFixture(
+        recipient: recipient,
+        confirmation: confirmation,
+        enrollment: enrollment,
+        currentGeneration: currentGeneration,
+        replacementGeneration: replacementGeneration,
+        anchorCommitment: commitment,
+        rotation: rotation,
+        breakGlass: breakGlass,
+        anchor: FreshnessAnchorFake(commitment: commitment),
+        custody: RecoveryCustodyFake(recipient: recipient)
+    )
+}
+
+private func expectRecoveryOperations(
+    _ fixture: RecoveryContractFixture
+) async throws {
+    #expect(
+        try await fixture.custody.globalRecoveryRecipient()
+            == fixture.recipient
+    )
+    #expect(
+        try await fixture.custody.stageEnrollment(fixture.enrollment).requestID
+            == fixture.enrollment.requestID
+    )
+    #expect(
+        try await fixture.custody.stageRotation(
+            fixture.rotation,
+            freshnessAnchor: fixture.anchor
+        ).requestID == fixture.rotation.requestID
+    )
+    #expect(
+        try await fixture.custody.stageBreakGlass(
+            fixture.breakGlass,
+            freshnessAnchor: fixture.anchor
+        ).requestID == fixture.breakGlass.requestID
+    )
+    #expect(fixture.enrollment.recoveryRecipient == fixture.recipient)
+}
+
+private func expectRecoveryGenerationReuseRejected(
+    _ fixture: RecoveryContractFixture
+) {
+    do {
+        _ = try RecoveryRotationRequest(
+            requestID: fixtureUUID(67),
+            scopeID: fixture.anchorCommitment.scopeID,
+            currentRecoveryRecipientID: fixture.recipient.recoveryRecipientID,
+            replacementRecoveryRecipient: fixture.recipient,
+            currentGenerationID: fixture.currentGeneration,
+            replacementGenerationID: fixture.currentGeneration,
+            expectedFreshnessCommitment: fixture.anchorCommitment,
+            blindConfirmation: fixture.confirmation
+        )
+        Issue.record("rotation accepted generation reuse")
+    } catch let error as SecretSyncInterfaceError {
+        #expect(error == .generationReuse)
+    } catch {
+        Issue.record("unexpected recovery rotation error: \(error)")
     }
 }
 
@@ -395,22 +668,33 @@ private actor TrustStoreFake: SecretSyncTrustStore {
 
 private actor PolicyStoreFake: SecretSyncPolicyStore {
     private var currentHead: SecretPolicyStoreHead
+    private let stagedEntry: SecretPolicyStoreEntry?
 
-    init(head: SecretPolicyStoreHead) {
+    init(
+        head: SecretPolicyStoreHead,
+        stagedEntry: SecretPolicyStoreEntry? = nil
+    ) {
         currentHead = head
+        self.stagedEntry = stagedEntry
     }
 
     func stagedPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
-    ) async throws -> SecretControlRecords? {
-        nil
+    ) async throws -> SecretPolicyStoreEntry? {
+        guard
+            stagedEntry?.commit.scopeID == scopeID,
+            stagedEntry?.commit.policyEpoch == epoch
+        else {
+            return nil
+        }
+        return stagedEntry
     }
 
     func committedPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
-    ) async throws -> SecretControlRecords? {
+    ) async throws -> SecretPolicyStoreEntry? {
         nil
     }
 
@@ -420,7 +704,7 @@ private actor PolicyStoreFake: SecretSyncPolicyStore {
         currentHead.scopeID == scopeID ? currentHead : nil
     }
 
-    func appendStagedPolicy(_ records: SecretControlRecords) async throws {}
+    func appendStagedPolicy(_ entry: SecretPolicyStoreEntry) async throws {}
 
     func compareAndAdvance(
         _ precondition: SecretPolicyAdvancePrecondition
@@ -503,9 +787,10 @@ private actor RecoveryCustodyFake: SecretSyncRecoveryRecipientCustody {
         _ request: RecoveryRotationRequest,
         freshnessAnchor: any ExternalBootstrapFreshnessAnchor
     ) async throws -> RecoveryOperationEvidence {
-        _ = try await freshnessAnchor.latestCommitment(
-            for: SecretScopeID(fixtureUUID(66))
+        let commitment = try await freshnessAnchor.latestCommitment(
+            for: request.scopeID
         )
+        precondition(commitment == request.expectedFreshnessCommitment)
         return try RecoveryOperationEvidence(
             requestID: request.requestID,
             evidenceBytes: Data([0xE2])
@@ -602,7 +887,9 @@ private func purgeRequirement() throws -> PurgeRequirement {
 }
 
 private func purgeReceipt(
-    for requirement: PurgeRequirement
+    for requirement: PurgeRequirement,
+    signerCredentialID: DeviceCredentialID? = nil,
+    coveredCategories: [PurgeArtifactCategory]? = nil
 ) throws -> SignedPurgeReceipt {
     try SignedPurgeReceipt(
         recordDigest: digest(0x73),
@@ -613,11 +900,101 @@ private func purgeReceipt(
         supersededGenerationID: requirement.supersededGenerationID,
         replacementGenerationID: requirement.replacementGenerationID,
         respondingCredentialID: requirement.targetCredentialID,
-        coveredCategories: requirement.requiredCategories,
+        coveredCategories: coveredCategories ?? requirement.requiredCategories,
         status: .completed,
-        signerCredentialID: requirement.targetCredentialID,
+        signerCredentialID: signerCredentialID
+            ?? requirement.targetCredentialID,
         signature: Data([0x74])
     )
+}
+
+private func trustRecord(
+    for credential: TrustedDeviceCredential,
+    byte: UInt8,
+    epoch: UInt64
+) throws -> DeviceTrustRecord {
+    try DeviceTrustRecord(
+        recordDigest: digest(byte),
+        credentialDigest: digest(byte &+ 0x20),
+        deviceID: credential.deviceID,
+        credentialID: credential.credentialID,
+        trustState: .trusted,
+        effectivePolicyEpoch: epoch
+    )
+}
+
+private func policyStoreEntry() throws -> SecretPolicyStoreEntry {
+    let scopeID = SecretScopeID(fixtureUUID(800))
+    let generationID = SecretGenerationID(fixtureUUID(801))
+    let credentialID = fixtureCredentialID(802)
+    let snapshot = try SecretScopeSnapshot(
+        scopeID: scopeID,
+        rootRecordID: fixtureUUID(803),
+        memberRecordIDs: [fixtureUUID(803)],
+        snapshotDigest: digest(0x80)
+    )
+    let policy = try SecretPolicyEpoch(
+        epoch: 1,
+        predecessorPolicyDigest: nil,
+        scopeSnapshot: snapshot,
+        generationID: generationID,
+        authorizedRecipientCredentialIDs: [credentialID],
+        trustedDeviceRecordDigests: [digest(0x81)],
+        recoveryRecipient: nil,
+        signerCredentialID: credentialID
+    )
+    let signedPolicy = try SignedSecretPolicyEpoch(
+        recordDigest: digest(0x82),
+        policy: policy,
+        signature: Data([0x82])
+    )
+    let payload = try SealedPayload(
+        recordDigest: digest(0x83),
+        scopeID: scopeID,
+        scopeSnapshotDigest: snapshot.snapshotDigest,
+        policyEpoch: 1,
+        policyDigest: signedPolicy.recordDigest,
+        generationID: generationID,
+        formatVersion: 1,
+        ciphertextBytes: Data([0x83])
+    )
+    let envelope = try RecipientKeyEnvelope(
+        recordDigest: digest(0x84),
+        scopeID: scopeID,
+        scopeSnapshotDigest: snapshot.snapshotDigest,
+        policyEpoch: 1,
+        policyDigest: signedPolicy.recordDigest,
+        generationID: generationID,
+        recipientCredentialID: credentialID,
+        formatVersion: 1,
+        wrappedKeyBytes: Data([0x84])
+    )
+    let records = try SecretControlRecords(
+        state: .staged,
+        signedPolicy: signedPolicy,
+        sealedPayload: payload,
+        recipientEnvelopes: [envelope],
+        recoveryEnvelope: nil,
+        purgeRequirements: [],
+        purgeReceipts: []
+    )
+    let commit = try SecretTransitionCommit(
+        recordDigest: digest(0x85),
+        scopeID: scopeID,
+        policyEpoch: 1,
+        predecessorCommitDigest: nil,
+        policyDigest: signedPolicy.recordDigest,
+        scopeSnapshotDigest: snapshot.snapshotDigest,
+        generationID: generationID,
+        sealedPayloadDigest: payload.recordDigest,
+        recipientEnvelopeDigests: [envelope.recordDigest],
+        recoveryEnvelopeDigest: nil,
+        purgeRequirementDigests: [],
+        purgeReceiptDigests: [],
+        signerCredentialID: credentialID,
+        signature: Data([0x85])
+    )
+    return try SecretPolicyStoreEntry(commit: commit, records: records)
 }
 
 private func recoveryRecipient(

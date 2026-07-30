@@ -7,7 +7,9 @@ public enum SecretSyncInterfaceError: Error, Sendable, Equatable {
     case unapprovedCredentialStatus
     case trustSnapshotEpochMismatch
     case trustedGroupContainsUnapprovedCredential
+    case trustRecordMismatch
     case invalidPolicyAdvancePrecondition
+    case invalidPolicyStoreEntry
     case invalidPurgeReceipt
     case admissionWouldBypassPendingPurge
     case generationReuse
