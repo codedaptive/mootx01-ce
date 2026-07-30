@@ -264,3 +264,70 @@ public struct SecretPolicyEpoch:
         )
     }
 }
+
+/// Signature-verification seam for later audited implementations.
+///
+/// The verifier receives canonical bytes and a public descriptor. This
+/// protocol does not select an algorithm or provide an implementation.
+public protocol SecretSignatureVerifying: Sendable {
+    func verify(
+        signature: Data,
+        canonicalBytes: Data,
+        signingPublicKey: SigningPublicKeyDescriptor
+    ) throws -> Bool
+}
+
+/// Content-addressed signed wrapper for an immutable policy epoch.
+public struct SignedSecretPolicyEpoch:
+    Sendable,
+    Codable,
+    Hashable,
+    SecretSyncCanonicalEncodable
+{
+    public let recordDigest: SecretRecordDigest
+    public let policy: SecretPolicyEpoch
+    public let signature: Data
+
+    public init(
+        recordDigest: SecretRecordDigest,
+        policy: SecretPolicyEpoch,
+        signature: Data
+    ) throws {
+        try SecretSyncContractBounds.requireOpaqueBytes(
+            signature,
+            field: "policySignature"
+        )
+        self.recordDigest = recordDigest
+        self.policy = policy
+        self.signature = signature
+    }
+
+    public var canonicalDomain: SecretSyncCanonicalDomain {
+        .signedSecretPolicyEpoch
+    }
+
+    public func canonicalFields() throws -> [SecretSyncCanonicalField] {
+        [
+            SecretSyncCanonicalField(tag: 1, value: try policy.canonicalBytes()),
+            SecretSyncCanonicalField(tag: 2, value: signature),
+        ]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recordDigest
+        case policy
+        case signature
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            recordDigest: container.decode(
+                SecretRecordDigest.self,
+                forKey: .recordDigest
+            ),
+            policy: container.decode(SecretPolicyEpoch.self, forKey: .policy),
+            signature: container.decode(Data.self, forKey: .signature)
+        )
+    }
+}

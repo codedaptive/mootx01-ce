@@ -100,6 +100,7 @@ public enum SecretSyncCanonicalEncoding {
     public static let schemaVersion: UInt16 = 1
     public static let maximumDomainByteCount = 64
     public static let maximumFieldCount = 64
+    public static let maximumCollectionElementCount = Int(UInt16.max)
     public static let maximumFieldByteCount = 1_048_576
     public static let maximumMessageByteCount = 4_194_304
 
@@ -252,7 +253,10 @@ enum SecretSyncCanonicalValue {
     }
 
     static func sequence(_ values: [Data]) throws -> Data {
-        guard values.count <= SecretSyncCanonicalEncoding.maximumFieldCount else {
+        guard
+            values.count
+                <= SecretSyncCanonicalEncoding.maximumCollectionElementCount
+        else {
             throw SecretSyncContractError.tooManyFields
         }
         var output = Data()
