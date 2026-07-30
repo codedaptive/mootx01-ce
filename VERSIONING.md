@@ -1,5 +1,5 @@
 ---
-version: 1.4.2
+version: 1.5.0
 status: active
 date: 2026-07-30
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
@@ -198,6 +198,15 @@ pre-release tags untouched, so a candidate installs with
 Tags are immutable. A tagged release is never altered. If a critical fix is
 required, a new PATCH tag is created.
 
+**Exception — the `pin/*` namespace.** Tags under `pin/` (e.g. `pin/forge`,
+`pin/fulcrum`) are consumer pins, not releases: each marks the commit a
+downstream consumer currently builds against. They are annotated tags moved
+only on the repository owner's explicit approval, and every move is pushed to
+origin immediately. Because git silently refuses to update an already-fetched
+tag that moved, every consumer of a `pin/*` tag MUST fetch with
+`git fetch --tags --force` (or the refspec `+refs/tags/pin/*:refs/tags/pin/*`).
+No release or CI process may treat a `pin/*` tag as a version tag.
+
 ---
 
 ## 3. Document Front Matter
@@ -297,6 +306,12 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 1.5.0 -- 2026-07-30
+Added the `pin/*` tag-namespace exception to the tag-immutability rule
+(§2.5): consumer pin tags move on explicit owner approval and require
+forced tag fetch by consumers. Introduced with the repo-shape migration
+(bare anchors, consumer pin policy).
 
 ### 1.4.2 -- 2026-07-30
 Updated §1.5 current-value statement to `1.1.0-beta-05` for the

@@ -1,4 +1,22 @@
 #!/bin/sh
-# Pre-push guard — blocks pushes carrying unsanctioned docs content.
-# Activate once per clone:  git config core.hooksPath .githooks
-exec python3 "$(git rev-parse --show-toplevel)/scripts/prepush_docs_guard.py"
+# Pre-push chain — every guard sees the ref-update list git passes on stdin.
+# Activate once per checkout:  git config core.hooksPath .githooks
+# (worktrees of the bare anchor get this via per-worktree config; see the
+# 2026-07-30 repo-shape migration record.)
+#
+# 1. Docs guard — blocks pushes carrying unsanctioned docs content.
+# 2. EE-leak guard — blocks pushes while any EE-only path is tracked.
+# 3. Git LFS — uploads LFS objects for the refs being pushed. A missing
+#    git-lfs is a hard error: skipping it strands LFS blobs locally while
+#    git reports success (the 2026-07 stranded-media failure mode).
+input=$(cat)
+top=$(git rev-parse --show-toplevel)
+
+printf '%s\n' "$input" | python3 "$top/scripts/prepush_docs_guard.py" || exit 1
+"$top/scripts/prepush_ee_leak_guard.sh" || exit 1
+
+command -v git-lfs >/dev/null 2>&1 || {
+    printf >&2 "\n%s\n\n" "This repository is configured for Git LFS but 'git-lfs' was not found on your path. Install git-lfs; pushing without it strands LFS content."
+    exit 2
+}
+printf '%s\n' "$input" | git lfs pre-push "$@"
