@@ -99,8 +99,18 @@ run_swift() {
 
 run_rust() {
   local dir="$1"
-  echo "-- cargo test: $dir"
-  (cd "$dir" && cargo test ${CARGO_TEST_ARGS})
+  # Crates whose [[test]] targets declare required-features are SILENTLY
+  # skipped by a bare `cargo test` — cargo omits the gated binaries and
+  # still exits 0, so the lane goes green having run nothing (bit us on
+  # rust-migrations: 17 tests invisible to CI). A crate-local
+  # .moot-test-features file names the features the runner must enable
+  # so those tests actually run.
+  local features=""
+  if [[ -f "$dir/.moot-test-features" ]]; then
+    features="--features $(paste -sd, "$dir/.moot-test-features")"
+  fi
+  echo "-- cargo test: $dir ${features}"
+  (cd "$dir" && cargo test ${features} ${CARGO_TEST_ARGS})
 }
 
 run_python() {
