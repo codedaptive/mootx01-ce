@@ -53,6 +53,12 @@ pub fn default_pool_dir() -> PathBuf {
     // Swift implementation. Keeping both ports on one writable table artifact
     // is part of the FDC classification contract: otherwise learned word-class
     // rows can diverge even when the bundled artifacts and input bytes match.
+    //
+    // The `.` on the home-lookup failure path is a NO-TRUSTED-LOCATION
+    // sentinel, not a usable directory. Both consumers fail closed on a
+    // relative result: `default_submitter` returns the no-op submitter, and
+    // `word_class_table::load_writable_table` refuses the derived artifact and
+    // falls back to the bundled table. Never write to, or load from, this path.
     #[cfg(target_os = "macos")]
     {
         return dirs_home()
@@ -159,9 +165,20 @@ pub fn local_dir_submitter(dir: PathBuf) -> Submitter {
 /// Returns a `Submitter` wired to the process-resolved default pool directory
 /// (`default_pool_dir()`). Resolves the directory once and captures it.
 ///
+/// If no trusted per-user location resolves, `default_pool_dir()` yields a
+/// relative path (the `PathBuf::from(".")` sentinel). Submissions are plaintext
+/// novel tokens, so writing them into whatever directory the process happens to
+/// be running in is a disclosure, not a fallback. Return the no-op submitter
+/// instead — the same shape `novel_token_cache` uses when pool submission is
+/// not configured.
+///
 /// Mirrors Swift `NovelPoolSubmitter.makeDefault()`.
 pub fn default_submitter() -> Submitter {
-    local_dir_submitter(default_pool_dir())
+    let dir = default_pool_dir();
+    if !dir.is_absolute() {
+        return Box::new(|_| {});
+    }
+    local_dir_submitter(dir)
 }
 
 // ─── Internal: write one submission ──────────────────────────────────────────
@@ -172,6 +189,14 @@ pub fn default_submitter() -> Submitter {
 const MAX_POOL_FILES: usize = 500;
 
 fn write_submission(submission: &PoolSubmission, dir: &Path) {
+    // Enforcement point for the trusted-location rule: refuse a relative target
+    // however the submitter was built, including `local_dir_submitter` called
+    // directly. Pool files carry plaintext novel tokens; a relative dir resolves
+    // against the process CWD, which the process does not own.
+    if !dir.is_absolute() {
+        eprintln!("novel pool: refusing relative pool dir {:?}; submission discarded", dir);
+        return;
+    }
     // Create the directory if it does not exist yet.
     if let Err(e) = fs::create_dir_all(dir) {
         eprintln!("novel pool: cannot create pool dir {:?}: {}", dir, e);

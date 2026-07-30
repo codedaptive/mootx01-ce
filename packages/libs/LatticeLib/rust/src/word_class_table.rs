@@ -84,6 +84,16 @@ pub const BUNDLED_TABLE_JSON: &[u8] = include_bytes!(
 ///
 /// Mirrors `WordClassTable.loadWritable()` in Swift.
 pub fn load_writable_table(artifact_path: &Path) -> Option<WordClassTable> {
+    // Fail closed on a relative artifact path. The writable artifact always
+    // resolves from an absolute per-user data directory (or an explicit
+    // LATTICE_POOL_DIR); a relative path means base resolution fell back to the
+    // process CWD. This table is loaded with precedence over the bundled one and
+    // seeds the process-global classifier, so honouring a CWD-relative path lets
+    // anyone who can influence the working directory plant a WordClassTable.json
+    // and steer every classification. Bundled bytes are the safe fallback.
+    if !artifact_path.is_absolute() {
+        return None;
+    }
     if !artifact_path.exists() {
         return None;
     }
