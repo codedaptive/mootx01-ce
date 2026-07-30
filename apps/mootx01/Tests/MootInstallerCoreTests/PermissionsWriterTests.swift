@@ -114,7 +114,7 @@ struct PermissionsWriterTests {
     /// gains or removes a tool, update BOTH this pinned list and whichever
     /// of `readTools` / `additiveWriteTools` / `mutationTools` /
     /// `destructiveTools` the new tool belongs in.
-    @Test("classify's tier tables are exhaustive over the real 71-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 72-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
@@ -133,20 +133,20 @@ struct PermissionsWriterTests {
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
             "moot_memory_list", "moot_memory_search", "moot_monitoring_status", "moot_move_memory",
             "moot_palace_import",
-            "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
+            "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped", "moot_recall_vague",
             "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact",
             "moot_review_tunnel", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_write_journal",
         ]
-        // Count guard (see doc comment): 71 = 68 (contradiction hunter era) +
+        // Count guard (see doc comment): 72 = 68 (contradiction hunter era) +
         // 3 dataset tools (MX-TAB-7: moot_file_dataset, moot_dataset_query,
-        // moot_dataset_stats).
+        // moot_dataset_stats) + moot_recall_vague (Wave 2 §4.4).
         // A mismatch here means THIS PINNED LIST is stale relative to
         // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
         // before trusting the set-difference below.
-        #expect(realTools.count == 71, "pinned tool inventory drifted from the real surface count")
+        #expect(realTools.count == 72, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
