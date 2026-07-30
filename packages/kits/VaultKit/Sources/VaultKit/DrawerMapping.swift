@@ -243,40 +243,10 @@ public struct DrawerMapping: Sendable {
             kgFactsByDrawerID[fact.sourceDrawerID, default: []].append(fact)
         }
 
-        // CAND-EXP-PROV: Build the set of exportable "wing/room" pairs from the
-        // already-scope-filtered `drawers` array. Used below to filter `_distilled_from`
-        // provenance tunnel targets so a normal exported factoid cannot leak the location
-        // (wing/room) of a secret or scope-excluded restricted source drawer.
-        //
-        // Rationale: provenance tunnels carry only `targetWing`/`targetRoom` — not a
-        // `targetDrawerId` (it is nil in this path; see import at `targetDrawerId: nil`).
-        // The check must therefore be keyed on the wing+room pair rather than the drawer ID.
-        // The `includedDrawerIDs` set above covers KG fact anchors (keyed by drawer.id);
-        // this set covers provenance tunnel targets (keyed by wing/room display name).
-        //
-        // Round-trip note: dropping an excluded target from `distilled_from_sources`
-        // means the provenance edge to that excluded drawer will NOT survive a vault
-        // round-trip (export → re-import). This is the correct privacy behavior —
-        // the excluded drawer's location must not be persisted in any exported artifact.
-        let includedWingRooms: Set<String> = Set(
-            drawers.compactMap { d -> String? in
-                guard let names = allNodeNames[d.parentNodeId] else { return nil }
-                return "\(names.wing)/\(names.room)"
-            }
-        )
-
         let notes = drawers.map { drawer in
             let names = allNodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
             let outgoing = (tunnelsByWing[names.wing] ?? []).filter {
                 $0.sourceDrawerId == drawer.id && $0.kind == .references
-            }.filter { tunnel in
-                // Content-reference tunnels (non-provenance) are always included.
-                // Provenance tunnels (`_distilled_from`) are included only if their
-                // target drawer's wing/room pair is in the exportable set. This prevents
-                // a normal exported factoid from leaking the location of a secret or
-                // restricted-under-default-scope source drawer via frontmatter.
-                guard tunnel.label == "_distilled_from" else { return true }
-                return includedWingRooms.contains("\(tunnel.targetWing)/\(tunnel.targetRoom)")
             }
             let drawerFacts = kgFactsByDrawerID[drawer.id] ?? []
             return Self.noteIR(from: drawer, wing: names.wing, room: names.room, references: outgoing, kgFacts: drawerFacts)
@@ -372,38 +342,16 @@ public struct DrawerMapping: Sendable {
             frontmatter["sensitivity"] = Self.sensitivityLabel(drawer.adjectiveSensitivity)
         }
 
-        // Bug N fix: `_distilled_from` tunnels are provenance graph edges, not body
-        // content. Rendering them as wikilinks (or standard-md links) into the note
-        // body causes two problems: (a) the body text gets the literal markdown link
-        // appended (e.g. `[_distilled_from](../../_distilled_from.md)`), and (b) on
-        // re-import that appended text is stored as the drawer's content, permanently
-        // corrupting the factoid. Provenance tunnels must be serialized as structured
-        // frontmatter that the import path can reconstruct as tunnels without touching
-        // the content field.
-        //
-        // Separation: filter into provenance tunnels (`label == "_distilled_from"`) and
-        // regular content-reference tunnels. Only content-reference tunnels become
-        // wikilinks in the `links` array; provenance tunnels ride the new frontmatter
-        // key `distilled_from_sources` as "targetWing/targetRoom" entries (semicolon-
-        // separated, deterministically sorted). The import path reads this key and
-        // reconstructs the tunnels without injecting text into content.
-        let provenanceTunnels = references.filter { $0.label == "_distilled_from" }
-        let contentTunnels   = references.filter { $0.label != "_distilled_from" }
-
-        // Each content `.references` tunnel's label carries the raw wikilink text
+        // Each outgoing `.references` tunnel's label carries the raw wikilink text
         // that produced it on import, so export renders it back verbatim.
-        let links = contentTunnels.map { WikiLink(target: $0.label, alias: nil, raw: $0.label) }
-
-        // Provenance tunnels encoded as "targetWing/targetRoom" pairs so the import
-        // path can reconstruct each `_distilled_from` tunnel from frontmatter alone.
-        // Sorted for deterministic output so round-trip comparisons are stable.
-        if !provenanceTunnels.isEmpty {
-            let targets = provenanceTunnels
-                .map { "\($0.targetWing)/\($0.targetRoom)" }
-                .sorted()
-                .joined(separator: ";")
-            frontmatter["distilled_from_sources"] = targets
-        }
+        // `_distilled_from` provenance tunnels are retired in 1.1.x per
+        // SPEC_DISTILLATION_STORAGE §11.2 and are absent from 1.1.x estates;
+        // the filter below is a belt-and-suspenders guard for any stale row.
+        // The retired `distilled_from_sources` frontmatter key is no longer emitted
+        // (SPEC_DISTILLATION_STORAGE §13.2; import side already ignores it).
+        let links = references
+            .filter { $0.label != "_distilled_from" }
+            .map { WikiLink(target: $0.label, alias: nil, raw: $0.label) }
 
         // Reconstruct tags from KG facts (hard-close #29-A round-trip).
         // Facts with subject "tag:<t>" and predicate "tagged" were filed on
@@ -1035,7 +983,7 @@ public struct DrawerMapping: Sendable {
         //
         // STRUCTURAL keys consumed:
         //   room, wing, udc, addedBy, embeddingModelID, moot_id,
-        //   wikidataQID, sensitivity, distilled_from_sources,
+        //   wikidataQID, sensitivity,
         //   captureChannel (informational — not re-honored on import),
         //   contentKind (informational — not re-honored on import),
         //   created (→ eventTime via originDate), type (OKF tag — ignored).

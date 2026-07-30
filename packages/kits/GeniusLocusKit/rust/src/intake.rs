@@ -46,6 +46,12 @@ use locus_kit::estate::Estate;
 /// content is immutable per ID (revisions are new drawers via lineage), so
 /// every live drawer reports revision 1 with digest = sha256(content).
 /// The estate verbs ARE the change stream — the polling feed is empty.
+///
+/// DENSE-OVER-DISTILLATE (MISSION_11X_RECALL_GAP_01 Stream F): `record()`
+/// supplies `dense_composition_text = drawer.distilled`. None (pre-sweep)
+/// causes `effective_dense_text()` to fall back to `text` unchanged. Non-None
+/// causes the engine to compose the dense float lane from the distillate while
+/// BM25 continues to index `text`. BM25 isolation is preserved.
 pub struct LocusDrawerContentSource {
     estate: Estate,
 }
@@ -76,11 +82,16 @@ impl CorpusContentSource for LocusDrawerContentSource {
             revision: 1,
             digest: content_digest(&drawer.content),
             text: drawer.content,
-            // dense_composition_text is None here: the GLK intake adapter exposes
-            // the verbatim drawer content as the lexical text. The dense-composition
-            // text (when GLK later wants to supply one) will be set by the GLK layer
-            // that sits above CorpusKit — that is GLK's business, not CorpusKit's.
-            dense_composition_text: None,
+            // Dense-over-distillate (MISSION_11X_RECALL_GAP_01 Stream F): supply
+            // the distillate column as dense_composition_text. When `distilled` is
+            // None (pre-sweep / edit-to-regeneration window), None propagates and
+            // `effective_dense_text()` falls back to `text` — zero behavior change
+            // for undistilled rows. When non-None, the engine uses the distillate
+            // for the dense float lane while BM25 indexes `text` unchanged.
+            // The digest keys on `text` only, so the idempotence anchor is
+            // unaffected by distillation writes.
+            // Swift parity: LocusDrawerCorpusContentSource.record(for:).
+            dense_composition_text: drawer.distilled.clone(),
         }))
     }
 

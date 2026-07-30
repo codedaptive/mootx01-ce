@@ -78,6 +78,12 @@ public enum GLKMigrationCatalog {
         }
 
         #if GLK_MIGRATION_V1_0_TO_V1_1
+        // Distillation storage migration (SPEC_DISTILLATION_STORAGE Appendix A.1)
+        // must run before SharedContentMigration because SharedContentMigration
+        // stamps the estate at v1_1 at the end of its chain. If the stamp were
+        // written first, a resume after a crash during the distillation migration
+        // would see v1_1 and return early without completing A.1.
+        try await kit.runDistillationStorageMigration(handle: handle, now: now)
         let report = try await kit.runSharedContentMigration(handle: handle, now: now)
         return GLKMigrationPreparation(
             format: .current,

@@ -1537,6 +1537,82 @@ impl Estate {
         self.store.recent_recall_traces(since, now)
     }
 
+    /// Wave-2 §3.2: atomic consolidation act. Delegates to
+    /// `DrawerStore::consolidate_transactionally`.
+    pub fn consolidate_transactionally(
+        &self,
+        vague_drawer: &crate::drawer::Drawer,
+        constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store
+            .consolidate_transactionally(vague_drawer, constituent_ids, added_by, now)
+    }
+
+    /// Wave-2 §5.1: fold-in reconsolidation. Delegates to
+    /// `DrawerStore::fold_in_transactionally`.
+    pub fn fold_in_transactionally(
+        &self,
+        vague_v2: &crate::drawer::Drawer,
+        prior_vague_id: &str,
+        enlarged_constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.fold_in_transactionally(
+            vague_v2,
+            prior_vague_id,
+            enlarged_constituent_ids,
+            added_by,
+            now,
+        )
+    }
+
+    /// Wave-2 §4.4 hop 2: constituent IDs behind a vague item's active
+    /// `_consolidated_from` tunnels. Delegates to
+    /// `DrawerStore::constituent_ids_for_vague_item`.
+    pub fn constituent_ids_for_vague_item(
+        &self,
+        vague_drawer_id: &str,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.store.constituent_ids_for_vague_item(vague_drawer_id)
+    }
+
+    /// Insert recall-trace rows directly — maintenance/test seeding for the
+    /// Wave-2 D3 quiet clock (mirrors Swift `Estate.insertRecallTraces`).
+    pub fn insert_recall_traces(
+        &self,
+        items: &[crate::recall_trace_item::RecallTraceItem],
+    ) -> Result<(), LocusKitError> {
+        self.store.insert_recall_traces(items)
+    }
+
+    /// Fetch one drawer by id (None when absent). Delegates to
+    /// `DrawerStore::get_drawer` (mirrors Swift `Estate.getDrawers(ids:)`
+    /// for the singular case).
+    pub fn get_drawer(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::drawer::Drawer>, LocusKitError> {
+        self.store.get_drawer(id)
+    }
+
+    /// Batch fetch by ids; absent ids are skipped (mirrors Swift
+    /// `Estate.getDrawers(ids:)`).
+    pub fn get_drawers(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Some(d) = self.store.get_drawer(id)? {
+                out.push(d);
+            }
+        }
+        Ok(out)
+    }
+
     // -----------------------------------------------------------------------
     // withdraw
     // -----------------------------------------------------------------------

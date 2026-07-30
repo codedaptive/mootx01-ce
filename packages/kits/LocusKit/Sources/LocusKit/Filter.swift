@@ -54,6 +54,36 @@ public enum StateCluster: Sendable {
     case terminal
 }
 
+// MARK: - RecallTier
+
+/// Fast Recall tier — controls which vague-tier items a recall request sees.
+/// The fourth `insertDefaults` axis (SPEC_CONSOLIDATION_VAGUE_RECALL §4.2).
+///
+/// The default (injected automatically when no tier filter is present) is
+/// `.currentAndVague`, which includes both ordinary drawers and vague items
+/// but excludes constituents that have been absorbed into a vague item
+/// (those carry `representedByVague = true` / bit 21 set).
+///
+/// Callers explicitly widening to all content (including absorbed constituents)
+/// pass `.recallTier(.all)`.
+public enum RecallTier: Sendable {
+    /// Include ordinary drawers and vague items; exclude absorbed constituents
+    /// (`represented_by_vague = 1`). This is the default tier injected by
+    /// `insertDefaults` when no tier filter is present. Predicate:
+    /// `(operationalBitmap & 0x200000) == 0`.
+    case currentAndVague
+    /// Include all drawers regardless of vague-tier status. No bitmap gate
+    /// applied. Use when the caller explicitly wants absorbed constituents too
+    /// (e.g. for direct hydration or debugging).
+    case all
+    /// Include only drawers where `is_vague = 1` (bit 20 set). Returns only
+    /// consolidated vague items. Used by the `vagueRecall` two-hop verb hop-1.
+    case vagueOnly
+    /// Include only drawers where `is_vague = 0` AND `represented_by_vague = 0`.
+    /// Ordinary episodic drawers only — no vague items, no absorbed constituents.
+    case currentOnly
+}
+
 // MARK: - Filter
 
 /// Named recall filter algebra. Per spec § 7.9.1.
@@ -126,6 +156,20 @@ public indirect enum Filter: Sendable {
     case channel(ProvenanceChannel)
     /// Rows with confidence at least this level.
     case confidenceAtLeast(Confidence)
+
+    // MARK: Recall tier queries (Wave 2, SPEC_CONSOLIDATION_VAGUE_RECALL §4.2)
+
+    /// Fast Recall tier filter. Controls whether absorbed constituents and/or
+    /// vague items appear in recall results. The evaluator injects
+    /// `.recallTier(.currentAndVague)` when no tier filter is present (the
+    /// fourth `insertDefaults` axis).
+    ///
+    /// - `.currentAndVague` (default) — ordinary drawers + vague items;
+    ///   excludes `represented_by_vague = 1` rows.
+    /// - `.all` — no bitmap gate; includes everything.
+    /// - `.vagueOnly` — only `is_vague = 1` rows (hop-1 of `vagueRecall`).
+    /// - `.currentOnly` — only ordinary episodic rows (bit 20 = 0, bit 21 = 0).
+    case recallTier(RecallTier)
 
     // MARK: Operational queries
 

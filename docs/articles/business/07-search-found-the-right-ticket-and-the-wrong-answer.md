@@ -18,7 +18,7 @@ A pricing exception may match a sales question while belonging to another accoun
 
 The first generation of agent memory naturally concentrated on persistence. Give the model a place to store useful lessons, index what accumulates, and bring related text into later sessions. That removes the cold start. Once recalled text begins directing action, however, the system has to distinguish a candidate from a current answer. Persistence has moved the bottleneck from finding the past to judging it.
 
-We met that boundary while working on our memory system. Its recall tools can cast a broad net, favor exact identifiers, or explore conceptual relationships. A discrimination signal also tells the agent whether the leading result stands clearly above its neighbors. The source describes that signal as confidence in the ranking rather than truth, because a clear winner can still be an abandoned experiment or a rule written for another condition.
+We met that boundary while working on our memory system. Its recall tools can cast a broad net, favor exact identifiers, or explore conceptual relationships. A discrimination signal also classifies the relative gap between the leading result and its neighbors, and applies a saturation discount when the semantic lane did not contribute. The source describes that signal as a confidence estimate of relative separation, not a statement about truth — a clear winner in the ranking can still be an abandoned experiment or a rule written for another condition.
 
 The next stage needs questions that a search score cannot answer:
 

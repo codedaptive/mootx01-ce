@@ -66,7 +66,7 @@ lexical, associative, consensus, temporal, structural, anti_redundant, and
 others).
 
 Use `moot_recall_distilled` when compact factoid answers are sufficient. The
-distilled tier contains dense factoids produced by `moot_consolidate`. Use
+distilled tier is populated by `moot_distill`. Use
 `moot_recollect` to follow a factoid back to its full source memories when
 the user needs episodic detail.
 
@@ -193,9 +193,10 @@ and write a cycle diary.
 
 ## Distillation
 
-Use `moot_consolidate` to run one distillation sweep. This produces compact
-factoids from eligible memories and stores them in the distilled tier. Run
-periodically or after significant memory growth.
+Use `moot_distill` to run one distillation sweep. This populates on-row
+distilled representations of eligible memories. Run periodically or after
+significant memory growth. (`moot_consolidate` is accepted as an ACK-gated
+compatibility alias.)
 
 Use `moot_recall_distilled` to search the distilled tier. Use
 `moot_recollect` to follow a factoid back to its source memories.

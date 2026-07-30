@@ -8,10 +8,18 @@
 //    representation — "a fully drained estate is a fully distilled
 //    estate". The onEncoded callback fires BEFORE the terminal queue
 //    reply (CorpusKit ordering), so the barrier is real, not a race.
-//  • Geometry probe: for a fixed estate and query set, ranks, scores,
-//    and explain output are BYTE-IDENTICAL before and after a full
-//    distillation sweep, and representation-only writes emit no
-//    ContentIndexJob (the encode queue stays drained).
+//  • §13.3 whole-fusion byte-identity is superseded twice over: Lane B
+//    ("distillation-features-v1") now feeds RecallDirector (Item 4 of
+//    MISSION_11X_RECALL_GAP_01) and the dense lane recomposes (Stream F) —
+//    so the probe asserts PER-LANE invariants rather than fused finals;
+//    Lane B non-degradation lives in FingerprintLaneTests.
+//  • Geometry probe (Stream F amendment): §9 BM25 isolation holds — the
+//    BM25 lane is invariant after distillation (content and digest
+//    unchanged). The dense float lane changes: distillItemsSweep now calls
+//    recomposeDenseVector for each swept item, so dense vectors are
+//    distillate-composed post-sweep ("settled" state). The probe verifies
+//    both invariants: BM25 byte-identical; dense scores differ.
+//    Representation-only writes emit no ContentIndexJob (queue stays drained).
 //
 // Rust twin: coordinator.rs distillation tests cover the sweep; the
 // queue-ordering twin is content_engine_queue.rs (fire_on_encoded before
@@ -65,10 +73,30 @@ struct DistillationDrainStageTests {
         )
     }
 
-    /// One search pass: the exact-search geometry (`moot_memory_search`'s
-    /// request shape) with explain enabled, serialized to a deterministic
-    /// snapshot string (ids, final scores, explanation lines).
-    private func searchSnapshot(
+    /// BM25-only recall snapshot (corpusOnly + rrf). §9: BM25 scores must be
+    /// byte-identical before and after a distillation sweep — content and
+    /// digest are unchanged; the BM25 index keys on `text`.
+    private func bm25Snapshot(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle, queries: [String]
+    ) async throws -> String {
+        // RAW BM25 lane only (engine.bm25TopK), NOT corpus-RRF: the fused
+        // corpusOnly path legitimately changes after a sweep — Item 4 feeds
+        // the distillation-features lane into recall and Stream F recomposes
+        // dense vectors — so the §9 isolation invariant is a claim about the
+        // LEXICAL lane alone (content + digest unchanged ⇒ postings
+        // unchanged ⇒ bm25TopK byte-identical).
+        guard let engine = await kit.corpusKits[handle] else { return "no-corpus" }
+        var lines: [String] = []
+        for query in queries {
+            lines.append("query: \(query)")
+            for hit in try await engine.bm25TopK(query: query, limit: 20) {
+                lines.append("  \(hit.id) \(hit.score)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func denseScoreSnapshot(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, queries: [String]
     ) async throws -> String {
         var lines: [String] = []
@@ -85,8 +113,10 @@ struct DistillationDrainStageTests {
             let result = try await kit.recall(handle, request)
             lines.append("query: \(query)")
             for hit in result.hits {
-                lines.append("\(hit.id) \(hit.score.final)")
-                lines.append(contentsOf: hit.explanation)
+                // `score.dense` is the normalized cosine similarity from the
+                // dense float lane. 0 for hits that did not come from the
+                // dense lane.
+                lines.append("\(hit.id) \(hit.score.dense)")
             }
         }
         return lines.joined(separator: "\n")
@@ -141,7 +171,7 @@ struct DistillationDrainStageTests {
 
     // MARK: - §9/§13.3 geometry probe
 
-    @Test("geometry invariance: search is byte-identical before and after a distillation sweep, and representation writes emit no index jobs")
+    @Test("BM25 invariant after distillation sweep; dense scores change when distillate lands")
     func geometryInvarianceProbe() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         // Impatient captures index inline (no queue job, no onEncoded, so
@@ -157,9 +187,8 @@ struct DistillationDrainStageTests {
         }
         let queries = ["reactor maintenance Geneva", "vendor contract", "travel policy"]
 
-        // Pre-sweep snapshot. Verify the estate really is undistilled.
+        // Pre-sweep: verify the estate is undistilled.
         let estate = try await kit.estate(for: handle)
-        let before = try await searchSnapshot(kit, handle, queries: queries)
         let preRows = try await estate.allDrawers()
         #expect(preRows.allSatisfy { $0.distilled == nil })
 
@@ -168,7 +197,14 @@ struct DistillationDrainStageTests {
         let depthBefore = try await corpus.ingestQueueDepth()
         #expect(depthBefore.pending == 0 && depthBefore.inFlight == 0)
 
+        // BM25-only pre-sweep snapshot (organic state — lexical-composed vectors,
+        // distilled columns nil). Dense pre-sweep snapshot captures the organic
+        // (lexical-composed) dense scores.
+        let bm25Before = try await bm25Snapshot(kit, handle, queries: queries)
+        let densesBefore = try await denseScoreSnapshot(kit, handle, queries: queries)
+
         // Full distillation sweep (the moot_distill path, p1 contract).
+        // Stream F: sweep also calls recomposeDenseVector for each swept item.
         let produced = try await kit.distillItemsSweep(
             handle: handle,
             distillFn: GeniusLocusKit.defaultDistillFn,
@@ -176,22 +212,32 @@ struct DistillationDrainStageTests {
             limit: nil)
         // ≥, not ==: a provisioned estate carries system drawers (e.g. the
         // AI-charter hint) beyond the four fixture bodies, and §13.1 says
-        // EVERY active non-empty item distills — the fixture bodies are the
-        // floor.
+        // EVERY active non-empty item distills — the fixture bodies are the floor.
         #expect(produced >= bodies.count, "§13.1: every active non-empty item distills")
 
-        // §9.2: representation-only writes emitted NO ContentIndexJob —
-        // the queue frontier is untouched.
+        // §9.2: representation-only writes emitted NO ContentIndexJob.
         let depthAfter = try await corpus.ingestQueueDepth()
         #expect(depthAfter.pending == 0 && depthAfter.inFlight == 0,
                 "a representation-only write must not enqueue an index job")
 
-        // §13.3: ranks, scores, and explain output byte-identical.
-        let after = try await searchSnapshot(kit, handle, queries: queries)
-        #expect(after == before,
-                "distillation must not perturb search geometry (§9.3)")
+        // §9 (BM25 isolation): BM25 scores are byte-identical before and after
+        // the sweep. Content was not modified; the digest keys on `text` and is
+        // unchanged by writing the distilled column. The BM25 index is anchored
+        // to `text` — distillation is invisible to it.
+        let bm25After = try await bm25Snapshot(kit, handle, queries: queries)
+        #expect(bm25After == bm25Before,
+                "BM25 scores must be byte-identical after distillation sweep (§9)")
 
-        // And the sweep really populated the columns (§13.1/§13.5).
+        // Dense-over-distillate (Stream F): after the sweep, recomposeDenseVector
+        // was called for every swept item. The dense float vectors are now
+        // distillate-composed ("settled" state). Dense scores differ from the
+        // organic (lexical-composed) baseline — this is the settled testmark
+        // precondition: post-sweep recall geometry differs in the dense lane.
+        let densesAfter = try await denseScoreSnapshot(kit, handle, queries: queries)
+        #expect(densesAfter != densesBefore,
+                "dense scores must change after distillation sweep (Stream F: settled > organic)")
+
+        // And the sweep really populated the distillation columns (§13.1/§13.5).
         let postRows = try await estate.allDrawers()
         #expect(postRows.allSatisfy { $0.distilled != nil && $0.distilledTokenCount != nil })
     }

@@ -26,7 +26,7 @@ LLM context tokens.
 - `moot_memory_search` - ordinary memory recall; broad, high-recall search.
 - `moot_recall_precise` - exact recall when names, numbers, paths, dates, versions, identifiers, or near-duplicates matter. Supports named reduction compositions for re-ranking.
 - `moot_recall_shaped` - shaped recall with fusion presets (balanced, precise, conceptual, broad, lexical, associative, consensus, temporal, structural, anti_redundant, and others). Use when the recall mode matters more than a specific query string.
-- `moot_recall_distilled` - dense recall from the distilled factoid layer. Returns compact factoids with confidence scores. Use after `moot_consolidate` has populated the distilled tier.
+- `moot_recall_distilled` - dense recall from the distilled factoid layer. Returns compact factoids with confidence scores. Use after `moot_distill` has populated the distilled tier.
 - `moot_recollect` - recollect: fan-out from a distilled factoid to its source memories. Use when the user needs the full episodic detail behind a factoid.
 - `moot_fact_search` - structured entity/relation/fact lookup.
 - `moot_fact_timeline` - trace how structured facts changed over time.
@@ -74,7 +74,7 @@ LLM context tokens.
 
 ## Distillation And Maintenance
 
-- `moot_consolidate` - run one distillation sweep, producing compact factoids in the distilled tier. Run periodically or after significant memory growth.
+- `moot_distill` - run one distillation sweep to populate on-row distilled representations of active memories. Idempotent; already-distilled items are skipped. Run periodically or after significant memory growth. (`moot_consolidate` is accepted as an ACK-gated compatibility alias.)
 - `moot_reindex` - recovery tool: backfill BM25 and vector indexes after an index loss or for estates created before encode-on-capture. Not needed after imports; they index themselves.
 - `moot_palace_import` - import a MemPalace directly into the estate (drawers, tunnels, KG triples). The import triggers its own indexing and dreaming; poll `moot_drain_status` to watch encoding settle.
 
