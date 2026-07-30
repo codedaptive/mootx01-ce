@@ -28,9 +28,9 @@ That is difficult work, and it matters. A perfect record buried at result 400 ma
 
 We spent a great deal of time on this part of our memory system. Ordinary memory search casts a broad net. Precise recall helps when the question contains a path, version, number, or proper name that separates one record from several near-duplicates. Shaped recall can favor literal language, concepts, structure, time, or associations depending on the job.
 
-The Git history records the usual progression. Search modes improved first, followed by a discrimination signal that tells the calling agent whether the leading result stands clearly above its neighbors. A flat group of scores should be treated as an uncertain set, even when the interface has placed one row at the top.
+The Git history records the usual progression. Search modes improved first, followed by a discrimination signal that classifies the relative gap between the leading result and its neighbors — and applies a saturation discount when the semantic lane did not contribute. A narrow relative gap, or a result ranked on lexical signals alone, should be treated as an uncertain set, even when the interface has placed one row at the top.
 
-The important sentence appears in the source code itself: the discrimination value is a confidence heuristic, not a ranking signal. For the person reading the result, the signal has one more boundary: it says nothing about truth.
+The important sentence appears in the source code itself: the discrimination value is a relative-gap confidence estimate, not a guarantee about which result is best. For the person reading the result, the signal has one more boundary: it says nothing about truth.
 
 A clear winner means the search system found one candidate that resembles the question much more than its neighbors. The winner may still be an abandoned experiment or a rejected proposal. An unconfirmed observation or a rule written for another customer can win the same ranking.
 

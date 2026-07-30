@@ -1271,16 +1271,20 @@ fn run_recall_distilled_tool(
             lines.push(format!("    tokens: {tokens} | source: distilled"));
         }
     }
-    // Discrimination signal mirrors moot_memory_search phrasing.
+    // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
+    // geometry over originals). Wire prefix matches moot_memory_search phrasing;
+    // wording unified with the recall_discrimination main ladder.
     let discrimination_line = match out.discrimination {
         cognition_kit::DistilledDiscriminationLevel::Single =>
-            "discrimination: single — only one result.",
+            "discrimination: n/a — single/zero results.",
         cognition_kit::DistilledDiscriminationLevel::High =>
             "discrimination: high — clear top result.",
         cognition_kit::DistilledDiscriminationLevel::Medium =>
-            "discrimination: medium — some separation.",
+            "discrimination: medium — partial separation.",
         cognition_kit::DistilledDiscriminationLevel::Low =>
-            "discrimination: low — results are effectively unranked.",
+            "discrimination: low — top results are within epsilon; treat as effectively unranked. \
+             Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for \
+             precision, or widen the query.",
     };
     lines.push(discrimination_line.to_owned());
     if any_fallback {

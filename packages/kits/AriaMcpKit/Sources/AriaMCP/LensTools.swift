@@ -197,7 +197,7 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_partial_cue",
-                description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination from this lens is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
+                description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching. Results include a discrimination signal. Fingerprint-based scores produce narrower relative gaps on small estates (the discrimination signal classifies relative gap — low discrimination here is expected, not an error). For keyword/exact retrieval use moot_recall_precise instead.",
                 inputSchema: objectSchema(
                     properties: [
                         "anchorID": stringSchema("The anchor drawer id (the cue)."),

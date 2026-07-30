@@ -154,7 +154,7 @@ These adapters assume the MOOTx01 MCP surface exposes these tool names:
 - `moot_list_lenses`
 - `moot_list_recipes`
 - `moot_synthesize`
-- `moot_consolidate`
+- `moot_distill`
 - `moot_dream`
 - `moot_reindex`
 - `moot_palace_import`
