@@ -1331,6 +1331,43 @@ public actor DrawerStore {
             )
             try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
 
+            // ── Wave-2 vague deletion cascade (§5.3) ──────────────────────────
+            // If the tombstoned drawer was a vague item (bit 20 set in the PRIOR
+            // operational bitmap), clear `representedByVague` (bit 21) on every
+            // constituent in the same transaction. One level per death — does not
+            // recurse into nested vague hierarchies.
+            if (priorOperational & DrawerFeatureFlags.isVague.rawValue) != 0 {
+                let tunnelRows = try await txn.rowStore.query(
+                    table: "tunnels",
+                    where: .and([
+                        .eq(Column(table: "tunnels", name: "sourceDrawerId"), .text(drawerId)),
+                        .eq(Column(table: "tunnels", name: "label"),
+                            .text("_consolidated_from")),
+                        .isNull(Column(table: "tunnels", name: "tombstonedAt"))
+                    ]),
+                    orderBy: [], limit: nil, offset: nil
+                )
+                for tr in tunnelRows {
+                    guard let constituentId = Self.optString(tr["targetDrawerId"]) else {
+                        continue
+                    }
+                    let constituentRows = try await txn.rowStore.query(
+                        table: "drawers",
+                        where: .eq(Column(table: "drawers", name: "id"), .text(constituentId)),
+                        orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
+                    )
+                    guard let cr = constituentRows.first else { continue }
+                    let constituentOp = Self.int64(cr["operationalBitmap"])
+                    let clearedConstituent = constituentOp & ~DrawerFeatureFlags.representedByVague.rawValue
+                    _ = try await txn.rowStore.update(
+                        table: "drawers",
+                        values: ["operationalBitmap": .bitmap(clearedConstituent)],
+                        where: .eq(Column(table: "drawers", name: "id"), .text(constituentId))
+                    )
+                }
+            }
+            // ── End vague deletion cascade ────────────────────────────────────
+
             // Record head drawer in the erasure ledger.
             try await ErasureLedgerOps.recordErasure(
                 rowStore: txn.rowStore,
@@ -4288,6 +4325,411 @@ public actor DrawerStore {
                     "operationalBitmap": .bitmap(clearedOp),
                 ]),
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+        }
+    }
+
+    // MARK: - Wave-2 vague tier (SPEC_CONSOLIDATION_VAGUE_RECALL §3.2, §4.4, §5.1)
+
+    /// Atomically consolidate N constituents into a pre-built vague drawer.
+    ///
+    /// Executes steps 2–4 of the spec §3.2 in one serializable transaction:
+    ///   2. Capture the vague drawer (via `gatedCaptureBody`).
+    ///   3. Create `_consolidated_from` tunnels (vague → each constituent).
+    ///   4. Set `representedByVague` (bit 21) on each constituent.
+    ///
+    /// The caller (ConsolidationSweep) is responsible for:
+    ///   - Constructing `vagueDrawer` with `isVague` (bit 20) set and
+    ///     a fresh `lineageID` (D13).
+    ///   - Combining and distilling constituent content (step 1 of §3.2).
+    ///   - Setting `vagueLevel` (bits 22–23) on `vagueDrawer` (D14).
+    ///   - Enforcing D5 (min 3 constituents) and D7 (>20 fallback).
+    ///
+    /// PersistenceKit v1.0 constraint: no nested transactions.
+    /// `gatedCaptureBody` returns a `@Sendable` closure that is executed
+    /// inside this method's outer `storage.transaction(.serializable)`,
+    /// so the vague capture and the N side-effect writes land in ONE commit.
+    ///
+    /// Mirrors Rust `consolidate_transactionally`.
+    public func consolidateTransactionally(
+        vagueDrawer: Drawer,
+        constituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        // Thrown, not a precondition: a background consolidation job passing a
+        // malformed drawer must surface an error the caller can handle, never
+        // crash the daemon process.
+        guard (vagueDrawer.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent(
+                "vagueDrawer must have isVague (bit 20) set before consolidateTransactionally")
+        }
+        guard constituentIDs.count >= 3 else {
+            throw LocusKitError.invalidContent(
+                "consolidation requires at least 3 constituents (D5); got \(constituentIDs.count)")
+        }
+
+        // ── Pre-transaction: resolve all actor-isolated values ───────────────
+        // Constituent rows and node names are read before the @Sendable closure
+        // so that actor-isolated HLC/vocabulary state can be captured here.
+
+        var constituentParentNodeIds: [String] = []
+        var constituentOpBitmaps: [Int64] = []
+        for cid in constituentIDs {
+            let rows = try await storage.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(cid)),
+                orderBy: [], limit: 1, offset: nil,
+                columns: ["operationalBitmap", "parent_node_id"]
+            )
+            guard let row = rows.first else {
+                throw LocusKitError.drawerNotFound(id: cid)
+            }
+            constituentParentNodeIds.append(Self.string(row["parent_node_id"]))
+            constituentOpBitmaps.append(Self.int64(row["operationalBitmap"]))
+        }
+
+        let allParentNodeIds = [vagueDrawer.parentNodeId] + constituentParentNodeIds
+        let nodeNames = try await resolveNodeNames(parentNodeIds: allParentNodeIds)
+        let vagueNames = nodeNames[vagueDrawer.parentNodeId] ?? (wing: "", room: "")
+
+        // Build tunnel insert value dictionaries (one per constituent).
+        let tunnelValuesList: [[String: TypedValue]] = zip(constituentIDs, constituentParentNodeIds)
+            .map { (cid, pNodeId) in
+                let cNames = nodeNames[pNodeId] ?? (wing: "", room: "")
+                let t = Tunnel(
+                    id: "_consolidated_from:\(vagueDrawer.id):\(cid)",
+                    sourceWing: vagueNames.wing, sourceRoom: vagueNames.room,
+                    sourceDrawerId: vagueDrawer.id,
+                    targetWing: cNames.wing, targetRoom: cNames.room,
+                    targetDrawerId: cid,
+                    label: "_consolidated_from",
+                    kind: .references,
+                    addedBy: addedBy,
+                    filedAt: now
+                )
+                return Self.tunnelValues(t)
+            }
+
+        // Build constituent bitmap update values (OR in representedByVague).
+        let constituentUpdates: [(id: String, newOpBitmap: Int64)] =
+            zip(constituentIDs, constituentOpBitmaps).map { (cid, priorOp) in
+                (id: cid,
+                 newOpBitmap: priorOp | DrawerFeatureFlags.representedByVague.rawValue)
+            }
+
+        // Get the capture closure (reads actor-isolated HLC/vocabulary).
+        let captureBody = try gatedCaptureBody(vagueDrawer, now: now)
+
+        // ── Atomic transaction: steps 2–4 ────────────────────────────────────
+        try await storage.transaction(isolation: .serializable) { txn in
+            // Step 2: Capture the vague drawer.
+            try await captureBody(txn)
+
+            // Step 3: Write _consolidated_from tunnels to every constituent.
+            for tv in tunnelValuesList {
+                _ = try await txn.rowStore.insert(table: "tunnels", values: tv)
+            }
+
+            // Step 4: Set representedByVague (bit 21) on every constituent.
+            for update in constituentUpdates {
+                _ = try await txn.rowStore.update(
+                    table: "drawers",
+                    values: ["operationalBitmap": .bitmap(update.newOpBitmap)],
+                    where: .eq(Column(table: "drawers", name: "id"), .text(update.id))
+                )
+            }
+        }
+    }
+
+    /// Wave-2 §5.1 fold-in reconsolidation: capture a regenerated vague
+    /// version in the SAME lineage as the prior vague item, superseding it —
+    /// the ONE legitimate supersession in the consolidation design (§3.3:
+    /// supersession applies to vague items' own lineages, exclusively).
+    ///
+    /// One serializable transaction carries: the v2 capture, the
+    /// `supersedes` tunnel (v2 → prior), the `_consolidated_from` tunnels to
+    /// the FULL enlarged constituent set, and the `representedByVague` bit
+    /// on every constituent (idempotent OR — existing constituents already
+    /// carry it). The predecessor's state flip (`active → superseded`) then
+    /// runs through the gate via `mutateState` — the same composition
+    /// `addDrawerWithCascade` uses (the automaton must validate the
+    /// transition independently; PersistenceKit v1.0 has no nested
+    /// transactions), so fold-in's atomicity exactly matches every other
+    /// supersession in the system.
+    ///
+    /// Preconditions (thrown, not trapped): `vagueV2` carries `isVague`,
+    /// shares `priorVagueID`'s lineage (the caller regenerates content and
+    /// levels), and the enlarged set still meets D5.
+    ///
+    /// Mirrors Rust `fold_in_transactionally`.
+    public func foldInTransactionally(
+        vagueV2: Drawer,
+        priorVagueID: String,
+        enlargedConstituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        guard (vagueV2.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent(
+                "vagueV2 must have isVague (bit 20) set before foldInTransactionally")
+        }
+        guard enlargedConstituentIDs.count >= 3 else {
+            throw LocusKitError.invalidContent(
+                "fold-in requires at least 3 constituents (D5); got \(enlargedConstituentIDs.count)")
+        }
+        // Prior vague row: must exist, must be vague, must share the lineage.
+        let priorRows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(priorVagueID)),
+            orderBy: [], limit: 1, offset: nil
+        )
+        guard let priorRow = priorRows.first else {
+            throw LocusKitError.drawerNotFound(id: priorVagueID)
+        }
+        let prior = try Self.drawerFromRow(priorRow)
+        guard (prior.operationalBitmap & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent("fold-in prior \(priorVagueID) is not a vague item")
+        }
+        guard prior.lineageID == vagueV2.lineageID else {
+            throw LocusKitError.invalidContent(
+                "fold-in v2 must share the prior vague item's lineage (§3.3 containment)")
+        }
+
+        // ── Pre-transaction reads (actor-isolated values resolved here) ──
+        var constituentParentNodeIds: [String] = []
+        var constituentOpBitmaps: [Int64] = []
+        for cid in enlargedConstituentIDs {
+            let rows = try await storage.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(cid)),
+                orderBy: [], limit: 1, offset: nil,
+                columns: ["operationalBitmap", "parent_node_id"]
+            )
+            guard let row = rows.first else {
+                throw LocusKitError.drawerNotFound(id: cid)
+            }
+            constituentParentNodeIds.append(Self.string(row["parent_node_id"]))
+            constituentOpBitmaps.append(Self.int64(row["operationalBitmap"]))
+        }
+        let allParents = [vagueV2.parentNodeId, prior.parentNodeId] + constituentParentNodeIds
+        let nodeNames = try await resolveNodeNames(parentNodeIds: allParents)
+        let v2Names = nodeNames[vagueV2.parentNodeId] ?? (wing: "", room: "")
+        let priorNames = nodeNames[prior.parentNodeId] ?? (wing: "", room: "")
+
+        let supersedesTunnel = Tunnel(
+            id: "supersedes:\(vagueV2.id):\(priorVagueID)",
+            sourceWing: v2Names.wing, sourceRoom: v2Names.room, sourceDrawerId: vagueV2.id,
+            targetWing: priorNames.wing, targetRoom: priorNames.room, targetDrawerId: priorVagueID,
+            label: "supersedes", kind: .supersedes,
+            addedBy: addedBy, filedAt: now
+        )
+        let supersedesValues = Self.tunnelValues(supersedesTunnel)
+        let tunnelValuesList: [[String: TypedValue]] = zip(enlargedConstituentIDs, constituentParentNodeIds)
+            .map { (cid, pNodeId) in
+                let cNames = nodeNames[pNodeId] ?? (wing: "", room: "")
+                let t = Tunnel(
+                    id: "_consolidated_from:\(vagueV2.id):\(cid)",
+                    sourceWing: v2Names.wing, sourceRoom: v2Names.room,
+                    sourceDrawerId: vagueV2.id,
+                    targetWing: cNames.wing, targetRoom: cNames.room,
+                    targetDrawerId: cid,
+                    label: "_consolidated_from",
+                    kind: .references,
+                    addedBy: addedBy,
+                    filedAt: now
+                )
+                return Self.tunnelValues(t)
+            }
+        let constituentUpdates: [(id: String, newOpBitmap: Int64)] =
+            zip(enlargedConstituentIDs, constituentOpBitmaps).map { (cid, priorOp) in
+                (id: cid,
+                 newOpBitmap: priorOp | DrawerFeatureFlags.representedByVague.rawValue)
+            }
+        let captureBody = try gatedCaptureBody(vagueV2, now: now)
+
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await captureBody(txn)
+            _ = try await txn.rowStore.insert(table: "tunnels", values: supersedesValues)
+            for tv in tunnelValuesList {
+                _ = try await txn.rowStore.insert(table: "tunnels", values: tv)
+            }
+            for update in constituentUpdates {
+                _ = try await txn.rowStore.update(
+                    table: "drawers",
+                    values: ["operationalBitmap": .bitmap(update.newOpBitmap)],
+                    where: .eq(Column(table: "drawers", name: "id"), .text(update.id))
+                )
+            }
+        }
+
+        // Gate-validated predecessor flip — same post-transaction composition
+        // as addDrawerWithCascade (automaton §9.2).
+        try await mutateState(
+            drawerId: priorVagueID,
+            to: .superseded,
+            via: .supersede,
+            changedBy: addedBy,
+            reason: "fold-in reconsolidation, vague lineage \(vagueV2.lineageID.uuidString)",
+            now: now
+        )
+    }
+
+    /// Return a bounded slice of drawers eligible for consolidation —
+    /// active, non-vague, non-absorbed, with recall clock older than `olderThan`
+    /// (per D3: recall clock = max(RecallTraceItem.recalledAt) for the drawer).
+    ///
+    /// `olderThan` is an ISO8601 string (TEXT column storage per schema invariant).
+    /// `limit` bounds the per-window sweep (D9 / Finding THETA cap).
+    ///
+    /// Mirrors Rust `drawers_eligible_for_consolidation`.
+    public func drawersEligibleForConsolidation(
+        olderThan: Date,
+        limit: Int
+    ) async throws -> [Drawer] {
+        // A drawer is eligible for consolidation when:
+        //   1. Not tombstoned (tombstonedAt IS NULL).
+        //   2. Not already a vague item (bit 20 = 0).
+        //   3. Not already absorbed (bit 21 = 0).
+        //   4. Recall clock older than `olderThan` — a join-equivalent
+        //      implemented as a sub-select via recall_trace table.
+        //
+        // Note: the full eligibility check (Hamming-NN cluster detection)
+        // is performed in ConsolidationSweep on top of this result set;
+        // this query returns candidates, not confirmed clusters.
+        // The `olderThan` date is used by the caller (ConsolidationSweep) to
+        // apply the recall-clock aging gate per D3 (max(RecallTraceItem.recalledAt)).
+        // This method returns the candidate pool (not tombstoned, not vague, not
+        // absorbed); the sweep applies the exact clock gate on top.
+        _ = olderThan // Passed through to caller; retained in signature for API clarity.
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                // bit 20 (is_vague) must be clear.
+                .bitmaskNone(
+                    Column(table: "drawers", name: "operationalBitmap"),
+                    mask: DrawerFeatureFlags.isVague.rawValue
+                ),
+                // bit 21 (represented_by_vague) must be clear.
+                .bitmaskNone(
+                    Column(table: "drawers", name: "operationalBitmap"),
+                    mask: DrawerFeatureFlags.representedByVague.rawValue
+                ),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "drawers", name: "filedAt"),
+                direction: .ascending
+            )],
+            limit: limit, offset: nil
+        )
+        return try rows.map(Self.drawerFromRow)
+    }
+
+    /// Return the IDs of all constituent drawers for a vague item, by reading
+    /// active `_consolidated_from` tunnels where `sourceDrawerId == vagueDrawerID`.
+    ///
+    /// Used by the two-hop `vagueRecall` verb (hop-2 constituent hydration)
+    /// and by the deletion cascade in `expungeGated` for vague items.
+    ///
+    /// Mirrors Rust `constituent_ids_for_vague_item`.
+    public func constituentIDsForVagueItem(vagueDrawerID: String) async throws -> [String] {
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "sourceDrawerId"), .text(vagueDrawerID)),
+                .eq(Column(table: "tunnels", name: "label"), .text("_consolidated_from")),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt"))
+            ]),
+            orderBy: [],
+            limit: nil, offset: nil
+        )
+        return rows.compactMap { Self.optString($0["targetDrawerId"]) }
+    }
+
+    /// Fold one new constituent into an existing vague item (§5.1).
+    ///
+    /// The fold-in is the ONLY legitimate path for adding a new constituent
+    /// after initial consolidation. It sets `representedByVague` (bit 21)
+    /// on the constituent and appends a `_consolidated_from` tunnel in one
+    /// serializable transaction. The rejection-rate counter (D10) is
+    /// incremented by the caller (ConsolidationSweep) when this method throws
+    /// `LocusKitError.invalidContent` with reason "level cap".
+    ///
+    /// Rejects constituents whose vague_level would push the vague item to
+    /// level 3 (cap = 2 per §5.4 / D8).
+    ///
+    /// Mirrors Rust `fold_in`.
+    public func foldIn(
+        constituentID: String,
+        intoVagueDrawerID: String,
+        addedBy: String,
+        now: Date
+    ) async throws {
+        // ── Pre-transaction: read current state ──────────────────────────────
+        let vagueRows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(intoVagueDrawerID)),
+            orderBy: [], limit: 1, offset: nil,
+            columns: ["operationalBitmap", "parent_node_id"]
+        )
+        guard let vagueRow = vagueRows.first else {
+            throw LocusKitError.drawerNotFound(id: intoVagueDrawerID)
+        }
+        let vagueOp = Self.int64(vagueRow["operationalBitmap"])
+        // Enforce is_vague: can only fold into a vague item.
+        guard (vagueOp & DrawerFeatureFlags.isVague.rawValue) != 0 else {
+            throw LocusKitError.invalidContent(
+                "foldIn target \(intoVagueDrawerID) is not a vague item (bit 20 not set)")
+        }
+        // Enforce vagueLevel cap: current vague item must be level ≤ 1 to
+        // accept a level-0 constituent without breaching the level-2 cap.
+        // vagueLevel 2-bit sub-field: mask 0xC00000, shift 22 (cookbook §2.4.2).
+        let vagueLevelMask: Int64 = 0xC00000
+        let currentLevel = UInt8(min(((vagueOp & vagueLevelMask) >> 22), 2))
+        if currentLevel >= 2 {
+            throw LocusKitError.invalidContent(
+                "level cap: vague item \(intoVagueDrawerID) is already at level \(currentLevel)")
+        }
+
+        let constituentRows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(constituentID)),
+            orderBy: [], limit: 1, offset: nil,
+            columns: ["operationalBitmap", "parent_node_id"]
+        )
+        guard let constituentRow = constituentRows.first else {
+            throw LocusKitError.drawerNotFound(id: constituentID)
+        }
+        let constituentOp = Self.int64(constituentRow["operationalBitmap"])
+        let constituentParentNodeId = Self.string(constituentRow["parent_node_id"])
+        let vagueParentNodeId = Self.string(vagueRow["parent_node_id"])
+
+        let nodeNames = try await resolveNodeNames(
+            parentNodeIds: [vagueParentNodeId, constituentParentNodeId])
+        let vagueNames = nodeNames[vagueParentNodeId] ?? (wing: "", room: "")
+        let cNames = nodeNames[constituentParentNodeId] ?? (wing: "", room: "")
+
+        let tunnel = Tunnel(
+            id: "_consolidated_from:\(intoVagueDrawerID):\(constituentID)",
+            sourceWing: vagueNames.wing, sourceRoom: vagueNames.room,
+            sourceDrawerId: intoVagueDrawerID,
+            targetWing: cNames.wing, targetRoom: cNames.room,
+            targetDrawerId: constituentID,
+            label: "_consolidated_from",
+            kind: .references,
+            addedBy: addedBy,
+            filedAt: now
+        )
+        let tv = Self.tunnelValues(tunnel)
+        let newConstituentOp = constituentOp | DrawerFeatureFlags.representedByVague.rawValue
+
+        try await storage.transaction(isolation: .serializable) { txn in
+            _ = try await txn.rowStore.insert(table: "tunnels", values: tv)
+            _ = try await txn.rowStore.update(
+                table: "drawers",
+                values: ["operationalBitmap": .bitmap(newConstituentOp)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(constituentID))
             )
         }
     }

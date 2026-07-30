@@ -37,7 +37,7 @@ import VectorKit
 /// and the gate short-circuits below the threshold.
 public extension GeniusLocusKit {
 
-    /// Names of the ten standing signals, in the order they are
+    /// Names of the eleven standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -53,6 +53,7 @@ public extension GeniusLocusKit {
             TemporalCausalitySignal.signalName,
             DistillationSignal.signalName,
             TrainingSignal.signalName,
+            ConsolidationSignal.signalName,
         ]
     }
 
@@ -156,6 +157,14 @@ public extension GeniusLocusKit {
             // invokes runOnce unconditionally. The default no-op is appropriate
             // for tests without a live daemon instance.
             TrainingSignal.spec(trainingCycle: trainingCycle),
+            // ConsolidationSignal (Wave-2 D9): daily maintenance-window fire
+            // running one bounded consolidation sweep. Registered here as the
+            // diagnostic-only defaultSpec — the live cycle needs the estate
+            // handle + distillFn, which this generic registration cannot
+            // supply; production callers re-register with
+            // ConsolidationSignal.spec(consolidationCycle:) at daemon wiring
+            // (the same pattern TemporalCausalitySignal documents above).
+            ConsolidationSignal.defaultSpec(),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {

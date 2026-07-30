@@ -738,6 +738,59 @@ public actor Estate {
         try await store.recentRecallTraces(since: since, now: now)
     }
 
+    /// Insert recall-trace rows directly. The scored-recall path records
+    /// traces itself (opt-in); this forwarder exists for the maintenance
+    /// surfaces that must SEED trace state — dream-cycle tooling and the
+    /// Wave-2 aging-gate tests (D3: the consolidation quiet clock reads
+    /// these rows). Delegates to `DrawerStore.insertRecallTraces`.
+    public func insertRecallTraces(_ items: [RecallTraceItem]) async throws {
+        try await store.insertRecallTraces(items)
+    }
+
+    /// Wave-2 §3.2: atomically capture a vague drawer, write its
+    /// `_consolidated_from` tunnels, and mark every constituent
+    /// `representedByVague` — one serializable commit. Delegates to
+    /// `DrawerStore.consolidateTransactionally`.
+    public func consolidateTransactionally(
+        vagueDrawer: Drawer,
+        constituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        try await store.consolidateTransactionally(
+            vagueDrawer: vagueDrawer,
+            constituentIDs: constituentIDs,
+            addedBy: addedBy,
+            now: now)
+    }
+
+    /// Wave-2 §4.4 hop 2: the constituent drawer IDs reachable through a
+    /// vague item's active `_consolidated_from` tunnels. Delegates to
+    /// `DrawerStore.constituentIDsForVagueItem`.
+    public func vagueConstituents(of vagueDrawerID: String) async throws -> [String] {
+        try await store.constituentIDsForVagueItem(vagueDrawerID: vagueDrawerID)
+    }
+
+    /// Wave-2 §5.1: fold-in reconsolidation — capture the regenerated vague
+    /// version in the prior's OWN lineage (the one legitimate supersession),
+    /// with tunnels to the enlarged constituent set and bit-21 marks, then
+    /// the gate-validated predecessor flip. Delegates to
+    /// `DrawerStore.foldInTransactionally`.
+    public func foldInTransactionally(
+        vagueV2: Drawer,
+        priorVagueID: String,
+        enlargedConstituentIDs: [String],
+        addedBy: String,
+        now: Date
+    ) async throws {
+        try await store.foldInTransactionally(
+            vagueV2: vagueV2,
+            priorVagueID: priorVagueID,
+            enlargedConstituentIDs: enlargedConstituentIDs,
+            addedBy: addedBy,
+            now: now)
+    }
+
     /// All non-tombstoned tunnels across all wings, in filed-at order.
     /// Used by the dreaming daemon to suppress candidate proposals that
     /// already have a Tunnel. Delegates to `DrawerStore.allTunnels`.

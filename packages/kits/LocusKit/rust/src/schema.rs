@@ -27,7 +27,11 @@
 //!   bits 0–3   capture channel                        ASSIGNED
 //!   bits 4–7   content kind                           ASSIGNED
 //!   bits 8–15  feature flags                          ASSIGNED
-//!   bits 16–63 FREE (48 bits headroom)
+//!   bits 16–19 FREE (4 bits headroom)
+//!   bit  20    is_vague (Wave-2 consolidation)        ASSIGNED
+//!   bit  21    represented_by_vague (Wave-2)          ASSIGNED
+//!   bits 22–23 vague_level 2-bit sub-field (Wave-2)   ASSIGNED
+//!   bits 24–63 FREE (40 bits headroom)
 //!
 //! drawers.provenance
 //!   bits 0–3   source type                            ASSIGNED

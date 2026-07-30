@@ -642,9 +642,24 @@ public extension GeniusLocusKit {
                       !drawer.hasCurrentRepresentation
                         || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
                 else { continue }
-                _ = try? await self.distillItem(
+                let didDistill = (try? await self.distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,
-                    distillFn: distillFn, now: now)
+                    distillFn: distillFn, now: now)) == true
+                if didDistill {
+                    // Dense-over-distillate (Stream F): recompose the dense
+                    // float vector from the newly-written distillate. The
+                    // idempotence gate in CorpusContentEngine keys on content
+                    // digest (not on denseCompositionText), so a normal
+                    // index() call would be silently skipped — here
+                    // recomposeDenseVector passes force=true to bypass the gate.
+                    // Routes through the CCE actor (FINDING_11X_MAINTENANCE_WALK
+                    // constraint 3: recompose writes must route through CCE, not
+                    // directly to VectorStore).
+                    // Best-effort: non-fatal; drain completion accounting is
+                    // unaffected (distillation is the drain-stage obligation —
+                    // recompose is opportunistic post-distillation work).
+                    try? await corpus.recomposeDenseVector(id: drawerID, now: now)
+                }
             }
         }
     }

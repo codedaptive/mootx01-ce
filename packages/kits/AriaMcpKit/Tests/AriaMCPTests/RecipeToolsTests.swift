@@ -51,7 +51,7 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 33 total: 10 recipe tools + 23 lens tools. moot_distill replaced the
+        // 34 total: 11 recipe tools + 23 lens tools. moot_distill replaced the
         // listed moot_consolidate (which survives as an unlisted dispatch
         // alias) and moot_recollect retired with the factoid tier
         // (SPEC_DISTILLATION_STORAGE §3/§11).
@@ -88,6 +88,7 @@ struct RecipeToolsTests {
             "moot_recall_distilled",
             "moot_recall_precise",
             "moot_recall_shaped",
+            "moot_recall_vague",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -673,11 +674,12 @@ struct RecipeToolsTests {
     // MARK: - tools() count
 
     @Test func testRecipeToolsCount() {
-        // 11 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
-        // preciseRecall, shapedRecall, runMigration, confirmMigration, dream,
-        // distill, recallDistilled, huntContradictions. (moot_consolidate is a
-        // dispatch alias, deliberately NOT listed.)
-        #expect(RecipeTools.tools().count == 11)
+        // 12 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
+        // preciseRecall, shapedRecall, vagueRecall, runMigration,
+        // confirmMigration, dream, distill, recallDistilled,
+        // huntContradictions. (moot_consolidate is a dispatch alias,
+        // deliberately NOT listed.)
+        #expect(RecipeTools.tools().count == 12)
         let names = RecipeTools.tools().map(\.name)
         #expect(names.contains("moot_distill"))
         #expect(!names.contains("moot_consolidate"))

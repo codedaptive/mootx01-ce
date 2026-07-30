@@ -277,11 +277,11 @@ fn tools_list_count_is_68() {
     // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 71.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 70, "expected 70 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_70_names() {
+fn tools_list_name_set_matches_expected_71_names() {
     // Gate: all 70 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
@@ -338,6 +338,7 @@ fn tools_list_name_set_matches_expected_70_names() {
         "moot_confirm_migration",
         "moot_recall_precise",
         "moot_recall_shaped",
+        "moot_recall_vague",
         "moot_dream",
         "moot_distill",
         "moot_recall_distilled",
@@ -5587,7 +5588,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 70, "vault-on must produce 70 tools (65 + 2 contradiction-hunter + 3 dataset)");
+    assert_eq!(arr.len(), 71, "vault-on must produce 71 tools (66 + 2 contradiction-hunter + 3 dataset)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -5602,7 +5603,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 64, "vault-off must produce 64 tools (70 - 5 vault - palace import)");
+    assert_eq!(arr.len(), 65, "vault-off must produce 65 tools (71 - 5 vault - palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

@@ -239,6 +239,16 @@ struct BitmapEvaluator {
             // suppresses this default rather than AND-ing against it.
             result.insert(.sensitivityAtMost(.elevated), at: 0)
         }
+        if !chain.contains(where: isRecallTierFilter) {
+            // Recall tier default (Wave 2, SPEC_CONSOLIDATION_VAGUE_RECALL §4.2).
+            // `.currentAndVague` includes ordinary drawers and vague items but
+            // excludes absorbed constituents (`represented_by_vague = 1`, bit 21).
+            // For all pre-Wave-2 drawers (bit 21 = 0), this is a no-op predicate —
+            // the default is behaviourally identical to "no tier filter" until the
+            // first vague item is created. Conditional on absence so an explicit
+            // tier from the caller suppresses this default.
+            result.insert(.recallTier(.currentAndVague), at: 0)
+        }
         return result
     }
 
@@ -277,6 +287,23 @@ struct BitmapEvaluator {
             return fs.contains(where: isBitmapSensitivityFilter)
         case .not(let inner):
             return isBitmapSensitivityFilter(inner)
+        default:
+            return false
+        }
+    }
+
+    /// Classifier for the recall tier default axis (Wave 2, §4.2).
+    /// Returns true when `f` is — or contains (recursively in .all/.any/.not)
+    /// — a `.recallTier` filter. Mirrors the `isBitmapSensitivityFilter`
+    /// pattern exactly (AC-6 parity).
+    private static func isRecallTierFilter(_ f: Filter) -> Bool {
+        switch f {
+        case .recallTier:
+            return true
+        case .all(let fs), .any(let fs):
+            return fs.contains(where: isRecallTierFilter)
+        case .not(let inner):
+            return isRecallTierFilter(inner)
         default:
             return false
         }
@@ -483,6 +510,28 @@ struct BitmapEvaluator {
             // bit-positioned; a non-zero intersection means at least one
             // requested flag is set.
             return (op & f.rawValue) != 0
+
+        // Recall tier gate (Wave 2, SPEC_CONSOLIDATION_VAGUE_RECALL §4.2,
+        // cookbook §2.4.2). Evaluates against the operational bitmap bits
+        // 20–21: is_vague (bit 20) and represented_by_vague (bit 21).
+        case .recallTier(let tier):
+            switch tier {
+            case .currentAndVague:
+                // Default: include ordinary drawers (bit 21 = 0) and vague items
+                // (bit 20 = 1, bit 21 = 0). Exclude absorbed constituents (bit 21 = 1).
+                // Predicate: (operationalBitmap & 0x200000) == 0
+                return (op & DrawerFeatureFlags.representedByVague.rawValue) == 0
+            case .all:
+                // No bitmap gate — include everything.
+                return true
+            case .vagueOnly:
+                // Only vague items: bit 20 must be set.
+                return (op & DrawerFeatureFlags.isVague.rawValue) != 0
+            case .currentOnly:
+                // Only ordinary episodic drawers: neither bit 20 nor bit 21 set.
+                return (op & (DrawerFeatureFlags.isVague.rawValue
+                              | DrawerFeatureFlags.representedByVague.rawValue)) == 0
+            }
 
         // Composition — bitmap-tier portion (structured / content cases
         // inside the children pass at this tier and are re-evaluated

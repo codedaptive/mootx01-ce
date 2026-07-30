@@ -691,6 +691,66 @@ public actor CorpusContentEngine {
         return true
     }
 
+    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
+    ///
+    /// Resolves the current record from the source — picking up any newly-written
+    /// `denseCompositionText` (e.g. a distillate written by the GLK distillation
+    /// rider) — and writes a fresh float-vector row (vectorIndex: 1) for each
+    /// active slot. Only the float (dense RI) lane is updated; BM25, binary
+    /// (Hamming) vectors, coverage, and the idempotence checkpoint are untouched.
+    ///
+    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
+    /// digest (unchanged by distillation). Calling `index(force: true)` would
+    /// bypass the gate but would also re-run BM25 indexing — unnecessary and
+    /// potentially disruptive to IDF state. This method bypasses BOTH the gate
+    /// AND the BM25 path by targeting only the float lane directly. §9 BM25
+    /// isolation (SPEC_DISTILLATION_STORAGE) is preserved: the content and digest
+    /// are unchanged, so BM25 scores remain byte-identical before and after.
+    ///
+    /// **Concurrency:** routes through the CCE actor (not direct to `VectorStore`)
+    /// so `countsAdmission` serialization is maintained against concurrent
+    /// trainable-slot operations (FINDING_11X_MAINTENANCE_WALK_2026-07-28
+    /// constraint 3). Returns false only when the content ID no longer resolves
+    /// in the source; derived state is left unchanged in that case.
+    ///
+    /// - Parameters:
+    ///   - id: The content ID to re-embed.
+    ///   - now: The operation timestamp (passed in — never read inside the engine).
+    /// - Returns: true when live content was found and re-embedded; false when
+    ///   the ID no longer resolves.
+    @discardableResult
+    public func recomposeDenseVector(id: CorpusContentID, now: Date) async throws -> Bool {
+        try validate(id: id)
+        guard let record = try await source.record(for: id) else {
+            return false
+        }
+        try await recomposeDenseFloat(record: record, now: now)
+        return true
+    }
+
+    /// Dense-float-only vector upsert for one content record. Writes the float
+    /// (vectorIndex: 1) row across all active slots using `effectiveDenseText`.
+    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
+    /// Called by `recomposeDenseVector` and the drain/sweep integration points.
+    private func recomposeDenseFloat(record: CorpusContentRecord, now: Date) async throws {
+        let unit = IndexUnit(
+            key: record.id, text: record.text, denseText: record.denseCompositionText)
+        var rows: [VectorPayloadInput] = []
+        for slot in slots {
+            let (_, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
+            guard !floats.isEmpty else { continue }
+            rows.append(VectorPayloadInput(
+                itemID: unit.key, vectorIndex: 1,
+                payload: VectorPayload(floats: floats),
+                modelID: slot.provider.modelID,
+                modelVersion: slot.provider.modelVersion,
+                filedAt: now))
+        }
+        if !rows.isEmpty {
+            try await vectorStore.addPayloads(rows)
+        }
+    }
+
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
     /// checkpoint, and STATELESS-slot vectors + coverage only. Trainable
     /// slots are deferred to `trainTrainableSlots` + the coverage backfill
