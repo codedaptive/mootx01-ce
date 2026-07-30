@@ -16,8 +16,8 @@ name: develop daily test
 on:
   schedule:
     # Daily, 08:00 UTC. A schedule trigger only fires from the DEFAULT branch's
-    # copy of this file (default = develop/1.0.x), so this file must live there —
-    # but the jobs below check out and test develop/1.1.x, the active dev branch.
+    # copy of this file (default = develop/1.1.x since the 2026-07-30 flip), so
+    # the schedule and the branch the jobs test are now the same line.
     - cron: "0 8 * * *"
   workflow_dispatch:   # manual "run it now" regardless of the moved-check
 
