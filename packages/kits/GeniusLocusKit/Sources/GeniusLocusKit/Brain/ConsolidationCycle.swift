@@ -332,6 +332,23 @@ extension GeniusLocusKit {
                 vagueItem.vagueLevel,
                 1 + (enlarged.map { $0.isVague ? $0.vagueLevel : 0 }.max() ?? 0))
             guard level <= config.vagueLevelCap else { continue }
+
+            // Sensitivity inheritance (§D.1 monotone ceiling): the fold-in
+            // drawer carries the MAX adjective and provenance sensitivity over
+            // the enlarged constituent set and the prior vague item. A fold-in
+            // must never lower the tier — cookbook §2.3 bits 6–11 (adjective)
+            // and §2.5 bits 30–35 (provenance at capture).
+            let v2MaxAdjSens: AdjectiveSensitivity = enlarged.reduce(vagueItem.adjectiveSensitivity) { best, d in
+                d.adjectiveSensitivity.rawValue > best.rawValue ? d.adjectiveSensitivity : best
+            }
+            let v2MaxProvSens: Sensitivity = enlarged.reduce(vagueItem.sensitivity) { best, d in
+                d.sensitivity.rawValue > best.rawValue ? d.sensitivity : best
+            }
+            let v2AdjBitmap = BitField.writeField(
+                Int64(v2MaxAdjSens.rawValue), into: 0, shift: 6, width: 6)
+            let v2ProvBitmap = BitField.writeField(
+                Int64(v2MaxProvSens.rawValue), into: 0, shift: 30, width: 6)
+
             let v2 = Drawer(
                 id: UUID().uuidString,
                 content: regen.rendering,
@@ -339,6 +356,8 @@ extension GeniusLocusKit {
                 addedBy: "consolidation-daemon",
                 filedAt: now,
                 embeddingModelID: vagueItem.embeddingModelID,
+                provenance: v2ProvBitmap,
+                adjectiveBitmap: v2AdjBitmap,
                 operationalBitmap: DrawerFeatureFlags.isVague.rawValue
                     | ((Int64(level) & 0b11) << 22),
                 lineageID: vagueItem.lineageID
@@ -392,9 +411,24 @@ extension GeniusLocusKit {
             // the earliest constituent's room, carrying isVague + vagueLevel
             // (bits 20 + 22–23; representedByVague is never set on a vague
             // item at capture).
+            //
+            // Sensitivity inheritance (§D.1): the vague drawer carries the MAX
+            // adjective and provenance sensitivity over all constituents —
+            // cookbook §2.3 bits 6–11 (adjective) and §2.5 bits 30–35
+            // (provenance at capture). Source tier flows to derived artifact.
             let vagueBitmap: Int64 =
                 DrawerFeatureFlags.isVague.rawValue
                 | ((Int64(productLevel) & 0b11) << 22)
+            let newMaxAdjSens: AdjectiveSensitivity = constituents.reduce(.normal) { best, d in
+                d.adjectiveSensitivity.rawValue > best.rawValue ? d.adjectiveSensitivity : best
+            }
+            let newMaxProvSens: Sensitivity = constituents.reduce(.normal) { best, d in
+                d.sensitivity.rawValue > best.rawValue ? d.sensitivity : best
+            }
+            let newVagueAdjBitmap = BitField.writeField(
+                Int64(newMaxAdjSens.rawValue), into: 0, shift: 6, width: 6)
+            let newVagueProvBitmap = BitField.writeField(
+                Int64(newMaxProvSens.rawValue), into: 0, shift: 30, width: 6)
             let vague = Drawer(
                 id: UUID().uuidString,
                 content: rendering,
@@ -402,6 +436,8 @@ extension GeniusLocusKit {
                 addedBy: "consolidation-daemon",
                 filedAt: now,
                 embeddingModelID: constituents[0].embeddingModelID,
+                provenance: newVagueProvBitmap,
+                adjectiveBitmap: newVagueAdjBitmap,
                 operationalBitmap: vagueBitmap
             )
 

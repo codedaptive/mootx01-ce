@@ -824,4 +824,50 @@ impl DrawerStore for SqliteDrawerStore {
     {
         self.0.get_container_fingerprint(wing, room)
     }
+
+    // Wave-2 vague-tier delegation — forward to DrawerStoreCore.
+    //
+    // These four methods ARE implemented in DrawerStoreCore (which serves both
+    // the in-memory and SQLite/Postgres backends through the shared
+    // Arc<dyn Storage> handle). The trait defaults return DatabaseUnavailable so
+    // every newtype wrapper MUST override them explicitly — omitting a forward
+    // silently routes callers to the error path instead of the real
+    // implementation. SqliteDrawerStore is a durable store; consolidation and
+    // vague_recall hop-2 MUST work on it.
+    fn consolidate_transactionally(
+        &self,
+        vague_drawer: &crate::drawer::Drawer,
+        constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.consolidate_transactionally(vague_drawer, constituent_ids, added_by, now)
+    }
+
+    fn drawers_eligible_for_consolidation(
+        &self,
+        older_than: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.drawers_eligible_for_consolidation(older_than, limit)
+    }
+
+    fn constituent_ids_for_vague_item(
+        &self,
+        vague_drawer_id: &str,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.0.constituent_ids_for_vague_item(vague_drawer_id)
+    }
+
+    fn fold_in_transactionally(
+        &self,
+        vague_v2: &crate::drawer::Drawer,
+        prior_vague_id: &str,
+        enlarged_constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0
+            .fold_in_transactionally(vague_v2, prior_vague_id, enlarged_constituent_ids, added_by, now)
+    }
 }

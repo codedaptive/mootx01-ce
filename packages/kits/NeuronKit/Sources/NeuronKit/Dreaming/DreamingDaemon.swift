@@ -736,6 +736,12 @@ public actor DreamingDaemon {
         }
 
         // ── Step 7: write exactly one diary entry recording the cycle ───
+        // Invariant: diary entries must stay COUNTS-ONLY — no drawer content
+        // or drawer IDs may appear in `entry`. The `diary` table has no
+        // sensitivity column; until it does, any content-carrying entry would
+        // be ungated. The format-contract test
+        // SensitivityInheritanceDiaryTests MIRRORS this format string —
+        // when editing the entry text, update the mirror in the same commit.
         cycleCount += 1
         let entry = DiaryEntry(
             agentName: Self.agentName,
@@ -1066,6 +1072,12 @@ public actor DreamingDaemon {
         }
 
         // Step 7: write one diary entry for this THETA cycle.
+        // Invariant: diary entries must stay COUNTS-ONLY — no drawer content
+        // or drawer IDs may appear in `entry`. The `diary` table has no
+        // sensitivity column; until it does, any content-carrying entry would
+        // be ungated. The format-contract test
+        // SensitivityInheritanceDiaryTests MIRRORS this format string —
+        // when editing the entry text, update the mirror in the same commit.
         cycleCount += 1
         let entry = DiaryEntry(
             agentName: Self.agentName,
@@ -1296,6 +1308,12 @@ public actor DreamingDaemon {
         _ = try await sink.pruneRecallTraces(olderThan: windowStart)
 
         // ── Step 5: write diary entry ─────────────────────────────────────────
+        // Invariant: diary entries must stay COUNTS-ONLY — no drawer content
+        // or drawer IDs may appear in `entry`. The `diary` table has no
+        // sensitivity column; until it does, any content-carrying entry would
+        // be ungated. The format-contract test
+        // SensitivityInheritanceDiaryTests MIRRORS this format string —
+        // when editing the entry text, update the mirror in the same commit.
         cycleCount += 1
         let entry = DiaryEntry(
             agentName: Self.agentName,

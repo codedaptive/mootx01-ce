@@ -1,7 +1,8 @@
 // brain/signals/mod.rs — Rust mirror of the standing signals.
 //
 // Mission GLK-05 (six v1 signals) + DG2 (DistillationSignal, signal 8)
-// + brain-layer governor ownership  (TemporalCausalitySignal signal 7, TrainingSignal signal 9).
+// + brain-layer governor ownership  (TemporalCausalitySignal signal 7, TrainingSignal signal 9)
+// + contradiction-scout (signal 10) + consolidation-sweep (signal 11).
 //
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The
@@ -17,6 +18,7 @@
 // conformance gate.
 
 pub mod by_reference_validity;
+pub mod consolidation;
 pub mod contradiction_scout;
 pub mod decay_sweep;
 pub mod default_set;
@@ -29,6 +31,7 @@ pub mod training;
 pub mod vector_similarity;
 
 pub use by_reference_validity::ByReferenceValiditySignal;
+pub use consolidation::ConsolidationSignal;
 pub use contradiction_scout::ContradictionScoutSignal;
 pub use decay_sweep::DecaySweepSignal;
 pub use default_set::{default_standing_signal_names, default_standing_signal_specs};
