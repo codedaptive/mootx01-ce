@@ -43,8 +43,8 @@ use std::sync::Arc;
 use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::{
-    EstateCoordinator, EstateKind, EstateMountState, EstateProvisionParams, GeniusLocusKitError,
-    SyncMode,
+    EstateCoordinator, EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams,
+    GeniusLocusKitError, SyncMode,
 };
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -280,6 +280,9 @@ impl EstateAdmin {
             zoom_window_high: request.zoom_window_high,
             framework_profile: request.framework_profile.clone(),
             sync_mode,
+            // The admin surface does not expose a lifetime choice; provisioned
+            // estates use durable key material (the EstateLifetime default).
+            lifetime: EstateLifetime::Durable,
         };
 
         // DEBT-2: provision-with-corpus. The coordinator creates → opens → wires
