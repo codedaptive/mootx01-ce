@@ -1,25 +1,28 @@
 // standing_signals_parity.rs — conformance gate for the Rust mirror
-// of the ten standing signals (GLK-05 + brain-layer governor ownership).
+// of the eleven standing signals (GLK-05 + brain-layer governor ownership
+// + consolidation-sweep signal 11).
 //
 // Mirrors `StandingSignalsTests.swift`. The gate asserts:
 //
 // 1. Each signal's stable name and cadence match the Swift reference.
 // 2. Each signal's spec produces the expected emission classes when
 //    fired through a `SerialLaneScheduler` instance.
-// 3. The default-set helper registers all ten in the canonical order.
+// 3. The default-set helper registers all eleven in the canonical order.
 // 4. VectorSimilaritySignal with an empty VectorStore emits only the
 //    scan-summary diagnostic (zero associate emissions) — parity with
 //    the Swift empty-store test.
 // 5. TrainingSignal fires TrainingDaemon::run_once and emits exactly
 //    one diagnostic per tick regardless of gate state.
+// 6. ConsolidationSignal (signal 11): daily cadence, default_spec emits
+//    "consolidation-sweep.fired", live spec surfaces sweep report counts.
 
 use std::sync::Arc;
 
 use genius_locus_kit::brain::signals::ContradictionScoutSignal;
 use genius_locus_kit::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
-    DecaySweepSignal, DistillationSignal, DreamingSignal, EndOfDayTournamentSignal,
-    MaintenanceSignal, SchedulerNoopDispatcher,
+    ConsolidationSignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
+    EndOfDayTournamentSignal, MaintenanceSignal, SchedulerNoopDispatcher,
     SchedulerSignalRouteOutcome as SignalRouteOutcome, SchedulerSignalTrigger as SignalTrigger,
     SerialLaneScheduler, TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
@@ -116,11 +119,19 @@ fn default_signal_names_and_cadences_match_swift_reference() {
     assert_eq!(TrainingSignal::SIGNAL_NAME, "training-daemon");
     assert_eq!(TrainingSignal::DEFAULT_CADENCE_SECONDS, 3_600,
         "training-daemon runs hourly matching distillation and temporal-causality rhythm");
+
+    // Signal 11 — Wave-2 consolidation sweep (daily, D9 cadence class).
+    assert_eq!(ConsolidationSignal::SIGNAL_NAME, "consolidation-sweep");
+    assert_eq!(
+        ConsolidationSignal::DEFAULT_CADENCE_SECONDS, 86_400,
+        "consolidation-sweep runs daily per Wave-2 D9 spec"
+    );
 }
 
 #[test]
 fn default_standing_signal_names_helper_returns_canonical_order() {
     // Keep this compile-time roster synchronized with the production helper.
+    // Signal 11 (consolidation-sweep) appended after training-daemon.
     let names = default_standing_signal_names();
     assert_eq!(
         names,
@@ -135,19 +146,22 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
             "temporal-causality-fold",
             "distillation-sweep",
             "training-daemon",
+            "consolidation-sweep",
         ]
     );
 }
 
 #[test]
-fn default_standing_signal_specs_returns_ten_specs_with_interval_triggers() {
+fn default_standing_signal_specs_returns_eleven_specs_with_interval_triggers() {
+    // Signal count updated from ten to eleven with the addition of signal 11
+    // (ConsolidationSignal, daily Wave-2 consolidation sweep).
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(store, "test-model", None);
-    assert_eq!(specs.len(), 10);
+    assert_eq!(specs.len(), 11);
     for spec in &specs {
         match spec.trigger {
             SignalTrigger::Interval { .. } => {}
-            _ => panic!("every v1 signal is interval-driven; got {:?}", spec),
+            _ => panic!("every standing signal is interval-driven; got {:?}", spec),
         }
     }
 }
@@ -341,14 +355,17 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 }
 
 #[test]
-fn registering_all_ten_default_specs_produces_ten_reports() {
+fn registering_all_eleven_default_specs_produces_eleven_reports() {
+    // Updated from ten to eleven specs with the addition of signal 11
+    // (ConsolidationSignal). The consolidation-sweep name must appear in the
+    // report and its trigger must be interval-driven (daily cadence).
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
     for spec in default_standing_signal_specs(store, "test-model", None) {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();
-    assert_eq!(reports.len(), 10);
+    assert_eq!(reports.len(), 11);
     let mut names: Vec<String> = reports.iter().map(|r| r.name.clone()).collect();
     names.sort();
     let mut expected: Vec<String> = default_standing_signal_names()
@@ -480,5 +497,87 @@ fn temporal_causality_signal_default_spec_emits_fired_diagnostic() {
     assert_eq!(
         report.recent_diagnostics[0].title, "temporal-causality-fold.fired",
         "no-op spec must emit temporal-causality-fold.fired title"
+    );
+}
+
+// ─── Signal 11: ConsolidationSignal parity tests ──────────────────────────────
+
+/// Parity with Swift's `ConsolidationSignal.defaultSpec()` no-op emission.
+/// The no-op spec fires a "consolidation-sweep.fired" diagnostic on each tick.
+#[test]
+fn consolidation_signal_default_spec_emits_fired_diagnostic() {
+    let spec = ConsolidationSignal::default_spec();
+    let report = fire(spec);
+    assert_eq!(report.name, "consolidation-sweep");
+    assert_eq!(
+        report.emission_count, 1,
+        "default spec emits one diagnostic per tick"
+    );
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "consolidation-sweep.fired",
+        "no-op spec must emit consolidation-sweep.fired title"
+    );
+}
+
+/// Parity with Swift `ConsolidationSignal.spec` live path: successful sweep
+/// surfaces new_vague_items, fold_ins, and fold_in_rejections counts in the
+/// "consolidation-sweep.complete" diagnostic title.
+#[test]
+fn consolidation_signal_live_spec_emits_complete_diagnostic_on_ok() {
+    use genius_locus_kit::brain::consolidation_cycle::ConsolidationSweepReport;
+    use std::sync::Arc;
+
+    let spec = ConsolidationSignal::spec(Arc::new(|| {
+        Ok(ConsolidationSweepReport {
+            new_vague_items: 3,
+            fold_ins: 1,
+            fold_in_rejections: 0,
+        })
+    }));
+    let report = fire(spec);
+    assert_eq!(report.name, "consolidation-sweep");
+    assert_eq!(
+        report.emission_count, 1,
+        "live spec emits one diagnostic per tick"
+    );
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "consolidation-sweep.complete",
+        "live spec emits consolidation-sweep.complete on success"
+    );
+    // The detail string must surface the report counts so the D10 drift
+    // policy can be evaluated from recentDiagnostics (mirrors Swift spec).
+    let detail = &report.recent_diagnostics[0].detail;
+    assert!(detail.contains("new=3"), "detail must include new_vague_items count");
+    assert!(detail.contains("foldIns=1"), "detail must include fold_ins count");
+    assert!(
+        detail.contains("foldInRejections=0"),
+        "detail must include fold_in_rejections count"
+    );
+}
+
+/// Live spec with Err(msg) emits "consolidation-sweep.error" diagnostic —
+/// the scheduler's drain loop is not interrupted.
+#[test]
+fn consolidation_signal_live_spec_emits_error_diagnostic_on_err() {
+    use std::sync::Arc;
+
+    let spec = ConsolidationSignal::spec(Arc::new(|| {
+        Err("estate unavailable during maintenance window".to_string())
+    }));
+    let report = fire(spec);
+    assert_eq!(report.name, "consolidation-sweep");
+    assert_eq!(report.emission_count, 1);
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "consolidation-sweep.error",
+        "error path must emit consolidation-sweep.error title"
+    );
+    assert!(
+        report.recent_diagnostics[0]
+            .detail
+            .contains("estate unavailable"),
+        "error detail must propagate the closure's message"
     );
 }
