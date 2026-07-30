@@ -16,8 +16,16 @@ EE repo before the sync; everything else is in CE.
   swift run moot-packager --canonical Data/canonical \
     --plugin-repo "$(git rev-parse --show-toplevel)/distribution/plugin"
   ```
-- [ ] **[EE]** Commit + push; run the EE→CE sync (its verify step asserts the
-      bundle and plugin surface — a stale or reverted tree fails the sync)
+- [ ] **[EE]** Commit + push as TWO commits (EE-only canonical/capability.json;
+      SHARED regen outputs + stamps) — `scripts/check-commit-scope.sh boundary`
+      warns on mixed staging
+- [ ] Port the shared commits up to CE via the port lane: in the CE 1.1.x
+      worktree, `git fetch ee && git cherry-pick <shared-only commits>`
+      (the `ee` remote is local, configured in the CE anchor)
+- [ ] Declare the port complete: verify SHARED byte-parity against the EE tip
+      and the plugin surface (reuse `scripts/repo_sync/sync-ee-to-ce.sh`'s
+      verify block — a stale or reverted tree fails it). The EE-leak lint runs
+      unconditionally on every CE push via `.githooks/pre-push`.
 
 ## 2 · Tag and build
 
@@ -49,8 +57,9 @@ EE repo before the sync; everything else is in CE.
 ## Invariants
 
 - `distribution/plugin/` and the embedded bundle files are **generated** —
-  never hand-edit; fix EE canonical and regenerate (`ce-backport.sh` refuses
-  patches to them)
+  never hand-edit; fix EE canonical and regenerate. (`ce-backport.sh` is
+  superseded — EE is the workshop and work ports **up** to CE; a supported
+  CE fix lands in EE first and ports up with the next shared publication.)
 - The plugin version always equals the product version
 - Marketplace *submissions* are one-time per marketplace; publishing the
   plugin repo happens every release
