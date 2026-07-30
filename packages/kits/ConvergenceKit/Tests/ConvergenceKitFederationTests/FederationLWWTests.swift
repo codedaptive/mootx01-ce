@@ -213,4 +213,30 @@ struct FederationLWWTests {
         #expect(rows.count == 0,
                 "newer delete must hard-delete the local row")
     }
+
+    /// A replayed older-but-valid envelope must NOT resurrect a row that a
+    /// newer delete already removed. The delete hard-deletes the row along
+    /// with its `_syncHLC`, so without a durable tombstone the stale replay
+    /// finds no baseline and is accepted — an untrusted relay re-sending a
+    /// message it already saw is enough, no signature forgery required.
+    @Test("stale update cannot resurrect a deleted row")
+    func staleUpdateCannotResurrectDeletedRow() async throws {
+        let storage = try await makeStorage()
+        let actor = FederationStateActor()
+        let rowID = UUID()
+
+        try await actor.applyInbound(makeRecord(id: rowID, note: "original", hlcTime: 500),
+                                     syncedTable: syncedTable, storage: storage)
+        try await actor.applyInbound(makeDeleteRecord(id: rowID, hlcTime: 1000),
+                                     syncedTable: syncedTable, storage: storage)
+        try await actor.applyInbound(makeRecord(id: rowID, note: "stale replay", hlcTime: 500),
+                                     syncedTable: syncedTable, storage: storage)
+
+        let rows = try await storage.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(rowID))
+        )
+        #expect(rows.isEmpty,
+                "a stale replay must not resurrect a row deleted by a newer HLC")
+    }
 }

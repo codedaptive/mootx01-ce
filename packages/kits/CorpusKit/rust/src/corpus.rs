@@ -3037,8 +3037,8 @@ impl Corpus {
 
     // MARK: - Lifecycle (GLK_PROVISION_001)
 
-    /// Destroy the entire recall index — clear BM25, chunk_source_map, and all
-    /// vectors.
+    /// Destroy the corpus's recall index — clear BM25, chunk_source_map, and
+    /// this corpus's own vector rows.
     ///
     /// Called by `EstateCoordinator::destroy` as part of the coordinated estate
     /// teardown path. After this call the corpus has no recall capability: BM25
@@ -3058,10 +3058,30 @@ impl Corpus {
             csm.clear();
         }
 
-        // Step 3: Delete all vector rows.
-        self.vector_store
-            .destroy_all_vectors()
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("destroy_recall_index vector teardown failed: {:?}", e)))?;
+        // Step 3: Delete THIS CORPUS'S vector rows — OWNERSHIP-SCOPED. The
+        // corpus owns exactly the rows keyed by its own chunk IDs under its
+        // held models' model_ids; on shared storage the vectors table can also
+        // hold rows written by other lanes, and destroying the corpus's recall
+        // index must never delete those. The chunk inventory comes from the
+        // append-only chunks table, so it covers every chunk this corpus ever
+        // wrote vectors for (already-removed sources' deletes are no-ops).
+        // Whole-table teardown (`destroy_all_vectors`) is reserved for the
+        // whole-estate destruction path in EstateCoordinator::destroy. Mirrors
+        // the Swift `Corpus.destroyRecallIndex` scoping.
+        let held_model_ids: Vec<String> =
+            self.slots.iter().map(|s| s.model_id.clone()).collect();
+        let source_ids = self.bundle_store.all_source_ids(None)?;
+        for source_id in &source_ids {
+            let chunks = self.bundle_store.chunks_for_source(source_id, None)?;
+            for chunk in &chunks {
+                for model_id in &held_model_ids {
+                    self.vector_store
+                        .delete_all_vectors(&chunk.id.to_string(), model_id)
+                        .map_err(|e| CorpusKitError::StoreUnavailable(format!(
+                            "destroy_recall_index vector teardown failed: {:?}", e)))?;
+                }
+            }
+        }
 
         // Step 4: Wipe the persisted trained basis (mission 6a-ii-β). A
         // destroyed corpus must leave no orphaned basis row: the next open would

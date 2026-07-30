@@ -263,6 +263,9 @@ actor FederationStateActor {
 
     func enable(manifest: SyncManifest, storage: any Storage) async throws {
         if isEnabled { throw SyncError.alreadyEnabled }
+        // Declare the tombstone side table before any inbound record can be
+        // applied — the LWW gate reads it on every apply.
+        try await Self.ensureFedSyncMetaTable(storage: storage)
         self.manifest = manifest
         self.storage = storage
         for table in manifest.tables where table.direction != .pullOnly {
@@ -515,13 +518,17 @@ actor FederationStateActor {
     /// from the cross-product of cases, not from complex logic.
     ///
     /// `lastWriterWinsByHLC` compares the incoming record's HLC against the
-    /// stored row's `_syncHLC`. If the incoming HLC is older (strictly less),
-    /// the write is silently dropped. On every apply that wins the comparison
-    /// the row is written with `_syncHLC` so the next inbound can compare.
+    /// baseline for the row — the newer of the live row's `_syncHLC` and the
+    /// durable `_fed_sync_meta` entry. If the incoming HLC is older (strictly
+    /// less), the write is silently dropped. On every apply that wins the
+    /// comparison the row is written with `_syncHLC` AND the side-table entry
+    /// is updated, so the next inbound can compare.
     /// Note: this path persists only `_syncHLC`; CloudKitStateActor.applyInbound
     /// also persists `_syncSchemaVersion` and `_syncKitID`.
-    /// The same HLC gate applies to delete events: a stale delete (incoming
-    /// HLC < local `_syncHLC`) is silently rejected; a newer delete proceeds.
+    /// The same gate applies to delete events: a stale delete is silently
+    /// rejected; a newer delete records its HLC in the side table before
+    /// hard-deleting, leaving a tombstone that survives the row and blocks a
+    /// replayed older envelope from resurrecting it.
     ///
     /// Internal (not private) so the LWW force-tests can call it directly
     /// via @testable import without going through the full push/pull stack.
@@ -530,6 +537,9 @@ actor FederationStateActor {
         syncedTable: SyncedTable,
         storage: any Storage
     ) async throws {
+        // Direct callers (including the LWW force-tests) need the same durable
+        // ordering state that enable() establishes for the public pull path.
+        try await Self.ensureFedSyncMetaTable(storage: storage)
         switch record.event {
         case .insert, .update:
             let values = record.values?.asTypedValues ?? [:]
@@ -542,28 +552,17 @@ actor FederationStateActor {
                 )
 
             case .lastWriterWinsByHLC:
-                // Compare HLC; only apply if remote >= local.
-                // Mirrors CloudKitStateActor.applyInbound exactly.
-                let existing = try? await storage.rowStore.query(
+                // Compare HLC against the durable baseline (live row OR
+                // tombstone); only apply if remote >= local. Consulting the
+                // tombstone is what stops a replayed older envelope from
+                // resurrecting a row a newer delete already removed.
+                if let localHLC = try await lwwBaselineHLC(
+                    storage: storage,
                     table: record.table,
-                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
-                )
-                if let first = existing?.first {
-                    // Recover the stored HLC from either `.hlc` (InMemory, where
-                    // TypedValue is preserved verbatim) or `.int` (SQLite/Postgres,
-                    // where the schema does not declare _syncHLC as .hlc so
-                    // readColumn returns the raw packed integer). Both cases carry
-                    // the canonical HLC.packed layout (node<<56 | logical<<40 | phys).
-                    let localHLC: HLC?
-                    switch first["_syncHLC"] ?? .null {
-                    case .hlc(let h): localHLC = h
-                    case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
-                    default: localHLC = nil
-                    }
-                    let incomingHLC = record.hlc.asHLC
-                    if let localHLC, incomingHLC < localHLC {
-                        return
-                    }
+                    primaryKeyColumn: syncedTable.primaryKeyColumn,
+                    rowKey: record.rowKey
+                ), record.hlc.asHLC < localHLC {
+                    return
                 }
                 // Persist _syncHLC so the next inbound write can compare.
                 // (Schema version and kit ID are not merged here.)
@@ -573,6 +572,12 @@ actor FederationStateActor {
                     table: record.table,
                     values: rowValues,
                     conflictColumns: [syncedTable.primaryKeyColumn]
+                )
+                try await writeFedSyncHLC(
+                    storage: storage,
+                    table: record.table,
+                    primaryKey: record.rowKey,
+                    hlc: record.hlc.asHLC
                 )
 
             case .remoteWins:
@@ -606,22 +611,23 @@ actor FederationStateActor {
                 // HLC gate on the delete path: a stale delete (incoming HLC <
                 // local _syncHLC) must not remove a newer local row. A newer
                 // delete (incoming HLC >= local _syncHLC) proceeds.
-                let existing = try? await storage.rowStore.query(
+                if let localHLC = try await lwwBaselineHLC(
+                    storage: storage,
                     table: record.table,
-                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
-                )
-                if let first = existing?.first {
-                    let localHLC: HLC?
-                    switch first["_syncHLC"] ?? .null {
-                    case .hlc(let h): localHLC = h
-                    case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
-                    default: localHLC = nil
-                    }
-                    let incomingHLC = record.hlc.asHLC
-                    if let localHLC, incomingHLC < localHLC {
-                        return
-                    }
+                    primaryKeyColumn: syncedTable.primaryKeyColumn,
+                    rowKey: record.rowKey
+                ), record.hlc.asHLC < localHLC {
+                    return
                 }
+                // Record the winning delete BEFORE removing the live row. The
+                // side-table entry outlives the hard delete and is the
+                // tombstone a later stale replay is measured against.
+                try await writeFedSyncHLC(
+                    storage: storage,
+                    table: record.table,
+                    primaryKey: record.rowKey,
+                    hlc: record.hlc.asHLC
+                )
                 _ = try await storage.rowStore.delete(table: record.table, where: predicate)
 
             case .remoteWins:
@@ -634,6 +640,106 @@ actor FederationStateActor {
                 return
             }
         }
+    }
+
+    // MARK: - Durable LWW ordering state (tombstones)
+
+    /// Side table carrying the last winning HLC per (table, row). Unlike the
+    /// `_syncHLC` column on the application row, an entry here SURVIVES a hard
+    /// delete, so it doubles as the delete tombstone.
+    ///
+    /// Without it the LWW ordering state dies with the row: a newer delete
+    /// removes the row and its `_syncHLC`, and a later replay of an older — but
+    /// validly signed — envelope from the same paired peer finds no baseline to
+    /// compare against and resurrects the deleted data. An untrusted relay only
+    /// has to re-send a message it already saw; no signature forgery is
+    /// involved. Mirrors the Rust `_fed_sync_meta` table.
+    static let fedSyncMetaTable = "_fed_sync_meta"
+
+    /// Declare the tombstone side table. Idempotent, so repeated enables (and
+    /// direct `applyInbound` callers in tests) converge on the same schema.
+    static func ensureFedSyncMetaTable(storage: any Storage) async throws {
+        let table = TableDeclaration(
+            name: fedSyncMetaTable,
+            columns: [
+                ColumnDeclaration(name: "table_name", type: .text),
+                ColumnDeclaration(name: "primary_key", type: .text),
+                ColumnDeclaration(name: "sync_hlc_wire", type: .blob),
+            ],
+            primaryKey: ["table_name", "primary_key"]
+        )
+        try await storage.migrate(to: SchemaDeclaration(
+            kitID: "ConvergenceKitFederation",
+            version: 1,
+            tables: [table]
+        ))
+    }
+
+    /// Read the durable ordering HLC for a row, if one was ever recorded.
+    ///
+    /// Stored full-width (16 wire bytes) rather than as a packed integer so the
+    /// tombstone does not lose precision the live-row `_syncHLC` column would.
+    func readFedSyncHLC(storage: any Storage, table: String, primaryKey: UUID) async throws -> HLC? {
+        let rows = try await storage.rowStore.query(
+            table: Self.fedSyncMetaTable,
+            where: .and([
+                .eq(Column(table: Self.fedSyncMetaTable, name: "table_name"), .text(table)),
+                .eq(Column(table: Self.fedSyncMetaTable, name: "primary_key"), .text(primaryKey.uuidString)),
+            ])
+        )
+        guard case .blob(let wire) = rows.first?["sync_hlc_wire"] else { return nil }
+        return try? HLC(wireBytes: [UInt8](wire))
+    }
+
+    /// The LWW baseline for a row: the newer of the live row's `_syncHLC` and
+    /// the durable tombstone entry.
+    ///
+    /// Both are consulted, not just the tombstone, so an estate that synced
+    /// before this side table existed keeps the ordering already recorded on
+    /// its live rows instead of treating every row as having no baseline.
+    func lwwBaselineHLC(
+        storage: any Storage,
+        table: String,
+        primaryKeyColumn: String,
+        rowKey: UUID
+    ) async throws -> HLC? {
+        let existing = try? await storage.rowStore.query(
+            table: table,
+            where: .eq(Column(table: table, name: primaryKeyColumn), .uuid(rowKey))
+        )
+        var live: HLC?
+        if let first = existing?.first {
+            // Recover the stored HLC from either `.hlc` (InMemory, where
+            // TypedValue is preserved verbatim) or `.int` (SQLite/Postgres,
+            // where the schema does not declare _syncHLC as .hlc so
+            // readColumn returns the raw packed integer). Both cases carry
+            // the canonical HLC.packed layout (node<<56 | logical<<40 | phys).
+            switch first["_syncHLC"] ?? .null {
+            case .hlc(let h): live = h
+            case .int(let i): live = HLC(packed: UInt64(bitPattern: i))
+            default: live = nil
+            }
+        }
+        let durable = try await readFedSyncHLC(storage: storage, table: table, primaryKey: rowKey)
+        switch (live, durable) {
+        case let (l?, d?): return l >= d ? l : d
+        case let (l?, nil): return l
+        case let (nil, d?): return d
+        case (nil, nil): return nil
+        }
+    }
+
+    /// Record the winning HLC for a row in the durable side table.
+    func writeFedSyncHLC(storage: any Storage, table: String, primaryKey: UUID, hlc: HLC) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.fedSyncMetaTable,
+            values: [
+                "table_name": .text(table),
+                "primary_key": .text(primaryKey.uuidString),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
     }
 
     /// Current wall-clock in milliseconds, passed explicitly into

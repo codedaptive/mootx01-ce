@@ -9,6 +9,7 @@ limits so later work can distinguish a historical result from current state.
 - [Security Finding Remediation Ledger — June 25 to July 21, 2026](SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-21.md)
 - [Security Finding Remediation Ledger — 537 issue-to-commit records](SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
 - [Security Finding Remediation Ledger — July 24 to 25, 2026](SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-25.md)
+- [Security Finding Remediation Ledger — substrate findings, July 30, 2026](SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-30.md)
 
 ## Conventions
 

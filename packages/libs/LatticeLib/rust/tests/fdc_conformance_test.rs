@@ -254,3 +254,20 @@ fn stemmer_conformance_snowball_corpus() {
         pass, total
     );
 }
+
+/// Colon-delimited compact rows must classify identically across ports.
+///
+/// UAX #29 treats ASCII ':' as MidLetter, so `unicode-segmentation` keeps
+/// `TASK:VERIFY` as ONE token while Foundation's `.byWords` splits it. Without
+/// the tokenizer's compatibility split the merged tokens miss the word-class
+/// table and lexicon, take the HMM `NonAlpha` path, and are dropped from the
+/// concept bag — collapsing this row to `000` in Rust while Swift resolves it.
+#[test]
+fn encode_uses_the_same_canonical_classifier_as_encode_anchor() {
+    // This compact estate row was one of 233 whose attached FDC vectors
+    // diverged cross-port because Rust's UAX #29 tokenizer retained ASCII
+    // colons while Foundation's `.byWords` tokenizer split them.
+    let text = "TASK:MXE-2026-0151-VERIFY|FILES:hydration.rs|PATTERNS:stale-inline-comment:CLOSED(v3+v3+v2=8)|TESTS:4/4-exit0|VERDICT:PASS";
+    assert_eq!(Fdc::encode(text).as_deref(), Some("700"));
+    assert_eq!(Fdc::encode(text), Fdc::encode_anchor(text).0);
+}

@@ -118,6 +118,14 @@ extension WordClassTable {
     /// path for the `WordClassTableCache` holder.
     public static func loadWritable() -> WordClassTable? {
         let url = NovelPoolSubmitter.tableArtifactURL()
+        // Fail closed on a relative artifact path — parity with the Rust
+        // `load_writable_table` guard. This table takes precedence over the
+        // bundled one and seeds the process-global classifier, so a
+        // CWD-relative path would let anyone who can influence the working
+        // directory plant a WordClassTable.json and steer classification.
+        guard url.path.hasPrefix("/") else {
+            return nil
+        }
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
         }
