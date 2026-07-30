@@ -1697,11 +1697,22 @@ public extension Estate {
         opBitmap = BitField.writeField(Int64(frame.generatedBy.rawValue), into: opBitmap, shift: 18, width: 6)
         opBitmap = BitField.writeField(Int64(frame.confidence.rawValue), into: opBitmap, shift: 24, width: 6)
 
-        // Adjective bitmap: set state to .pending (bits 0–5, raw value 1).
-        let adjBitmap = BitField.writeField(
+        // Adjective bitmap: set state to .pending (bits 0–5, raw value 1) and
+        // inherit the target drawer's sensitivity in bits 6–11 (§D.2). Proposals
+        // derive from the target so they carry its tier at birth — surfaces that
+        // read proposals later get the sensitivity gate for free. Target-only
+        // stamping; a counterpart-frame extension for two-endpoint proposals is
+        // noted as a ruled follow-up (§D.2 / §D.3 investigation findings).
+        var adjBitmap = BitField.writeField(
             Int64(State.pending.rawValue),
             into: 0,
             shift: 0,
+            width: 6
+        )
+        adjBitmap = BitField.writeField(
+            Int64(targetDrawer.adjectiveSensitivity.rawValue),
+            into: adjBitmap,
+            shift: 6,
             width: 6
         )
 

@@ -167,4 +167,19 @@ public extension Proposal {
         // Cookbook §2.3: state at bits 0–5.
         State(rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 0, width: 6))) ?? .active
     }
+
+    /// Decode bits 6–11 of `adjectiveBitmap` as an `AdjectiveSensitivity`
+    /// (6-bit scale-gapped field, cookbook §2.3). Returns `.normal` for
+    /// unrecognised raw values — the fail-closed default matching the
+    /// estate's default access posture.
+    ///
+    /// Stamped by `EstateVerbs.propose` from the target drawer's tier
+    /// (§D.2 sensitivity inheritance). Mirrors `Drawer.adjectiveSensitivity`
+    /// and `Tunnel.adjectiveSensitivity` — the same adjective bitmap layout
+    /// is shared across all three nouns.
+    var adjectiveSensitivity: AdjectiveSensitivity {
+        // Cookbook §2.3: sensitivity at bits 6–11.
+        AdjectiveSensitivity(
+            rawValue: Int(BitField.extractField(adjectiveBitmap, shift: 6, width: 6))) ?? .normal
+    }
 }
