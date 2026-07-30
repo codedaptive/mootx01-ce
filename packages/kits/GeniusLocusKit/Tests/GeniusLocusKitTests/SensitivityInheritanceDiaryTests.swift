@@ -5,20 +5,26 @@
 // The `diary` table has no sensitivity column. Until it does, diary entries
 // MUST NOT interpolate drawer content, drawer IDs, or any other material
 // derived from estate drawers — only count integers and fixed keywords may
-// appear. This file pins that contract with two complementary checks:
+// appear. This file pins that contract with two FORMAT-CONTRACT checks.
+//
+// Scope caveat: these tests validate locally-MIRRORED copies of the diary
+// format strings and a directly-written entry via kit.addDiaryEntry — they
+// do NOT execute DreamingDaemon's own diary write path. A regression in
+// DreamingDaemon's interpolation surfaces here only if the mirrored format
+// strings below are kept in sync with DreamingDaemon.swift (its three
+// diary-site invariant comments point back here with a keep-in-sync
+// instruction). A daemon-invoking sentinel test is the stronger upgrade if
+// the invariant ever needs hard enforcement.
 //
 //   1. Format shape — the three dreaming diary format strings (ALPHA, THETA,
-//      OMEGA) are assembled locally using the same interpolation as
-//      DreamingDaemon and validated against a whitelist of allowed tokens:
-//      cycle-type keywords and non-negative integers.
+//      OMEGA), mirrored locally, validated against a whitelist of allowed
+//      tokens: cycle-type keywords and non-negative integers.
 //
-//   2. Sentinel non-leakage — a GLK estate is provisioned with a drawer
-//      whose content contains a known sentinel string; one full dream cycle
-//      runs; the resulting diary entry text is asserted to not contain the
-//      sentinel. This catches future regressions where someone adds content
-//      interpolation to DreamingDaemon's diary strings.
+//   2. Sentinel non-leakage — a counts-only entry written alongside a
+//      sentinel-bearing drawer is asserted to not contain the sentinel.
 //
-// Both checks together constitute the guard required by Bob's §D.6 ruling.
+// Together these constitute the guard required by Bob's §D.6 ruling
+// (option a: format contract + invariant comments, no schema change).
 
 import Testing
 import Foundation
