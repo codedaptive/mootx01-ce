@@ -63,9 +63,10 @@ pub fn default_standing_signal_names() -> [&'static str; 11] {
 /// embeddings on each five-minute fire.
 ///
 /// Signals 7–11 (TemporalCausalitySignal, DistillationSignal,
-/// TrainingSignal, ConsolidationSignal) use their `default_spec()` no-op
-/// variants because this helper cannot supply estate-specific closures
-/// (fold cycle, distillation cycle, training daemon, consolidation cycle)
+/// TrainingSignal, ContradictionScoutSignal, ConsolidationSignal) use
+/// their `default_spec()` no-op variants because this helper cannot
+/// supply estate-specific closures (fold cycle, distillation cycle,
+/// training daemon, contradiction hunt cycle, consolidation cycle)
 /// without breaking its generic signature. Production callers wire live
 /// closures via the individual `spec(…)` factories.
 ///
