@@ -74,8 +74,6 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_reclassify_fdc") == .ask)
         #expect(PermissionsWriter.classify("moot_dream") == .ask)
         #expect(PermissionsWriter.classify("moot_distill") == .ask)
-        // moot_consolidate is the SPEC §3 dispatch alias — same class.
-        #expect(PermissionsWriter.classify("moot_consolidate") == .ask)
         #expect(PermissionsWriter.classify("moot_synthesize") == .ask)
         #expect(PermissionsWriter.classify("moot_palace_import") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_import") == .ask)
@@ -118,7 +116,7 @@ struct PermissionsWriterTests {
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
-            "moot_connection_search", "moot_consolidate", "moot_distill", "moot_drain_status", "moot_dream",
+            "moot_connection_search", "moot_distill", "moot_drain_status", "moot_dream",
             "moot_dataset_query", "moot_dataset_stats", "moot_file_dataset",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
             "moot_fact_search", "moot_fact_timeline", "moot_federated_search", "moot_file_fact",
@@ -140,13 +138,16 @@ struct PermissionsWriterTests {
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_write_journal",
         ]
-        // Count guard (see doc comment): 72 = 68 (contradiction hunter era) +
+        // Count guard (see doc comment): 71 = 68 (contradiction hunter era) +
         // 3 dataset tools (MX-TAB-7: moot_file_dataset, moot_dataset_query,
-        // moot_dataset_stats) + moot_recall_vague (Wave 2 §4.4).
+        // moot_dataset_stats) + moot_recall_vague (Wave 2 §4.4) −
+        // moot_consolidate (its alias-era dispatch name left the surface in
+        // SPEC_DISTILLATION_STORAGE §3 Phase 2; the name reserves for
+        // multi-item consolidation).
         // A mismatch here means THIS PINNED LIST is stale relative to
         // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
         // before trusting the set-difference below.
-        #expect(realTools.count == 72, "pinned tool inventory drifted from the real surface count")
+        #expect(realTools.count == 71, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)

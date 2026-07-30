@@ -2,9 +2,9 @@
 //
 // Recipe that triggers the per-item distillation sweep on demand —
 // SPEC_DISTILLATION_STORAGE §3/§7.1. Registered name: `distill`; the MCP
-// surface lists it as `moot_distill` (with `moot_consolidate` retained as
-// a compatibility alias until the Phase 2 multi-item consolidation
-// feature claims the "consolidate" name).
+// surface lists it as `moot_distill`. The `moot_consolidate` name no longer
+// dispatches here (§3 Phase 2); it reserves for the multi-item
+// consolidation feature.
 //
 // Layer discipline B-1/B-2: pure sequencing. Delegates all sweep work to
 // GeniusLocusKit.distillItemsSweep, which distills every active drawer

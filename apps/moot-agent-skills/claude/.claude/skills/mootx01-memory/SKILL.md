@@ -49,7 +49,7 @@ happened unless you actually queried it.
 5. Dream:
    - Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
    - Run `moot_dream` after bulk import, major filing, or substantial memory growth.
-   - Run `moot_distill` (alias: `moot_consolidate`) to populate on-row distilled representations; captures also distill automatically as the encode queue drains.
+   - Run `moot_distill` to populate on-row distilled representations; captures also distill automatically as the encode queue drains.
 
 ## Answer Discipline
 

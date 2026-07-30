@@ -182,8 +182,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // arguments; no mode field is surfaced here.
     tools.push(dream_tool());
     // Distillation tools — Rust parity with Swift RecipeTools.swift.
-    // moot_distill: run one per-item distillation sweep (SPEC §3;
-    //   moot_consolidate is an unlisted dispatch alias).
+    // moot_distill: run one per-item distillation sweep (SPEC §3).
     // moot_recall_distilled: exact-search geometry + distilled hydration (§10.3).
     // (moot_recollect retired with the factoid tier, §11.)
     tools.push(distill_tool());
@@ -890,12 +889,11 @@ fn hunt_contradictions_tool() -> serde_json::Value {
 /// Distillation sweep tool — mirrors Swift `RecipeTools.distillTool()`
 /// (SPEC_DISTILLATION_STORAGE §3/§7.1). Populates the on-row distilled
 /// representation of every eligible drawer; no factoid drawers, no
-/// tunnels. Idempotent by the NULL predicate. `moot_consolidate` is
-/// accepted at dispatch as a compatibility alias but not listed.
+/// tunnels. Idempotent by the NULL predicate.
 fn distill_tool() -> serde_json::Value {
     json!({
         "name": "moot_distill",
-        "description": "Distill working memory: populate the on-row distilled representation (token-economical prose) of every active item whose representation is missing or stale. Idempotent — already-distilled items are skipped. Returns the count of items distilled this sweep. (moot_consolidate is accepted as a compatibility alias.)",
+        "description": "Distill working memory: populate the on-row distilled representation (token-economical prose) of every active item whose representation is missing or stale. Idempotent — already-distilled items are skipped. Returns the count of items distilled this sweep.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "cluster_id": string_schema("Accepted for API stability; not used by the per-item sweep model."),
