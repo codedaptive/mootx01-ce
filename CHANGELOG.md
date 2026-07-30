@@ -5,6 +5,35 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-05 — 2026-07-30
+
+Second internal beta cut for 1.1. Stamps the sensitivity-inheritance and
+Wave-2 consolidation feature set. 198 commits since beta-04.
+
+- **Sensitivity inheritance (both ports).** Vague drawers, consolidation
+  tunnels (`consolidated_from`, `supersedes`), and proposals now stamp the
+  maximum constituent-source sensitivity. `vagueRecall` hop-1 expansion is
+  capped at the Elevated ceiling. Diary counts-only invariant guard added.
+  A repair-sweep prologue re-stamps rows written before inheritance landed.
+- **Wave-2 consolidation.** `ConsolidationSignal` joins the standing-signal
+  roster (signal 11) with a daily sweep in both ports; SQLite and Postgres
+  store delegations wired through; vague recall serves dense-over-distillate.
+- **Distillation storage Phase 2.** The `moot_consolidate` compatibility
+  alias is removed; `moot_recall_vague` is classified read-tier (pinned tool
+  inventory 72).
+- **1.0.x → 1.1.x migration.** Appendix A migration catalog plus the A.0.5
+  vault protocol.
+- **Ingest tail and perf.** CorpusKit queue-drain fan-out restored with
+  three-state basis logic; drain/commit batch queries replace per-row
+  fetches; JacobiSVD trailing-worker range-trap guard.
+- **Cross-port parity.** Combined-fingerprint word split drops empty
+  segments in Rust; twin conformance ceilings tightened to 90.
+- **Security.** LatticeLib fails closed on CWD-relative pool and table
+  paths; July-25 second-wave closures (encryption-migration hardening,
+  signing fail-closed, fixture guard).
+- **Release engineering.** The release workflow excludes pre-release tags;
+  the Rust CI lane honors required-features crates so migrations tests run.
+
 ## 1.1.0-beta-04 — 2026-07-24
 
 First internal beta cut for 1.1. Stamps the Wave-1 / FAB5 feature set

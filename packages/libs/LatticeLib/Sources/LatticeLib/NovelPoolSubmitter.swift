@@ -116,6 +116,15 @@ public enum NovelPoolSubmitter {
     static let maxPoolFiles = 500
 
     static func writeSubmission(_ submission: PoolSubmission, to directory: URL) {
+        // Enforcement point for the trusted-location rule — parity with the
+        // Rust `write_submission` guard. Pool files carry plaintext novel
+        // tokens; a relative directory resolves against the process working
+        // directory, which the process does not own. Fire-and-forget: log and
+        // discard, never throw.
+        guard directory.path.hasPrefix("/") else {
+            log.error("novel pool: refusing relative pool dir \(directory.path); submission discarded")
+            return
+        }
         do {
             try FileManager.default.createDirectory(
                 at: directory,

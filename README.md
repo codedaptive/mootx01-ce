@@ -45,7 +45,7 @@ provided to paying clients require a commercial license. See the
 and the binding [`LICENSE`](LICENSE).
 
 > **Development branch:** this branch carries the active 1.1 beta
-> (`1.1.0-beta-04`). The public release links below install stable 1.0. To
+> (`1.1.0-beta-05`). The public release links below install stable 1.0. To
 > test 1.1, build this checkout, pin the commit, and use a backed-up estate —
 > see the [1.1 development instructions](docs/start-here/DEVELOPMENT_BETA.md).
 

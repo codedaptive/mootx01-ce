@@ -1,7 +1,7 @@
 ---
-version: 1.4.1
+version: 1.4.2
 status: active
-date: 2026-07-24
+date: 2026-07-30
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
 ---
 
@@ -69,8 +69,9 @@ The development channel carries an explicit SemVer pre-release version.
 - `YY` is the zero-padded count of pushes to `candidate/1.1.x`, starting with
   the branch-creation push as `01`. The field expands beyond two digits when
   necessary.
-- The current value is `1.1.0-beta-04`: stamped 2026-07-24 in preparation
-  for the fourth push to `candidate/1.1.x`.
+- The current value is `1.1.0-beta-05`: stamped 2026-07-30 for the sixth
+  push to `candidate/1.1.x` (the fifth push, on 2026-07-30, reused the
+  `beta-04` stamp and produced no build).
 - CE and EE source, binary, plugin, and embedded-installer stamps use the same
   beta version.
 - Candidate artifacts use the source version verbatim, without a leading `v`.
@@ -296,6 +297,10 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 1.4.2 -- 2026-07-30
+Updated §1.5 current-value statement to `1.1.0-beta-05` for the
+sensitivity-inheritance candidate cut; recorded the unstamped fifth push.
 
 ### 1.4.1 -- 2026-07-24
 Updated §1.5 current-value statement to `1.1.0-beta-04` after the FAB5-B1

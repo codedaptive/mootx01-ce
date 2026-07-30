@@ -118,6 +118,14 @@ extension WordClassTable {
     /// path for the `WordClassTableCache` holder.
     public static func loadWritable() -> WordClassTable? {
         let url = NovelPoolSubmitter.tableArtifactURL()
+        // Fail closed on a relative artifact path — parity with the Rust
+        // `load_writable_table` guard. This table takes precedence over the
+        // bundled one and seeds the process-global classifier, so a
+        // CWD-relative path would let anyone who can influence the working
+        // directory plant a WordClassTable.json and steer classification.
+        guard url.path.hasPrefix("/") else {
+            return nil
+        }
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
         }
@@ -278,12 +286,18 @@ public enum WordClassTableCache {
     /// `poolTableArtifactURL`): re-resolving from that exact path picks up the
     /// just-merged tokens so the running tagger learns them in-session. Returns
     /// the new version. Falls back to the bundled table if the artifact is
-    /// absent/malformed (never publishes an empty table over a good one
+    /// absent/malformed/relative (never publishes an empty table over a good one
     /// silently — a missing artifact yields the bundled pristine set).
+    ///
+    /// The leading absolute-path test is the same guard `loadWritable()` applies.
+    /// This path decodes the caller's URL directly rather than going through
+    /// `loadWritable()`, so without it the live in-session swap would still adopt
+    /// a table from a CWD-relative path that the startup seed already refuses.
     @discardableResult
     public static func reload(fromArtifact artifactURL: URL) -> UInt64 {
         let resolved: WordClassTable?
-        if FileManager.default.fileExists(atPath: artifactURL.path),
+        if artifactURL.path.hasPrefix("/"),
+           FileManager.default.fileExists(atPath: artifactURL.path),
            let data = try? Data(contentsOf: artifactURL),
            let merged = try? JSONDecoder().decode(WordClassTable.self, from: data) {
             resolved = merged
