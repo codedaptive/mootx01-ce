@@ -418,3 +418,94 @@ public struct TrustedDeviceCredential:
         )
     }
 }
+
+/// Immutable trust decision carried by a monotonic policy epoch.
+public enum DeviceTrustState: String, Sendable, Codable, Hashable {
+    case pendingEnrollment
+    case trusted
+    case revoked
+}
+
+/// Content-addressed trust state for a stable device credential.
+public struct DeviceTrustRecord:
+    Sendable,
+    Codable,
+    Hashable,
+    SecretSyncCanonicalEncodable
+{
+    public let recordDigest: SecretRecordDigest
+    public let deviceID: TrustedDeviceID
+    public let credentialID: DeviceCredentialID
+    public let trustState: DeviceTrustState
+    public let effectivePolicyEpoch: UInt64
+
+    public init(
+        recordDigest: SecretRecordDigest,
+        deviceID: TrustedDeviceID,
+        credentialID: DeviceCredentialID,
+        trustState: DeviceTrustState,
+        effectivePolicyEpoch: UInt64
+    ) throws {
+        guard effectivePolicyEpoch > 0 else {
+            throw SecretSyncContractError.invalidPolicyEpoch
+        }
+        self.recordDigest = recordDigest
+        self.deviceID = deviceID
+        self.credentialID = credentialID
+        self.trustState = trustState
+        self.effectivePolicyEpoch = effectivePolicyEpoch
+    }
+
+    public var canonicalDomain: SecretSyncCanonicalDomain {
+        .deviceTrustRecord
+    }
+
+    public func canonicalFields() throws -> [SecretSyncCanonicalField] {
+        [
+            SecretSyncCanonicalField(
+                tag: 1,
+                value: SecretSyncCanonicalValue.uuid(deviceID.rawValue)
+            ),
+            SecretSyncCanonicalField(
+                tag: 2,
+                value: SecretSyncCanonicalValue.uuid(credentialID.rawValue)
+            ),
+            SecretSyncCanonicalField(
+                tag: 3,
+                value: SecretSyncCanonicalValue.string(trustState.rawValue)
+            ),
+            SecretSyncCanonicalField(
+                tag: 4,
+                value: SecretSyncCanonicalValue.uint64(effectivePolicyEpoch)
+            ),
+        ]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recordDigest
+        case deviceID
+        case credentialID
+        case trustState
+        case effectivePolicyEpoch
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            recordDigest: container.decode(
+                SecretRecordDigest.self,
+                forKey: .recordDigest
+            ),
+            deviceID: container.decode(TrustedDeviceID.self, forKey: .deviceID),
+            credentialID: container.decode(
+                DeviceCredentialID.self,
+                forKey: .credentialID
+            ),
+            trustState: container.decode(DeviceTrustState.self, forKey: .trustState),
+            effectivePolicyEpoch: container.decode(
+                UInt64.self,
+                forKey: .effectivePolicyEpoch
+            )
+        )
+    }
+}

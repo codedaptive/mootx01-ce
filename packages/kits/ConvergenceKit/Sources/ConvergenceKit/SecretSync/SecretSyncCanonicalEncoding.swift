@@ -6,8 +6,14 @@ public enum SecretSyncContractError: Error, Sendable, Equatable {
     case emptyValue(field: String)
     case valueTooLarge(field: String)
     case invalidCredentialVersion
+    case invalidPolicyEpoch
     case keyRoleReuse
     case selfAuthorizedEnrollment
+    case duplicateIdentifier(field: String)
+    case emptySet(field: String)
+    case missingPredecessor
+    case unexpectedPredecessor
+    case recoveryRecipientIsRoutineRecipient
     case invalidCanonicalMagic
     case unsupportedSchemaVersion(UInt16)
     case invalidFieldTag
@@ -286,6 +292,23 @@ enum SecretSyncContractBounds {
         guard bytes.count <= maximumAlgorithmIdentifierBytes else {
             throw SecretSyncContractError.valueTooLarge(field: "algorithmIdentifier")
         }
+    }
+
+    static func sortedUniqueUUIDs(
+        _ values: [UUID],
+        field: String,
+        allowEmpty: Bool = false
+    ) throws -> [UUID] {
+        if !allowEmpty, values.isEmpty {
+            throw SecretSyncContractError.emptySet(field: field)
+        }
+        let sorted = values.sorted {
+            $0.uuidString.lowercased() < $1.uuidString.lowercased()
+        }
+        for index in sorted.indices.dropFirst() where sorted[index] == sorted[index - 1] {
+            throw SecretSyncContractError.duplicateIdentifier(field: field)
+        }
+        return sorted
     }
 }
 
