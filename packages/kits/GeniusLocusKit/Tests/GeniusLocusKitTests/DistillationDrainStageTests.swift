@@ -79,30 +79,23 @@ struct DistillationDrainStageTests {
     private func bm25Snapshot(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, queries: [String]
     ) async throws -> String {
+        // RAW BM25 lane only (engine.bm25TopK), NOT corpus-RRF: the fused
+        // corpusOnly path legitimately changes after a sweep — Item 4 feeds
+        // the distillation-features lane into recall and Stream F recomposes
+        // dense vectors — so the §9 isolation invariant is a claim about the
+        // LEXICAL lane alone (content + digest unchanged ⇒ postings
+        // unchanged ⇒ bm25TopK byte-identical).
+        guard let engine = await kit.corpusKits[handle] else { return "no-corpus" }
         var lines: [String] = []
         for query in queries {
-            let request = GLKRecallRequest(
-                frame: RecallFrame(filterChain: [], hydrationLevel: .full, limit: 20),
-                mode: .corpusOnly,
-                scoring: .rrf,
-                limit: 20,
-                fallback: .allowDegraded,
-                queryText: query,
-                origin: .external
-            )
-            let result = try await kit.recall(handle, request)
             lines.append("query: \(query)")
-            for hit in result.hits {
-                lines.append("\(hit.id) \(hit.score.bm25)")
+            for hit in try await engine.bm25TopK(query: query, limit: 20) {
+                lines.append("  \(hit.id) \(hit.score)")
             }
         }
         return lines.joined(separator: "\n")
     }
 
-    /// Dense-lane score snapshot (unionBest + matrixAware, `score.dense`).
-    /// After a distillation sweep that triggers recomposeDenseVector, the
-    /// dense float vectors are distillate-composed ("settled" state), so
-    /// scores differ from the pre-sweep organic baseline.
     private func denseScoreSnapshot(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, queries: [String]
     ) async throws -> String {
