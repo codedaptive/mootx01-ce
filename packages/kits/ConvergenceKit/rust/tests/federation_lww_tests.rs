@@ -258,3 +258,39 @@ fn newer_delete_removes_local_row() {
         "newer delete must hard-delete the local row"
     );
 }
+
+/// A replayed older-but-valid envelope must NOT resurrect a row that a newer
+/// delete already removed. The delete hard-deletes the row along with its
+/// `_syncHLC`, so without a durable tombstone the stale replay finds no
+/// baseline and is accepted — an untrusted relay re-sending a message it
+/// already saw is enough, no signature forgery required.
+#[test]
+fn stale_update_cannot_resurrect_a_deleted_row() {
+    let storage_a = make_storage();
+    let storage_b = make_storage();
+    let (mut engine_a, mut engine_b) = make_pair(storage_a, storage_b.clone());
+
+    let row_id = Uuid::new_v4();
+
+    // Valid update at T=500.
+    engine_a.enqueue(make_upsert_record(row_id, "original", 500)).unwrap();
+    engine_a.push().unwrap();
+    engine_b.pull().unwrap();
+    assert!(row_exists(&storage_b, row_id));
+
+    // Newer delete at T=1000 removes the row.
+    engine_a.enqueue(make_delete_record(row_id, 1000)).unwrap();
+    engine_a.push().unwrap();
+    engine_b.pull().unwrap();
+    assert!(!row_exists(&storage_b, row_id));
+
+    // Replay of the older T=500 update — must be rejected by the tombstone.
+    engine_a.enqueue(make_upsert_record(row_id, "stale replay", 500)).unwrap();
+    engine_a.push().unwrap();
+    engine_b.pull().unwrap();
+
+    assert!(
+        !row_exists(&storage_b, row_id),
+        "a stale replay must not resurrect a row deleted by a newer HLC"
+    );
+}

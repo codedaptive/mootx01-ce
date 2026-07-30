@@ -5,6 +5,37 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.37 — 2026-07-30
+
+**Security release — four findings closed across ConvergenceKit, CorpusKit,
+LatticeLib.** Expected to be the final 1.0.x release barring further security
+issues; development continues on the 1.1.x line.
+
+- **Federation deletes lose HLC tombstones (high).** LWW ordering state lived
+  only on the live row's `_syncHLC`, so a newer delete removed the row and its
+  baseline; a replayed older-but-validly-signed envelope then found nothing to
+  compare against and resurrected the data. A durable `_fed_sync_meta` side
+  table now records the winning HLC on every LWW apply and before each winning
+  delete, so the tombstone outlives the row.
+- **Corpus teardown wiped all shared vector rows (medium).** `destroyRecallIndex`
+  called the whole-store destroy primitive, deleting the vectors table
+  regardless of ownership. Now scoped to the corpus's own chunk IDs under its
+  held models.
+- **Rust tokenizer no longer split colon-delimited input (medium).** UAX #29
+  treats ASCII `:` as MidLetter, so `TASK:VERIFY` stayed one token in Rust
+  while Swift split it; merged tokens were dropped from the concept bag.
+  The split is restored and both ports agree.
+- **Writable word-class table loadable from the working directory (medium).**
+  A CWD-relative artifact path took precedence over the bundled table and
+  seeded the process-global classifier. Both ports now fail closed to the
+  bundled table on a relative path.
+
+Each fix ships a regression test verified to fail against the unfixed code.
+Swift and Rust ports kept in parity throughout.
+
+(v1.0.36, 2026-07-29, contained no code changes — documentation and
+repository-content cleanup only.)
+
 ## Unreleased (1.0.x finalization — 1.0.35)
 
 **mcp-benchmarker: benchmark suite finalized on the 1.0.x line**
