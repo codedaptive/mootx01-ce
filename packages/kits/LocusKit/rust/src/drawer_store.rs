@@ -669,6 +669,14 @@ pub trait DrawerStore: Send + Sync {
     ///   - `vague_drawer.is_vague()` is true (bit 20 set).
     ///   - `constituent_ids.len() >= 3` (D5 min cluster size).
     ///
+    /// # Implementation coverage
+    ///
+    /// Implemented by: `DrawerStoreCore` (and all three newtypes — InMemory,
+    /// SQLite, Postgres — which delegate to their inner core).
+    /// `Arc<dyn DrawerStore>` also forwards. Test-only stubs (FakeStore) keep
+    /// the `DatabaseUnavailable` default intentionally — the default remains so
+    /// minimal stubs do not need to implement consolidation.
+    ///
     /// Mirrors Swift `DrawerStore.consolidateTransactionally`.
     fn consolidate_transactionally(
         &self,
@@ -2341,5 +2349,46 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn wipe_all_content(&self) -> Result<(), LocusKitError> {
         self.as_ref().wipe_all_content()
+    }
+    // Wave-2 vague-tier delegation — forward through the trait object.
+    //
+    // These four methods have DatabaseUnavailable defaults in the trait. Without
+    // explicit forwards here, an Arc<dyn DrawerStore> wrapping a SqliteDrawerStore
+    // or PostgresDrawerStore would always hit the error path instead of the real
+    // implementation inside DrawerStoreCore. The live path in the Rust Autonomic
+    // Governor holds Arc<dyn DrawerStore>, so these forwards are required for
+    // production consolidation sweeps and vague_recall hop-2 to function.
+    fn consolidate_transactionally(
+        &self,
+        vague_drawer: &Drawer,
+        constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().consolidate_transactionally(vague_drawer, constituent_ids, added_by, now)
+    }
+    fn drawers_eligible_for_consolidation(
+        &self,
+        older_than: i64,
+        limit: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().drawers_eligible_for_consolidation(older_than, limit)
+    }
+    fn constituent_ids_for_vague_item(
+        &self,
+        vague_drawer_id: &str,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.as_ref().constituent_ids_for_vague_item(vague_drawer_id)
+    }
+    fn fold_in_transactionally(
+        &self,
+        vague_v2: &Drawer,
+        prior_vague_id: &str,
+        enlarged_constituent_ids: &[&str],
+        added_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref()
+            .fold_in_transactionally(vague_v2, prior_vague_id, enlarged_constituent_ids, added_by, now)
     }
 }
