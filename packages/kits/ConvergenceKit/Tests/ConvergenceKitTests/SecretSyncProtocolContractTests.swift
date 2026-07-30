@@ -39,54 +39,49 @@ struct SecretSyncProtocolContractTests {
     @Test("policy entries retain signed commits required for rehydration")
     func policyEntriesRetainCommits() async throws {
         let entry = try policyStoreEntry()
-        let head = try SecretPolicyStoreHead(
-            scopeID: entry.commit.scopeID,
-            policyEpoch: entry.commit.policyEpoch,
-            commitDigest: entry.commit.recordDigest,
-            policyDigest: entry.commit.policyDigest
+        let revoked = try #require(
+            entry.trustRecords.first { $0.trustState == .revoked }
         )
-        let store = PolicyStoreFake(head: head, stagedEntry: entry)
+        #expect(
+            entry.records.signedPolicy.policy.trustedDeviceRecordDigests
+                .contains(revoked.recordDigest)
+        )
+        #expect(revoked.credentialID == fixtureCredentialID(806))
+    }
 
-        let hydrated = try #require(
-            try await store.stagedPolicy(
+    @Test("policy CAS requires the exact staged validator-produced candidate")
+    func policyCompareAndAdvanceIsMonotonic() async throws {
+        let entry = try policyStoreEntry()
+        let snapshot = try authoritativeSnapshotFixture(for: entry)
+        let precondition = try SecretPolicyAdvancePrecondition(
+            expectedHead: nil,
+            candidateEntry: entry,
+            validatedSnapshot: snapshot
+        )
+        let store = PolicyStoreFake()
+        await #expect(throws: SecretSyncInterfaceError.self) {
+            try await store.compareAndAdvance(precondition)
+        }
+        try await store.appendStagedPolicy(
+            policyStoreEntry(seed: 900, byte: 0x90)
+        )
+        await #expect(throws: SecretSyncInterfaceError.self) {
+            try await store.compareAndAdvance(precondition)
+        }
+        try await store.appendStagedPolicy(entry)
+        #expect(
+            try await store.compareAndAdvance(precondition)
+                == .advanced(precondition.candidateHead)
+        )
+        let committed = try #require(
+            try await store.committedPolicy(
                 for: entry.commit.scopeID,
                 epoch: entry.commit.policyEpoch
             )
         )
-        #expect(hydrated.commit == entry.commit)
-        #expect(hydrated.records == entry.records)
-    }
-
-    @Test("policy compare-and-advance reports forks without overwriting the head")
-    func policyCompareAndAdvanceIsMonotonic() async throws {
-        let fixture = try policyAdvanceFixture()
-        let precondition = try SecretPolicyAdvancePrecondition(
-            expectedHead: fixture.head,
-            candidateHead: fixture.next,
-            predecessorCommitDigest: fixture.head.commitDigest
-        )
-        #expect(
-            try await fixture.store.compareAndAdvance(precondition)
-                == .advanced(fixture.next)
-        )
-        let siblingPrecondition = try SecretPolicyAdvancePrecondition(
-            expectedHead: fixture.head,
-            candidateHead: fixture.sibling,
-            predecessorCommitDigest: fixture.head.commitDigest
-        )
-        let result = try await fixture.store.compareAndAdvance(
-            siblingPrecondition
-        )
-        #expect(
-            result == .forkDetected(
-                currentHead: fixture.next,
-                competingCommitDigest: fixture.sibling.commitDigest
-            )
-        )
-        #expect(
-            try await fixture.store.policyHead(for: fixture.head.scopeID)
-                == fixture.next
-        )
+        #expect(committed.commit == snapshot.commit)
+        #expect(committed.records == snapshot.records)
+        #expect(committed.trustRecords == snapshot.trustedDeviceRecords)
     }
 
     @Test("purge receipts are category-idempotent and admission defaults closed")
@@ -295,41 +290,6 @@ private func expectFutureCredentialRejected(
     } catch {
         Issue.record("unexpected trust snapshot error: \(error)")
     }
-}
-
-private struct PolicyAdvanceFixture {
-    let head: SecretPolicyStoreHead
-    let next: SecretPolicyStoreHead
-    let sibling: SecretPolicyStoreHead
-    let store: PolicyStoreFake
-}
-
-private func policyAdvanceFixture() throws -> PolicyAdvanceFixture {
-    let scopeID = SecretScopeID(fixtureUUID(20))
-    let head = try SecretPolicyStoreHead(
-        scopeID: scopeID,
-        policyEpoch: 3,
-        commitDigest: digest(0x31),
-        policyDigest: digest(0x32)
-    )
-    let next = try SecretPolicyStoreHead(
-        scopeID: scopeID,
-        policyEpoch: 4,
-        commitDigest: digest(0x41),
-        policyDigest: digest(0x42)
-    )
-    let sibling = try SecretPolicyStoreHead(
-        scopeID: scopeID,
-        policyEpoch: 4,
-        commitDigest: digest(0x51),
-        policyDigest: digest(0x52)
-    )
-    return PolicyAdvanceFixture(
-        head: head,
-        next: next,
-        sibling: sibling,
-        store: PolicyStoreFake(head: head)
-    )
 }
 
 private func expectIdempotentPurgeRecording(
@@ -667,16 +627,9 @@ private actor TrustStoreFake: SecretSyncTrustStore {
 }
 
 private actor PolicyStoreFake: SecretSyncPolicyStore {
-    private var currentHead: SecretPolicyStoreHead
-    private let stagedEntry: SecretPolicyStoreEntry?
-
-    init(
-        head: SecretPolicyStoreHead,
-        stagedEntry: SecretPolicyStoreEntry? = nil
-    ) {
-        currentHead = head
-        self.stagedEntry = stagedEntry
-    }
+    private var currentHead: SecretPolicyStoreHead?
+    private var stagedEntry: SecretPolicyStoreEntry?
+    private var committedEntry: SecretPolicyStoreEntry?
 
     func stagedPolicy(
         for scopeID: SecretScopeID,
@@ -695,28 +648,48 @@ private actor PolicyStoreFake: SecretSyncPolicyStore {
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry? {
-        nil
+        guard
+            committedEntry?.commit.scopeID == scopeID,
+            committedEntry?.commit.policyEpoch == epoch
+        else {
+            return nil
+        }
+        return committedEntry
     }
 
     func policyHead(
         for scopeID: SecretScopeID
     ) async throws -> SecretPolicyStoreHead? {
-        currentHead.scopeID == scopeID ? currentHead : nil
+        currentHead?.scopeID == scopeID ? currentHead : nil
     }
 
-    func appendStagedPolicy(_ entry: SecretPolicyStoreEntry) async throws {}
+    func appendStagedPolicy(_ entry: SecretPolicyStoreEntry) async throws {
+        stagedEntry = entry
+    }
 
     func compareAndAdvance(
         _ precondition: SecretPolicyAdvancePrecondition
     ) async throws -> SecretPolicyAdvanceResult {
         let candidate = precondition.candidateHead
+        guard stagedEntry == precondition.candidateEntry else {
+            throw SecretSyncInterfaceError.invalidPolicyAdvancePrecondition
+        }
         guard precondition.expectedHead == currentHead else {
+            guard let currentHead else {
+                throw SecretSyncInterfaceError.invalidPolicyAdvancePrecondition
+            }
             return .forkDetected(
                 currentHead: currentHead,
                 competingCommitDigest: candidate.commitDigest
             )
         }
         currentHead = candidate
+        committedEntry = try SecretPolicyStoreEntry(
+            commit: precondition.validatedSnapshot.commit,
+            records: precondition.validatedSnapshot.records,
+            trustRecords: precondition.validatedSnapshot.trustedDeviceRecords
+        )
+        stagedEntry = nil
         return .advanced(candidate)
     }
 }
@@ -923,15 +896,18 @@ private func trustRecord(
     )
 }
 
-private func policyStoreEntry() throws -> SecretPolicyStoreEntry {
-    let scopeID = SecretScopeID(fixtureUUID(800))
-    let generationID = SecretGenerationID(fixtureUUID(801))
-    let credentialID = fixtureCredentialID(802)
+private func policyStoreEntry(
+    seed: Int = 800,
+    byte: UInt8 = 0x80
+) throws -> SecretPolicyStoreEntry {
+    let scopeID = SecretScopeID(fixtureUUID(seed))
+    let generationID = SecretGenerationID(fixtureUUID(seed + 1))
+    let credentialID = fixtureCredentialID(seed + 2)
     let snapshot = try SecretScopeSnapshot(
         scopeID: scopeID,
-        rootRecordID: fixtureUUID(803),
-        memberRecordIDs: [fixtureUUID(803)],
-        snapshotDigest: digest(0x80)
+        rootRecordID: fixtureUUID(seed + 3),
+        memberRecordIDs: [fixtureUUID(seed + 3)],
+        snapshotDigest: digest(byte)
     )
     let policy = try SecretPolicyEpoch(
         epoch: 1,
@@ -939,27 +915,30 @@ private func policyStoreEntry() throws -> SecretPolicyStoreEntry {
         scopeSnapshot: snapshot,
         generationID: generationID,
         authorizedRecipientCredentialIDs: [credentialID],
-        trustedDeviceRecordDigests: [digest(0x81)],
+        trustedDeviceRecordDigests: [
+            digest(byte &+ 1),
+            digest(byte &+ 6),
+        ],
         recoveryRecipient: nil,
         signerCredentialID: credentialID
     )
     let signedPolicy = try SignedSecretPolicyEpoch(
-        recordDigest: digest(0x82),
+        recordDigest: digest(byte &+ 2),
         policy: policy,
-        signature: Data([0x82])
+        signature: Data([byte &+ 2])
     )
     let payload = try SealedPayload(
-        recordDigest: digest(0x83),
+        recordDigest: digest(byte &+ 3),
         scopeID: scopeID,
         scopeSnapshotDigest: snapshot.snapshotDigest,
         policyEpoch: 1,
         policyDigest: signedPolicy.recordDigest,
         generationID: generationID,
         formatVersion: 1,
-        ciphertextBytes: Data([0x83])
+        ciphertextBytes: Data([byte &+ 3])
     )
     let envelope = try RecipientKeyEnvelope(
-        recordDigest: digest(0x84),
+        recordDigest: digest(byte &+ 4),
         scopeID: scopeID,
         scopeSnapshotDigest: snapshot.snapshotDigest,
         policyEpoch: 1,
@@ -967,7 +946,7 @@ private func policyStoreEntry() throws -> SecretPolicyStoreEntry {
         generationID: generationID,
         recipientCredentialID: credentialID,
         formatVersion: 1,
-        wrappedKeyBytes: Data([0x84])
+        wrappedKeyBytes: Data([byte &+ 4])
     )
     let records = try SecretControlRecords(
         state: .staged,
@@ -979,7 +958,7 @@ private func policyStoreEntry() throws -> SecretPolicyStoreEntry {
         purgeReceipts: []
     )
     let commit = try SecretTransitionCommit(
-        recordDigest: digest(0x85),
+        recordDigest: digest(byte &+ 5),
         scopeID: scopeID,
         policyEpoch: 1,
         predecessorCommitDigest: nil,
@@ -992,9 +971,41 @@ private func policyStoreEntry() throws -> SecretPolicyStoreEntry {
         purgeRequirementDigests: [],
         purgeReceiptDigests: [],
         signerCredentialID: credentialID,
-        signature: Data([0x85])
+        signature: Data([byte &+ 5])
     )
-    return try SecretPolicyStoreEntry(commit: commit, records: records)
+    let trustRecords = [
+        try DeviceTrustRecord(
+            recordDigest: digest(byte &+ 1),
+            credentialDigest: digest(byte &+ 7),
+            deviceID: TrustedDeviceID(fixtureUUID(seed + 5)),
+            credentialID: credentialID,
+            trustState: .trusted,
+            effectivePolicyEpoch: 1
+        ),
+        try DeviceTrustRecord(
+            recordDigest: digest(byte &+ 6),
+            credentialDigest: digest(byte &+ 8),
+            deviceID: TrustedDeviceID(fixtureUUID(seed + 6)),
+            credentialID: fixtureCredentialID(seed + 6),
+            trustState: .revoked,
+            effectivePolicyEpoch: 1
+        ),
+    ]
+    return try SecretPolicyStoreEntry(
+        commit: commit,
+        records: records,
+        trustRecords: trustRecords
+    )
+}
+
+private func authoritativeSnapshotFixture(
+    for entry: SecretPolicyStoreEntry
+) throws -> SecretControlSnapshot {
+    try SecretControlSnapshot(
+        commit: entry.commit,
+        records: entry.records.committedCopy(),
+        trustedDeviceRecords: entry.trustRecords
+    )
 }
 
 private func recoveryRecipient(

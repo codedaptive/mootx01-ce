@@ -23,17 +23,40 @@ public struct SecretPolicyStoreHead: Sendable, Hashable {
     }
 }
 
-/// Exact compare-and-advance expectation for a monotonic policy append.
+/// Exact staged and validator-produced authority for a monotonic policy append.
+///
+/// External callers cannot construct `SecretControlSnapshot`; they can only
+/// supply the snapshot returned by `SecretPolicyValidator`.
 public struct SecretPolicyAdvancePrecondition: Sendable, Hashable {
     public let expectedHead: SecretPolicyStoreHead?
+    public let candidateEntry: SecretPolicyStoreEntry
+    public let validatedSnapshot: SecretControlSnapshot
     public let candidateHead: SecretPolicyStoreHead
     public let predecessorCommitDigest: SecretRecordDigest?
 
     public init(
         expectedHead: SecretPolicyStoreHead?,
-        candidateHead: SecretPolicyStoreHead,
-        predecessorCommitDigest: SecretRecordDigest?
+        candidateEntry: SecretPolicyStoreEntry,
+        validatedSnapshot: SecretControlSnapshot
     ) throws {
+        let committedRecords = try candidateEntry.records.committedCopy()
+        guard
+            candidateEntry.records.state == .staged,
+            validatedSnapshot.commit == candidateEntry.commit,
+            validatedSnapshot.records == committedRecords,
+            validatedSnapshot.trustedDeviceRecords
+                == candidateEntry.trustRecords
+        else {
+            throw SecretSyncInterfaceError.invalidPolicyAdvancePrecondition
+        }
+        let commit = candidateEntry.commit
+        let candidateHead = try SecretPolicyStoreHead(
+            scopeID: commit.scopeID,
+            policyEpoch: commit.policyEpoch,
+            commitDigest: commit.recordDigest,
+            policyDigest: commit.policyDigest
+        )
+        let predecessorCommitDigest = commit.predecessorCommitDigest
         if let expectedHead {
             guard
                 expectedHead.policyEpoch < UInt64.max,
@@ -52,6 +75,8 @@ public struct SecretPolicyAdvancePrecondition: Sendable, Hashable {
             }
         }
         self.expectedHead = expectedHead
+        self.candidateEntry = candidateEntry
+        self.validatedSnapshot = validatedSnapshot
         self.candidateHead = candidateHead
         self.predecessorCommitDigest = predecessorCommitDigest
     }
@@ -69,20 +94,30 @@ public enum SecretPolicyAdvanceResult: Sendable, Hashable {
 /// Immutable policy-store value retaining one commit and its referenced records.
 ///
 /// The entry keeps the signed transition certificate beside its complete
-/// record set. Full transition validation separately requires the current
-/// snapshot, trust inputs, competing-child knowledge, external freshness,
-/// a digester, and a signature verifier.
+/// control and policy-referenced trust-record sets, including revoked
+/// tombstones. Full transition validation separately requires the current
+/// snapshot, trusted credentials, competing-child knowledge, external
+/// freshness, a digester, and a signature verifier.
 public struct SecretPolicyStoreEntry: Sendable, Hashable {
     public let commit: SecretTransitionCommit
     public let records: SecretControlRecords
+    public let trustRecords: [DeviceTrustRecord]
 
     public init(
         commit: SecretTransitionCommit,
-        records: SecretControlRecords
+        records: SecretControlRecords,
+        trustRecords: [DeviceTrustRecord]
     ) throws {
         let policy = records.signedPolicy.policy
+        let sortedTrustRecords = trustRecords.sorted {
+            $0.recordDigest.bytes.lexicographicallyPrecedes(
+                $1.recordDigest.bytes
+            )
+        }
         guard
             records.state != .rejected,
+            sortedTrustRecords.map(\.recordDigest)
+                == policy.trustedDeviceRecordDigests,
             commit.scopeID == policy.scopeSnapshot.scopeID,
             commit.policyEpoch == policy.epoch,
             commit.policyDigest == records.signedPolicy.recordDigest,
@@ -102,6 +137,7 @@ public struct SecretPolicyStoreEntry: Sendable, Hashable {
         }
         self.commit = commit
         self.records = records
+        self.trustRecords = sortedTrustRecords
     }
 }
 
