@@ -1008,3 +1008,64 @@ fn circuit_breaker_explicit_clear_resets_failure_count() {
         "single failure after clear must not re-park (threshold is 3)"
     );
 }
+
+/// A park recorded by an EARLIER build auto-clears on the next run, so a binary
+/// carrying the fix gets a fresh attempt with no operator action.
+///
+/// Rust twin of Swift `circuitBreakerParkFromAnEarlierBuildAutoClears`.
+/// This guarantee is what `MIGRATION_VERSION` exists to provide and it had no
+/// test in either port: beta-08 shipped the ee#49 repair without bumping the
+/// token, so estates parked by the beta-07 failure stayed parked on the fixed
+/// binary and had to be unparked by hand.
+#[test]
+#[cfg(feature = "migration-v1-0-to-v1-1")]
+fn circuit_breaker_park_from_an_earlier_build_auto_clears() {
+    let mut est = make_legacy_estate(&["cb-version fixture"], true, false);
+
+    // Drive to a parked state under the CURRENT token.
+    for _ in 0..3 {
+        let _ = est.coord.run_shared_content_migration(
+            &est.handle,
+            NOW,
+            vec![EmbeddingModelConfig::Deterministic],
+        );
+    }
+    assert!(
+        est.coord.shared_content_migration_is_parked(&est.handle),
+        "must be parked after 3 failures"
+    );
+
+    // Rewrite the stored token to simulate a park left behind by an older
+    // build — the on-disk state of a beta-07-parked estate opened by a later
+    // binary.
+    let store = SharedContentMigrationStore::new(Arc::clone(&est.storage));
+    let mut record = store.load().expect("load record").expect("record");
+    record
+        .circuit_breaker
+        .as_mut()
+        .expect("parked record must carry circuit-breaker state")
+        .parked_under_migration_version = Some("some-earlier-build".to_string());
+    store.save(&record, NOW).expect("save record");
+
+    assert!(
+        !est.coord.shared_content_migration_is_parked(&est.handle),
+        "a park recorded under an earlier token must not gate the current build"
+    );
+
+    // The next run must ATTEMPT the migration rather than short-circuiting on
+    // the parked guard. This fixture still fails on its own merits, which is
+    // the proof it ran — a parked guard returns MigrationParked without
+    // touching the state machine.
+    let result = est.coord.run_shared_content_migration(
+        &est.handle,
+        NOW,
+        vec![EmbeddingModelConfig::Deterministic],
+    );
+    assert!(
+        !matches!(
+            result,
+            Err(SharedContentMigrationError::MigrationParked { .. })
+        ),
+        "auto-clear failed: the parked guard fired under a stale token"
+    );
+}

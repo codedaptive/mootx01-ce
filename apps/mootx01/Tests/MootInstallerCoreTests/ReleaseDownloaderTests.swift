@@ -124,6 +124,43 @@ struct ReleaseDownloaderTests {
         #expect(tag == "1.1.0-beta-04")
     }
 
+    /// A three-digit beta counter must sort AFTER a two-digit one.
+    ///
+    /// SemVer splits prerelease identifiers on "." and not "-", so this
+    /// project's `beta-NN` suffix is a single TEXT identifier. Plain string
+    /// order puts "beta-100" before "beta-99", which would silently stop
+    /// offering upgrades once the candidate counter reached three digits — and
+    /// the candidate pipeline explicitly permits `[0-9]{2,}`.
+    @Test func threeDigitBetaCounterOutranksTwoDigit() async throws {
+        #expect(
+            ReleaseDownloader.isVersion("1.1.0-beta-100", newerThan: "1.1.0-beta-99"),
+            "beta-100 must be newer than beta-99; plain string order gets this backwards")
+        #expect(
+            !ReleaseDownloader.isVersion("1.1.0-beta-99", newerThan: "1.1.0-beta-100"),
+            "the comparison must be antisymmetric across the digit-count boundary")
+        // Ordinary same-width ordering is unaffected.
+        #expect(ReleaseDownloader.isVersion("1.1.0-beta-09", newerThan: "1.1.0-beta-08"))
+        // A stable release still outranks any beta with the same core.
+        #expect(ReleaseDownloader.isVersion("1.1.0", newerThan: "1.1.0-beta-100"))
+    }
+
+    /// `latestTagIgnoringOrder` reports what is published without judging
+    /// whether it is newer, so the CLI can distinguish "you are current" from
+    /// "you are AHEAD of the feed" — the case that told a beta tester
+    /// "Already up to date" while the feed sat at an older stable release.
+    @Test func latestTagIgnoringOrderReportsOlderRemote() async throws {
+        let json = #"{"tag_name":"v1.0.38","name":"Release v1.0.38"}"#
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.1.0-beta-08",
+            fetchData: mockFetch([ok(apiURL, json)]))
+
+        // The ordering-aware call says "nothing to offer"...
+        #expect(try await downloader.latestTag() == nil)
+        // ...while the plain read still reports what is actually published.
+        #expect(try await downloader.latestTagIgnoringOrder() == "v1.0.38")
+    }
+
     // MARK: download — checksum verification
 
     /// When the downloaded asset's SHA-256 does not match checksums.txt, download()

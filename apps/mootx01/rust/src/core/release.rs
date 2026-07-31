@@ -211,7 +211,17 @@ pub fn platform() -> (&'static str, &'static str) {
 pub fn download_and_verify(version: &str) -> Result<(PathBuf, PathBuf), ReleaseError> {
     let (os, arch) = platform();
     let asset = format!("mootx01-{version}-{os}-{arch}.tar.gz");
-    let base = format!("https://github.com/{REPO}/releases/download/v{version}");
+    // Stable releases are tagged "vX.Y.Z"; candidate builds are tagged bare
+    // ("X.Y.Z-beta-NN", VERSIONING.md §2.5) because a leading `v` would trip
+    // the signed-release pipeline. Hardcoding the `v` here 404'd every
+    // candidate download on this vertical. Add the prefix only when the
+    // version is not already a prerelease-shaped tag.
+    let tag = if version.contains('-') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    };
+    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
 
     let tmp = secure_upgrade_temp_dir()?;
     let tarball = tmp.join(&asset);
