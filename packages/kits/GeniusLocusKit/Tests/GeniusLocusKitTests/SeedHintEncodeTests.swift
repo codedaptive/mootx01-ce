@@ -1,14 +1,15 @@
 // SeedHintEncodeTests.swift
 //
 // DISTILL_SEED_STALL regression coverage: the seven seeded AI_Charter_Hint
-// wing drawers ride the Corpus encode stream (seedDefaultWings enqueues
-// them), so:
+// wing drawers go through the encode path INLINE (seedDefaultWings indexes
+// and distills them in place, the same transform a queued drawer gets at
+// drain), so:
 //
-//   • the "distillation" drain lane reaches ZERO on a fresh drained estate
+//   • the "distillation" drain lane reaches ZERO on a fresh estate
 //     (the lane previously pinned at pending:7 forever — the benchmark
 //     drain-barrier stall, probe 1 2026-07-30);
-//   • re-running seedDefaultWings on an already-converged estate enqueues
-//     NOTHING (idempotent open — no spurious encode work per open);
+//   • re-running seedDefaultWings on an already-converged estate does
+//     NOTHING — no queue work, no re-distillation (idempotent open);
 //   • a seeded hint is recallable via BM25 (the EstateVerbs.seedWing
 //     "recallable like any other drawer" promise, defect 2).
 //
@@ -60,12 +61,15 @@ struct SeedHintEncodeTests {
     @Test("fresh estate + drain: the distillation lane reaches zero (stall regression)")
     func freshEstateDrainsToZero() async throws {
         let (kit, handle) = try await provisionGLKEstate()
-        // Provision seeded 7 hints and enqueued them; drain the encode queue.
-        // The drain-stage rider distills each encoded drawer before its job
-        // replies, so after the barrier the lane must be fully settled.
+        // Seeding settles its hints inline, so the estate OPENS settled —
+        // the lane is already at zero before anything drives the queue.
+        #expect(try await distillationPending(kit, handle) == 0,
+                "seeding settles inline: the lane must be zero at open, before any drain")
+        // Draining changes nothing (there is no seed batch to drain) and
+        // must leave the lane settled.
         try await kit.awaitEncodeDrain(for: handle)
         #expect(try await distillationPending(kit, handle) == 0,
-                "the 7 seeded hints must distill at drain — a non-zero count is the probe-1 stall")
+                "the 7 seeded hints must stay distilled — a non-zero count is the probe-1 stall")
         // The encode drain itself is also settled.
         let statuses = try await kit.drainStatuses(handle)
         #expect(DrainStatus.encodeSettled(statuses))

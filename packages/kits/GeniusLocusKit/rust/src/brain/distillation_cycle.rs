@@ -8,9 +8,12 @@
 // "_distilled", `_distilled_from` tunnels, "distillation-daemon"
 // provenance) is retired on 1.1.x (§11).
 //
-// This module supplies the pure decision functions and constants the
-// Coordinator's `distill_items_sweep` delegates to. Storage I/O lives at
-// the Coordinator level where the storage handle is available.
+// This module supplies the pure decision functions, the pure rendering
+// step (`render_distillation`), and the lane constants that every
+// distillation caller delegates to. Storage I/O lives at the Coordinator
+// level where the storage handle is available — see `distill_item` there,
+// the single write seam shared by the drain-stage rider, the seeding path,
+// and `distill_items_sweep`.
 
 // MARK: - Rendering-path selection
 
@@ -42,6 +45,56 @@ pub fn compaction_rendering(content: &str) -> String {
         content.to_string()
     } else {
         compacted
+    }
+}
+
+/// Render one item's distilled representation and its structural
+/// fingerprint — the pure half of `distill_item` (§7.4/§7.5), shared by
+/// every caller so the two paths can never drift apart.
+///
+/// Segments `content` with the canonical cross-leg delimiter algorithm
+/// (the same segmenter the corpus Chunker uses, so reduction units line up
+/// with the dense index), then takes the MATRIX path when the item has at
+/// least `MIN_INTRA_ITEM_UNITS` units and the short-item compaction path
+/// otherwise. A degenerate matrix (no features extracted at all) falls back
+/// to the short-item transform so §13.1 population holds for every
+/// non-empty item.
+///
+/// Pure: no storage I/O, no clock. Mirrors the rendering half of Swift
+/// `GeniusLocusKit.distillItem(handle:drawerID:content:distillFn:now:)`.
+pub fn render_distillation(
+    drawer_id: &str,
+    content: &str,
+) -> (String, substrate_types::fingerprint256::Fingerprint256) {
+    use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
+
+    let sentences: Vec<String> = eidetic_lib::segmenter::sentences(content);
+    if item_is_distillable(sentences.len()) {
+        // Matrix path (§7.4): intra-item M×|V| reduction.
+        let input = DistillationInput::new(
+            sentences,
+            None,
+            drawer_id.to_string(),
+            vec![drawer_id.to_string()],
+        );
+        let output =
+            DistillationPipeline::run(&input, DistillationPipeline::default_extractor, true);
+        let rendering = if output.distilled_text.is_empty() {
+            compaction_rendering(content)
+        } else {
+            output.distilled_text
+        };
+        (rendering, output.feature_fingerprint)
+    } else {
+        // Short-item path (§7.5): token-compaction fallback, fingerprint via
+        // the query-fingerprint construction over the content.
+        (
+            compaction_rendering(content),
+            DistillationPipeline::query_fingerprint(
+                content,
+                DistillationPipeline::default_extractor,
+            ),
+        )
     }
 }
 

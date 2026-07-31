@@ -1,13 +1,14 @@
 // seed_hint_encode_parity.rs — DISTILL_SEED_STALL regression coverage.
 //
-// The seven seeded AI_Charter_Hint wing drawers ride the Corpus encode
-// stream (`seed_default_wings` enqueues them), so:
+// The seven seeded AI_Charter_Hint wing drawers go through the encode path
+// INLINE (`seed_default_wings` indexes and distills them in place, the same
+// transform a queued drawer gets at drain), so:
 //
-//   • the "distillation" drain lane reaches ZERO on a fresh drained estate
+//   • the "distillation" drain lane reaches ZERO on a fresh estate
 //     (the lane previously pinned at pending:7 forever — the benchmark
 //     drain-barrier stall, probe 1 2026-07-30);
-//   • re-running seed_default_wings on an already-converged estate enqueues
-//     NOTHING (idempotent open — no spurious encode work per open);
+//   • re-running seed_default_wings on an already-converged estate does
+//     NOTHING — no queue work, no re-distillation (idempotent open);
 //   • a seeded hint is recallable via BM25 (the estate_verbs `seed_wing`
 //     "recallable like any other drawer" promise, defect 2).
 //
@@ -31,7 +32,7 @@ const NOW: i64 = 1_700_000_000_000; // millis since epoch
 
 /// Provision a GLK estate (mounts Corpus + VectorStore + the encode queue).
 /// Same fixture as encode_intake_parity.rs; provision seeds the 7 default
-/// wings AND enqueues their hint drawers onto the encode stream.
+/// wings AND settles their hint drawers inline (index + distill).
 fn provision_glk_estate() -> (EstateCoordinator, EstateHandle) {
     let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let store: Arc<dyn DrawerStore> = Arc::new(
@@ -77,9 +78,15 @@ fn distillation_pending(coord: &mut EstateCoordinator, handle: &EstateHandle) ->
 #[test]
 fn seed_hint_fresh_estate_drains_to_zero() {
     let (mut coord, handle) = provision_glk_estate();
-    // Provision seeded 7 hints and enqueued them; pump-drive the encode
-    // queue. The drain-stage distillation runs for each encoded drawer
-    // before its job replies, so after the drain the lane must be settled.
+    // Seeding settles its hints inline, so the estate OPENS settled — the
+    // lane is already at zero before anything drives the queue.
+    assert_eq!(
+        distillation_pending(&mut coord, &handle),
+        0,
+        "seeding settles inline: the lane must be zero at open, before any drain"
+    );
+    // Draining changes nothing (there is no seed batch to drain) and must
+    // leave the lane settled.
     coord.await_encode_drain(&handle).expect("await_encode_drain");
     assert_eq!(
         distillation_pending(&mut coord, &handle),
@@ -104,7 +111,8 @@ fn seed_hint_reseed_enqueues_nothing() {
     // Simulate the estate being re-opened: the open path calls
     // seed_default_wings again. All 7 wings exist and all 7 hints carry a
     // current representation (bit 19 set, current pipeline version), so the
-    // enqueue predicate must admit ZERO drawers.
+    // settle predicate must admit ZERO drawers — no index, no distill, and
+    // (as asserted below) nothing on the queue either.
     coord
         .seed_default_wings(&handle, NOW + 60_000)
         .expect("re-seed");

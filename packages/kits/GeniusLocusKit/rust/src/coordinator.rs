@@ -64,8 +64,7 @@ use crate::glk_emit;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
 use corpus_kit::{
-    content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentConfiguration,
-    CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
+    CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
 use crate::intake::LocusDrawerContentSource;
 use engram_lib::Engram;
@@ -2607,16 +2606,81 @@ impl EstateCoordinator {
     /// Returns `VerbDispatchError` for stale handles. Individual item
     /// failures (row vanished mid-sweep) are skipped; VectorStore absence
     /// is non-fatal (the lane is simply dark).
+    /// Distill a SINGLE item into its on-row representation (§7.2) — the
+    /// one write seam every distillation caller shares.
+    ///
+    /// Writes the four representation columns on the source drawer row in
+    /// one atomic UPDATE, then replaces the item's
+    /// `distillation-features-v1` lane entry when a non-zero structural
+    /// fingerprint was computed. VectorStore absence is non-fatal: the
+    /// columns are still written (the lane is simply dark, matching the
+    /// estate's semantic-tier wiring).
+    ///
+    /// A FREE function, not a method: the drain-stage `on_encoded` callback
+    /// is a `'static` closure that cannot borrow the coordinator, so every
+    /// dependency is passed explicitly. That is what lets the rider, the
+    /// seeding path (`seed_default_wings`), and `distill_items_sweep` all
+    /// traverse this same call tree instead of keeping private copies of
+    /// the transform.
+    ///
+    /// Callers own the dense-over-distillate recompose (Stream F) that
+    /// follows a successful write — it needs the Corpus, which not every
+    /// caller has.
+    ///
+    /// `now` is passed in, never read here. Returns true when the columns
+    /// were written (false when the content is empty or the row vanished).
+    ///
+    /// Mirrors Swift `GeniusLocusKit.distillItem(handle:drawerID:content:distillFn:now:)`.
+    pub(crate) fn distill_item(
+        estate: &Estate,
+        vector_store: Option<&std::sync::Arc<VectorStore>>,
+        drawer_id: &str,
+        content: &str,
+        now: i64,
+    ) -> bool {
+        use crate::brain::distillation_cycle::{render_distillation, DISTILLATION_LANE_MODEL_ID};
+        use substrate_ml::token_compaction;
+
+        if content.is_empty() {
+            return false;
+        }
+        let (rendering, fingerprint) = render_distillation(drawer_id, content);
+
+        // Write 1 of 2 (§7.2): the four representation columns, atomically.
+        let token_count = token_compaction::estimate_token_count(&rendering);
+        match estate.set_distilled_representation(
+            drawer_id,
+            &rendering,
+            token_compaction::DISTILLATION_PIPELINE_VERSION,
+            token_count,
+            now,
+        ) {
+            Ok(1) => {}
+            // Row vanished mid-flight or the write failed: no columns, no
+            // lane entry — the next sweep recovers it.
+            _ => return false,
+        }
+
+        // Write 2 of 2 (§7.2/§8): the lane entry, keyed by the SOURCE drawer
+        // id. add_vector upserts on (itemID, modelID) — the §8
+        // replace-on-regeneration semantic. A zero fingerprint (no extracted
+        // features) writes no entry; columns and lane are independently
+        // valid (§7.5). add_vector failure is non-fatal — only the Hamming
+        // NN lane is affected.
+        if fingerprint != substrate_types::fingerprint256::Fingerprint256::ZERO {
+            if let Some(vs) = vector_store {
+                let _ = vs.add_vector(drawer_id, &fingerprint, DISTILLATION_LANE_MODEL_ID, "1", now);
+            }
+        }
+        true
+    }
+
     pub fn distill_items_sweep(
         &self,
         handle: &EstateHandle,
         now: i64,
         limit: Option<usize>,
     ) -> Result<usize, VerbDispatchError> {
-        use crate::brain::distillation_cycle::{
-            compaction_rendering, item_is_distillable, DISTILLATION_LANE_MODEL_ID,
-        };
-        use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
         use substrate_ml::token_compaction;
 
         let estate = self.estate_for_verb(handle)?;
@@ -2677,70 +2741,18 @@ impl EstateCoordinator {
                 continue;
             }
 
-            // Sentence segmentation via the canonical cross-leg delimiter
-            // algorithm (eidetic_lib::segmenter::sentences) — the same
-            // segmenter the Swift path and the corpus Chunker use.
-            let sentences: Vec<String> = eidetic_lib::segmenter::sentences(&drawer.content);
-
-            let (rendering, fingerprint) = if item_is_distillable(sentences.len()) {
-                // Matrix path (§7.4).
-                let input = DistillationInput::new(
-                    sentences,
-                    None,
-                    drawer.id.clone(),
-                    vec![drawer.id.clone()],
-                );
-                let output = DistillationPipeline::run(
-                    &input,
-                    DistillationPipeline::default_extractor,
-                    true,
-                );
-                let rendering = if output.distilled_text.is_empty() {
-                    // Degenerate matrix: fall back to the short-item
-                    // transform so §13.1 population holds.
-                    compaction_rendering(&drawer.content)
-                } else {
-                    output.distilled_text
-                };
-                (rendering, output.feature_fingerprint)
-            } else {
-                // Short-item path (§7.5).
-                (
-                    compaction_rendering(&drawer.content),
-                    DistillationPipeline::query_fingerprint(
-                        &drawer.content,
-                        DistillationPipeline::default_extractor,
-                    ),
-                )
-            };
-
-            // Write 1 of 2 (§7.2): the four columns, atomically.
-            let token_count = token_compaction::estimate_token_count(&rendering);
-            match estate.set_distilled_representation(
+            // Render + both writes through the shared seam (§7.2/§7.4/§7.5)
+            // — the same call tree the drain-stage rider and the seeding
+            // path take. A false return means the row vanished mid-sweep or
+            // the write failed: skip it.
+            if !Self::distill_item(
+                estate,
+                vector_store_opt.as_ref(),
                 &drawer.id,
-                &rendering,
-                token_compaction::DISTILLATION_PIPELINE_VERSION,
-                token_count,
+                &drawer.content,
                 now,
             ) {
-                Ok(1) => {}
-                _ => continue, // row vanished mid-sweep or write failed: skip
-            }
-
-            // Write 2 of 2 (§7.2/§8): the lane entry, keyed by the SOURCE
-            // drawer id. Upsert-replace; zero fingerprint writes nothing.
-            if fingerprint != substrate_types::fingerprint256::Fingerprint256::ZERO {
-                if let Some(vs) = &vector_store_opt {
-                    // add_vector failure is non-fatal — the columns are
-                    // written; only the Hamming NN lane is affected.
-                    let _ = vs.add_vector(
-                        &drawer.id,
-                        &fingerprint,
-                        DISTILLATION_LANE_MODEL_ID,
-                        "1",
-                        now,
-                    );
-                }
+                continue;
             }
 
             produced += 1;
@@ -6524,16 +6536,22 @@ impl EstateCoordinator {
             seeded_count += 1;
         }
 
-        // Encode routing (DISTILL_SEED_STALL): enqueue hint drawers that still
-        // owe a representation onto the Corpus encode stream. Runs AFTER the
-        // seeding loop so it covers both the hints seeded just now and hints
-        // seeded by an earlier open that predates this routing (their bit 19
-        // is clear — the one-time backfill). Skipped entirely when no Corpus
-        // is registered (LocusOnly / bare open before wiring): a corpus-less
-        // estate has no encode stream to ride; those hints are picked up by
-        // reindex/sweep once a corpus exists. Twin of the Swift block in
-        // `seedDefaultWings`.
-        let mut enqueued_hints = 0usize;
+        // Encode routing (DISTILL_SEED_STALL): index + distill hint drawers
+        // that still owe a representation, INLINE through the encode path —
+        // the same index/distill/recompose transform a queued drawer receives
+        // at drain, without touching the queue. Inline (not enqueued) on
+        // purpose: seeding returns with the estate SETTLED — hints
+        // BM25/vector indexed, distilled (bit 19 set), and the young fallback
+        // basis converged via the post-ingest settle — so nothing races the
+        // first user capture and no drain worker or lease is required at
+        // open. Runs AFTER the seeding loop so it covers both the hints
+        // seeded just now and hints seeded by an earlier open that predates
+        // this routing (their bit 19 is clear — the one-time backfill).
+        // Skipped entirely when no Corpus is registered (LocusOnly / bare
+        // open before wiring): a corpus-less estate has no semantic lane;
+        // those hints are picked up by reindex/sweep once a corpus exists.
+        // Twin of the Swift block in `seedDefaultWings`.
+        let mut settled_hints = 0usize;
         if let Some(corpus) = self.corpus_for(handle) {
             // Re-scan when the loop seeded new hints (they are not in the
             // first scan); otherwise reuse it.
@@ -6557,40 +6575,36 @@ impl EstateCoordinator {
                         || d.distilled_pipeline_version.as_deref()
                             != Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION))
             }) {
-                let job = ContentIndexJob {
-                    kind: ContentIndexJobKind::Upsert,
-                    content_id: hint.id.clone(),
-                    revision: 1,
-                    digest: Some(content_digest(&hint.content)),
-                    cursor: None,
-                };
+                // Index (BM25 + vector lanes) through the engine's direct
+                // path; the post-ingest settle inside index_content keeps the
+                // young basis covering the growing corpus.
                 corpus
-                    .enqueue_change(&job, hint.filed_at)
+                    .index_content(&hint.id, hint.filed_at)
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                         reason: format!(
-                            "seed_default_wings: corpus enqueue_change failed for '{}': {e:?}",
+                            "seed_default_wings: corpus index_content failed for '{}': {e:?}",
                             hint.id
                         ),
                     })?;
-                enqueued_hints += 1;
+                // Drain-stage transform, inline: the same shared seam the
+                // queue's on_encoded rider calls, with the seeding `now`
+                // threaded for determinism.
+                if Self::distill_item(
+                    estate,
+                    self.vector_stores.get(handle),
+                    &hint.id,
+                    &hint.content,
+                    now,
+                ) {
+                    let _ = corpus.recompose_dense_vector(&hint.id, now);
+                }
+                settled_hints += 1;
             }
         }
 
-        // Seeding drains its own enqueue: an estate OPENS SETTLED — hints
-        // indexed + distilled and the young basis converged — so the first
-        // user capture never races the seed batch (the race made a
-        // hint-trained fallback basis vocab-miss the user's first content
-        // until the queue settled). Idempotent re-opens enqueue nothing and
-        // skip this entirely. Twin of the Swift awaitEncodeDrain call.
-        if enqueued_hints > 0 {
-            self.await_encode_drain(handle)
-                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                    reason: format!("seed_default_wings: await_encode_drain failed: {e:?}"),
-                })?;
-        }
-
-        // Suppress unused-variable warning in release builds where log is a no-op.
+        // Suppress unused-variable warnings in release builds where log is a no-op.
         let _ = seeded_count;
+        let _ = settled_hints;
 
         Ok(())
     }
@@ -6910,13 +6924,6 @@ impl EstateCoordinator {
                         let vector_store_for_callback =
                             self.vector_stores.get(&handle).cloned();
                         corpus.set_on_encoded(move |drawer_ids| {
-                            use crate::brain::distillation_cycle::{
-                                compaction_rendering, item_is_distillable,
-                                DISTILLATION_LANE_MODEL_ID,
-                            };
-                            use substrate_ml::distillation_pipeline::{
-                                DistillationInput, DistillationPipeline,
-                            };
                             use substrate_ml::token_compaction;
 
                             // (1) Room-rollup — always best-effort.
@@ -6953,64 +6960,16 @@ impl EstateCoordinator {
                                     continue;
                                 }
 
-                                // Distillation: same matrix / short-item logic
-                                // as distill_items_sweep.
-                                let sentences: Vec<String> =
-                                    eidetic_lib::segmenter::sentences(&drawer.content);
-                                let (rendering, fingerprint) =
-                                    if item_is_distillable(sentences.len()) {
-                                        let input = DistillationInput::new(
-                                            sentences,
-                                            None,
-                                            drawer.id.clone(),
-                                            vec![drawer.id.clone()],
-                                        );
-                                        let output = DistillationPipeline::run(
-                                            &input,
-                                            DistillationPipeline::default_extractor,
-                                            true,
-                                        );
-                                        let r = if output.distilled_text.is_empty() {
-                                            compaction_rendering(&drawer.content)
-                                        } else {
-                                            output.distilled_text
-                                        };
-                                        (r, output.feature_fingerprint)
-                                    } else {
-                                        (
-                                            compaction_rendering(&drawer.content),
-                                            DistillationPipeline::query_fingerprint(
-                                                &drawer.content,
-                                                DistillationPipeline::default_extractor,
-                                            ),
-                                        )
-                                    };
-
-                                // Write 1 of 2 (§7.2): the four distillation columns.
-                                let token_count =
-                                    token_compaction::estimate_token_count(&rendering);
-                                let wrote = estate.set_distilled_representation(
+                                // Distillation through the shared seam — the
+                                // same call tree `distill_items_sweep` and the
+                                // seeding path take.
+                                if EstateCoordinator::distill_item(
+                                    &estate,
+                                    vector_store_for_callback.as_ref(),
                                     &drawer.id,
-                                    &rendering,
-                                    token_compaction::DISTILLATION_PIPELINE_VERSION,
-                                    token_count,
+                                    &drawer.content,
                                     now_ms,
-                                );
-                                if let Ok(1) = wrote {
-                                    // Write 2 of 2 (§7.2/§8): fingerprint lane.
-                                    if fingerprint
-                                        != substrate_types::fingerprint256::Fingerprint256::ZERO
-                                    {
-                                        if let Some(vs) = &vector_store_for_callback {
-                                            let _ = vs.add_vector(
-                                                &drawer.id,
-                                                &fingerprint,
-                                                DISTILLATION_LANE_MODEL_ID,
-                                                "1",
-                                                now_ms,
-                                            );
-                                        }
-                                    }
+                                ) {
                                     // (3) Dense-over-distillate (Stream F): recompose
                                     // the dense float vector from the new distillate.
                                     // The idempotence gate keys on content digest (not
