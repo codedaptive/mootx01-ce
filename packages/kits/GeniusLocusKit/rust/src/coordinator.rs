@@ -64,7 +64,8 @@ use crate::glk_emit;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
 use corpus_kit::{
-    CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
+    content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentConfiguration,
+    CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
 use crate::intake::LocusDrawerContentSource;
 use engram_lib::Engram;
@@ -938,16 +939,15 @@ impl DrainStatus {
     /// detached `mootx01 drain` finisher may exit and release the encode
     /// DrainLease.
     ///
-    /// Deliberately ignores every drain except "corpus_encode"
-    /// (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3): the "distillation" entry
-    /// counts rows that only a `moot_distill` sweep or the hourly standing
-    /// signal can distill — system-provisioned drawers never transit the
-    /// encode queue, so the drain-stage rider never fires for them and the
-    /// entry does not settle under the drain command. A finisher keyed on ALL
-    /// drains would poll to its full max wait holding the encode lease,
-    /// wedging the next serve session's encode queue. The T5 finisher's
-    /// contract is the encode queue and its lease — nothing else. Mirrors
-    /// Swift `DrainStatus.encodeSettled`.
+    /// Deliberately ignores every drain except "corpus_encode" — the T5
+    /// finisher's CONTRACT is the encode queue and its DrainLease, nothing
+    /// else (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3 established the gate).
+    /// Since DISTILL_SEED_STALL routed the wing-seed hints through the encode
+    /// stream, the "distillation" entry also settles under a normal drain
+    /// (every enqueued drawer distills via the drain-stage rider before its
+    /// job replies); the gate stays encode-only anyway so the finisher's
+    /// lease tenure is bounded by its own queue, not by any other lane's
+    /// accounting. Mirrors Swift `DrainStatus.encodeSettled`.
     pub fn encode_settled(statuses: &[DrainStatus]) -> bool {
         !statuses
             .iter()
@@ -6442,6 +6442,17 @@ impl EstateCoordinator {
     ///
     /// Mirrors Swift `GeniusLocusKit.seedDefaultWings(for:now:)`.
     ///
+    /// **Encode routing (DISTILL_SEED_STALL):** when a Corpus is registered,
+    /// hint drawers are enqueued onto the Corpus encode stream — the same
+    /// change-reference path a `Regular` capture rides — so the drain-stage
+    /// distillation fires for them and the "distillation" drain lane can reach
+    /// zero. The enqueue predicate is representation-eligibility (bit 19
+    /// `has_current_representation` clear, or a stale pipeline version) over
+    /// the `AI_Charter_Hint` room only: an already-encoded-and-distilled hint
+    /// is never re-enqueued, so re-opening an estate stays a no-op — no
+    /// spurious encode work per open. (Deliberately does NOT key on
+    /// `hint_added_by`, which is provenance-only.)
+    ///
     /// - `handle`: An open estate handle in the coordinator's registry.
     /// - `now`:    Write timestamp (epoch seconds) for any hints seeded.
     ///             Pass `SystemTime::now()` from serve entry points (acceptable
@@ -6472,7 +6483,7 @@ impl EstateCoordinator {
         // (Drawer no longer stores wing/room — node-tree integrity).
         let node_names = build_node_name_map(self.node_stores.get(handle), &existing_drawers);
         let seeded_wings: std::collections::HashSet<String> = existing_drawers
-            .into_iter()
+            .iter()
             .filter(|d| {
                 node_names.get(&d.parent_node_id)
                     .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
@@ -6511,6 +6522,56 @@ impl EstateCoordinator {
                     ),
                 })?;
             seeded_count += 1;
+        }
+
+        // Encode routing (DISTILL_SEED_STALL): enqueue hint drawers that still
+        // owe a representation onto the Corpus encode stream. Runs AFTER the
+        // seeding loop so it covers both the hints seeded just now and hints
+        // seeded by an earlier open that predates this routing (their bit 19
+        // is clear — the one-time backfill). Skipped entirely when no Corpus
+        // is registered (LocusOnly / bare open before wiring): a corpus-less
+        // estate has no encode stream to ride; those hints are picked up by
+        // reindex/sweep once a corpus exists. Twin of the Swift block in
+        // `seedDefaultWings`.
+        if let Some(corpus) = self.corpus_for(handle) {
+            // Re-scan when the loop seeded new hints (they are not in the
+            // first scan); otherwise reuse it.
+            let drawers = if seeded_count > 0 {
+                estate
+                    .all_drawers()
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("seed_default_wings: all_drawers (post-seed) failed: {e:?}"),
+                    })?
+            } else {
+                existing_drawers
+            };
+            let node_names = build_node_name_map(self.node_stores.get(handle), &drawers);
+            for hint in drawers.iter().filter(|d| {
+                node_names
+                    .get(&d.parent_node_id)
+                    .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
+                    .unwrap_or(false)
+                    && !d.content.is_empty()
+                    && (!d.has_current_representation()
+                        || d.distilled_pipeline_version.as_deref()
+                            != Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION))
+            }) {
+                let job = ContentIndexJob {
+                    kind: ContentIndexJobKind::Upsert,
+                    content_id: hint.id.clone(),
+                    revision: 1,
+                    digest: Some(content_digest(&hint.content)),
+                    cursor: None,
+                };
+                corpus
+                    .enqueue_change(&job, hint.filed_at)
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!(
+                            "seed_default_wings: corpus enqueue_change failed for '{}': {e:?}",
+                            hint.id
+                        ),
+                    })?;
+            }
         }
 
         // Suppress unused-variable warning in release builds where log is a no-op.
@@ -6961,10 +7022,10 @@ impl EstateCoordinator {
         // Step 2c: Seed the seven default wings (the default-wing policy) — AFTER wiring,
         // so each hint drawer is stamped with the corpus's normal model id rather
         // than the "estate-provision" sentinel (matches the serve open path and the
-        // Swift provision order). Hints are filed row-only (seed_wing does not
-        // enqueue); their vectors are produced by the next full-corpus reindex,
-        // not by training a basis on the 7 hints alone. Seeding failure closes the
-        // estate (no half-provisioned zombie). Provision-time wall clock (epoch
+        // Swift provision order), and `seed_default_wings` enqueues each hint onto
+        // the Corpus encode stream so the drain-stage distillation fires for hints
+        // exactly as for user content (DISTILL_SEED_STALL). Seeding failure closes
+        // the estate (no half-provisioned zombie). Provision-time wall clock (epoch
         // seconds) at the app boundary — the engine interior never reads the clock.
         {
             let seed_now: i64 = std::time::SystemTime::now()

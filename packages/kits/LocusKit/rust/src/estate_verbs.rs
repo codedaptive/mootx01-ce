@@ -556,6 +556,11 @@ impl Estate {
     /// - `embedding_model_id`: the caller-supplied model id (normal embedding)
     /// - `lattice_anchor`: UDC "001" (Knowledge class — spec I-5)
     ///
+    /// `seed_wing` performs the covered ROW write only; the GLK caller
+    /// enqueues the hint onto the Corpus encode stream
+    /// (`seed_default_wings`, DISTILL_SEED_STALL), which is what delivers
+    /// BM25/vector indexing and drain-stage distillation for the hints.
+    ///
     /// Idempotent at the business level: re-seeding an already-seeded wing
     /// adds a second hint drawer, but the seven default wings are seeded
     /// exactly once at `provision`. GeniusLocusKit's seed loop is the only

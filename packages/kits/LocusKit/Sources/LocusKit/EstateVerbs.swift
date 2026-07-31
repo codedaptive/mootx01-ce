@@ -2018,6 +2018,9 @@ public extension Estate {
     ///
     /// The hint memory is a NORMAL drawer: embedded using the caller-supplied
     /// embedding model, recallable like any other drawer, user-deletable.
+    /// (`seedWing` itself performs the covered ROW write only; the GLK caller
+    /// enqueues the hint onto the Corpus encode stream — `seedDefaultWings`,
+    /// DISTILL_SEED_STALL — which is what delivers the indexing/recallability.)
     ///
     /// Note: `capture(_:)` also supports an explicit wing via `CaptureFrame.wing`
     /// (wing organization follow-up). `seedWing` remains the estate-init path; per-drawer
