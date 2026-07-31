@@ -645,6 +645,58 @@ struct SharedContentMigrationTests {
             "single failure after clear must not re-park (threshold is 3)"
         )
     }
+
+    /// A park recorded by an EARLIER build auto-clears on the next run, so a
+    /// binary carrying the fix gets a fresh attempt with no operator action.
+    ///
+    /// This is the guarantee `sharedContentMigrationVersion` exists to provide,
+    /// and it had no test. beta-08 shipped the ee#49 repair without bumping the
+    /// token, so every estate parked by the beta-07 failure stayed parked on the
+    /// fixed binary and had to be unparked by hand with SQL — the fix was
+    /// withheld from exactly the estates it was written for. This test fails if
+    /// the auto-clear comparison is removed or inverted; it does NOT (and
+    /// cannot) verify that a future author remembers to bump the constant, so
+    /// the file-level doc comment on `sharedContentMigrationVersion` carries
+    /// that instruction.
+    @Test func circuitBreakerParkFromAnEarlierBuildAutoClears() async throws {
+        let (kit, handle, _, _, url) = try await makeLegacyEstate(
+            drawerContents: ["cb-version fixture"], includeOrphanChunk: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Drive to a parked state under the CURRENT token.
+        for _ in 0..<3 {
+            _ = try? await kit.runSharedContentMigration(handle: handle, now: now)
+        }
+        #expect(await kit.sharedContentMigrationIsParked(handle: handle))
+
+        // Rewrite the stored token to simulate a park left behind by an older
+        // build — exactly the on-disk state of a beta-07-parked estate opened
+        // by a later binary.
+        let storage = try await kit.migrationStorage(for: handle)
+        let store = SharedContentMigrationStore(storage: storage)
+        var record = try #require(await store.load())
+        record.circuitBreaker?.parkedUnderMigrationVersion = "some-earlier-build"
+        try await store.save(record, now: now)
+
+        // The park no longer applies: the new build owns a fresh attempt.
+        #expect(
+            !(await kit.sharedContentMigrationIsParked(handle: handle)),
+            "a park recorded under an earlier token must not gate the current build"
+        )
+
+        // And the next run must actually ATTEMPT the migration rather than
+        // short-circuiting on the parked guard. This fixture still fails (the
+        // orphan chunk is unresolved), which is the proof it ran: a parked
+        // guard returns .migrationParked without touching the state machine.
+        do {
+            _ = try await kit.runSharedContentMigration(handle: handle, now: now)
+            Issue.record("fixture is expected to fail on orphanedLegacySources")
+        } catch SharedContentMigrationError.migrationParked {
+            Issue.record("auto-clear failed: the parked guard fired under a stale token")
+        } catch {
+            // Expected: a real migration attempt that failed on its own merits.
+        }
+    }
 }
 
 #endif

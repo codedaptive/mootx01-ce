@@ -252,7 +252,15 @@ const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
 /// expected to resolve a class of parked failures; a mismatch between the
 /// stored token and this constant causes an auto-clear on the next run.
 /// Mirrors `sharedContentMigrationVersion` in the Swift port.
-const MIGRATION_VERSION: &str = "mxe-bb";
+///
+/// **Bump this in the SAME commit as any change to migration behavior.**
+/// beta-08 shipped the ee#49 repair while leaving this at `"mxe-bb"`, so every
+/// estate parked by the beta-07 failure stayed parked on the fixed build and
+/// had to be unparked by hand. A token that does not move with the code it
+/// describes silently withholds the fix from the estates it was written for.
+///
+/// History: "mxe-bb" (beta-07), "mxe-bb-2" (beta-09, ee#49 follow-up repair).
+const MIGRATION_VERSION: &str = "mxe-bb-2";
 
 // MARK: - Circuit-breaker state
 

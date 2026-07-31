@@ -376,7 +376,18 @@ private let sharedContentCircuitBreakerThreshold = 3
 /// change is expected to resolve a class of parked failures; a mismatch
 /// between the stored token and this constant causes an auto-clear on the
 /// next run, giving the updated code a fresh attempt without operator action.
-private let sharedContentMigrationVersion = "mxe-bb"
+///
+/// **Bump this in the SAME commit as any change to migration behavior.**
+/// beta-08 shipped the ee#49 repair (raised blob ceiling, real 3-column basis
+/// PK, resume-safe schema ensure) while leaving this at `"mxe-bb"`, so every
+/// estate parked by the beta-07 failure stayed parked on the fixed build and
+/// had to be unparked by hand with SQL. A token that does not move with the
+/// code it describes is worse than no token: it silently withholds the fix
+/// from exactly the estates the fix was written for.
+///
+/// History: "mxe-bb" (beta-07, chunked basis persistence + circuit breaker),
+/// "mxe-bb-2" (beta-09, ee#49 follow-up repair).
+private let sharedContentMigrationVersion = "mxe-bb-2"
 
 // MARK: - Runner
 
