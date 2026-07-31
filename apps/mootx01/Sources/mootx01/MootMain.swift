@@ -54,7 +54,7 @@ struct Mootx01: AsyncParsableCommand {
     /// SemVer for the installed binary. Development builds carry the beta
     /// pre-release component; stable builds use a bare numeric version.
     /// The human-facing --version string adds the date via `versionDisplay`.
-    static let currentVersion = "1.1.0-beta-06"
+    static let currentVersion = "1.1.0-beta-07"
 
     /// Release date stamp shown alongside the version by --version.
     static let releaseDate = "2026-07-30"
