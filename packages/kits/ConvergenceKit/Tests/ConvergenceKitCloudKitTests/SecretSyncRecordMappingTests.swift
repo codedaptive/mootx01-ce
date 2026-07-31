@@ -93,6 +93,15 @@ struct SecretSyncRecordMappingTests {
             )
         }
 
+        #expect(throws: SecretSyncCloudKitError.digestComputationFailed) {
+            _ = try SecretSyncCloudKitImmutableRecord(
+                type: .deviceTrustRecord,
+                digest: digest,
+                canonicalBytes: canonicalBytes,
+                digester: U4ThrowingDigester()
+            )
+        }
+
         let unknownTagBytes = try SecretSyncCanonicalEncoding.encode(
             domain: .deviceTrustRecord,
             fields: U4CanonicalFixture.fields(for: .deviceTrustRecord)
@@ -238,6 +247,130 @@ struct SecretSyncRecordMappingTests {
         ])
         #expect(updated.recordType == SecretSyncCloudKitRecordType.scopeHead.rawValue)
     }
+
+    @Test("canonical payloads retain a margin below CloudKit's 1 MB record limit")
+    func cloudKitRecordLimitFailsClosed() throws {
+        let oversizedBytes = try SecretSyncCanonicalEncoding.encode(
+            domain: .sealedPayload,
+            fields: U4CanonicalFixture.fields(for: .sealedPayload).map { field in
+                field.tag == 7
+                    ? SecretSyncCanonicalField(
+                        tag: 7,
+                        value: Data(
+                            repeating: 0xAA,
+                            count: SecretSyncCloudKitImmutableRecord.maximumCanonicalByteCount
+                        )
+                    )
+                    : field
+            }
+        )
+        let digester = U4TestDigester()
+
+        #expect(throws: SecretSyncCloudKitError.recordTooLarge) {
+            _ = try SecretSyncCloudKitImmutableRecord(
+                type: .sealedPayload,
+                digest: digester.digest(canonicalBytes: oversizedBytes),
+                canonicalBytes: oversizedBytes,
+                digester: digester
+            )
+        }
+    }
+
+    @Test("hand-built canonical bytes cannot bypass core semantic contracts")
+    func handBuiltCanonicalSemanticsFailClosed() throws {
+        let zeroEpoch = Data(repeating: 0, count: 8)
+        let identifier = U4CanonicalFixture.uuidBytesForTesting(0x21)
+        let digest11 = try U4CanonicalFixture.digest(0x11).bytes
+        let digest12 = try U4CanonicalFixture.digest(0x12).bytes
+
+        let invalidDocuments: [(SecretSyncCloudKitRecordType, Data)] = [
+            (
+                .deviceCredential,
+                try U4CanonicalFixture.bytes(
+                    for: .deviceCredential,
+                    replacing: .init(tag: 3, value: Data([0, 0]))
+                )
+            ),
+            (
+                .deviceTrustRecord,
+                try U4CanonicalFixture.bytes(
+                    for: .deviceTrustRecord,
+                    replacing: .init(tag: 5, value: zeroEpoch)
+                )
+            ),
+            (
+                .policyEpoch,
+                try U4CanonicalFixture.bytes(
+                    for: .policyEpoch,
+                    replacing: .init(tag: 1, value: Data([0, 2]))
+                )
+            ),
+            (
+                .policyEpoch,
+                try SecretSyncCanonicalEncoding.encode(
+                    domain: .secretPolicyEpoch,
+                    fields: U4CanonicalFixture.fields(for: .policyEpoch) + [
+                        .init(tag: 3, value: digest11),
+                    ]
+                )
+            ),
+            (
+                .scopeSnapshot,
+                try U4CanonicalFixture.bytes(
+                    for: .scopeSnapshot,
+                    replacing: .init(
+                        tag: 3,
+                        value: U4CanonicalFixture.sequenceBytesForTesting([
+                            identifier, identifier,
+                        ])
+                    )
+                )
+            ),
+            (
+                .purgeRequirement,
+                try U4CanonicalFixture.bytes(
+                    for: .purgeRequirement,
+                    replacing: .init(
+                        tag: 7,
+                        value: U4CanonicalFixture.sequenceBytesForTesting([
+                            Data("Private Project Title".utf8),
+                        ])
+                    )
+                )
+            ),
+            (
+                .transitionCommit,
+                try U4CanonicalFixture.bytes(
+                    for: .transitionCommit,
+                    replacing: .init(
+                        tag: 8,
+                        value: U4CanonicalFixture.sequenceBytesForTesting([
+                            digest12, digest11,
+                        ])
+                    )
+                )
+            ),
+            (
+                .sealedPayload,
+                try U4CanonicalFixture.bytes(
+                    for: .sealedPayload,
+                    replacing: .init(tag: 6, value: Data([0, 2]))
+                )
+            ),
+        ]
+        let digester = U4TestDigester()
+
+        for (type, bytes) in invalidDocuments {
+            #expect(throws: SecretSyncCloudKitError.canonicalSchemaViolation) {
+                _ = try SecretSyncCloudKitImmutableRecord(
+                    type: type,
+                    digest: digester.digest(canonicalBytes: bytes),
+                    canonicalBytes: bytes,
+                    digester: digester
+                )
+            }
+        }
+    }
 }
 
 private struct U4TestDigester: SecretSyncDigesting {
@@ -254,6 +387,14 @@ private struct U4TestDigester: SecretSyncDigesting {
 private struct U4ConstantDigester: SecretSyncDigesting {
     func digest(canonicalBytes _: Data) throws -> SecretRecordDigest {
         try U4CanonicalFixture.digest(0xA5)
+    }
+}
+
+private struct U4ThrowingDigester: SecretSyncDigesting {
+    private enum Failure: Error { case scripted }
+
+    func digest(canonicalBytes _: Data) throws -> SecretRecordDigest {
+        throw Failure.scripted
     }
 }
 
@@ -278,12 +419,13 @@ private enum U4CanonicalFixture {
         let d2 = try! digest(0x12).bytes
         let id1 = uuidBytes(0x21)
         let id2 = uuidBytes(0x22)
+        let id3 = uuidBytes(0x23)
         let enrollment = try! SecretSyncCanonicalEncoding.encode(
             domain: .deviceEnrollmentProof,
             fields: [
                 .init(tag: 1, value: id1), .init(tag: 2, value: Data([0x01])),
                 .init(tag: 3, value: Data([0x02])), .init(tag: 4, value: Data([0x03])),
-                .init(tag: 5, value: id2),
+                .init(tag: 5, value: id3),
             ]
         )
         let scope = try! SecretSyncCanonicalEncoding.encode(
@@ -401,6 +543,14 @@ private enum U4CanonicalFixture {
 
     static func digest(_ byte: UInt8) throws -> SecretRecordDigest {
         try SecretRecordDigest(bytes: Data(repeating: byte, count: 32))
+    }
+
+    static func uuidBytesForTesting(_ byte: UInt8) -> Data {
+        uuidBytes(byte)
+    }
+
+    static func sequenceBytesForTesting(_ values: [Data]) -> Data {
+        sequence(values)
     }
 
     private static func uuidBytes(_ byte: UInt8) -> Data {

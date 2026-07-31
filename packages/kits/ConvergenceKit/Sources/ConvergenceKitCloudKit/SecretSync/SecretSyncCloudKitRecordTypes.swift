@@ -50,7 +50,9 @@ public enum SecretSyncCloudKitRecordType: String, CaseIterable, Sendable {
 /// content, record bytes, key material, or authorization explanation.
 public enum SecretSyncCloudKitError: Error, Sendable, Equatable {
     case unsupportedRecordType
+    case digestComputationFailed
     case digestMismatch
+    case recordTooLarge
     case canonicalSchemaViolation
     case invalidRecordIdentity
     case invalidFieldSchema
@@ -61,6 +63,11 @@ public enum SecretSyncCloudKitError: Error, Sendable, Equatable {
 
 /// Validated immutable SecretSync record ready for CloudKit transport.
 public struct SecretSyncCloudKitImmutableRecord: Sendable, Equatable {
+    /// CloudKit caps non-asset record data at 1 MB. The canonical payload is
+    /// capped at 900 KB so its 32-byte digest, field framing, record metadata,
+    /// and future compatible system overhead cannot cross that hard limit.
+    static let maximumCanonicalByteCount = 900_000
+
     public let type: SecretSyncCloudKitRecordType
     public let digest: SecretRecordDigest
     public let canonicalBytes: Data
@@ -76,7 +83,15 @@ public struct SecretSyncCloudKitImmutableRecord: Sendable, Equatable {
         guard type.isImmutable, let domain = type.canonicalDomain else {
             throw SecretSyncCloudKitError.unsupportedRecordType
         }
-        let computed = try digester.digest(canonicalBytes: canonicalBytes)
+        guard canonicalBytes.count <= Self.maximumCanonicalByteCount else {
+            throw SecretSyncCloudKitError.recordTooLarge
+        }
+        let computed: SecretRecordDigest
+        do {
+            computed = try digester.digest(canonicalBytes: canonicalBytes)
+        } catch {
+            throw SecretSyncCloudKitError.digestComputationFailed
+        }
         guard computed == digest else {
             throw SecretSyncCloudKitError.digestMismatch
         }
@@ -132,12 +147,20 @@ enum SecretSyncCloudKitCanonicalSchema {
         switch type {
         case .deviceCredential:
             try tags(fields, required: 1...12)
-            try uuid(fields[1]); try uuid(fields[2]); try u16(fields[3])
+            try uuid(fields[1]); try uuid(fields[2]); try positiveU16(fields[3])
             try oneOf(fields[4], ["active", "revoked"])
             try algorithm(fields[5]); try opaque(fields[6]); try opaque(fields[7])
             try algorithm(fields[8]); try opaque(fields[9]); try opaque(fields[10])
             try nested(fields[11], domain: .deviceEnrollmentProof, as: .deviceEnrollmentProof)
             try opaque(fields[12])
+            guard fields[6] != fields[9], fields[7] != fields[10] else { try fail() }
+            let enrollment = try SecretSyncCanonicalEncoding.decode(
+                try required(fields[11]),
+                expectedDomain: .deviceEnrollmentProof
+            )
+            guard enrollment.fields.first(where: { $0.tag == 5 })?.value != fields[2] else {
+                try fail()
+            }
         case .deviceEnrollmentProof:
             try tags(fields, required: 1...5)
             try uuid(fields[1]); try opaque(fields[2]); try opaque(fields[3])
@@ -146,17 +169,24 @@ enum SecretSyncCloudKitCanonicalSchema {
             try tags(fields, required: 1...5)
             try digest(fields[1]); try uuid(fields[2]); try uuid(fields[3])
             try oneOf(fields[4], ["pendingEnrollment", "trusted", "revoked"])
-            try u64(fields[5])
+            try positiveU64(fields[5])
         case .scopeSnapshot:
             try tags(fields, required: 1...3)
-            try uuid(fields[1]); try uuid(fields[2]); try sequence(fields[3], element: uuid)
+            try uuid(fields[1]); try uuid(fields[2]); _ = try uuidSequence(fields[3])
         case .policyEpoch:
             try tags(fields, required: [1, 2, 4, 5, 6, 7, 8, 10], optional: [3, 9])
-            try u16(fields[1]); try u64(fields[2]); if fields[3] != nil { try digest(fields[3]) }
+            guard try u16Value(fields[1]) == SecretSyncCanonicalEncoding.schemaVersion else {
+                try fail()
+            }
+            let epoch = try positiveU64(fields[2])
+            try validatePredecessor(epoch: epoch, predecessor: fields[3])
             try nested(fields[4], domain: .secretScopeSnapshot, as: .scopeSnapshot)
-            try digest(fields[5]); try uuid(fields[6]); try sequence(fields[7], element: uuid)
-            try sequence(fields[8], element: digest)
-            if let recovery = fields[9] { try recoveryDescriptor(recovery) }
+            try digest(fields[5]); try uuid(fields[6]); let recipients = try uuidSequence(fields[7])
+            try digestSequence(fields[8])
+            if let recovery = fields[9] {
+                let recoveryID = try recoveryDescriptor(recovery)
+                guard !recipients.contains(recoveryID) else { try fail() }
+            }
             try uuid(fields[10])
         case .signedPolicyEpoch:
             try tags(fields, required: 1...2)
@@ -171,34 +201,35 @@ enum SecretSyncCloudKitCanonicalSchema {
             try opaque(fields[9])
         case .purgeRequirement:
             try tags(fields, required: 1...7)
-            try uuid(fields[1]); try u64(fields[2]); try digest(fields[3])
+            try uuid(fields[1]); try positiveU64(fields[2]); try digest(fields[3])
             try uuid(fields[4]); try uuid(fields[5]); try uuid(fields[6])
-            try sequence(fields[7], element: nonemptyString)
+            try purgeCategorySequence(fields[7])
         case .purgeReceipt:
             try tags(fields, required: 1...11)
-            try digest(fields[1]); try uuid(fields[2]); try u64(fields[3]); try digest(fields[4])
+            try digest(fields[1]); try uuid(fields[2]); try positiveU64(fields[3]); try digest(fields[4])
             try uuid(fields[5]); try uuid(fields[6]); try uuid(fields[7])
-            try sequence(fields[8], element: nonemptyString)
+            try purgeCategorySequence(fields[8])
             try oneOf(fields[9], ["completed", "partial", "failed"])
             try uuid(fields[10]); try opaque(fields[11])
         case .transitionCommit:
             try tags(fields, required: [1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 14], optional: [3, 9])
-            try uuid(fields[1]); try u64(fields[2]); if fields[3] != nil { try digest(fields[3]) }
+            try uuid(fields[1]); let epoch = try positiveU64(fields[2])
+            try validatePredecessor(epoch: epoch, predecessor: fields[3])
             try digest(fields[4]); try digest(fields[5]); try uuid(fields[6]); try digest(fields[7])
-            try sequence(fields[8], element: digest); if fields[9] != nil { try digest(fields[9]) }
-            try sequence(fields[10], allowEmpty: true, element: digest)
-            try sequence(fields[11], allowEmpty: true, element: digest)
+            try digestSequence(fields[8]); if fields[9] != nil { try digest(fields[9]) }
+            try digestSequence(fields[10], allowEmpty: true)
+            try digestSequence(fields[11], allowEmpty: true)
             try uuid(fields[12]); try opaque(fields[14])
         case .controlRecords:
             try tags(fields, required: [1, 2, 3, 4, 6, 7], optional: [5])
             try oneOf(fields[1], ["staged", "committed", "rejected"])
-            try digest(fields[2]); try digest(fields[3]); try sequence(fields[4], element: digest)
+            try digest(fields[2]); try digest(fields[3]); try digestSequence(fields[4])
             if fields[5] != nil { try digest(fields[5]) }
-            try sequence(fields[6], allowEmpty: true, element: digest)
-            try sequence(fields[7], allowEmpty: true, element: digest)
+            try digestSequence(fields[6], allowEmpty: true)
+            try digestSequence(fields[7], allowEmpty: true)
         case .freshnessCommitment:
             try tags(fields, required: 1...4)
-            try uuid(fields[1]); try u64(fields[2]); try digest(fields[3]); try digest(fields[4])
+            try uuid(fields[1]); try positiveU64(fields[2]); try digest(fields[3]); try digest(fields[4])
         case .sealedPayload:
             try boundRecord(fields, lastTag: 7)
             try opaque(fields[7])
@@ -209,8 +240,9 @@ enum SecretSyncCloudKitCanonicalSchema {
 
     private static func boundRecord(_ fields: [UInt16: Data], lastTag: UInt16) throws {
         try tags(fields, required: Array(UInt16(1)...lastTag))
-        try uuid(fields[1]); try digest(fields[2]); try u64(fields[3])
-        try digest(fields[4]); try uuid(fields[5]); try u16(fields[6])
+        try uuid(fields[1]); try digest(fields[2]); try positiveU64(fields[3])
+        try digest(fields[4]); try uuid(fields[5])
+        guard try u16Value(fields[6]) == 1 else { try fail() }
     }
 
     private static func tags(
@@ -241,8 +273,29 @@ enum SecretSyncCloudKitCanonicalSchema {
         guard value?.count == SecretRecordDigest.byteCount else { try fail() }
     }
 
-    private static func u16(_ value: Data?) throws { guard value?.count == 2 else { try fail() } }
-    private static func u64(_ value: Data?) throws { guard value?.count == 8 else { try fail() } }
+    private static func u16Value(_ value: Data?) throws -> UInt16 {
+        guard let value, value.count == 2 else { try fail() }
+        return value.reduce(UInt16(0)) { ($0 << 8) | UInt16($1) }
+    }
+
+    @discardableResult
+    private static func positiveU16(_ value: Data?) throws -> UInt16 {
+        let decoded = try u16Value(value)
+        guard decoded > 0 else { try fail() }
+        return decoded
+    }
+
+    private static func u64Value(_ value: Data?) throws -> UInt64 {
+        guard let value, value.count == 8 else { try fail() }
+        return value.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+
+    @discardableResult
+    private static func positiveU64(_ value: Data?) throws -> UInt64 {
+        let decoded = try u64Value(value)
+        guard decoded > 0 else { try fail() }
+        return decoded
+    }
 
     private static func opaque(_ value: Data?) throws {
         guard let value, !value.isEmpty, value.count <= 65_536 else { try fail() }
@@ -250,11 +303,6 @@ enum SecretSyncCloudKitCanonicalSchema {
 
     private static func algorithm(_ value: Data?) throws {
         guard let value, !value.isEmpty, value.count <= 128,
-              String(data: value, encoding: .utf8) != nil else { try fail() }
-    }
-
-    private static func nonemptyString(_ value: Data?) throws {
-        guard let value, !value.isEmpty,
               String(data: value, encoding: .utf8) != nil else { try fail() }
     }
 
@@ -277,19 +325,63 @@ enum SecretSyncCloudKitCanonicalSchema {
         try validate(document, as: type)
     }
 
-    private static func recoveryDescriptor(_ value: Data) throws {
+    private static func recoveryDescriptor(_ value: Data) throws -> Data {
         let values = try sequenceValues(value, allowEmpty: false)
         guard values.count == 4 else { try fail() }
         try uuid(values[0]); try algorithm(values[1]); try opaque(values[2]); try opaque(values[3])
+        return values[0]
     }
 
-    private static func sequence(
+    private static func uuidSequence(_ value: Data?) throws -> [Data] {
+        let values = try validatedSequence(value, allowEmpty: false, element: uuid)
+        try requireSortedUnique(values)
+        return values
+    }
+
+    private static func digestSequence(_ value: Data?, allowEmpty: Bool = false) throws {
+        let values = try validatedSequence(value, allowEmpty: allowEmpty, element: digest)
+        try requireSortedUnique(values)
+    }
+
+    private static func purgeCategorySequence(_ value: Data?) throws {
+        let allowed = Set(PurgeArtifactCategory.allCases.map(\.rawValue))
+        let values = try validatedSequence(value, allowEmpty: false) { item in
+            guard let item, let text = String(data: item, encoding: .utf8),
+                  allowed.contains(text) else { try fail() }
+        }
+        try requireSortedUnique(values)
+    }
+
+    private static func validatedSequence(
         _ value: Data?,
-        allowEmpty: Bool = false,
+        allowEmpty: Bool,
         element: (Data?) throws -> Void
-    ) throws {
+    ) throws -> [Data] {
         guard let value else { try fail() }
-        for item in try sequenceValues(value, allowEmpty: allowEmpty) { try element(item) }
+        let values = try sequenceValues(value, allowEmpty: allowEmpty)
+        for item in values { try element(item) }
+        return values
+    }
+
+    private static func requireSortedUnique(_ values: [Data]) throws {
+        for index in values.indices.dropFirst() {
+            guard values[index - 1].lexicographicallyPrecedes(values[index]) else {
+                try fail()
+            }
+        }
+    }
+
+    private static func validatePredecessor(epoch: UInt64, predecessor: Data?) throws {
+        if epoch == 1 {
+            guard predecessor == nil else { try fail() }
+        } else {
+            try digest(predecessor)
+        }
+    }
+
+    private static func required(_ value: Data?) throws -> Data {
+        guard let value else { try fail() }
+        return value
     }
 
     private static func sequenceValues(_ value: Data, allowEmpty: Bool) throws -> [Data] {

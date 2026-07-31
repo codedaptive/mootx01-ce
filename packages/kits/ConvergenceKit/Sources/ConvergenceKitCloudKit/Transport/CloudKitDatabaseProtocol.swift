@@ -142,7 +142,8 @@ public extension CloudKitDatabaseProtocol {
     /// distinguish `serverRecordChanged` from transport failure. Missing or
     /// unexpected outcomes fail closed instead of being treated as success.
     func modifySecretSyncRecords(
-        saving records: [CKRecord]
+        saving records: [CKRecord],
+        digester: any SecretSyncDigesting
     ) async throws -> (
         saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
         deleteResults: [CKRecord.ID: Result<Void, any Error>]
@@ -154,7 +155,12 @@ public extension CloudKitDatabaseProtocol {
         var types: [SecretSyncCloudKitRecordType] = []
         types.reserveCapacity(records.count)
         for record in records {
-            types.append(try CKRecordMapping.validateSecretSyncRecordForWrite(record))
+            types.append(
+                try CKRecordMapping.validateSecretSyncRecordForWrite(
+                    record,
+                    digester: digester
+                )
+            )
         }
 
         let requestedIDs = records.map(\.recordID)

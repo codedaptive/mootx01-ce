@@ -509,7 +509,10 @@ public extension CKRecordMapping {
         return fetchedRecord
     }
 
-    static func validateSecretSyncRecordForWrite(_ record: CKRecord) throws
+    internal static func validateSecretSyncRecordForWrite(
+        _ record: CKRecord,
+        digester: any SecretSyncDigesting
+    ) throws
         -> SecretSyncCloudKitRecordType
     {
         guard let type = SecretSyncCloudKitRecordType(rawValue: record.recordType) else {
@@ -518,19 +521,9 @@ public extension CKRecordMapping {
         if type == .scopeHead {
             _ = try decodeSecretSyncScopeHead(record)
         } else {
-            try validateSecretSyncImmutableTransportShape(record, type: type)
-            guard let bytes = record[secretSyncCanonicalBytesKey] as? Data,
-                  let domain = type.canonicalDomain else {
-                throw SecretSyncCloudKitError.invalidFieldSchema
-            }
-            do {
-                let document = try SecretSyncCanonicalEncoding.decode(bytes, expectedDomain: domain)
-                try SecretSyncCloudKitCanonicalSchema.validate(document, as: type)
-            } catch let error as SecretSyncCloudKitError {
-                throw error
-            } catch {
-                throw SecretSyncCloudKitError.canonicalSchemaViolation
-            }
+            // Raw CKRecord callers cannot bypass content addressing: admission
+            // re-runs the injected digest and exact canonical schema checks.
+            _ = try decodeSecretSyncImmutableRecord(record, digester: digester)
         }
         return type
     }

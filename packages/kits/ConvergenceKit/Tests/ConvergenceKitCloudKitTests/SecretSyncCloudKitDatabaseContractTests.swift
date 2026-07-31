@@ -11,7 +11,10 @@ struct SecretSyncCloudKitDatabaseContractTests {
         let database = U4RecordingDatabase()
         let record = try U4DatabaseFixture.immutableRecord(type: .deviceTrustRecord)
 
-        let result = try await database.modifySecretSyncRecords(saving: [record])
+        let result = try await database.modifySecretSyncRecords(
+            saving: [record],
+            digester: U4DatabaseFixture.digester
+        )
         let capture = try #require(await database.capture)
 
         #expect(capture.savePolicy == .ifServerRecordUnchanged)
@@ -27,7 +30,10 @@ struct SecretSyncCloudKitDatabaseContractTests {
         let database = U4RecordingDatabase(mode: .perItemConflict)
         let record = try U4DatabaseFixture.immutableRecord(type: .deviceEnrollmentProof)
 
-        let result = try await database.modifySecretSyncRecords(saving: [record])
+        let result = try await database.modifySecretSyncRecords(
+            saving: [record],
+            digester: U4DatabaseFixture.digester
+        )
         let item = try #require(result.saveResults[record.recordID])
 
         switch item {
@@ -44,7 +50,10 @@ struct SecretSyncCloudKitDatabaseContractTests {
         let record = try U4DatabaseFixture.immutableRecord(type: .deviceTrustRecord)
 
         await #expect(throws: SecretSyncCloudKitError.incompleteModifyResults) {
-            _ = try await database.modifySecretSyncRecords(saving: [record])
+            _ = try await database.modifySecretSyncRecords(
+                saving: [record],
+                digester: U4DatabaseFixture.digester
+            )
         }
     }
 
@@ -63,14 +72,38 @@ struct SecretSyncCloudKitDatabaseContractTests {
         )
 
         await #expect(throws: SecretSyncCloudKitError.invalidWriteBatch) {
-            _ = try await database.modifySecretSyncRecords(saving: [control, payload])
+            _ = try await database.modifySecretSyncRecords(
+                saving: [control, payload],
+                digester: U4DatabaseFixture.digester
+            )
         }
         await #expect(throws: SecretSyncCloudKitError.invalidWriteBatch) {
-            _ = try await database.modifySecretSyncRecords(saving: [control, head])
+            _ = try await database.modifySecretSyncRecords(
+                saving: [control, head],
+                digester: U4DatabaseFixture.digester
+            )
         }
         await #expect(throws: SecretSyncCloudKitError.invalidWriteBatch) {
-            _ = try await database.modifySecretSyncRecords(saving: [])
+            _ = try await database.modifySecretSyncRecords(
+                saving: [],
+                digester: U4DatabaseFixture.digester
+            )
         }
+    }
+
+    @Test("raw records cannot bypass digest recomputation")
+    func manufacturedDigestMismatchFailsClosed() async throws {
+        let database = U4RecordingDatabase()
+        let record = try U4DatabaseFixture.immutableRecord(type: .deviceTrustRecord)
+        record["ss_canonical_bytes"] = Data([0x01, 0x02, 0x03]) as NSData
+
+        await #expect(throws: SecretSyncCloudKitError.digestMismatch) {
+            _ = try await database.modifySecretSyncRecords(
+                saving: [record],
+                digester: U4DatabaseFixture.digester
+            )
+        }
+        #expect(await database.capture == nil)
     }
 }
 
@@ -168,6 +201,8 @@ private actor U4RecordingDatabase: CloudKitDatabaseProtocol {
 }
 
 private enum U4DatabaseFixture {
+    static var digester: some SecretSyncDigesting { Digester() }
+
     static func immutableRecord(type: SecretSyncCloudKitRecordType) throws -> CKRecord {
         let bytes = try SecretSyncCanonicalEncoding.encode(
             domain: try #require(type.canonicalDomain),
