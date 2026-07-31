@@ -4,6 +4,27 @@ import Foundation
 
 @testable import ConvergenceKitAppleSecurity
 
+/// Builds the opt-in hardware harness with an injected active state because a
+/// SwiftPM CLI test process has no application lifecycle. This exercises real
+/// Secure Enclave and Keychain custody, but it does not claim to verify the
+/// production UIApplication/NSApplication foreground-state integration.
+func makeSecretSyncHardwareCustodyForCLITest()
+  -> SecretSyncSecureEnclaveCustody
+{
+  SecretSyncSecureEnclaveCustody(
+    handleStore: SecretSyncKeychainHandleStore(),
+    authorization: SecretSyncLocalAuthorization(
+      foregroundState: SecretSyncTestOnlyActiveForegroundState()
+    )
+  )
+}
+
+private struct SecretSyncTestOnlyActiveForegroundState:
+  SecretSyncForegroundStateProviding
+{
+  func isForegroundActive() async -> Bool { true }
+}
+
 /// Software-only custody used by the AppleSecurity test target.
 ///
 /// Keeping this type under `Tests/` makes simulator coverage possible without

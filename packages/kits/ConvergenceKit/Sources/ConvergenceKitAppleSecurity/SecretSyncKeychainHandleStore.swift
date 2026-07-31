@@ -45,7 +45,7 @@ enum SecretSyncKeychainAccessibility: Sendable, Equatable {
 
 struct SecretSyncKeychainRequest: Sendable, Equatable {
   let service: String
-  let account: String
+  let account: String?
   let data: Data?
   let accessibility: SecretSyncKeychainAccessibility
   let synchronizable: Bool
@@ -55,13 +55,19 @@ struct SecretSyncKeychainRequest: Sendable, Equatable {
   // access group without requiring a sharing entitlement.
   let accessGroup: String? = nil
 
-  var storageKey: String { service + "\u{0}" + account }
+  var storageKey: String { service + "\u{0}" + (account ?? "*") }
 }
 
 enum SecretSyncKeychainResult: Sendable, Equatable {
   case success(Data?)
   case notFound
   case duplicate
+  case failure
+}
+
+enum SecretSyncKeychainItemsResult: Sendable, Equatable {
+  case success([Data])
+  case notFound
   case failure
 }
 
@@ -74,9 +80,9 @@ protocol SecretSyncKeychainOperating: Sendable {
     _ request: SecretSyncKeychainRequest
   ) async -> SecretSyncKeychainResult
 
-  func update(
+  func readAll(
     _ request: SecretSyncKeychainRequest
-  ) async -> SecretSyncKeychainResult
+  ) async -> SecretSyncKeychainItemsResult
 
   func delete(
     _ request: SecretSyncKeychainRequest
@@ -108,18 +114,28 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
     return .success(data)
   }
 
-  func update(
+  func readAll(
     _ request: SecretSyncKeychainRequest
-  ) -> SecretSyncKeychainResult {
-    guard let data = request.data else { return .failure }
-    let query = baseAttributes(request)
-    let changes = [kSecValueData as String: data]
-    return result(
-      for: SecItemUpdate(
-        query as CFDictionary,
-        changes as CFDictionary
-      )
-    )
+  ) -> SecretSyncKeychainItemsResult {
+    var query = baseAttributes(request)
+    query[kSecReturnData as String] = kCFBooleanTrue
+    query[kSecMatchLimit as String] = kSecMatchLimitAll
+    var returned: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &returned)
+    switch status {
+    case errSecSuccess:
+      if let values = returned as? [Data], !values.isEmpty {
+        return .success(values)
+      }
+      if let value = returned as? Data {
+        return .success([value])
+      }
+      return .failure
+    case errSecItemNotFound:
+      return .notFound
+    default:
+      return .failure
+    }
   }
 
   func delete(
@@ -134,10 +150,12 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
     var attributes: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: request.service,
-      kSecAttrAccount as String: request.account,
       kSecAttrSynchronizable as String:
         request.synchronizable ? kCFBooleanTrue! : kCFBooleanFalse!,
     ]
+    if let account = request.account {
+      attributes[kSecAttrAccount as String] = account
+    }
     #if os(macOS)
       if request.usesDataProtectionKeychain {
         attributes[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue

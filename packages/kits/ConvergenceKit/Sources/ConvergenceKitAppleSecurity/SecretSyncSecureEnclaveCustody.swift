@@ -51,6 +51,9 @@ public actor SecretSyncSecureEnclaveCustody:
     }
     let context = try await authorization.authorityContext()
     do {
+      // Keep creation as one authority-scoped transaction: two independent
+      // role keys and both opaque handles must either persist together or the
+      // first handle is removed before the method returns.
       let accessControl = try Self.privateKeyAccessControl()
       guard let rawContext = context.localAuthenticationContext else {
         throw SecretSyncCustodyError.authorizationFailed
@@ -124,6 +127,7 @@ public actor SecretSyncSecureEnclaveCustody:
     try await createCredential(for: deviceID)
   }
 
+  /// Retrieves the signing descriptor after fresh authority authorization.
   public func signingPublicCredential(
     for credentialID: DeviceCredentialID
   ) async throws -> SigningPublicKeyDescriptor {
@@ -134,6 +138,7 @@ public actor SecretSyncSecureEnclaveCustody:
     return try Self.signingDescriptor(record)
   }
 
+  /// Retrieves the agreement descriptor after fresh authority authorization.
   public func keyAgreementPublicCredential(
     for credentialID: DeviceCredentialID
   ) async throws -> KeyAgreementPublicKeyDescriptor {
@@ -144,6 +149,7 @@ public actor SecretSyncSecureEnclaveCustody:
     return try Self.agreementDescriptor(record)
   }
 
+  /// Retrieves the opaque signing handle after fresh authority authorization.
   public func signingPrivateKeyHandle(
     for credentialID: DeviceCredentialID
   ) async throws -> SigningPrivateKeyHandle {
@@ -154,6 +160,7 @@ public actor SecretSyncSecureEnclaveCustody:
     return SigningPrivateKeyHandle(record.handleID)
   }
 
+  /// Retrieves the opaque agreement handle after fresh authority authorization.
   public func keyAgreementPrivateKeyHandle(
     for credentialID: DeviceCredentialID
   ) async throws -> KeyAgreementPrivateKeyHandle {
@@ -164,11 +171,14 @@ public actor SecretSyncSecureEnclaveCustody:
     return KeyAgreementPrivateKeyHandle(record.handleID)
   }
 
+  /// Produces a canonical low-S signing proof for a complete bound challenge.
   public func proveSigningKeyPossession(
     _ request: SigningProofOfPossessionRequest
   ) async throws -> SigningProofOfPossessionResult {
     let context = try await authorization.authorityContext()
     do {
+      // Load both role descriptors under one fresh authority context because
+      // the challenge binds the credential pair, not only the signing key.
       let signingRecord = try await handleStore.record(
         for: request.credentialID,
         role: .signing
@@ -226,11 +236,14 @@ public actor SecretSyncSecureEnclaveCustody:
     }
   }
 
+  /// Produces an externally verifiable agreement proof for a bound challenge.
   public func proveKeyAgreementKeyPossession(
     _ request: KeyAgreementProofOfPossessionRequest
   ) async throws -> KeyAgreementProofOfPossessionResult {
     let context = try await authorization.authorityContext()
     do {
+      // Load both role descriptors before key reconstruction so validation
+      // binds the agreement response to the complete enrolled credential.
       let signingRecord = try await handleStore.record(
         for: request.credentialID,
         role: .signing
@@ -297,10 +310,12 @@ public actor SecretSyncSecureEnclaveCustody:
     context envelopeContext: SecretSyncRecipientEnvelopeContext,
     session: SecretSyncForegroundAuthorizationSession
   ) async throws -> SecretSyncGenerationKey {
-    let authorizedContext = try await session.authorizedContext()
-    guard let rawContext = authorizedContext.localAuthenticationContext else {
-      throw SecretSyncCustodyError.authorizationFailed
+    guard envelopeContext.recipientCredentialID == credentialID else {
+      // Reject cross-credential relabeling before authorization, Keychain, or
+      // Secure Enclave work can reveal anything about the supplied handle.
+      throw SecretSyncCustodyError.invalidProof
     }
+    _ = try await session.authorizedContext()
     let record = try await handleStore.record(
       for: credentialID,
       role: .agreement
@@ -308,6 +323,12 @@ public actor SecretSyncSecureEnclaveCustody:
     guard record.handleID == privateKeyHandle.rawValue else {
       throw SecretSyncCustodyError.corruptHandle
     }
+    let authorizedContext = try await session.authorizedContext()
+    guard let rawContext = authorizedContext.localAuthenticationContext else {
+      throw SecretSyncCustodyError.authorizationFailed
+    }
+    // Revalidate foreground state immediately before each private-key phase;
+    // retaining an authorized LAContext alone never grants background use.
     let key: SecureEnclave.P256.KeyAgreement.PrivateKey
     do {
       key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
@@ -330,6 +351,7 @@ public actor SecretSyncSecureEnclaveCustody:
     }
     let encapsulatedKey = Data(wrappedKeyBytes.prefix(65))
     let ciphertext = Data(wrappedKeyBytes.dropFirst(65))
+    _ = try await session.authorizedContext()
     do {
       var recipient = try HPKE.Recipient(
         privateKey: key,

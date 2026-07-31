@@ -516,6 +516,8 @@ enum SecretSyncProofOfPossession {
   private static func parseTranscript(
     _ bytes: Data
   ) throws -> SecretSyncProofOfPossessionTranscript {
+    // Validate the exact tag sequence and suite constants in one guard so no
+    // partially parsed transcript can omit a security-relevant binding field.
     let document: SecretSyncCanonicalDocument
     do {
       document = try SecretSyncCanonicalEncoding.decode(

@@ -1,6 +1,12 @@
 import Foundation
 import LocalAuthentication
 
+#if os(iOS)
+  @preconcurrency import UIKit
+#elseif os(macOS)
+  @preconcurrency import AppKit
+#endif
+
 enum SecretSyncAuthorizationScope: Sendable, Equatable {
   case authority
   case foregroundHydration
@@ -42,6 +48,24 @@ protocol SecretSyncAuthorizationOperating: Sendable {
   func invalidate(_ context: SecretSyncAuthorizedContext) async
 }
 
+protocol SecretSyncForegroundStateProviding: Sendable {
+  func isForegroundActive() async -> Bool
+}
+
+struct SecretSyncSystemForegroundState: SecretSyncForegroundStateProviding {
+  func isForegroundActive() async -> Bool {
+    await MainActor.run {
+      #if os(iOS)
+        UIApplication.shared.applicationState == .active
+      #elseif os(macOS)
+        NSApplication.shared.isActive
+      #else
+        false
+      #endif
+    }
+  }
+}
+
 actor SecretSyncSystemAuthorization: SecretSyncAuthorizationOperating {
   func authorize(
     scope: SecretSyncAuthorizationScope
@@ -66,10 +90,12 @@ actor SecretSyncSystemAuthorization: SecretSyncAuthorizationOperating {
     }
     do {
       var availabilityError: NSError?
-      guard context.canEvaluatePolicy(
-        .deviceOwnerAuthentication,
-        error: &availabilityError
-      ) else {
+      guard
+        context.canEvaluatePolicy(
+          .deviceOwnerAuthentication,
+          error: &availabilityError
+        )
+      else {
         throw SecretSyncCustodyError.authorizationFailed
       }
       _ = try await context.evaluatePolicy(
@@ -101,19 +127,29 @@ actor SecretSyncSystemAuthorization: SecretSyncAuthorizationOperating {
 public actor SecretSyncForegroundAuthorizationSession {
   private let context: SecretSyncAuthorizedContext
   private let operations: any SecretSyncAuthorizationOperating
+  private let foregroundState: any SecretSyncForegroundStateProviding
   private var isInvalidated = false
 
   fileprivate init(
     context: SecretSyncAuthorizedContext,
-    operations: any SecretSyncAuthorizationOperating
+    operations: any SecretSyncAuthorizationOperating,
+    foregroundState: any SecretSyncForegroundStateProviding
   ) {
     self.context = context
     self.operations = operations
+    self.foregroundState = foregroundState
   }
 
-  func authorizedContext() throws -> SecretSyncAuthorizedContext {
+  func authorizedContext() async throws -> SecretSyncAuthorizedContext {
     guard !isInvalidated, context.scope == .foregroundHydration else {
       throw SecretSyncCustodyError.authorizationFailed
+    }
+    guard await foregroundState.isForegroundActive() else {
+      // A retained LAContext is not proof that its owning scene remains in the
+      // foreground. Revoke it before any caller can reach a private handle.
+      isInvalidated = true
+      await operations.invalidate(context)
+      throw SecretSyncCustodyError.backgroundOperationDenied
     }
     return context
   }
@@ -128,12 +164,16 @@ public actor SecretSyncForegroundAuthorizationSession {
 
 actor SecretSyncLocalAuthorization {
   private let operations: any SecretSyncAuthorizationOperating
+  private let foregroundState: any SecretSyncForegroundStateProviding
 
   init(
     operations: any SecretSyncAuthorizationOperating =
-      SecretSyncSystemAuthorization()
+      SecretSyncSystemAuthorization(),
+    foregroundState: any SecretSyncForegroundStateProviding =
+      SecretSyncSystemForegroundState()
   ) {
     self.operations = operations
+    self.foregroundState = foregroundState
   }
 
   func authorityContext() async throws -> SecretSyncAuthorizedContext {
@@ -143,12 +183,20 @@ actor SecretSyncLocalAuthorization {
   func beginForegroundSession()
     async throws -> SecretSyncForegroundAuthorizationSession
   {
+    guard await foregroundState.isForegroundActive() else {
+      throw SecretSyncCustodyError.backgroundOperationDenied
+    }
     let context = try await operations.authorize(
       scope: .foregroundHydration
     )
+    guard await foregroundState.isForegroundActive() else {
+      await operations.invalidate(context)
+      throw SecretSyncCustodyError.backgroundOperationDenied
+    }
     return SecretSyncForegroundAuthorizationSession(
       context: context,
-      operations: operations
+      operations: operations,
+      foregroundState: foregroundState
     )
   }
 

@@ -24,7 +24,7 @@ public struct SecretSyncProtectedHeadAdvance: Sendable, Hashable {
 /// `ExternalBootstrapFreshnessAnchor`: local state cannot establish external
 /// freshness or substitute for an enrolled peer/recovery checkpoint.
 public actor SecretSyncProtectedHeadStore {
-  private static let service =
+  private static let baseService =
     "com.codedaptive.mootx01.secret-sync.protected-head"
   private static let maximumRecordByteCount = 4_096
   private let keychain: any SecretSyncKeychainOperating
@@ -45,10 +45,18 @@ public actor SecretSyncProtectedHeadStore {
   public func initialize(
     _ commitment: SecretBootstrapFreshnessCommitment
   ) async throws {
+    do {
+      _ = try await protectedHead(for: commitment.scopeID)
+      throw SecretSyncCustodyError.rollbackDetected
+    } catch SecretSyncCustodyError.missingProtectedHead {
+      // Expected: initialization is the only path allowed to create epoch one.
+    }
     let bytes = try encode(commitment)
-    switch await keychain.add(request(for: commitment.scopeID, data: bytes)) {
+    switch await keychain.add(appendRequest(for: commitment, data: bytes)) {
     case .success:
-      return
+      guard try await protectedHead(for: commitment.scopeID) == commitment else {
+        throw SecretSyncCustodyError.rollbackDetected
+      }
     case .duplicate:
       throw SecretSyncCustodyError.rollbackDetected
     case .notFound, .failure:
@@ -60,34 +68,35 @@ public actor SecretSyncProtectedHeadStore {
   public func protectedHead(
     for scopeID: SecretScopeID
   ) async throws -> SecretBootstrapFreshnessCommitment {
-    let bytes: Data
-    switch await keychain.read(request(for: scopeID, data: nil)) {
+    let records: [Data]
+    switch await keychain.readAll(historyRequest(for: scopeID)) {
     case .success(let result):
-      guard let result else {
+      guard !result.isEmpty else {
         throw SecretSyncCustodyError.corruptProtectedHead
       }
-      bytes = result
+      records = result
     case .notFound:
       throw SecretSyncCustodyError.missingProtectedHead
-    case .duplicate, .failure:
+    case .failure:
       throw SecretSyncCustodyError.corruptProtectedHead
     }
-    guard !bytes.isEmpty, bytes.count <= Self.maximumRecordByteCount else {
+
+    // Decode the complete immutable history before selecting a floor. Ignoring
+    // one malformed or duplicated record could hide a same-epoch fork.
+    let commitments = try records.map { try decode($0, scopeID: scopeID) }
+    guard Set(commitments).count == commitments.count else {
       throw SecretSyncCustodyError.corruptProtectedHead
     }
-    let commitment: SecretBootstrapFreshnessCommitment
-    do {
-      commitment = try PropertyListDecoder().decode(
-        SecretBootstrapFreshnessCommitment.self,
-        from: bytes
-      )
-    } catch {
+    guard let maximumEpoch = commitments.map(\.latestPolicyEpoch).max() else {
       throw SecretSyncCustodyError.corruptProtectedHead
     }
-    guard commitment.scopeID == scopeID else {
-      throw SecretSyncCustodyError.corruptProtectedHead
+    let highest = commitments.filter {
+      $0.latestPolicyEpoch == maximumEpoch
     }
-    return commitment
+    guard highest.count == 1, let floor = highest.first else {
+      throw SecretSyncCustodyError.rollbackDetected
+    }
+    return floor
   }
 
   /// Advances the floor only from its exact current value and predecessor.
@@ -112,12 +121,17 @@ public actor SecretSyncProtectedHeadStore {
       throw SecretSyncCustodyError.rollbackDetected
     }
     let bytes = try encode(request.candidate)
-    switch await keychain.update(
-      self.request(for: current.scopeID, data: bytes)
+    switch await keychain.add(
+      appendRequest(for: request.candidate, data: bytes)
     ) {
     case .success:
-      return
-    case .notFound, .duplicate, .failure:
+      break
+    case .duplicate:
+      break
+    case .notFound, .failure:
+      throw SecretSyncCustodyError.rollbackDetected
+    }
+    guard try await protectedHead(for: current.scopeID) == request.candidate else {
       throw SecretSyncCustodyError.rollbackDetected
     }
   }
@@ -140,17 +154,70 @@ public actor SecretSyncProtectedHeadStore {
     }
   }
 
-  private func request(
-    for scopeID: SecretScopeID,
+  private func decode(
+    _ bytes: Data,
+    scopeID: SecretScopeID
+  ) throws -> SecretBootstrapFreshnessCommitment {
+    guard !bytes.isEmpty, bytes.count <= Self.maximumRecordByteCount else {
+      throw SecretSyncCustodyError.corruptProtectedHead
+    }
+    do {
+      let commitment = try PropertyListDecoder().decode(
+        SecretBootstrapFreshnessCommitment.self,
+        from: bytes
+      )
+      guard commitment.scopeID == scopeID else {
+        throw SecretSyncCustodyError.corruptProtectedHead
+      }
+      return commitment
+    } catch let error as SecretSyncCustodyError {
+      throw error
+    } catch {
+      throw SecretSyncCustodyError.corruptProtectedHead
+    }
+  }
+
+  private func appendRequest(
+    for commitment: SecretBootstrapFreshnessCommitment,
     data: Data?
   ) -> SecretSyncKeychainRequest {
     SecretSyncKeychainRequest(
-      service: Self.service,
-      account: scopeID.rawValue.uuidString.lowercased(),
+      service: service(for: commitment.scopeID),
+      account: Self.account(for: commitment),
       data: data,
       accessibility: .whenUnlockedThisDeviceOnly,
       synchronizable: false,
       usesDataProtectionKeychain: true
     )
+  }
+
+  private func historyRequest(
+    for scopeID: SecretScopeID
+  ) -> SecretSyncKeychainRequest {
+    SecretSyncKeychainRequest(
+      service: service(for: scopeID),
+      account: nil,
+      data: nil,
+      accessibility: .whenUnlockedThisDeviceOnly,
+      synchronizable: false,
+      usesDataProtectionKeychain: true
+    )
+  }
+
+  private func service(for scopeID: SecretScopeID) -> String {
+    Self.baseService + "." + scopeID.rawValue.uuidString.lowercased()
+  }
+
+  private static func account(
+    for commitment: SecretBootstrapFreshnessCommitment
+  ) -> String {
+    let epoch = String(
+      format: "epoch-%020llu-",
+      commitment.latestPolicyEpoch
+    )
+    let digest = commitment.headCommitDigest.bytes.map {
+      String(format: "%02x", $0)
+    }.joined()
+    return epoch + digest
   }
 }

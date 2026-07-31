@@ -41,11 +41,13 @@ struct SecretSyncCustodyContractTests {
   @Test("software provider source is outside every production source path")
   func softwareProviderIsTestOnly() throws {
     let thisFile = URL(fileURLWithPath: #filePath)
-    let packageRoot = thisFile
+    let packageRoot =
+      thisFile
       .deletingLastPathComponent()
       .deletingLastPathComponent()
       .deletingLastPathComponent()
-    let productionRoot = packageRoot
+    let productionRoot =
+      packageRoot
       .appendingPathComponent("Sources/ConvergenceKitAppleSecurity")
     let productionFiles = try FileManager.default.contentsOfDirectory(
       at: productionRoot,
@@ -70,14 +72,14 @@ struct SecretSyncCustodyContractTests {
       throw SecretSyncCustodyError.hardwareUnavailable
     }
 
-    let provider = SecretSyncSecureEnclaveCustody()
+    let provider = makeSecretSyncHardwareCustodyForCLITest()
     let generation = try await provider.createCredential(
       for: TrustedDeviceID(UUID())
     )
     do {
       // A new provider owns new LA contexts and reloads the opaque handles
       // from the Data Protection Keychain rather than retaining key objects.
-      let reloaded = SecretSyncSecureEnclaveCustody()
+      let reloaded = makeSecretSyncHardwareCustodyForCLITest()
       let signingHandle = try await reloaded.signingPrivateKeyHandle(
         for: generation.credentialID
       )
@@ -232,8 +234,9 @@ private func hardwareDigest(_ byte: UInt8) throws -> SecretRecordDigest {
 }
 
 private func fixtureUUID(_ byte: UInt8) -> UUID {
-  UUID(uuid: (
-    byte, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, byte
-  ))
+  UUID(
+    uuid: (
+      byte, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, byte
+    ))
 }
