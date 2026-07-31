@@ -60,6 +60,91 @@ struct SecretSyncCustodyContractTests {
     }
   }
 
+  @Test("signed host accepts the macOS development profile shape")
+  func signedHostAcceptsMacOSDevelopmentProfileShape() throws {
+    let packageRoot =
+      URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let script = packageRoot.appendingPathComponent(
+      "U3SignedHost/run-physical-proof.sh"
+    )
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: temporaryDirectory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+    let profile = """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+      "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>TeamIdentifier</key>
+        <array><string>TESTTEAM123</string></array>
+        <key>Platform</key>
+        <array><string>OSX</string></array>
+        <key>Entitlements</key>
+        <dict>
+          <key>com.apple.application-identifier</key>
+          <string>TESTTEAM123.com.example.u3-host</string>
+          <key>keychain-access-groups</key>
+          <array><string>TESTTEAM123.*</string></array>
+        </dict>
+      </dict>
+      </plist>
+      """
+    let validProfile = temporaryDirectory.appendingPathComponent("valid.plist")
+    try profile.write(to: validProfile, atomically: true, encoding: .utf8)
+
+    #expect(
+      try signedHostProfileValidationStatus(
+        script: script,
+        profile: validProfile,
+        teamID: "TESTTEAM123"
+      ) == 0
+    )
+    #expect(
+      try signedHostProfileValidationStatus(
+        script: script,
+        profile: validProfile,
+        teamID: "WRONGTEAM456"
+      ) != 0
+    )
+
+    let legacyProfile = temporaryDirectory.appendingPathComponent("legacy.plist")
+    try profile.replacingOccurrences(
+      of: "com.apple.application-identifier",
+      with: "application-identifier"
+    ).write(to: legacyProfile, atomically: true, encoding: .utf8)
+    #expect(
+      try signedHostProfileValidationStatus(
+        script: script,
+        profile: legacyProfile,
+        teamID: "TESTTEAM123"
+      ) != 0
+    )
+
+    let wrongGroupProfile = temporaryDirectory.appendingPathComponent(
+      "wrong-group.plist"
+    )
+    try profile.replacingOccurrences(
+      of: "TESTTEAM123.*",
+      with: "WRONGTEAM456.*"
+    ).write(to: wrongGroupProfile, atomically: true, encoding: .utf8)
+    #expect(
+      try signedHostProfileValidationStatus(
+        script: script,
+        profile: wrongGroupProfile,
+        teamID: "TESTTEAM123"
+      ) != 0
+    )
+  }
+
   @Test("opt-in supported-hardware custody and user-presence proof")
   func supportedHardwareProof() async throws {
     guard
@@ -193,6 +278,32 @@ struct SecretSyncCustodyContractTests {
       throw SecretSyncCustodyError.cryptographicFailure
     }
   }
+}
+
+private func signedHostProfileValidationStatus(
+  script: URL,
+  profile: URL,
+  teamID: String
+) throws -> Int32 {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/bash")
+  process.arguments = [
+    "-c",
+    """
+    source "$1"
+    team_id="$2"
+    application_id="$3"
+    profile_is_match "$4"
+    """,
+    "u3-profile-smoke",
+    script.path,
+    teamID,
+    "com.example.u3-host",
+    profile.path,
+  ]
+  try process.run()
+  process.waitUntilExit()
+  return process.terminationStatus
 }
 
 private func hardwareAttributesAreLocked(

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 package_dir="$(cd "$script_dir/.." && pwd)"
 project_path="$script_dir/U3SignedHost.xcodeproj"
 scheme="U3SignedHost"
@@ -23,6 +23,53 @@ fail() {
   exit 1
 }
 
+decode_profile() {
+  local source_path="$1"
+  local output_path="$2"
+  security cms -D -i "$source_path" >"$output_path" 2>/dev/null
+}
+
+profile_value() {
+  local decoded_path="$1"
+  local key_path="$2"
+  /usr/libexec/PlistBuddy -c "Print :$key_path" "$decoded_path" 2>/dev/null
+}
+
+profile_is_match() {
+  local decoded_path="$1"
+  local candidate_team candidate_application candidate_platform candidate_group
+  candidate_team="$(profile_value "$decoded_path" 'TeamIdentifier:0' || true)"
+  # macOS profiles use the namespaced application identifier and may omit
+  # get-task-allow. The Apple Development identity, macOS platform, team,
+  # exact bundle suffix, and authorized Keychain group form the fail-closed
+  # development-profile relationship checked here and by xcodebuild.
+  candidate_application="$(
+    profile_value \
+      "$decoded_path" \
+      'Entitlements:com.apple.application-identifier' || true
+  )"
+  candidate_platform="$(profile_value "$decoded_path" 'Platform:0' || true)"
+  candidate_group="$(
+    profile_value \
+      "$decoded_path" \
+      'Entitlements:keychain-access-groups:0' || true
+  )"
+
+  [[ -n "$candidate_team" && -n "$candidate_application" ]] || return 1
+  [[ "$candidate_application" =~ ^[A-Z0-9]+\.[A-Za-z0-9.-]+$ ]] || return 1
+  [[ "$candidate_application" == "$candidate_team."* ]] || return 1
+  [[ "$candidate_platform" == "OSX" || "$candidate_platform" == "macOS" ]] \
+    || return 1
+  [[
+    "$candidate_group" == "$candidate_application"
+      || "$candidate_group" == "$candidate_team.*"
+  ]] || return 1
+  [[ -z "$team_id" || "$candidate_team" == "$team_id" ]] || return 1
+  [[ -z "$application_id" || "$candidate_application" == *".$application_id" ]] \
+    || return 1
+}
+
+main() {
 while (($#)); do
   case "$1" in
     --identity)
@@ -88,51 +135,6 @@ else
   [[ "$identity_count" == "1" ]] || fail "signing-identity-ambiguous"
 fi
 
-decode_profile() {
-  local source_path="$1"
-  local output_path="$2"
-  security cms -D -i "$source_path" >"$output_path" 2>/dev/null
-}
-
-profile_value() {
-  local decoded_path="$1"
-  local key_path="$2"
-  /usr/libexec/PlistBuddy -c "Print :$key_path" "$decoded_path" 2>/dev/null
-}
-
-profile_is_match() {
-  local decoded_path="$1"
-  local candidate_team candidate_application candidate_debug candidate_platform
-  local candidate_group
-  candidate_team="$(profile_value "$decoded_path" 'TeamIdentifier:0' || true)"
-  candidate_application="$(
-    profile_value "$decoded_path" 'Entitlements:application-identifier' || true
-  )"
-  candidate_debug="$(
-    profile_value "$decoded_path" 'Entitlements:get-task-allow' || true
-  )"
-  candidate_platform="$(profile_value "$decoded_path" 'Platform:0' || true)"
-  candidate_group="$(
-    profile_value \
-      "$decoded_path" \
-      'Entitlements:keychain-access-groups:0' || true
-  )"
-
-  [[ -n "$candidate_team" && -n "$candidate_application" ]] || return 1
-  [[ "$candidate_application" =~ ^[A-Z0-9]+\.[A-Za-z0-9.-]+$ ]] || return 1
-  [[ "$candidate_application" == "$candidate_team."* ]] || return 1
-  [[ "$candidate_debug" == "true" ]] || return 1
-  [[ "$candidate_platform" == "OSX" || "$candidate_platform" == "macOS" ]] \
-    || return 1
-  [[
-    "$candidate_group" == "$candidate_application"
-      || "$candidate_group" == "$candidate_team.*"
-  ]] || return 1
-  [[ -z "$team_id" || "$candidate_team" == "$team_id" ]] || return 1
-  [[ -z "$application_id" || "$candidate_application" == *".$application_id" ]] \
-    || return 1
-}
-
 selected_profile="$work_dir/selected-profile.plist"
 if [[ -n "$profile_path" ]]; then
   [[ -f "$profile_path" ]] || fail "provisioning-profile-unavailable"
@@ -163,7 +165,9 @@ fi
 
 profile_team="$(profile_value "$selected_profile" 'TeamIdentifier:0')"
 profile_application="$(
-  profile_value "$selected_profile" 'Entitlements:application-identifier'
+  profile_value \
+    "$selected_profile" \
+    'Entitlements:com.apple.application-identifier'
 )"
 profile_name="$(profile_value "$selected_profile" 'Name')"
 profile_uuid="$(profile_value "$selected_profile" 'UUID')"
@@ -244,3 +248,8 @@ embedded_uuid="$(profile_value "$embedded_plist" 'UUID' || true)"
   || fail "embedded-profile-mismatch"
 
 "$app_path/Contents/MacOS/U3SignedHost"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
