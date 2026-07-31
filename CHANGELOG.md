@@ -5,6 +5,17 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.38 — 2026-07-30
+
+**Packaging-only release — plugin MCP server renamed to `memory`.** No code
+changes. The plugin's MCP server key changes from `mootx01` to `memory` in
+every generated plugin package and both embedded installer copies, so tools
+surface as `plugin:mootx01:memory` in Claude Code — plainest naming for new
+users. Direct (non-plugin) MCP entries are unaffected and keep the `mootx01`
+key. One-time effect on existing plugin installs: tool permission grants and
+any user hooks keyed to the old `mcp__plugin_mootx01_mootx01__*` names
+re-prompt under the new prefix.
+
 ## v1.0.37 — 2026-07-30
 
 **Security release — four findings closed across ConvergenceKit, CorpusKit,
