@@ -51,11 +51,29 @@ extension EstateKeyProvider {
         public var description: String {
             switch self {
             case let .encryptedEstateKeyMissing(estateURL, underlying):
+                // The Keychain account is derived from the estate PATH
+                // (KeychainKeyStore.estateAccount), so the overwhelmingly most
+                // likely cause of this error is that the estate moved or
+                // MOOTX01_DATA_DIR changed — not that the Keychain item was
+                // deleted. Say so, and name the account being looked for, so
+                // the user can either move the file back or find the item.
+                // There is no escrow: a key that cannot be located makes the
+                // estate permanently unreadable, which makes an actionable
+                // message the difference between a two-second fix and data loss.
                 return """
                     the estate at \(estateURL.path) is encrypted but its key could not be \
                     loaded (\(underlying)). Refusing to continue: opening it without the \
                     correct key would fail, and creating a new estate would hide the \
                     existing one.
+
+                    The key is looked up by the estate's PATH — Keychain service \
+                    "\(EstateKeyProvider.keychainService)", account \
+                    "\(KeychainKeyStore.estateAccount(for: estateURL))". If this estate \
+                    was MOVED, or MOOTX01_DATA_DIR changed, the key is still in the \
+                    Keychain under the OLD path's account and this lookup cannot find \
+                    it. Move the estate back to its original path, or point \
+                    MOOTX01_DATA_DIR at it, and the key resolves again. There is no \
+                    escrow copy: do not delete the Keychain item.
                     """
             }
         }
