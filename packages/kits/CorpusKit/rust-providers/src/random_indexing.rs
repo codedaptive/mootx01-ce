@@ -328,6 +328,70 @@ impl RandomIndexingProvider {
         w.into_bytes()
     }
 
+    /// Split the counts blob into its fixed header and one entry per term.
+    /// Twin of the Swift `RandomIndexingProvider.decomposeCounts()`.
+    ///
+    /// The header is the identical prefix `serialize_counts` writes, followed
+    /// by an EMPTY map — so it stays a decodable RICT blob on its own and the
+    /// `counts` column never becomes NULL or undecodable. A NULL there is read
+    /// everywhere as "no counts, start from zero", which would silently discard
+    /// an estate's accumulated statistics instead of failing.
+    ///
+    /// Each entry's vector is exactly the bytes `write_f32_array` emits for
+    /// that term inside the blob: `u32 count` then `count` little-endian f32.
+    /// Reusing the same writer is deliberate — the per-term encoding is the
+    /// cross-port conformance contract and must not acquire a second encoder
+    /// that could drift from the Swift twin.
+    pub fn decompose_counts(&self) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+        let mut header = BasisWriter::new();
+        header.write_magic(RI_COUNTS_MAGIC);
+        header.write_byte(BASIS_FORMAT_VERSION);
+        header.write_string(&self.model_id);
+        header.write_string(&self.model_version);
+        header.write_u64(self.projection_seed);
+        header.write_string_f32_vector_map(&std::collections::HashMap::new());
+
+        let terms = self
+            .vocab
+            .iter()
+            .map(|(term, vector)| {
+                let mut w = BasisWriter::new();
+                w.write_f32_array(vector);
+                (term.clone(), w.into_bytes())
+            })
+            .collect();
+        (header.into_bytes(), terms)
+    }
+
+    /// Rehydrate from a header plus per-term entries — inverse of
+    /// `decompose_counts`. Twin of the Swift
+    /// `restoreCounts(header:terms:)`.
+    ///
+    /// The header is validated exactly as `restore_counts` validates a full
+    /// blob, so a mismatched provider or format version still fails closed.
+    /// Term order is irrelevant: the result is a map, and only the blob WRITER
+    /// needs the UTF-8 byte ordering that keeps the two ports byte-identical.
+    pub fn restore_counts_from_parts(
+        &mut self,
+        header: &[u8],
+        terms: &[(String, Vec<u8>)],
+    ) -> Result<(), BasisCodecError> {
+        let mut r = BasisReader::new(header);
+        r.expect_magic(RI_COUNTS_MAGIC)?;
+        r.expect_version(BASIS_FORMAT_VERSION)?;
+        let _model_id = r.read_string()?;
+        let _model_version = r.read_string()?;
+        let _projection_seed = r.read_u64()?;
+
+        let mut rebuilt = std::collections::HashMap::with_capacity(terms.len());
+        for (term, vector) in terms {
+            let mut vr = BasisReader::new(vector);
+            rebuilt.insert(term.clone(), vr.read_f32_array()?);
+        }
+        self.vocab = rebuilt;
+        Ok(())
+    }
+
     /// Restore the accumulated context vectors in place from a counts blob, so
     /// incremental maintenance resumes after a restart. Returns
     /// `Err(BasisCodecError)` on a bad blob — never panics.
