@@ -147,7 +147,7 @@ impl BasisStore {
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitBasis",
-            3,
+            4,
             vec![TableDeclaration::new(
                 "corpus_provider_basis",
                 vec![
@@ -180,9 +180,8 @@ impl BasisStore {
         )
         .with_migrations(vec![
             // v2 → v3: add the part_index column (default 0 preserves existing
-            // single-blob rows as part 0 of a 1-part basis). The PK constraint
-            // cannot be changed via ALTER TABLE in SQLite; since NO DATA EXISTS
-            // TO MIGRATE this is acceptable — all real estates start at v3.
+            // single-blob rows as part 0 of a 1-part basis). This alone is NOT
+            // sufficient — see v3 → v4 below.
             Migration {
                 from_version: 2,
                 to_version: 3,
@@ -190,6 +189,38 @@ impl BasisStore {
                     table: "corpus_provider_basis".to_string(),
                     column: ColumnDeclaration::int("part_index")
                         .with_default(TypedValue::Int(0)),
+                }],
+            },
+            // v3 → v4: rebuild the table so the primary key actually includes
+            // part_index. SQLite cannot ALTER a primary key, so v3 left every
+            // upgraded estate on the old 2-column PK and the first multi-part
+            // write failed with a unique-constraint violation. Mirrors the Swift
+            // twin exactly. Separate version (not a corrected v3) so estates
+            // already recorded at v3 are still repaired.
+            Migration {
+                from_version: 3,
+                to_version: 4,
+                operations: vec![SchemaOperation::Custom {
+                    sqlite: Some(
+                        r#"CREATE TABLE "corpus_provider_basis__v4" (
+  "model_id" TEXT NOT NULL,
+  "model_version" TEXT NOT NULL,
+  "part_index" INTEGER NOT NULL DEFAULT 0,
+  "basis" BLOB NOT NULL,
+  "trained_at" TEXT NOT NULL,
+  "trained_chunk_count" INTEGER NOT NULL,
+  "ext" BLOB,
+  PRIMARY KEY ("model_id", "model_version", "part_index")
+);
+INSERT INTO "corpus_provider_basis__v4"
+  ("model_id", "model_version", "part_index", "basis", "trained_at", "trained_chunk_count", "ext")
+  SELECT "model_id", "model_version", 0, "basis", "trained_at", "trained_chunk_count", "ext"
+  FROM "corpus_provider_basis";
+DROP TABLE "corpus_provider_basis";
+ALTER TABLE "corpus_provider_basis__v4" RENAME TO "corpus_provider_basis";"#
+                            .to_string(),
+                    ),
+                    postgresql: None,
                 }],
             },
         ])

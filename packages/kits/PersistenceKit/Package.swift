@@ -103,6 +103,17 @@ let package = Package(
                 .define("SQLITE_HAS_CODEC"),
                 .define("SQLCIPHER_CRYPTO_CC"),
                 .define("SQLITE_TEMP_STORE", to: "2"),
+                // Raise the hard blob/text ceiling from SQLite's 1e9 default to
+                // the engine maximum (2^31-3). This is COMPILE-TIME and load
+                // bearing: sqlite3_limit() can only LOWER a limit below the
+                // compile-time max, never raise it — so the defensive
+                // sqlite3_limit(SQLITE_LIMIT_LENGTH, INT_MAX) call in
+                // SQLiteConnection is a silent no-op without this define
+                // (ee#49 follow-up: a 1 GB+ bind still failed on a real estate
+                // after chunked basis persistence shipped, because OTHER
+                // unbounded blobs — matrix snapshots, migration progress
+                // records — share the same ceiling).
+                .define("SQLITE_MAX_LENGTH", to: "2147483645"),
                 // Mandatory for SQLCipher: wires the codec init/shutdown hooks.
                 .define("SQLITE_EXTRA_INIT", to: "sqlcipher_extra_init"),
                 .define("SQLITE_EXTRA_SHUTDOWN", to: "sqlcipher_extra_shutdown"),
