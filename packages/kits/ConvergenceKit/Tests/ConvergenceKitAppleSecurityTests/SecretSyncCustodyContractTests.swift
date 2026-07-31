@@ -145,6 +145,107 @@ struct SecretSyncCustodyContractTests {
     )
   }
 
+  @Test("signed host respects managed and manual profile signing modes")
+  func signedHostSelectsProfileSigningMode() throws {
+    let packageRoot =
+      URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let script = packageRoot.appendingPathComponent(
+      "U3SignedHost/run-physical-proof.sh"
+    )
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: temporaryDirectory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+    let profilePrefix = """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+      "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0"><dict>
+      """
+    let profileSuffix = "</dict></plist>"
+    let managedProfile = temporaryDirectory.appendingPathComponent(
+      "managed.plist"
+    )
+    try (profilePrefix + "<key>IsXcodeManaged</key><true/>" + profileSuffix)
+      .write(to: managedProfile, atomically: true, encoding: .utf8)
+    let manualProfile = temporaryDirectory.appendingPathComponent(
+      "manual.plist"
+    )
+    try (profilePrefix + "<key>IsXcodeManaged</key><false/>" + profileSuffix)
+      .write(to: manualProfile, atomically: true, encoding: .utf8)
+    let unmarkedProfile = temporaryDirectory.appendingPathComponent(
+      "unmarked.plist"
+    )
+    try (profilePrefix + profileSuffix)
+      .write(to: unmarkedProfile, atomically: true, encoding: .utf8)
+    let invalidProfile = temporaryDirectory.appendingPathComponent(
+      "invalid.plist"
+    )
+    try (
+      profilePrefix
+        + "<key>IsXcodeManaged</key><string>unexpected</string>"
+        + profileSuffix
+    ).write(to: invalidProfile, atomically: true, encoding: .utf8)
+
+    #expect(
+      try signedHostProfileSigningMode(
+        script: script,
+        profile: managedProfile
+      ) == (0, "managed")
+    )
+    #expect(
+      try signedHostProfileSigningMode(
+        script: script,
+        profile: manualProfile
+      ) == (0, "manual")
+    )
+    #expect(
+      try signedHostProfileSigningMode(
+        script: script,
+        profile: unmarkedProfile
+      ) == (0, "manual")
+    )
+    #expect(
+      try signedHostProfileSigningMode(
+        script: script,
+        profile: invalidProfile
+      ).status != 0
+    )
+
+    let managedArguments = try signedHostBuildArguments(
+      script: script,
+      signingMode: "managed",
+      temporaryDirectory: temporaryDirectory
+    )
+    #expect(managedArguments.contains("CODE_SIGN_STYLE=Automatic"))
+    #expect(managedArguments.contains("CODE_SIGN_IDENTITY=Apple Development"))
+    #expect(!managedArguments.contains { argument in
+      argument.hasPrefix("PROVISIONING_PROFILE_SPECIFIER=")
+    })
+
+    let manualArguments = try signedHostBuildArguments(
+      script: script,
+      signingMode: "manual",
+      temporaryDirectory: temporaryDirectory
+    )
+    #expect(manualArguments.contains("CODE_SIGN_STYLE=Manual"))
+    #expect(
+      manualArguments.contains(
+        "CODE_SIGN_IDENTITY=Apple Development: Exact Identity"
+      )
+    )
+    #expect(
+      manualArguments.contains("PROVISIONING_PROFILE_SPECIFIER=Manual Profile")
+    )
+  }
+
   @Test("opt-in supported-hardware custody and user-presence proof")
   func supportedHardwareProof() async throws {
     guard
@@ -304,6 +405,76 @@ private func signedHostProfileValidationStatus(
   try process.run()
   process.waitUntilExit()
   return process.terminationStatus
+}
+
+private func signedHostProfileSigningMode(
+  script: URL,
+  profile: URL
+) throws -> (status: Int32, mode: String) {
+  let output = Pipe()
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/bash")
+  process.arguments = [
+    "-c",
+    """
+    source "$1"
+    profile_signing_mode_for "$2"
+    """,
+    "u3-signing-mode",
+    script.path,
+    profile.path,
+  ]
+  process.standardOutput = output
+  try process.run()
+  process.waitUntilExit()
+  let mode = String(
+    decoding: output.fileHandleForReading.readDataToEndOfFile(),
+    as: UTF8.self
+  ).trimmingCharacters(in: .whitespacesAndNewlines)
+  return (process.terminationStatus, mode)
+}
+
+private func signedHostBuildArguments(
+  script: URL,
+  signingMode: String,
+  temporaryDirectory: URL
+) throws -> [String] {
+  let capture = temporaryDirectory.appendingPathComponent(
+    "\(signingMode)-arguments.txt"
+  )
+  let buildLog = temporaryDirectory.appendingPathComponent(
+    "\(signingMode)-build.log"
+  )
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/bash")
+  process.arguments = [
+    "-c",
+    """
+    source "$1"
+    capture_path="$3"
+    xcodebuild() { printf '%s\\n' "$@" > "$capture_path"; }
+    project_path="/tmp/U3SignedHost.xcodeproj"
+    scheme="U3SignedHost"
+    signing_identity="Apple Development: Exact Identity"
+    team_id="TESTTEAM123"
+    application_id="com.example.u3-host"
+    profile_name="Manual Profile"
+    run_signed_build "$2" "/tmp/U3DerivedData" "$4"
+    """,
+    "u3-build-arguments",
+    script.path,
+    signingMode,
+    capture.path,
+    buildLog.path,
+  ]
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0 else {
+    return []
+  }
+  return try String(contentsOf: capture, encoding: .utf8)
+    .split(separator: "\n")
+    .map(String.init)
 }
 
 private func hardwareAttributesAreLocked(

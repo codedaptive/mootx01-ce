@@ -35,6 +35,62 @@ profile_value() {
   /usr/libexec/PlistBuddy -c "Print :$key_path" "$decoded_path" 2>/dev/null
 }
 
+profile_signing_mode_for() {
+  local decoded_path="$1"
+  local managed_value
+  managed_value="$(profile_value "$decoded_path" 'IsXcodeManaged' || true)"
+
+  # Xcode-managed profiles must be selected through automatic signing. An
+  # absent marker is the established shape for manually managed profiles.
+  case "$managed_value" in
+    true)
+      printf '%s\n' 'managed'
+      ;;
+    false|'')
+      printf '%s\n' 'manual'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+run_signed_build() {
+  local signing_mode="$1"
+  local derived_data="$2"
+  local build_log="$3"
+
+  if [[ "$signing_mode" == "managed" ]]; then
+    # Automatic signing accepts Xcode-managed development profiles only with
+    # the generic identity class. The selected profile is still proven below
+    # by its embedded UUID and signed entitlement relationship.
+    xcodebuild \
+      -project "$project_path" \
+      -scheme "$scheme" \
+      -configuration Debug \
+      -destination 'platform=macOS,arch=arm64' \
+      -derivedDataPath "$derived_data" \
+      CODE_SIGN_STYLE=Automatic \
+      CODE_SIGN_IDENTITY='Apple Development' \
+      DEVELOPMENT_TEAM="$team_id" \
+      PRODUCT_BUNDLE_IDENTIFIER="$application_id" \
+      build >"$build_log" 2>&1
+  else
+    xcodebuild \
+      -project "$project_path" \
+      -scheme "$scheme" \
+      -configuration Debug \
+      -destination 'platform=macOS,arch=arm64' \
+      -derivedDataPath "$derived_data" \
+      CODE_SIGN_STYLE=Manual \
+      CODE_SIGN_IDENTITY="$signing_identity" \
+      DEVELOPMENT_TEAM="$team_id" \
+      PRODUCT_BUNDLE_IDENTIFIER="$application_id" \
+      PROVISIONING_PROFILE_SPECIFIER="$profile_name" \
+      build >"$build_log" 2>&1
+  fi
+}
+
 profile_is_match() {
   local decoded_path="$1"
   local candidate_team candidate_application candidate_platform candidate_group
@@ -172,6 +228,8 @@ profile_application="$(
 profile_name="$(profile_value "$selected_profile" 'Name')"
 profile_uuid="$(profile_value "$selected_profile" 'UUID')"
 profile_bundle_id="${profile_application#*.}"
+signing_mode="$(profile_signing_mode_for "$selected_profile")" \
+  || fail "provisioning-profile-invalid"
 
 [[ -n "$team_id" ]] || team_id="$profile_team"
 [[ -n "$application_id" ]] || application_id="$profile_bundle_id"
@@ -200,18 +258,7 @@ printf '%s\n' 'U3_SIGNED_HOST_UNSIGNED_CLASSIFICATION=missing-entitlement'
 
 derived_data="$work_dir/DerivedData"
 build_log="$work_dir/xcodebuild.log"
-if ! xcodebuild \
-  -project "$project_path" \
-  -scheme "$scheme" \
-  -configuration Debug \
-  -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath "$derived_data" \
-  CODE_SIGN_STYLE=Manual \
-  CODE_SIGN_IDENTITY="$signing_identity" \
-  DEVELOPMENT_TEAM="$team_id" \
-  PRODUCT_BUNDLE_IDENTIFIER="$application_id" \
-  PROVISIONING_PROFILE_SPECIFIER="$profile_name" \
-  build >"$build_log" 2>&1; then
+if ! run_signed_build "$signing_mode" "$derived_data" "$build_log"; then
   fail "signed-build-failed"
 fi
 
