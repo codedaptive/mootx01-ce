@@ -1674,7 +1674,13 @@ public actor CorpusContentEngine {
                 modelID: slots[index].provider.modelID,
                 modelVersion: slots[index].provider.modelVersion)
             if let persisted {
-                try accumulator.restoreCounts(from: persisted.counts)
+                // Prefers term rows, falls back to the legacy blob — the same
+                // decision as the open path, kept in the store so the two
+                // cannot diverge.
+                try await countsStore.restoreCounts(
+                    into: accumulator,
+                    modelID: slots[index].provider.modelID,
+                    modelVersion: slots[index].provider.modelVersion)
                 slots[index].countsDocumentCount = persisted.documentCount
             } else {
                 slots[index].countsDocumentCount = 0
@@ -2376,7 +2382,18 @@ public actor CorpusContentEngine {
                 let countsStore = self.countsStore
                 try await storage.transaction(isolation: .serializable) { txn in
                     try await basisStore.upsert(result.basisRow, into: txn.rowStore)
-                    try await countsStore.upsert(result.countsRow, into: txn.rowStore)
+                    // Routed through persistCounts so a provider whose counts
+                    // scale with vocabulary is written as term rows rather than
+                    // one bind. This is the exact write that failed on a real
+                    // estate at 1,009,861,855 bytes (ee#49).
+                    try await countsStore.persistCounts(
+                        provider: result.countsAccumulator,
+                        modelID: result.countsRow.modelID,
+                        modelVersion: result.countsRow.modelVersion,
+                        documentCount: result.countsRow.documentCount,
+                        vocabSize: result.countsRow.vocabSize,
+                        updatedAt: result.countsRow.updatedAt,
+                        into: txn.rowStore)
                     try await countsStore.deleteReferences(
                         modelID: result.job.modelID,
                         modelVersion: result.job.modelVersion,
@@ -2594,19 +2611,25 @@ public actor CorpusContentEngine {
     private func persistCounts(now: Date) async throws {
         for slot in slots {
             guard let accumulator = slot.countsAccumulator else { continue }
-            let row = PersistedCounts(
+            let countsStore = self.countsStore
+            // The persisted counts are the immutable publication snapshot.
+            // Identity-scoped growth references remain authoritative until the
+            // next provider publication; deleting them here would lose
+            // restart-exact term contributions.
+            //
+            // Routed through persistCounts so this path uses the same layout
+            // decision as the training commit. Splitting the choice across
+            // paths would leave a provider term-split by one write and
+            // blob-written by another, and the read side prefers term rows —
+            // so the blob write would silently lose.
+            try await countsStore.persistCounts(
+                provider: accumulator,
                 modelID: slot.provider.modelID,
                 modelVersion: slot.provider.modelVersion,
-                counts: accumulator.serializeCounts(),
                 documentCount: slot.countsDocumentCount,
                 vocabSize: slot.countsVocabAnchor,
-                updatedAt: now)
-            let countsStore = self.countsStore
-            // The blob is the immutable publication snapshot. Identity-scoped
-            // growth references remain authoritative until the next provider
-            // publication; deleting them here would lose restart-exact term
-            // contributions.
-            try await countsStore.upsert(row)
+                updatedAt: now,
+                into: storage.rowStore)
         }
     }
 

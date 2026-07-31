@@ -302,6 +302,88 @@ public actor CorpusProviderCountsStore {
         )
     }
 
+    // MARK: - Provider-aware persist / restore
+
+    /// Persist `provider`'s maintained counts, splitting them into term rows
+    /// when the provider supports it and writing one blob when it does not.
+    ///
+    /// This is the ONLY place that decides between the two layouts. The three
+    /// write paths (training commit, batch-boundary persist, and maintained-
+    /// counts persist) all route through it, because a provider that is
+    /// term-split on one path and blob-written on another would leave the two
+    /// representations disagreeing about the same provider key — and the read
+    /// side prefers term rows, so the blob write would silently lose.
+    public func persistCounts(
+        provider: any TrainableEmbeddingBasis,
+        modelID: String,
+        modelVersion: String,
+        documentCount: Int,
+        vocabSize: Int,
+        updatedAt: Date,
+        into rowStore: any RowStore
+    ) async throws {
+        if let decomposed = provider.decomposeCounts() {
+            // `header` is a complete, decodable counts blob carrying an empty
+            // map, so the column stays NOT NULL and a reader that ignores term
+            // rows still succeeds.
+            try await upsert(
+                PersistedCounts(
+                    modelID: modelID,
+                    modelVersion: modelVersion,
+                    counts: decomposed.header,
+                    documentCount: documentCount,
+                    vocabSize: vocabSize,
+                    updatedAt: updatedAt),
+                into: rowStore)
+            try await replaceVocab(
+                modelID: modelID, modelVersion: modelVersion,
+                terms: decomposed.terms, into: rowStore)
+        } else {
+            try await upsert(
+                PersistedCounts(
+                    modelID: modelID,
+                    modelVersion: modelVersion,
+                    counts: provider.serializeCounts(),
+                    documentCount: documentCount,
+                    vocabSize: vocabSize,
+                    updatedAt: updatedAt),
+                into: rowStore)
+            // A provider can stop decomposing (or a key can be reused by a
+            // provider that never did). Clear any term rows so the blob is
+            // unambiguously the whole truth for this key.
+            try await deleteVocab(
+                modelID: modelID, modelVersion: modelVersion, into: rowStore)
+        }
+    }
+
+    /// Restore `provider`'s maintained counts, preferring term rows and
+    /// falling back to the legacy single blob.
+    ///
+    /// The fallback is what lets an upgraded estate keep working untouched:
+    /// no bulk migration runs, the blob is read exactly as before, and the
+    /// provider converts to term rows on its next persist.
+    ///
+    /// - Returns: false when nothing is stored for this provider key, which
+    ///   callers already treat as "start from zero".
+    @discardableResult
+    public func restoreCounts(
+        into provider: any TrainableEmbeddingBasis,
+        modelID: String,
+        modelVersion: String
+    ) async throws -> Bool {
+        guard let persisted = try await load(modelID: modelID, modelVersion: modelVersion) else {
+            return false
+        }
+        let terms = try await loadVocab(modelID: modelID, modelVersion: modelVersion)
+        if terms.isEmpty {
+            // Legacy layout, or a provider that does not decompose.
+            try provider.restoreCounts(from: persisted.counts)
+        } else {
+            try provider.restoreCounts(header: persisted.counts, terms: terms)
+        }
+        return true
+    }
+
     // MARK: - Term-keyed vocabulary
 
     /// Replace the stored vocabulary for a provider key with `terms`.

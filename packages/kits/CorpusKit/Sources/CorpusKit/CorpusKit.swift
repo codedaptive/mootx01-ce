@@ -958,7 +958,15 @@ public actor Corpus {
             modelID: freshProvider.modelID,
             modelVersion: freshProvider.modelVersion
         ) {
-            try accumulator.restoreCounts(from: counts.counts)
+            // restoreCounts prefers term rows and falls back to the blob, so an
+            // estate that predates the term table rehydrates exactly as before
+            // and converts on its next persist. No bulk migration runs here —
+            // deliberately: this is the open path, and transforming a
+            // multi-gigabyte estate inside it is the failure shape ee#49 was.
+            try await countsStore.restoreCounts(
+                into: accumulator,
+                modelID: freshProvider.modelID,
+                modelVersion: freshProvider.modelVersion)
             accumulatorDocCount = counts.documentCount
         }
 
@@ -1787,13 +1795,19 @@ public actor Corpus {
     private func persistMaintainedCounts(now: Date) async throws {
         for slot in slots {
             guard let accumulator = slot.countsAccumulator else { continue }
-            try await countsStore.upsert(PersistedCounts(
+            // Same layout decision as the other two write paths — see
+            // CorpusProviderCountsStore.persistCounts. This is the path whose
+            // cost the batching exists to amortize: re-serializing the whole
+            // counts blob per chunk is O(N·vocab) over an import, which term
+            // rows remove.
+            try await countsStore.persistCounts(
+                provider: accumulator,
                 modelID: slot.provider.modelID,
                 modelVersion: slot.provider.modelVersion,
-                counts: accumulator.serializeCounts(),
                 documentCount: slot.countsDocumentCount,
                 vocabSize: accumulator.countsVocabularySize,
-                updatedAt: now))
+                updatedAt: now,
+                into: storage.rowStore)
         }
     }
 
