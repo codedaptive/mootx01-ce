@@ -6533,6 +6533,7 @@ impl EstateCoordinator {
         // estate has no encode stream to ride; those hints are picked up by
         // reindex/sweep once a corpus exists. Twin of the Swift block in
         // `seedDefaultWings`.
+        let mut enqueued_hints = 0usize;
         if let Some(corpus) = self.corpus_for(handle) {
             // Re-scan when the loop seeded new hints (they are not in the
             // first scan); otherwise reuse it.
@@ -6571,7 +6572,21 @@ impl EstateCoordinator {
                             hint.id
                         ),
                     })?;
+                enqueued_hints += 1;
             }
+        }
+
+        // Seeding drains its own enqueue: an estate OPENS SETTLED — hints
+        // indexed + distilled and the young basis converged — so the first
+        // user capture never races the seed batch (the race made a
+        // hint-trained fallback basis vocab-miss the user's first content
+        // until the queue settled). Idempotent re-opens enqueue nothing and
+        // skip this entirely. Twin of the Swift awaitEncodeDrain call.
+        if enqueued_hints > 0 {
+            self.await_encode_drain(handle)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("seed_default_wings: await_encode_drain failed: {e:?}"),
+                })?;
         }
 
         // Suppress unused-variable warning in release builds where log is a no-op.

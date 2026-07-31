@@ -688,6 +688,9 @@ public actor CorpusContentEngine {
             return false
         }
         try await index(record: record, appliedCursor: nil, force: false, now: now)
+        // Post-ingest settle (direct path): only when the queue is fully
+        // idle — see settleYoungBasisIfGrown.
+        try await settleYoungBasisIfGrown(now: now, requireIdleInFlight: true)
         return true
     }
 
@@ -1419,6 +1422,10 @@ public actor CorpusContentEngine {
                     + "record rev \(record.revision) — stale job rejected without checkpoint advance")
             }
             try await index(record: record, appliedCursor: cursor, force: false, now: now)
+            // Post-ingest settle (direct path): the queue-idle guard makes
+            // this a no-op when applyChange runs as a per-job drain entry
+            // (the batch is in-flight) — see settleYoungBasisIfGrown.
+            try await settleYoungBasisIfGrown(now: now, requireIdleInFlight: true)
         case .remove(let id, _):
             try await clearDerivedState(id: id, now: now)
             Intellectus.report(.metric(
@@ -2046,11 +2053,9 @@ public actor CorpusContentEngine {
     /// estate lifetime. Used by `prepareIndex` (direct `indexContent`,
     /// `applyChange`, and `prepareQueueJob` callers).
     ///
-    /// The growth-retrain check is intentionally ABSENT here. Per-document
-    /// callers do not have batch context; a growth retrain that fires on every
-    /// `indexContent` call would mutate the counts store in ways that break
-    /// idempotence contracts. Growth retrains belong to the batch drain path —
-    /// see `batchTrainIfNeeded`.
+    /// The growth-retrain check is intentionally ABSENT here — growth is
+    /// handled by `settleYoungBasisIfGrown` (the post-ingest settle seam),
+    /// whose queue-idle guard keeps it off the mid-batch per-document paths.
     private func firstIngestTrainIfNeeded(now: Date) async throws {
         let untrained = slots.indices.filter {
             slots[$0].freshBasisBlob != nil
@@ -2060,62 +2065,81 @@ public actor CorpusContentEngine {
         _ = try await trainTrainableSlots(now: now)
     }
 
-    /// Three-state auto-train (Kinsta-fix, batch drain path): prevents a
-    /// degenerate rank-1 basis from freezing during early corpus growth.
+    /// First-ingest auto-train for the batch drain path.
     ///
     /// Called from `drainIndexBatch` Phase 0 — ONCE per batch, before any
-    /// per-document embed work. Never called from per-document paths.
-    ///
-    /// Implicit train triggers (mirrors Corpus.ingest fix-basis d7011ae2):
-    ///   (1) First-ingest: no persisted basis → train from scratch on the full
-    ///       current corpus snapshot (all content IDs in `source`).
-    ///   (2) Growth retrain: basis is young (trainedChunkCount <
-    ///       `perDocAutoRetrainStableChunkThreshold`) AND corpus has grown to
-    ///       ≥ 2× trainedChunkCount → retrain from scratch on the full corpus.
-    ///       Prevents a 1-doc rank-1 LSA SVD from becoming the permanent basis.
-    ///       Retrains thin out exponentially and stop once the basis is stable.
-    ///   (3) Fold-in: basis is stable or hasn't grown 2× → no retrain; new
-    ///       records are projected onto the frozen basis.
-    ///
-    /// Active content is fetched lazily and cached across slots so multi-slot
-    /// corpora pay only one DB read per drain pass. Retrain decisions are serial;
-    /// the embed fan-out (Phase 2) runs on the post-retrain basis.
-    ///
-    /// `force: true` in `trainTrainableSlots` is required for case (2) because
-    /// a young-basis slot has basisDigest ≠ untrainedDigest (already trained once),
-    /// and the non-forced path would skip it. All trainable slots are retrained
-    /// together (same corpus snapshot) so the decision is uniform.
+    /// per-document embed work — so the batch's documents embed under SOME
+    /// basis. Growth handling lives in `settleYoungBasisIfGrown` (the
+    /// post-ingest settle seam), which runs after ingest commits and
+    /// therefore covers the batch's own documents — something a pre-batch
+    /// check never could.
     private func batchTrainIfNeeded(now: Date) async throws {
+        try await firstIngestTrainIfNeeded(now: now)
+    }
+
+    /// Post-ingest young-basis settle (fix-basis follow-up, DISTILL_SEED_STALL
+    /// consistency ruling 2026-07-30): while a trainable basis is YOUNG
+    /// (trainedChunkCount < `perDocAutoRetrainStableChunkThreshold`), ANY
+    /// indexed-corpus growth retrains the basis from scratch and
+    /// coverage-backfills every row under the new basis digest — so queries
+    /// after ingest just work, matching how the named production providers
+    /// behave (their vocabularies are corpus-independent). At/after the
+    /// stable threshold the existing contract is unchanged: only an explicit
+    /// `reindex` retrains.
+    ///
+    /// Replaces the former pre-batch 2× growth heuristic, whose gaps were the
+    /// real defect behind the seed-hint vocabMiss: (a) a small
+    /// unrepresentative first batch (e.g. the 7 seeded wing hints) poisoned
+    /// the fallback basis until the corpus DOUBLED; (b) the direct/impatient
+    /// ingest path never grew the basis at all.
+    ///
+    /// Deterministic (a pure function of the indexed corpus), bounded (a
+    /// young basis means < 50 trained chunks; the threshold caps how long the
+    /// corpus stays young), and idempotent (no growth → no work).
+    ///
+    /// CALL SITES + the counts-idempotence guard: training scans
+    /// `source.activeContentIDs()`, so it must never run while queued
+    /// documents are awaiting their batch commit (their subsumed references
+    /// would be deleted by `commitQueueBatch` instead of becoming delta
+    /// references — the double-count hazard documented on the old growth
+    /// check). Therefore:
+    ///   - the batch drain calls this AFTER `commitQueueBatch` (its own
+    ///     documents are checkpointed) and only when nothing further is
+    ///     PENDING (`requireIdleInFlight: false` — the current batch is
+    ///     still in-flight until its terminal reply, which is fine: it is
+    ///     already committed);
+    ///   - the direct ingest paths (`indexContent`, `applyChange` upsert)
+    ///     call it only when the queue is fully idle
+    ///     (`requireIdleInFlight: true`), so a per-job drain invocation of
+    ///     `applyChange` can never fire it mid-batch.
+    ///
+    /// Mirrors Rust `settle_young_basis_if_grown`.
+    @discardableResult
+    func settleYoungBasisIfGrown(
+        now: Date, requireIdleInFlight: Bool
+    ) async throws -> Bool {
+        // Queue guard — see the doc-comment. `ingestQueueDepth` is (0, 0)
+        // when no queue is mounted.
+        let depth = try await ingestQueueDepth()
+        if depth.pending > 0 || (requireIdleInFlight && depth.inFlight > 0) {
+            return false
+        }
+
         let stableThreshold = Self.perDocAutoRetrainStableChunkThreshold
-        // Indexed-doc count (CHECKPOINTED docs only), fetched lazily and
-        // shared across all trainable slots — one DB read per batch.
-        //
-        // IMPORTANT — indexed count, not source count: the growth ratio compares
-        // the basis (trained on trainedChunkCount INDEXED docs) against the ALREADY
-        // CHECKPOINTED doc count. Using source.activeContentIDs() would include docs
-        // queued but not yet indexed in the current drain batch. Those docs are about
-        // to be processed below. If they triggered a growth retrain, trainTrainableSlots
-        // would include them in the training corpus and create subsumed references for
-        // them, which commitQueueBatch would then delete instead of creating the normal
-        // non-subsumed delta references, corrupting the maintained counts.
         var cachedIndexedCount: Int? = nil
         var shouldRetrain = false
 
         for slotIndex in slots.indices {
             guard slots[slotIndex].freshBasisBlob != nil else { continue }
-            // No persisted basis: first ingest — always train.
-            if slots[slotIndex].basisDigest == Self.untrainedDigest {
-                shouldRetrain = true
-                break
-            }
-            // Persisted basis exists. Check if it is young enough to retrain.
+            // An untrained slot is first-ingest territory, not settle territory.
+            if slots[slotIndex].basisDigest == Self.untrainedDigest { continue }
             let persisted = try await basisStore.load(
                 modelID: slots[slotIndex].provider.modelID,
                 modelVersion: slots[slotIndex].provider.modelVersion)
             guard let basis = persisted,
                   basis.trainedChunkCount < stableThreshold
-            else { continue } // Case (3): stable basis — fold-in only.
-            // Case (2): young basis — check 2× growth against INDEXED count.
+            else { continue } // Stable basis — explicit reindex only.
+            // Young basis: ANY growth of the INDEXED corpus retrains.
             let indexedCount: Int
             if let cached = cachedIndexedCount {
                 indexedCount = cached
@@ -2123,18 +2147,21 @@ public actor CorpusContentEngine {
                 indexedCount = try await indexedContentIDs().count
                 cachedIndexedCount = indexedCount
             }
-            if indexedCount >= basis.trainedChunkCount * 2 {
+            if indexedCount > basis.trainedChunkCount {
                 shouldRetrain = true
                 break
             }
-            // Indexed corpus hasn't grown 2× yet — fold-in only.
         }
 
-        guard shouldRetrain else { return }
-        // Retrain all trainable slots. force: true is required for cases (1)
-        // and (2) — for case (2) basisDigest ≠ untrainedDigest; the non-forced
-        // path skips already-trained slots.
+        guard shouldRetrain else { return false }
+        // force: true — the settling slots have non-empty digests; the
+        // non-forced path would skip them.
         _ = try await trainTrainableSlots(now: now, force: true)
+        // Re-cover every row under the new basis digest: coverage is keyed by
+        // (model, digest), so the retrain invalidated all prior coverage and
+        // the backfill re-embeds the whole (young, small) corpus.
+        while try await backfillProviderCoverage(now: now, batchSize: 256) > 0 {}
+        return true
     }
 
     /// Training page size: how many canonical records stream through the

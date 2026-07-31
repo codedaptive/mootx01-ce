@@ -405,6 +405,12 @@ impl CorpusContentEngine {
         if !encoded_ids.is_empty() {
             self.fire_on_encoded(&encoded_ids);
         }
+        // Post-ingest young-basis settle: fires only when nothing further is
+        // pending (this batch is committed above; it may still be in-flight
+        // until the reply below, which keeps the settle's embedding work
+        // inside drain-completion accounting — same rationale as the
+        // fire_on_encoded ordering). See settle_young_basis_if_grown.
+        self.settle_young_basis_if_grown((drain_now() * 1000.0) as i64, false)?;
         if let Err(error) = queue.reply_batch(&completions) {
             let error = CorpusKitError::StoreUnavailable(format!("content reply batch: {error:?}"));
             return Err(match self.publish_vector_index() {

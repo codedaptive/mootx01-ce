@@ -1181,6 +1181,9 @@ impl CorpusContentEngine {
         match self.source.record(id)? {
             Some(record) => {
                 self.index_record(&record, None, false, now_millis, SlotScope::All)?;
+                // Post-ingest settle (direct path): only when the queue is
+                // fully idle — see settle_young_basis_if_grown.
+                self.settle_young_basis_if_grown(now_millis, true)?;
                 Ok(true)
             }
             None => {
@@ -1546,6 +1549,10 @@ impl CorpusContentEngine {
                     )));
                 }
                 self.index_record(&record, cursor, false, now_millis, SlotScope::All)?;
+                // Post-ingest settle (direct path): the queue-idle guard makes
+                // this a no-op when apply_change runs as a per-job drain entry
+                // (the batch is in-flight) — see settle_young_basis_if_grown.
+                self.settle_young_basis_if_grown(now_millis, true)?;
             }
             CorpusContentChange::Remove { id, .. } => {
                 self.clear_derived_state(id, now_millis)?;
@@ -2341,7 +2348,9 @@ impl CorpusContentEngine {
 
     /// First-ingest auto-train (standalone UX): a trainable slot with no
     /// persisted basis trains ONCE — via the BOUNDED streaming trainer,
-    /// never by materializing the corpus.
+    /// never by materializing the corpus. Growth after that first training
+    /// is handled by `settle_young_basis_if_grown` (the post-ingest settle
+    /// seam), never here.
     fn first_ingest_train_if_needed(&self, now_millis: i64) -> CorpusKitResult<()> {
         let any_untrained = self.slots.iter().any(|slot| {
             slot.fresh_basis_blob.is_some() && slot.basis_digest.lock().unwrap().is_empty()
@@ -2360,42 +2369,68 @@ impl CorpusContentEngine {
     /// d7011ae2) and Swift `CorpusContentEngine.perDocAutoRetrainStableChunkThreshold`.
     pub const PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD: usize = 50;
 
-    /// Three-state auto-train for the batch drain path (Kinsta-fix): prevents
-    /// a degenerate rank-1 basis from freezing during early corpus growth.
+    /// First-ingest auto-train for the batch drain path.
     ///
     /// Called from `drain_content_with_queue` ONCE per batch, before per-document
-    /// work. NEVER called from per-document paths (`prepare_index_record`); doing
-    /// so would fire spurious growth retrains that break counts idempotence.
-    ///
-    /// States:
-    ///   (1) First-ingest: no persisted basis → train from scratch.
-    ///   (2) Growth retrain: young basis (trained_chunk_count <
-    ///       `PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD`) AND the INDEXED corpus
-    ///       has grown to ≥ 2× trained_chunk_count → retrain from scratch. Stops
-    ///       exponentially; at most ⌊log₂(50)⌋ ≈ 5 implicit retrains before stable.
-    ///   (3) Fold-in: stable basis or indexed corpus hasn't grown 2× → no retrain.
-    ///
-    /// IMPORTANT — indexed count, not source count: the growth ratio compares the
-    /// basis (trained on `trained_chunk_count` INDEXED docs) against the ALREADY
-    /// CHECKPOINTED doc count from `index_state`. Using `source.active_content_ids()`
-    /// would include docs queued but not yet indexed in the current batch. Those
-    /// docs are about to be indexed by the drain loop below. If they triggered a
-    /// growth retrain, `train_trainable_slots` would include them in the training
-    /// corpus and create subsumed references for them, which `commit_queue_batch`
-    /// would then delete instead of creating the normal non-subsumed delta references.
-    /// Using the indexed count prevents this double-counting. The same doc count
-    /// is fetched lazily and shared across all trainable slots (one DB read per
-    /// batch even with N trainable models).
-    ///
-    /// `train_trainable_slots` is called with `force: true` for cases (1) and (2)
-    /// — the non-forced path skips providers whose basis digest is already set.
+    /// work, so the batch's documents embed under SOME basis. Growth handling
+    /// lives in `settle_young_basis_if_grown` (the post-ingest settle seam),
+    /// which runs after ingest commits and therefore covers the batch's own
+    /// documents — something a pre-batch check never could.
     pub(crate) fn batch_train_if_needed(&self, now_millis: i64) -> CorpusKitResult<()> {
+        self.first_ingest_train_if_needed(now_millis)
+    }
+
+    /// Post-ingest young-basis settle (fix-basis follow-up, DISTILL_SEED_STALL
+    /// consistency ruling 2026-07-30): while a trainable basis is YOUNG
+    /// (trained_chunk_count < `PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD`),
+    /// ANY indexed-corpus growth retrains the basis from scratch and
+    /// coverage-backfills every row under the new basis digest — so queries
+    /// after ingest just work, matching how the named production providers
+    /// behave (their vocabularies are corpus-independent). At/after the stable
+    /// threshold the existing contract is unchanged: only an explicit
+    /// `reindex` retrains.
+    ///
+    /// Replaces the former pre-batch 2× growth heuristic, whose gaps were the
+    /// real defect behind the seed-hint vocabMiss: (a) a small unrepresentative
+    /// first batch (e.g. the 7 seeded wing hints) poisoned the fallback basis
+    /// until the corpus DOUBLED; (b) the direct/impatient ingest path never
+    /// grew the basis at all.
+    ///
+    /// Deterministic (a pure function of the indexed corpus), bounded (a young
+    /// basis means < 50 trained chunks; each settle retrains once and the
+    /// threshold caps how long the corpus stays young), and idempotent (no
+    /// growth → no work).
+    ///
+    /// CALL SITES + the counts-idempotence guard: training scans
+    /// `source.active_content_ids()`, so it must never run while queued
+    /// documents are awaiting their batch commit (their subsumed references
+    /// would be deleted by `commit_queue_batch` instead of becoming delta
+    /// references — the double-count hazard documented on the old growth
+    /// check). Therefore:
+    ///   - the batch drain calls this AFTER `commit_queue_batch` (its own
+    ///     documents are checkpointed) and only when nothing further is
+    ///     PENDING (`require_idle_in_flight: false` — the current batch is
+    ///     still in-flight until its terminal reply, which is fine: it is
+    ///     already committed);
+    ///   - the direct ingest paths (`index_content`, `apply_change` upsert)
+    ///     call it only when the queue is fully idle
+    ///     (`require_idle_in_flight: true`), so a per-job drain invocation
+    ///     of `apply_change` can never fire it mid-batch.
+    pub(crate) fn settle_young_basis_if_grown(
+        &self,
+        now_millis: i64,
+        require_idle_in_flight: bool,
+    ) -> CorpusKitResult<bool> {
+        // Queue guard — see the doc-comment. `ingest_queue_depth` is (0, 0)
+        // when no queue is mounted.
+        let (pending, in_flight) = self.ingest_queue_depth()?;
+        if pending > 0 || (require_idle_in_flight && in_flight > 0) {
+            return Ok(false);
+        }
+
         let stable_threshold = Self::PER_DOC_AUTO_RETRAIN_STABLE_CHUNK_THRESHOLD;
-        let mut should_retrain = false;
-        // Indexed-doc count: CHECKPOINTED documents only. Source docs not yet
-        // indexed (queued but not checkpointed) are excluded on purpose — see
-        // the function doc-comment above.
         let mut cached_indexed_count: Option<usize> = None;
+        let mut should_retrain = false;
 
         for slot in &self.slots {
             if slot.fresh_basis_blob.is_none() {
@@ -2408,12 +2443,10 @@ impl CorpusContentEngine {
                     CorpusKitError::StoreUnavailable("basis digest mutex poisoned".into())
                 })?
                 .clone();
-            // Case (1): no persisted basis — first ingest.
+            // An untrained slot is first-ingest territory, not settle territory.
             if digest.is_empty() {
-                should_retrain = true;
-                break;
+                continue;
             }
-            // Persisted basis exists — check if it is young enough to retrain.
             let model_id = slot.model_id.clone();
             let model_version = slot
                 .handle
@@ -2428,9 +2461,9 @@ impl CorpusContentEngine {
                 continue;
             };
             if basis.trained_chunk_count >= stable_threshold {
-                continue; // Case (3): stable basis — fold-in only.
+                continue; // Stable basis — explicit reindex only.
             }
-            // Case (2): young basis — check 2× growth against INDEXED count.
+            // Young basis: ANY growth of the INDEXED corpus retrains.
             let indexed_count = if let Some(count) = cached_indexed_count {
                 count
             } else {
@@ -2443,19 +2476,23 @@ impl CorpusContentEngine {
                 cached_indexed_count = Some(count);
                 count
             };
-            if indexed_count >= basis.trained_chunk_count * 2 {
+            if indexed_count > basis.trained_chunk_count {
                 should_retrain = true;
                 break;
             }
-            // Indexed corpus hasn't grown 2× yet — fold-in only.
         }
 
-        if should_retrain {
-            // force: true required for cases (1) and (2) — for case (2) the
-            // basis digest is non-empty; the non-forced path would skip it.
-            self.train_trainable_slots(now_millis, true)?;
+        if !should_retrain {
+            return Ok(false);
         }
-        Ok(())
+        // force: true — the settling slots have non-empty digests; the
+        // non-forced path would skip them.
+        self.train_trainable_slots(now_millis, true)?;
+        // Re-cover every row under the new basis digest: coverage is keyed by
+        // (model, digest), so the retrain invalidated all prior coverage and
+        // the backfill re-embeds the whole (young, small) corpus.
+        while self.backfill_provider_coverage(now_millis, 256)? > 0 {}
+        Ok(true)
     }
 
     /// Training page size — bounds transient text memory to one page; the
