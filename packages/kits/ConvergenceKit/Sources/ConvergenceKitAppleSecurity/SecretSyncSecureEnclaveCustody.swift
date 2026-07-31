@@ -369,17 +369,37 @@ public actor SecretSyncSecureEnclaveCustody:
     }
   }
 
-  func removeCredentialForHardwareProof(
+  /// Strictly deletes both role records for the signed physical-proof host.
+  ///
+  /// This SPI is not product cleanup policy. It exists only so a separately
+  /// signed host can prove that the production Keychain records are removable
+  /// and then exercise the normal retrieval APIs to confirm absence.
+  @_spi(SecretSyncPhysicalProof)
+  public func removeCredentialForPhysicalProof(
     _ credentialID: DeviceCredentialID
-  ) async {
-    await handleStore.remove(
-      credentialID: credentialID,
-      role: .signing
-    )
-    await handleStore.remove(
-      credentialID: credentialID,
-      role: .agreement
-    )
+  ) async throws {
+    var firstFailure: SecretSyncCustodyError?
+    for role in [SecretSyncStoredKeyRole.signing, .agreement] {
+      do {
+        try await handleStore.removeStrict(
+          credentialID: credentialID,
+          role: role
+        )
+      } catch let error as SecretSyncCustodyError {
+        // Attempt both role deletions even when the first fails. A cleanup
+        // harness that leaves the second private handle behind is not strict.
+        if firstFailure == nil {
+          firstFailure = error
+        }
+      } catch {
+        if firstFailure == nil {
+          firstFailure = .cryptographicFailure
+        }
+      }
+    }
+    if let firstFailure {
+      throw firstFailure
+    }
   }
 
   private func authorizedRecord(

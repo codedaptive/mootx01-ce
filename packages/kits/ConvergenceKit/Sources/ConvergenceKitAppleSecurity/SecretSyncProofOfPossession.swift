@@ -96,6 +96,19 @@ public struct SecretSyncSigningProofChallenge: Sendable, Hashable {
       verifierPublicKey: nil
     )
   }
+
+  /// Verifies a signing proof for the signed physical-proof host.
+  @_spi(SecretSyncPhysicalProof)
+  public func verify(
+    _ proofBytes: Data,
+    publicKey: SigningPublicKeyDescriptor
+  ) throws -> Bool {
+    try SecretSyncProofOfPossession.verifySigning(
+      proofBytes,
+      challengeBytes: canonicalBytes,
+      publicKey: publicKey
+    )
+  }
 }
 
 /// Externally verifiable agreement challenge for one exact transcript.

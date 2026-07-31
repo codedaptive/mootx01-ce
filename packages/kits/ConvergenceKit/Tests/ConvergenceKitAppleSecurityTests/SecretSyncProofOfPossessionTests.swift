@@ -2,7 +2,7 @@ import ConvergenceKit
 import Foundation
 import Testing
 
-@testable import ConvergenceKitAppleSecurity
+@_spi(SecretSyncPhysicalProof) @testable import ConvergenceKitAppleSecurity
 
 @Suite("SecretSync proof of possession")
 struct SecretSyncProofOfPossessionTests {
@@ -41,6 +41,12 @@ struct SecretSyncProofOfPossessionTests {
       try SecretSyncProofOfPossession.verifySigning(
         signing.proofBytes,
         challengeBytes: signingChallenge.canonicalBytes,
+        publicKey: generation.signingPublicKey
+      )
+    )
+    #expect(
+      try signingChallenge.verify(
+        signing.proofBytes,
         publicKey: generation.signingPublicKey
       )
     )

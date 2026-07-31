@@ -59,6 +59,8 @@ public actor SecretSyncProtectedHeadStore {
       }
     case .duplicate:
       throw SecretSyncCustodyError.rollbackDetected
+    case .missingEntitlement:
+      throw SecretSyncCustodyError.missingEntitlement
     case .notFound, .failure:
       throw SecretSyncCustodyError.cryptographicFailure
     }
@@ -77,6 +79,8 @@ public actor SecretSyncProtectedHeadStore {
       records = result
     case .notFound:
       throw SecretSyncCustodyError.missingProtectedHead
+    case .missingEntitlement:
+      throw SecretSyncCustodyError.missingEntitlement
     case .failure:
       throw SecretSyncCustodyError.corruptProtectedHead
     }
@@ -128,6 +132,8 @@ public actor SecretSyncProtectedHeadStore {
       break
     case .duplicate:
       break
+    case .missingEntitlement:
+      throw SecretSyncCustodyError.missingEntitlement
     case .notFound, .failure:
       throw SecretSyncCustodyError.rollbackDetected
     }

@@ -1,8 +1,9 @@
 import ConvergenceKit
 import Foundation
+import Security
 import Testing
 
-@testable import ConvergenceKitAppleSecurity
+@_spi(SecretSyncPhysicalProof) @testable import ConvergenceKitAppleSecurity
 
 @Suite("SecretSync Keychain and authorization")
 struct SecretSyncKeychainAndAuthorizationTests {
@@ -37,6 +38,64 @@ struct SecretSyncKeychainAndAuthorizationTests {
       try await store.record(for: credentialID, role: .signing)
     }
     #expect(await keychain.writeCount == 0)
+  }
+
+  @Test("missing entitlement is a fixed payload-free classification")
+  func missingEntitlementClassificationIsStable() async throws {
+    #expect(
+      SecretSyncSystemKeychain.classifiedResult(
+        for: errSecMissingEntitlement
+      ) == .missingEntitlement
+    )
+
+    let keychain = MissingEntitlementKeychain()
+    let store = SecretSyncKeychainHandleStore(keychain: keychain)
+    let record = fixtureStoredHandle(role: .signing)
+
+    await #expect(throws: SecretSyncCustodyError.missingEntitlement) {
+      try await store.insert(record)
+    }
+    await #expect(throws: SecretSyncCustodyError.missingEntitlement) {
+      try await store.record(
+        for: record.credentialID,
+        role: record.role
+      )
+    }
+    await #expect(throws: SecretSyncCustodyError.missingEntitlement) {
+      try await store.removeStrict(
+        credentialID: record.credentialID,
+        role: record.role
+      )
+    }
+  }
+
+  @Test("physical-proof cleanup strictly removes both production roles")
+  func physicalProofCleanupRemovesBothRoles() async throws {
+    let keychain = RecordingKeychain()
+    let store = SecretSyncKeychainHandleStore(keychain: keychain)
+    let credentialID = DeviceCredentialID(fixtureUUID(36))
+    try await store.insert(
+      fixtureStoredHandle(role: .signing, credentialID: credentialID)
+    )
+    try await store.insert(
+      fixtureStoredHandle(role: .agreement, credentialID: credentialID)
+    )
+    let custody = SecretSyncSecureEnclaveCustody(
+      handleStore: store,
+      authorization: SecretSyncLocalAuthorization(
+        operations: RecordingAuthorizationOperations(),
+        foregroundState: MutableForegroundState(isActive: true)
+      )
+    )
+
+    try await custody.removeCredentialForPhysicalProof(credentialID)
+
+    await #expect(throws: SecretSyncCustodyError.missingHandle) {
+      try await store.record(for: credentialID, role: .signing)
+    }
+    await #expect(throws: SecretSyncCustodyError.missingHandle) {
+      try await store.record(for: credentialID, role: .agreement)
+    }
   }
 
   @Test("authority contexts are fresh while one foreground session is reusable")
@@ -281,6 +340,26 @@ struct SecretSyncKeychainAndAuthorizationTests {
     await #expect(throws: SecretSyncCustodyError.rollbackDetected) {
       try await store.protectedHead(for: head.scopeID)
     }
+  }
+}
+
+private actor MissingEntitlementKeychain: SecretSyncKeychainOperating {
+  func add(_ request: SecretSyncKeychainRequest) -> SecretSyncKeychainResult {
+    .missingEntitlement
+  }
+
+  func read(_ request: SecretSyncKeychainRequest) -> SecretSyncKeychainResult {
+    .missingEntitlement
+  }
+
+  func readAll(
+    _ request: SecretSyncKeychainRequest
+  ) -> SecretSyncKeychainItemsResult {
+    .missingEntitlement
+  }
+
+  func delete(_ request: SecretSyncKeychainRequest) -> SecretSyncKeychainResult {
+    .missingEntitlement
   }
 }
 

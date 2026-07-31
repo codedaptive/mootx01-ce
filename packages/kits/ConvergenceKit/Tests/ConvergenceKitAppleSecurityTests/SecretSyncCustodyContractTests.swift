@@ -3,7 +3,7 @@ import Foundation
 import Security
 import Testing
 
-@testable import ConvergenceKitAppleSecurity
+@_spi(SecretSyncPhysicalProof) @testable import ConvergenceKitAppleSecurity
 
 @Suite("SecretSync custody contracts")
 struct SecretSyncCustodyContractTests {
@@ -182,18 +182,14 @@ struct SecretSyncCustodyContractTests {
       } catch SecretSyncCustodyError.backgroundOperationDenied {
         // Expected: the denial occurs before any Keychain/private operation.
       }
-      await reloaded.removeCredentialForHardwareProof(
+      try await reloaded.removeCredentialForPhysicalProof(
         generation.credentialID
       )
     } catch let error as SecretSyncCustodyError {
-      await provider.removeCredentialForHardwareProof(
-        generation.credentialID
-      )
+      try? await provider.removeCredentialForPhysicalProof(generation.credentialID)
       throw error
     } catch {
-      await provider.removeCredentialForHardwareProof(
-        generation.credentialID
-      )
+      try? await provider.removeCredentialForPhysicalProof(generation.credentialID)
       throw SecretSyncCustodyError.cryptographicFailure
     }
   }

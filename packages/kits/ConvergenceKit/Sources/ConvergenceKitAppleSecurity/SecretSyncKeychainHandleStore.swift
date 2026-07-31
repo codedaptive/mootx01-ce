@@ -15,6 +15,7 @@ public enum SecretSyncCustodyError: Error, Sendable, Equatable {
   case missingProtectedHead
   case corruptProtectedHead
   case rollbackDetected
+  case missingEntitlement
 }
 
 enum SecretSyncStoredKeyRole: String, Sendable, Codable {
@@ -62,12 +63,14 @@ enum SecretSyncKeychainResult: Sendable, Equatable {
   case success(Data?)
   case notFound
   case duplicate
+  case missingEntitlement
   case failure
 }
 
 enum SecretSyncKeychainItemsResult: Sendable, Equatable {
   case success([Data])
   case notFound
+  case missingEntitlement
   case failure
 }
 
@@ -98,7 +101,9 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
     attributes[kSecValueData as String] = data
     attributes[kSecAttrAccessible as String] =
       kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-    return result(for: SecItemAdd(attributes as CFDictionary, nil))
+    return Self.classifiedResult(
+      for: SecItemAdd(attributes as CFDictionary, nil)
+    )
   }
 
   func read(
@@ -109,7 +114,9 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
     query[kSecMatchLimit as String] = kSecMatchLimitOne
     var returned: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &returned)
-    guard status == errSecSuccess else { return result(for: status) }
+    guard status == errSecSuccess else {
+      return Self.classifiedResult(for: status)
+    }
     guard let data = returned as? Data else { return .failure }
     return .success(data)
   }
@@ -133,6 +140,8 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
       return .failure
     case errSecItemNotFound:
       return .notFound
+    case errSecMissingEntitlement:
+      return .missingEntitlement
     default:
       return .failure
     }
@@ -141,7 +150,9 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
   func delete(
     _ request: SecretSyncKeychainRequest
   ) -> SecretSyncKeychainResult {
-    result(for: SecItemDelete(baseAttributes(request) as CFDictionary))
+    Self.classifiedResult(
+      for: SecItemDelete(baseAttributes(request) as CFDictionary)
+    )
   }
 
   private func baseAttributes(
@@ -164,7 +175,9 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
     return attributes
   }
 
-  private func result(for status: OSStatus) -> SecretSyncKeychainResult {
+  nonisolated static func classifiedResult(
+    for status: OSStatus
+  ) -> SecretSyncKeychainResult {
     switch status {
     case errSecSuccess:
       .success(nil)
@@ -172,6 +185,8 @@ actor SecretSyncSystemKeychain: SecretSyncKeychainOperating {
       .notFound
     case errSecDuplicateItem:
       .duplicate
+    case errSecMissingEntitlement:
+      .missingEntitlement
     default:
       .failure
     }
@@ -208,6 +223,8 @@ actor SecretSyncKeychainHandleStore {
       return
     case .duplicate:
       throw SecretSyncCustodyError.duplicateHandle
+    case .missingEntitlement:
+      throw SecretSyncCustodyError.missingEntitlement
     case .notFound, .failure:
       throw SecretSyncCustodyError.cryptographicFailure
     }
@@ -229,6 +246,8 @@ actor SecretSyncKeychainHandleStore {
       bytes = result
     case .notFound:
       throw SecretSyncCustodyError.missingHandle
+    case .missingEntitlement:
+      throw SecretSyncCustodyError.missingEntitlement
     case .duplicate, .failure:
       throw SecretSyncCustodyError.corruptHandle
     }
@@ -264,6 +283,24 @@ actor SecretSyncKeychainHandleStore {
     _ = await keychain.delete(
       request(credentialID: credentialID, role: role, data: nil)
     )
+  }
+
+  func removeStrict(
+    credentialID: DeviceCredentialID,
+    role: SecretSyncStoredKeyRole
+  ) async throws {
+    switch await keychain.delete(
+      request(credentialID: credentialID, role: role, data: nil)
+    ) {
+    case .success:
+      return
+    case .notFound:
+      throw SecretSyncCustodyError.missingHandle
+    case .missingEntitlement:
+      throw SecretSyncCustodyError.missingEntitlement
+    case .duplicate, .failure:
+      throw SecretSyncCustodyError.cryptographicFailure
+    }
   }
 
   private func request(
