@@ -126,6 +126,16 @@ final class SQLiteConnection: @unchecked Sendable {
         // window fall back to normal read() I/O. Compatible with WAL mode
         // and SQLCipher (mmap applies after decryption).
         try exec("PRAGMA mmap_size = 2147483648;")
+
+        // Restore SQLITE_LIMIT_LENGTH to the compile-time maximum (INT_MAX as the
+        // new-val is silently clamped to SQLITE_MAX_LENGTH = 1,000,000,000 by the
+        // SQLite engine). This call is defensive: it ensures no earlier
+        // sqlite3_limit call on this handle has accidentally lowered the per-connection
+        // limit below the compile-time default (MXE-BB / ee#49). In the normal case
+        // where no prior call lowered the limit, this is a harmless no-op.
+        // The real fix for the 1 GB ceiling is chunked basis persistence (Parts 1+2).
+        // sqlite3_limit returns the previous value; discarded intentionally.
+        _ = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 0x7fffffff)
     }
 
     deinit {

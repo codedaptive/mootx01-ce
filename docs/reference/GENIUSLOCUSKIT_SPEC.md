@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.16.0
+version: 1.17.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-07-30
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1894,6 +1894,23 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.17.0 -- 2026-07-30
+
+MXE-BB (ee#49): migration circuit breaker for `runSharedContentMigration`.
+After `sharedContentCircuitBreakerThreshold` (= 3) consecutive identical
+failures — same `SharedContentMigrationError.briefDescription` at the same
+committed `SharedContentMigrationState` — the migration is parked and
+`runSharedContentMigration` throws `SharedContentMigrationError.migrationParked`
+on all subsequent calls, preventing moot-mgr from respawning into the same
+fatal error at 100 % CPU. A code-version change (the compile-time
+`sharedContentMigrationVersion` token) auto-clears the park, giving the
+updated binary a fresh attempt without operator intervention. The explicit
+operator path is `clearParkedSharedContentMigration(handle:now:)`. The
+observable state is queried via `sharedContentMigrationIsParked(handle:)`.
+Circuit-breaker state is stored as an optional `circuitBreaker` field in the
+migration record (backward-compatible: old records decode with `nil`).
+Both Swift and Rust ports ship identical behavior gated by the same threshold.
 
 ### 1.16.0 -- 2026-07-20
 

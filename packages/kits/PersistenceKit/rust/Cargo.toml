@@ -20,7 +20,10 @@ uuid = { version = "1", features = ["v4"] }
 # PRAGMA key at open, so page 1 (the schema) and all content are ciphertext on
 # disk. Matches the prior zero-system-dependency posture of the plain bundled
 # build.
-rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+# "limits" feature enables rusqlite's Connection::set_limit / limit API, used
+# in SqliteStorage::new to raise SQLITE_LIMIT_LENGTH above the default 1 GB cap
+# (MXE-BB / ee#49 defense-in-depth).
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl", "limits"] }
 # intellectus-lib: zero-dep telemetry floor. persistence-kit emits DB-layer
 # health metrics via the report! macro, which is a no-op when monitoring is
 # disabled (the default). Off-path cost: one AtomicBool load + branch.

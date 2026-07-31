@@ -92,9 +92,10 @@ ORIENT_MESSAGE = (
 
 COMPETING_ENTRY_MESSAGE = (
     "[MOOTx01] Direct MCP entry \"{name}\" found in {path} in addition to the "
-    "mootx01@mootx01 plugin — Claude Code may open two connections to the same "
-    "estate. Run `mootx01 install` to remove the redundant direct entry (or "
-    "remove it by hand); the plugin's own wiring is enough."
+    "MOOTx01 plugin's own \"memory\" server — Claude Code may open two "
+    "connections to the same estate. Run `mootx01 install` to remove the "
+    "redundant direct entry (or remove it by hand); the plugin's own wiring is "
+    "enough."
 )
 
 RECOVERY_MESSAGE = (
