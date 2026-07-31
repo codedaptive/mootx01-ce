@@ -680,6 +680,17 @@ public extension GeniusLocusKit {
         //    commit retrains it from zero; already-committed providers are
         //    skipped by their persisted generation.
         if record.state.ordinal < SharedContentMigrationState.basesTrained.ordinal {
+            // Ensure the basis table is at its current schema HERE, immediately
+            // before the step that writes to it. The same call in the
+            // `legacyDerivedCleared` step above is not sufficient: that step is
+            // skipped when the migration RESUMES past it, so a resume (crash,
+            // respawn, or circuit-breaker unpark) reaches this write with the
+            // table still at whatever version the estate was created on. That is
+            // exactly how ee#49's fix failed in the field — a resume from
+            // `drawerIndexRebuilt` trained bases and then could not write them,
+            // because part_index had never been added on this run. migrate() is
+            // idempotent and a no-op once the recorded version is current.
+            try await storage.migrate(to: BasisStore.schemaDeclaration)
             let engine = try await migrationEngine(
                 handle: handle, storage: storage, source: source, models: embeddingModels)
             _ = try await engine.trainTrainableSlots(now: now)

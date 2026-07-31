@@ -127,15 +127,17 @@ final class SQLiteConnection: @unchecked Sendable {
         // and SQLCipher (mmap applies after decryption).
         try exec("PRAGMA mmap_size = 2147483648;")
 
-        // Restore SQLITE_LIMIT_LENGTH to the compile-time maximum (INT_MAX as the
-        // new-val is silently clamped to SQLITE_MAX_LENGTH = 1,000,000,000 by the
-        // SQLite engine). This call is defensive: it ensures no earlier
-        // sqlite3_limit call on this handle has accidentally lowered the per-connection
-        // limit below the compile-time default (MXE-BB / ee#49). In the normal case
-        // where no prior call lowered the limit, this is a harmless no-op.
-        // The real fix for the 1 GB ceiling is chunked basis persistence (Parts 1+2).
+        // Raise SQLITE_LIMIT_LENGTH to the compile-time maximum. sqlite3_limit
+        // clamps its new-val to SQLITE_MAX_LENGTH, so this call is only
+        // meaningful because the SQLCipher target is built with
+        // SQLITE_MAX_LENGTH=2147483645 (see PersistenceKit/Package.swift). With
+        // the stock 1e9 define this line is a silent no-op — which is exactly
+        // how a 1 GB+ bind still failed on a real estate after chunked basis
+        // persistence shipped (ee#49 follow-up). Chunking bounds the BASIS blob;
+        // this bounds everything else (matrix snapshots, migration progress
+        // records) that can grow past 1 GB on a large estate.
         // sqlite3_limit returns the previous value; discarded intentionally.
-        _ = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 0x7fffffff)
+        _ = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 0x7ffffffd)
     }
 
     deinit {

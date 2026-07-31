@@ -64,14 +64,20 @@ struct SQLiteLimitLengthTests {
         _ = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 0x7fffffff)
 
         // Query the current limit by passing -1 (read-only, does not change the limit).
-        // SQLite clamps the earlier set call to SQLITE_MAX_LENGTH (1,000,000,000), so
-        // effective will be 1,000,000,000 in the bundled SQLCipher build, not 0x7fffffff.
         let effective = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, -1)
 
-        // The effective limit must be at the compile-time maximum.
+        // The ceiling must be ABOVE SQLite's 1e9 stock default, which proves the
+        // SQLITE_MAX_LENGTH define on the SQLCipher target took effect.
+        //
+        // A `>= 1_000_000_000` assertion is NOT sufficient and is how this
+        // regression shipped: sqlite3_limit clamps to the compile-time
+        // SQLITE_MAX_LENGTH, so with the stock define the guard call is a silent
+        // no-op and lands on exactly 1e9 — passing a `>=` check while the 1 GB
+        // ceiling it was meant to lift is still fully in force. A real estate
+        // then failed a >1 GB bind after chunked basis persistence shipped.
         #expect(
-            effective >= 1_000_000_000,
-            "SQLITE_LIMIT_LENGTH must be at the compile-time maximum (>= 1,000,000,000) after the guard call; got \(effective)"
+            effective > 1_000_000_000,
+            "SQLITE_LIMIT_LENGTH must exceed the 1e9 stock default — the SQLITE_MAX_LENGTH define on the SQLCipher target is missing or ineffective; got \(effective)"
         )
     }
 }

@@ -157,14 +157,23 @@ public actor BasisStore {
     /// lifting the single-blob 1 GB ceiling by chunking large bases into
     /// multiple rows (ee#49). Schema history: v2 = single-blob, v3 = chunked.
     ///
-    /// The v2→v3 migration is present for schema protocol correctness. It adds
-    /// the `part_index` column but cannot change the PK constraint in SQLite
-    /// (ALTER TABLE does not support PK changes). Since NO DATA EXISTS TO
-    /// MIGRATE, this limitation is immaterial — all real estates are created
-    /// fresh at v3 and always have the 3-column PK.
+    /// v4 rebuilds the table so the 3-column PK is REAL on existing estates.
+    ///
+    /// History of the mistake this repairs: v3 added `part_index` with
+    /// `ALTER TABLE ADD COLUMN` and a comment claiming the unchanged 2-column
+    /// PK was "immaterial — all real estates are created fresh at v3". That is
+    /// false for every fielded estate. `ALTER TABLE` cannot change a primary
+    /// key, so upgraded estates kept `PRIMARY KEY (model_id, model_version)`
+    /// and the very first multi-part write failed with a unique-constraint
+    /// violation — the chunking this table exists for could not work at all.
+    /// v4 is a full table rebuild (the only way to change a PK in SQLite).
+    ///
+    /// v4 is a separate version rather than a corrected v3 on purpose: estates
+    /// already recorded at v3 — including any repaired by hand — must still be
+    /// rebuilt, and a migration only runs when the recorded version is below it.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitBasis",
-        version: 3,
+        version: 4,
         tables: [
             TableDeclaration(
                 name: "corpus_provider_basis",
@@ -204,6 +213,45 @@ public actor BasisStore {
                     .addColumn(
                         table: "corpus_provider_basis",
                         column: ColumnDeclaration(name: "part_index", type: .int, nullable: false, defaultValue: .int(0))
+                    )
+                ]
+            ),
+            // v3 → v4: rebuild the table so the primary key actually includes
+            // part_index. SQLite cannot ALTER a PK, so the only correct route is
+            // create-copy-drop-rename. Existing rows become part 0 of a 1-part
+            // basis, which is exactly how `load` interprets a single row.
+            //
+            // Written to be safe from either starting shape: a true v3 table
+            // (part_index present, 2-column PK) or a v2 table whose column was
+            // added by hand during the ee#49 incident. The SELECT names only the
+            // v2 columns and supplies 0 for part_index, so it does not depend on
+            // the source table having the column; a 2-column PK guarantees at
+            // most one row per provider key, so collapsing to part 0 cannot
+            // collide.
+            Migration(
+                fromVersion: 3,
+                toVersion: 4,
+                operations: [
+                    .custom(
+                        sqlite: """
+                        CREATE TABLE "corpus_provider_basis__v4" (
+                          "model_id" TEXT NOT NULL,
+                          "model_version" TEXT NOT NULL,
+                          "part_index" INTEGER NOT NULL DEFAULT 0,
+                          "basis" BLOB NOT NULL,
+                          "trained_at" TEXT NOT NULL,
+                          "trained_chunk_count" INTEGER NOT NULL,
+                          "ext" BLOB,
+                          PRIMARY KEY ("model_id", "model_version", "part_index")
+                        );
+                        INSERT INTO "corpus_provider_basis__v4"
+                          ("model_id", "model_version", "part_index", "basis", "trained_at", "trained_chunk_count", "ext")
+                          SELECT "model_id", "model_version", 0, "basis", "trained_at", "trained_chunk_count", "ext"
+                          FROM "corpus_provider_basis";
+                        DROP TABLE "corpus_provider_basis";
+                        ALTER TABLE "corpus_provider_basis__v4" RENAME TO "corpus_provider_basis";
+                        """,
+                        postgresql: nil
                     )
                 ]
             )

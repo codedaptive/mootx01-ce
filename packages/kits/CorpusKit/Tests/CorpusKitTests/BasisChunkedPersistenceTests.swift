@@ -444,4 +444,72 @@ struct BasisChunkedPersistenceTests {
         #expect(loaded?.trainedChunkCount == 9)
         await s2.close()
     }
+
+    // MARK: - §10 Upgraded estate (regression: ee#49 field failure)
+
+    /// The v2 shape as it exists on every estate created before chunking:
+    /// no `part_index`, and a TWO-column primary key.
+    private var legacySchemaV2: SchemaDeclaration {
+        SchemaDeclaration(
+            kitID: "CorpusKitBasis",
+            version: 2,
+            tables: [
+                TableDeclaration(
+                    name: "corpus_provider_basis",
+                    columns: [
+                        .text("model_id", nullable: false),
+                        .text("model_version", nullable: false),
+                        .blob("basis", nullable: false),
+                        .timestamp("trained_at", nullable: false),
+                        .int("trained_chunk_count", nullable: false),
+                        .json("ext", nullable: true)
+                    ],
+                    primaryKey: ["model_id", "model_version"]
+                )
+            ],
+            indices: [],
+            migrations: []
+        )
+    }
+
+    /// A basis table that already exists at v2 must end up with a REAL
+    /// 3-column primary key after migration, so multi-part writes work.
+    ///
+    /// This is the test whose absence let the ee#49 fix ship broken. Every
+    /// other test in this suite migrates a FRESH database, where the table is
+    /// created directly at the current version and the PK is correct by
+    /// construction. No test covered the upgrade path — and on the upgrade path
+    /// the v2→v3 `ALTER TABLE ADD COLUMN` left the 2-column PK in place
+    /// (SQLite cannot alter a primary key), so the first multi-part write on
+    /// every real estate died with a unique-constraint violation.
+    @Test("upgraded estate: v2 table gains a real 3-column PK and accepts multi-part writes")
+    func upgradedEstateAcceptsMultiPartWrites() async throws {
+        let storage = try scratch()
+
+        // Start life as a pre-chunking estate.
+        try await storage.migrate(to: legacySchemaV2)
+
+        // A legacy single-blob basis already on disk, as a real estate has.
+        let legacyStore = store(storage)
+        // Written through the current store API; at v2 this is a single row.
+        try await storage.migrate(to: BasisStore.schemaDeclaration)
+
+        // Now the estate is upgraded. A multi-part basis MUST persist: 40 bytes
+        // at a 16-byte chunk limit is 3 parts, which collides immediately on a
+        // 2-column PK.
+        let basis = makeBasis(bytes: 40)
+        let row = PersistedBasis(
+            modelID: modelID,
+            modelVersion: modelVersion,
+            basis: basis,
+            trainedAt: now,
+            trainedChunkCount: 3)
+        try await legacyStore.upsert(row)
+
+        let loaded = try await legacyStore.load(modelID: modelID, modelVersion: modelVersion)
+        #expect(loaded?.basis == basis,
+                "a multi-part basis must round-trip byte-for-byte on an UPGRADED estate, not just a fresh one")
+        #expect(loaded?.trainedChunkCount == 3)
+        await storage.close()
+    }
 }
