@@ -29,6 +29,8 @@ struct SecretSyncHPKEAndAESVectorTests {
 
   @Test("fixed recipient and recovery HPKE OPEN vectors recover the key")
   func fixedHPKEOpenVectors() throws {
+    // Both independent OPEN fixtures stay together so they prove identical
+    // opaque-key usability while preserving their distinct typed contexts.
     let suite = try SecretSyncV1GoldenVectors.suite()
     let hpke = try SecretSyncHPKEEnvelopeProvider(suite: suite)
     let aes = try SecretSyncAESGCMProvider(suite: suite)
@@ -75,6 +77,8 @@ struct SecretSyncHPKEAndAESVectorTests {
 
   @Test("random HPKE creation is one-shot and non-repeating")
   func randomizedHPKESealOpen() throws {
+    // The routine and recovery lanes deliberately mirror each other in one
+    // matrix so nonce-free HPKE randomness and typed round trips cannot drift.
     let suite = try SecretSyncV1GoldenVectors.suite()
     let hpke = try SecretSyncHPKEEnvelopeProvider(suite: suite)
     let aes = try SecretSyncAESGCMProvider(suite: suite)

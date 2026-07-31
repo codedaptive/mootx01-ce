@@ -40,6 +40,8 @@ struct SecretSyncCryptoAdversarialTests {
 
   @Test("HPKE rejects role swaps, wrong keys, corrupt wrappers, and bad public keys")
   func hpkeMalformedAndCrossRoleInputsReject() throws {
+    // This matrix shares one provider setup so wrapper framing, key mismatch,
+    // and public-key encoding failures retain stable lane-specific errors.
     let provider = try SecretSyncHPKEEnvelopeProvider(
       suite: SecretSyncV1GoldenVectors.suite()
     )
@@ -144,8 +146,64 @@ struct SecretSyncCryptoAdversarialTests {
     }
   }
 
+  @Test("HPKE role and domain separate an identical key and identifier")
+  func identicalKeyAndIdentifierCrossRoleReject() throws {
+    // The same key and UUID intentionally remove every discriminator except
+    // the typed recipient/recovery domain and fixed role embedded in SSCP.
+    let provider = try SecretSyncHPKEEnvelopeProvider(
+      suite: SecretSyncV1GoldenVectors.suite()
+    )
+    let sharedPrivateKey = P256.KeyAgreement.PrivateKey()
+    let sharedUUID = UUID(
+      uuidString: "12345678-1234-5678-9abc-def012345678"
+    )!
+    let descriptor = try KeyAgreementPublicKeyDescriptor(
+      algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+      keyIdentifier: Data("shared-cross-role-key".utf8),
+      publicKeyBytes: sharedPrivateKey.publicKey.x963Representation
+    )
+    let boundContext = try SecretSyncV1GoldenVectors.boundContext()
+    let recipientContext = SecretSyncRecipientEnvelopeContext(
+      boundContext: boundContext,
+      recipientCredentialID: DeviceCredentialID(sharedUUID)
+    )
+    let recoveryContext = SecretSyncRecoveryEnvelopeContext(
+      boundContext: boundContext,
+      recoveryRecipientID: sharedUUID
+    )
+    let generationKey = SecretSyncGenerationKey.generate()
+
+    let recipientWrapped = try provider.sealGenerationKey(
+      generationKey,
+      for: descriptor,
+      context: recipientContext
+    )
+    #expect(throws: SecretSyncV1CryptoError.authenticationFailed) {
+      _ = try provider.openRecoveryGenerationKey(
+        recipientWrapped,
+        using: sharedPrivateKey,
+        context: recoveryContext
+      )
+    }
+
+    let recoveryWrapped = try provider.sealRecoveryGenerationKey(
+      generationKey,
+      for: descriptor,
+      context: recoveryContext
+    )
+    #expect(throws: SecretSyncV1CryptoError.authenticationFailed) {
+      _ = try provider.openRecipientGenerationKey(
+        recoveryWrapped,
+        using: sharedPrivateKey,
+        context: recipientContext
+      )
+    }
+  }
+
   @Test("AES binds every field and rejects all malformed payload shapes")
   func aesAdversarialMatrix() throws {
+    // A single fixed ciphertext anchors all AAD-field and payload-shape
+    // mutations, proving that no malformed case changes the plaintext oracle.
     let provider = try SecretSyncAESGCMProvider(
       suite: SecretSyncV1GoldenVectors.suite()
     )
@@ -245,6 +303,8 @@ struct SecretSyncCryptoAdversarialTests {
 
   @Test("ECDSA rejects alternate encodings and noncanonical scalars")
   func signatureAdversarialMatrix() throws {
+    // Keeping the raw64 scalar and public-key cases together makes alternate
+    // parsing or verifier-side normalization visible as one fail-closed matrix.
     let provider = try SecretSyncP256SignatureProvider(
       suite: SecretSyncV1GoldenVectors.suite()
     )
@@ -369,6 +429,8 @@ struct SecretSyncCryptoAdversarialTests {
 
   @Test("all providers reject manufactured or unavailable suites")
   func suiteMutationsReject() throws {
+    // Every tuple component is varied against every provider in one atomic
+    // matrix so leaf-local validation cannot diverge by provider type.
     let exact = SecretSyncV1GoldenVectors.exactIdentifiers()
     #expect(throws: SecretSyncAppleSecurityError.suiteUnavailable) {
       _ = try SecretSyncAlgorithmRegistry.resolve(
@@ -434,6 +496,8 @@ struct SecretSyncCryptoAdversarialTests {
     original: Data,
     valueOffsets: [Int]
   ) throws {
+    // Each bound value must fail independently in both HPKE lanes: mutated
+    // info with original AAD, then original info with mutated AAD.
     let privateKey = try P256.KeyAgreement.PrivateKey(
       rawRepresentation: privateKeyBytes
     )

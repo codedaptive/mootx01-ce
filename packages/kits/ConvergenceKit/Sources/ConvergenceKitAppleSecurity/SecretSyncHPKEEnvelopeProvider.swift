@@ -127,6 +127,9 @@ public struct SecretSyncHPKEEnvelopeProvider: Sendable {
     using privateKey: P256.KeyAgreement.PrivateKey,
     bindingBytes: Data
   ) throws -> SecretSyncGenerationKey {
+    // Keep structural parsing and authenticated opening contiguous so each
+    // failure class collapses to its fixed public error without retaining a
+    // CryptoKit error or partially constructed generation key.
     guard
       wrappedKeyBytes.count == wrappedKeyByteCount,
       wrappedKeyBytes.first == 0x04
