@@ -39,6 +39,23 @@ import Foundation
 import CloudKit
 import ConvergenceKit
 
+enum SecretSyncCloudKitSubscriptionFactory {
+    /// Construct a silent subscription without touching an engine, database,
+    /// host application, or CloudKit account. SecretSync's two-zone lifecycle
+    /// uses this pure factory so discovery acceleration stays deterministic.
+    static func subscription(for zoneID: CKRecordZone.ID) -> CKRecordZoneSubscription {
+        let subscription = CKRecordZoneSubscription(
+            zoneID: zoneID,
+            subscriptionID: "ck-zone-wake-\(zoneID.zoneName)"
+        )
+        let notificationInfo = CKSubscription.NotificationInfo()
+        notificationInfo.shouldSendContentAvailable = true
+        notificationInfo.shouldBadge = false
+        subscription.notificationInfo = notificationInfo
+        return subscription
+    }
+}
+
 // MARK: - CloudKitStateActor extension
 
 extension CloudKitStateActor {
