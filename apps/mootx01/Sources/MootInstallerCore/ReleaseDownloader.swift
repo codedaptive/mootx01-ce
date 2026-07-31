@@ -87,6 +87,37 @@ public struct ReleaseDownloader: Sendable {
         return tagName
     }
 
+    /// The newest published tag, WITHOUT the "is it newer than us" filter.
+    ///
+    /// `latestTag()` returns nil for two different situations — "you are
+    /// current" and "the published release is older than what you run" — and
+    /// callers printed "Already up to date" for both. On a prerelease build
+    /// that is actively misleading, because `/releases/latest` never lists
+    /// prereleases: a beta tester is told they are up to date while the feed
+    /// sits several versions behind them. This lets the caller tell the two
+    /// apart and say something true.
+    ///
+    /// Same endpoint and decode as `latestTag()`; no ordering judgment.
+    public func latestTagIgnoringOrder() async throws -> String? {
+        let apiURL = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
+        let (data, _) = try await fetchData(apiURL)
+        guard
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let tagName = json["tag_name"] as? String
+        else {
+            throw UpgradeError.invalidAPIResponse("missing tag_name in GitHub releases/latest response")
+        }
+        return tagName
+    }
+
+    /// Semver precedence check, exposed so the CLI can warn before a pinned
+    /// `--version` tag downgrades the installed binary.
+    public static func isVersion(_ a: String, newerThan b: String) -> Bool {
+        guard let parsedA = ParsedSemanticVersion(a), let parsedB = ParsedSemanticVersion(b)
+        else { return false }
+        return parsedB < parsedA
+    }
+
     /// Downloads the platform asset for `tag`, verifies SHA-256, verifies the
     /// detached minisign signature for `checksums.txt` on non-macOS platforms,
     /// extracts the binary, and returns a URL pointing to the extracted
@@ -376,11 +407,10 @@ public struct ReleaseDownloader: Sendable {
 
     /// Compare two SemVer strings, including pre-release precedence.
     /// A stable version sorts after a beta with the same numeric core.
+    /// Instance shim over the static implementation so both callers share
+    /// exactly one comparison rule.
     private func isVersion(_ a: String, newerThan b: String) -> Bool {
-        guard let parsedA = ParsedSemanticVersion(a),
-              let parsedB = ParsedSemanticVersion(b)
-        else { return false }
-        return parsedA > parsedB
+        Self.isVersion(a, newerThan: b)
     }
 
     /// Platform OS token matching install.sh detect_os(): "macos" or "linux".
@@ -483,11 +513,39 @@ private struct ParsedSemanticVersion: Comparable {
                 case (.text, .numeric):
                     return false
                 case let (.text(lhsValue), .text(rhsValue)):
+                    // SemVer splits prerelease identifiers on ".", not "-", so
+                    // this project's "beta-NN" suffix arrives here as ONE text
+                    // identifier rather than ("beta", NN). Plain string order
+                    // then puts "beta-100" BEFORE "beta-99", and the candidate
+                    // pipeline permits 3+ digit counters — so beta-100 would be
+                    // judged older than beta-99 and never offered as an
+                    // upgrade. Compare a trailing numeric run numerically when
+                    // the non-numeric prefixes match; fall back to string order
+                    // otherwise, which preserves plain SemVer behavior for
+                    // every identifier that is not of this shape.
+                    let lhsSplit = Self.splitTrailingNumber(lhsValue)
+                    let rhsSplit = Self.splitTrailingNumber(rhsValue)
+                    if let lhsNum = lhsSplit.number, let rhsNum = rhsSplit.number,
+                       lhsSplit.prefix == rhsSplit.prefix {
+                        return lhsNum < rhsNum
+                    }
                     return lhsValue < rhsValue
                 }
             }
             return lhsIDs.count < rhsIDs.count
         }
+    }
+
+    /// Split a trailing run of ASCII digits off an identifier:
+    /// "beta-08" → ("beta-", 8); "beta" → ("beta", nil).
+    /// Used so "beta-100" sorts after "beta-99" (see the .text case above).
+    static func splitTrailingNumber(_ value: String) -> (prefix: String, number: Int?) {
+        let digits = value.reversed().prefix { $0.isASCII && $0.isNumber }
+        guard !digits.isEmpty else { return (value, nil) }
+        let suffix = String(digits.reversed())
+        // Refuse absurd digit runs rather than overflow Int.
+        guard suffix.count <= 18, let number = Int(suffix) else { return (value, nil) }
+        return (String(value.dropLast(suffix.count)), number)
     }
 }
 

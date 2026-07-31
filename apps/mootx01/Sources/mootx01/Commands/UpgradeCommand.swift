@@ -40,6 +40,24 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Path to the new binary to install (skips online check).")
     var from: String?
 
+    /// Install a specific release tag instead of the newest stable.
+    ///
+    /// Load-bearing for candidate builds: `latestTag()` queries GitHub's
+    /// `/releases/latest`, which EXCLUDES prereleases by definition, so plain
+    /// `mootx01 upgrade` can never install a `X.Y.Z-beta-NN` build — it
+    /// silently installs the newest stable instead. A user told to "run
+    /// mootx01 upgrade" to pick up a beta fix stayed broken because of this.
+    ///
+    /// Same name and semantics as `MOOTX01_VERSION` in install.sh / install.ps1,
+    /// and the exact string every candidate release note already prints. The
+    /// download path needs no change: `download(tag:)` uses the tag verbatim to
+    /// build the asset name and URL, which already matches what the candidate
+    /// pipeline publishes.
+    @Option(
+        name: .long,
+        help: "Install this exact release tag (e.g. 1.1.0-beta-08) instead of the newest stable. Also settable via MOOTX01_VERSION.")
+    var version: String?
+
     @Flag(name: .customLong("check"), help: "Print the latest available version and exit without downloading.")
     var checkOnly: Bool = false
 
@@ -78,6 +96,24 @@ struct UpgradeCommand: AsyncParsableCommand {
         if checkOnly {
             if let tag = try await downloader.latestTag() {
                 print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
+            } else if let remote = try await downloader.latestTagIgnoringOrder() {
+                // latestTag() returns nil for BOTH "you are current" and "the
+                // newest release is older than what you run". Conflating them
+                // told a beta tester "Already up to date (1.1.0-beta-08)" while
+                // the release feed sat at stable 1.0.38 — technically true,
+                // actively misleading, and the same class of silent wrongness
+                // as the prerelease exclusion itself.
+                let current = Mootx01.currentVersion
+                if remote == current || remote == "v\(current)" {
+                    print("Already up to date (\(current)).")
+                } else {
+                    print("""
+                        Running \(current); newest published release is \(remote).
+                        Nothing to upgrade to — you are ahead of the release feed. \
+                        Prereleases are not listed here; install one explicitly with \
+                        `mootx01 upgrade --version <tag>`.
+                        """)
+                }
             } else {
                 print("Already up to date (\(Mootx01.currentVersion)).")
             }
@@ -95,6 +131,53 @@ struct UpgradeCommand: AsyncParsableCommand {
         if from != nil {
             sourcePath = try resolveSource(cwd: cwd)
             isRemoteDownload = false
+        } else if let pinned = version ?? ProcessInfo.processInfo.environment["MOOTX01_VERSION"],
+                  !pinned.trimmingCharacters(in: .whitespaces).isEmpty {
+            // Pinned tag: skip release-feed resolution entirely. This is the
+            // only path that can reach a prerelease, because /releases/latest
+            // never lists one.
+            let tag = pinned.trimmingCharacters(in: .whitespaces)
+            print("Installing pinned release \(tag) (current: \(Mootx01.currentVersion)).")
+            // A pin is also a downgrade vector, so confirm when the target is
+            // not newer than what is installed. --yes still skips it, matching
+            // the ordinary download gate.
+            if !yes, !ReleaseDownloader.isVersion(
+                tag.hasPrefix("v") ? String(tag.dropFirst()) : tag,
+                newerThan: Mootx01.currentVersion) {
+                print("""
+                    \(tag) is not newer than the installed \(Mootx01.currentVersion) — \
+                    this will REPLACE your binary with an older or equal build.
+                    """)
+                print("Install \(tag) anyway? Type 'yes' to confirm: ", terminator: "")
+                guard readLine()?.trimmingCharacters(in: .whitespaces) == "yes" else {
+                    print("Aborted.")
+                    throw ExitCode.failure
+                }
+            } else if !yes {
+                print("Download and install \(tag)? Type 'yes' to confirm: ", terminator: "")
+                guard readLine()?.trimmingCharacters(in: .whitespaces) == "yes" else {
+                    print("Aborted.")
+                    throw ExitCode.failure
+                }
+            }
+            let binaryURL: URL
+            do {
+                binaryURL = try await downloader.download(tag: tag)
+            } catch {
+                // Candidate tags are pruned to the last few by the release
+                // pipeline, so a documented beta tag goes 404 after a handful
+                // of pushes. Say that, rather than emitting a bare failure.
+                print("""
+                    Could not download \(tag): \(error)
+                    If this is a candidate build, it may have been pruned from the \
+                    release feed — candidates are kept only for the most recent few. \
+                    Check the available tags on the releases page.
+                    """)
+                throw ExitCode.failure
+            }
+            downloadTmpDir = binaryURL.deletingLastPathComponent()
+            sourcePath = binaryURL.path
+            isRemoteDownload = true
         } else {
             let tag: String?
             do {
