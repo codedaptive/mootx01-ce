@@ -30,8 +30,8 @@
 
 use crate::error::{CorpusKitError, CorpusKitResult};
 use persistence_kit::{
-    Column, ColumnDeclaration, SchemaDeclaration, Storage, StoragePredicate, StorageRow,
-    TableDeclaration, TypedValue,
+    Column, ColumnDeclaration, Migration, SchemaDeclaration, SchemaOperation, Storage,
+    StoragePredicate, StorageRow, TableDeclaration, TypedValue,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -158,7 +158,7 @@ impl CorpusProviderCountsStore {
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitCounts",
-            2,
+            3,
             vec![
                 TableDeclaration::new(
                     "corpus_provider_counts",
@@ -194,6 +194,43 @@ impl CorpusProviderCountsStore {
                         "content_id".to_string(),
                     ],
                 ),
+                Self::vocab_table(),
+            ],
+        )
+        .with_migrations(vec![
+            // v2 -> v3: create the term table. Additive only — no existing row
+            // is read, rewritten, or moved. This is the first migration this
+            // kit has ever had, and keeping it to a CREATE is deliberate:
+            // transforming a multi-gigabyte estate inside the open path is the
+            // failure shape ee#49 was.
+            Migration {
+                from_version: 2,
+                to_version: 3,
+                operations: vec![SchemaOperation::CreateTable(Self::vocab_table())],
+            },
+        ])
+    }
+
+    /// The term-keyed vocabulary table, shared by the declaration and its
+    /// v2->v3 migration so the two cannot drift. Mirrors the Swift
+    /// `CorpusProviderCountsStore.vocabTable`.
+    fn vocab_table() -> TableDeclaration {
+        TableDeclaration::new(
+            "corpus_provider_vocab",
+            vec![
+                ColumnDeclaration::text("model_id"),
+                ColumnDeclaration::text("model_version"),
+                ColumnDeclaration::text("term"),
+                // The provider's per-term payload, byte-identical to what the
+                // blob format writes for this term (RandomIndexing: 2048
+                // little-endian f32, 8192 bytes).
+                ColumnDeclaration::blob("vector"),
+                ColumnDeclaration::json("ext").nullable(),
+            ],
+            vec![
+                "model_id".to_string(),
+                "model_version".to_string(),
+                "term".to_string(),
             ],
         )
     }
@@ -241,6 +278,108 @@ impl CorpusProviderCountsStore {
             )
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         Ok(())
+    }
+
+    /// Replace the stored vocabulary for a provider key with `terms`.
+    ///
+    /// Delete-then-insert through the caller's row store so a retrain becomes
+    /// visible atomically with its counts and basis rows and never leaves a
+    /// union of two generations. Each bound value is one term's vector, so no
+    /// single bind scales with vocabulary — the whole point of the table.
+    /// Mirrors Swift `replaceVocab(modelID:modelVersion:terms:into:)`.
+    pub fn replace_vocab_into(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        terms: &[(String, Vec<u8>)],
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        self.delete_vocab_into(model_id, model_version, row_store)?;
+        for (term, vector) in terms {
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            values.insert("model_id".into(), TypedValue::Text(model_id.to_string()));
+            values.insert(
+                "model_version".into(),
+                TypedValue::Text(model_version.to_string()),
+            );
+            values.insert("term".into(), TypedValue::Text(term.clone()));
+            values.insert("vector".into(), TypedValue::Blob(vector.clone()));
+            row_store
+                .upsert(
+                    "corpus_provider_vocab",
+                    values,
+                    &[
+                        "model_id".to_string(),
+                        "model_version".to_string(),
+                        "term".to_string(),
+                    ],
+                )
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Every stored term/vector pair for a provider key.
+    ///
+    /// Returns EMPTY both when the provider has no vocabulary and when the
+    /// estate predates the term table — callers must read empty as "fall back
+    /// to the legacy blob", never as "the vocabulary is empty". Order is
+    /// unspecified: only the blob WRITER needs UTF-8 byte ordering for
+    /// cross-port determinism; the reader builds a map.
+    pub fn load_vocab(
+        &self,
+        model_id: &str,
+        model_version: &str,
+    ) -> CorpusKitResult<Vec<(String, Vec<u8>)>> {
+        let predicate = Self::vocab_key_predicate(model_id, model_version);
+        let rows = self
+            .storage
+            .row_store()
+            .query("corpus_provider_vocab", Some(&predicate), &[], None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let term = match row.get("term") {
+                    Some(TypedValue::Text(t)) => t.clone(),
+                    _ => return None,
+                };
+                let vector = match row.get("vector") {
+                    Some(TypedValue::Blob(b)) => b.clone(),
+                    _ => return None,
+                };
+                Some((term, vector))
+            })
+            .collect())
+    }
+
+    /// Drop the stored vocabulary for a provider key.
+    pub fn delete_vocab_into(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        let predicate = Self::vocab_key_predicate(model_id, model_version);
+        row_store
+            .delete("corpus_provider_vocab", &predicate)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Provider-key predicate for the term table, shared by load and delete so
+    /// the two can never disagree about what "this provider key" means.
+    fn vocab_key_predicate(model_id: &str, model_version: &str) -> StoragePredicate {
+        StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_vocab", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_vocab", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+        ])
     }
 
     /// Load the full persisted counts for a provider key, or `None` if none.
