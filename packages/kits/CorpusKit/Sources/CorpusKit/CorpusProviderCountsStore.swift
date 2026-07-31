@@ -169,9 +169,31 @@ public actor CorpusProviderCountsStore {
     /// update UPSERTs the existing (modelID, modelVersion) row, so the table
     /// holds at most one counts row per provider key. The `.json` `ext` slot is
     /// the nullable entity ext slots forward-compat reservation (written NULL / omitted in 1.0).
+    /// v3 adds `corpus_provider_vocab`: one row per vocabulary term, so a
+    /// provider's term→vector map no longer has to be one blob whose size
+    /// scales with vocabulary.
+    ///
+    /// Why: `corpus_provider_counts.counts` held the entire serialized map.
+    /// Measured on real estates, 736,844,490 B at ~89.8K terms and
+    /// 1,009,861,855 B at ~123K terms — the latter exceeded SQLite's 1e9
+    /// bind ceiling and bricked a daemon (ee#49). Raising the ceiling bought
+    /// headroom but left the real cost: every incremental update rewrote the
+    /// whole blob (O(N·vocab), which is why persistence is batched at all).
+    ///
+    /// The change is ADDITIVE — a new table, not a reshape of
+    /// `corpus_provider_counts`. Mutating the existing table is how the basis
+    /// store ended up needing a full v3→v4 rebuild: `ALTER TABLE` cannot
+    /// change a primary key, and the claim that no fielded estate would need
+    /// migrating was false. The PK here is correct in the CREATE.
+    ///
+    /// There is deliberately NO bulk data migration. The read path prefers
+    /// term rows and falls back to the legacy blob, so an upgraded estate
+    /// keeps working untouched and converts on its next write. A one-shot
+    /// transformation of a multi-gigabyte estate inside the open path is
+    /// exactly the shape of failure this whole incident chain was.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitCounts",
-        version: 2,
+        version: 3,
         tables: [
             TableDeclaration(
                 name: "corpus_provider_counts",
@@ -203,9 +225,49 @@ public actor CorpusProviderCountsStore {
                     .json("ext", nullable: true)
                 ],
                 primaryKey: ["model_id", "model_version", "content_id"]
-            )
+            ),
+            // One row per vocabulary term. `vector` carries the provider's own
+            // per-term bytes verbatim — the same bytes the blob format writes
+            // for that term — so nothing recomputes and cross-port byte
+            // equality is unaffected.
+            //
+            // `term` is stored as TEXT. The attached-mode profile guard about
+            // text columns concerns canonical CONTENT text ownership and
+            // erasure, not tokens: `iix_termfreqs` in the same profile is
+            // already PRIMARY KEY (term TEXT, item_id) and maps each term to
+            // the document containing it, which is strictly more revealing
+            // than a de-duplicated vocabulary. Terms are also already
+            // plaintext inside the existing blob.
+            vocabTable
         ],
-        indices: []
+        indices: [],
+        migrations: [
+            // v2 → v3: create the term table. Additive only — no existing row
+            // is read, rewritten, or moved. This is the first migration this
+            // kit has ever had; keeping it to a CREATE is deliberate.
+            Migration(
+                fromVersion: 2,
+                toVersion: 3,
+                operations: [.createTable(vocabTable)]
+            )
+        ]
+    )
+
+    /// The term-keyed vocabulary table, shared by the declaration and its
+    /// v2→v3 migration so the two can never drift apart.
+    static let vocabTable = TableDeclaration(
+        name: "corpus_provider_vocab",
+        columns: [
+            .text("model_id", nullable: false),
+            .text("model_version", nullable: false),
+            .text("term", nullable: false),
+            // The provider's per-term payload, byte-identical to what the
+            // blob format writes for this term (for RandomIndexing: 2048
+            // little-endian f32, 8192 bytes).
+            .blob("vector", nullable: false),
+            .json("ext", nullable: true)
+        ],
+        primaryKey: ["model_id", "model_version", "term"]
     )
 
     public init(storage: any Storage) {
@@ -237,6 +299,78 @@ public actor CorpusProviderCountsStore {
             table: "corpus_provider_counts",
             values: values,
             conflictColumns: ["model_id", "model_version"]
+        )
+    }
+
+    // MARK: - Term-keyed vocabulary
+
+    /// Replace the stored vocabulary for a provider key with `terms`.
+    ///
+    /// Delete-then-insert inside the caller's row store so a retrain becomes
+    /// visible atomically with its counts and basis rows, and never leaves a
+    /// union of an old and new generation. Each bound value is one term's
+    /// vector (8192 B for RandomIndexing), so no single bind scales with
+    /// vocabulary — which is the entire point of the table.
+    public func replaceVocab(
+        modelID: String,
+        modelVersion: String,
+        terms: [(term: String, vector: Data)],
+        into rowStore: any RowStore
+    ) async throws {
+        try await deleteVocab(modelID: modelID, modelVersion: modelVersion, into: rowStore)
+        for entry in terms {
+            _ = try await rowStore.upsert(
+                table: "corpus_provider_vocab",
+                values: [
+                    "model_id": .text(modelID),
+                    "model_version": .text(modelVersion),
+                    "term": .text(entry.term),
+                    "vector": .blob(entry.vector)
+                ],
+                conflictColumns: ["model_id", "model_version", "term"]
+            )
+        }
+    }
+
+    /// Every stored term/vector pair for a provider key.
+    ///
+    /// Returns an EMPTY array both when the provider has no vocabulary and
+    /// when this estate predates the term table — callers must treat empty as
+    /// "fall back to the legacy blob", never as "the vocabulary is empty".
+    /// Order is unspecified: the blob writer sorts by UTF-8 bytes for
+    /// cross-port determinism, but the reader builds a dictionary and is
+    /// order-independent.
+    public func loadVocab(
+        modelID: String, modelVersion: String
+    ) async throws -> [(term: String, vector: Data)] {
+        let rows = try await storage.rowStore.query(
+            table: "corpus_provider_vocab",
+            where: .and([
+                .eq(Column(table: "corpus_provider_vocab", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "corpus_provider_vocab", name: "model_version"), .text(modelVersion))
+            ]),
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        return rows.compactMap { row in
+            guard case let .text(term) = row["term"] ?? .null,
+                  case let .blob(vector) = row["vector"] ?? .null
+            else { return nil }
+            return (term: term, vector: vector)
+        }
+    }
+
+    /// Drop the stored vocabulary for a provider key.
+    public func deleteVocab(
+        modelID: String, modelVersion: String, into rowStore: any RowStore
+    ) async throws {
+        _ = try await rowStore.delete(
+            table: "corpus_provider_vocab",
+            where: .and([
+                .eq(Column(table: "corpus_provider_vocab", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "corpus_provider_vocab", name: "model_version"), .text(modelVersion))
+            ])
         )
     }
 
@@ -461,6 +595,15 @@ public actor CorpusProviderCountsStore {
         )
         _ = try await storage.rowStore.delete(
             table: "corpus_provider_counts",
+            where: .isTrue
+        )
+        // The term table is part of this store's state, so a wholesale clear
+        // must include it. Missing this would leave a previous generation's
+        // vocabulary behind after destroyRecallIndex or the shared-content
+        // migration's derived-state wipe, and the next load would read term
+        // rows that no longer match the counts row beside them.
+        _ = try await storage.rowStore.delete(
+            table: "corpus_provider_vocab",
             where: .isTrue
         )
     }
