@@ -47,8 +47,12 @@ struct AdaptivePollSchedulerUnitTests {
         await scheduler.start()
         await scheduler.start()  // second start — should no-op
 
-        // Yield a few times to let the loop run
-        for _ in 0..<10 { await Task.yield() }
+        // Wait until the scheduler produces an observable pull, bounded so a
+        // broken start path fails instead of leaving the test suspended.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await pullCount.value < 1 && ContinuousClock.now < deadline {
+            await Task.yield()
+        }
         await scheduler.stop()
 
         let count = await pullCount.value
