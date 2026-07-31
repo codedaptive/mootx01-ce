@@ -123,20 +123,21 @@ impl SharedContentMigrationError {
     pub fn brief_description(&self) -> String {
         match self {
             SharedContentMigrationError::OrphanedLegacySources { state, .. } => {
-                format!("orphanedLegacySources:{:?}", state)
+                // state_token produces the same camelCase rawValue Swift uses.
+                format!("orphanedLegacySources:{}", state_token(*state))
             }
             SharedContentMigrationError::VerificationFailed { reason } => {
                 format!("verificationFailed:{}", &reason[..reason.len().min(200)])
             }
             SharedContentMigrationError::StorageFailure { state, reason } => {
                 format!(
-                    "storageFailure:{:?}:{}",
-                    state,
+                    "storageFailure:{}:{}",
+                    state_token(*state),
                     &reason[..reason.len().min(200)]
                 )
             }
             SharedContentMigrationError::InjectedFault { after } => {
-                format!("injectedFault:{:?}", after)
+                format!("injectedFault:{}", state_token(*after))
             }
             SharedContentMigrationError::InsufficientTrainingCapacity { .. } => {
                 "insufficientTrainingCapacity".to_string()
