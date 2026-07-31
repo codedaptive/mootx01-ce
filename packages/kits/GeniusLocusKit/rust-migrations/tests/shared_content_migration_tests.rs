@@ -890,3 +890,121 @@ fn legacy_estate_keeps_corpus_lane_dark_until_migrated() {
         None
     ));
 }
+
+// ── Circuit-breaker tests ──
+
+/// An orphan chunk causes the `CanonicalValidated` step to throw
+/// `OrphanedLegacySources` on every call without advancing the committed
+/// state (the error fires before `record.state = CanonicalValidated` is
+/// saved).  After CIRCUIT_BREAKER_THRESHOLD (= 3) identical failures the
+/// circuit breaker parks the migration.  The 4th call returns
+/// `MigrationParked` immediately instead of repeating the same failing step.
+#[test]
+fn circuit_breaker_parks_after_three_identical_failures() {
+    // Rust twin of Swift circuitBreakerParksAfterThreeIdenticalFailures.
+    let mut est = make_legacy_estate(&["cb-park fixture"], true, false);
+
+    // Calls 1–2: must fail with OrphanedLegacySources; circuit breaker not
+    // yet tripped because the failure count has not reached the threshold.
+    for i in 0..2_usize {
+        let result = est.coord.run_shared_content_migration(
+            &est.handle,
+            NOW,
+            vec![EmbeddingModelConfig::Deterministic],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(SharedContentMigrationError::OrphanedLegacySources { .. })
+            ),
+            "call {} must fail with OrphanedLegacySources before park",
+            i + 1
+        );
+        assert!(
+            !est.coord.shared_content_migration_is_parked(&est.handle),
+            "migration must not be parked after only {} failure(s)",
+            i + 1
+        );
+    }
+
+    // Call 3: threshold reached — the circuit breaker parks after this call.
+    let result3 = est.coord.run_shared_content_migration(
+        &est.handle,
+        NOW,
+        vec![EmbeddingModelConfig::Deterministic],
+    );
+    assert!(
+        matches!(
+            result3,
+            Err(SharedContentMigrationError::OrphanedLegacySources { .. })
+        ),
+        "3rd failure must still be OrphanedLegacySources (park recorded, original error re-thrown)"
+    );
+    assert!(
+        est.coord.shared_content_migration_is_parked(&est.handle),
+        "migration must be parked after 3 identical failures"
+    );
+
+    // Call 4: the park guard fires before any state-machine step.
+    let parked_result = est.coord.run_shared_content_migration(
+        &est.handle,
+        NOW,
+        vec![EmbeddingModelConfig::Deterministic],
+    );
+    assert!(
+        matches!(
+            parked_result,
+            Err(SharedContentMigrationError::MigrationParked { .. })
+        ),
+        "4th call must return MigrationParked; got {parked_result:?}"
+    );
+}
+
+/// After `clear_parked_shared_content_migration`, the circuit-breaker failure
+/// count resets.  A single subsequent failure does NOT re-park (the threshold
+/// is 3, not 1).
+#[test]
+fn circuit_breaker_explicit_clear_resets_failure_count() {
+    // Rust twin of Swift circuitBreakerExplicitClearResetsFailureCount.
+    let mut est = make_legacy_estate(&["cb-clear fixture"], true, false);
+
+    // Drive to a parked state (3 identical failures).
+    for _ in 0..3 {
+        let _ = est.coord.run_shared_content_migration(
+            &est.handle,
+            NOW,
+            vec![EmbeddingModelConfig::Deterministic],
+        );
+    }
+    assert!(
+        est.coord.shared_content_migration_is_parked(&est.handle),
+        "must be parked after 3 failures"
+    );
+
+    // Explicit clear.
+    est.coord
+        .clear_parked_shared_content_migration(&est.handle, NOW)
+        .expect("clear must succeed");
+    assert!(
+        !est.coord.shared_content_migration_is_parked(&est.handle),
+        "migration must not be parked after explicit clear"
+    );
+
+    // One failure after clear: count = 1, below the threshold — no park.
+    let result = est.coord.run_shared_content_migration(
+        &est.handle,
+        NOW,
+        vec![EmbeddingModelConfig::Deterministic],
+    );
+    assert!(
+        matches!(
+            result,
+            Err(SharedContentMigrationError::OrphanedLegacySources { .. })
+        ),
+        "first failure after clear must be OrphanedLegacySources, not MigrationParked"
+    );
+    assert!(
+        !est.coord.shared_content_migration_is_parked(&est.handle),
+        "single failure after clear must not re-park (threshold is 3)"
+    );
+}

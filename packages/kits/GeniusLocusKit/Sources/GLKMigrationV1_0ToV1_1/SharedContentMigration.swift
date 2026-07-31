@@ -106,6 +106,36 @@ public enum SharedContentMigrationError: Error, Equatable {
     /// training working-set budget cannot safely hold this estate.
     case insufficientTrainingCapacity(
         contentCount: Int, requiredBytes: UInt64, budgetBytes: UInt64)
+    /// The circuit breaker parked this migration after repeated identical
+    /// failures. Call `clearParkedSharedContentMigration` or wait for a
+    /// version upgrade to allow retries. moot-mgr's respawn loop detects
+    /// this case and idles instead of spinning at 100% CPU.
+    case migrationParked(
+        atState: SharedContentMigrationState,
+        failureCount: Int,
+        error: String,
+        parkedAt: String)
+
+    /// A brief, stable description used by the circuit breaker to detect
+    /// consecutive identical failures. Volatile per-run context (timestamps,
+    /// row IDs) is excluded; the error class and first 200 chars of the
+    /// reason form a stable identity key.
+    var briefDescription: String {
+        switch self {
+        case .orphanedLegacySources(_, let state):
+            return "orphanedLegacySources:\(state.rawValue)"
+        case .verificationFailed(let reason):
+            return "verificationFailed:\(reason.prefix(200))"
+        case .storageFailure(let state, let reason):
+            return "storageFailure:\(state.rawValue):\(reason.prefix(200))"
+        case .injectedFault(let after):
+            return "injectedFault:\(after.rawValue)"
+        case .insufficientTrainingCapacity:
+            return "insufficientTrainingCapacity"
+        case .migrationParked:
+            return "migrationParked"
+        }
+    }
 }
 
 /// Conservative five-signal training-capacity contract. The calibrated
@@ -140,6 +170,30 @@ public enum SharedContentTrainingCapacity {
                 contentCount: contentCount, requiredBytes: required, budgetBytes: budgetBytes)
         }
     }
+}
+
+// MARK: - Circuit-breaker state
+
+/// Tracks consecutive identical failures to detect deterministic failure loops
+/// (e.g., a permanently oversized basis blob that causes step 7 to fail every
+/// time moot-mgr respawns the migration). After `sharedContentCircuitBreakerThreshold`
+/// identical failures, the migration is parked and the respawn loop idles.
+/// Stored as an optional field in the migration record for backward compatibility:
+/// old records decode with `circuitBreaker == nil`, meaning no failure history.
+public struct CircuitBreakerState: Sendable, Codable, Equatable {
+    /// Number of consecutive failures at `lastFailureState` with `lastFailureError`.
+    public var failureCount: Int
+    /// The committed migration state that was active when the last failure occurred.
+    public var lastFailureState: SharedContentMigrationState?
+    /// A brief, stable description of the last failure (for identity matching).
+    public var lastFailureError: String?
+    /// ISO8601 timestamp when the circuit breaker parked this migration.
+    /// nil until the failure threshold is reached.
+    public var parkedAt: String?
+    /// The migration implementation version token active when the park was set.
+    /// A version change causes the park to auto-clear on the next run, giving
+    /// a new code build a fresh attempt without operator intervention.
+    public var parkedUnderMigrationVersion: String?
 }
 
 // MARK: - Durable record
@@ -179,6 +233,10 @@ public struct SharedContentMigrationRecord: Sendable, Codable, Equatable {
     /// Per-provider basis generations (modelID → basis digest) recorded at
     /// `basesTrained` and re-verified at `verified`.
     public var providerGenerations: [String: String]?
+    /// Circuit-breaker failure tracking. nil on old records (backward-compatible:
+    /// Swift's synthesized Codable uses `decodeIfPresent` for Optional properties,
+    /// so records written before this field was added decode with nil here).
+    public var circuitBreaker: CircuitBreakerState? = nil
 }
 
 /// Store for the migration record. Its table is deliberately OUTSIDE every
@@ -306,6 +364,20 @@ enum SharedContentRetirement {
     }
 }
 
+// MARK: - Circuit-breaker constants
+
+/// Number of consecutive identical failures required to park the migration.
+/// Three is chosen as a practical trade-off — enough to absorb transient
+/// storage hiccups (disk-full spike, momentary lock contention) without
+/// letting a deterministic failure class spin forever at 100% CPU.
+private let sharedContentCircuitBreakerThreshold = 3
+
+/// Migration implementation version token. Update this constant when a code
+/// change is expected to resolve a class of parked failures; a mismatch
+/// between the stored token and this constant causes an auto-clear on the
+/// next run, giving the updated code a fresh attempt without operator action.
+private let sharedContentMigrationVersion = "mxe-bb"
+
 // MARK: - Runner
 
 public extension GeniusLocusKit {
@@ -427,6 +499,24 @@ public extension GeniusLocusKit {
             try await store.save(record, now: now)
             try checkFault(after: record.state)
         }
+        // Circuit-breaker: refuse to run if parked under the current version.
+        // If the migration implementation version has changed (a code update),
+        // auto-clear the park and give the new code a fresh attempt.
+        if let cb = record.circuitBreaker, let parkedAt = cb.parkedAt {
+            if cb.parkedUnderMigrationVersion == sharedContentMigrationVersion {
+                throw SharedContentMigrationError.migrationParked(
+                    atState: cb.lastFailureState ?? record.state,
+                    failureCount: cb.failureCount,
+                    error: cb.lastFailureError ?? "(unknown)",
+                    parkedAt: parkedAt)
+            }
+            // Version changed — auto-clear the park and continue.
+            migrationLog.notice(
+                "shared-content migration auto-clearing park (version changed from \(cb.parkedUnderMigrationVersion ?? "<none>", privacy: .public) to \(sharedContentMigrationVersion, privacy: .public))")
+            record.circuitBreaker = nil
+            try await store.save(record, now: now)
+        }
+
         if record.state == .complete {
             if record.ensembleFingerprint == wiredFingerprint {
                 try await EstateFormatStore(storage: storage).stamp(.current, now: now)
@@ -443,6 +533,12 @@ public extension GeniusLocusKit {
             record.state = .drawerIndexRebuilt
             try await store.save(record, now: now)
         }
+
+        // Circuit-breaker wrapper: catch any failure from the state-machine steps,
+        // track consecutive identical failures, and park when the threshold is reached.
+        // Distinct errors or errors at different committed states reset the count so
+        // that transient hiccups never park a healthy migration.
+        do {
 
         // 2. canonicalValidated — every active legacy source resolves to a
         //    Drawer. Stop dark on orphans; never synthesize Drawers.
@@ -653,7 +749,45 @@ public extension GeniusLocusKit {
         // 11. complete — after physical reclamation (P5's maintenance API).
         //    `completeSharedContentReclaim` flips the final state; until
         //    then the record honestly reports reclaimPending.
+
+        // Success: reset the circuit-breaker failure history.
+        if record.circuitBreaker != nil {
+            record.circuitBreaker = nil
+            try await store.save(record, now: now)
+        }
         return report(for: record)
+
+        } catch {
+            // Circuit-breaker: track consecutive identical failures.
+            // `record.state` is the last COMMITTED state before the failing step.
+            let errorDesc = (error as? SharedContentMigrationError)?.briefDescription
+                ?? "\(error)".prefix(200).description
+            let failingState = record.state
+            var cb = record.circuitBreaker ?? CircuitBreakerState(
+                failureCount: 0, lastFailureState: nil, lastFailureError: nil,
+                parkedAt: nil, parkedUnderMigrationVersion: nil)
+            if cb.lastFailureState == failingState && cb.lastFailureError == errorDesc {
+                cb.failureCount += 1
+            } else {
+                // Different state or different error — reset the streak counter.
+                cb.failureCount = 1
+                cb.lastFailureError = errorDesc
+                cb.lastFailureState = failingState
+            }
+            if cb.failureCount >= sharedContentCircuitBreakerThreshold {
+                let parkedAt = ISO8601DateFormatter().string(from: now)
+                cb.parkedAt = parkedAt
+                cb.parkedUnderMigrationVersion = sharedContentMigrationVersion
+                migrationLog.error(
+                    "shared-content migration parked after \(cb.failureCount, privacy: .public) identical failures at \(failingState.rawValue, privacy: .public): \(errorDesc, privacy: .public)")
+            }
+            record.circuitBreaker = cb
+            // Best-effort save of circuit-breaker state. If the storage itself
+            // is broken (same cause as the step failure), this save may also fail;
+            // we discard that error and surface the original step failure.
+            try? await store.save(record, now: now)
+            throw error
+        }
     }
 
     /// Run the physical reclamation and mark the reclaim outcome (the P5
@@ -699,6 +833,42 @@ public extension GeniusLocusKit {
         record.state = .complete
         try await store.save(record, now: now)
         return report
+    }
+
+    /// Clear a parked migration, allowing the next call to
+    /// `runSharedContentMigration` to attempt the migration again.
+    ///
+    /// Call this after diagnosing and resolving the root cause of the repeated
+    /// failure (e.g., freeing disk space, upgrading the binary to a version
+    /// that addresses the failure class, or removing the offending content).
+    /// Clearing without resolving the underlying cause will result in the
+    /// migration re-parking after another three identical failures.
+    ///
+    /// Note: a binary version change also clears the park automatically — see
+    /// `sharedContentMigrationVersion`. Explicit clear is the operator path for
+    /// cases where the fix does not change the binary version token.
+    func clearParkedSharedContentMigration(
+        handle: EstateHandle, now: Date
+    ) async throws {
+        guard let storage = try? migrationStorage(for: handle) else { return }
+        try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
+        let store = SharedContentMigrationStore(storage: storage)
+        guard var record = try await store.load() else { return }
+        guard record.circuitBreaker?.parkedAt != nil else { return }
+        record.circuitBreaker = nil
+        try await store.save(record, now: now)
+        migrationLog.notice(
+            "shared-content migration park cleared for estate \(handle.estateUUID, privacy: .public)")
+    }
+
+    /// Whether the migration is currently parked (circuit breaker tripped).
+    /// Returns false when no record exists or when the migration is not parked.
+    func sharedContentMigrationIsParked(handle: EstateHandle) async -> Bool {
+        guard let storage = try? migrationStorage(for: handle) else { return false }
+        guard let record = try? await SharedContentMigrationStore(storage: storage).load()
+        else { return false }
+        guard let cb = record.circuitBreaker, let _ = cb.parkedAt else { return false }
+        return cb.parkedUnderMigrationVersion == sharedContentMigrationVersion
     }
 
     /// The migration record's current state for the status surface (nil

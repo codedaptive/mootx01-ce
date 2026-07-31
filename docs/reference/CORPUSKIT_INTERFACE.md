@@ -2,10 +2,10 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-22
+date: 2026-07-30
 spec_type: kit
-version: 1.18.0
-description: Public API surface for CorpusKit in both the Swift and Rust ports.
+version: 1.19.0
+description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.19.0: MXE-BB — chunked BasisStore persistence (multi-row, 256 MiB parts) on both ports.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
@@ -2156,6 +2156,15 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.19.0 -- 2026-07-30
+
+MXE-BB: `BasisStore` split/reassemble contract. Blobs are stored as N
+rows per logical basis entry (`part_index` 0…N−1, max part size 256 MiB),
+written atomically, and reassembled in ascending `part_index` order on
+load. The public `save`, `load`, `delete`, and `deleteAll` signatures are
+unchanged; callers receive the same `Data` blob regardless of how many
+parts it was split into. Both Swift and Rust ports conform.
 
 ### 1.18.0 -- 2026-07-22
 

@@ -824,6 +824,16 @@ impl SqliteStorage {
         .map_err(|e| StorageError::BackendError {
             underlying: format!("sqlite pragmas: {e}"),
         })?;
+        // Restore SQLITE_LIMIT_LENGTH to the compile-time maximum. SQLite silently
+        // clamps sqlite3_limit calls to SQLITE_MAX_LENGTH (compile-time constant =
+        // 1,000,000,000 in the bundled SQLCipher build). The call with i32::MAX
+        // therefore has no effect when the limit is already at the compile-time
+        // ceiling, but it is defensive: if any earlier set_limit call on this handle
+        // lowered the per-connection limit, this restores it to the maximum.
+        // The primary fix for the >1 GB blob rejection (MXE-BB / ee#49) is chunked
+        // basis persistence (Parts 1+2); this call is defense-in-depth only.
+        // set_limit returns the previous value; discarded intentionally.
+        conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, i32::MAX);
         // Statement cache sized for the estate schema's statement variety (one
         // cached statement per distinct SQL text: per-table insert/upsert/update/
         // delete/select shapes). rusqlite's default of 16 evicts constantly on a

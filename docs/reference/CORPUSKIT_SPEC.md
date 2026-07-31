@@ -1,9 +1,9 @@
 ---
 title: CorpusKit Specification
-version: 1.15.0
+version: 1.16.0
 status: accepted-1.1-target
-date: 2026-07-22
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-07-30
+description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.16.0: MXE-BB — chunked BasisStore persistence; SQLITE_LIMIT_LENGTH defense-in-depth in PersistenceKit."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -815,6 +815,24 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.16.0 -- 2026-07-30
+
+MXE-BB (ee#49 — basis blob limit): `BasisStore` now persists trained
+embedding-provider bases using chunked multi-row storage. Blobs are split
+into 256 MiB parts and written in one atomic transaction; reads reassemble
+parts in `part_index ASC` order. The single-blob schema used before this
+version cannot be written for any basis that exceeds `sqlite3_limit`'s
+compile-time `SQLITE_MAX_LENGTH` (1 GB). Both Swift and Rust ports ship
+the same chunked layout. Existing single-row bases are transparent at read
+time via a fallback path that loads a legacy row if the `part_index`
+column is absent or if no chunked rows are found. `BasisStore.deleteAll`
+and `BasisStore.delete(provider:)` delete across both old and new layouts.
+
+This is an additive behavioral change. The invariant that `BasisStore`
+blobs survive unbounded vocabulary growth (ee#49 root cause: a 122 k-term
+RI/PPMI basis compresses to ≈ 950 MiB single-blob → `sqlite3_bind_blob`
+error) is now met.
 
 ### 1.15.0 -- 2026-07-22
 

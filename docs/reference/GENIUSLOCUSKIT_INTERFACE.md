@@ -2,10 +2,10 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-20
-version: 1.21.0
+date: 2026-07-30
+version: 1.22.0
 spec_type: kit
-description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
+description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.22.0: MXE-BB — circuit-breaker API (migrationParked, isParked, clearParked) on both ports.
 package: GeniusLocusKit
 languages: [swift, rust]
 relates_to:
@@ -2084,6 +2084,23 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.22.0 -- 2026-07-30
+
+MXE-BB: three new migration-surface entries (both ports):
+
+- `SharedContentMigrationError.migrationParked(atState:failureCount:error:parkedAt:)`
+  — thrown by `runSharedContentMigration` when the circuit breaker has tripped.
+  moot-mgr detects this case and idles its respawn loop.
+- `sharedContentMigrationIsParked(handle:) async -> Bool` — queries whether the
+  migration is currently parked; returns false when no record exists.
+- `clearParkedSharedContentMigration(handle:now:) async throws` — operator reset;
+  clears circuit-breaker state so the next call to `runSharedContentMigration`
+  will attempt the migration again.
+
+Circuit-breaker state is persisted as the optional `circuitBreaker` field of
+`SharedContentMigrationRecord`; absent on records written before this version
+(decodes as `nil` = no failure history).
 
 ### 1.21.0 -- 2026-07-20
 

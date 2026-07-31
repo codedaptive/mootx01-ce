@@ -50,11 +50,12 @@ table=corpus_index_state
 table=corpus_provider_basis
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-
+  col=part_index type=int null=0 default=int role=-
   col=basis type=blob null=0 default=- role=-
   col=trained_at type=timestamp null=0 default=- role=-
   col=trained_chunk_count type=int null=0 default=- role=-
   col=ext type=json null=1 default=- role=-
-  pk=model_id,model_version
+  pk=model_id,model_version,part_index
   appendOnly=0 hashable=0
 table=corpus_provider_configuration
   col=singleton_id type=int null=0 default=- role=-

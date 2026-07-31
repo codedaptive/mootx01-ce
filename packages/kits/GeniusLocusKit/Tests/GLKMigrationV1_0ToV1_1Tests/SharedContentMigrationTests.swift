@@ -570,6 +570,81 @@ struct SharedContentMigrationTests {
         #expect(!(await kit.sharedContentLaneMustStayDark(storage: storage)))
         _ = handle
     }
+
+    // MARK: - Circuit-breaker
+
+    /// An orphan chunk causes `canonicalValidated` to fail with
+    /// `orphanedLegacySources` on every call (the state is never advanced
+    /// because the error fires BEFORE `record.state = .canonicalValidated` is
+    /// saved). After `sharedContentCircuitBreakerThreshold` (= 3) identical
+    /// failures the circuit breaker parks the migration, and the 4th call
+    /// returns `migrationParked` instead of repeating the same work.
+    @Test func circuitBreakerParksAfterThreeIdenticalFailures() async throws {
+        let (kit, handle, _, _, url) = try await makeLegacyEstate(
+            drawerContents: ["cb-park fixture"], includeOrphanChunk: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Calls 1–2: each must fail with orphanedLegacySources; not yet parked.
+        for i in 0..<2 {
+            await #expect(
+                throws: SharedContentMigrationError.self,
+                "call \(i + 1) must fail with orphanedLegacySources"
+            ) {
+                try await kit.runSharedContentMigration(handle: handle, now: now)
+            }
+            let isParked = await kit.sharedContentMigrationIsParked(handle: handle)
+            #expect(!isParked, "not yet parked after only \(i + 1) failure(s)")
+        }
+
+        // Call 3: threshold reached — circuit breaker parks after this failure.
+        await #expect(throws: SharedContentMigrationError.self) {
+            try await kit.runSharedContentMigration(handle: handle, now: now)
+        }
+        #expect(
+            await kit.sharedContentMigrationIsParked(handle: handle),
+            "migration must be parked after 3 identical failures"
+        )
+
+        // Call 4: the park guard fires immediately, returning migrationParked.
+        do {
+            _ = try await kit.runSharedContentMigration(handle: handle, now: now)
+            Issue.record("expected migrationParked on the 4th call but no error was thrown")
+        } catch SharedContentMigrationError.migrationParked {
+            // Expected: the parked guard returned before running any state-machine
+            // step, so moot-mgr can detect this case and idle the respawn loop.
+        } catch {
+            Issue.record("expected migrationParked on 4th call, got \(error)")
+        }
+    }
+
+    /// After an explicit `clearParkedSharedContentMigration`, the circuit-breaker
+    /// failure count resets. A single subsequent failure does NOT re-park —
+    /// only another CIRCUIT_BREAKER_THRESHOLD identical failures would.
+    @Test func circuitBreakerExplicitClearResetsFailureCount() async throws {
+        let (kit, handle, _, _, url) = try await makeLegacyEstate(
+            drawerContents: ["cb-clear fixture"], includeOrphanChunk: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Drive to a parked state (3 identical failures).
+        for _ in 0..<3 {
+            _ = try? await kit.runSharedContentMigration(handle: handle, now: now)
+        }
+        #expect(await kit.sharedContentMigrationIsParked(handle: handle))
+
+        // Explicit clear resets the circuit breaker.
+        try await kit.clearParkedSharedContentMigration(handle: handle, now: now)
+        #expect(
+            !(await kit.sharedContentMigrationIsParked(handle: handle)),
+            "migration must not be parked after explicit clear"
+        )
+
+        // One failure after clear: failure count = 1, below the threshold.
+        _ = try? await kit.runSharedContentMigration(handle: handle, now: now)
+        #expect(
+            !(await kit.sharedContentMigrationIsParked(handle: handle)),
+            "single failure after clear must not re-park (threshold is 3)"
+        )
+    }
 }
 
 #endif

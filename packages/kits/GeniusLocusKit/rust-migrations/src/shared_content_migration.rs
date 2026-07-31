@@ -103,6 +103,53 @@ pub enum SharedContentMigrationError {
         found: EstateFormatVersion,
         current: EstateFormatVersion,
     },
+    /// The circuit breaker parked this migration after repeated identical
+    /// failures. Call `clear_parked_shared_content_migration` or wait for a
+    /// version upgrade to allow retries. The moot-mgr respawn loop detects
+    /// this case and idles instead of spinning at 100% CPU.
+    MigrationParked {
+        at_state: SharedContentMigrationState,
+        failure_count: usize,
+        error: String,
+        parked_at: String,
+    },
+}
+
+impl SharedContentMigrationError {
+    /// A brief, stable description used by the circuit breaker to detect
+    /// consecutive identical failures. Volatile per-run context (timestamps,
+    /// row IDs) is excluded; the error class and first 200 chars of the
+    /// reason form a stable identity key. Mirrors Swift's `briefDescription`.
+    pub fn brief_description(&self) -> String {
+        match self {
+            SharedContentMigrationError::OrphanedLegacySources { state, .. } => {
+                format!("orphanedLegacySources:{:?}", state)
+            }
+            SharedContentMigrationError::VerificationFailed { reason } => {
+                format!("verificationFailed:{}", &reason[..reason.len().min(200)])
+            }
+            SharedContentMigrationError::StorageFailure { state, reason } => {
+                format!(
+                    "storageFailure:{:?}:{}",
+                    state,
+                    &reason[..reason.len().min(200)]
+                )
+            }
+            SharedContentMigrationError::InjectedFault { after } => {
+                format!("injectedFault:{:?}", after)
+            }
+            SharedContentMigrationError::InsufficientTrainingCapacity { .. } => {
+                "insufficientTrainingCapacity".to_string()
+            }
+            SharedContentMigrationError::BelowCompiledFloor { .. } => {
+                "belowCompiledFloor".to_string()
+            }
+            SharedContentMigrationError::UnsupportedFuture { .. } => {
+                "unsupportedFuture".to_string()
+            }
+            SharedContentMigrationError::MigrationParked { .. } => "migrationParked".to_string(),
+        }
+    }
 }
 
 /// Conservative five-signal capacity contract. The 320 KiB/content slope is
@@ -194,6 +241,45 @@ fn physical_memory_bytes() -> Option<u64> {
     None
 }
 
+// MARK: - Circuit-breaker constants
+
+/// Number of consecutive identical failures required to park the migration.
+/// Mirrors `sharedContentCircuitBreakerThreshold` in the Swift port.
+const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
+
+/// Migration implementation version token. Update when a code change is
+/// expected to resolve a class of parked failures; a mismatch between the
+/// stored token and this constant causes an auto-clear on the next run.
+/// Mirrors `sharedContentMigrationVersion` in the Swift port.
+const MIGRATION_VERSION: &str = "mxe-bb";
+
+// MARK: - Circuit-breaker state
+
+/// Tracks consecutive identical failures to detect deterministic failure loops.
+/// Stored as an optional field in the migration record for backward compatibility:
+/// old records deserialize with `circuit_breaker == None` via serde default.
+/// Mirrors Swift `CircuitBreakerState`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CircuitBreakerState {
+    /// Number of consecutive failures at `last_failure_state` with `last_failure_error`.
+    #[serde(rename = "failureCount")]
+    pub failure_count: usize,
+    /// The committed migration state active when the last failure occurred.
+    #[serde(rename = "lastFailureState", default)]
+    pub last_failure_state: Option<SharedContentMigrationState>,
+    /// A brief, stable description of the last failure (for identity matching).
+    #[serde(rename = "lastFailureError", default)]
+    pub last_failure_error: Option<String>,
+    /// ISO8601 timestamp when the circuit breaker parked this migration.
+    /// None until the failure threshold is reached.
+    #[serde(rename = "parkedAt", default)]
+    pub parked_at: Option<String>,
+    /// The migration implementation version token active when the park was set.
+    /// A version change causes the park to auto-clear on the next run.
+    #[serde(rename = "parkedUnderMigrationVersion", default)]
+    pub parked_under_migration_version: Option<String>,
+}
+
 // MARK: - Durable record
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,6 +319,11 @@ pub struct SharedContentMigrationRecord {
     /// at `basesTrained` and re-verified at `verified`.
     #[serde(rename = "providerGenerations", default)]
     pub provider_generations: Option<BTreeMap<String, String>>,
+    /// Circuit-breaker failure tracking. None on old records (backward-compatible:
+    /// serde `default` deserializes absent JSON keys as None). Mirrors Swift
+    /// `circuitBreaker` field in `SharedContentMigrationRecord`.
+    #[serde(rename = "circuitBreaker", default)]
+    pub circuit_breaker: Option<CircuitBreakerState>,
 }
 
 const SINGLETON_ID: &str = "shared-content-1.1";
@@ -425,6 +516,16 @@ pub trait SharedContentMigrationExt {
         now_millis: i64,
         models: Vec<EmbeddingModelConfig>,
     ) -> Result<SharedContentMigrationReport, SharedContentMigrationError>;
+    /// Clear a parked migration, allowing the next call to
+    /// `run_shared_content_migration` to attempt the migration again.
+    /// Mirrors Swift `clearParkedSharedContentMigration`.
+    fn clear_parked_shared_content_migration(
+        &self,
+        handle: &EstateHandle,
+        now_millis: i64,
+    ) -> Result<(), SharedContentMigrationError>;
+    /// Whether the migration is currently parked (circuit breaker tripped).
+    fn shared_content_migration_is_parked(&self, handle: &EstateHandle) -> bool;
 }
 
 fn check_shared_content_fault(
@@ -670,6 +771,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
                         legacy_vector_key_count: None,
                         ensemble_fingerprint: Some(wired_fingerprint.clone()),
                         provider_generations: None,
+                        circuit_breaker: None,
                     }));
                 }
                 let layout = detect_legacy_layout(&storage)?;
@@ -687,6 +789,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
                     legacy_vector_key_count: None,
                     ensemble_fingerprint: None,
                     provider_generations: None,
+                    circuit_breaker: None,
                 };
                 if layout.is_none() {
                     // Fresh estate: stamp current without creating historical
@@ -707,6 +810,32 @@ impl SharedContentMigrationExt for EstateCoordinator {
                 record
             }
         };
+        // Circuit-breaker: refuse to run if parked under the current version.
+        // If the migration implementation version has changed (a code update),
+        // auto-clear the park and give the new code a fresh attempt.
+        if let Some(ref cb) = record.circuit_breaker {
+            if cb.parked_at.is_some() {
+                if cb.parked_under_migration_version.as_deref() == Some(MIGRATION_VERSION) {
+                    return Err(SharedContentMigrationError::MigrationParked {
+                        at_state: cb.last_failure_state.unwrap_or(record.state),
+                        failure_count: cb.failure_count,
+                        error: cb
+                            .last_failure_error
+                            .clone()
+                            .unwrap_or_else(|| "(unknown)".to_string()),
+                        parked_at: cb.parked_at.clone().unwrap_or_default(),
+                    });
+                }
+                // Version changed — auto-clear the park and continue.
+                eprintln!(
+                    "shared-content migration auto-clearing park (version changed from {:?} to {})",
+                    cb.parked_under_migration_version, MIGRATION_VERSION
+                );
+                record.circuit_breaker = None;
+                store.save(&record, now_millis)?;
+            }
+        }
+
         if record.state == SharedContentMigrationState::Complete {
             if record.ensemble_fingerprint.as_deref() == Some(wired_fingerprint.as_str()) {
                 EstateFormatStore::new(Arc::clone(&storage))
@@ -730,6 +859,30 @@ impl SharedContentMigrationExt for EstateCoordinator {
             store.save(&record, now_millis)?;
         }
 
+        // Extract the trainable-provider flag before wrapping `models` in an
+        // Option for the circuit-breaker closure.  The flag is a bool (Copy)
+        // and can be captured without conflicting with the subsequent move of
+        // `models_opt` into CorpusContentEngine::open inside the closure.
+        let has_trainable_provider = models.iter().any(|model| {
+            !matches!(
+                model,
+                EmbeddingModelConfig::Deterministic
+                    | EmbeddingModelConfig::Fdc { .. }
+                    | EmbeddingModelConfig::MiniLM { .. }
+                    | EmbeddingModelConfig::MPNet { .. }
+                    | EmbeddingModelConfig::EmbeddingGemma { .. }
+            )
+        });
+        // Circuit-breaker wrapper: the immediately-invoked closure captures all
+        // shared state by reference / mutable borrow; `?` inside returns from
+        // the closure, not the outer function.  After the call the match handles
+        // success (reset CB state) and failure (increment / park CB state) in
+        // one place, preventing moot-mgr from respawning into the same fatal
+        // error at 100 % CPU.  `models_opt` uses Option::take() so the closure
+        // does not need to be `move`, which preserves access to `record` and
+        // `store` in the match arms after the closure drops.
+        let mut models_opt = Some(models);
+        let result: Result<SharedContentMigrationReport, SharedContentMigrationError> = (|| {
         // 2. canonicalValidated
         if record.state < SharedContentMigrationState::CanonicalValidated {
             let source_ids = legacy_source_ids(&storage)?;
@@ -775,16 +928,9 @@ impl SharedContentMigrationExt for EstateCoordinator {
 
         // Refuse only before the first destructive transition. Once an estate
         // has crossed that boundary it must be allowed to resume to completion.
-        let has_trainable_provider = models.iter().any(|model| {
-            !matches!(
-                model,
-                EmbeddingModelConfig::Deterministic
-                    | EmbeddingModelConfig::Fdc { .. }
-                    | EmbeddingModelConfig::MiniLM { .. }
-                    | EmbeddingModelConfig::MPNet { .. }
-                    | EmbeddingModelConfig::EmbeddingGemma { .. }
-            )
-        });
+        // `has_trainable_provider` was computed before the closure from `models`
+        // and captured by copy; `models_opt` carries the original Vec for the
+        // CorpusContentEngine::open call further below.
         if record.state == SharedContentMigrationState::LegacyInventoryCaptured
             && has_trainable_provider
         {
@@ -910,7 +1056,10 @@ impl SharedContentMigrationExt for EstateCoordinator {
                                     })?
                                     .clone(),
                             )),
-                            models,
+                            // models_opt is consumed exactly once here; the
+                            // outer function wrapped the Vec in Some() before
+                            // entering the closure.
+                            models_opt.take().expect("models consumed once by closure"),
                         )
                         .map_err(|e| {
                             SharedContentMigrationError::StorageFailure {
@@ -1076,6 +1225,101 @@ impl SharedContentMigrationExt for EstateCoordinator {
             })?;
 
         Ok(report_for(&record))
+        })();
+        // On success, reset circuit-breaker failure history so a future
+        // regression starts the failure count fresh.  On error, track the
+        // failure and park the migration if the same error fires at the same
+        // committed state CIRCUIT_BREAKER_THRESHOLD times consecutively.
+        match result {
+            Ok(report) => {
+                if record.circuit_breaker.is_some() {
+                    record.circuit_breaker = None;
+                    // Best-effort; a save failure here must not mask success.
+                    let _ = store.save(&record, now_millis);
+                }
+                Ok(report)
+            }
+            Err(error) => {
+                // Same error description at the same committed state increments
+                // the counter.  Any change in either resets it so transient
+                // failures never park a healthy migration.
+                let error_desc = error.brief_description();
+                let failing_state = record.state;
+                let mut cb = record.circuit_breaker.take().unwrap_or(CircuitBreakerState {
+                    failure_count: 0,
+                    last_failure_state: None,
+                    last_failure_error: None,
+                    parked_at: None,
+                    parked_under_migration_version: None,
+                });
+                if cb.last_failure_state == Some(failing_state)
+                    && cb.last_failure_error.as_deref() == Some(error_desc.as_str())
+                {
+                    cb.failure_count += 1;
+                } else {
+                    // Different error or different committed state: restart.
+                    cb.failure_count = 1;
+                    cb.last_failure_error = Some(error_desc.clone());
+                    cb.last_failure_state = Some(failing_state);
+                }
+                if cb.failure_count >= CIRCUIT_BREAKER_THRESHOLD {
+                    // chrono is not a direct dep of this crate; a unix-ms
+                    // string is sufficient for the diagnostic display field.
+                    cb.parked_at = Some(format!("unix-ms:{now_millis}"));
+                    cb.parked_under_migration_version = Some(MIGRATION_VERSION.to_string());
+                    eprintln!(
+                        "shared-content migration parked after {} identical failures \
+                         at {:?}: {}",
+                        cb.failure_count, failing_state, error_desc
+                    );
+                }
+                record.circuit_breaker = Some(cb);
+                // Best-effort save; original error takes priority.
+                let _ = store.save(&record, now_millis);
+                Err(error)
+            }
+        }
+    }
+
+    fn clear_parked_shared_content_migration(
+        &self,
+        handle: &EstateHandle,
+        now_millis: i64,
+    ) -> Result<(), SharedContentMigrationError> {
+        let Some(storage) = self.migration_storage(handle) else {
+            return Ok(());
+        };
+        storage
+            .migrate(&SharedContentMigrationStore::schema_declaration())
+            .map_err(|e| SharedContentMigrationError::StorageFailure {
+                state: SharedContentMigrationState::Discovered,
+                reason: format!("{e:?}"),
+            })?;
+        let store = SharedContentMigrationStore::new(Arc::clone(&storage));
+        let Some(mut record) = store.load()? else {
+            return Ok(());
+        };
+        if record.circuit_breaker.as_ref().and_then(|cb| cb.parked_at.as_ref()).is_none() {
+            return Ok(());
+        }
+        record.circuit_breaker = None;
+        store.save(&record, now_millis)?;
+        Ok(())
+    }
+
+    fn shared_content_migration_is_parked(&self, handle: &EstateHandle) -> bool {
+        let Some(storage) = self.migration_storage(handle) else {
+            return false;
+        };
+        let Ok(Some(record)) = SharedContentMigrationStore::new(Arc::clone(&storage)).load()
+        else {
+            return false;
+        };
+        let Some(cb) = &record.circuit_breaker else {
+            return false;
+        };
+        cb.parked_at.is_some()
+            && cb.parked_under_migration_version.as_deref() == Some(MIGRATION_VERSION)
     }
 }
 
