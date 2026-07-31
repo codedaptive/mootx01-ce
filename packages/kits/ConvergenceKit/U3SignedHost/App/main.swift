@@ -303,5 +303,5 @@ private func writeFixedResult(_ result: String) {
 let application = NSApplication.shared
 private let delegate = U3SignedHostDelegate()
 application.delegate = delegate
-application.setActivationPolicy(.accessory)
+application.setActivationPolicy(.regular)
 application.run()

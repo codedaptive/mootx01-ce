@@ -246,6 +246,78 @@ struct SecretSyncCustodyContractTests {
     )
   }
 
+  @Test("signed host uses a regular LaunchServices proof contract")
+  func signedHostUsesRegularLaunchServicesProofContract() throws {
+    let packageRoot =
+      URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let hostRoot = packageRoot.appendingPathComponent("U3SignedHost")
+    let script = hostRoot.appendingPathComponent("run-physical-proof.sh")
+    let infoPlist = hostRoot.appendingPathComponent("App/Info.plist")
+    let mainSource = hostRoot.appendingPathComponent("App/main.swift")
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: temporaryDirectory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+    let plistData = try Data(contentsOf: infoPlist)
+    let plist = try #require(
+      PropertyListSerialization.propertyList(from: plistData, format: nil)
+        as? [String: Any]
+    )
+    #expect(plist["LSUIElement"] == nil)
+
+    let source = try String(contentsOf: mainSource, encoding: .utf8)
+    #expect(source.contains("setActivationPolicy(.regular)"))
+    #expect(!source.contains("setActivationPolicy(.accessory)"))
+
+    let launchProbe = try signedHostLaunchProbe(
+      script: script,
+      temporaryDirectory: temporaryDirectory
+    )
+    #expect(launchProbe.status == 0)
+    #expect(
+      launchProbe.arguments == [
+        "-n",
+        "-F",
+        "-W",
+        "--stdout",
+        launchProbe.standardOutput.path,
+        "--stderr",
+        launchProbe.standardError.path,
+        launchProbe.application.path,
+      ]
+    )
+    #expect(
+      try signedHostResultValidationStatus(
+        script: script,
+        output: launchProbe.standardOutput
+      ) == 0
+    )
+
+    let rejectedOutputs = [
+      ("empty", ""),
+      ("failure", "U3_SIGNED_HOST_RESULT=proof-failed\n"),
+      ("extra", "U3_SIGNED_HOST_RESULT=pass\nunexpected\n"),
+      ("unterminated", "U3_SIGNED_HOST_RESULT=pass"),
+    ]
+    for (name, contents) in rejectedOutputs {
+      let output = temporaryDirectory.appendingPathComponent("\(name).txt")
+      try contents.write(to: output, atomically: true, encoding: .utf8)
+      #expect(
+        try signedHostResultValidationStatus(
+          script: script,
+          output: output
+        ) != 0
+      )
+    }
+  }
+
   @Test("opt-in supported-hardware custody and user-presence proof")
   func supportedHardwareProof() async throws {
     guard
@@ -475,6 +547,109 @@ private func signedHostBuildArguments(
   return try String(contentsOf: capture, encoding: .utf8)
     .split(separator: "\n")
     .map(String.init)
+}
+
+private struct SignedHostLaunchProbe {
+  let status: Int32
+  let arguments: [String]
+  let application: URL
+  let standardOutput: URL
+  let standardError: URL
+}
+
+private func signedHostLaunchProbe(
+  script: URL,
+  temporaryDirectory: URL
+) throws -> SignedHostLaunchProbe {
+  let launcher = temporaryDirectory.appendingPathComponent("open-probe.sh")
+  let capturedArguments = temporaryDirectory.appendingPathComponent(
+    "open-arguments.txt"
+  )
+  let application = temporaryDirectory.appendingPathComponent(
+    "U3SignedHost.app"
+  )
+  let standardOutput = temporaryDirectory.appendingPathComponent(
+    "signed-host.stdout"
+  )
+  let standardError = temporaryDirectory.appendingPathComponent(
+    "signed-host.stderr"
+  )
+  let launcherSource = """
+    #!/bin/bash
+    set -euo pipefail
+    printf '%s\\n' "$@" > "$U3_ARGUMENT_CAPTURE"
+    while (($#)); do
+      case "$1" in
+        --stdout)
+          printf '%s\\n' 'U3_SIGNED_HOST_RESULT=pass' > "$2"
+          shift 2
+          ;;
+        --stderr)
+          : > "$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    """
+  try launcherSource.write(to: launcher, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o700],
+    ofItemAtPath: launcher.path
+  )
+
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/bash")
+  process.arguments = [
+    "-c",
+    """
+    source "$1"
+    export U3_ARGUMENT_CAPTURE="$6"
+    run_signed_host "$2" "$3" "$4" "$5"
+    """,
+    "u3-launch-probe",
+    script.path,
+    application.path,
+    standardOutput.path,
+    standardError.path,
+    launcher.path,
+    capturedArguments.path,
+  ]
+  try process.run()
+  process.waitUntilExit()
+  let arguments = try String(contentsOf: capturedArguments, encoding: .utf8)
+    .split(separator: "\n")
+    .map(String.init)
+  return SignedHostLaunchProbe(
+    status: process.terminationStatus,
+    arguments: arguments,
+    application: application,
+    standardOutput: standardOutput,
+    standardError: standardError
+  )
+}
+
+private func signedHostResultValidationStatus(
+  script: URL,
+  output: URL
+) throws -> Int32 {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/bash")
+  process.arguments = [
+    "-c",
+    """
+    source "$1"
+    signed_host_result_is_pass "$2"
+    """,
+    "u3-result-validation",
+    script.path,
+    output.path,
+  ]
+  try process.run()
+  process.waitUntilExit()
+  return process.terminationStatus
 }
 
 private func hardwareAttributesAreLocked(

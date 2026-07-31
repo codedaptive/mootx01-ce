@@ -91,6 +91,36 @@ run_signed_build() {
   fi
 }
 
+run_signed_host() {
+  local app_path="$1"
+  local standard_output="$2"
+  local standard_error="$3"
+  local launcher="${4:-/usr/bin/open}"
+
+  # LaunchServices is part of the proof boundary: direct execution does not
+  # establish foreground app state. Captured streams let the runner validate
+  # the app's own fixed result after `open` has waited for termination.
+  "$launcher" \
+    -n \
+    -F \
+    -W \
+    --stdout "$standard_output" \
+    --stderr "$standard_error" \
+    "$app_path"
+}
+
+signed_host_result_is_pass() {
+  local standard_output="$1"
+
+  # `open` reports only launch/wait success, not the application's exit status.
+  # Compare exact bytes so empty, additional, unterminated, and failure output
+  # all fail closed rather than being accepted through substring matching.
+  [[ -f "$standard_output" ]] || return 1
+  cmp -s \
+    <(printf '%s\n' 'U3_SIGNED_HOST_RESULT=pass') \
+    "$standard_output"
+}
+
 profile_is_match() {
   local decoded_path="$1"
   local candidate_team candidate_application candidate_platform candidate_group
@@ -294,7 +324,13 @@ embedded_uuid="$(profile_value "$embedded_plist" 'UUID' || true)"
 [[ "$embedded_uuid" == "$profile_uuid" ]] \
   || fail "embedded-profile-mismatch"
 
-"$app_path/Contents/MacOS/U3SignedHost"
+signed_host_output="$work_dir/signed-host.stdout"
+signed_host_error="$work_dir/signed-host.stderr"
+run_signed_host "$app_path" "$signed_host_output" "$signed_host_error" \
+  || fail "signed-host-launch-failed"
+signed_host_result_is_pass "$signed_host_output" \
+  || fail "signed-host-proof-failed"
+printf '%s\n' 'U3_SIGNED_HOST_RESULT=pass'
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
