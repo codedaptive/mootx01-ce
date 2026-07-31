@@ -280,6 +280,82 @@ impl CorpusProviderCountsStore {
         Ok(())
     }
 
+    /// Persist a provider's maintained counts, splitting them into term rows
+    /// when the provider supports it and writing one blob when it does not.
+    ///
+    /// This is the ONLY place that decides between the two layouts, mirroring
+    /// the Swift `persistCounts`. Every write path routes through it: a
+    /// provider term-split by one path and blob-written by another would leave
+    /// the two representations disagreeing for the same key, and the read side
+    /// prefers term rows, so the blob write would silently lose.
+    pub fn persist_counts_into(
+        &self,
+        provider: &dyn crate::TrainableEmbeddingBasis,
+        model_id: &str,
+        model_version: &str,
+        document_count: usize,
+        vocab_size: usize,
+        updated_at_secs: i64,
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        match provider.decompose_counts() {
+            Some((header, terms)) => {
+                // `header` is a complete, decodable counts blob with an empty
+                // map, so the column stays NOT NULL.
+                let row = PersistedCounts {
+                    model_id: model_id.to_string(),
+                    model_version: model_version.to_string(),
+                    counts: header,
+                    document_count,
+                    vocab_size,
+                    updated_at_secs,
+                };
+                self.upsert_into(&row, row_store)?;
+                self.replace_vocab_into(model_id, model_version, &terms, row_store)
+            }
+            None => {
+                let row = PersistedCounts {
+                    model_id: model_id.to_string(),
+                    model_version: model_version.to_string(),
+                    counts: provider.serialize_counts(),
+                    document_count,
+                    vocab_size,
+                    updated_at_secs,
+                };
+                self.upsert_into(&row, row_store)?;
+                // A key can be reused by a provider that does not decompose;
+                // clear any term rows so the blob is unambiguously the whole
+                // truth for this key.
+                self.delete_vocab_into(model_id, model_version, row_store)
+            }
+        }
+    }
+
+    /// Restore a provider's maintained counts, preferring term rows and falling
+    /// back to the legacy single blob.
+    ///
+    /// The fallback is what lets an upgraded estate keep working untouched: no
+    /// bulk migration runs, the blob is read exactly as before, and the
+    /// provider converts to term rows on its next persist. Returns false when
+    /// nothing is stored, which callers already treat as "start from zero".
+    pub fn restore_counts_into(
+        &self,
+        provider: &mut dyn crate::TrainableEmbeddingBasis,
+        model_id: &str,
+        model_version: &str,
+    ) -> CorpusKitResult<bool> {
+        let Some(persisted) = self.load(model_id, model_version)? else {
+            return Ok(false);
+        };
+        let terms = self.load_vocab(model_id, model_version)?;
+        if terms.is_empty() {
+            provider.restore_counts(&persisted.counts)?;
+        } else {
+            provider.restore_counts_from_parts(&persisted.counts, &terms)?;
+        }
+        Ok(true)
+    }
+
     /// Replace the stored vocabulary for a provider key with `terms`.
     ///
     /// Delete-then-insert through the caller's row store so a retrain becomes

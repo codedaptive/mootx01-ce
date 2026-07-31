@@ -626,6 +626,21 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
             .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))
     }
 
+    /// RandomIndexing is the provider whose counts scale with vocabulary, so it
+    /// is the one that overrides the decomposition seam.
+    fn decompose_counts(&self) -> Option<(Vec<u8>, Vec<(String, Vec<u8>)>)> {
+        Some(RandomIndexingProvider::decompose_counts(self))
+    }
+
+    fn restore_counts_from_parts(
+        &mut self,
+        header: &[u8],
+        terms: &[(String, Vec<u8>)],
+    ) -> Result<(), CorpusKitError> {
+        RandomIndexingProvider::restore_counts_from_parts(self, header, terms)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))
+    }
+
     /// Maintained vocabulary size for the growth trigger.
     fn counts_vocabulary_size(&self) -> usize {
         self.vocab.len()

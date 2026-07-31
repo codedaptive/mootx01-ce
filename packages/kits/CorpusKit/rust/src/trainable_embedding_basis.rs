@@ -178,6 +178,41 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// basis. Returns `Err(CorpusKitError::DecodingFailure)` on a bad blob.
     fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError>;
 
+    /// Split maintained counts into a small header and one entry per vocabulary
+    /// term, so storage need not hold the whole map in a single value.
+    ///
+    /// Optional by design. The default returns `None` — "no term decomposition,
+    /// persist me as one blob" — so every provider whose counts are small keeps
+    /// that behavior with no code. Only providers whose counts scale with
+    /// vocabulary override it: RandomIndexing's map reached 1,009,861,855 bytes
+    /// on a real estate and exceeded SQLite's bind ceiling (ee#49), while Nmf
+    /// and Lsa sit at ~2 MB and gain nothing from a split.
+    ///
+    /// The header MUST remain a valid counts blob on its own — same magic and
+    /// format version, empty term map — so `corpus_provider_counts.counts` is
+    /// never NULL and a reader that ignores term rows still decodes it. A NULL
+    /// there is read as "no counts, start from zero", which would discard an
+    /// estate's accumulated statistics rather than fail.
+    ///
+    /// Mirrors the Swift `decomposeCounts()`.
+    fn decompose_counts(&self) -> Option<(Vec<u8>, Vec<(String, Vec<u8>)>)> {
+        None
+    }
+
+    /// Restore maintained counts from a header plus per-term entries — the
+    /// inverse of `decompose_counts`. A provider returning `Some` from
+    /// `decompose_counts` MUST override this; the pair is exercised together by
+    /// the round-trip tests. Mirrors the Swift `restoreCounts(header:terms:)`.
+    fn restore_counts_from_parts(
+        &mut self,
+        _header: &[u8],
+        _terms: &[(String, Vec<u8>)],
+    ) -> Result<(), CorpusKitError> {
+        Err(CorpusKitError::DecodingFailure(
+            "provider does not support term-decomposed counts".to_string(),
+        ))
+    }
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.

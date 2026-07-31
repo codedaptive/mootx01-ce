@@ -1907,7 +1907,14 @@ impl CorpusContentEngine {
             })?;
             let mut accumulator = state.accumulator.reconstruct_trainable_basis(fresh_blob)?;
             let document_count = if let Some(row) = persisted {
-                accumulator.restore_counts(&row.counts)?;
+                // Prefers term rows, falls back to the legacy blob — the same
+                // decision as the open path, kept in the store so the two
+                // cannot diverge.
+                self.counts_store.restore_counts_into(
+                    accumulator.as_mut(),
+                    &model_id,
+                    &model_version,
+                )?;
                 row.document_count
             } else {
                 0
@@ -2745,8 +2752,20 @@ impl CorpusContentEngine {
                             .map_err(|e| persistence_kit::StorageError::BackendError {
                                 underlying: format!("{e:?}"),
                             })?;
+                        // Routed through persist_counts_into so a provider whose
+                        // counts scale with vocabulary is written as term rows
+                        // rather than one bind. This is the exact write that
+                        // failed on a real estate at 1,009,861,855 bytes (ee#49).
                         counts_store
-                            .upsert_into(&result.counts_row, &rows)
+                            .persist_counts_into(
+                                result.counts_accumulator.as_ref(),
+                                &result.counts_row.model_id,
+                                &result.counts_row.model_version,
+                                result.counts_row.document_count,
+                                result.counts_row.vocab_size,
+                                result.counts_row.updated_at_secs,
+                                &rows,
+                            )
                             .map_err(|e| persistence_kit::StorageError::BackendError {
                                 underlying: format!("{e:?}"),
                             })?;
@@ -3391,18 +3410,20 @@ impl CorpusContentEngine {
             let Some(state) = counts.as_ref() else {
                 continue;
             };
-            let row = PersistedCounts {
-                model_id,
-                model_version,
-                counts: state.accumulator.serialize_counts(),
-                document_count: state.document_count,
-                vocab_size: state.vocab_anchor,
+            // The persisted counts are the immutable publication snapshot;
+            // reference contributions remain authoritative until provider
+            // publication. Routed through persist_counts_into so this path
+            // uses the same layout decision as the training commit.
+            self.counts_store.persist_counts_into(
+                state.accumulator.as_ref(),
+                &model_id,
+                &model_version,
+                state.document_count,
+                state.vocab_anchor,
                 // Unix seconds per the store's field contract.
-                updated_at_secs: now_millis / 1000,
-            };
-            // This blob is the immutable publication snapshot. Reference
-            // contributions remain authoritative until provider publication.
-            self.counts_store.upsert(&row)?;
+                now_millis / 1000,
+                &self.storage.row_store(),
+            )?;
         }
         Ok(())
     }
