@@ -213,3 +213,70 @@ struct ProviderVocabStorageTests {
         await storage.close()
     }
 }
+
+// MARK: - Provider decomposition round-trip
+
+import CorpusKitProviders
+
+@Suite("ProviderCountsDecomposition", .serialized)
+struct ProviderCountsDecompositionTests {
+
+    /// Decompose → restore reproduces the identical vocabulary, and the
+    /// header alone is still a decodable counts blob.
+    ///
+    /// The header staying decodable is load-bearing, not cosmetic: it is what
+    /// keeps `corpus_provider_counts.counts` NOT NULL and non-empty after the
+    /// split. A NULL or undecodable value there is read by every caller as
+    /// "no counts, start from zero", which would silently discard an estate's
+    /// accumulated statistics rather than fail.
+    @Test("decomposeCounts round-trips through restoreCounts(header:terms:)")
+    func decomposeRoundTrips() throws {
+        let provider = RandomIndexingProvider(modelID: "random-indexing-v1", modelVersion: "1.1.0")
+        provider.trainOnCorpus(texts: [
+            "alpha beta gamma delta",
+            "beta gamma epsilon",
+            "gamma delta zeta eta theta"
+        ])
+        let originalSize = provider.countsVocabularySize
+        #expect(originalSize > 0, "fixture must actually train a vocabulary")
+
+        let decomposed = try #require(
+            provider.decomposeCounts(),
+            "RandomIndexing must offer a term decomposition — it is the provider whose counts scale with vocabulary")
+        #expect(decomposed.terms.count == originalSize,
+                "one entry per vocabulary term")
+
+        // The header alone must still decode as a counts blob, yielding an
+        // empty vocabulary rather than an error.
+        let headerOnly = RandomIndexingProvider(modelID: "random-indexing-v1", modelVersion: "1.1.0")
+        try headerOnly.restoreCounts(from: decomposed.header)
+        #expect(headerOnly.countsVocabularySize == 0)
+
+        // Full rehydration reproduces the original vocabulary exactly.
+        let restored = RandomIndexingProvider(modelID: "random-indexing-v1", modelVersion: "1.1.0")
+        try restored.restoreCounts(header: decomposed.header, terms: decomposed.terms)
+        #expect(restored.countsVocabularySize == originalSize)
+
+        // Byte-level equivalence: re-serializing the rehydrated provider must
+        // reproduce the original blob exactly. This is the check that proves
+        // the split did not perturb the cross-port conformance contract.
+        #expect(restored.serializeCounts() == provider.serializeCounts(),
+                "a decompose/restore cycle must be byte-transparent to the blob format")
+    }
+
+    /// No single term entry carries the whole map.
+    @Test("each decomposed entry is one term's vector, not the map")
+    func entriesAreBounded() throws {
+        let provider = RandomIndexingProvider(modelID: "random-indexing-v1", modelVersion: "1.1.0")
+        provider.trainOnCorpus(texts: ["alpha beta gamma", "delta epsilon zeta"])
+        let decomposed = try #require(provider.decomposeCounts())
+
+        let wholeBlob = provider.serializeCounts().count
+        let widest = decomposed.terms.map(\.vector.count).max() ?? 0
+        #expect(widest < wholeBlob,
+                "a per-term entry must be strictly smaller than the whole serialized map")
+        // 2048 f32 plus the u32 count prefix.
+        #expect(widest == 2048 * 4 + 4,
+                "expected one 2048-dimensional f32 vector per entry; got \(widest) bytes")
+    }
+}

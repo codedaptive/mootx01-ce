@@ -180,6 +180,36 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     ///   format version, or a provider-magic mismatch — never crashes.
     func restoreCounts(from data: Data) throws
 
+    /// Split maintained counts into a small header and one entry per vocabulary
+    /// term, so storage does not have to hold the whole map in a single value.
+    ///
+    /// Optional by design. The default implementation returns `nil`, meaning
+    /// "this provider has no term decomposition — persist me as one blob", and
+    /// every provider whose counts are small keeps that behavior with no code.
+    /// Only providers whose counts scale with vocabulary need to override it:
+    /// RandomIndexing's map reached 1,009,861,855 bytes on a real estate and
+    /// exceeded SQLite's bind ceiling (ee#49), while Nmf and Lsa sit at ~2 MB
+    /// and gain nothing from the split.
+    ///
+    /// `header` MUST remain a valid counts blob on its own — same magic and
+    /// format version, with an empty term map — so a reader that knows nothing
+    /// about term rows still decodes it, and `counts` never becomes NULL.
+    /// A NULL there is silently read as "no counts, start from zero", which
+    /// would discard an estate's accumulated statistics.
+    ///
+    /// Each entry's `vector` is the provider's own per-term bytes, byte-identical
+    /// to what the blob format writes for that term. Nothing recomputes, so
+    /// cross-port byte equality is unaffected.
+    func decomposeCounts() -> (header: Data, terms: [(term: String, vector: Data)])?
+
+    /// Restore maintained counts from a header plus per-term entries — the
+    /// inverse of `decomposeCounts()`.
+    ///
+    /// Default implementation throws `CorpusKitError.decodingFailure`; a
+    /// provider that returns non-nil from `decomposeCounts()` MUST override
+    /// this, and the pair is exercised together by the round-trip tests.
+    func restoreCounts(header: Data, terms: [(term: String, vector: Data)]) throws
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
@@ -196,6 +226,20 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
 }
 
 public extension TrainableEmbeddingBasis {
+
+    /// Default: no term decomposition. The provider is persisted as one blob,
+    /// which is correct for every provider whose counts do not scale with
+    /// vocabulary size.
+    func decomposeCounts() -> (header: Data, terms: [(term: String, vector: Data)])? { nil }
+
+    /// Default: unsupported. Reaching this means a caller tried to rehydrate
+    /// term rows for a provider that never emits them, which is a wiring bug
+    /// rather than bad data.
+    func restoreCounts(header: Data, terms: [(term: String, vector: Data)]) throws {
+        throw CorpusKitError.decodingFailure(
+            "provider does not support term-decomposed counts")
+    }
+
     /// Synthetic/test providers that do not expose a vocabulary conservatively
     /// treat every term as novel. Production distributional providers override
     /// this with their exact maintained-vocabulary lookup.

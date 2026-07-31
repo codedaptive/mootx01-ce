@@ -485,6 +485,60 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
     /// Restore the accumulated context vectors in place from a counts blob, so
     /// incremental maintenance resumes after a restart. Throws
     /// `CorpusKitError.decodingFailure` on a bad blob — never crashes.
+    /// Split the counts blob into its fixed header and one entry per term.
+    ///
+    /// The header is the identical prefix `serializeCounts()` writes, followed
+    /// by an EMPTY map — so it stays a decodable RICT blob on its own and a
+    /// reader that knows nothing about term rows still gets a valid (empty)
+    /// vocabulary rather than a decode failure or a NULL column.
+    ///
+    /// Each term's `vector` is exactly the bytes `writeFloatArray` emits for
+    /// that term inside the blob: `u32 count` followed by `count` little-endian
+    /// f32. Reusing the same writer is deliberate — the per-term bytes are the
+    /// cross-port conformance contract, so they must not acquire a second
+    /// encoder that could drift from the Rust twin.
+    public func decomposeCounts() -> (header: Data, terms: [(term: String, vector: Data)])? {
+        var headerWriter = BasisWriter()
+        headerWriter.writeMagic(RandomIndexingProvider.countsMagic)
+        headerWriter.writeByte(basisFormatVersion)
+        headerWriter.writeString(modelID)
+        headerWriter.writeString(modelVersion)
+        headerWriter.writeU64(projectionSeed)
+        headerWriter.writeStringFloatVectorMap([:])
+
+        let terms = vocab.map { key, value -> (term: String, vector: Data) in
+            var vectorWriter = BasisWriter()
+            vectorWriter.writeFloatArray(value)
+            return (term: key, vector: vectorWriter.data)
+        }
+        return (header: headerWriter.data, terms: terms)
+    }
+
+    /// Rehydrate from a header plus per-term entries — inverse of
+    /// `decomposeCounts()`.
+    ///
+    /// The header is validated exactly as `restoreCounts(from:)` validates a
+    /// full blob, so a mismatched provider or format version still fails
+    /// closed. Term order is irrelevant: the result is a dictionary, and only
+    /// the blob WRITER needs the UTF-8 byte ordering that keeps the two ports
+    /// byte-identical.
+    public func restoreCounts(header: Data, terms: [(term: String, vector: Data)]) throws {
+        var headerReader = BasisReader(header)
+        try headerReader.expectMagic(RandomIndexingProvider.countsMagic)
+        try headerReader.expectVersion(basisFormatVersion)
+        _ = try headerReader.readString()  // modelID — validated by magic + row key
+        _ = try headerReader.readString()  // modelVersion
+        _ = try headerReader.readU64()     // projectionSeed
+
+        var rebuilt: [String: [Float]] = [:]
+        rebuilt.reserveCapacity(terms.count)
+        for entry in terms {
+            var vectorReader = BasisReader(entry.vector)
+            rebuilt[entry.term] = try vectorReader.readFloatArray()
+        }
+        self.vocab = rebuilt
+    }
+
     public func restoreCounts(from data: Data) throws {
         var r = BasisReader(data)
         try r.expectMagic(RandomIndexingProvider.countsMagic)
