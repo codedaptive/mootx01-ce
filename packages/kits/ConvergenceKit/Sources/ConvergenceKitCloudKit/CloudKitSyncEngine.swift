@@ -61,6 +61,24 @@ public final class CloudKitSyncEngine: SyncEngine, Sendable {
         self._autoStartPolling = enablePolling
     }
 
+    /// Construct an engine with the product-selected SecretSync digester.
+    ///
+    /// This overload preserves the generic sync initializer and behavior. The
+    /// digester is injected into the isolated SecretSync reconstruction/CAS
+    /// path; ConvergenceKitCloudKit still performs no key custody or crypto.
+    public init(
+        containerIdentifier: String? = nil,
+        enablePolling: Bool = false,
+        secretSyncDigester: any SecretSyncDigesting
+    ) {
+        self.containerIdentifier = containerIdentifier
+        self.stateActor = CloudKitStateActor(
+            containerIdentifier: containerIdentifier,
+            secretSyncDigester: secretSyncDigester
+        )
+        self._autoStartPolling = enablePolling
+    }
+
     public func enable(manifest: SyncManifest, storage: any Storage) async throws {
         try await stateActor.enable(manifest: manifest, storage: storage)
         if _autoStartPolling {
@@ -129,6 +147,47 @@ public final class CloudKitSyncEngine: SyncEngine, Sendable {
 
     public var state: SyncState {
         get async { await stateActor.currentState }
+    }
+
+    // MARK: - SecretSync control-store surface
+
+    /// Append one complete staged immutable policy graph.
+    public func appendSecretSyncStagedPolicy(
+        _ entry: SecretPolicyStoreEntry
+    ) async throws {
+        try await stateActor.secretSyncPolicyStore().appendStagedPolicy(entry)
+    }
+
+    /// Advance one scope head from a core validator-produced precondition.
+    public func advanceSecretSyncPolicy(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) async throws -> SecretPolicyAdvanceResult {
+        try await stateActor.secretSyncPolicyStore()
+            .compareAndAdvance(precondition)
+    }
+
+    /// Read the exact current transport head without treating it as authority.
+    public func secretSyncPolicyHead(
+        for scopeID: SecretScopeID
+    ) async throws -> SecretPolicyStoreHead? {
+        try await stateActor.secretSyncPolicyStore().policyHead(for: scopeID)
+    }
+
+    /// Resolve normal-path freshness from an explicit protected or peer source.
+    public func secretSyncNormalPathCommitment(
+        for scopeID: SecretScopeID,
+        authority: SecretSyncFreshnessAuthority
+    ) async throws -> SecretBootstrapFreshnessCommitment {
+        try await stateActor.secretSyncFreshnessTransport()
+            .normalPathCommitment(for: scopeID, authority: authority)
+    }
+
+    /// Carry a non-authoritative CloudKit-current candidate toward U6.
+    public func secretSyncRecoveryTransportCandidate(
+        for scopeID: SecretScopeID
+    ) async throws -> SecretSyncRecoveryTransportCandidate {
+        try await stateActor.secretSyncFreshnessTransport()
+            .recoveryTransportCandidate(for: scopeID)
     }
 
     // MARK: - Accelerator surface (B-11)

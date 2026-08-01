@@ -140,6 +140,13 @@ extension CloudKitStateActor {
                         // Empty default for undeclared tables preserves byte-identical wire format.
                         encryptedColumns: manifest.encryptedContentColumns[entry.tableName] ?? []
                     )
+                    // SecretSync control records have their own immutable staging
+                    // and conditional head-CAS path. They must never enter this
+                    // generic changedKeys/non-atomic batch even if a manifest
+                    // table produces a colliding record type in the future.
+                    guard SecretSyncCloudKitRecordType(rawValue: record.recordType) == nil else {
+                        continue
+                    }
                     saved.append(record)
                     recordToEntryID[record.recordID] = entry.id
                 } catch {

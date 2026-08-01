@@ -39,6 +39,18 @@ import CloudKit
 import PersistenceKit
 import ConvergenceKit
 
+/// Closed SecretSync change-token vocabulary.
+///
+/// These cursors can resume transport after restart. Their presence, absence,
+/// reset, and account membership carry no authorization or freshness meaning.
+public enum SecretSyncCloudKitTransportTokens {
+    public static let zoneNames = [
+        SecretSyncCloudKitZones.controlZoneName,
+        SecretSyncCloudKitZones.payloadZoneName,
+    ]
+    public static let presenceGrantsFreshness = false
+}
+
 // MARK: - TokenStore
 
 /// Persists and retrieves CKServerChangeToken per CloudKit zone.
