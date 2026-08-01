@@ -49,6 +49,51 @@ struct SecretSyncPolicyReconstructionTests {
         #expect(await database.savedHeadCount == 0)
     }
 
+    @Test("full-loss authorization round-trips with credential provenance")
+    func recoveryAuthorizationRoundTrips() async throws {
+        let fixture = try U5PolicyFixture.make()
+        let entry = try U5PolicyFixture.entryWithRecoveryAuthorization(fixture)
+        let database = U5ScriptedDatabase()
+        let store = SecretSyncCloudKitPolicyStore(
+            database: database,
+            digester: U5PolicyFixture.digester
+        )
+
+        try await store.appendStagedPolicy(entry)
+        let reconstructed = try await store.reconstructPolicy(
+            commitDigest: entry.commit.recordDigest
+        )
+
+        #expect(reconstructed == entry)
+        #expect(reconstructed.records.recoveryAuthorization != nil)
+        #expect(reconstructed.credentials == entry.credentials)
+    }
+
+    @Test("missing full-loss authorization remains non-authoritative")
+    func missingRecoveryAuthorizationFailsClosed() async throws {
+        let fixture = try U5PolicyFixture.make()
+        let entry = try U5PolicyFixture.entryWithRecoveryAuthorization(fixture)
+        let authorization = try #require(entry.records.recoveryAuthorization)
+        let database = U5ScriptedDatabase()
+        let store = SecretSyncCloudKitPolicyStore(
+            database: database,
+            digester: U5PolicyFixture.digester
+        )
+        try await store.appendStagedPolicy(entry)
+        await database.removeRecord(
+            digest: authorization.recordDigest,
+            type: .fullLossRecoveryAuthorization
+        )
+
+        await #expect(
+            throws: SecretSyncCloudKitPolicyStoreError.incompleteRecordSet
+        ) {
+            _ = try await store.reconstructPolicy(
+                commitDigest: entry.commit.recordDigest
+            )
+        }
+    }
+
     @Test("missing cross-zone payload remains non-authoritative")
     func missingPayloadFailsClosed() async throws {
         let fixture = try U5PolicyFixture.make()
@@ -217,8 +262,12 @@ struct U5PolicyFixture: Sendable {
             challengeBytes: Data([0x25]),
             signingProofBytes: Data([0x26]),
             keyAgreementProofBytes: Data([0x27]),
-            authorityCredentialID: DeviceCredentialID(uuid(0x15)),
-            authoritySignature: Data([0xA1])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(uuid(0x15)),
+                    signature: Data([0xA1])
+                )
+            )
         )
         let credential = try TrustedDeviceCredential(
             deviceID: deviceID,
@@ -253,9 +302,18 @@ struct U5PolicyFixture: Sendable {
         let recoveryDescriptor = try RecoveryRecipientDescriptor(
             recoveryRecipientID: uuid(0x18),
             keyAgreementPublicKey: try KeyAgreementPublicKeyDescriptor(
-                algorithmIdentifier: "P256-KA",
+                algorithmIdentifier: RecoveryRecipientDescriptor
+                    .agreementAlgorithmIdentifier,
                 keyIdentifier: Data([0x28]),
-                publicKeyBytes: Data([0x29])
+                publicKeyBytes: Data([0x04])
+                    + Data(repeating: 0x29, count: 64)
+            ),
+            authorizationSigningPublicKey: try SigningPublicKeyDescriptor(
+                algorithmIdentifier: RecoveryRecipientDescriptor
+                    .authorizationSigningAlgorithmIdentifier,
+                keyIdentifier: Data([0x2A]),
+                publicKeyBytes: Data([0x04])
+                    + Data(repeating: 0x2B, count: 64)
             )
         )
         let policy = try SecretPolicyEpoch(
@@ -320,7 +378,8 @@ struct U5PolicyFixture: Sendable {
             recipientEnvelopes: [recipient],
             recoveryEnvelope: recovery,
             purgeRequirements: [],
-            purgeReceipts: []
+            purgeReceipts: [],
+            recoveryAuthorization: nil
         )
         let commit = try contentAddressed { digest in
             try SecretTransitionCommit(
@@ -336,6 +395,7 @@ struct U5PolicyFixture: Sendable {
                 recoveryEnvelopeDigest: recovery.recordDigest,
                 purgeRequirementDigests: [],
                 purgeReceiptDigests: [],
+                recoveryAuthorizationDigest: nil,
                 signerCredentialID: credentialID,
                 signature: Data([0xA1])
             )
@@ -361,7 +421,9 @@ struct U5PolicyFixture: Sendable {
             entry: SecretPolicyStoreEntry(
                 commit: commit,
                 records: records,
-                trustRecords: [trustRecord]
+                credentials: [credential],
+                trustRecords: [trustRecord],
+                digester: digester
             ),
             snapshot: snapshot,
             credentials: [credential]
@@ -396,6 +458,128 @@ struct U5PolicyFixture: Sendable {
             )
         }
         return try rebuiltEntry(fixture, payload: payload)
+    }
+
+    static func entryWithRecoveryAuthorization(
+        _ fixture: U5PolicyFixture
+    ) throws -> SecretPolicyStoreEntry {
+        let original = fixture.entry
+        let policy = original.records.signedPolicy.policy
+        let replacementRecovery = try #require(policy.recoveryRecipient)
+        let recoveryEnvelope = try #require(original.records.recoveryEnvelope)
+        let replacementCredential = try #require(
+            original.credentials.first {
+                $0.credentialID == original.commit.signerCredentialID
+            }
+        )
+        let currentRecovery = try RecoveryRecipientDescriptor(
+            recoveryRecipientID: uuid(0x91),
+            keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+                algorithmIdentifier: RecoveryRecipientDescriptor
+                    .agreementAlgorithmIdentifier,
+                keyIdentifier: Data([0x92]),
+                publicKeyBytes: Data([0x04])
+                    + Data(repeating: 0x93, count: 64)
+            ),
+            authorizationSigningPublicKey: SigningPublicKeyDescriptor(
+                algorithmIdentifier: RecoveryRecipientDescriptor
+                    .authorizationSigningAlgorithmIdentifier,
+                keyIdentifier: Data([0x94]),
+                publicKeyBytes: Data([0x04])
+                    + Data(repeating: 0x95, count: 64)
+            )
+        )
+        let credentialDigests = try original.credentials.map {
+            try digester.digest(canonicalBytes: $0.canonicalBytes())
+        }
+        let semantics = try FullLossRecoveryCandidateSemantics(
+            scopeSnapshotDigest: original.commit.scopeSnapshotDigest,
+            signedPolicyDigest: original.commit.policyDigest,
+            sealedPayloadDigest: original.commit.sealedPayloadDigest,
+            recipientEnvelopeDigests: original.commit.recipientEnvelopeDigests,
+            recoveryEnvelopeDigest: recoveryEnvelope.recordDigest,
+            purgeRequirementDigests: original.commit.purgeRequirementDigests,
+            purgeReceiptDigests: [],
+            credentialDigests: credentialDigests,
+            trustRecordDigests: original.trustRecords.map(\.recordDigest)
+        )
+        let challenge = try FullLossRecoveryChallenge(
+            requestID: uuid(0x96),
+            challengeID: uuid(0x97),
+            sessionID: uuid(0x98),
+            nonce: Data(repeating: 0x99, count: 16),
+            issuedAtMilliseconds: 1_000,
+            expiresAtMilliseconds: 2_000
+        )
+        let intent = try GlobalRecoveryTransitionIntent(
+            appNamespace: "com.codedaptive.cloudkit.tests",
+            estateID: uuid(0x9A),
+            scopeID: original.commit.scopeID,
+            challenge: challenge,
+            warning: FullLossRecoveryWarningAcknowledgement(
+                acknowledgement: "acknowledged-no-erasure-and-rollback-risk"
+            ),
+            currentCommitDigest: try digest(0x9B),
+            currentPolicyDigest: try digest(0x9C),
+            currentPolicyEpoch: original.commit.policyEpoch - 1,
+            currentGenerationID: SecretGenerationID(uuid(0x9D)),
+            currentRecoveryRecipient: currentRecovery,
+            replacementDeviceID: replacementCredential.deviceID,
+            replacementCredentialID: replacementCredential.credentialID,
+            replacementSigningPublicKey: replacementCredential.signingPublicKey,
+            replacementAgreementPublicKey: replacementCredential.keyAgreementPublicKey,
+            signingPossessionProof: Data([0x9E]),
+            agreementPossessionProof: Data([0x9F]),
+            candidatePolicyEpoch: original.commit.policyEpoch,
+            candidateGenerationID: original.commit.generationID,
+            candidateSignedPolicyDigest: original.commit.policyDigest,
+            replacementRecoveryRecipient: replacementRecovery,
+            recoveryEnvelopeDigest: recoveryEnvelope.recordDigest,
+            candidateSemantics: semantics
+        )
+        let authorization = try contentAddressed { recordDigest in
+            try FullLossRecoveryAuthorization(
+                recordDigest: recordDigest,
+                intent: intent,
+                signature: Data([0xA0])
+            )
+        }
+        let records = try SecretControlRecords(
+            state: .staged,
+            signedPolicy: original.records.signedPolicy,
+            sealedPayload: original.records.sealedPayload,
+            recipientEnvelopes: original.records.recipientEnvelopes,
+            recoveryEnvelope: recoveryEnvelope,
+            purgeRequirements: original.records.purgeRequirements,
+            purgeReceipts: [],
+            recoveryAuthorization: authorization
+        )
+        let commit = try contentAddressed { recordDigest in
+            try SecretTransitionCommit(
+                recordDigest: recordDigest,
+                scopeID: original.commit.scopeID,
+                policyEpoch: original.commit.policyEpoch,
+                predecessorCommitDigest: original.commit.predecessorCommitDigest,
+                policyDigest: original.commit.policyDigest,
+                scopeSnapshotDigest: original.commit.scopeSnapshotDigest,
+                generationID: original.commit.generationID,
+                sealedPayloadDigest: original.commit.sealedPayloadDigest,
+                recipientEnvelopeDigests: original.commit.recipientEnvelopeDigests,
+                recoveryEnvelopeDigest: original.commit.recoveryEnvelopeDigest,
+                purgeRequirementDigests: original.commit.purgeRequirementDigests,
+                purgeReceiptDigests: [],
+                recoveryAuthorizationDigest: authorization.recordDigest,
+                signerCredentialID: original.commit.signerCredentialID,
+                signature: original.commit.signature
+            )
+        }
+        return try SecretPolicyStoreEntry(
+            commit: commit,
+            records: records,
+            credentials: original.credentials,
+            trustRecords: original.trustRecords,
+            digester: digester
+        )
     }
 
     static func entryWithUnauthorizedRecipient(
@@ -629,7 +813,8 @@ struct U5PolicyFixture: Sendable {
             recipientEnvelopes: recipientValues,
             recoveryEnvelope: recoveryValue,
             purgeRequirements: purgeRequirements,
-            purgeReceipts: purgeReceipts
+            purgeReceipts: purgeReceipts,
+            recoveryAuthorization: nil
         )
         let commit = try contentAddressed { digest in
             try SecretTransitionCommit(
@@ -646,6 +831,7 @@ struct U5PolicyFixture: Sendable {
                 recoveryEnvelopeDigest: recoveryValue?.recordDigest,
                 purgeRequirementDigests: purgeRequirements.map(\.recordDigest),
                 purgeReceiptDigests: purgeReceipts.map(\.recordDigest),
+                recoveryAuthorizationDigest: nil,
                 signerCredentialID: original.commit.signerCredentialID,
                 signature: original.commit.signature
             )
@@ -653,7 +839,9 @@ struct U5PolicyFixture: Sendable {
         return try SecretPolicyStoreEntry(
             commit: commit,
             records: records,
-            trustRecords: original.trustRecords
+            credentials: original.credentials,
+            trustRecords: original.trustRecords,
+            digester: digester
         )
     }
 

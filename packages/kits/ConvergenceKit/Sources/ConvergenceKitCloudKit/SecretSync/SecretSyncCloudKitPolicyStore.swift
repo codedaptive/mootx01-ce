@@ -157,7 +157,6 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
             values.append((type, digest, try value.canonicalBytes()))
         }
 
-        try append(.transitionCommit, entry.commit.recordDigest, entry.commit)
         try append(
             .signedPolicyEpoch,
             entry.records.signedPolicy.recordDigest,
@@ -179,6 +178,13 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         if let value = entry.records.recoveryEnvelope {
             try append(.recoveryEnvelope, value.recordDigest, value)
         }
+        if let value = entry.records.recoveryAuthorization {
+            try append(
+                .fullLossRecoveryAuthorization,
+                value.recordDigest,
+                value
+            )
+        }
         for value in entry.records.purgeRequirements {
             try append(.purgeRequirement, value.recordDigest, value)
         }
@@ -188,6 +194,19 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         for value in entry.trustRecords {
             try append(.deviceTrustRecord, value.recordDigest, value)
         }
+        for value in entry.credentials {
+            let proofBytes = try value.enrollmentProof.canonicalBytes()
+            let proofDigest = try digester.digest(canonicalBytes: proofBytes)
+            values.append((.deviceEnrollmentProof, proofDigest, proofBytes))
+            try append(
+                .deviceCredential,
+                digester.digest(canonicalBytes: value.canonicalBytes()),
+                value
+            )
+        }
+        // The commit is staged last so a partially written graph cannot leave
+        // a discoverable commit that references absent authority records.
+        try append(.transitionCommit, entry.commit.recordDigest, entry.commit)
 
         for (type, digest, canonicalBytes) in values {
             let value: SecretSyncCloudKitImmutableRecord
@@ -434,6 +453,19 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
             )
             purgeReceipts.append(try parsePurgeReceipt(record))
         }
+        let recoveryAuthorization: FullLossRecoveryAuthorization?
+        if let digest = commit.recoveryAuthorizationDigest {
+            let record = try await fetchImmutable(
+                digest: digest,
+                type: .fullLossRecoveryAuthorization
+            )
+            recoveryAuthorization = try FullLossRecoveryAuthorization(
+                recordDigest: digest,
+                canonicalBytes: record.canonicalBytes
+            )
+        } else {
+            recoveryAuthorization = nil
+        }
         var trustRecords: [DeviceTrustRecord] = []
         trustRecords.reserveCapacity(
             signedPolicy.policy.trustedDeviceRecordDigests.count
@@ -445,6 +477,25 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
             )
             trustRecords.append(try parseTrustRecord(record))
         }
+        var credentials: [TrustedDeviceCredential] = []
+        credentials.reserveCapacity(trustRecords.count)
+        for trustRecord in trustRecords {
+            let credentialRecord = try await fetchImmutable(
+                digest: trustRecord.credentialDigest,
+                type: .deviceCredential
+            )
+            let credential = try parseCredential(credentialRecord)
+            let proofBytes = try credential.enrollmentProof.canonicalBytes()
+            let proofDigest = try digester.digest(canonicalBytes: proofBytes)
+            let proofRecord = try await fetchImmutable(
+                digest: proofDigest,
+                type: .deviceEnrollmentProof
+            )
+            guard proofRecord.canonicalBytes == proofBytes else {
+                throw SecretSyncCloudKitPolicyStoreError.referenceMismatch
+            }
+            credentials.append(credential)
+        }
 
         try validateStructuralBindings(
             commit: commit,
@@ -453,7 +504,10 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
             recipients: recipients,
             recovery: recovery,
             purgeRequirements: purgeRequirements,
-            purgeReceipts: purgeReceipts
+            purgeReceipts: purgeReceipts,
+            recoveryAuthorization: recoveryAuthorization,
+            credentials: credentials,
+            trustRecords: trustRecords
         )
 
         do {
@@ -464,12 +518,15 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
                 recipientEnvelopes: recipients,
                 recoveryEnvelope: recovery,
                 purgeRequirements: purgeRequirements,
-                purgeReceipts: purgeReceipts
+                purgeReceipts: purgeReceipts,
+                recoveryAuthorization: recoveryAuthorization
             )
             return try SecretPolicyStoreEntry(
                 commit: commit,
                 records: records,
-                trustRecords: trustRecords
+                credentials: credentials,
+                trustRecords: trustRecords,
+                digester: digester
             )
         } catch {
             throw SecretSyncCloudKitPolicyStoreError.referenceMismatch
@@ -483,10 +540,15 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         recipients: [RecipientKeyEnvelope],
         recovery: RecoveryEnvelope?,
         purgeRequirements: [PurgeRequirement],
-        purgeReceipts: [SignedPurgeReceipt]
+        purgeReceipts: [SignedPurgeReceipt],
+        recoveryAuthorization: FullLossRecoveryAuthorization?,
+        credentials: [TrustedDeviceCredential],
+        trustRecords: [DeviceTrustRecord]
     ) throws {
         let policy = signedPolicy.policy
-        guard commit.signerCredentialID == policy.signerCredentialID,
+        guard commit.recoveryAuthorizationDigest
+                == recoveryAuthorization?.recordDigest,
+              commit.signerCredentialID == policy.signerCredentialID,
               payload.scopeID == commit.scopeID,
               payload.scopeSnapshotDigest == commit.scopeSnapshotDigest,
               payload.policyEpoch == commit.policyEpoch,
@@ -525,7 +587,9 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         default:
             throw SecretSyncCloudKitPolicyStoreError.referenceMismatch
         }
-        guard purgeRequirements.count == purgeReceipts.count,
+        let fullLossRecovery = recoveryAuthorization != nil
+        guard (fullLossRecovery ? purgeReceipts.isEmpty
+                : purgeRequirements.count == purgeReceipts.count),
               purgeRequirements.allSatisfy({ requirement in
                   requirement.scopeID == commit.scopeID
                     && requirement.policyEpoch == commit.policyEpoch
@@ -558,6 +622,39 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
                     == receipt.respondingCredentialID
         }) else {
             throw SecretSyncCloudKitPolicyStoreError.referenceMismatch
+        }
+        if let recoveryAuthorization {
+            let intent = recoveryAuthorization.intent
+            let semantics = intent.candidateSemantics
+            let credentialDigests = try credentials.map {
+                try digester.digest(canonicalBytes: $0.canonicalBytes())
+            }.sorted { $0.bytes.lexicographicallyPrecedes($1.bytes) }
+            let trustDigests = trustRecords.map(\.recordDigest).sorted {
+                $0.bytes.lexicographicallyPrecedes($1.bytes)
+            }
+            guard
+                intent.scopeID == commit.scopeID,
+                intent.candidatePolicyEpoch == commit.policyEpoch,
+                intent.candidateGenerationID == commit.generationID,
+                intent.candidateSignedPolicyDigest == commit.policyDigest,
+                intent.recoveryEnvelopeDigest == commit.recoveryEnvelopeDigest,
+                intent.replacementCredentialID == commit.signerCredentialID,
+                intent.replacementCredentialID == policy.signerCredentialID,
+                intent.replacementRecoveryRecipient == policy.recoveryRecipient,
+                semantics.scopeSnapshotDigest == commit.scopeSnapshotDigest,
+                semantics.signedPolicyDigest == signedPolicy.recordDigest,
+                semantics.sealedPayloadDigest == payload.recordDigest,
+                semantics.recipientEnvelopeDigests
+                    == recipients.map(\.recordDigest),
+                semantics.recoveryEnvelopeDigest == recovery?.recordDigest,
+                semantics.purgeRequirementDigests
+                    == purgeRequirements.map(\.recordDigest),
+                semantics.purgeReceiptDigests.isEmpty,
+                semantics.credentialDigests == credentialDigests,
+                semantics.trustRecordDigests == trustDigests
+            else {
+                throw SecretSyncCloudKitPolicyStoreError.referenceMismatch
+            }
         }
     }
 
@@ -644,7 +741,7 @@ private extension SecretSyncCloudKitPolicyStore {
             value.canonicalBytes,
             domain: .secretTransitionCommit,
             required: [1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 14],
-            optional: [3, 9]
+            optional: [3, 9, 13]
         )
         let parsed = try SecretTransitionCommit(
             recordDigest: value.digest,
@@ -659,6 +756,7 @@ private extension SecretSyncCloudKitPolicyStore {
             recoveryEnvelopeDigest: fields.optionalDigest(9),
             purgeRequirementDigests: fields.digestSequence(10),
             purgeReceiptDigests: fields.digestSequence(11),
+            recoveryAuthorizationDigest: fields.optionalDigest(13),
             signerCredentialID: DeviceCredentialID(fields.uuid(12)),
             signature: fields.data(14)
         )
@@ -698,13 +796,18 @@ private extension SecretSyncCloudKitPolicyStore {
         let recovery: RecoveryRecipientDescriptor?
         if let bytes = fields.optionalData(9) {
             let values = try U5CanonicalFields.sequence(bytes)
-            guard values.count == 4 else { throw U5CanonicalError.invalid }
+            guard values.count == 7 else { throw U5CanonicalError.invalid }
             recovery = try RecoveryRecipientDescriptor(
                 recoveryRecipientID: try U5CanonicalFields.uuid(values[0]),
                 keyAgreementPublicKey: try KeyAgreementPublicKeyDescriptor(
                     algorithmIdentifier: try U5CanonicalFields.string(values[1]),
                     keyIdentifier: values[2],
                     publicKeyBytes: values[3]
+                ),
+                authorizationSigningPublicKey: try SigningPublicKeyDescriptor(
+                    algorithmIdentifier: try U5CanonicalFields.string(values[4]),
+                    keyIdentifier: values[5],
+                    publicKeyBytes: values[6]
                 )
             )
         } else {
@@ -900,6 +1003,85 @@ private extension SecretSyncCloudKitPolicyStore {
             credentialID: DeviceCredentialID(fields.uuid(3)),
             trustState: state,
             effectivePolicyEpoch: fields.uint64(5)
+        )
+        try requireRoundTrip(parsed, equals: value.canonicalBytes)
+        return parsed
+    }
+
+    func parseCredential(
+        _ value: SecretSyncCloudKitImmutableRecord
+    ) throws -> TrustedDeviceCredential {
+        let fields = try U5CanonicalFields(
+            value.canonicalBytes,
+            domain: .trustedDeviceCredential,
+            required: Array(1...11).map(UInt16.init),
+            optional: [12]
+        )
+        let proofBytes = try fields.data(11)
+        let proofDocument = try SecretSyncCanonicalEncoding.decode(
+            proofBytes,
+            expectedDomain: .deviceEnrollmentProof
+        )
+        let proofTags = Set(proofDocument.fields.map(\.tag))
+        let proofFields: U5CanonicalFields
+        let provenance: DeviceCredentialEnrollmentProvenance
+        if proofTags == Set([1, 2, 3, 4, 5]) {
+            proofFields = try U5CanonicalFields(
+                proofBytes,
+                domain: .deviceEnrollmentProof,
+                required: [1, 2, 3, 4, 5]
+            )
+            provenance = .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(proofFields.uuid(5)),
+                    signature: fields.data(12)
+                )
+            )
+        } else if proofTags == Set([1, 2, 3, 4, 6, 7]) {
+            guard fields.optionalData(12) == nil else {
+                throw U5CanonicalError.invalid
+            }
+            proofFields = try U5CanonicalFields(
+                proofBytes,
+                domain: .deviceEnrollmentProof,
+                required: [1, 2, 3, 4, 6, 7]
+            )
+            provenance = .globalRecovery(
+                GlobalRecoveryEnrollmentAuthority(
+                    requestID: try proofFields.uuid(6),
+                    recoveryRecipientID: try proofFields.uuid(7)
+                )
+            )
+        } else {
+            throw U5CanonicalError.invalid
+        }
+        guard let status = TrustedDeviceCredentialStatus(
+            rawValue: try fields.string(4)
+        ) else {
+            throw U5CanonicalError.invalid
+        }
+        let parsed = try TrustedDeviceCredential(
+            deviceID: TrustedDeviceID(fields.uuid(1)),
+            credentialID: DeviceCredentialID(fields.uuid(2)),
+            credentialVersion: fields.uint16(3),
+            status: status,
+            signingPublicKey: SigningPublicKeyDescriptor(
+                algorithmIdentifier: fields.string(5),
+                keyIdentifier: fields.data(6),
+                publicKeyBytes: fields.data(7)
+            ),
+            keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+                algorithmIdentifier: fields.string(8),
+                keyIdentifier: fields.data(9),
+                publicKeyBytes: fields.data(10)
+            ),
+            enrollmentProof: DeviceCredentialEnrollmentProof(
+                challengeID: proofFields.uuid(1),
+                challengeBytes: proofFields.data(2),
+                signingProofBytes: proofFields.data(3),
+                keyAgreementProofBytes: proofFields.data(4),
+                provenance: provenance
+            )
         )
         try requireRoundTrip(parsed, equals: value.canonicalBytes)
         return parsed

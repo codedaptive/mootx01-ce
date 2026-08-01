@@ -101,21 +101,46 @@ public enum SecretPolicyAdvanceResult: Sendable, Hashable {
 public struct SecretPolicyStoreEntry: Sendable, Hashable {
     public let commit: SecretTransitionCommit
     public let records: SecretControlRecords
+    public let credentials: [TrustedDeviceCredential]
     public let trustRecords: [DeviceTrustRecord]
 
     public init(
         commit: SecretTransitionCommit,
         records: SecretControlRecords,
-        trustRecords: [DeviceTrustRecord]
+        credentials: [TrustedDeviceCredential],
+        trustRecords: [DeviceTrustRecord],
+        digester: any SecretSyncDigesting
     ) throws {
         let policy = records.signedPolicy.policy
+        let sortedCredentials = credentials.sorted {
+            $0.credentialID.rawValue.uuidString.lowercased()
+                < $1.credentialID.rawValue.uuidString.lowercased()
+        }
         let sortedTrustRecords = trustRecords.sorted {
             $0.recordDigest.bytes.lexicographicallyPrecedes(
                 $1.recordDigest.bytes
             )
         }
+        var credentialDigestsByID: [
+            DeviceCredentialID: SecretRecordDigest
+        ] = [:]
+        for credential in sortedCredentials {
+            guard credentialDigestsByID[credential.credentialID] == nil else {
+                throw SecretSyncInterfaceError.invalidPolicyStoreEntry
+            }
+            credentialDigestsByID[credential.credentialID] = try digester.digest(
+                canonicalBytes: credential.canonicalBytes()
+            )
+        }
         guard
             records.state != .rejected,
+            sortedCredentials.count == sortedTrustRecords.count,
+            Set(sortedCredentials.map(\.credentialID))
+                == Set(sortedTrustRecords.map(\.credentialID)),
+            sortedTrustRecords.allSatisfy({ record in
+                credentialDigestsByID[record.credentialID]
+                    == record.credentialDigest
+            }),
             sortedTrustRecords.map(\.recordDigest)
                 == policy.trustedDeviceRecordDigests,
             commit.scopeID == policy.scopeSnapshot.scopeID,
@@ -131,12 +156,15 @@ public struct SecretPolicyStoreEntry: Sendable, Hashable {
             commit.purgeRequirementDigests
                 == records.purgeRequirements.map(\.recordDigest),
             commit.purgeReceiptDigests
-                == records.purgeReceipts.map(\.recordDigest)
+                == records.purgeReceipts.map(\.recordDigest),
+            commit.recoveryAuthorizationDigest
+                == records.recoveryAuthorization?.recordDigest
         else {
             throw SecretSyncInterfaceError.invalidPolicyStoreEntry
         }
         self.commit = commit
         self.records = records
+        self.credentials = sortedCredentials
         self.trustRecords = sortedTrustRecords
     }
 }

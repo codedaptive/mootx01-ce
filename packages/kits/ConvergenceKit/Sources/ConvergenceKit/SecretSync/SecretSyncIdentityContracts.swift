@@ -170,7 +170,67 @@ public struct KeyAgreementPublicKeyDescriptor: Sendable, Codable, Hashable {
     }
 }
 
-/// Opaque proof-of-possession and policy-authority evidence for enrollment.
+/// Normal enrollment authority supplied by an already-trusted credential.
+public struct TrustedDeviceEnrollmentAuthority:
+    Sendable,
+    Codable,
+    Hashable
+{
+    public let credentialID: DeviceCredentialID
+    public let signature: Data
+
+    public init(credentialID: DeviceCredentialID, signature: Data) throws {
+        try SecretSyncContractBounds.requireOpaqueBytes(
+            signature,
+            field: "enrollmentAuthoritySignature"
+        )
+        self.credentialID = credentialID
+        self.signature = signature
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case credentialID
+        case signature
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            credentialID: container.decode(
+                DeviceCredentialID.self,
+                forKey: .credentialID
+            ),
+            signature: container.decode(Data.self, forKey: .signature)
+        )
+    }
+}
+
+/// Recovery provenance that is intentionally not a device credential.
+public struct GlobalRecoveryEnrollmentAuthority:
+    Sendable,
+    Codable,
+    Hashable
+{
+    public let requestID: UUID
+    public let recoveryRecipientID: UUID
+
+    public init(requestID: UUID, recoveryRecipientID: UUID) {
+        self.requestID = requestID
+        self.recoveryRecipientID = recoveryRecipientID
+    }
+}
+
+/// Type-distinct enrollment provenance; transport never selects a case.
+public enum DeviceCredentialEnrollmentProvenance:
+    Sendable,
+    Codable,
+    Hashable
+{
+    case trustedDevice(TrustedDeviceEnrollmentAuthority)
+    case globalRecovery(GlobalRecoveryEnrollmentAuthority)
+}
+
+/// Opaque proof-of-possession and typed policy-authority evidence for enrollment.
 public struct DeviceCredentialEnrollmentProof:
     Sendable,
     Codable,
@@ -181,16 +241,24 @@ public struct DeviceCredentialEnrollmentProof:
     public let challengeBytes: Data
     public let signingProofBytes: Data
     public let keyAgreementProofBytes: Data
-    public let authorityCredentialID: DeviceCredentialID
-    public let authoritySignature: Data
+    public let provenance: DeviceCredentialEnrollmentProvenance
+
+    public var trustedDeviceAuthority: TrustedDeviceEnrollmentAuthority? {
+        guard case .trustedDevice(let value) = provenance else { return nil }
+        return value
+    }
+
+    public var globalRecoveryAuthority: GlobalRecoveryEnrollmentAuthority? {
+        guard case .globalRecovery(let value) = provenance else { return nil }
+        return value
+    }
 
     public init(
         challengeID: UUID,
         challengeBytes: Data,
         signingProofBytes: Data,
         keyAgreementProofBytes: Data,
-        authorityCredentialID: DeviceCredentialID,
-        authoritySignature: Data
+        provenance: DeviceCredentialEnrollmentProvenance
     ) throws {
         try SecretSyncContractBounds.requireOpaqueBytes(
             challengeBytes,
@@ -204,16 +272,11 @@ public struct DeviceCredentialEnrollmentProof:
             keyAgreementProofBytes,
             field: "keyAgreementProofBytes"
         )
-        try SecretSyncContractBounds.requireOpaqueBytes(
-            authoritySignature,
-            field: "authoritySignature"
-        )
         self.challengeID = challengeID
         self.challengeBytes = challengeBytes
         self.signingProofBytes = signingProofBytes
         self.keyAgreementProofBytes = keyAgreementProofBytes
-        self.authorityCredentialID = authorityCredentialID
-        self.authoritySignature = authoritySignature
+        self.provenance = provenance
     }
 
     public var canonicalDomain: SecretSyncCanonicalDomain {
@@ -221,7 +284,7 @@ public struct DeviceCredentialEnrollmentProof:
     }
 
     public func canonicalFields() throws -> [SecretSyncCanonicalField] {
-        [
+        var fields = [
             SecretSyncCanonicalField(
                 tag: 1,
                 value: SecretSyncCanonicalValue.uuid(challengeID)
@@ -229,11 +292,34 @@ public struct DeviceCredentialEnrollmentProof:
             SecretSyncCanonicalField(tag: 2, value: challengeBytes),
             SecretSyncCanonicalField(tag: 3, value: signingProofBytes),
             SecretSyncCanonicalField(tag: 4, value: keyAgreementProofBytes),
-            SecretSyncCanonicalField(
-                tag: 5,
-                value: SecretSyncCanonicalValue.uuid(authorityCredentialID.rawValue)
-            ),
         ]
+        switch provenance {
+        case .trustedDevice(let authority):
+            fields.append(
+                SecretSyncCanonicalField(
+                    tag: 5,
+                    value: SecretSyncCanonicalValue.uuid(
+                        authority.credentialID.rawValue
+                    )
+                )
+            )
+        case .globalRecovery(let authority):
+            fields.append(
+                SecretSyncCanonicalField(
+                    tag: 6,
+                    value: SecretSyncCanonicalValue.uuid(authority.requestID)
+                )
+            )
+            fields.append(
+                SecretSyncCanonicalField(
+                    tag: 7,
+                    value: SecretSyncCanonicalValue.uuid(
+                        authority.recoveryRecipientID
+                    )
+                )
+            )
+        }
+        return fields
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -241,8 +327,7 @@ public struct DeviceCredentialEnrollmentProof:
         case challengeBytes
         case signingProofBytes
         case keyAgreementProofBytes
-        case authorityCredentialID
-        case authoritySignature
+        case provenance
     }
 
     public init(from decoder: Decoder) throws {
@@ -255,13 +340,9 @@ public struct DeviceCredentialEnrollmentProof:
                 Data.self,
                 forKey: .keyAgreementProofBytes
             ),
-            authorityCredentialID: container.decode(
-                DeviceCredentialID.self,
-                forKey: .authorityCredentialID
-            ),
-            authoritySignature: container.decode(
-                Data.self,
-                forKey: .authoritySignature
+            provenance: container.decode(
+                DeviceCredentialEnrollmentProvenance.self,
+                forKey: .provenance
             )
         )
     }
@@ -306,7 +387,8 @@ public struct TrustedDeviceCredential:
         else {
             throw SecretSyncContractError.keyRoleReuse
         }
-        guard enrollmentProof.authorityCredentialID != credentialID else {
+        if let authority = enrollmentProof.trustedDeviceAuthority,
+           authority.credentialID == credentialID {
             throw SecretSyncContractError.selfAuthorizedEnrollment
         }
 
@@ -324,13 +406,13 @@ public struct TrustedDeviceCredential:
     }
 
     public func canonicalFields() throws -> [SecretSyncCanonicalField] {
-        try enrollmentFields()
-            + [
-                SecretSyncCanonicalField(
-                    tag: 12,
-                    value: enrollmentProof.authoritySignature
-                ),
-            ]
+        var fields = try enrollmentFields()
+        if let authority = enrollmentProof.trustedDeviceAuthority {
+            fields.append(
+                SecretSyncCanonicalField(tag: 12, value: authority.signature)
+            )
+        }
+        return fields
     }
 
     /// Bytes an enrollment authority signs to bind the candidate identity,

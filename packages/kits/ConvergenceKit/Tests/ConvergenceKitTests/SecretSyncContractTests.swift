@@ -34,8 +34,12 @@ struct SecretSyncContractTests {
             challengeBytes: Data([0x30]),
             signingProofBytes: Data([0x31]),
             keyAgreementProofBytes: Data([0x32]),
-            authorityCredentialID: DeviceCredentialID(UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!),
-            authoritySignature: Data([0x33])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!),
+                    signature: Data([0x33])
+                )
+            )
         )
 
         let credential = try TrustedDeviceCredential(
@@ -542,7 +546,8 @@ struct SecretSyncContractTests {
             recipientEnvelopes: fixture.records.recipientEnvelopes,
             recoveryEnvelope: fixture.records.recoveryEnvelope,
             purgeRequirements: fixture.records.purgeRequirements,
-            purgeReceipts: []
+            purgeReceipts: [],
+            recoveryAuthorization: nil
         )
 
         expectPolicyError(.incompletePurgeReceipts) {
@@ -692,7 +697,8 @@ struct SecretSyncContractTests {
             recipientEnvelopes: fixture.records.recipientEnvelopes,
             recoveryEnvelope: fixture.records.recoveryEnvelope,
             purgeRequirements: [],
-            purgeReceipts: []
+            purgeReceipts: [],
+            recoveryAuthorization: nil
         )
         let emptyCommit = try fixture.commitReplacingPurge(
             requirementDigests: [],
@@ -763,7 +769,8 @@ struct SecretSyncContractTests {
                 recipientEnvelopes: fixture.records.recipientEnvelopes,
                 recoveryEnvelope: fixture.records.recoveryEnvelope,
                 purgeRequirements: [wrongRequirement],
-                purgeReceipts: fixture.records.purgeReceipts
+                purgeReceipts: fixture.records.purgeReceipts,
+                recoveryAuthorization: nil
             )
             expectPolicyError(.purgeCoverageMismatch) {
                 _ = try fixture.validate(records: wrongRecords)
@@ -997,8 +1004,8 @@ struct SecretSyncContractTests {
             "credential": "U1NDUAABACVzZWNyZXQtc3luYy90cnVzdGVkLWRldmljZS1jcmVkZW50aWFsAAwAAQAAACQzYWFhYWFhYS1hYWFhLWFhYWEtYWFhYS1hYWFhYWFhYWFhYWEAAgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDQAAwAAAAIAAQAEAAAABmFjdGl2ZQAFAAAAIW9wYXF1ZS10cmFuc2l0aW9uLXNpZ25hdHVyZS1zdWl0ZQAGAAAAAbEABwAAAAGyAAgAAAAhb3BhcXVlLXRyYW5zaXRpb24tYWdyZWVtZW50LXN1aXRlAAkAAAABswAKAAAAAbQACwAAAJZTU0NQAAEAI3NlY3JldC1zeW5jL2RldmljZS1lbnJvbGxtZW50LXByb29mAAUAAQAAACQzZWVlZWVlZS1lZWVlLWVlZWUtZWVlZS1lZWVlZWVlZWVlZWUAAgAAAAG1AAMAAAABtgAEAAAAAbcABQAAACRmMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEADAAAAAG4",
             "trust": "U1NDUAABAB9zZWNyZXQtc3luYy9kZXZpY2UtdHJ1c3QtcmVjb3JkAAUAAQAAACBTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTUwACAAAAJDNhYWFhYWFhLWFhYWEtYWFhYS1hYWFhLWFhYWFhYWFhYWFhYQADAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNAAEAAAAB3RydXN0ZWQABQAAAAgAAAAAAAAAAg==",
             "scope": "U1NDUAABACFzZWNyZXQtc3luYy9zZWNyZXQtc2NvcGUtc25hcHNob3QAAwABAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQACAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMgADAAAAUgACAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDU=",
-            "policy": "U1NDUAABAB9zZWNyZXQtc3luYy9zZWNyZXQtcG9saWN5LWVwb2NoAAoAAQAAAAIAAQACAAAACAAAAAAAAAACAAMAAAAgY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MABAAAANdTU0NQAAEAIXNlY3JldC1zeW5jL3NlY3JldC1zY29wZS1zbmFwc2hvdAADAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAMAAABSAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNQAFAAAAIGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgAAYAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAcAAAAqAAEAAAAkMTAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAgAAABuAAMAAAAgUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFAAAAAgUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVEAAAAgUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlIACQAAAFcABAAAACQyMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEAAAAfb3BhcXVlLXJlY292ZXJ5LWFncmVlbWVudC1zdWl0ZQAAAAFhAAAAAWIACgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDQ=",
-            "signedPolicy": "U1NDUAABACZzZWNyZXQtc3luYy9zaWduZWQtc2VjcmV0LXBvbGljeS1lcG9jaAACAAEAAAK9U1NDUAABAB9zZWNyZXQtc3luYy9zZWNyZXQtcG9saWN5LWVwb2NoAAoAAQAAAAIAAQACAAAACAAAAAAAAAACAAMAAAAgY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MABAAAANdTU0NQAAEAIXNlY3JldC1zeW5jL3NlY3JldC1zY29wZS1zbmFwc2hvdAADAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAMAAABSAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNQAFAAAAIGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgAAYAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAcAAAAqAAEAAAAkMTAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAgAAABuAAMAAAAgUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFAAAAAgUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVEAAAAgUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlIACQAAAFcABAAAACQyMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEAAAAfb3BhcXVlLXJlY292ZXJ5LWFncmVlbWVudC1zdWl0ZQAAAAFhAAAAAWIACgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDQAAgAAAAGh",
+            "policy": "U1NDUAABAB9zZWNyZXQtc3luYy9zZWNyZXQtcG9saWN5LWVwb2NoAAoAAQAAAAIAAQACAAAACAAAAAAAAAACAAMAAAAgY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MABAAAANdTU0NQAAEAIXNlY3JldC1zeW5jL3NlY3JldC1zY29wZS1zbmFwc2hvdAADAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAMAAABSAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNQAFAAAAIGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgAAYAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAcAAAAqAAEAAAAkMTAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAgAAABuAAMAAAAgUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFAAAAAgUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVEAAAAgUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlIACQAAAUEABwAAACQyMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEAAAA1bW9vdHgwMS5zZWNyZXQtcmVjb3ZlcnkuaGtkZi1zaGEyNTYtcDI1Ni1hZ3JlZW1lbnQudjIAAAABYQAAAEEEYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYgAAAEZtb290eDAxLnNlY3JldC1yZWNvdmVyeS5oa2RmLXNoYTI1Ni1wMjU2LWVjZHNhLXNoYTI1Ni1hdXRob3JpemF0aW9uLnYyAAAAAWMAAABBBGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQACgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDQ=",
+            "signedPolicy": "U1NDUAABACZzZWNyZXQtc3luYy9zaWduZWQtc2VjcmV0LXBvbGljeS1lcG9jaAACAAEAAAOnU1NDUAABAB9zZWNyZXQtc3luYy9zZWNyZXQtcG9saWN5LWVwb2NoAAoAAQAAAAIAAQACAAAACAAAAAAAAAACAAMAAAAgY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MABAAAANdTU0NQAAEAIXNlY3JldC1zeW5jL3NlY3JldC1zY29wZS1zbmFwc2hvdAADAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAMAAABSAAIAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAyAAAAJDMwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNQAFAAAAIGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgAAYAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAcAAAAqAAEAAAAkMTAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAgAAABuAAMAAAAgUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFAAAAAgUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVEAAAAgUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlIACQAAAUEABwAAACQyMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEAAAA1bW9vdHgwMS5zZWNyZXQtcmVjb3ZlcnkuaGtkZi1zaGEyNTYtcDI1Ni1hZ3JlZW1lbnQudjIAAAABYQAAAEEEYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYgAAAEZtb290eDAxLnNlY3JldC1yZWNvdmVyeS5oa2RmLXNoYTI1Ni1wMjU2LWVjZHNhLXNoYTI1Ni1hdXRob3JpemF0aW9uLnYyAAAAAWMAAABBBGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQACgAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDQAAgAAAAGh",
             "payload": "U1NDUAABABpzZWNyZXQtc3luYy9zZWFsZWQtcGF5bG9hZAAHAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGAAAwAAAAgAAAAAAAAAAgAEAAAAIGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkAAUAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAYAAAACAAEABwAAAAGi",
             "recipient": "U1NDUAABACJzZWNyZXQtc3luYy9yZWNpcGllbnQta2V5LWVudmVsb3BlAAgAAQAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEAAgAAACBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYAADAAAACAAAAAAAAAACAAQAAAAgZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQABQAAACQzMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMABgAAAAIAAQAHAAAAJDEwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAIAAAAAaM=",
             "recovery": "U1NDUAABAB1zZWNyZXQtc3luYy9yZWNvdmVyeS1lbnZlbG9wZQAJAAEAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxAAIAAAAgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGAAAwAAAAgAAAAAAAAAAgAEAAAAIGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkAAUAAAAkMzAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAzAAYAAAACAAEABwAAACQyMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEACAAAABZicmVha0dsYXNzUmVjb3ZlcnlPbmx5AAkAAAABpA==",
@@ -1116,9 +1123,16 @@ private func recoveryRecipient() throws -> RecoveryRecipientDescriptor {
             uuidString: "20000000-0000-0000-0000-000000000001"
         )!,
         keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
-            algorithmIdentifier: "opaque-recovery-agreement-suite",
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .agreementAlgorithmIdentifier,
             keyIdentifier: Data([0x61]),
-            publicKeyBytes: Data([0x62])
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x62, count: 64)
+        ),
+        authorizationSigningPublicKey: SigningPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .authorizationSigningAlgorithmIdentifier,
+            keyIdentifier: Data([0x63]),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x64, count: 64)
         )
     )
 }
@@ -1218,10 +1232,14 @@ private func enrolledCredential() throws -> TrustedDeviceCredential {
             challengeBytes: Data([0x30]),
             signingProofBytes: Data([0x31]),
             keyAgreementProofBytes: Data([0x32]),
-            authorityCredentialID: DeviceCredentialID(
-                UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!
-            ),
-            authoritySignature: Data([0x33])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(
+                        UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!
+                    ),
+                    signature: Data([0x33])
+                )
+            )
         )
     )
 }
@@ -1253,10 +1271,14 @@ private func authorityCredential() throws -> TrustedDeviceCredential {
             challengeBytes: Data([0x95]),
             signingProofBytes: Data([0x96]),
             keyAgreementProofBytes: Data([0x97]),
-            authorityCredentialID: DeviceCredentialID(
-                UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
-            ),
-            authoritySignature: Data([0x98])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(
+                        UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
+                    ),
+                    signature: Data([0x98])
+                )
+            )
         )
     )
 }
@@ -1286,10 +1308,14 @@ private func transitionSignerCredential() throws -> TrustedDeviceCredential {
             challengeBytes: Data([0xB5]),
             signingProofBytes: Data([0xB6]),
             keyAgreementProofBytes: Data([0xB7]),
-            authorityCredentialID: DeviceCredentialID(
-                UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
-            ),
-            authoritySignature: Data([0xB8])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(
+                        UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
+                    ),
+                    signature: Data([0xB8])
+                )
+            )
         )
     )
 }
@@ -1322,10 +1348,14 @@ private func fixtureCredential(
             challengeBytes: Data([byte &+ 4]),
             signingProofBytes: Data([byte &+ 5]),
             keyAgreementProofBytes: Data([byte &+ 6]),
-            authorityCredentialID: DeviceCredentialID(
-                UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
-            ),
-            authoritySignature: Data([byte &+ 7])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: DeviceCredentialID(
+                        UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!
+                    ),
+                    signature: Data([byte &+ 7])
+                )
+            )
         )
     )
 }
@@ -1444,7 +1474,8 @@ private struct TransitionFixture {
             recipientEnvelopes: [recipient],
             recoveryEnvelope: recovery,
             purgeRequirements: [requirement],
-            purgeReceipts: [receipt]
+            purgeReceipts: [receipt],
+            recoveryAuthorization: nil
         )
 
         let previousCommit = try SecretTransitionCommit(
@@ -1462,6 +1493,7 @@ private struct TransitionFixture {
             recoveryEnvelopeDigest: nil,
             purgeRequirementDigests: [],
             purgeReceiptDigests: [],
+            recoveryAuthorizationDigest: nil,
             signerCredentialID: signerCredential.credentialID,
             signature: Data([0xA6])
         )
@@ -1489,7 +1521,8 @@ private struct TransitionFixture {
             recipientEnvelopes: [recipient],
             recoveryEnvelope: nil,
             purgeRequirements: [],
-            purgeReceipts: []
+            purgeReceipts: [],
+            recoveryAuthorization: nil
         )
         currentSnapshot = try SecretControlSnapshot(
             commit: previousCommit,
@@ -1510,6 +1543,7 @@ private struct TransitionFixture {
             recoveryEnvelopeDigest: recovery.recordDigest,
             purgeRequirementDigests: [requirement.recordDigest],
             purgeReceiptDigests: [receipt.recordDigest],
+            recoveryAuthorizationDigest: nil,
             signerCredentialID: signerCredential.credentialID,
             signature: Data([0xA7])
         )
@@ -1565,6 +1599,7 @@ private struct TransitionFixture {
             recoveryEnvelopeDigest: commit.recoveryEnvelopeDigest,
             purgeRequirementDigests: commit.purgeRequirementDigests,
             purgeReceiptDigests: commit.purgeReceiptDigests,
+            recoveryAuthorizationDigest: commit.recoveryAuthorizationDigest,
             signerCredentialID: commit.signerCredentialID,
             signature: commit.signature
         )
@@ -1587,6 +1622,7 @@ private struct TransitionFixture {
             recoveryEnvelopeDigest: commit.recoveryEnvelopeDigest,
             purgeRequirementDigests: requirementDigests,
             purgeReceiptDigests: receiptDigests,
+            recoveryAuthorizationDigest: commit.recoveryAuthorizationDigest,
             signerCredentialID: commit.signerCredentialID,
             signature: commit.signature
         )

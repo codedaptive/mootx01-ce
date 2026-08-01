@@ -45,6 +45,7 @@ struct SecretSyncRecordMappingTests {
             "SSSignedPolicyEpochV1",
             "SSRecipientEnvelopeV1",
             "SSRecoveryEnvelopeV1",
+            "SSFullLossRecoveryAuthorizationV1",
             "SSPurgeRequirementV1",
             "SSPurgeReceiptV1",
             "SSTransitionCommitV1",
@@ -488,6 +489,8 @@ private enum U4CanonicalFixture {
                 .init(tag: 8, value: Data("breakGlassRecoveryOnly".utf8)),
                 .init(tag: 9, value: Data([0x52])),
             ]
+        case .fullLossRecoveryAuthorization:
+            return recoveryAuthorizationFields()
         case .purgeRequirement:
             return [
                 .init(tag: 1, value: id1), .init(tag: 2, value: uint64(1)),
@@ -532,6 +535,111 @@ private enum U4CanonicalFixture {
         case .scopeHead:
             return []
         }
+    }
+
+    private static func recoveryAuthorizationFields()
+        -> [SecretSyncCanonicalField]
+    {
+        let currentRecovery = try! recoveryDescriptor(
+            idByte: 0x61,
+            agreementByte: 0x62,
+            signingByte: 0x63
+        )
+        let replacementRecovery = try! recoveryDescriptor(
+            idByte: 0x64,
+            agreementByte: 0x65,
+            signingByte: 0x66
+        )
+        let signing = try! SigningPublicKeyDescriptor(
+            algorithmIdentifier: "P256",
+            keyIdentifier: Data([0x67]),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x68, count: 64)
+        )
+        let agreement = try! KeyAgreementPublicKeyDescriptor(
+            algorithmIdentifier: "P256",
+            keyIdentifier: Data([0x69]),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x6A, count: 64)
+        )
+        let candidateDigest = try! digest(0x71)
+        let recoveryEnvelopeDigest = try! digest(0x72)
+        let semantics = try! FullLossRecoveryCandidateSemantics(
+            scopeSnapshotDigest: try! digest(0x70),
+            signedPolicyDigest: candidateDigest,
+            sealedPayloadDigest: try! digest(0x73),
+            recipientEnvelopeDigests: [try! digest(0x74)],
+            recoveryEnvelopeDigest: recoveryEnvelopeDigest,
+            purgeRequirementDigests: [],
+            purgeReceiptDigests: [],
+            credentialDigests: [try! digest(0x75)],
+            trustRecordDigests: [try! digest(0x76)]
+        )
+        let challenge = try! FullLossRecoveryChallenge(
+            requestID: uuid(0x77),
+            challengeID: uuid(0x78),
+            sessionID: uuid(0x79),
+            nonce: Data(repeating: 0x7A, count: 16),
+            issuedAtMilliseconds: 1_000,
+            expiresAtMilliseconds: 2_000
+        )
+        let intent = try! GlobalRecoveryTransitionIntent(
+            appNamespace: "com.codedaptive.test",
+            estateID: uuid(0x7B),
+            scopeID: SecretScopeID(uuid(0x7C)),
+            challenge: challenge,
+            warning: try! FullLossRecoveryWarningAcknowledgement(
+                acknowledgement: "acknowledged-no-erasure-and-rollback-risk"
+            ),
+            currentCommitDigest: try! digest(0x7D),
+            currentPolicyDigest: try! digest(0x7E),
+            currentPolicyEpoch: 1,
+            currentGenerationID: SecretGenerationID(uuid(0x7F)),
+            currentRecoveryRecipient: currentRecovery,
+            replacementDeviceID: TrustedDeviceID(uuid(0x80)),
+            replacementCredentialID: DeviceCredentialID(uuid(0x81)),
+            replacementSigningPublicKey: signing,
+            replacementAgreementPublicKey: agreement,
+            signingPossessionProof: Data([0x82]),
+            agreementPossessionProof: Data([0x83]),
+            candidatePolicyEpoch: 2,
+            candidateGenerationID: SecretGenerationID(uuid(0x84)),
+            candidateSignedPolicyDigest: candidateDigest,
+            replacementRecoveryRecipient: replacementRecovery,
+            recoveryEnvelopeDigest: recoveryEnvelopeDigest,
+            candidateSemantics: semantics
+        )
+        let authorization = try! FullLossRecoveryAuthorization(
+            recordDigest: try! digest(0x85),
+            intent: intent,
+            signature: Data([0x86])
+        )
+        return try! SecretSyncCanonicalEncoding.decode(
+            authorization.canonicalBytes(),
+            expectedDomain: .fullLossRecoveryAuthorization
+        ).fields
+    }
+
+    private static func recoveryDescriptor(
+        idByte: UInt8,
+        agreementByte: UInt8,
+        signingByte: UInt8
+    ) throws -> RecoveryRecipientDescriptor {
+        try RecoveryRecipientDescriptor(
+            recoveryRecipientID: uuid(idByte),
+            keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+                algorithmIdentifier: RecoveryRecipientDescriptor
+                    .agreementAlgorithmIdentifier,
+                keyIdentifier: Data([agreementByte]),
+                publicKeyBytes: Data([0x04])
+                    + Data(repeating: agreementByte, count: 64)
+            ),
+            authorizationSigningPublicKey: SigningPublicKeyDescriptor(
+                algorithmIdentifier: RecoveryRecipientDescriptor
+                    .authorizationSigningAlgorithmIdentifier,
+                keyIdentifier: Data([signingByte]),
+                publicKeyBytes: Data([0x04])
+                    + Data(repeating: signingByte, count: 64)
+            )
+        )
     }
 
     static func uuid(_ byte: UInt8) -> UUID {

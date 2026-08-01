@@ -11,6 +11,7 @@ public enum SecretSyncCloudKitRecordType: String, CaseIterable, Sendable {
     case signedPolicyEpoch = "SSSignedPolicyEpochV1"
     case recipientEnvelope = "SSRecipientEnvelopeV1"
     case recoveryEnvelope = "SSRecoveryEnvelopeV1"
+    case fullLossRecoveryAuthorization = "SSFullLossRecoveryAuthorizationV1"
     case purgeRequirement = "SSPurgeRequirementV1"
     case purgeReceipt = "SSPurgeReceiptV1"
     case transitionCommit = "SSTransitionCommitV1"
@@ -32,6 +33,7 @@ public enum SecretSyncCloudKitRecordType: String, CaseIterable, Sendable {
         case .signedPolicyEpoch: .signedSecretPolicyEpoch
         case .recipientEnvelope: .recipientKeyEnvelope
         case .recoveryEnvelope: .recoveryEnvelope
+        case .fullLossRecoveryAuthorization: .fullLossRecoveryAuthorization
         case .purgeRequirement: .purgeRequirement
         case .purgeReceipt: .purgeReceipt
         case .transitionCommit: .secretTransitionCommit
@@ -146,25 +148,34 @@ enum SecretSyncCloudKitCanonicalSchema {
 
         switch type {
         case .deviceCredential:
-            try tags(fields, required: 1...12)
+            try tags(fields, required: Array(1...11).map(UInt16.init), optional: [12])
             try uuid(fields[1]); try uuid(fields[2]); try positiveU16(fields[3])
             try oneOf(fields[4], ["active", "revoked"])
             try algorithm(fields[5]); try opaque(fields[6]); try opaque(fields[7])
             try algorithm(fields[8]); try opaque(fields[9]); try opaque(fields[10])
             try nested(fields[11], domain: .deviceEnrollmentProof, as: .deviceEnrollmentProof)
-            try opaque(fields[12])
             guard fields[6] != fields[9], fields[7] != fields[10] else { try fail() }
             let enrollment = try SecretSyncCanonicalEncoding.decode(
                 try required(fields[11]),
                 expectedDomain: .deviceEnrollmentProof
             )
-            guard enrollment.fields.first(where: { $0.tag == 5 })?.value != fields[2] else {
-                try fail()
+            let enrollmentTags = Set(enrollment.fields.map(\.tag))
+            if enrollmentTags == Set([1, 2, 3, 4, 5]) {
+                try opaque(fields[12])
+                guard enrollment.fields.first(where: { $0.tag == 5 })?.value != fields[2]
+                else { try fail() }
+            } else {
+                guard enrollmentTags == Set([1, 2, 3, 4, 6, 7]), fields[12] == nil
+                else { try fail() }
             }
         case .deviceEnrollmentProof:
-            try tags(fields, required: 1...5)
-            try uuid(fields[1]); try opaque(fields[2]); try opaque(fields[3])
-            try opaque(fields[4]); try uuid(fields[5])
+            let fieldTags = Set(fields.keys)
+            guard fieldTags == Set([1, 2, 3, 4, 5])
+                    || fieldTags == Set([1, 2, 3, 4, 6, 7])
+            else { try fail() }
+            try uuid(fields[1]); try opaque(fields[2]); try opaque(fields[3]); try opaque(fields[4])
+            if fields[5] != nil { try uuid(fields[5]) }
+            if fields[6] != nil { try uuid(fields[6]); try uuid(fields[7]) }
         case .deviceTrustRecord:
             try tags(fields, required: 1...5)
             try digest(fields[1]); try uuid(fields[2]); try uuid(fields[3])
@@ -199,6 +210,21 @@ enum SecretSyncCloudKitCanonicalSchema {
             try boundRecord(fields, lastTag: 9)
             try uuid(fields[7]); try exact(fields[8], "breakGlassRecoveryOnly")
             try opaque(fields[9])
+        case .fullLossRecoveryAuthorization:
+            try tags(fields, required: 1...2)
+            try opaque(fields[1]); try opaque(fields[2])
+            let canonicalBytes = try SecretSyncCanonicalEncoding.encode(
+                domain: .fullLossRecoveryAuthorization,
+                fields: document.fields.map {
+                    SecretSyncCanonicalField(tag: $0.tag, value: $0.value)
+                }
+            )
+            _ = try FullLossRecoveryAuthorization(
+                recordDigest: SecretRecordDigest(
+                    bytes: Data(repeating: 0, count: SecretRecordDigest.byteCount)
+                ),
+                canonicalBytes: canonicalBytes
+            )
         case .purgeRequirement:
             try tags(fields, required: 1...7)
             try uuid(fields[1]); try positiveU64(fields[2]); try digest(fields[3])
@@ -212,21 +238,23 @@ enum SecretSyncCloudKitCanonicalSchema {
             try oneOf(fields[9], ["completed", "partial", "failed"])
             try uuid(fields[10]); try opaque(fields[11])
         case .transitionCommit:
-            try tags(fields, required: [1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 14], optional: [3, 9])
+            try tags(fields, required: [1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 14], optional: [3, 9, 13])
             try uuid(fields[1]); let epoch = try positiveU64(fields[2])
             try validatePredecessor(epoch: epoch, predecessor: fields[3])
             try digest(fields[4]); try digest(fields[5]); try uuid(fields[6]); try digest(fields[7])
             try digestSequence(fields[8]); if fields[9] != nil { try digest(fields[9]) }
             try digestSequence(fields[10], allowEmpty: true)
             try digestSequence(fields[11], allowEmpty: true)
+            if fields[13] != nil { try digest(fields[13]) }
             try uuid(fields[12]); try opaque(fields[14])
         case .controlRecords:
-            try tags(fields, required: [1, 2, 3, 4, 6, 7], optional: [5])
+            try tags(fields, required: [1, 2, 3, 4, 6, 7], optional: [5, 8])
             try oneOf(fields[1], ["staged", "committed", "rejected"])
             try digest(fields[2]); try digest(fields[3]); try digestSequence(fields[4])
             if fields[5] != nil { try digest(fields[5]) }
             try digestSequence(fields[6], allowEmpty: true)
             try digestSequence(fields[7], allowEmpty: true)
+            if fields[8] != nil { try digest(fields[8]) }
         case .freshnessCommitment:
             try tags(fields, required: 1...4)
             try uuid(fields[1]); try positiveU64(fields[2]); try digest(fields[3]); try digest(fields[4])
@@ -327,8 +355,14 @@ enum SecretSyncCloudKitCanonicalSchema {
 
     private static func recoveryDescriptor(_ value: Data) throws -> Data {
         let values = try sequenceValues(value, allowEmpty: false)
-        guard values.count == 4 else { try fail() }
+        guard values.count == 7,
+              values[1] == Data(RecoveryRecipientDescriptor.agreementAlgorithmIdentifier.utf8),
+              values[4] == Data(RecoveryRecipientDescriptor.authorizationSigningAlgorithmIdentifier.utf8),
+              values[2] != values[5], values[3] != values[6],
+              values[3].count == 65, values[3].first == 0x04,
+              values[6].count == 65, values[6].first == 0x04 else { try fail() }
         try uuid(values[0]); try algorithm(values[1]); try opaque(values[2]); try opaque(values[3])
+        try algorithm(values[4]); try opaque(values[5]); try opaque(values[6])
         return values[0]
     }
 

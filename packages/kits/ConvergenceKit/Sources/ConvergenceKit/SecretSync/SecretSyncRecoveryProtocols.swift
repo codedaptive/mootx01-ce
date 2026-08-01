@@ -142,6 +142,72 @@ public struct RecoveryOperationEvidence: Sendable, Hashable {
     }
 }
 
+/// Atomic staged graph admitted by the full-loss recovery validator.
+///
+/// The wrapper prevents callers from presenting a recovery proof separately
+/// from the exact commit, credentials, trust tombstones, and sealed records it
+/// authorizes. Cryptographic signatures remain the validator's responsibility.
+public struct RecoveryPreparedTransition: Sendable, Hashable {
+    public let entry: SecretPolicyStoreEntry
+
+    public init(
+        commit: SecretTransitionCommit,
+        records: SecretControlRecords,
+        credentials: [TrustedDeviceCredential],
+        trustRecords: [DeviceTrustRecord],
+        digester: any SecretSyncDigesting
+    ) throws {
+        guard
+            records.state == .staged,
+            let authorization = records.recoveryAuthorization,
+            commit.recoveryAuthorizationDigest == authorization.recordDigest,
+            records.purgeReceipts.isEmpty,
+            commit.purgeReceiptDigests.isEmpty
+        else {
+            throw SecretSyncInterfaceError.invalidPolicyStoreEntry
+        }
+        let intent = authorization.intent
+        let semantics = intent.candidateSemantics
+        let credentialDigests = try credentials.map {
+            try digester.digest(canonicalBytes: $0.canonicalBytes())
+        }
+        guard
+            semantics.scopeSnapshotDigest
+                == records.signedPolicy.policy.scopeSnapshot.snapshotDigest,
+            semantics.signedPolicyDigest == records.signedPolicy.recordDigest,
+            semantics.sealedPayloadDigest == records.sealedPayload.recordDigest,
+            semantics.recipientEnvelopeDigests
+                == records.recipientEnvelopes.map(\.recordDigest),
+            semantics.recoveryEnvelopeDigest
+                == records.recoveryEnvelope?.recordDigest,
+            semantics.purgeRequirementDigests
+                == records.purgeRequirements.map(\.recordDigest),
+            semantics.purgeReceiptDigests.isEmpty,
+            semantics.credentialDigests == credentialDigests.sorted(by: {
+                $0.bytes.lexicographicallyPrecedes($1.bytes)
+            }),
+            semantics.trustRecordDigests
+                == trustRecords.map(\.recordDigest).sorted(by: {
+                    $0.bytes.lexicographicallyPrecedes($1.bytes)
+                }),
+            records.signedPolicy.policy.signerCredentialID
+                == intent.replacementCredentialID,
+            commit.signerCredentialID == intent.replacementCredentialID,
+            records.signedPolicy.policy.authorizedRecipientCredentialIDs
+                == [intent.replacementCredentialID]
+        else {
+            throw SecretSyncInterfaceError.invalidPolicyStoreEntry
+        }
+        self.entry = try SecretPolicyStoreEntry(
+            commit: commit,
+            records: records,
+            credentials: credentials,
+            trustRecords: trustRecords,
+            digester: digester
+        )
+    }
+}
+
 /// Custody seam for the one global break-glass recovery recipient.
 ///
 /// Rotation and break-glass require the existing independent freshness-anchor

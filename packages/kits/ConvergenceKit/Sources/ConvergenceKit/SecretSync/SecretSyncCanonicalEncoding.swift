@@ -14,6 +14,7 @@ public enum SecretSyncContractError: Error, Sendable, Equatable {
     case missingPredecessor
     case unexpectedPredecessor
     case recoveryRecipientIsRoutineRecipient
+    case invalidRecoveryDescriptor
     case invalidCanonicalMagic
     case unsupportedSchemaVersion(UInt16)
     case invalidFieldTag
@@ -45,6 +46,10 @@ public enum SecretSyncCanonicalDomain: String, Sendable, Codable, CaseIterable {
     case secretTransitionCommit = "secret-sync/secret-transition-commit"
     case secretControlRecords = "secret-sync/secret-control-records"
     case bootstrapFreshnessCommitment = "secret-sync/bootstrap-freshness-commitment"
+    case fullLossRecoveryCandidateSemantics = "secret-sync/full-loss-recovery-candidate-semantics"
+    case fullLossRecoveryPossessionChallenge = "secret-sync/full-loss-recovery-possession-challenge"
+    case globalRecoveryTransitionIntent = "secret-sync/global-recovery-transition-intent"
+    case fullLossRecoveryAuthorization = "secret-sync/full-loss-recovery-authorization"
 }
 
 /// One typed field in the deterministic SecretSync canonical frame.
