@@ -181,6 +181,25 @@ struct SecretSyncFreshnessTransportTests {
         #expect(candidate.commitment == expected)
     }
 
+    @Test("normal publication never samples the recovery authority clock")
+    func normalPublicationDoesNotReadRecoveryClock() async throws {
+        let fixture = try U5PolicyFixture.make()
+        let database = U5ScriptedDatabase()
+        let clock = U6ClockProbe(0)
+        let store = SecretSyncCloudKitPolicyStore(
+            database: database,
+            digester: U5PolicyFixture.digester,
+            recoveryTimeSource: { clock.read() }
+        )
+        try await store.appendStagedPolicy(fixture.entry)
+
+        _ = try await store.compareAndAdvance(
+            U5PolicyFixture.precondition(fixture, expected: nil)
+        )
+
+        #expect(clock.readCount == 0)
+    }
+
     @Test("SecretSync zone cursors never grant freshness")
     func tokensAreTransportOnly() {
         #expect(SecretSyncCloudKitTransportTokens.presenceGrantsFreshness == false)

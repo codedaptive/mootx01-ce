@@ -486,7 +486,10 @@ struct U5PolicyFixture: Sendable {
     }
 
     static func entryWithRecoveryAuthorization(
-        _ fixture: U5PolicyFixture
+        _ fixture: U5PolicyFixture,
+        current: U5PolicyFixture? = nil,
+        issuedAtMilliseconds: UInt64 = 1_000,
+        expiresAtMilliseconds: UInt64 = 2_000
     ) throws -> SecretPolicyStoreEntry {
         let original = fixture.entry
         let policy = original.records.signedPolicy.policy
@@ -533,8 +536,8 @@ struct U5PolicyFixture: Sendable {
             challengeID: uuid(0x97),
             sessionID: uuid(0x98),
             nonce: Data(repeating: 0x99, count: 16),
-            issuedAtMilliseconds: 1_000,
-            expiresAtMilliseconds: 2_000
+            issuedAtMilliseconds: issuedAtMilliseconds,
+            expiresAtMilliseconds: expiresAtMilliseconds
         )
         let intent = try GlobalRecoveryTransitionIntent(
             appNamespace: "com.codedaptive.cloudkit.tests",
@@ -544,11 +547,16 @@ struct U5PolicyFixture: Sendable {
             warning: FullLossRecoveryWarningAcknowledgement(
                 acknowledgement: "acknowledged-no-erasure-and-rollback-risk"
             ),
-            currentCommitDigest: try digest(0x9B),
-            currentPolicyDigest: try digest(0x9C),
-            currentPolicyEpoch: original.commit.policyEpoch - 1,
-            currentGenerationID: SecretGenerationID(uuid(0x9D)),
-            currentRecoveryRecipient: currentRecovery,
+            currentCommitDigest: try current?.entry.commit.recordDigest
+                ?? digest(0x9B),
+            currentPolicyDigest: try current?.entry.commit.policyDigest
+                ?? digest(0x9C),
+            currentPolicyEpoch: current?.entry.commit.policyEpoch
+                ?? original.commit.policyEpoch - 1,
+            currentGenerationID: current?.entry.commit.generationID
+                ?? SecretGenerationID(uuid(0x9D)),
+            currentRecoveryRecipient: current?.entry.records.signedPolicy
+                .policy.recoveryRecipient ?? currentRecovery,
             replacementDeviceID: replacementCredential.deviceID,
             replacementCredentialID: replacementCredential.credentialID,
             replacementSigningPublicKey: replacementCredential.signingPublicKey,
@@ -908,6 +916,85 @@ struct U5PolicyFixture: Sendable {
     }
 }
 
+/// Boundary fixture for CloudKit publication tests.
+///
+/// Core recovery tests separately prove that only the full validator can
+/// construct the committed snapshot. This `@testable` fixture starts from that
+/// post-validation shape so the CloudKit suite can isolate final-CAS timing,
+/// cancellation, and one-shot behavior without duplicating cryptographic
+/// verification fixtures.
+struct U6RecoveryPolicyFixture: Sendable {
+    let current: U5PolicyFixture
+    let candidate: U5PolicyFixture
+    let entry: SecretPolicyStoreEntry
+    let snapshot: SecretControlSnapshot
+    let precondition: SecretPolicyAdvancePrecondition
+
+    static func make(
+        issuedAtMilliseconds: UInt64 = 1_000,
+        expiresAtMilliseconds: UInt64 = 2_000,
+        candidateGenerationByte: UInt8 = 0x62
+    ) throws -> U6RecoveryPolicyFixture {
+        let current = try U5PolicyFixture.make(generationByte: 0x61)
+        let candidate = try U5PolicyFixture.make(
+            previous: current,
+            generationByte: candidateGenerationByte
+        )
+        let entry = try U5PolicyFixture.entryWithRecoveryAuthorization(
+            candidate,
+            current: current,
+            issuedAtMilliseconds: issuedAtMilliseconds,
+            expiresAtMilliseconds: expiresAtMilliseconds
+        )
+        let snapshot = try SecretControlSnapshot(
+            commit: entry.commit,
+            records: entry.records.committedCopy(),
+            trustedDeviceRecords: entry.trustRecords
+        )
+        let expected = try SecretPolicyStoreHead(
+            scopeID: current.entry.commit.scopeID,
+            policyEpoch: current.entry.commit.policyEpoch,
+            commitDigest: current.entry.commit.recordDigest,
+            policyDigest: current.entry.commit.policyDigest
+        )
+        let precondition = try SecretPolicyAdvancePrecondition(
+            expectedHead: expected,
+            candidateEntry: entry,
+            validatedSnapshot: snapshot
+        )
+        return U6RecoveryPolicyFixture(
+            current: current,
+            candidate: candidate,
+            entry: entry,
+            snapshot: snapshot,
+            precondition: precondition
+        )
+    }
+}
+
+final class U6ClockProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let value: UInt64
+    private var reads = 0
+
+    init(_ value: UInt64) {
+        self.value = value
+    }
+
+    func read() -> UInt64 {
+        lock.lock()
+        reads += 1
+        lock.unlock()
+        return value
+    }
+
+    var readCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return reads
+    }
+}
+
 struct U5DeterministicDigester: SecretSyncDigesting {
     func digest(canonicalBytes: Data) throws -> SecretRecordDigest {
         var bytes = [UInt8](repeating: 0, count: SecretRecordDigest.byteCount)
@@ -947,6 +1034,16 @@ actor U5ScriptedDatabase: CloudKitDatabaseProtocol {
     private var failNextHeadCAS = false
     private var failNextFetchTransport = false
     private var injectUnexpectedFetchResult = false
+    private var suspendedHeadFetchID: CKRecord.ID?
+    private var headFetchIsSuspended = false
+    private var headFetchContinuation: CheckedContinuation<Void, Never>?
+    private var headFetchWaiters: [CheckedContinuation<Void, Never>] = []
+    private var suspendNextHeadCAS = false
+    private var headCASIsSuspended = false
+    private var headCASContinuation: CheckedContinuation<Void, Never>?
+    private var headCASWaiters: [CheckedContinuation<Void, Never>] = []
+    private var failNextHeadCASTransportBeforeSave = false
+    private var failNextHeadCASAmbiguouslyAfterSave = false
 
     var savedHeadCount: Int {
         records.values.filter {
@@ -968,6 +1065,48 @@ actor U5ScriptedDatabase: CloudKitDatabaseProtocol {
     }
     func setInjectUnexpectedFetchResult(_ value: Bool) {
         injectUnexpectedFetchResult = value
+    }
+
+    func suspendNextHeadFetch(scopeID: SecretScopeID) {
+        suspendedHeadFetchID = Self.headID(scopeID)
+    }
+
+    func waitForHeadFetchSuspension() async {
+        if headFetchIsSuspended { return }
+        await withCheckedContinuation { continuation in
+            headFetchWaiters.append(continuation)
+        }
+    }
+
+    func resumeHeadFetch() {
+        headFetchContinuation?.resume()
+        headFetchContinuation = nil
+        headFetchIsSuspended = false
+    }
+
+    func setSuspendNextHeadCAS(_ value: Bool) {
+        suspendNextHeadCAS = value
+    }
+
+    func waitForHeadCASSuspension() async {
+        if headCASIsSuspended { return }
+        await withCheckedContinuation { continuation in
+            headCASWaiters.append(continuation)
+        }
+    }
+
+    func resumeHeadCAS() {
+        headCASContinuation?.resume()
+        headCASContinuation = nil
+        headCASIsSuspended = false
+    }
+
+    func setFailNextHeadCASTransportBeforeSave(_ value: Bool) {
+        failNextHeadCASTransportBeforeSave = value
+    }
+
+    func setFailNextHeadCASAmbiguouslyAfterSave(_ value: Bool) {
+        failNextHeadCASAmbiguouslyAfterSave = value
     }
 
     func removeHead(scopeID: SecretScopeID) {
@@ -1021,6 +1160,34 @@ actor U5ScriptedDatabase: CloudKitDatabaseProtocol {
                 preservedHeadChangeTag = preservedHeadChangeTag
                     || record.recordChangeTag == existing.recordChangeTag
             }
+            if record.recordType
+                == SecretSyncCloudKitRecordType.scopeHead.rawValue,
+                suspendNextHeadCAS
+            {
+                suspendNextHeadCAS = false
+                headCASIsSuspended = true
+                let waiters = headCASWaiters
+                headCASWaiters.removeAll()
+                waiters.forEach { $0.resume() }
+                await withCheckedContinuation { continuation in
+                    headCASContinuation = continuation
+                }
+            }
+            if record.recordType
+                == SecretSyncCloudKitRecordType.scopeHead.rawValue,
+                failNextHeadCASTransportBeforeSave
+            {
+                failNextHeadCASTransportBeforeSave = false
+                throw CKError(.networkFailure)
+            }
+            if record.recordType
+                == SecretSyncCloudKitRecordType.scopeHead.rawValue,
+                failNextHeadCASAmbiguouslyAfterSave
+            {
+                failNextHeadCASAmbiguouslyAfterSave = false
+                records[record.recordID] = record
+                throw CKError(.networkFailure)
+            }
             if record.recordType == SecretSyncCloudKitRecordType.scopeHead.rawValue,
                failNextHeadCAS
             {
@@ -1064,6 +1231,18 @@ actor U5ScriptedDatabase: CloudKitDatabaseProtocol {
     func fetch(
         withRecordIDs recordIDs: [CKRecord.ID]
     ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
+        if let suspendedHeadFetchID,
+           recordIDs == [suspendedHeadFetchID]
+        {
+            self.suspendedHeadFetchID = nil
+            headFetchIsSuspended = true
+            let waiters = headFetchWaiters
+            headFetchWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { continuation in
+                headFetchContinuation = continuation
+            }
+        }
         if failNextFetchTransport {
             failNextFetchTransport = false
             throw CKError(.networkFailure)

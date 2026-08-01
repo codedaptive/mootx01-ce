@@ -35,6 +35,23 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         self.headCAS = SecretSyncHeadCAS(database: database, digester: digester)
     }
 
+    /// Deterministic construction seam for package tests. Production callers
+    /// use the public two-argument initializer and cannot inject or backdate
+    /// the recovery authority's time source.
+    init(
+        database: any CloudKitDatabaseProtocol,
+        digester: any SecretSyncDigesting,
+        recoveryTimeSource: @escaping @Sendable () -> UInt64
+    ) {
+        self.database = database
+        self.digester = digester
+        self.headCAS = SecretSyncHeadCAS(
+            database: database,
+            digester: digester,
+            recoveryTimeSource: recoveryTimeSource
+        )
+    }
+
     public func stagedPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
@@ -249,6 +266,13 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         }
     }
 
+    /// Cancel a recovery capability before its final head CAS is issued.
+    public func cancelRecoveryAdvance(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) async -> SecretRecoveryAdvanceCancellationResult {
+        await headCAS.cancelRecoveryAdvance(precondition)
+    }
+
     /// Reconstruct one exact staged entry from a transition-commit digest.
     public func reconstructPolicy(
         commitDigest: SecretRecordDigest
@@ -265,6 +289,19 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         }
         if current == precondition.candidateHead {
             return .advanced(current)
+        }
+        // A recovery capability is consumed before its one issued CAS. A
+        // conflict whose refetched head is not the exact candidate terminates
+        // this operation; it never enters the normal stale-tag retry path.
+        if precondition.recoveryPublicationCapability != nil {
+            guard current != precondition.expectedHead else {
+                throw SecretSyncCloudKitPolicyStoreError
+                    .conditionalWriteConflict
+            }
+            return .forkDetected(
+                currentHead: current,
+                competingCommitDigest: precondition.candidateHead.commitDigest
+            )
         }
         guard current == precondition.expectedHead else {
             return .forkDetected(

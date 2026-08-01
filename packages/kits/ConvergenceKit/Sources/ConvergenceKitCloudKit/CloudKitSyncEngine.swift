@@ -166,6 +166,14 @@ public final class CloudKitSyncEngine: SyncEngine, Sendable {
             .compareAndAdvance(precondition)
     }
 
+    /// Cancel a full-loss recovery before its final head write is issued.
+    public func cancelSecretSyncRecoveryPolicyAdvance(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) async throws -> SecretRecoveryAdvanceCancellationResult {
+        try await stateActor.secretSyncPolicyStore()
+            .cancelRecoveryAdvance(precondition)
+    }
+
     /// Read the exact current transport head without treating it as authority.
     public func secretSyncPolicyHead(
         for scopeID: SecretScopeID

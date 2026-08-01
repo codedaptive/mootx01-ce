@@ -9,6 +9,11 @@ public enum SecretSyncHeadCASError: Error, Sendable, Equatable {
     case rollbackDetected
     case conditionalWriteFailed
     case transportFailure
+    case recoveryCapabilityMismatch
+    case recoveryAuthorizationNotYetValid
+    case recoveryAuthorizationExpired
+    case recoveryPublicationCancelled
+    case recoveryCapabilityConsumed
 }
 
 enum SecretSyncHeadCASAttempt: Sendable {
@@ -24,6 +29,11 @@ enum SecretSyncHeadCASAttempt: Sendable {
 public actor SecretSyncHeadCAS {
     private let database: any CloudKitDatabaseProtocol
     private let digester: any SecretSyncDigesting
+    private let recoveryTimeSource: @Sendable () -> UInt64
+    private var cancelledRecoveryCapabilities:
+        Set<SecretRecoveryPublicationCapability> = []
+    private var consumedRecoveryCapabilities:
+        Set<SecretRecoveryPublicationCapability> = []
 
     public init(
         database: any CloudKitDatabaseProtocol,
@@ -31,6 +41,23 @@ public actor SecretSyncHeadCAS {
     ) {
         self.database = database
         self.digester = digester
+        // Recovery authorization timestamps are Unix wall-time milliseconds.
+        // The production authority therefore trusts the platform wall clock;
+        // privileged clock rollback remains outside this threat model.
+        self.recoveryTimeSource = {
+            let milliseconds = Date().timeIntervalSince1970 * 1_000
+            return milliseconds > 0 ? UInt64(milliseconds) : 0
+        }
+    }
+
+    init(
+        database: any CloudKitDatabaseProtocol,
+        digester: any SecretSyncDigesting,
+        recoveryTimeSource: @escaping @Sendable () -> UInt64
+    ) {
+        self.database = database
+        self.digester = digester
+        self.recoveryTimeSource = recoveryTimeSource
     }
 
     public func currentHead(
@@ -94,6 +121,13 @@ public actor SecretSyncHeadCAS {
             )
         }
 
+        // This is the recovery publication linearization boundary. It runs
+        // after the awaited fetch and record construction. The owned clock
+        // sample, validity check, cancellation check, and one-shot consumption
+        // are synchronous actor-isolated operations immediately before the
+        // single database invocation below.
+        try admitRecoveryPublicationIfNeeded(precondition)
+
         let result: (
             saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
             deleteResults: [CKRecord.ID: Result<Void, any Error>]
@@ -104,6 +138,18 @@ public actor SecretSyncHeadCAS {
                 digester: digester
             )
         } catch {
+            // A thrown transport result is ambiguous: CloudKit may have
+            // accepted the conditional write. Recovery never reissues the
+            // consumed capability; only the exact candidate head can classify
+            // this one issued attempt as successful.
+            if precondition.recoveryPublicationCapability != nil,
+               let authoritative = try? await currentHead(
+                   for: precondition.candidateHead.scopeID
+               ),
+               authoritative == precondition.candidateHead
+            {
+                return .advanced(authoritative)
+            }
             throw SecretSyncHeadCASError.transportFailure
         }
         guard let item = result.saveResults[recordToSave.recordID] else {
@@ -121,6 +167,49 @@ public actor SecretSyncHeadCAS {
                 )
             }
             throw SecretSyncHeadCASError.conditionalWriteFailed
+        }
+    }
+
+    func cancelRecoveryAdvance(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) -> SecretRecoveryAdvanceCancellationResult {
+        guard let capability = precondition.recoveryPublicationCapability else {
+            return .notRecovery
+        }
+        guard !consumedRecoveryCapabilities.contains(capability) else {
+            return .tooLate
+        }
+        cancelledRecoveryCapabilities.insert(capability)
+        return .cancelled
+    }
+
+    private func admitRecoveryPublicationIfNeeded(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) throws {
+        guard let capability = precondition.recoveryPublicationCapability else {
+            return
+        }
+        guard let authorization = precondition.candidateEntry.records
+                .recoveryAuthorization,
+              capability.matches(
+                  authorization: authorization,
+                  candidateHead: precondition.candidateHead
+              )
+        else {
+            throw SecretSyncHeadCASError.recoveryCapabilityMismatch
+        }
+        let nowMilliseconds = recoveryTimeSource()
+        guard nowMilliseconds >= capability.issuedAtMilliseconds else {
+            throw SecretSyncHeadCASError.recoveryAuthorizationNotYetValid
+        }
+        guard nowMilliseconds < capability.expiresAtMilliseconds else {
+            throw SecretSyncHeadCASError.recoveryAuthorizationExpired
+        }
+        guard !cancelledRecoveryCapabilities.contains(capability) else {
+            throw SecretSyncHeadCASError.recoveryPublicationCancelled
+        }
+        guard consumedRecoveryCapabilities.insert(capability).inserted else {
+            throw SecretSyncHeadCASError.recoveryCapabilityConsumed
         }
     }
 

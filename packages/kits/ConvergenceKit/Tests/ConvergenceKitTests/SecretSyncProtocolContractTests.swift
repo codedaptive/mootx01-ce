@@ -58,7 +58,11 @@ struct SecretSyncProtocolContractTests {
             candidateEntry: entry,
             validatedSnapshot: snapshot
         )
+        #expect(precondition.recoveryPublicationCapability == nil)
         let store = PolicyStoreFake()
+        #expect(
+            await store.cancelRecoveryAdvance(precondition) == .notRecovery
+        )
         await #expect(throws: SecretSyncInterfaceError.self) {
             try await store.compareAndAdvance(precondition)
         }
@@ -693,6 +697,14 @@ private actor PolicyStoreFake: SecretSyncPolicyStore {
         )
         stagedEntry = nil
         return .advanced(candidate)
+    }
+
+    func cancelRecoveryAdvance(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) async -> SecretRecoveryAdvanceCancellationResult {
+        precondition.recoveryPublicationCapability == nil
+            ? .notRecovery
+            : .cancelled
     }
 }
 

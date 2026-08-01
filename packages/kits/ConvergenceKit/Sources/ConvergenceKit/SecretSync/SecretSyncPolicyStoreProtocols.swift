@@ -23,6 +23,67 @@ public struct SecretPolicyStoreHead: Sendable, Hashable {
     }
 }
 
+/// Validator-bound authority for one final full-loss recovery publication.
+///
+/// The type deliberately has no public initializer. A caller can retain or
+/// copy the value embedded in a policy precondition, but cannot manufacture a
+/// different authorization, session, time window, or candidate binding.
+public struct SecretRecoveryPublicationCapability: Sendable, Hashable {
+    public let recoveryAuthorizationDigest: SecretRecordDigest
+    public let scopeID: SecretScopeID
+    public let candidatePolicyEpoch: UInt64
+    public let candidateCommitDigest: SecretRecordDigest
+    public let candidatePolicyDigest: SecretRecordDigest
+    public let requestID: UUID
+    public let challengeID: UUID
+    public let sessionID: UUID
+    public let issuedAtMilliseconds: UInt64
+    public let expiresAtMilliseconds: UInt64
+
+    init(
+        authorization: FullLossRecoveryAuthorization,
+        candidateHead: SecretPolicyStoreHead
+    ) {
+        let challenge = authorization.intent.challenge
+        self.recoveryAuthorizationDigest = authorization.recordDigest
+        self.scopeID = candidateHead.scopeID
+        self.candidatePolicyEpoch = candidateHead.policyEpoch
+        self.candidateCommitDigest = candidateHead.commitDigest
+        self.candidatePolicyDigest = candidateHead.policyDigest
+        self.requestID = challenge.requestID
+        self.challengeID = challenge.challengeID
+        self.sessionID = challenge.sessionID
+        self.issuedAtMilliseconds = challenge.issuedAtMilliseconds
+        self.expiresAtMilliseconds = challenge.expiresAtMilliseconds
+    }
+
+    /// Confirms that reconstructed CloudKit authority still agrees with every
+    /// value captured when the validator-produced precondition was created.
+    public func matches(
+        authorization: FullLossRecoveryAuthorization,
+        candidateHead: SecretPolicyStoreHead
+    ) -> Bool {
+        let challenge = authorization.intent.challenge
+        return recoveryAuthorizationDigest == authorization.recordDigest
+            && scopeID == candidateHead.scopeID
+            && candidatePolicyEpoch == candidateHead.policyEpoch
+            && candidateCommitDigest == candidateHead.commitDigest
+            && candidatePolicyDigest == candidateHead.policyDigest
+            && requestID == challenge.requestID
+            && challengeID == challenge.challengeID
+            && sessionID == challenge.sessionID
+            && issuedAtMilliseconds == challenge.issuedAtMilliseconds
+            && expiresAtMilliseconds == challenge.expiresAtMilliseconds
+    }
+}
+
+/// Truthful result from cancelling one live recovery publication capability.
+public enum SecretRecoveryAdvanceCancellationResult: Sendable, Hashable {
+    case cancelled
+    case tooLate
+    case notRecovery
+}
+
 /// Exact staged and validator-produced authority for a monotonic policy append.
 ///
 /// External callers cannot construct `SecretControlSnapshot`; they can only
@@ -33,6 +94,8 @@ public struct SecretPolicyAdvancePrecondition: Sendable, Hashable {
     public let validatedSnapshot: SecretControlSnapshot
     public let candidateHead: SecretPolicyStoreHead
     public let predecessorCommitDigest: SecretRecordDigest?
+    public let recoveryPublicationCapability:
+        SecretRecoveryPublicationCapability?
 
     public init(
         expectedHead: SecretPolicyStoreHead?,
@@ -74,11 +137,44 @@ public struct SecretPolicyAdvancePrecondition: Sendable, Hashable {
                 throw SecretSyncInterfaceError.invalidPolicyAdvancePrecondition
             }
         }
+        let recoveryPublicationCapability:
+            SecretRecoveryPublicationCapability?
+        if let authorization = candidateEntry.records.recoveryAuthorization {
+            let intent = authorization.intent
+            guard let expectedHead,
+                  commit.recoveryAuthorizationDigest
+                    == authorization.recordDigest,
+                  intent.scopeID == candidateHead.scopeID,
+                  intent.currentCommitDigest == expectedHead.commitDigest,
+                  intent.currentPolicyDigest == expectedHead.policyDigest,
+                  intent.currentPolicyEpoch == expectedHead.policyEpoch,
+                  intent.candidatePolicyEpoch == candidateHead.policyEpoch,
+                  intent.candidateGenerationID == commit.generationID,
+                  intent.candidateSignedPolicyDigest
+                    == candidateHead.policyDigest,
+                  intent.recoveryEnvelopeDigest
+                    == commit.recoveryEnvelopeDigest,
+                  intent.replacementRecoveryRecipient
+                    == candidateEntry.records.signedPolicy.policy
+                        .recoveryRecipient
+            else {
+                throw SecretSyncInterfaceError
+                    .invalidPolicyAdvancePrecondition
+            }
+            recoveryPublicationCapability =
+                SecretRecoveryPublicationCapability(
+                    authorization: authorization,
+                    candidateHead: candidateHead
+                )
+        } else {
+            recoveryPublicationCapability = nil
+        }
         self.expectedHead = expectedHead
         self.candidateEntry = candidateEntry
         self.validatedSnapshot = validatedSnapshot
         self.candidateHead = candidateHead
         self.predecessorCommitDigest = predecessorCommitDigest
+        self.recoveryPublicationCapability = recoveryPublicationCapability
     }
 }
 
@@ -192,4 +288,9 @@ public protocol SecretSyncPolicyStore: Sendable {
     func compareAndAdvance(
         _ precondition: SecretPolicyAdvancePrecondition
     ) async throws -> SecretPolicyAdvanceResult
+
+    /// Cancels a full-loss recovery before its final head write is issued.
+    func cancelRecoveryAdvance(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) async -> SecretRecoveryAdvanceCancellationResult
 }
