@@ -275,6 +275,16 @@ struct SecretSyncRecoveryAuthorityContractTests {
         }
     }
 
+    @Test("replacement enrollment binds the exact recovery challenge nonce")
+    func replacementEnrollmentRejectsWrongChallengeBytes() throws {
+        let fixture = try FullLossFixture.make(
+            enrollmentChallengeBytes: Data(repeating: 0x98, count: 16)
+        )
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
     @Test("empty replacement-key possession proofs cannot form an intent")
     func absentPossessionProofsRejectIndependently() {
         expectAnyRejection {
@@ -491,6 +501,7 @@ private struct FullLossFixture {
         keyCollision: GlobalKeyCollision? = nil,
         signingPossessionProof: Data = Data([0x52]),
         agreementPossessionProof: Data = Data([0x53]),
+        enrollmentChallengeBytes: Data? = nil,
         graphMutation: RecoveryGraphMutation? = nil
     ) throws -> FullLossFixture {
         let digester = RecoveryAuthorityDigester()
@@ -632,7 +643,8 @@ private struct FullLossFixture {
             reuse: deviceReuse,
             keyCollision: keyCollision,
             signingPossessionProof: signingPossessionProof,
-            agreementPossessionProof: agreementPossessionProof
+            agreementPossessionProof: agreementPossessionProof,
+            enrollmentChallengeBytes: enrollmentChallengeBytes
         )
         let replacementCredentialDigest = try digester.digest(
             canonicalBytes: replacement.canonicalBytes()
@@ -986,7 +998,8 @@ private func recoveryCredential(
     reuse: ReplacementCredentialReuse,
     keyCollision: GlobalKeyCollision?,
     signingPossessionProof: Data,
-    agreementPossessionProof: Data
+    agreementPossessionProof: Data,
+    enrollmentChallengeBytes: Data?
 ) throws -> TrustedDeviceCredential {
     let deviceID = reuse == .deviceID
         ? priorCredential.deviceID
@@ -1057,7 +1070,7 @@ private func recoveryCredential(
         keyAgreementPublicKey: agreementPublicKey,
         enrollmentProof: DeviceCredentialEnrollmentProof(
             challengeID: challenge.challengeID,
-            challengeBytes: challenge.nonce,
+            challengeBytes: enrollmentChallengeBytes ?? challenge.nonce,
             signingProofBytes: signingPossessionProof,
             keyAgreementProofBytes: agreementPossessionProof,
             provenance: .globalRecovery(

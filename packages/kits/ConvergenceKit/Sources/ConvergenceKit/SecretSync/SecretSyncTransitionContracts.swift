@@ -1331,6 +1331,8 @@ public enum SecretPolicyValidator {
             priorPublicKeyBytes.isDisjoint(with: replacementPublicKeyByteSet),
             replacement.enrollmentProof.challengeID
                 == intent.challenge.challengeID,
+            replacement.enrollmentProof.challengeBytes
+                == intent.challenge.nonce,
             replacement.enrollmentProof.signingProofBytes
                 == intent.signingPossessionProof,
             replacement.enrollmentProof.keyAgreementProofBytes
