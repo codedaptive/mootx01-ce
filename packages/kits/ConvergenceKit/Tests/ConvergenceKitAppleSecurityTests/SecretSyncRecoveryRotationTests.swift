@@ -382,6 +382,149 @@ struct SecretSyncRecoveryRotationTests {
     }
   }
 
+  @Test("coordinated request and intent substitutions fail at live custody")
+  func coordinatedBreakGlassSubstitutions() async throws {
+    for mutation in U6BCoordinatedMutation.allCases {
+      let fixture = U6BFixture()
+      let custody = fixture.custody()
+      let current = try await enroll(custody, fixture: fixture)
+      let confirmed = try await confirmedBreakGlass(
+        custody,
+        fixture: fixture,
+        current: current
+      )
+      let exactRequest = try breakGlassRequest(
+        confirmed,
+        fixture: fixture,
+        current: current
+      )
+      let exactIntent = try makeU6BIntent(
+        fixture: fixture,
+        handle: confirmed.handle,
+        current: current
+      )
+
+      var changedRequestID = exactRequest.requestID
+      var changedScope = exactRequest.scopeID
+      var changedRecoveryID = exactRequest.recoveryRecipientID
+      var changedGeneration = exactRequest.sealedGenerationID
+      var changedFreshness = exactRequest.expectedFreshnessCommitment
+      var changedEvidence = exactRequest.blindConfirmation
+      var changedIntent = exactIntent
+
+      switch mutation {
+      case .request:
+        changedRequestID = UUID()
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          challengeRequestID: changedRequestID
+        )
+      case .scope:
+        changedScope = SecretScopeID(UUID())
+        changedFreshness = try SecretBootstrapFreshnessCommitment(
+          scopeID: changedScope,
+          latestPolicyEpoch: fixture.freshness.latestPolicyEpoch,
+          headCommitDigest: fixture.freshness.headCommitDigest,
+          policyDigest: fixture.freshness.policyDigest
+        )
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          scopeID: changedScope
+        )
+      case .generation:
+        changedGeneration = SecretGenerationID(UUID())
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          currentGenerationID: changedGeneration
+        )
+      case .freshnessEpoch:
+        changedFreshness = try changedU6BFreshness(
+          fixture.freshness,
+          epoch: fixture.freshness.latestPolicyEpoch + 1
+        )
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          currentPolicyEpoch: changedFreshness.latestPolicyEpoch
+        )
+      case .freshnessHead:
+        let digest = try SecretRecordDigest(
+          bytes: Data(repeating: 0xa1, count: 32)
+        )
+        changedFreshness = try changedU6BFreshness(
+          fixture.freshness,
+          head: digest
+        )
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          currentCommitDigest: digest
+        )
+      case .freshnessPolicy:
+        let digest = try SecretRecordDigest(
+          bytes: Data(repeating: 0xa2, count: 32)
+        )
+        changedFreshness = try changedU6BFreshness(
+          fixture.freshness,
+          policy: digest
+        )
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          currentPolicyDigest: digest
+        )
+      case .recoveryIdentity:
+        changedRecoveryID = UUID()
+        let changedDescriptor = try RecoveryRecipientDescriptor(
+          recoveryRecipientID: changedRecoveryID,
+          keyAgreementPublicKey: current.keyAgreementPublicKey,
+          authorizationSigningPublicKey:
+            current.authorizationSigningPublicKey
+        )
+        changedEvidence = try BlindRecoveryConfirmationEvidence(
+          recoveryRecipientID: changedRecoveryID,
+          challengeID: confirmed.evidence.challengeID,
+          evidenceBytes: confirmed.evidence.evidenceBytes
+        )
+        changedIntent = try makeU6BIntent(
+          fixture: fixture,
+          handle: confirmed.handle,
+          current: current,
+          currentRecoveryRecipient: changedDescriptor
+        )
+      }
+      let changedRequest = try BreakGlassRecoveryRequest(
+        requestID: changedRequestID,
+        scopeID: changedScope,
+        recoveryRecipientID: changedRecoveryID,
+        sealedGenerationID: changedGeneration,
+        expectedFreshnessCommitment: changedFreshness,
+        blindConfirmation: changedEvidence
+      )
+      await #expect(throws: SecretSyncRecoveryError.invalidConfirmation) {
+        _ = try await custody.stageBreakGlassAuthorization(
+          changedRequest,
+          intent: changedIntent,
+          freshnessAnchor: U6BFreshnessAnchor(commitment: changedFreshness)
+        )
+      }
+      _ = try await custody.stageBreakGlassAuthorization(
+        exactRequest,
+        intent: exactIntent,
+        freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
+      )
+    }
+  }
+
   @Test("concurrent break-glass paths admit exactly one terminal operation")
   func breakGlassConcurrentCrossMethod() async throws {
     let fixture = U6BFixture()
@@ -551,6 +694,16 @@ private enum U6BIntentMutation: CaseIterable {
   case policy
 }
 
+private enum U6BCoordinatedMutation: CaseIterable {
+  case request
+  case scope
+  case generation
+  case freshnessEpoch
+  case freshnessHead
+  case freshnessPolicy
+  case recoveryIdentity
+}
+
 func makeU6BIntent(
   fixture: U6BFixture,
   handle: SecretSyncRecoveryConfirmationHandle,
@@ -640,5 +793,19 @@ func makeU6BIntent(
     replacementRecoveryRecipient: replacement,
     recoveryEnvelopeDigest: recoveryEnvelope,
     candidateSemantics: semantics
+  )
+}
+
+private func changedU6BFreshness(
+  _ original: SecretBootstrapFreshnessCommitment,
+  epoch: UInt64? = nil,
+  head: SecretRecordDigest? = nil,
+  policy: SecretRecordDigest? = nil
+) throws -> SecretBootstrapFreshnessCommitment {
+  try SecretBootstrapFreshnessCommitment(
+    scopeID: original.scopeID,
+    latestPolicyEpoch: epoch ?? original.latestPolicyEpoch,
+    headCommitDigest: head ?? original.headCommitDigest,
+    policyDigest: policy ?? original.policyDigest
   )
 }
