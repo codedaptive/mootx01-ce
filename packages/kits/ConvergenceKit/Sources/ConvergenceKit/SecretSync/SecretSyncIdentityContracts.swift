@@ -220,7 +220,8 @@ public struct GlobalRecoveryEnrollmentAuthority:
     }
 }
 
-/// Type-distinct enrollment provenance; transport never selects a case.
+/// Type-distinct enrollment provenance decoded by transport without granting
+/// or choosing the authority represented by either case.
 public enum DeviceCredentialEnrollmentProvenance:
     Sendable,
     Codable,

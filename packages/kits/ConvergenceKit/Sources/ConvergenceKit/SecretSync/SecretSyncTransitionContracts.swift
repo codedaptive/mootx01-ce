@@ -1260,15 +1260,75 @@ public enum SecretPolicyValidator {
     ) throws {
         let replacementID = intent.replacementCredentialID
         let newIDs = Set(candidateTrust.keys).subtracting(currentTrust.keys)
+        let priorCredentials = credentialsByID.values.filter {
+            $0.credentialID != replacementID
+        }
+        let priorDeviceIDs = Set(priorCredentials.map(\.deviceID))
+        let priorKeyIdentifiers = Set(
+            priorCredentials.flatMap {
+                [
+                    $0.signingPublicKey.keyIdentifier,
+                    $0.keyAgreementPublicKey.keyIdentifier,
+                ]
+            }
+                + [
+                    intent.currentRecoveryRecipient.keyAgreementPublicKey
+                        .keyIdentifier,
+                    intent.currentRecoveryRecipient
+                        .authorizationSigningPublicKey.keyIdentifier,
+                ]
+        )
+        let priorPublicKeyBytes = Set(
+            priorCredentials.flatMap {
+                [
+                    $0.signingPublicKey.publicKeyBytes,
+                    $0.keyAgreementPublicKey.publicKeyBytes,
+                ]
+            }
+                + [
+                    intent.currentRecoveryRecipient.keyAgreementPublicKey
+                        .publicKeyBytes,
+                    intent.currentRecoveryRecipient
+                        .authorizationSigningPublicKey.publicKeyBytes,
+                ]
+        )
+        let replacementKeyIdentifiers = [
+            intent.replacementSigningPublicKey.keyIdentifier,
+            intent.replacementAgreementPublicKey.keyIdentifier,
+            intent.replacementRecoveryRecipient.keyAgreementPublicKey
+                .keyIdentifier,
+            intent.replacementRecoveryRecipient.authorizationSigningPublicKey
+                .keyIdentifier,
+        ]
+        let replacementPublicKeyBytes = [
+            intent.replacementSigningPublicKey.publicKeyBytes,
+            intent.replacementAgreementPublicKey.publicKeyBytes,
+            intent.replacementRecoveryRecipient.keyAgreementPublicKey
+                .publicKeyBytes,
+            intent.replacementRecoveryRecipient.authorizationSigningPublicKey
+                .publicKeyBytes,
+        ]
+        // Every cryptographic role receives independent material. Comparing
+        // both identifiers and encoded keys prevents a renamed key from
+        // crossing device, agreement, authorization, or recovery roles.
+        let replacementKeyIdentifierSet = Set(replacementKeyIdentifiers)
+        let replacementPublicKeyByteSet = Set(replacementPublicKeyBytes)
         guard
             newIDs == Set([replacementID]),
             Set(credentialsByID.keys) == Set(candidateTrust.keys),
             let replacement = credentialsByID[replacementID],
             replacement.status == .active,
             replacement.deviceID == intent.replacementDeviceID,
+            !priorDeviceIDs.contains(replacement.deviceID),
             replacement.signingPublicKey == intent.replacementSigningPublicKey,
             replacement.keyAgreementPublicKey
                 == intent.replacementAgreementPublicKey,
+            replacementKeyIdentifierSet.count
+                == replacementKeyIdentifiers.count,
+            replacementPublicKeyByteSet.count
+                == replacementPublicKeyBytes.count,
+            priorKeyIdentifiers.isDisjoint(with: replacementKeyIdentifierSet),
+            priorPublicKeyBytes.isDisjoint(with: replacementPublicKeyByteSet),
             replacement.enrollmentProof.challengeID
                 == intent.challenge.challengeID,
             replacement.enrollmentProof.signingProofBytes
@@ -1314,7 +1374,8 @@ public enum SecretPolicyValidator {
             policy.authorizedRecipientCredentialIDs
                 == [intent.replacementCredentialID],
             policy.recoveryRecipient == intent.replacementRecoveryRecipient,
-            intent.replacementRecoveryRecipient != intent.currentRecoveryRecipient,
+            intent.replacementRecoveryRecipient.recoveryRecipientID
+                != intent.currentRecoveryRecipient.recoveryRecipientID,
             records.recipientEnvelopes.count == 1,
             records.recipientEnvelopes.first?.recipientCredentialID
                 == intent.replacementCredentialID,

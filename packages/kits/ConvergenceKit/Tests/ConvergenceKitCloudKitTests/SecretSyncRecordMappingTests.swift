@@ -221,6 +221,124 @@ struct SecretSyncRecordMappingTests {
         }
     }
 
+    @Test("full-loss authorization schema and immutable identity fail closed")
+    func recoveryAuthorizationSchemaFailsClosed() throws {
+        let digester = U4TestDigester()
+        let authorizationFields = U4CanonicalFixture.fields(
+            for: .fullLossRecoveryAuthorization
+        )
+        let authorizationBytes = try SecretSyncCanonicalEncoding.encode(
+            domain: .fullLossRecoveryAuthorization,
+            fields: authorizationFields
+        )
+
+        let extraProofField = try SecretSyncCanonicalEncoding.encode(
+            domain: .fullLossRecoveryAuthorization,
+            fields: authorizationFields
+                + [.init(tag: 3, value: Data([0x01]))]
+        )
+        #expect(throws: SecretSyncCloudKitError.canonicalSchemaViolation) {
+            _ = try SecretSyncCloudKitImmutableRecord(
+                type: .fullLossRecoveryAuthorization,
+                digest: digester.digest(canonicalBytes: extraProofField),
+                canonicalBytes: extraProofField,
+                digester: digester
+            )
+        }
+
+        #expect(throws: SecretSyncContractError.duplicateField(tag: 2)) {
+            _ = try SecretSyncCanonicalEncoding.encode(
+                domain: .fullLossRecoveryAuthorization,
+                fields: authorizationFields
+                    + [.init(tag: 2, value: Data([0x02]))]
+            )
+        }
+
+        let authorizationDocument = try SecretSyncCanonicalEncoding.decode(
+            authorizationBytes,
+            expectedDomain: .fullLossRecoveryAuthorization
+        )
+        let intentBytes = try #require(
+            authorizationDocument.fields.first { $0.tag == 1 }
+        ).value
+        let intentDocument = try SecretSyncCanonicalEncoding.decode(
+            intentBytes,
+            expectedDomain: .globalRecoveryTransitionIntent
+        )
+        let oldFourElementDescriptor = U4CanonicalFixture
+            .sequenceBytesForTesting([
+                U4CanonicalFixture.uuidBytesForTesting(0x61),
+                Data(
+                    RecoveryRecipientDescriptor.agreementAlgorithmIdentifier
+                        .utf8
+                ),
+                Data([0x62]),
+                Data([0x04]) + Data(repeating: 0x63, count: 64),
+            ])
+        let oldDescriptorIntent = try SecretSyncCanonicalEncoding.encode(
+            domain: .globalRecoveryTransitionIntent,
+            fields: intentDocument.fields.map {
+                $0.tag == 16
+                    ? .init(tag: 16, value: oldFourElementDescriptor)
+                    : $0
+            }
+        )
+        let oldDescriptorAuthorization = try SecretSyncCanonicalEncoding.encode(
+            domain: .fullLossRecoveryAuthorization,
+            fields: authorizationDocument.fields.map {
+                $0.tag == 1
+                    ? .init(tag: 1, value: oldDescriptorIntent)
+                    : $0
+            }
+        )
+        #expect(throws: SecretSyncCloudKitError.canonicalSchemaViolation) {
+            _ = try SecretSyncCloudKitImmutableRecord(
+                type: .fullLossRecoveryAuthorization,
+                digest: digester.digest(
+                    canonicalBytes: oldDescriptorAuthorization
+                ),
+                canonicalBytes: oldDescriptorAuthorization,
+                digester: digester
+            )
+        }
+
+        let constantDigester = U4ConstantDigester()
+        let alteredBytes = try SecretSyncCanonicalEncoding.encode(
+            domain: .fullLossRecoveryAuthorization,
+            fields: authorizationFields.map {
+                $0.tag == 2
+                    ? .init(tag: 2, value: Data([0xFE]))
+                    : $0
+            }
+        )
+        let constantDigest = try constantDigester.digest(
+            canonicalBytes: authorizationBytes
+        )
+        let first = try CKRecordMapping.secretSyncRecord(
+            SecretSyncCloudKitImmutableRecord(
+                type: .fullLossRecoveryAuthorization,
+                digest: constantDigest,
+                canonicalBytes: authorizationBytes,
+                digester: constantDigester
+            )
+        )
+        let collision = try CKRecordMapping.secretSyncRecord(
+            SecretSyncCloudKitImmutableRecord(
+                type: .fullLossRecoveryAuthorization,
+                digest: constantDigest,
+                canonicalBytes: alteredBytes,
+                digester: constantDigester
+            )
+        )
+        #expect(throws: SecretSyncCloudKitError.immutableCollision) {
+            try CKRecordMapping.validateSecretSyncImmutableIdempotency(
+                existing: first,
+                retry: collision,
+                digester: constantDigester
+            )
+        }
+    }
+
     @Test("scope head is the sole mutable mapping and update preserves the fetched object")
     func scopeHeadUpdatePreservesSystemFields() throws {
         let scopeID = SecretScopeID(U4CanonicalFixture.uuid(0x61))

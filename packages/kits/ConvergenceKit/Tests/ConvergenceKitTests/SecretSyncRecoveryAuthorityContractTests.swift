@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Testing
 
 @testable import ConvergenceKit
@@ -104,6 +105,69 @@ struct SecretSyncRecoveryAuthorityContractTests {
         }
     }
 
+    @Test("recovery proof, intent, and candidate semantics have fixed vectors")
+    func recoveryCanonicalVectorsAreFixed() throws {
+        let fixture = try FullLossFixture.make()
+        let authorization = try #require(
+            fixture.prepared.entry.records.recoveryAuthorization
+        )
+
+        #expect(
+            sha256Hex(
+                try authorization.intent.candidateSemantics.canonicalBytes()
+            ) == "096714a3d5ac30e8d139983b0be589c9f8edebc2a69a0e6297f6f4341a47443b"
+        )
+        #expect(
+            sha256Hex(try authorization.intent.canonicalBytes())
+                == "6ede9a5a69ac3d7c40d5639f690030b1d6511eaf230f7b6eeb9ded6b3b8466d8"
+        )
+        #expect(
+            sha256Hex(try authorization.canonicalBytes())
+                == "af4c81634e1b8dc9fc3fec2b6fc8d690d6ec12ed97dfff01e9dc71d5d03dacb5"
+        )
+    }
+
+    @Test(
+        "every intent transcript field changes the authorization input",
+        arguments: (1...31).map(UInt16.init)
+    )
+    func everyIntentFieldIsBound(_ tag: UInt16) throws {
+        let fixture = try FullLossFixture.make()
+        let authorization = try #require(
+            fixture.prepared.entry.records.recoveryAuthorization
+        )
+        let original = try authorization.intent.canonicalBytes()
+        let mutated = try mutateCanonicalField(
+            original,
+            domain: .globalRecoveryTransitionIntent,
+            tag: tag
+        )
+
+        #expect(mutated != original)
+        #expect(sha256Hex(mutated) != sha256Hex(original))
+    }
+
+    @Test(
+        "every candidate digest field changes the authorization input",
+        arguments: (1...9).map(UInt16.init)
+    )
+    func everyCandidateDigestFieldIsBound(_ tag: UInt16) throws {
+        let fixture = try FullLossFixture.make()
+        let authorization = try #require(
+            fixture.prepared.entry.records.recoveryAuthorization
+        )
+        let original = try authorization.intent.candidateSemantics
+            .canonicalBytes()
+        let mutated = try mutateCanonicalField(
+            original,
+            domain: .fullLossRecoveryCandidateSemantics,
+            tag: tag
+        )
+
+        #expect(mutated != original)
+        #expect(sha256Hex(mutated) != sha256Hex(original))
+    }
+
     @Test("recovery enrollment provenance cannot impersonate device authority")
     func typedEnrollmentProvenance() throws {
         let proof = try DeviceCredentialEnrollmentProof(
@@ -161,6 +225,8 @@ struct SecretSyncRecoveryAuthorityContractTests {
             _ = try fixture.validate(
                 recoveryVerifier: RecoveryAuthorityVerifier(
                     expectedAuthorizationKey: fixture.candidateRecoveryKey,
+                    expectedSigningKey: fixture.replacementSigningKey,
+                    expectedAgreementKey: fixture.replacementAgreementKey,
                     acceptSigningPossession: true,
                     acceptAgreementPossession: true
                 )
@@ -175,10 +241,47 @@ struct SecretSyncRecoveryAuthorityContractTests {
             _ = try fixture.validate(
                 recoveryVerifier: RecoveryAuthorityVerifier(
                     expectedAuthorizationKey: fixture.currentRecoveryKey,
+                    expectedSigningKey: fixture.replacementSigningKey,
+                    expectedAgreementKey: fixture.replacementAgreementKey,
                     acceptSigningPossession: true,
                     acceptAgreementPossession: false
                 )
             )
+        }
+    }
+
+    @Test("each replacement-key possession proof rejects independently")
+    func wrongPossessionProofsRejectIndependently() throws {
+        let wrongSigning = try FullLossFixture.make(
+            signingPossessionProof: Data([0x99])
+        )
+        expectPolicyError(.fullLossRecoveryProofRejected) {
+            _ = try wrongSigning.validate()
+        }
+
+        let wrongAgreement = try FullLossFixture.make(
+            agreementPossessionProof: Data([0x99])
+        )
+        expectPolicyError(.fullLossRecoveryProofRejected) {
+            _ = try wrongAgreement.validate()
+        }
+
+        let substituted = try FullLossFixture.make(
+            signingPossessionProof: Data([0x53]),
+            agreementPossessionProof: Data([0x52])
+        )
+        expectPolicyError(.fullLossRecoveryProofRejected) {
+            _ = try substituted.validate()
+        }
+    }
+
+    @Test("empty replacement-key possession proofs cannot form an intent")
+    func absentPossessionProofsRejectIndependently() {
+        expectAnyRejection {
+            _ = try FullLossFixture.make(signingPossessionProof: Data())
+        }
+        expectAnyRejection {
+            _ = try FullLossFixture.make(agreementPossessionProof: Data())
         }
     }
 
@@ -189,6 +292,28 @@ struct SecretSyncRecoveryAuthorityContractTests {
             _ = try fixture.validate(
                 knownCompetingChildDigests: [digest(0xF0)]
             )
+        }
+    }
+
+    @Test("an accepted proof cannot replay after the head advances")
+    func acceptedProofCannotReplayAfterCAS() throws {
+        let fixture = try FullLossFixture.make()
+        let accepted = try fixture.validate()
+        expectPolicyError(.replayedHead) {
+            _ = try fixture.validate(currentSnapshot: accepted)
+        }
+    }
+
+    @Test(
+        "full-loss graph rejects replacement, tombstone, envelope, and receipt drift",
+        arguments: RecoveryGraphMutation.allCases
+    )
+    fileprivate func malformedRecoveryGraphsReject(
+        _ mutation: RecoveryGraphMutation
+    ) throws {
+        expectAnyRejection {
+            let fixture = try FullLossFixture.make(graphMutation: mutation)
+            _ = try fixture.validate()
         }
     }
 
@@ -210,6 +335,140 @@ struct SecretSyncRecoveryAuthorityContractTests {
             )
         }
     }
+
+    @Test("full-loss recovery requires a fresh replacement device identifier")
+    func replacementDeviceIdentifierMustBeFresh() throws {
+        let fixture = try FullLossFixture.make(deviceReuse: .deviceID)
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("full-loss recovery rejects a reused signing key")
+    func replacementSigningKeyMustBeFresh() throws {
+        let fixture = try FullLossFixture.make(deviceReuse: .signingKey)
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("full-loss recovery rejects a reused agreement key")
+    func replacementAgreementKeyMustBeFresh() throws {
+        let fixture = try FullLossFixture.make(deviceReuse: .agreementKey)
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("full-loss recovery rejects cross-role device key reuse")
+    func replacementDeviceKeysMustNotCrossRoles() throws {
+        let fixture = try FullLossFixture.make(
+            deviceReuse: .signingFromPriorAgreement
+        )
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("replacement recovery requires a fresh recipient identifier")
+    func replacementRecoveryIdentifierMustBeFresh() throws {
+        let fixture = try FullLossFixture.make(recoveryReuse: .recipientID)
+        expectPolicyError(.fullLossRecoveryCandidateMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("replacement recovery rejects a reused agreement key")
+    func replacementRecoveryAgreementKeyMustBeFresh() throws {
+        let fixture = try FullLossFixture.make(recoveryReuse: .agreementKey)
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("replacement recovery rejects a reused authorization key")
+    func replacementRecoveryAuthorizationKeyMustBeFresh() throws {
+        let fixture = try FullLossFixture.make(recoveryReuse: .authorizationKey)
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("replacement recovery agreement keys cannot reuse authorization keys")
+    func replacementRecoveryAgreementKeyMustNotCrossRoles() throws {
+        let fixture = try FullLossFixture.make(
+            recoveryReuse: .agreementFromPriorAuthorization
+        )
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test("replacement recovery authorization keys cannot reuse agreement keys")
+    func replacementRecoveryAuthorizationKeyMustNotCrossRoles() throws {
+        let fixture = try FullLossFixture.make(
+            recoveryReuse: .authorizationFromPriorAgreement
+        )
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+
+    @Test(
+        "replacement key roles reject identifier and public-byte collisions",
+        arguments: GlobalKeyCollision.allCases
+    )
+    fileprivate func replacementKeyRolesAreGloballyDistinct(
+        _ collision: GlobalKeyCollision
+    ) throws {
+        let fixture = try FullLossFixture.make(keyCollision: collision)
+        expectPolicyError(.fullLossRecoveryTrustMismatch) {
+            _ = try fixture.validate()
+        }
+    }
+}
+
+private enum ReplacementCredentialReuse {
+    case none
+    case deviceID
+    case signingKey
+    case agreementKey
+    case signingFromPriorAgreement
+}
+
+private enum ReplacementRecoveryReuse {
+    case none
+    case recipientID
+    case agreementKey
+    case authorizationKey
+    case agreementFromPriorAuthorization
+    case authorizationFromPriorAgreement
+}
+
+fileprivate enum GlobalKeyCollision: CaseIterable, Sendable {
+    case deviceSigningIdentifierWithCurrentRecoveryAgreement
+    case deviceSigningBytesWithCurrentRecoveryAuthorization
+    case deviceAgreementIdentifierWithCurrentRecoveryAuthorization
+    case deviceAgreementBytesWithCurrentRecoveryAgreement
+    case recoveryAgreementIdentifierWithPriorDeviceSigning
+    case recoveryAgreementBytesWithPriorDeviceAgreement
+    case recoveryAuthorizationIdentifierWithPriorDeviceAgreement
+    case recoveryAuthorizationBytesWithPriorDeviceSigning
+    case recoveryAgreementIdentifierWithReplacementSigning
+    case recoveryAgreementBytesWithReplacementSigning
+    case recoveryAuthorizationIdentifierWithReplacementAgreement
+    case recoveryAuthorizationBytesWithReplacementAgreement
+}
+
+fileprivate enum RecoveryGraphMutation: CaseIterable, Sendable {
+    case zeroReplacements
+    case twoReplacements
+    case missingPriorTombstone
+    case extraTombstone
+    case survivingOldAuthority
+    case survivingOldEnvelope
+    case surrogateReceipt
+    case reusedGeneration
 }
 
 private struct FullLossFixture {
@@ -223,8 +482,17 @@ private struct FullLossFixture {
     let replacementCredentialID: DeviceCredentialID
     let currentRecoveryKey: SigningPublicKeyDescriptor
     let candidateRecoveryKey: SigningPublicKeyDescriptor
+    let replacementSigningKey: SigningPublicKeyDescriptor
+    let replacementAgreementKey: KeyAgreementPublicKeyDescriptor
 
-    static func make() throws -> FullLossFixture {
+    static func make(
+        deviceReuse: ReplacementCredentialReuse = .none,
+        recoveryReuse: ReplacementRecoveryReuse = .none,
+        keyCollision: GlobalKeyCollision? = nil,
+        signingPossessionProof: Data = Data([0x52]),
+        agreementPossessionProof: Data = Data([0x53]),
+        graphMutation: RecoveryGraphMutation? = nil
+    ) throws -> FullLossFixture {
         let digester = RecoveryAuthorityDigester()
         let scopeID = SecretScopeID(fixtureUUID(401))
         let oldCredential = try normalCredential(
@@ -357,17 +625,27 @@ private struct FullLossFixture {
             issuedAtMilliseconds: 1_000,
             expiresAtMilliseconds: 2_000
         )
-        let replacement = try recoveryCredential(challenge: challenge)
+        let replacement = try recoveryCredential(
+            challenge: challenge,
+            priorCredential: oldCredential,
+            currentRecovery: currentRecovery,
+            reuse: deviceReuse,
+            keyCollision: keyCollision,
+            signingPossessionProof: signingPossessionProof,
+            agreementPossessionProof: agreementPossessionProof
+        )
         let replacementCredentialDigest = try digester.digest(
             canonicalBytes: replacement.canonicalBytes()
         )
-        let revokedOldTrust = try addressed(digester) { recordDigest in
+        let candidateOldTrust = try addressed(digester) { recordDigest in
             try DeviceTrustRecord(
                 recordDigest: recordDigest,
                 credentialDigest: oldCredentialDigest,
                 deviceID: oldCredential.deviceID,
                 credentialID: oldCredential.credentialID,
-                trustState: .revoked,
+                trustState: graphMutation == .survivingOldAuthority
+                    ? .trusted
+                    : .revoked,
                 effectivePolicyEpoch: 2
             )
         }
@@ -381,12 +659,51 @@ private struct FullLossFixture {
                 effectivePolicyEpoch: 2
             )
         }
-        let candidateRecovery = try recoveryDescriptor(
-            id: 413,
-            agreementByte: 0x61,
-            signingByte: 0x62
+        let extraCredential = try normalCredential(
+            device: 417,
+            credential: 418,
+            byte: 0x81
         )
-        let candidateGeneration = SecretGenerationID(fixtureUUID(414))
+        let extraCredentialDigest = try digester.digest(
+            canonicalBytes: extraCredential.canonicalBytes()
+        )
+        let extraTrust = try addressed(digester) { recordDigest in
+            try DeviceTrustRecord(
+                recordDigest: recordDigest,
+                credentialDigest: extraCredentialDigest,
+                deviceID: extraCredential.deviceID,
+                credentialID: extraCredential.credentialID,
+                trustState: graphMutation == .extraTombstone
+                    ? .revoked
+                    : .trusted,
+                effectivePolicyEpoch: 2
+            )
+        }
+        var candidateCredentials = [oldCredential]
+        var candidateTrustRecords: [DeviceTrustRecord] = []
+        if graphMutation != .missingPriorTombstone {
+            candidateTrustRecords.append(candidateOldTrust)
+        }
+        if graphMutation != .zeroReplacements {
+            candidateCredentials.append(replacement)
+            candidateTrustRecords.append(replacementTrust)
+        }
+        if graphMutation == .twoReplacements
+            || graphMutation == .extraTombstone
+        {
+            candidateCredentials.append(extraCredential)
+            candidateTrustRecords.append(extraTrust)
+        }
+        let candidateRecovery = try replacementRecoveryDescriptor(
+            current: currentRecovery,
+            priorCredential: oldCredential,
+            replacementCredential: replacement,
+            reuse: recoveryReuse,
+            keyCollision: keyCollision
+        )
+        let candidateGeneration = graphMutation == .reusedGeneration
+            ? currentGeneration
+            : SecretGenerationID(fixtureUUID(414))
         let candidateScope = try addressed(digester) { snapshotDigest in
             try SecretScopeSnapshot(
                 scopeID: scopeID,
@@ -401,10 +718,7 @@ private struct FullLossFixture {
             scopeSnapshot: candidateScope,
             generationID: candidateGeneration,
             authorizedRecipientCredentialIDs: [replacement.credentialID],
-            trustedDeviceRecordDigests: [
-                revokedOldTrust.recordDigest,
-                replacementTrust.recordDigest,
-            ],
+            trustedDeviceRecordDigests: candidateTrustRecords.map(\.recordDigest),
             recoveryRecipient: candidateRecovery,
             signerCredentialID: replacement.credentialID
         )
@@ -440,6 +754,22 @@ private struct FullLossFixture {
                 wrappedKeyBytes: Data([0x73])
             )
         }
+        let survivingOldRecipient = try addressed(digester) { recordDigest in
+            try RecipientKeyEnvelope(
+                recordDigest: recordDigest,
+                scopeID: scopeID,
+                scopeSnapshotDigest: candidateScope.snapshotDigest,
+                policyEpoch: 2,
+                policyDigest: candidateSigned.recordDigest,
+                generationID: candidateGeneration,
+                recipientCredentialID: oldCredential.credentialID,
+                formatVersion: 1,
+                wrappedKeyBytes: Data([0x76])
+            )
+        }
+        let candidateRecipients = graphMutation == .survivingOldEnvelope
+            ? [candidateRecipient, survivingOldRecipient]
+            : [candidateRecipient]
         let candidateRecoveryEnvelope = try addressed(digester) { recordDigest in
             try RecoveryEnvelope(
                 recordDigest: recordDigest,
@@ -465,19 +795,38 @@ private struct FullLossFixture {
                 requiredCategories: [.plaintext]
             )
         }
+        let surrogateReceipt = try addressed(digester) { recordDigest in
+            try PurgeReceipt(
+                recordDigest: recordDigest,
+                requirementDigest: purge.recordDigest,
+                scopeID: scopeID,
+                policyEpoch: 2,
+                policyDigest: candidateSigned.recordDigest,
+                supersededGenerationID: currentGeneration,
+                replacementGenerationID: candidateGeneration,
+                respondingCredentialID: replacement.credentialID,
+                coveredCategories: [.plaintext],
+                status: .completed,
+                signerCredentialID: replacement.credentialID,
+                signature: Data([0x77])
+            )
+        }
+        let candidateReceipts = graphMutation == .surrogateReceipt
+            ? [surrogateReceipt]
+            : []
+        let candidateCredentialDigests = try candidateCredentials.map {
+            try digester.digest(canonicalBytes: $0.canonicalBytes())
+        }
         let semantics = try FullLossRecoveryCandidateSemantics(
             scopeSnapshotDigest: candidateScope.snapshotDigest,
             signedPolicyDigest: candidateSigned.recordDigest,
             sealedPayloadDigest: candidatePayload.recordDigest,
-            recipientEnvelopeDigests: [candidateRecipient.recordDigest],
+            recipientEnvelopeDigests: candidateRecipients.map(\.recordDigest),
             recoveryEnvelopeDigest: candidateRecoveryEnvelope.recordDigest,
             purgeRequirementDigests: [purge.recordDigest],
-            purgeReceiptDigests: [],
-            credentialDigests: [oldCredentialDigest, replacementCredentialDigest],
-            trustRecordDigests: [
-                revokedOldTrust.recordDigest,
-                replacementTrust.recordDigest,
-            ]
+            purgeReceiptDigests: candidateReceipts.map(\.recordDigest),
+            credentialDigests: candidateCredentialDigests,
+            trustRecordDigests: candidateTrustRecords.map(\.recordDigest)
         )
         let intent = try GlobalRecoveryTransitionIntent(
             appNamespace: appNamespace,
@@ -496,8 +845,8 @@ private struct FullLossFixture {
             replacementCredentialID: replacement.credentialID,
             replacementSigningPublicKey: replacement.signingPublicKey,
             replacementAgreementPublicKey: replacement.keyAgreementPublicKey,
-            signingPossessionProof: Data([0x52]),
-            agreementPossessionProof: Data([0x53]),
+            signingPossessionProof: signingPossessionProof,
+            agreementPossessionProof: agreementPossessionProof,
             candidatePolicyEpoch: 2,
             candidateGenerationID: candidateGeneration,
             candidateSignedPolicyDigest: candidateSigned.recordDigest,
@@ -516,10 +865,10 @@ private struct FullLossFixture {
             state: .staged,
             signedPolicy: candidateSigned,
             sealedPayload: candidatePayload,
-            recipientEnvelopes: [candidateRecipient],
+            recipientEnvelopes: candidateRecipients,
             recoveryEnvelope: candidateRecoveryEnvelope,
             purgeRequirements: [purge],
-            purgeReceipts: [],
+            purgeReceipts: candidateReceipts,
             recoveryAuthorization: authorization
         )
         let commit = try addressed(digester) { recordDigest in
@@ -532,10 +881,10 @@ private struct FullLossFixture {
                 scopeSnapshotDigest: candidateScope.snapshotDigest,
                 generationID: candidateGeneration,
                 sealedPayloadDigest: candidatePayload.recordDigest,
-                recipientEnvelopeDigests: [candidateRecipient.recordDigest],
+                recipientEnvelopeDigests: candidateRecipients.map(\.recordDigest),
                 recoveryEnvelopeDigest: candidateRecoveryEnvelope.recordDigest,
                 purgeRequirementDigests: [purge.recordDigest],
-                purgeReceiptDigests: [],
+                purgeReceiptDigests: candidateReceipts.map(\.recordDigest),
                 recoveryAuthorizationDigest: authorization.recordDigest,
                 signerCredentialID: replacement.credentialID,
                 signature: Data([0x75])
@@ -544,8 +893,8 @@ private struct FullLossFixture {
         let prepared = try RecoveryPreparedTransition(
             commit: commit,
             records: staged,
-            credentials: [oldCredential, replacement],
-            trustRecords: [revokedOldTrust, replacementTrust],
+            credentials: candidateCredentials,
+            trustRecords: candidateTrustRecords,
             digester: digester
         )
         return try FullLossFixture(
@@ -560,17 +909,20 @@ private struct FullLossFixture {
             oldCredentialID: oldCredential.credentialID,
             replacementCredentialID: replacement.credentialID,
             currentRecoveryKey: currentRecovery.authorizationSigningPublicKey,
-            candidateRecoveryKey: candidateRecovery.authorizationSigningPublicKey
+            candidateRecoveryKey: candidateRecovery.authorizationSigningPublicKey,
+            replacementSigningKey: replacement.signingPublicKey,
+            replacementAgreementKey: replacement.keyAgreementPublicKey
         )
     }
 
     func validate(
         nowMilliseconds: UInt64 = 1_500,
         knownCompetingChildDigests: [SecretRecordDigest] = [],
+        currentSnapshot: SecretControlSnapshot? = nil,
         recoveryVerifier: RecoveryAuthorityVerifier? = nil
     ) throws -> SecretControlSnapshot {
         try SecretPolicyValidator.validateFullLossRecoveryTransition(
-            currentSnapshot: currentSnapshot,
+            currentSnapshot: currentSnapshot ?? self.currentSnapshot,
             preparedTransition: prepared,
             knownCompetingChildDigests: knownCompetingChildDigests,
             externalFreshness: externalFreshness,
@@ -582,6 +934,8 @@ private struct FullLossFixture {
             recoveryVerifier: recoveryVerifier
                 ?? RecoveryAuthorityVerifier(
                     expectedAuthorizationKey: currentRecoveryKey,
+                    expectedSigningKey: replacementSigningKey,
+                    expectedAgreementKey: replacementAgreementKey,
                     acceptSigningPossession: true,
                     acceptAgreementPossession: true
                 )
@@ -626,28 +980,86 @@ private func normalCredential(
 }
 
 private func recoveryCredential(
-    challenge: FullLossRecoveryChallenge
+    challenge: FullLossRecoveryChallenge,
+    priorCredential: TrustedDeviceCredential,
+    currentRecovery: RecoveryRecipientDescriptor,
+    reuse: ReplacementCredentialReuse,
+    keyCollision: GlobalKeyCollision?,
+    signingPossessionProof: Data,
+    agreementPossessionProof: Data
 ) throws -> TrustedDeviceCredential {
-    try TrustedDeviceCredential(
-        deviceID: TrustedDeviceID(fixtureUUID(415)),
-        credentialID: DeviceCredentialID(fixtureUUID(416)),
-        credentialVersion: 1,
-        status: .active,
-        signingPublicKey: SigningPublicKeyDescriptor(
+    let deviceID = reuse == .deviceID
+        ? priorCredential.deviceID
+        : TrustedDeviceID(fixtureUUID(415))
+    var signingPublicKey: SigningPublicKeyDescriptor
+    switch reuse {
+    case .signingKey:
+        signingPublicKey = priorCredential.signingPublicKey
+    case .signingFromPriorAgreement:
+        signingPublicKey = try SigningPublicKeyDescriptor(
+            algorithmIdentifier: "P256",
+            keyIdentifier: priorCredential.keyAgreementPublicKey.keyIdentifier,
+            publicKeyBytes: priorCredential.keyAgreementPublicKey.publicKeyBytes
+        )
+    case .none, .deviceID, .agreementKey:
+        signingPublicKey = try SigningPublicKeyDescriptor(
             algorithmIdentifier: "P256",
             keyIdentifier: Data([0x57]),
             publicKeyBytes: Data([0x04]) + Data(repeating: 0x58, count: 64)
-        ),
-        keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+        )
+    }
+    var agreementPublicKey = try reuse == .agreementKey
+        ? priorCredential.keyAgreementPublicKey
+        : KeyAgreementPublicKeyDescriptor(
             algorithmIdentifier: "P256",
             keyIdentifier: Data([0x59]),
             publicKeyBytes: Data([0x04]) + Data(repeating: 0x5A, count: 64)
-        ),
+        )
+    switch keyCollision {
+    case .deviceSigningIdentifierWithCurrentRecoveryAgreement:
+        signingPublicKey = try signingDescriptor(
+            basedOn: signingPublicKey,
+            keyIdentifier: currentRecovery.keyAgreementPublicKey.keyIdentifier
+        )
+    case .deviceSigningBytesWithCurrentRecoveryAuthorization:
+        signingPublicKey = try signingDescriptor(
+            basedOn: signingPublicKey,
+            publicKeyBytes: currentRecovery.authorizationSigningPublicKey
+                .publicKeyBytes
+        )
+    case .deviceAgreementIdentifierWithCurrentRecoveryAuthorization:
+        agreementPublicKey = try agreementDescriptor(
+            basedOn: agreementPublicKey,
+            keyIdentifier: currentRecovery.authorizationSigningPublicKey
+                .keyIdentifier
+        )
+    case .deviceAgreementBytesWithCurrentRecoveryAgreement:
+        agreementPublicKey = try agreementDescriptor(
+            basedOn: agreementPublicKey,
+            publicKeyBytes: currentRecovery.keyAgreementPublicKey.publicKeyBytes
+        )
+    case .none, .recoveryAgreementIdentifierWithPriorDeviceSigning,
+            .recoveryAgreementBytesWithPriorDeviceAgreement,
+            .recoveryAuthorizationIdentifierWithPriorDeviceAgreement,
+            .recoveryAuthorizationBytesWithPriorDeviceSigning,
+            .recoveryAgreementIdentifierWithReplacementSigning,
+            .recoveryAgreementBytesWithReplacementSigning,
+            .recoveryAuthorizationIdentifierWithReplacementAgreement,
+            .recoveryAuthorizationBytesWithReplacementAgreement:
+        break
+    }
+    return try TrustedDeviceCredential(
+        deviceID: deviceID,
+        credentialID: DeviceCredentialID(fixtureUUID(416)),
+        credentialVersion: 1,
+        status: .active,
+        signingPublicKey: signingPublicKey,
+        keyAgreementPublicKey: agreementPublicKey,
         enrollmentProof: DeviceCredentialEnrollmentProof(
             challengeID: challenge.challengeID,
             challengeBytes: challenge.nonce,
-            signingProofBytes: Data([0x52]),
-            keyAgreementProofBytes: Data([0x53]),
+            signingProofBytes: signingPossessionProof,
+            keyAgreementProofBytes: agreementPossessionProof,
             provenance: .globalRecovery(
                 GlobalRecoveryEnrollmentAuthority(
                     requestID: challenge.requestID,
@@ -655,6 +1067,136 @@ private func recoveryCredential(
                 )
             )
         )
+    )
+}
+
+private func replacementRecoveryDescriptor(
+    current: RecoveryRecipientDescriptor,
+    priorCredential: TrustedDeviceCredential,
+    replacementCredential: TrustedDeviceCredential,
+    reuse: ReplacementRecoveryReuse,
+    keyCollision: GlobalKeyCollision?
+) throws -> RecoveryRecipientDescriptor {
+    let recipientID = reuse == .recipientID
+        ? current.recoveryRecipientID
+        : fixtureUUID(413)
+    var agreementPublicKey: KeyAgreementPublicKeyDescriptor
+    switch reuse {
+    case .agreementKey:
+        agreementPublicKey = current.keyAgreementPublicKey
+    case .agreementFromPriorAuthorization:
+        agreementPublicKey = try KeyAgreementPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .agreementAlgorithmIdentifier,
+            keyIdentifier: current.authorizationSigningPublicKey.keyIdentifier,
+            publicKeyBytes: current.authorizationSigningPublicKey.publicKeyBytes
+        )
+    case .none, .recipientID, .authorizationKey,
+            .authorizationFromPriorAgreement:
+        agreementPublicKey = try KeyAgreementPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .agreementAlgorithmIdentifier,
+            keyIdentifier: Data([0x61]),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x61, count: 64)
+        )
+    }
+    var authorizationPublicKey: SigningPublicKeyDescriptor
+    switch reuse {
+    case .authorizationKey:
+        authorizationPublicKey = current.authorizationSigningPublicKey
+    case .authorizationFromPriorAgreement:
+        authorizationPublicKey = try SigningPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .authorizationSigningAlgorithmIdentifier,
+            keyIdentifier: current.keyAgreementPublicKey.keyIdentifier,
+            publicKeyBytes: current.keyAgreementPublicKey.publicKeyBytes
+        )
+    case .none, .recipientID, .agreementKey,
+            .agreementFromPriorAuthorization:
+        authorizationPublicKey = try SigningPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .authorizationSigningAlgorithmIdentifier,
+            keyIdentifier: Data([0x62]),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x62, count: 64)
+        )
+    }
+    switch keyCollision {
+    case .recoveryAgreementIdentifierWithPriorDeviceSigning:
+        agreementPublicKey = try agreementDescriptor(
+            basedOn: agreementPublicKey,
+            keyIdentifier: priorCredential.signingPublicKey.keyIdentifier
+        )
+    case .recoveryAgreementBytesWithPriorDeviceAgreement:
+        agreementPublicKey = try agreementDescriptor(
+            basedOn: agreementPublicKey,
+            publicKeyBytes: priorCredential.keyAgreementPublicKey.publicKeyBytes
+        )
+    case .recoveryAuthorizationIdentifierWithPriorDeviceAgreement:
+        authorizationPublicKey = try signingDescriptor(
+            basedOn: authorizationPublicKey,
+            keyIdentifier: priorCredential.keyAgreementPublicKey.keyIdentifier
+        )
+    case .recoveryAuthorizationBytesWithPriorDeviceSigning:
+        authorizationPublicKey = try signingDescriptor(
+            basedOn: authorizationPublicKey,
+            publicKeyBytes: priorCredential.signingPublicKey.publicKeyBytes
+        )
+    case .recoveryAgreementIdentifierWithReplacementSigning:
+        agreementPublicKey = try agreementDescriptor(
+            basedOn: agreementPublicKey,
+            keyIdentifier: replacementCredential.signingPublicKey.keyIdentifier
+        )
+    case .recoveryAgreementBytesWithReplacementSigning:
+        agreementPublicKey = try agreementDescriptor(
+            basedOn: agreementPublicKey,
+            publicKeyBytes: replacementCredential.signingPublicKey.publicKeyBytes
+        )
+    case .recoveryAuthorizationIdentifierWithReplacementAgreement:
+        authorizationPublicKey = try signingDescriptor(
+            basedOn: authorizationPublicKey,
+            keyIdentifier: replacementCredential.keyAgreementPublicKey
+                .keyIdentifier
+        )
+    case .recoveryAuthorizationBytesWithReplacementAgreement:
+        authorizationPublicKey = try signingDescriptor(
+            basedOn: authorizationPublicKey,
+            publicKeyBytes: replacementCredential.keyAgreementPublicKey
+                .publicKeyBytes
+        )
+    case .none, .deviceSigningIdentifierWithCurrentRecoveryAgreement,
+            .deviceSigningBytesWithCurrentRecoveryAuthorization,
+            .deviceAgreementIdentifierWithCurrentRecoveryAuthorization,
+            .deviceAgreementBytesWithCurrentRecoveryAgreement:
+        break
+    }
+    return try RecoveryRecipientDescriptor(
+        recoveryRecipientID: recipientID,
+        keyAgreementPublicKey: agreementPublicKey,
+        authorizationSigningPublicKey: authorizationPublicKey
+    )
+}
+
+private func signingDescriptor(
+    basedOn descriptor: SigningPublicKeyDescriptor,
+    keyIdentifier: Data? = nil,
+    publicKeyBytes: Data? = nil
+) throws -> SigningPublicKeyDescriptor {
+    try SigningPublicKeyDescriptor(
+        algorithmIdentifier: descriptor.algorithmIdentifier,
+        keyIdentifier: keyIdentifier ?? descriptor.keyIdentifier,
+        publicKeyBytes: publicKeyBytes ?? descriptor.publicKeyBytes
+    )
+}
+
+private func agreementDescriptor(
+    basedOn descriptor: KeyAgreementPublicKeyDescriptor,
+    keyIdentifier: Data? = nil,
+    publicKeyBytes: Data? = nil
+) throws -> KeyAgreementPublicKeyDescriptor {
+    try KeyAgreementPublicKeyDescriptor(
+        algorithmIdentifier: descriptor.algorithmIdentifier,
+        keyIdentifier: keyIdentifier ?? descriptor.keyIdentifier,
+        publicKeyBytes: publicKeyBytes ?? descriptor.publicKeyBytes
     )
 }
 
@@ -718,6 +1260,8 @@ private struct ReplacementSignatureVerifier: SecretSignatureVerifying {
 
 private struct RecoveryAuthorityVerifier: FullLossRecoveryProofVerifying {
     let expectedAuthorizationKey: SigningPublicKeyDescriptor
+    let expectedSigningKey: SigningPublicKeyDescriptor
+    let expectedAgreementKey: KeyAgreementPublicKeyDescriptor
     let acceptSigningPossession: Bool
     let acceptAgreementPossession: Bool
 
@@ -739,7 +1283,7 @@ private struct RecoveryAuthorityVerifier: FullLossRecoveryProofVerifying {
         acceptSigningPossession
             && proof == Data([0x52])
             && !canonicalBytes.isEmpty
-            && signingPublicKey.keyIdentifier == Data([0x57])
+            && signingPublicKey == expectedSigningKey
     }
 
     func verifyReplacementAgreementPossession(
@@ -750,7 +1294,7 @@ private struct RecoveryAuthorityVerifier: FullLossRecoveryProofVerifying {
         acceptAgreementPossession
             && proof == Data([0x53])
             && !canonicalBytes.isEmpty
-            && agreementPublicKey.keyIdentifier == Data([0x59])
+            && agreementPublicKey == expectedAgreementKey
     }
 }
 
@@ -766,6 +1310,44 @@ private func expectPolicyError(
     } catch {
         Issue.record("Unexpected error")
     }
+}
+
+private func expectAnyRejection(_ operation: () throws -> Void) {
+    do {
+        try operation()
+        Issue.record("Expected fail-closed rejection")
+    } catch {
+        // Construction, store-integrity, and policy-admission guards are all
+        // valid fail-closed boundaries for malformed recovery graphs.
+    }
+}
+
+private func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+private func mutateCanonicalField(
+    _ canonicalBytes: Data,
+    domain: SecretSyncCanonicalDomain,
+    tag: UInt16
+) throws -> Data {
+    let document = try SecretSyncCanonicalEncoding.decode(
+        canonicalBytes,
+        expectedDomain: domain
+    )
+    let fields = try document.fields.map { field -> SecretSyncCanonicalField in
+        guard field.tag == tag else { return field }
+        guard !field.value.isEmpty else {
+            throw RecoveryAuthorityTestError.invalid
+        }
+        var value = field.value
+        value[value.startIndex] ^= 0x01
+        return SecretSyncCanonicalField(tag: field.tag, value: value)
+    }
+    guard fields.contains(where: { $0.tag == tag }) else {
+        throw RecoveryAuthorityTestError.invalid
+    }
+    return try SecretSyncCanonicalEncoding.encode(domain: domain, fields: fields)
 }
 
 private func fixtureUUID(_ suffix: Int) -> UUID {

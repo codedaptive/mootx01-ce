@@ -94,6 +94,31 @@ struct SecretSyncPolicyReconstructionTests {
         }
     }
 
+    @Test("altered full-loss authorization bytes remain non-authoritative")
+    func alteredRecoveryAuthorizationFailsClosed() async throws {
+        let fixture = try U5PolicyFixture.make()
+        let entry = try U5PolicyFixture.entryWithRecoveryAuthorization(fixture)
+        let authorization = try #require(entry.records.recoveryAuthorization)
+        let database = U5ScriptedDatabase()
+        let store = SecretSyncCloudKitPolicyStore(
+            database: database,
+            digester: U5PolicyFixture.digester
+        )
+        try await store.appendStagedPolicy(entry)
+        await database.tamperCanonicalBytes(
+            digest: authorization.recordDigest,
+            type: .fullLossRecoveryAuthorization
+        )
+
+        await #expect(
+            throws: SecretSyncCloudKitPolicyStoreError.invalidCanonicalRecord
+        ) {
+            _ = try await store.reconstructPolicy(
+                commitDigest: entry.commit.recordDigest
+            )
+        }
+    }
+
     @Test("missing cross-zone payload remains non-authoritative")
     func missingPayloadFailsClosed() async throws {
         let fixture = try U5PolicyFixture.make()
