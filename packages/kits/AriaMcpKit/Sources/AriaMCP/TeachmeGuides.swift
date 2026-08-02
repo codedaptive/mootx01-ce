@@ -761,6 +761,15 @@ enum TeachmeGuides {
 
             Total: \(totalVaultOn) tools vault-on / \(totalVaultOff) vault-off.
             All accept teachme. All may return hint.
+
+            Subject debt (the "subjects: N/M (K missing)" line) — STANDING
+            BEHAVIOR: when K > 0, offer the user an interactive backfill,
+            and only proceed with their explicit time-and-permission
+            consent. The walk: moot_memory_list filter:missing_subject →
+            moot_memory_get per id → moot_update_memory
+            mutation=setSubject with a one-sentence AI-facing subject.
+            Never backfill silently; the debt line is a reminder, not a
+            license.
             """
     }
 

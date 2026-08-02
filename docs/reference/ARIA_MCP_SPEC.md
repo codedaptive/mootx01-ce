@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.21.0
+version: 1.22.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -878,6 +878,21 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.22.0 -- 2026-08-02
+
+- Utility tier (progressive recall PR-04). moot_estate_status gains the
+  subject-debt counter line `subjects: N/M (K missing)` (presence debt
+  over the live cluster-A non-empty-content set) with a STANDING
+  BEHAVIOR contract in its teachme: when K > 0 the AI offers a
+  consent-gated interactive backfill (missing_subject walk →
+  setSubject), never a silent one. moot_drain_status reserves the
+  `subject_backfill` lane name (constants both ports; the PR-09/10
+  rider registers the live lane, and the benchmarker's non-gating
+  denylist must gain the name in that same mission). moot_list_lenses
+  and moot_list_recipes default to a terse catalogue (name +
+  first-sentence one-liner) with the full catalogue behind
+  `verbose: true`.
 
 ### 1.21.0 -- 2026-08-02
 

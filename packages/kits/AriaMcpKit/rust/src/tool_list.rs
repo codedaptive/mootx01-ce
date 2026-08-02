@@ -723,16 +723,24 @@ fn federated_search_tool() -> serde_json::Value {
 fn list_lenses_tool() -> serde_json::Value {
     json!({
         "name": "moot_list_lenses",
-        "description": "List all available cognition lenses and recipes with descriptions and required capabilities.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+        "description": "List all available cognition lenses and recipes. Terse by default (name + one-liner per tool); pass verbose:true for full descriptions and required arguments.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "verbose": boolean_schema("Full catalogue with complete descriptions and required args. Omit for the terse default; null is invalid.")
+            }),
+            json!([]))))
     })
 }
 
 fn list_recipes_catalog_tool() -> serde_json::Value {
     json!({
         "name": "moot_list_recipes",
-        "description": "Browse the full recipe catalog: name, version, description, and required capabilities for every entry.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+        "description": "Browse the recipe catalog in order. Terse by default (name, version, one-liner); pass verbose:true for full descriptions and required capabilities.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "verbose": boolean_schema("Full catalogue with complete descriptions and capabilities. Omit for the terse default; null is invalid.")
+            }),
+            json!([]))))
     })
 }
 

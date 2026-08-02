@@ -492,8 +492,16 @@ Optional args:
   estateID (string) defaults to the default estate
   teachme  (bool)   true returns this guide without touching the estate
 
-Returns: estate name, drawer count, KG fact count, wing list, plus the ARIA
+Returns: estate name, drawer count, subject-debt counter
+(\"subjects: N/M (K missing)\"), KG fact count, wing list, plus the ARIA
 session protocol block.
+
+Subject debt — STANDING BEHAVIOR: when K > 0, offer the user an
+interactive backfill, and only proceed with their explicit
+time-and-permission consent. The walk: moot_memory_list
+filter:missing_subject → moot_memory_get per id → moot_update_memory
+mutation=setSubject with a one-sentence AI-facing subject. Never
+backfill silently; the debt line is a reminder, not a license.
 
 Tips:
   — Call moot_estate_status with teachme:true for a full orientation on first connect.

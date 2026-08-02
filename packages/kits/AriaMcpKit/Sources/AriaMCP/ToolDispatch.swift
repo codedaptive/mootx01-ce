@@ -2707,9 +2707,22 @@ extension ToolDispatcher {
         } else {
             fdcRecalculationState = "stale"
         }
+        // Subject-debt counter (PR-04): presence debt over the live
+        // cluster-A set — N subject-bearing / M eligible (non-empty
+        // content), K missing. This is the every-load reminder that
+        // drives the consent-gated interactive backfill (the AI asks the
+        // user for time and permission before walking
+        // moot_memory_list filter:missing_subject → setSubject; standing
+        // behavior documented in the estate-status teachme). Presence
+        // debt only — pipeline-version regeneration debt stays the store
+        // verb countMissingSubject's concern.
+        let subjectEligible = active.filter { !$0.content.isEmpty }
+        let subjectBearing = subjectEligible.filter { $0.subject != nil }
         var stats = [
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
             "memories: \(active.count) active (\(total.count) total)",
+            "subjects: \(subjectBearing.count)/\(subjectEligible.count) "
+                + "(\(subjectEligible.count - subjectBearing.count) missing)",
             "wings: \(wings.joined(separator: ", "))",
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",
@@ -3023,6 +3036,16 @@ extension ToolDispatcher {
     /// encoded-chunk count, so forward progress is visible). The report is a
     /// LIST so additional drains surface here automatically when they exist; an
     /// estate with no Corpus registered reports no drains.
+    /// Reserved lane name for the subject-backfill drain (PR-04). The
+    /// PR-09/10 rider registers a drain under THIS name; the generic
+    /// renderer below then carries it with no further dispatcher change.
+    /// Its `pending` will be a row-level ELIGIBILITY count (subject debt),
+    /// not queue depth — when the rider lands, the benchmarker's
+    /// `barrierNonGatingLanes` denylist must gain this name in the same
+    /// mission or the encode barrier hangs on healthy estates (the
+    /// distillation-lane precedent). Twin: Rust `SUBJECT_BACKFILL_LANE_NAME`.
+    static let subjectBackfillLaneName = "subject_backfill"
+
     func runDrainStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let drains = try await kit.drainStatuses(handle)

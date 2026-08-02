@@ -192,8 +192,8 @@ pub fn dispatch(
     }
 
     match name {
-        LIST_LENSES => Ok(run_list_recipes()),
-        LIST_RECIPES_CATALOG => Ok(run_list_recipes_catalog()),
+        LIST_LENSES => run_list_recipes(args),
+        LIST_RECIPES_CATALOG => run_list_recipes_catalog(args),
         SYNTHESIZE => run_grounded_synthesis_tool(args, registry),
         RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
         CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
@@ -217,7 +217,30 @@ pub fn dispatch(
 // moot_list_lenses
 // ---------------------------------------------------------------------------
 
-fn run_list_recipes() -> serde_json::Value {
+/// Decode the shared `verbose` flag for the two catalogue tools (PR-04).
+/// Absent → false (terse default); present-but-non-bool → invalidParams.
+fn decode_verbose(args: &BTreeMap<String, JsonValue>) -> Result<bool, JSONRPCError> {
+    match args.get("verbose") {
+        None => Ok(false),
+        Some(v) => v.as_bool().ok_or_else(|| JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "verbose must be a boolean; omit it for the terse default".to_string(),
+        )),
+    }
+}
+
+/// First sentence of a tool description, for the terse catalogue rows
+/// (PR-04). Deterministic and byte-identical to the Swift twin: cut at
+/// the first ". " boundary, keeping the period.
+pub fn one_liner(description: &str) -> String {
+    match description.find(". ") {
+        Some(idx) => format!("{}.", &description[..idx]),
+        None => description.to_string(),
+    }
+}
+
+fn run_list_recipes(args: &BTreeMap<String, JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+    let verbose = decode_verbose(args)?;
     // Mirrors Swift runListRecipes: project the 27 cognition tools (4 Tier-6
     // recipe tools + 23 lens tools) from the tool surface, showing name,
     // description, and required args for each. NOT a catalog dump — the tool
@@ -251,36 +274,57 @@ fn run_list_recipes() -> serde_json::Value {
         cognition_tools.len()
     )];
 
-    for tool in &cognition_tools {
-        let name = tool["name"].as_str().unwrap_or("?");
-        let desc = tool["description"].as_str().unwrap_or("");
-        let required: Vec<&str> = tool["inputSchema"]["required"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        let req_text = if required.is_empty() {
-            "none".to_string()
-        } else {
-            required.join(", ")
-        };
+    if verbose {
+        for tool in &cognition_tools {
+            let name = tool["name"].as_str().unwrap_or("?");
+            let desc = tool["description"].as_str().unwrap_or("");
+            let required: Vec<&str> = tool["inputSchema"]["required"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let req_text = if required.is_empty() {
+                "none".to_string()
+            } else {
+                required.join(", ")
+            };
+            lines.push(String::new());
+            lines.push(name.to_string());
+            lines.push(format!("  {desc}"));
+            lines.push(format!("  Required: {req_text}."));
+        }
         lines.push(String::new());
-        lines.push(name.to_string());
-        lines.push(format!("  {desc}"));
-        lines.push(format!("  Required: {req_text}."));
+    } else {
+        // Terse default (PR-04): one row per tool — name and first
+        // sentence. The always-verbose ~8.8KB catalogue reply ends;
+        // pass verbose:true for full descriptions + required args.
+        // Mirrors Swift runListRecipes.
+        for tool in &cognition_tools {
+            let name = tool["name"].as_str().unwrap_or("?");
+            let desc = tool["description"].as_str().unwrap_or("");
+            lines.push(format!("{name} — {}", one_liner(desc)));
+        }
+        lines.push("(terse — pass verbose:true for full descriptions and required args)".to_string());
     }
-
-    lines.push(String::new());
     lines.push("Call any tool with teachme:true for a full usage guide.".to_string());
-    text_result(&lines.join("\n"))
+    Ok(text_result(&lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
 // moot_list_recipes — full catalog browse (format mirrors Swift runListRecipesCatalog)
 // ---------------------------------------------------------------------------
 
-fn run_list_recipes_catalog() -> serde_json::Value {
+fn run_list_recipes_catalog(args: &BTreeMap<String, JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+    let verbose = decode_verbose(args)?;
     let catalog = recipe_catalog();
     let mut lines = vec![format!("moot_list_recipes: {} recipe(s)", catalog.len())];
+    if !verbose {
+        // Terse default (PR-04). Mirrors Swift runListRecipesCatalog.
+        for d in &catalog {
+            lines.push(format!("{} {} — {}", d.name, d.version, one_liner(&d.description)));
+        }
+        lines.push("(terse — pass verbose:true for versions, capabilities, and full descriptions)".to_string());
+        return Ok(text_result(&lines.join("\n")));
+    }
     for d in &catalog {
         let caps: Vec<&str> = d
             .required_capabilities
@@ -300,7 +344,7 @@ fn run_list_recipes_catalog() -> serde_json::Value {
             }
         ));
     }
-    text_result(&lines.join("\n"))
+    Ok(text_result(&lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------

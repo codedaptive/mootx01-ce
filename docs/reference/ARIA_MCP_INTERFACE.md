@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.25.0
+version: 1.26.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1154,6 +1154,15 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.26.0 -- 2026-08-02
+
+- PR-04 utility tier: documented the estate-status `subjects: N/M
+  (K missing)` line, the reserved `subject_backfill` drain-lane name
+  (Swift `ToolDispatcher.subjectBackfillLaneName` ↔ Rust
+  `SUBJECT_BACKFILL_LANE_NAME`), and the `verbose` flag on
+  moot_list_lenses / moot_list_recipes (terse default). Estate-status
+  teachme carries the consent-gated backfill standing behavior.
 
 ### 1.25.0 -- 2026-08-02
 

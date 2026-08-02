@@ -195,8 +195,15 @@ enum RecipeTools {
     private static func listRecipesTool() -> ProjectedTool {
         ProjectedTool(
             name: listRecipesToolName,
-            description: "List the available reasoning lenses and CognitionKit behaviour recipes — each with its version, description, and the NeuronKit capabilities it requires.",
-            inputSchema: objectSchema(properties: [:], required: []),
+            description: "List the available reasoning lenses and CognitionKit behaviour recipes. Terse by default (name + one-liner per tool); pass verbose:true for full descriptions and required arguments.",
+            inputSchema: objectSchema(
+                properties: [
+                    "verbose": .object([
+                        "type": .string("boolean"),
+                        "description": .string("Full catalogue with complete descriptions and required args. Omit for the terse default; null is invalid."),
+                    ]),
+                ],
+                required: []),
             provenance: .recipe)
     }
 
@@ -207,8 +214,15 @@ enum RecipeTools {
     private static func listRecipesCatalogTool() -> ProjectedTool {
         ProjectedTool(
             name: listRecipesCatalogToolName,
-            description: "List every shipped CognitionKit recipe — name, version, description, and required NeuronKit capabilities — in catalog order.",
-            inputSchema: objectSchema(properties: [:], required: []),
+            description: "List every shipped CognitionKit recipe in catalog order. Terse by default (name, version, one-liner); pass verbose:true for full descriptions and required capabilities.",
+            inputSchema: objectSchema(
+                properties: [
+                    "verbose": .object([
+                        "type": .string("boolean"),
+                        "description": .string("Full catalogue with complete descriptions and capabilities. Omit for the terse default; null is invalid."),
+                    ]),
+                ],
+                required: []),
             provenance: .recipe)
     }
 
@@ -478,10 +492,10 @@ enum RecipeTools {
         // Recipe discovery needs no estate; answer before resolving a handle
         // so discovery tools work even with no estate targeted.
         if name == listRecipesToolName {
-            return runListRecipes()
+            return try runListRecipes(args)
         }
         if name == listRecipesCatalogToolName {
-            return runListRecipesCatalog()
+            return try runListRecipesCatalog(args)
         }
 
         // MARK: ACK gates and notice-only stubs
@@ -542,7 +556,31 @@ enum RecipeTools {
     /// `moot_recall_precise`, `moot_recall_shaped`) for 27 total.
     /// Migration and distillation tools (Tier 7) are intentionally excluded;
     /// they have their own teachme guides and a separate caller workflow.
-    private static func runListRecipes() -> JSONValue {
+    /// Decode the shared `verbose` flag for the two catalogue tools
+    /// (PR-04). Absent → false (terse default); present-but-non-bool →
+    /// invalidParams (omit-to-default contract).
+    private static func decodeVerbose(_ args: [String: JSONValue]) throws -> Bool {
+        guard let raw = args["verbose"] else { return false }
+        guard let b = raw.boolValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "verbose must be a boolean; omit it for the terse default")
+        }
+        return b
+    }
+
+    /// First sentence of a tool description, for the terse catalogue rows
+    /// (PR-04). Deterministic and byte-identical to the Rust twin: cut at
+    /// the first ". " boundary, keeping the period.
+    static func oneLiner(_ description: String) -> String {
+        if let range = description.range(of: ". ") {
+            return String(description[..<range.lowerBound]) + "."
+        }
+        return description
+    }
+
+    private static func runListRecipes(_ args: [String: JSONValue]) throws -> JSONValue {
+        let verbose = try decodeVerbose(args)
         // Tier 6 recipe tools: list-lenses + synthesize + precise recall + shaped
         // recall (not migration or distillation, which are Tier 7).
         let tier6RecipeNames: Set<String> = [
@@ -555,32 +593,51 @@ enum RecipeTools {
         let cognitionTools = recipeTools + lensTools
 
         var lines: [String] = ["\(listRecipesToolName): \(cognitionTools.count) cognition tools"]
-        for tool in cognitionTools {
-            let required = requiredArgNames(from: tool.inputSchema)
-            let requiredText = required.isEmpty ? "none" : required.joined(separator: ", ")
+        if verbose {
+            for tool in cognitionTools {
+                let required = requiredArgNames(from: tool.inputSchema)
+                let requiredText = required.isEmpty ? "none" : required.joined(separator: ", ")
+                lines.append("")
+                lines.append(tool.name)
+                lines.append("  \(tool.description)")
+                lines.append("  Required: \(requiredText).")
+            }
             lines.append("")
-            lines.append(tool.name)
-            lines.append("  \(tool.description)")
-            lines.append("  Required: \(requiredText).")
+        } else {
+            // Terse default (PR-04): one row per tool — name and first
+            // sentence. The always-verbose ~8.8KB catalogue reply ends;
+            // pass verbose:true for full descriptions + required args.
+            for tool in cognitionTools {
+                lines.append("\(tool.name) — \(Self.oneLiner(tool.description))")
+            }
+            lines.append("(terse — pass verbose:true for full descriptions and required args)")
         }
-        lines.append("")
         lines.append("Call any tool with teachme:true for a full usage guide.")
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
     /// Return every shipped recipe from `RecipeCatalog.all` — name, version,
     /// description, and required NeuronKit capabilities — in catalog order.
-    /// Reads the catalog directly; hard-codes nothing.
-    private static func runListRecipesCatalog() -> JSONValue {
+    /// Reads the catalog directly; hard-codes nothing. Terse by default
+    /// (PR-04); verbose:true restores the full per-recipe block.
+    private static func runListRecipesCatalog(_ args: [String: JSONValue]) throws -> JSONValue {
+        let verbose = try decodeVerbose(args)
         let catalog = RecipeCatalog.all
         var lines: [String] = ["\(listRecipesCatalogToolName): \(catalog.count) recipe(s)"]
-        for recipe in catalog {
-            lines.append("")
-            lines.append(recipe.name)
-            lines.append("  version: \(recipe.version)")
-            lines.append("  \(recipe.description)")
-            let caps = recipe.requiredCapabilities.map { "\($0)" }
-            lines.append("  requires: \(caps.isEmpty ? "none" : caps.joined(separator: ", "))")
+        if verbose {
+            for recipe in catalog {
+                lines.append("")
+                lines.append(recipe.name)
+                lines.append("  version: \(recipe.version)")
+                lines.append("  \(recipe.description)")
+                let caps = recipe.requiredCapabilities.map { "\($0)" }
+                lines.append("  requires: \(caps.isEmpty ? "none" : caps.joined(separator: ", "))")
+            }
+        } else {
+            for recipe in catalog {
+                lines.append("\(recipe.name) \(recipe.version) — \(Self.oneLiner(recipe.description))")
+            }
+            lines.append("(terse — pass verbose:true for versions, capabilities, and full descriptions)")
         }
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }

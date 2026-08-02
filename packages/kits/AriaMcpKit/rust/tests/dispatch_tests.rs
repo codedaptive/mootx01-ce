@@ -5182,18 +5182,32 @@ fn lens_with_unknown_estate_returns_invalid_params() {
 
 #[test]
 fn list_recipes_catalog_returns_full_catalog() {
+    // PR-04: terse by default; verbose:true restores the full per-recipe
+    // block with the version: field.
     let registry = EstateRegistry::new_inmemory();
-    let result = dispatch_tool("moot_list_recipes", &args![], &registry, &SurfacedRecallLedger::new())
+    let terse = dispatch_tool("moot_list_recipes", &args![], &registry, &SurfacedRecallLedger::new())
         .expect("moot_list_recipes must succeed");
-    assert!(is_success(&result), "moot_list_recipes must be isError:false; got: {result:?}");
-    let text = content_text(&result);
+    assert!(is_success(&terse), "moot_list_recipes must be isError:false; got: {terse:?}");
+    let terse_text = content_text(&terse);
     assert!(
-        text.starts_with("moot_list_recipes:"),
-        "result must start with 'moot_list_recipes: N recipe(s)'; got: {text}"
+        terse_text.starts_with("moot_list_recipes:"),
+        "result must start with 'moot_list_recipes: N recipe(s)'; got: {terse_text}"
     );
     assert!(
-        text.contains("version:"),
-        "catalog entries must include version field; got: {text}"
+        terse_text.contains("(terse — pass verbose:true"),
+        "terse default must advertise the verbose flag; got: {terse_text}"
+    );
+    let verbose = dispatch_tool(
+        "moot_list_recipes",
+        &args!["verbose" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("verbose moot_list_recipes must succeed");
+    assert!(
+        content_text(&verbose).contains("version:"),
+        "verbose catalog entries must include version field; got: {}",
+        content_text(&verbose)
     );
 }
 

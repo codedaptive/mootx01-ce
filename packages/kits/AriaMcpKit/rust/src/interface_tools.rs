@@ -2394,13 +2394,29 @@ fn run_estate_status(
         "stale"
     };
 
+    // Subject-debt counter (PR-04): presence debt over the live cluster-A
+    // set — N subject-bearing / M eligible (non-empty content), K missing.
+    // The every-load reminder driving the consent-gated interactive
+    // backfill (walk moot_memory_list filter:missing_subject → setSubject
+    // only after the user grants time and permission). Presence debt only —
+    // pipeline-version regeneration debt stays count_missing_subject's
+    // concern. Mirrors Swift runEstateStatus.
+    let subject_eligible = active.iter().filter(|d| !d.content.is_empty()).count();
+    let subject_bearing = active
+        .iter()
+        .filter(|d| !d.content.is_empty() && d.subject.is_some())
+        .count();
+
     // Field order and wording mirror Swift runEstateStatus exactly:
-    //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
+    //   estate / memories / subjects / wings / kg facts (space, "active" suffix) / trace_rows / sync
     //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
     let mut body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
         active.len(),
         total.len(),
+        subject_bearing,
+        subject_eligible,
+        subject_eligible - subject_bearing,
         wings_list,
         kg_facts.len(),
         trace_rows,
@@ -2952,6 +2968,16 @@ fn run_reindex(
 /// called repeatedly while a drain settles. Today the only drain is
 /// `corpus_encode`; the report is a LIST so additional drains surface here
 /// automatically when they exist. Read-only. Mirrors Swift `runDrainStatus`.
+///
+/// Reserved lane name for the subject-backfill drain (PR-04): the
+/// PR-09/10 rider registers a drain under this name and the generic
+/// renderer carries it unchanged. Its `pending` will be a row-level
+/// ELIGIBILITY count (subject debt), not queue depth — when the rider
+/// lands, the benchmarker's `BARRIER_NON_GATING_LANES` denylist must
+/// gain this name in the same mission (the distillation-lane
+/// precedent). Twin: Swift `ToolDispatcher.subjectBackfillLaneName`.
+pub const SUBJECT_BACKFILL_LANE_NAME: &str = "subject_backfill";
+
 fn run_drain_status(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
