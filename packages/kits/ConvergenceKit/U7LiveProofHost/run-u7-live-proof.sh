@@ -182,22 +182,43 @@ def no_symlink_components(path, root):
             return False
     return True
 
-def regular_owned(path, mode=None):
-    try:
-        info = os.lstat(path)
-    except OSError:
-        die()
+def require_regular_owned(info, mode=None):
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
         die()
     if mode is not None and stat.S_IMODE(info.st_mode) != mode:
         die()
     return info
 
-def read_plist(path):
-    regular_owned(path)
+def regular_owned(path, mode=None):
     try:
-        with open(path, "rb") as handle:
-            return plistlib.load(handle)
+        return require_regular_owned(os.lstat(path), mode)
+    except OSError:
+        die()
+
+def read_regular_bytes(path, mode=None):
+    path_info = regular_owned(path, mode)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        die()
+    try:
+        opened = require_regular_owned(os.fstat(descriptor), mode)
+        if (opened.st_dev, opened.st_ino) != (path_info.st_dev, path_info.st_ino):
+            die()
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), opened
+    finally:
+        os.close(descriptor)
+
+def read_plist(path):
+    try:
+        data, _ = read_regular_bytes(path)
+        return plistlib.loads(data)
     except Exception:
         die()
 
@@ -254,10 +275,13 @@ def stable_identity(info):
     return "{}:{}:{:o}".format(info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
 
 def validate(path, root, expected_platform, authority_path, mode=None, expected_environment=None):
-    path_info = regular_owned(path, mode)
     if not beneath(path, root) or not no_symlink_components(path, root):
         die()
-    document = read_plist(path)
+    try:
+        data, path_info = read_regular_bytes(path, mode)
+        document = plistlib.loads(data)
+    except Exception:
+        die()
     _, _, target = target_entry(document)
     raw_bundle = target.get("TestBundlePath")
     if not isinstance(raw_bundle, str) or not raw_bundle.startswith("__TESTROOT__/"):
@@ -278,8 +302,11 @@ def validate(path, root, expected_platform, authority_path, mode=None, expected_
         die()
     if info.get("DTPlatformName") not in (None, expected_name):
         die()
-    with open(authority_path, "r", encoding="utf-8") as handle:
-        authority = handle.read().strip()
+    try:
+        authority_data, _ = read_regular_bytes(authority_path, 0o600)
+        authority = authority_data.decode("utf-8").strip()
+    except Exception:
+        die()
     if not authority or info.get("MOOTSecretSyncHostAuthorityPublicKey") != authority:
         die()
     if expected_environment is not None:
@@ -289,8 +316,7 @@ def validate(path, root, expected_platform, authority_path, mode=None, expected_
         }
         if actual != expected_environment:
             die()
-    with open(path, "rb") as handle:
-        digest = hashlib.sha256(handle.read()).hexdigest()
+    digest = hashlib.sha256(data).hexdigest()
     return document, digest, stable_identity(path_info)
 
 action = sys.argv[1]
