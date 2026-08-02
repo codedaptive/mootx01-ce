@@ -156,6 +156,18 @@ import sys
 
 TARGET = "ConvergenceKitSecretSyncConformanceTests"
 PREFIX = "MOOT_SECRET_SYNC_"
+PROBE_KEYS = frozenset({
+    PREFIX + "LIVE_PROOF", PREFIX + "RUN_NAMESPACE",
+    PREFIX + "DEVICE_ROLE", PREFIX + "SIGNED_RUN_MANIFEST",
+})
+ORDINARY_KEYS = PROBE_KEYS | frozenset({
+    PREFIX + "PHASE", PREFIX + "OPERATOR_ATTESTATION",
+    PREFIX + "HOST_LAUNCH_GRANT",
+})
+CLEANUP_KEYS = ORDINARY_KEYS | frozenset({
+    PREFIX + "CLEANUP_AUTHORIZATION", PREFIX + "STAGE_INVENTORY",
+    PREFIX + "STAGE_RECEIPT",
+})
 
 def die():
     raise SystemExit(1)
@@ -260,11 +272,13 @@ def target_entry(document):
         die()
     return matches[0]
 
-def load_environment(path):
-    regular_owned(path, 0o600)
+def load_environment(path, expected_digest, expected_identity):
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            value = json.load(handle)
+        data, info = read_regular_bytes(path, 0o600)
+        if (hashlib.sha256(data).hexdigest() != expected_digest
+                or stable_identity(info) != expected_identity):
+            die()
+        value = json.loads(data.decode("utf-8"))
     except Exception:
         die()
     if not isinstance(value, dict) or not value or not all(
@@ -272,7 +286,16 @@ def load_environment(path):
         for key, item in value.items()
     ):
         die()
-    if "MOOT_SECRET_SYNC_HOST_AUTHORITY_PUBLIC_KEY" in value:
+    keys = frozenset(value)
+    if keys == PROBE_KEYS:
+        pass
+    elif keys == ORDINARY_KEYS:
+        if value[PREFIX + "PHASE"] == "cleanup":
+            die()
+    elif keys == CLEANUP_KEYS:
+        if value[PREFIX + "PHASE"] != "cleanup":
+            die()
+    else:
         die()
     return value
 
@@ -358,7 +381,8 @@ if action == "discover":
     print(digest + "\t" + identity + "\t" + os.path.realpath(candidates[0]))
 elif action == "inject":
     (source, copy, root, platform, authority_path, environment_path,
-     source_digest, source_identity, injection_attack) = sys.argv[2:11]
+     environment_digest, environment_identity, source_digest, source_identity,
+     injection_attack) = sys.argv[2:13]
     document, current_source_digest, current_source_identity, data = validate(
         source, root, platform, authority_path
     )
@@ -382,7 +406,9 @@ elif action == "inject":
         for key in list(environment):
             if key.startswith(PREFIX):
                 del environment[key]
-        expected_environment = load_environment(environment_path)
+        expected_environment = load_environment(
+            environment_path, environment_digest, environment_identity
+        )
         environment.update(expected_environment)
         document["TestConfigurations"][configuration_index]["TestTargets"][target_index]["EnvironmentVariables"] = environment
         intended = plistlib.dumps(document, fmt=plistlib.FMT_BINARY, sort_keys=True)
@@ -417,9 +443,12 @@ elif action == "inject":
     print(digest + "\t" + identity)
 elif action == "verify":
     (source, copy, root, platform, authority_path, environment_path,
-     source_digest, source_identity, copy_digest, copy_identity) = sys.argv[2:12]
+     environment_digest, environment_identity, source_digest, source_identity,
+     copy_digest, copy_identity) = sys.argv[2:14]
     _, current_source_digest, current_source_identity, _ = validate(source, root, platform, authority_path)
-    expected_environment = load_environment(environment_path)
+    expected_environment = load_environment(
+        environment_path, environment_digest, environment_identity
+    )
     _, current_copy_digest, current_copy_identity, _ = validate(
         copy, root, platform, authority_path, 0o600, expected_environment
     )
@@ -446,7 +475,7 @@ write_environment_spec() {
   local output="$1"
   shift
   /usr/bin/python3 -c '
-import json, os, sys
+import hashlib, json, os, stat, sys
 output = sys.argv[1]
 items = sys.stdin.buffer.read().split(b"\0")
 environment = {}
@@ -460,13 +489,29 @@ for item in items:
     if decoded_key in environment:
         raise SystemExit(1)
     environment[decoded_key] = value.decode("utf-8")
-descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-    json.dump(environment, handle, sort_keys=True, separators=(",", ":"))
-    handle.flush()
-    os.fsync(handle.fileno())
-' "${output}" < <(printf '%s\0' "$@") || fail U7_RUNNER_ENVIRONMENT_INVALID
-  chmod 600 "${output}"
+data = json.dumps(environment, sort_keys=True, separators=(",", ":")).encode("utf-8")
+descriptor = os.open(
+    output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+)
+try:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise SystemExit(1)
+        remaining = remaining[written:]
+    os.fchmod(descriptor, 0o600)
+    os.fsync(descriptor)
+    info = os.fstat(descriptor)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+        raise SystemExit(1)
+    identity = "{}:{}:{:o}".format(info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+    print(hashlib.sha256(data).hexdigest() + "\t" + identity)
+finally:
+    os.close(descriptor)
+' "${output}" < <(printf '%s\0' "$@") \
+    || fail U7_RUNNER_ENVIRONMENT_INVALID
 }
 
 prepare_invocation_copy() {
@@ -488,12 +533,43 @@ prepare_invocation_copy() {
         ;;
     esac
   fi
-  write_environment_spec "${environment_spec}" "$@"
+  if [[ "${runner_self_test_mode}" == 1 \
+    && "${U7_SELF_TEST_XCTESTRUN_ATTACK:-}" == environment-extra-key ]]; then
+    set -- "$@" MOOT_SECRET_SYNC_UNKNOWN=forbidden
+  fi
+  local environment_binding environment_digest environment_identity
+  environment_binding="$(write_environment_spec "${environment_spec}" "$@")"
+  IFS=$'\t' read -r environment_digest environment_identity \
+    <<<"${environment_binding}"
+  [[ "${environment_digest}" =~ ^[0-9a-f]{64}$ \
+    && "${environment_identity}" =~ ^[0-9]+:[0-9]+:[0-7]+$ ]] \
+    || fail U7_RUNNER_ENVIRONMENT_INVALID
+  if [[ "${runner_self_test_mode}" == 1 ]]; then
+    case "${U7_SELF_TEST_XCTESTRUN_ATTACK:-}" in
+      environment-replace)
+        /bin/cp -p "${environment_spec}" "${environment_spec}.replacement"
+        /bin/mv -f "${environment_spec}.replacement" "${environment_spec}"
+        ;;
+      environment-mutate)
+        /usr/bin/printf ' ' >>"${environment_spec}"
+        ;;
+      environment-symlink)
+        /bin/cp -p "${environment_spec}" "${environment_spec}.target"
+        /bin/rm -f "${environment_spec}"
+        /bin/ln -s "${environment_spec}.target" "${environment_spec}"
+        ;;
+      environment-hardlink)
+        local environment_alias="${U7_RUN_DIR}/../u7-retained-environment-hardlink.json"
+        /bin/ln "${environment_spec}" "${environment_alias}"
+        attack_aliases+=("${environment_alias}")
+        ;;
+    esac
+  fi
   capture_checked U7_RUNNER_XCTESTRUN_INVALID "${digest_file}" \
     /usr/bin/python3 "${plist_helper}" inject "${source}" "${copy}" \
       "${root}" "${platform}" "${transient}/authority.b64" \
-      "${environment_spec}" "${source_digest}" "${source_identity}" \
-      "${injection_attack}"
+      "${environment_spec}" "${environment_digest}" "${environment_identity}" \
+      "${source_digest}" "${source_identity}" "${injection_attack}"
   invocation_copies+=("${copy}")
   local copy_digest copy_identity
   IFS=$'\t' read -r copy_digest copy_identity <"${digest_file}"
@@ -502,6 +578,8 @@ prepare_invocation_copy() {
     || fail U7_RUNNER_XCTESTRUN_INVALID
   prepared_copy="${copy}"
   prepared_environment_spec="${environment_spec}"
+  prepared_environment_digest="${environment_digest}"
+  prepared_environment_identity="${environment_identity}"
   prepared_copy_digest="${copy_digest}"
   prepared_copy_identity="${copy_identity}"
 }
@@ -512,15 +590,18 @@ verify_invocation_copy() {
   local root="$3"
   local platform="$4"
   local environment_spec="$5"
-  local source_digest="$6"
-  local source_identity="$7"
-  local copy_digest="$8"
-  local copy_identity="$9"
+  local environment_digest="$6"
+  local environment_identity="$7"
+  local source_digest="$8"
+  local source_identity="$9"
+  local copy_digest="${10}"
+  local copy_identity="${11}"
   run_checked U7_RUNNER_XCTESTRUN_INVALID \
     /usr/bin/python3 "${plist_helper}" verify "${source}" "${copy}" \
       "${root}" "${platform}" "${transient}/authority.b64" \
-      "${environment_spec}" "${source_digest}" "${source_identity}" \
-      "${copy_digest}" "${copy_identity}"
+      "${environment_spec}" "${environment_digest}" "${environment_identity}" \
+      "${source_digest}" "${source_identity}" "${copy_digest}" \
+      "${copy_identity}"
 }
 
 attack_invocation_copy_if_requested() {
@@ -564,6 +645,10 @@ attack_invocation_copy_if_requested() {
     copy-window)
       # The embedded helper mutates the installed copy before it can establish
       # the intended digest and identity as the invocation baseline.
+      ;;
+    environment-replace|environment-mutate|environment-symlink|environment-hardlink|environment-extra-key)
+      # prepare_invocation_copy performs these environment-spec attacks before
+      # the embedded helper reads the intended invocation allowlist.
       ;;
     *)
       fail U7_RUNNER_XCTESTRUN_INVALID
@@ -782,6 +867,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
     verify_invocation_copy \
       "${source_xctestrun}" "${prepared_copy}" "${source_root}" \
       "${product_platform}" "${prepared_environment_spec}" \
+      "${prepared_environment_digest}" "${prepared_environment_identity}" \
       "${source_digest}" "${source_identity}" "${prepared_copy_digest}" \
       "${prepared_copy_identity}"
     run_xcode_checked U7_RUNNER_PROBE_FAILED \
@@ -828,6 +914,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
     verify_invocation_copy \
       "${source_xctestrun}" "${prepared_copy}" "${source_root}" \
       "${product_platform}" "${prepared_environment_spec}" \
+      "${prepared_environment_digest}" "${prepared_environment_identity}" \
       "${source_digest}" "${source_identity}" "${prepared_copy_digest}" \
       "${prepared_copy_identity}"
     phase_log="${transient}/phase-${number}.log"
