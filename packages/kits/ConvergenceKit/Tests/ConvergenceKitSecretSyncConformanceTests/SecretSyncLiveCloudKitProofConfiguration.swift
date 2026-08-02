@@ -33,6 +33,14 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     let trustedHostAuthorityPublicKey: Data
   }
 
+  struct ProbeValues: Sendable, Equatable {
+    let runNamespace: String
+    let deviceRole: DeviceRole
+    let ledgerURL: URL
+    let signedRunManifest: SecretSyncLiveSignedRunManifest
+    let runManifestDigest: Data
+  }
+
   enum DeviceRole: String, Codable, Sendable, CaseIterable {
     case a = "A"
     case b = "B"
@@ -62,6 +70,8 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
   static let signedRunManifestKey = "MOOT_SECRET_SYNC_SIGNED_RUN_MANIFEST"
   static let hostLaunchGrantKey = "MOOT_SECRET_SYNC_HOST_LAUNCH_GRANT"
   static let cleanupAuthorizationKey = "MOOT_SECRET_SYNC_CLEANUP_AUTHORIZATION"
+  static let stageInventoryKey = "MOOT_SECRET_SYNC_STAGE_INVENTORY"
+  static let stageReceiptKey = "MOOT_SECRET_SYNC_STAGE_RECEIPT"
   static let hostAuthorityBundleKey = "MOOTSecretSyncHostAuthorityPublicKey"
   static let canonicalContainerIdentifier = "iCloud.com.codedaptive.simplemachines"
 
@@ -96,6 +106,45 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
       independentlyAuthenticatedHostAuthorityPublicKey:
         independentlyAuthenticatedHostAuthorityPublicKey,
       applicationSupportRoot: applicationSupportRoot
+    )
+  }
+
+  /// Loads only manifest-authenticated role-local state needed by the ledger
+  /// probe. A probe deliberately has no launch grant and cannot enter any
+  /// protected CloudKit or Secure Enclave operation.
+  static func loadProbe(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) throws -> ProbeValues {
+    guard environment[optInKey] == "1" else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.operatorAttestationMissing
+    }
+    guard let authority = SecretSyncLiveHostAuthorityTrustAnchor
+      .signedTestBundlePublicKey()
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.hostAuthorityMissing }
+    guard let namespace = environment[namespaceKey], valid(namespace: namespace) else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.invalidRunNamespace
+    }
+    guard let rawRole = environment[roleKey], let role = DeviceRole(rawValue: rawRole) else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.invalidDeviceRole
+    }
+    guard let encoded = environment[signedRunManifestKey],
+      let data = Data(base64Encoded: encoded),
+      let signed = try? JSONDecoder().decode(SecretSyncLiveSignedRunManifest.self, from: data)
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.signedRunManifestMissing }
+    let digest = try SecretSyncLiveSignedRunManifestVerifier.verify(
+      signed, trustedAuthorityPublicKey: authority, namespace: namespace
+    )
+    guard let applicationSupportRoot = FileManager.default.urls(
+      for: .applicationSupportDirectory, in: .userDomainMask
+    ).first else { throw SecretSyncLiveCloudKitProofConfigurationError.invalidLedgerPath }
+    return ProbeValues(
+      runNamespace: namespace, deviceRole: role,
+      ledgerURL: SecretSyncLiveCleanupLedger.derivedURL(
+        applicationSupportRoot: applicationSupportRoot,
+        logicalLedgerIdentifier: signed.manifest.ledgerIdentifier,
+        role: role
+      ),
+      signedRunManifest: signed, runManifestDigest: digest
     )
   }
 
@@ -536,6 +585,58 @@ struct SecretSyncLivePhaseReceiptAttachment: Codable, Sendable, Equatable {
   let destinationBindingDigest: Data
   let artifactDigest: Data
   let inventoryDigest: Data?
+  let credentialBindingDigest: Data?
+
+  private enum CodingKeys: String, CodingKey {
+    case version, namespace, role, phase, runManifestDigest
+    case launchGrantDigest, destinationBindingDigest, artifactDigest
+    case inventoryDigest, credentialBindingDigest
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(version, forKey: .version)
+    try container.encode(namespace, forKey: .namespace)
+    try container.encode(role, forKey: .role)
+    try container.encode(phase, forKey: .phase)
+    try container.encode(runManifestDigest, forKey: .runManifestDigest)
+    try container.encode(launchGrantDigest, forKey: .launchGrantDigest)
+    try container.encode(destinationBindingDigest, forKey: .destinationBindingDigest)
+    try container.encode(artifactDigest, forKey: .artifactDigest)
+    try container.encode(inventoryDigest, forKey: .inventoryDigest)
+    try container.encode(credentialBindingDigest, forKey: .credentialBindingDigest)
+  }
+
+  func validated(
+    values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    expectedRole: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    expectedPhase: SecretSyncLiveCloudKitProofConfiguration.Phase
+  ) throws -> Self {
+    guard version == 1, namespace == values.runNamespace,
+      role == expectedRole, phase == expectedPhase,
+      runManifestDigest == values.runManifestDigest,
+      launchGrantDigest.count == SHA256.byteCount,
+      destinationBindingDigest.count == SHA256.byteCount,
+      artifactDigest.count == SHA256.byteCount,
+      (expectedPhase == .stage) == (inventoryDigest != nil),
+      (expectedPhase == .credential) == (credentialBindingDigest != nil),
+      credentialBindingDigest?.count == nil
+        || credentialBindingDigest?.count == SHA256.byteCount,
+      inventoryDigest?.count == nil || inventoryDigest?.count == SHA256.byteCount
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.attachmentBindingMismatch }
+    return self
+  }
+
+  static func decodeExact(_ data: Data) throws -> Self {
+    try SecretSyncLiveExactJSON.decode(
+      Self.self, from: data,
+      exactKeys: [
+        "version", "namespace", "role", "phase", "runManifestDigest",
+        "launchGrantDigest", "destinationBindingDigest", "artifactDigest",
+        "inventoryDigest", "credentialBindingDigest",
+      ]
+    )
+  }
 }
 
 struct SecretSyncLiveStageInventoryAttachment: Codable, Sendable, Equatable {
