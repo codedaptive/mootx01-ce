@@ -29,40 +29,93 @@ struct SecretSyncCrashRestartConformanceTests {
     ].contains(head.commitDigest))
   }
 
-  @Test("restart classifies before-save and after-save transport crashes")
-  func ambiguousCrashRestart() async throws {
+  @Test("crash before immutable staging leaves no reconstructable candidate")
+  func crashBeforeImmutableStaging() async throws {
     let digester = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+    let fixture = try U7PolicyFixture.make()
+    let database = U7ScriptedCloudKitDatabase()
+    await database.failNextSaveBeforeCommit()
+    let store = SecretSyncCloudKitPolicyStore(database: database, digester: digester)
 
-    let before = U7ScriptedCloudKitDatabase()
-    await before.failNextSaveBeforeCommit()
-    #expect(
-      await attemptSave(
-        try U7HeadRecord.make(epoch: 1, commit: 0x31, policy: 0x32),
-        database: before,
-        digester: digester
-      ) == false
-    )
-    let beforeRestart = SecretSyncHeadCAS(database: before, digester: digester)
-    #expect(try await beforeRestart.currentHead(for: U7GoldenVectors.scopeID) == nil)
+    await #expect(throws: (any Error).self) {
+      try await store.appendStagedPolicy(fixture.entry)
+    }
+    let restarted = SecretSyncCloudKitPolicyStore(database: database, digester: digester)
+    #expect(try await restarted.stagedPolicy(for: fixture.entry.commit.scopeID, epoch: 1) == nil)
+  }
 
-    let after = U7ScriptedCloudKitDatabase()
-    await after.failNextSaveAfterCommit()
+  @Test("crash after staging preserves complete graph without authority")
+  func crashAfterStagingBeforeCAS() async throws {
+    let context = try await stagedContext()
+    let restarted = SecretSyncCloudKitPolicyStore(
+      database: context.database, digester: context.digester
+    )
+
+    #expect(try await restarted.policyHead(for: U7GoldenVectors.scopeID) == nil)
     #expect(
-      await attemptSave(
-        try U7HeadRecord.make(epoch: 1, commit: 0x41, policy: 0x42),
-        database: after,
-        digester: digester
-      ) == false
+      try await restarted.reconstructPolicy(
+        commitDigest: context.fixture.entry.commit.recordDigest
+      ) == context.fixture.entry
     )
-    let afterRestart = SecretSyncHeadCAS(database: after, digester: digester)
-    let accepted = try #require(
-      try await afterRestart.currentHead(for: U7GoldenVectors.scopeID)
+  }
+
+  @Test("crash during CAS is classified from the durable production head")
+  func crashDuringCAS() async throws {
+    let context = try await stagedContext()
+    await context.database.failNextSaveAfterCommit()
+
+    await #expect(throws: (any Error).self) {
+      _ = try await context.store.compareAndAdvance(
+        U7PolicyFixture.precondition(context.fixture)
+      )
+    }
+    let restarted = SecretSyncCloudKitPolicyStore(
+      database: context.database, digester: context.digester
     )
-    let expectedAcceptedDigest = try U7GoldenVectors.digest(0x41)
-    #expect(accepted.commitDigest == expectedAcceptedDigest)
+    let head = try #require(try await restarted.policyHead(for: U7GoldenVectors.scopeID))
+    #expect(head.commitDigest == context.fixture.entry.commit.recordDigest)
+  }
+
+  @Test("restart after accepted head reconstructs committed graph before receipt")
+  func crashAfterAcceptedHeadBeforeReceipt() async throws {
+    let context = try await stagedContext()
+    let outcome = try await context.store.compareAndAdvance(
+      U7PolicyFixture.precondition(context.fixture)
+    )
+    guard case .advanced = outcome else { Issue.record("initial CAS must advance"); return }
+    let restarted = SecretSyncCloudKitPolicyStore(
+      database: context.database, digester: context.digester
+    )
+
+    let committed = try await restarted.committedPolicy(
+      for: U7GoldenVectors.scopeID, epoch: 1
+    )
+    #expect(committed?.commit == context.fixture.entry.commit)
+    #expect(committed?.records.state == .committed)
+    #expect(committed?.credentials == context.fixture.entry.credentials)
+  }
+
+  @Test("partial cross-zone graphs reject while unreferenced orphans authorize nothing")
+  func partialAndOrphanGraphs() async throws {
+    let partial = try await stagedContext()
+    await partial.database.removeFirst(type: .sealedPayload)
+    await #expect(throws: SecretSyncCloudKitPolicyStoreError.incompleteRecordSet) {
+      _ = try await partial.store.reconstructPolicy(
+        commitDigest: partial.fixture.entry.commit.recordDigest
+      )
+    }
+
+    let orphaned = try await stagedContext()
+    await orphaned.database.seedOrphan()
+    let reconstructed = try await orphaned.store.reconstructPolicy(
+      commitDigest: orphaned.fixture.entry.commit.recordDigest
+    )
+    #expect(reconstructed == orphaned.fixture.entry)
   }
 
   @Test("protected offline floor survives while missing restored and forked pins block")
+  // The three offline outcomes share one exact commitment; separating them
+  // would obscure that only protected-local equality changes admission.
   func protectedOfflineFloor() async throws {
     let commitment = try U7HeadRecord.commitment(
       epoch: 7,
@@ -131,6 +184,20 @@ struct SecretSyncCrashRestartConformanceTests {
     } catch {
       return false
     }
+  }
+
+  private func stagedContext() async throws -> (
+    fixture: U7PolicyFixture,
+    database: U7ScriptedCloudKitDatabase,
+    digester: SecretSyncSHA256DigestProvider,
+    store: SecretSyncCloudKitPolicyStore
+  ) {
+    let fixture = try U7PolicyFixture.make()
+    let database = U7ScriptedCloudKitDatabase()
+    let digester = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+    let store = SecretSyncCloudKitPolicyStore(database: database, digester: digester)
+    try await store.appendStagedPolicy(fixture.entry)
+    return (fixture, database, digester, store)
   }
 }
 
@@ -203,6 +270,19 @@ private actor U7ScriptedCloudKitDatabase: CloudKitDatabaseProtocol {
   func failNextSaveBeforeCommit() { failBefore = true }
   func failNextSaveAfterCommit() { failAfter = true }
   func seed(_ record: CKRecord) { records[record.recordID] = record }
+  func removeFirst(type: SecretSyncCloudKitRecordType) {
+    guard let id = records.first(where: { $0.value.recordType == type.rawValue })?.key else {
+      return
+    }
+    records.removeValue(forKey: id)
+  }
+  func seedOrphan() {
+    let id = CKRecord.ID(
+      recordName: "unreferenced-u7-orphan",
+      zoneID: SecretSyncCloudKitZones.payloadZoneID
+    )
+    records[id] = CKRecord(recordType: "U7UnreferencedOrphan", recordID: id)
+  }
 
   func modifyRecords(
     saving recordsToSave: [CKRecord],

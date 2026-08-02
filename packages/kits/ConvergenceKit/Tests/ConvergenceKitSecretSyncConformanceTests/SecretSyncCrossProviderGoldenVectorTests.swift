@@ -212,3 +212,325 @@ enum U7GoldenVectors {
     return result
   }
 }
+
+/// Complete immutable policy graph used through the public validator and store.
+struct U7PolicyFixture: Sendable {
+  let entry: SecretPolicyStoreEntry
+  let snapshot: SecretControlSnapshot
+  let generationKey: SecretSyncGenerationKey
+
+  static func make(
+    previous: U7PolicyFixture? = nil,
+    scopeID: SecretScopeID = U7GoldenVectors.scopeID
+  ) throws -> U7PolicyFixture {
+    let digester = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+    let signatures = try SecretSyncP256SignatureProvider(suite: U7GoldenVectors.suite())
+    let epoch = (previous?.entry.commit.policyEpoch ?? 0) + 1
+    let signerA = P256.Signing.PrivateKey()
+    let agreementA = P256.KeyAgreement.PrivateKey()
+    let signerB = P256.Signing.PrivateKey()
+    let agreementB = P256.KeyAgreement.PrivateKey()
+    let signerC = P256.Signing.PrivateKey()
+    let agreementC = P256.KeyAgreement.PrivateKey()
+    let recovery = P256.KeyAgreement.PrivateKey()
+    let credentialA = try credential(
+      signing: signerA, agreement: agreementA, marker: 0x73, label: "a", status: .active
+    )
+    let credentialB = try credential(
+      signing: signerB, agreement: agreementB, marker: 0x83, label: "b", status: .active
+    )
+    let credentialC = try credential(
+      signing: signerC, agreement: agreementC, marker: 0x93, label: "c", status: .revoked
+    )
+    let credentials = [credentialA, credentialB, credentialC]
+    let trusts = try zip(credentials, [DeviceTrustState.trusted, .trusted, .revoked]).map {
+      credential, state in
+      let credentialDigest = try digester.digest(canonicalBytes: credential.canonicalBytes())
+      return try addressed(digester) { digest in
+        try DeviceTrustRecord(
+          recordDigest: digest, credentialDigest: credentialDigest,
+          deviceID: credential.deviceID, credentialID: credential.credentialID,
+          trustState: state, effectivePolicyEpoch: epoch
+        )
+      }
+    }.sorted { $0.recordDigest.bytes.lexicographicallyPrecedes($1.recordDigest.bytes) }
+    let scope = try addressed(digester) { digest in
+      try SecretScopeSnapshot(
+        scopeID: scopeID,
+        rootRecordID: U7UUID.byte(0x71),
+        memberRecordIDs: [U7UUID.byte(0x71), U7UUID.byte(0x72)],
+        snapshotDigest: digest
+      )
+    }
+    let recoveryDescriptor = try recoveryDescriptor(recovery)
+    let policy = try SecretPolicyEpoch(
+      epoch: epoch,
+      predecessorPolicyDigest: previous?.entry.commit.policyDigest,
+      scopeSnapshot: scope,
+      generationID: SecretGenerationID(UUID()),
+      authorizedRecipientCredentialIDs: [credentialA.credentialID, credentialB.credentialID],
+      trustedDeviceRecordDigests: trusts.map(\.recordDigest),
+      recoveryRecipient: recoveryDescriptor,
+      signerCredentialID: credentialA.credentialID
+    )
+    let policySignature = try signatures.sign(
+      canonicalBytes: policy.canonicalBytes(), using: signerA
+    )
+    let signedPolicy = try addressed(digester) { digest in
+      try SignedSecretPolicyEpoch(
+        recordDigest: digest,
+        policy: policy,
+        signature: policySignature
+      )
+    }
+    let graph = try encryptedGraph(
+      policy: signedPolicy,
+      recipients: [(credentialA, agreementA), (credentialB, agreementB)],
+      recovery: recovery,
+      digester: digester
+    )
+    return try finish(
+      previous: previous,
+      credentials: credentials,
+      trusts: trusts,
+      signedPolicy: signedPolicy,
+      graph: graph,
+      digester: digester,
+      signer: signerA,
+      signatures: signatures
+    )
+  }
+
+  static func precondition(
+    _ fixture: U7PolicyFixture,
+    expected: U7PolicyFixture? = nil
+  ) throws -> SecretPolicyAdvancePrecondition {
+    try SecretPolicyAdvancePrecondition(
+      expectedHead: try expected.map { item in
+        try SecretPolicyStoreHead(
+          scopeID: item.entry.commit.scopeID,
+          policyEpoch: item.entry.commit.policyEpoch,
+          commitDigest: item.entry.commit.recordDigest,
+          policyDigest: item.entry.commit.policyDigest
+        )
+      },
+      candidateEntry: fixture.entry,
+      validatedSnapshot: fixture.snapshot
+    )
+  }
+
+  private struct EncryptedGraph {
+    let payload: SealedPayload
+    let recipientEnvelopes: [RecipientKeyEnvelope]
+    let recoveryEnvelope: RecoveryEnvelope
+    let generationKey: SecretSyncGenerationKey
+  }
+
+  private static func encryptedGraph(
+    policy: SignedSecretPolicyEpoch,
+    recipients: [(TrustedDeviceCredential, P256.KeyAgreement.PrivateKey)],
+    recovery: P256.KeyAgreement.PrivateKey,
+    digester: any SecretSyncDigesting
+  ) throws -> EncryptedGraph {
+    let crypto = try SecretSyncV1CryptoProvider(suite: U7GoldenVectors.suite())
+    let key = SecretSyncGenerationKey.generate()
+    let bound = try SecretSyncV1BoundContext(
+      scopeID: policy.policy.scopeSnapshot.scopeID,
+      scopeSnapshotDigest: policy.policy.scopeSnapshot.snapshotDigest,
+      policyEpoch: policy.policy.epoch,
+      policyDigest: policy.recordDigest,
+      generationID: policy.policy.generationID,
+      formatVersion: 1
+    )
+    let payloadBytes = try crypto.aesGCMProvider.seal(
+      plaintext: Data("u7-production-encrypted-payload".utf8), using: key, context: bound
+    )
+    let recoveryWrapped = try crypto.hpkeEnvelopeProvider.sealRecoveryGenerationKey(
+      key,
+      for: agreementDescriptor(recovery, label: "u7-recovery-agreement"),
+      context: SecretSyncRecoveryEnvelopeContext(
+        boundContext: bound,
+        recoveryRecipientID: try #require(policy.policy.recoveryRecipient).recoveryRecipientID
+      )
+    )
+    let payload = try addressed(digester) { digest in
+      try SealedPayload(
+        recordDigest: digest, scopeID: bound.scopeID,
+        scopeSnapshotDigest: bound.scopeSnapshotDigest, policyEpoch: bound.policyEpoch,
+        policyDigest: bound.policyDigest, generationID: bound.generationID,
+        formatVersion: bound.formatVersion, ciphertextBytes: payloadBytes
+      )
+    }
+    let recipientEnvelopes = try recipients.map { credential, _ in
+      let wrapped = try crypto.hpkeEnvelopeProvider.sealGenerationKey(
+        key,
+        for: credential.keyAgreementPublicKey,
+        context: SecretSyncRecipientEnvelopeContext(
+          boundContext: bound, recipientCredentialID: credential.credentialID
+        )
+      )
+      return try addressed(digester) { digest in
+        try RecipientKeyEnvelope(
+          recordDigest: digest, scopeID: bound.scopeID,
+          scopeSnapshotDigest: bound.scopeSnapshotDigest, policyEpoch: bound.policyEpoch,
+          policyDigest: bound.policyDigest, generationID: bound.generationID,
+          recipientCredentialID: credential.credentialID,
+          formatVersion: bound.formatVersion, wrappedKeyBytes: wrapped
+        )
+      }
+    }
+    let recoveryEnvelope = try addressed(digester) { digest in
+      try RecoveryEnvelope(
+        recordDigest: digest, scopeID: bound.scopeID,
+        scopeSnapshotDigest: bound.scopeSnapshotDigest, policyEpoch: bound.policyEpoch,
+        policyDigest: bound.policyDigest, generationID: bound.generationID,
+        recoveryRecipientID: try #require(policy.policy.recoveryRecipient).recoveryRecipientID,
+        formatVersion: bound.formatVersion, wrappedKeyBytes: recoveryWrapped
+      )
+    }
+    return EncryptedGraph(
+      payload: payload,
+      recipientEnvelopes: recipientEnvelopes,
+      recoveryEnvelope: recoveryEnvelope,
+      generationKey: key
+    )
+  }
+
+  private static func finish(
+    previous: U7PolicyFixture?, credentials: [TrustedDeviceCredential],
+    trusts: [DeviceTrustRecord], signedPolicy: SignedSecretPolicyEpoch,
+    graph: EncryptedGraph,
+    digester: any SecretSyncDigesting,
+    signer: P256.Signing.PrivateKey,
+    signatures: SecretSyncP256SignatureProvider
+  ) throws -> U7PolicyFixture {
+    let records = try SecretControlRecords(
+      state: .staged, signedPolicy: signedPolicy, sealedPayload: graph.payload,
+      recipientEnvelopes: graph.recipientEnvelopes, recoveryEnvelope: graph.recoveryEnvelope,
+      purgeRequirements: [], purgeReceipts: [], recoveryAuthorization: nil
+    )
+    let provisionalCommit = try commit(
+      digest: U7GoldenVectors.digest(0), signature: Data([0]),
+      previous: previous, credentials: credentials,
+      signedPolicy: signedPolicy, graph: graph
+    )
+    let commitSignature = try signatures.sign(
+      canonicalBytes: provisionalCommit.signingBytes(), using: signer
+    )
+    let commit = try addressed(digester) { digest in
+      try commit(
+        digest: digest, signature: commitSignature,
+        previous: previous, credentials: credentials,
+        signedPolicy: signedPolicy, graph: graph
+      )
+    }
+    let freshness = try SecretBootstrapFreshnessCommitment(
+      scopeID: commit.scopeID, latestPolicyEpoch: commit.policyEpoch,
+      headCommitDigest: commit.recordDigest, policyDigest: commit.policyDigest
+    )
+    let snapshot = try SecretPolicyValidator.validateTransition(
+      currentSnapshot: previous?.snapshot, stagedRecords: records, commit: commit,
+      trustedCredentials: credentials, trustedDeviceRecords: trusts,
+      knownCompetingChildDigests: [], externalFreshness: freshness,
+      digester: digester, signatureVerifier: signatures
+    )
+    return try U7PolicyFixture(
+      entry: SecretPolicyStoreEntry(
+        commit: commit, records: records, credentials: credentials,
+        trustRecords: trusts, digester: digester
+      ),
+      snapshot: snapshot, generationKey: graph.generationKey
+    )
+  }
+
+  private static func commit(
+    digest: SecretRecordDigest,
+    signature: Data,
+    previous: U7PolicyFixture?,
+    credentials: [TrustedDeviceCredential],
+    signedPolicy: SignedSecretPolicyEpoch,
+    graph: EncryptedGraph
+  ) throws -> SecretTransitionCommit {
+    try SecretTransitionCommit(
+      recordDigest: digest,
+      scopeID: signedPolicy.policy.scopeSnapshot.scopeID,
+      policyEpoch: signedPolicy.policy.epoch,
+      predecessorCommitDigest: previous?.entry.commit.recordDigest,
+      policyDigest: signedPolicy.recordDigest,
+      scopeSnapshotDigest: signedPolicy.policy.scopeSnapshot.snapshotDigest,
+      generationID: signedPolicy.policy.generationID,
+      sealedPayloadDigest: graph.payload.recordDigest,
+      recipientEnvelopeDigests: graph.recipientEnvelopes.map(\.recordDigest),
+      recoveryEnvelopeDigest: graph.recoveryEnvelope.recordDigest,
+      purgeRequirementDigests: [], purgeReceiptDigests: [],
+      recoveryAuthorizationDigest: nil,
+      signerCredentialID: try #require(credentials.first).credentialID,
+      signature: signature
+    )
+  }
+
+  private static func credential(
+    signing: P256.Signing.PrivateKey,
+    agreement: P256.KeyAgreement.PrivateKey,
+    marker: UInt8,
+    label: String,
+    status: TrustedDeviceCredentialStatus
+  ) throws -> TrustedDeviceCredential {
+    let credentialID = DeviceCredentialID(U7UUID.byte(marker))
+    return try TrustedDeviceCredential(
+      deviceID: TrustedDeviceID(U7UUID.byte(marker &+ 1)), credentialID: credentialID,
+      credentialVersion: 1, status: status,
+      signingPublicKey: SigningPublicKeyDescriptor(
+        algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+        keyIdentifier: Data("u7-\(label)-signing".utf8),
+        publicKeyBytes: signing.publicKey.x963Representation
+      ),
+      keyAgreementPublicKey: agreementDescriptor(agreement, label: "u7-\(label)-agreement"),
+      enrollmentProof: DeviceCredentialEnrollmentProof(
+        challengeID: U7UUID.byte(marker &+ 2), challengeBytes: Data([marker &+ 2]),
+        signingProofBytes: Data([marker &+ 3]), keyAgreementProofBytes: Data([marker &+ 4]),
+        provenance: .trustedDevice(
+          TrustedDeviceEnrollmentAuthority(
+            credentialID: DeviceCredentialID(U7UUID.byte(0x78)), signature: Data([0xA1])
+          )
+        )
+      )
+    )
+  }
+
+  private static func recoveryDescriptor(
+    _ key: P256.KeyAgreement.PrivateKey
+  ) throws -> RecoveryRecipientDescriptor {
+    let signing = P256.Signing.PrivateKey()
+    return try RecoveryRecipientDescriptor(
+      recoveryRecipientID: U7UUID.byte(0x79),
+      keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+        algorithmIdentifier: RecoveryRecipientDescriptor.agreementAlgorithmIdentifier,
+        keyIdentifier: Data("u7-recovery-agreement".utf8),
+        publicKeyBytes: key.publicKey.x963Representation
+      ),
+      authorizationSigningPublicKey: SigningPublicKeyDescriptor(
+        algorithmIdentifier: RecoveryRecipientDescriptor.authorizationSigningAlgorithmIdentifier,
+        keyIdentifier: Data("u7-recovery-signing".utf8),
+        publicKeyBytes: signing.publicKey.x963Representation
+      )
+    )
+  }
+
+  private static func agreementDescriptor(
+    _ key: P256.KeyAgreement.PrivateKey, label: String
+  ) throws -> KeyAgreementPublicKeyDescriptor {
+    try KeyAgreementPublicKeyDescriptor(
+      algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+      keyIdentifier: Data(label.utf8), publicKeyBytes: key.publicKey.x963Representation
+    )
+  }
+
+  private static func addressed<T: SecretSyncCanonicalEncodable>(
+    _ digester: any SecretSyncDigesting,
+    build: (SecretRecordDigest) throws -> T
+  ) throws -> T {
+    let provisional = try build(U7GoldenVectors.digest(0))
+    return try build(digester.digest(canonicalBytes: provisional.canonicalBytes()))
+  }
+}

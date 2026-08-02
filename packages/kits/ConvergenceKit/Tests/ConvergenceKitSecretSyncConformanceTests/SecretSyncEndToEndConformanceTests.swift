@@ -7,7 +7,16 @@ import Testing
 @Suite("SecretSync end-to-end conformance")
 struct SecretSyncEndToEndConformanceTests {
   @Test("A and B can open while excluded C receives no usable envelope")
+  // Graph admission and cryptographic opening remain in one test because the
+  // same A/B/C keys prove both policy membership and actual decryptability.
   func authorizedAudienceExcludesC() throws {
+    let graph = try U7PolicyFixture.make().entry
+    let cID = DeviceCredentialID(U7UUID.byte(0x93))
+    #expect(graph.records.signedPolicy.policy.authorizedRecipientCredentialIDs.count == 2)
+    #expect(graph.records.recipientEnvelopes.count == 2)
+    #expect(!graph.records.recipientEnvelopes.contains { $0.recipientCredentialID == cID })
+    #expect(graph.trustRecords.first { $0.credentialID == cID }?.trustState == .revoked)
+
     let provider = try SecretSyncV1CryptoProvider(suite: U7GoldenVectors.suite())
     let generationKey = SecretSyncGenerationKey.generate()
     let a = P256.KeyAgreement.PrivateKey()
@@ -15,7 +24,7 @@ struct SecretSyncEndToEndConformanceTests {
     let c = P256.KeyAgreement.PrivateKey()
     let aID = DeviceCredentialID(U7UUID.byte(0xA1))
     let bID = DeviceCredentialID(U7UUID.byte(0xB1))
-    let cID = DeviceCredentialID(U7UUID.byte(0xC1))
+    let excludedID = DeviceCredentialID(U7UUID.byte(0xC1))
     let bound = try U7GoldenVectors.boundContext()
     let plaintext = Data("isolated-u7-secret".utf8)
     let sealed = try provider.aesGCMProvider.seal(
@@ -40,11 +49,9 @@ struct SecretSyncEndToEndConformanceTests {
         boundContext: bound
       )
     )
-    let opaqueRecords = [aID: aEnvelope, bID: bEnvelope]
-
-    for (id, privateKey) in [(aID, a), (bID, b)] {
+    for (id, privateKey, envelope) in [(aID, a, aEnvelope), (bID, b, bEnvelope)] {
       let opened = try provider.hpkeEnvelopeProvider.openRecipientGenerationKey(
-        try #require(opaqueRecords[id]),
+        envelope,
         using: privateKey,
         context: try U7GoldenVectors.recipientContext(
           credentialID: id,
@@ -60,13 +67,12 @@ struct SecretSyncEndToEndConformanceTests {
       )
     }
 
-    #expect(opaqueRecords[cID] == nil)
     #expect(throws: SecretSyncV1CryptoError.authenticationFailed) {
       _ = try provider.hpkeEnvelopeProvider.openRecipientGenerationKey(
         aEnvelope,
         using: c,
         context: try U7GoldenVectors.recipientContext(
-          credentialID: aID,
+          credentialID: excludedID,
           boundContext: bound
         )
       )
@@ -74,6 +80,8 @@ struct SecretSyncEndToEndConformanceTests {
   }
 
   @Test("audience contraction rotates epoch generation and content key")
+  // This end-to-end boundary deliberately retains old and replacement epochs
+  // together so stale-key rejection and current-key success share one fixture.
   func audienceContractionRotatesAllAuthority() throws {
     let provider = try SecretSyncV1CryptoProvider(suite: U7GoldenVectors.suite())
     let a = P256.KeyAgreement.PrivateKey()
@@ -144,16 +152,29 @@ struct SecretSyncEndToEndConformanceTests {
 
   @Test("account and transport tokens carry no cryptographic authority")
   func transportMetadataIsNotAuthority() throws {
-    let token = Data("cloud-account-token".utf8)
-    let provider = try SecretSyncAESGCMProvider(suite: U7GoldenVectors.suite())
-    let sealed = try provider.seal(
-      plaintext: Data("authority-is-the-key".utf8),
-      using: SecretSyncGenerationKey.generate(),
-      context: U7GoldenVectors.boundContext()
+    let commit = try U7TransitionFixture.commit(epoch: 7, marker: 0x91)
+    let exact = try SecretBootstrapFreshnessCommitment(
+      scopeID: commit.scopeID,
+      latestPolicyEpoch: commit.policyEpoch,
+      headCommitDigest: commit.recordDigest,
+      policyDigest: commit.policyDigest
+    )
+    try SecretPolicyValidator.validateBootstrapFreshness(
+      localCommit: commit,
+      against: exact
     )
 
-    #expect(token != sealed)
-    #expect(SecretSyncCloudAuthority.accountOrChangeToken.authorizes == false)
+    #expect(throws: SecretPolicyValidationError.externalFreshnessFork) {
+      try SecretPolicyValidator.validateBootstrapFreshness(
+        localCommit: commit,
+        against: SecretBootstrapFreshnessCommitment(
+          scopeID: exact.scopeID,
+          latestPolicyEpoch: exact.latestPolicyEpoch,
+          headCommitDigest: U7GoldenVectors.digest(0x92),
+          policyDigest: exact.policyDigest
+        )
+      )
+    }
   }
 
   private func descriptor(
@@ -166,12 +187,6 @@ struct SecretSyncEndToEndConformanceTests {
       publicKeyBytes: key.publicKey.x963Representation
     )
   }
-}
-
-private enum SecretSyncCloudAuthority {
-  case accountOrChangeToken
-
-  var authorizes: Bool { false }
 }
 
 enum U7UUID {
