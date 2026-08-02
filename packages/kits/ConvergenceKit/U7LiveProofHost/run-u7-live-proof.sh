@@ -1257,7 +1257,7 @@ recover_stage_material() {
       --output-path "${output}"
   local receipt inventory
   admit_evidence "${output}" \
-    'ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase()' \
+    'SecretSyncLiveCloudKitProofTests/externalPhase()' \
     stage "${output}/admitted"
   receipt="${admitted_primary}"
   inventory="${admitted_secondary}"
@@ -1369,7 +1369,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       "${U7_XCRESULTTOOL}" export attachments --path "${probe_result}" \
         --output-path "${phase_directory}/probe-attachments"
     admit_evidence "${phase_directory}/probe-attachments" \
-      'ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/ledgerProbe()' \
+      'SecretSyncLiveCloudKitProofTests/ledgerProbe()' \
       probe "${phase_directory}/probe-admitted"
     probe="${admitted_primary}"
     interrupt_if_requested U7_SELF_TEST_INTERRUPT_BEFORE_GRANT_INDEX "${index}"
@@ -1429,7 +1429,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
   evidence_kind=ordinary
   [[ "${phase}" != stage ]] || evidence_kind=stage
   admit_evidence "${phase_directory}/phase-attachments" \
-    'ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase()' \
+    'SecretSyncLiveCloudKitProofTests/externalPhase()' \
     "${evidence_kind}" "${phase_directory}/phase-admitted"
   receipt="${admitted_primary}"
   inventory="${admitted_secondary}"

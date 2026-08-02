@@ -3028,10 +3028,10 @@ import base64, hashlib, json, os, pathlib, plistlib, shutil, stat, sys, uuid
 
 TARGET = "ConvergenceKitSecretSyncConformanceTests"
 PREFIX = "MOOT_SECRET_SYNC_"
-PROBE_TEST_IDENTIFIER = TARGET + "/SecretSyncLiveCloudKitProofTests/ledgerProbe()"
-PHASE_TEST_IDENTIFIER = TARGET + "/SecretSyncLiveCloudKitProofTests/externalPhase()"
-PROBE_SELECTOR = "-only-testing:" + PROBE_TEST_IDENTIFIER
-PHASE_SELECTOR = "-only-testing:" + PHASE_TEST_IDENTIFIER
+PROBE_TEST_IDENTIFIER = "SecretSyncLiveCloudKitProofTests/ledgerProbe()"
+PHASE_TEST_IDENTIFIER = "SecretSyncLiveCloudKitProofTests/externalPhase()"
+PROBE_SELECTOR = "-only-testing:" + TARGET + "/" + PROBE_TEST_IDENTIFIER
+PHASE_SELECTOR = "-only-testing:" + TARGET + "/" + PHASE_TEST_IDENTIFIER
 PROBE_KEYS = {
     PREFIX + "LIVE_PROOF", PREFIX + "RUN_NAMESPACE",
     PREFIX + "DEVICE_ROLE", PREFIX + "SIGNED_RUN_MANIFEST",
@@ -3419,7 +3419,9 @@ if (role == "A") != (platform == "MacOSX") or (role != "A" and platform != "iPho
 result = arg("-resultBundlePath")
 attachments = result / "Attachments"
 attachments.mkdir(parents=True, exist_ok=True)
-result.joinpath("test-identifier.txt").write_text(test_filter.removeprefix("-only-testing:"))
+result.joinpath("test-identifier.txt").write_text(
+    PROBE_TEST_IDENTIFIER if test_filter == PROBE_SELECTOR else PHASE_TEST_IDENTIFIER
+)
 if mode == "nonzero-probe" and test_filter == PROBE_SELECTOR:
     sys.exit(9)
 if mode == "nonzero-phase" and test_filter == PHASE_SELECTOR:
