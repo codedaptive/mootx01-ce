@@ -1376,6 +1376,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   func runnerRejectsXCTestrunReplacement() throws {
     for attack in [
       "replace", "symlink", "source-replace", "copy-mode", "source-mode",
+      "copy-window",
     ] {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("u7-runner-attack-\(attack)-\(UUID().uuidString)")

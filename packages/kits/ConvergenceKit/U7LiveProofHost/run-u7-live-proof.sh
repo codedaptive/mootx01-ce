@@ -354,7 +354,7 @@ if action == "discover":
 elif action == "inject":
     (source, copy, root, platform, authority_path, environment_path,
      source_digest, source_identity, injection_attack) = sys.argv[2:11]
-    _, current_source_digest, current_source_identity, data = validate(
+    document, current_source_digest, current_source_identity, data = validate(
         source, root, platform, authority_path
     )
     if (current_source_digest != source_digest or current_source_identity != source_identity
@@ -362,51 +362,53 @@ elif action == "inject":
         die()
     if os.path.lexists(copy) or not beneath(copy, root):
         die()
-    if injection_attack not in ("none", "source-window"):
+    if injection_attack not in ("none", "source-window", "copy-window"):
         die()
-    window_mutated = injection_attack == "source-window"
-    if window_mutated:
+    source_window_mutated = injection_attack == "source-window"
+    if source_window_mutated:
         mutated = bytearray(data)
         if not mutated:
             die()
         mutated[0] ^= 0xff
         overwrite_bound(source, mutated, source_identity)
     try:
-        output = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        configuration_index, target_index, target = target_entry(document)
+        environment = dict(target.get("EnvironmentVariables", {}))
+        for key in list(environment):
+            if key.startswith(PREFIX):
+                del environment[key]
+        expected_environment = load_environment(environment_path)
+        environment.update(expected_environment)
+        document["TestConfigurations"][configuration_index]["TestTargets"][target_index]["EnvironmentVariables"] = environment
+        intended = plistlib.dumps(document, fmt=plistlib.FMT_BINARY, sort_keys=True)
+        intended_digest = hashlib.sha256(intended).hexdigest()
+        temporary = copy + ".new"
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+        )
         try:
-            write_all(output, data)
-            os.fsync(output)
+            write_all(descriptor, intended)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            intended_identity = stable_identity(require_regular_owned(os.fstat(descriptor), 0o600))
         finally:
-            os.close(output)
+            os.close(descriptor)
+        os.replace(temporary, copy)
     finally:
-        if window_mutated:
+        if source_window_mutated:
             overwrite_bound(source, data, source_identity)
-    document = read_plist(copy)
-    configuration_index, target_index, target = target_entry(document)
-    environment = dict(target.get("EnvironmentVariables", {}))
-    for key in list(environment):
-        if key.startswith(PREFIX):
-            del environment[key]
-    expected_environment = load_environment(environment_path)
-    environment.update(expected_environment)
-    document["TestConfigurations"][configuration_index]["TestTargets"][target_index]["EnvironmentVariables"] = environment
-    temporary = copy + ".new"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            plistlib.dump(document, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, copy)
-    os.chmod(copy, 0o600)
     directory_descriptor = os.open(os.path.dirname(copy), os.O_RDONLY)
     try:
         os.fsync(directory_descriptor)
     finally:
         os.close(directory_descriptor)
+    if injection_attack == "copy-window":
+        mutated = bytearray(intended)
+        mutated[0] ^= 0xff
+        overwrite_bound(copy, mutated, intended_identity)
     _, digest, identity, _ = validate(copy, root, platform, authority_path, 0o600, expected_environment)
+    if digest != intended_digest or identity != intended_identity:
+        die()
     print(digest + "\t" + identity)
 elif action == "verify":
     (source, copy, root, platform, authority_path, environment_path,
@@ -474,9 +476,12 @@ prepare_invocation_copy() {
   local environment_spec="${transient}/${label}-environment.json"
   local digest_file="${transient}/${label}-digest.txt"
   local injection_attack=none
-  if [[ "${runner_self_test_mode}" == 1 \
-    && "${U7_SELF_TEST_XCTESTRUN_ATTACK:-}" == source-window ]]; then
-    injection_attack=source-window
+  if [[ "${runner_self_test_mode}" == 1 ]]; then
+    case "${U7_SELF_TEST_XCTESTRUN_ATTACK:-}" in
+      source-window|copy-window)
+        injection_attack="${U7_SELF_TEST_XCTESTRUN_ATTACK}"
+        ;;
+    esac
   fi
   write_environment_spec "${environment_spec}" "$@"
   capture_checked U7_RUNNER_XCTESTRUN_INVALID "${digest_file}" \
@@ -540,6 +545,10 @@ attack_invocation_copy_if_requested() {
     source-window)
       # The embedded helper performs and restores this mutation between its
       # descriptor-bound validation and private-copy construction.
+      ;;
+    copy-window)
+      # The embedded helper mutates the installed copy before it can establish
+      # the intended digest and identity as the invocation baseline.
       ;;
     *)
       fail U7_RUNNER_XCTESTRUN_INVALID
