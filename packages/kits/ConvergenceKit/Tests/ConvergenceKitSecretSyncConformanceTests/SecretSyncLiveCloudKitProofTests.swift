@@ -282,12 +282,10 @@ enum SecretSyncLiveZoneAdmission {
 
 enum SecretSyncLiveCleanupPlan {
   static func authorizedRecordIDs(
-    manifest: [SecretSyncLiveRecordReference],
-    artifactIDs: [CKRecord.ID],
-    headID: CKRecord.ID,
+    authorization: SecretSyncLiveSignedCleanupAuthorization,
     values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) throws -> [CKRecord.ID] {
-    var recordIDs = manifest.map {
+    let recordIDs = authorization.manifest.records.map {
       CKRecord.ID(
         recordName: $0.recordName,
         zoneID: CKRecordZone.ID(
@@ -295,29 +293,19 @@ enum SecretSyncLiveCleanupPlan {
         )
       )
     }
-    recordIDs.append(contentsOf: artifactIDs)
-    recordIDs.append(headID)
-    let exact = Array(Set(recordIDs))
-    try requireAuthorized(exact, values: values)
-    let signed = Set(values.signedRunManifest.manifest.cleanupRecords)
-    let candidate = Set(exact.map {
-      SecretSyncLiveRecordReference(
-        recordName: $0.recordName, zoneName: $0.zoneID.zoneName
-      )
-    })
-    guard candidate == signed else {
-      throw SecretSyncLiveCloudKitProofConfigurationError.unauthorizedRunRecord
-    }
-    return exact
+    try requireAuthorized(recordIDs, authorization: authorization, values: values)
+    return recordIDs
   }
 
   static func requireAuthorized(
     _ recordIDs: [CKRecord.ID],
+    authorization: SecretSyncLiveSignedCleanupAuthorization,
     values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) throws {
     let allowed = Set([values.controlZoneID, values.payloadZoneID])
-    let signed = Set(values.signedRunManifest.manifest.cleanupRecords)
-    guard recordIDs.allSatisfy({ allowed.contains($0.zoneID) }) else {
+    let signed = Set(authorization.manifest.records)
+    guard recordIDs.count == Set(recordIDs).count,
+      recordIDs.allSatisfy({ allowed.contains($0.zoneID) }) else {
       throw SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone
     }
     for recordID in recordIDs {
@@ -339,14 +327,17 @@ enum SecretSyncLiveCleanupPlan {
     database: any CloudKitDatabaseProtocol,
     ledger: SecretSyncLiveCleanupLedger
   ) async throws {
-    try requireAuthorized(recordIDs, values: values)
+    guard let authorization = values.cleanupAuthorization else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.cleanupAuthorizationMissing
+    }
+    try requireAuthorized(recordIDs, authorization: authorization, values: values)
     guard !recordIDs.isEmpty else {
       try await ledger.retainUnresolved([])
       return
     }
     var unresolved = Set(recordIDs)
     for ids in Dictionary(grouping: recordIDs, by: \.zoneID).values {
-      try requireAuthorized(ids, values: values)
+      try requireAuthorized(ids, authorization: authorization, values: values)
       do {
         let result = try await database.modifyRecords(
           saving: [], deleting: ids,
@@ -369,7 +360,7 @@ enum SecretSyncLiveCleanupPlan {
         throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
       }
     }
-    try requireAuthorized(recordIDs, values: values)
+    try requireAuthorized(recordIDs, authorization: authorization, values: values)
     let fetched: [CKRecord.ID: Result<CKRecord, any Error>]
     do {
       fetched = try await database.fetch(withRecordIDs: recordIDs)
@@ -533,9 +524,14 @@ enum SecretSyncLiveCleanupEntryPoint {
       } else {
         try await verifyAPrerequisites()
         let expected = try expectedRecordIDs()
-        try SecretSyncLiveCleanupPlan.requireAuthorized(expected, values: values)
+        guard let authorization = values.cleanupAuthorization else {
+          throw SecretSyncLiveCloudKitProofConfigurationError.cleanupAuthorizationMissing
+        }
+        try SecretSyncLiveCleanupPlan.requireAuthorized(
+          expected, authorization: authorization, values: values
+        )
         aRecordIDs = try await ledger.checkpointCleanupPrerequisites(
-          including: expected, signedRunManifest: values.signedRunManifest
+          including: expected, cleanupAuthorization: authorization
         )
       }
     }
@@ -554,7 +550,12 @@ enum SecretSyncLiveCleanupEntryPoint {
 
     let marker = try await ledger.cleanupMarker(role: values.deviceRole)
     if values.deviceRole == .a {
-      try SecretSyncLiveCleanupPlan.requireAuthorized(aRecordIDs, values: values)
+      guard let authorization = values.cleanupAuthorization else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.cleanupAuthorizationMissing
+      }
+      try SecretSyncLiveCleanupPlan.requireAuthorized(
+        aRecordIDs, authorization: authorization, values: values
+      )
       try await SecretSyncLiveCleanupPlan.deleteAndVerify(
         aRecordIDs, values: values, database: database, ledger: ledger
       )
@@ -740,8 +741,101 @@ enum SecretSyncLiveRecoveryExercise {
   }
 }
 
+private func u7TestManifestDigest(namespace: String) -> Data {
+  let manifest = SecretSyncLiveSignedRunManifest.Manifest(
+    version: 2, runNamespace: namespace,
+    ledgerIdentifier: SecretSyncLiveSignedRunManifestVerifier
+      .expectedLedgerIdentifier(namespace: namespace),
+    artifactRecordNames: u7ExactArtifactNames(namespace: namespace)
+  )
+  let bytes = try! SecretSyncLiveSignedRunManifestVerifier
+    .canonicalManifestBytes(manifest)
+  return SecretSyncLiveSignedRunManifestVerifier.digest(
+    manifestBytes: bytes, signature: Data()
+  )
+}
+
+private func u7ExactArtifactNames(namespace: String) -> [String] {
+  let pairs: [(String, SecretSyncLiveCloudKitProofConfiguration.DeviceRole)] = [
+    ("agreement-verifier", .a), ("agreement-verifier", .b),
+    ("agreement-verifier", .c), ("credential", .a), ("credential", .b),
+    ("credential", .c), ("phase-credential", .a), ("phase-credential", .b),
+    ("phase-credential", .c), ("phase-backgroundDenied", .a),
+    ("candidate", .a), ("candidate", .b), ("manifest", .a),
+    ("phase-stage", .a), ("cas", .a), ("cas", .b),
+    ("phase-conditionalHead", .a), ("phase-conditionalHead", .b),
+    ("phase-verify", .a), ("phase-verify", .b), ("phase-verify", .c),
+    ("phase-revoke", .c), ("phase-offline", .a), ("phase-recovery", .a),
+    ("phase-rotation", .a), ("phase-restart", .a), ("phase-audit", .a),
+    ("phase-cleanup", .b), ("phase-cleanup", .c),
+  ]
+  return pairs.map { "\(namespace)-\($0.0)-\($0.1.rawValue)" }
+}
+
+private func u7TestLedgerURL(
+  applicationSupportRoot: URL,
+  namespace: String,
+  role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole = .a
+) -> URL {
+  SecretSyncLiveCleanupLedger.derivedURLForDeterministicTesting(
+    applicationSupportRoot: applicationSupportRoot, namespace: namespace,
+    logicalLedgerIdentifier: SecretSyncLiveSignedRunManifestVerifier
+      .expectedLedgerIdentifier(namespace: namespace),
+    role: role
+  )
+}
+
+private func u7TestLedger(
+  applicationSupportRoot: URL,
+  namespace: String,
+  role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole = .a,
+  runManifestDigest: Data? = nil
+) throws -> SecretSyncLiveCleanupLedger {
+  let identifier = SecretSyncLiveSignedRunManifestVerifier
+    .expectedLedgerIdentifier(namespace: namespace)
+  return try SecretSyncLiveCleanupLedger(
+    url: u7TestLedgerURL(
+      applicationSupportRoot: applicationSupportRoot,
+      namespace: namespace, role: role
+    ),
+    namespace: namespace, logicalLedgerIdentifier: identifier, role: role,
+    signedRunManifestDigest: runManifestDigest
+      ?? u7TestManifestDigest(namespace: namespace)
+  )
+}
+
 @Suite("SecretSync live proof configuration contract")
 struct SecretSyncLiveCloudKitProofConfigurationTests {
+  @Test("manifest v2 derives distinct role-local ledgers from one logical identity")
+  func logicalLedgerIdentityIsRoleLocal() throws {
+    let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
+    let logicalIdentity = SecretSyncLiveSignedRunManifestVerifier
+      .expectedLedgerIdentifier(namespace: namespace)
+    let manifest = SecretSyncLiveSignedRunManifest.Manifest(
+      version: 2,
+      runNamespace: namespace,
+      ledgerIdentifier: logicalIdentity,
+      artifactRecordNames: ["\(namespace)-credential-A"]
+    )
+    let encoded = try JSONEncoder().encode(manifest)
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("ledgerDirectoryPath"))
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("cleanupRecords"))
+
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-role-local-ledgers-\(UUID().uuidString)")
+    let a = SecretSyncLiveCleanupLedger.derivedURLForDeterministicTesting(
+      applicationSupportRoot: root, namespace: namespace,
+      logicalLedgerIdentifier: logicalIdentity, role: .a
+    )
+    let b = SecretSyncLiveCleanupLedger.derivedURLForDeterministicTesting(
+      applicationSupportRoot: root, namespace: namespace,
+      logicalLedgerIdentifier: logicalIdentity, role: .b
+    )
+    #expect(a != b)
+    #expect(!a.path.contains(namespace))
+    #expect(!b.path.contains(namespace))
+  }
+
   @Test("normal prompt-free runs remain explicitly non-proof")
   func disabledIsNotProof() {
     #expect(loadConfiguration(environment: [:], runtimePlatform: .mac) == .disabled)
@@ -785,8 +879,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     defer { try? FileManager.default.removeItem(at: directory) }
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
     let url = ledgerURL(directory: directory, namespace: namespace)
-    let first = try SecretSyncLiveCleanupLedger(url: url, namespace: namespace)
-    let second = try SecretSyncLiveCleanupLedger(url: url, namespace: namespace)
+    let first = try u7TestLedger(applicationSupportRoot: directory, namespace: namespace)
+    let second = try u7TestLedger(applicationSupportRoot: directory, namespace: namespace)
     let firstName = String(repeating: "1", count: 64)
     let secondName = String(repeating: "2", count: 64)
     let headName = String(repeating: "3", count: 32)
@@ -857,20 +951,15 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       Issue.record("complete proof configuration must load")
       return
     }
-    let kinds = [
-      "agreement-verifier", "credential", "phase-credential", "phase-verify",
-      "phase-backgroundDenied", "candidate", "manifest", "phase-stage", "cas",
-      "phase-conditionalHead", "phase-revoke", "phase-offline", "phase-recovery",
-      "phase-rotation", "phase-restart", "phase-audit", "phase-cleanup",
-    ]
-    for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
-      for kind in kinds {
-        let recordID = try SecretSyncLiveArtifactRecordID.make(
-          kind: kind, role: role, values: values
-        )
-        #expect(recordID.zoneID == SecretSyncCloudKitZones.controlZoneID)
-        #expect(recordID.zoneID != CKRecordZone.default().zoneID)
-      }
+    for recordName in values.signedRunManifest.manifest.artifactRecordNames {
+      try SecretSyncLiveRunOwnedRecordGrammar.requireArtifact(
+        recordName: recordName, namespace: values.runNamespace
+      )
+      let recordID = CKRecord.ID(
+        recordName: recordName, zoneID: values.controlZoneID
+      )
+      #expect(recordID.zoneID == SecretSyncCloudKitZones.controlZoneID)
+      #expect(recordID.zoneID != CKRecordZone.default().zoneID)
     }
     #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone) {
       try SecretSyncLiveArtifactRecordID.requireAuthorized(
@@ -974,18 +1063,19 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       .appendingPathComponent("u7-grant-ledger-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
-    let ledger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: directory, namespace: namespace), namespace: namespace
-    )
     let nonce = UUID()
     let credentialEnvironment = completeEnvironment(
       role: "A", phase: "credential", nonce: nonce,
-      ledgerDirectoryPath: directory.path,
-      expiresAtUnixSeconds: 4_000_000_000
+      expiresAtUnixSeconds: 1_200
     )
     let credentialValues = try #require(configured(
-      credentialEnvironment, runtimePlatform: .mac
+      credentialEnvironment, runtimePlatform: .mac,
+      applicationSupportRoot: directory
     ))
+    let ledger = try u7TestLedger(
+      applicationSupportRoot: directory, namespace: namespace,
+      runManifestDigest: credentialValues.runManifestDigest
+    )
     let signedRunManifestText = try #require(
       credentialEnvironment[SecretSyncLiveCloudKitProofConfiguration.signedRunManifestKey]
     )
@@ -997,11 +1087,11 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let replayEnvironment = completeEnvironment(
       role: "A", phase: "credential", nonce: nonce,
       signedRunManifestText: signedRunManifestText,
-      ledgerDirectoryPath: directory.path,
-      expiresAtUnixSeconds: 4_000_000_001
+      expiresAtUnixSeconds: 1_201
     )
     let replayValues = try #require(configured(
-      replayEnvironment, runtimePlatform: .mac
+      replayEnvironment, runtimePlatform: .mac,
+      applicationSupportRoot: directory
     ))
     await #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.launchGrantReplay) {
       try await ledger.admitLaunchGrant(values: replayValues)
@@ -1016,9 +1106,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         role: "A", phase: "stage",
         signedRunManifestText: signedRunManifestText,
         credentialBindingDigest: Data(repeating: 0xFE, count: 32),
-        ledgerDirectoryPath: directory.path,
         expectedLedgerContentDigest: postCredentialDigest
-      ), runtimePlatform: .mac
+      ), runtimePlatform: .mac, applicationSupportRoot: directory
     ))
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.launchGrantCredentialMismatch
@@ -1030,9 +1119,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         role: "A", phase: "stage",
         signedRunManifestText: signedRunManifestText,
         credentialBindingDigest: SecretSyncLiveCredentialBinding.digest(credential),
-        ledgerDirectoryPath: directory.path,
         expectedLedgerContentDigest: postCredentialDigest
-      ), runtimePlatform: .mac
+      ), runtimePlatform: .mac, applicationSupportRoot: directory
     ))
     try await ledger.admitLaunchGrant(values: correctBinding)
     try await ledger.markCredentialRemoved(role: .a)
@@ -1105,9 +1193,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       zoneID: SecretSyncCloudKitZones.payloadZoneID
     )
     let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
-    let ledger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: directory, namespace: namespace),
-      namespace: namespace
+    let ledger = try u7TestLedger(
+      applicationSupportRoot: directory, namespace: namespace
     )
     try await ledger.storeCredentialForCleanup(credential, role: .a)
     let values = try cleanupValues(
@@ -1116,19 +1203,14 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       expectedLedgerContentDigest: try await ledger.currentContentDigest(),
       credentialBindingDigest: SecretSyncLiveCredentialBinding.digest(credential)
     )
-    let manifest = [
-      SecretSyncLiveRecordReference(
-        recordName: payloadID.recordName, zoneName: payloadID.zoneID.zoneName
-      )
-    ]
+    let authorization = try #require(values.cleanupAuthorization)
     let exact = try SecretSyncLiveCleanupPlan.authorizedRecordIDs(
-      manifest: manifest, artifactIDs: [artifactID], headID: headID,
-      values: values
+      authorization: authorization, values: values
     )
     #expect(Set(exact) == Set([artifactID, payloadID, headID]))
     try await ledger.admitLaunchGrant(values: values)
     _ = try await ledger.checkpointCleanupPrerequisites(
-      including: exact, signedRunManifest: values.signedRunManifest
+      including: exact, cleanupAuthorization: authorization
     )
     let database = SecretSyncLiveArtifactDatabaseFake()
     await database.seed(recordIDs: exact)
@@ -1143,9 +1225,19 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         SecretSyncLiveRecordReference(recordName: "hostile", zoneName: zoneName)
       ]
       #expect(throws: (any Error).self) {
+        let bad = SecretSyncLiveSignedCleanupAuthorization(
+          manifest: .init(
+            version: 1, namespace: values.runNamespace,
+            runManifestDigest: values.runManifestDigest,
+            records: corrupted,
+            allowedZones: SecretSyncLiveCleanupAuthorizationVerifier.exactZones,
+            inventoryDigest: Data(repeating: 1, count: 32),
+            issuedAtUnixSeconds: 1_000, expiresAtUnixSeconds: 1_200,
+            nonce: UUID()
+          ), signature: Data()
+        )
         _ = try SecretSyncLiveCleanupPlan.authorizedRecordIDs(
-          manifest: corrupted, artifactIDs: [artifactID], headID: headID,
-          values: values
+          authorization: bad, values: values
         )
       }
     }
@@ -1172,9 +1264,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let partialDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-partial-cleanup-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: partialDirectory) }
-    let partialLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: partialDirectory, namespace: namespace),
-      namespace: namespace
+    let partialLedger = try u7TestLedger(
+      applicationSupportRoot: partialDirectory, namespace: namespace
     )
     let partialCredential = try SecretSyncLiveAttestationFixture.make().evidence.credential
     try await partialLedger.storeCredentialForCleanup(partialCredential, role: .a)
@@ -1188,7 +1279,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     await partialDatabase.seed(recordIDs: [control, payload])
     await partialDatabase.setDeleteFailures([payload])
     let firstAttempt = try await partialLedger.checkpointCleanupPrerequisites(
-      including: exact, signedRunManifest: values.signedRunManifest
+      including: exact, cleanupAuthorization: try #require(values.cleanupAuthorization)
     )
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
@@ -1210,9 +1301,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let lossDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-verification-loss-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: lossDirectory) }
-    let lossLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: lossDirectory, namespace: namespace),
-      namespace: namespace
+    let lossLedger = try u7TestLedger(
+      applicationSupportRoot: lossDirectory, namespace: namespace
     )
     let lossCredential = try SecretSyncLiveAttestationFixture.make().evidence.credential
     try await lossLedger.storeCredentialForCleanup(lossCredential, role: .a)
@@ -1226,7 +1316,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     await lossDatabase.seed(recordIDs: [control, payload])
     await lossDatabase.failNextAbsenceVerification()
     let lossAttempt = try await lossLedger.checkpointCleanupPrerequisites(
-      including: [control, payload], signedRunManifest: lossValues.signedRunManifest
+      including: [control, payload],
+      cleanupAuthorization: try #require(lossValues.cleanupAuthorization)
     )
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
@@ -1249,9 +1340,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-entry-a-cleanup-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let ledger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: directory, namespace: namespace),
-      namespace: namespace
+    let ledger = try u7TestLedger(
+      applicationSupportRoot: directory, namespace: namespace
     )
     let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
     try await ledger.storeCredentialForCleanup(credential, role: .a)
@@ -1324,9 +1414,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-entry-b-cleanup-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let ledger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: directory, namespace: values.runNamespace),
-      namespace: values.runNamespace
+    let ledger = try u7TestLedger(
+      applicationSupportRoot: directory, namespace: values.runNamespace,
+      role: .b, runManifestDigest: values.runManifestDigest
     )
     let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
     try await ledger.storeCredentialForCleanup(credential, role: .b)
@@ -1470,8 +1560,13 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let target = root.appendingPathComponent("attacker.json")
     _ = FileManager.default.createFile(atPath: target.path, contents: Data("{}".utf8))
     let ledgerPath = ledgerURL(directory: root, namespace: namespace)
+    try FileManager.default.createDirectory(
+      at: ledgerPath.deletingLastPathComponent(),
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: NSNumber(value: 0o700)]
+    )
     try FileManager.default.createSymbolicLink(at: ledgerPath, withDestinationURL: target)
-    let ledger = try SecretSyncLiveCleanupLedger(url: ledgerPath, namespace: namespace)
+    let ledger = try u7TestLedger(applicationSupportRoot: root, namespace: namespace)
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.corruptLocalLedger
     ) {
@@ -1485,10 +1580,11 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
 
     try FileManager.default.removeItem(at: ledgerPath)
     try FileManager.default.setAttributes(
-      [.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: root.path
+      [.posixPermissions: NSNumber(value: 0o755)],
+      ofItemAtPath: ledgerPath.deletingLastPathComponent().path
     )
-    let unsafeLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: root, namespace: namespace), namespace: namespace
+    let unsafeLedger = try u7TestLedger(
+      applicationSupportRoot: root, namespace: namespace
     )
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.corruptLocalLedger
@@ -1503,8 +1599,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-credential-rollback-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let ledger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: directory, namespace: namespace), namespace: namespace
+    let ledger = try u7TestLedger(
+      applicationSupportRoot: directory, namespace: namespace
     )
     let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
     let generation = SecretSyncCustodyCredentialGeneration(
@@ -1532,9 +1628,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let absentDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-credential-absent-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: absentDirectory) }
-    let absentLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: absentDirectory, namespace: namespace),
-      namespace: namespace
+    let absentLedger = try u7TestLedger(
+      applicationSupportRoot: absentDirectory, namespace: namespace,
+      role: .b
     )
     try await absentLedger.checkpointProvisionalCredential(generation, role: .b)
     let probe = SecretSyncLiveCleanupEntryProbe()
@@ -1558,9 +1654,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let uncertainDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-credential-uncertain-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: uncertainDirectory) }
-    let uncertainLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: uncertainDirectory, namespace: namespace),
-      namespace: namespace
+    let uncertainLedger = try u7TestLedger(
+      applicationSupportRoot: uncertainDirectory, namespace: namespace,
+      role: .c
     )
     try await uncertainLedger.checkpointProvisionalCredential(generation, role: .c)
     await #expect(throws: SecretSyncLiveArtifactFakeError.mismatch) {
@@ -1581,9 +1677,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let clearFailureDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-credential-clear-failure-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: clearFailureDirectory) }
-    let clearFailureLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: clearFailureDirectory, namespace: namespace),
-      namespace: namespace
+    let clearFailureLedger = try u7TestLedger(
+      applicationSupportRoot: clearFailureDirectory, namespace: namespace
     )
     try await clearFailureLedger.checkpointProvisionalCredential(
       generation, role: .a
@@ -1604,9 +1699,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let removalFailureDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-credential-removal-failure-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: removalFailureDirectory) }
-    let removalFailureLedger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: removalFailureDirectory, namespace: namespace),
-      namespace: namespace
+    let removalFailureLedger = try u7TestLedger(
+      applicationSupportRoot: removalFailureDirectory, namespace: namespace,
+      role: .b
     )
     try await removalFailureLedger.checkpointProvisionalCredential(
       generation, role: .b
@@ -1635,8 +1730,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-verifier-erasure-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let ledger = try SecretSyncLiveCleanupLedger(
-      url: ledgerURL(directory: directory, namespace: namespace), namespace: namespace
+    let ledger = try u7TestLedger(
+      applicationSupportRoot: directory, namespace: namespace
     )
     for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
       try await ledger.storeAgreementVerifierPrivateKey(
@@ -1710,8 +1805,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         .appendingPathComponent("u7-audit-fault-\(fault)-\(UUID().uuidString)")
       defer { try? FileManager.default.removeItem(at: directory) }
       let url = ledgerURL(directory: directory, namespace: namespace)
-      let ledger = try SecretSyncLiveCleanupLedger(
-        url: url, namespace: namespace
+      let ledger = try u7TestLedger(
+        applicationSupportRoot: directory, namespace: namespace
       )
       for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
         try await ledger.storeAgreementVerifierPrivateKey(
@@ -1728,8 +1823,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
           evidence: evidence, injecting: fault
         )
       }
-      let reloaded = try SecretSyncLiveCleanupLedger(
-        url: url, namespace: namespace
+      let reloaded = try u7TestLedger(
+        applicationSupportRoot: directory, namespace: namespace
       )
       for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
         _ = try await reloaded.agreementVerifierPrivateKey(role: role)
@@ -1769,9 +1864,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("u7-restart-\(insertedCount)-\(UUID().uuidString)")
       defer { try? FileManager.default.removeItem(at: directory) }
-      let ledger = try SecretSyncLiveCleanupLedger(
-        url: ledgerURL(directory: directory, namespace: namespace),
-        namespace: namespace
+      let ledger = try u7TestLedger(
+        applicationSupportRoot: directory, namespace: namespace
       )
       try await ledger.checkpointProvisionalCredential(generation, role: .a)
       let handles = SecretSyncRestartHandleProbe(insertedCount: insertedCount)
@@ -1829,12 +1923,14 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     authoritySeed: UInt8 = 1,
     signedRunManifestText: String? = nil,
     credentialBindingDigest: Data? = nil,
-    ledgerDirectoryPath: String = "/tmp/u7-live-proof-authorized-ledger",
-    cleanupRecords: [SecretSyncLiveRecordReference] = [],
     expectedLedgerContentDigest: Data? = nil,
     prerequisiteArtifactDigests: [Data] = [],
     trustedCredentialGrantDigestsByRole: [String: Data] = [:],
-    expiresAtUnixSeconds: Int64 = 4_000_000_000
+    issuedAtUnixSeconds: Int64 = 1_000,
+    expiresAtUnixSeconds: Int64 = 1_200,
+    destinationBindingDigest: Data? = nil,
+    cleanupAuthorizationDigest: Data? = nil,
+    cleanupAuthorizationRecords: [SecretSyncLiveRecordReference] = []
   ) -> [String: String] {
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
     let parsedRole = SecretSyncLiveCloudKitProofConfiguration.DeviceRole(rawValue: role) ?? .a
@@ -1852,23 +1948,12 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     {
       signedRunManifest = decoded
     } else {
-      let artifactKinds = [
-        "agreement-verifier", "credential", "phase-credential",
-        "phase-backgroundDenied", "candidate", "manifest", "phase-stage",
-        "cas", "phase-conditionalHead", "phase-verify", "phase-revoke",
-        "phase-offline", "phase-recovery", "phase-rotation", "phase-restart",
-        "phase-audit", "phase-cleanup",
-      ]
-      let artifactRecordNames = SecretSyncLiveCloudKitProofConfiguration.DeviceRole
-        .allCases.flatMap { candidateRole in
-          artifactKinds.map { "\(namespace)-\($0)-\(candidateRole.rawValue)" }
-        }
+      let artifactRecordNames = u7ExactArtifactNames(namespace: namespace)
       let runManifestBody = SecretSyncLiveSignedRunManifest.Manifest(
-        version: 1, runNamespace: namespace,
-        ledgerDirectoryPath: ledgerDirectoryPath,
+        version: 2, runNamespace: namespace,
         ledgerIdentifier: SecretSyncLiveSignedRunManifestVerifier
           .expectedLedgerIdentifier(namespace: namespace),
-        artifactRecordNames: artifactRecordNames, cleanupRecords: cleanupRecords
+        artifactRecordNames: artifactRecordNames
       )
       let body = try! SecretSyncLiveSignedRunManifestVerifier
         .canonicalManifestBytes(runManifestBody)
@@ -1882,18 +1967,58 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let runManifestDigest = SecretSyncLiveSignedRunManifestVerifier.digest(
       manifestBytes: runManifestBytes, signature: signedRunManifest.signature
     )
+    let signedCleanupAuthorization: SecretSyncLiveSignedCleanupAuthorization?
+    if parsedPhase == .cleanup {
+      let cleanupManifest = SecretSyncLiveSignedCleanupAuthorization.Manifest(
+        version: 1, namespace: namespace,
+        runManifestDigest: runManifestDigest,
+        records: cleanupAuthorizationRecords.sorted(
+          by: SecretSyncLiveCleanupAuthorizationVerifier.recordOrder
+        ),
+        allowedZones: SecretSyncLiveCleanupAuthorizationVerifier.exactZones,
+        inventoryDigest: Data(repeating: 0x1A, count: 32),
+        issuedAtUnixSeconds: issuedAtUnixSeconds,
+        expiresAtUnixSeconds: expiresAtUnixSeconds,
+        nonce: UUID(uuidString: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")!
+      )
+      let body = try! SecretSyncLiveCleanupAuthorizationVerifier
+        .canonicalManifestBytes(cleanupManifest)
+      signedCleanupAuthorization = SecretSyncLiveSignedCleanupAuthorization(
+        manifest: cleanupManifest,
+        signature: try! authority.signature(for: body).derRepresentation
+      )
+    } else {
+      signedCleanupAuthorization = nil
+    }
+    let actualCleanupAuthorizationDigest = signedCleanupAuthorization.map {
+      SecretSyncLiveCleanupAuthorizationVerifier.digest(
+        manifestBytes: try! SecretSyncLiveCleanupAuthorizationVerifier
+          .canonicalManifestBytes($0.manifest),
+        signature: $0.signature
+      )
+    }
     let manifest = SecretSyncLiveHostLaunchGrant.Manifest(
-      version: 1,
+      version: 2,
       runNamespace: namespace,
       role: parsedRole, phase: parsedPhase,
       platform: SecretSyncLivePlatformMatrix.expectedPlatform(for: parsedRole),
-      nonce: nonce, expiresAtUnixSeconds: expiresAtUnixSeconds,
+      nonce: nonce, issuedAtUnixSeconds: issuedAtUnixSeconds,
+      expiresAtUnixSeconds: expiresAtUnixSeconds,
       runManifestDigest: runManifestDigest,
+      destinationBindingDigest: destinationBindingDigest
+        ?? Data(repeating: parsedRole == .a ? 0xDA : parsedRole == .b ? 0xDB : 0xDC, count: 32),
       expectedLedgerContentDigest: expectedLedgerContentDigest
-        ?? SecretSyncLiveCleanupLedger.initialContentDigest(namespace: namespace),
+        ?? SecretSyncLiveCleanupLedger.initialContentDigest(
+          namespace: namespace,
+          logicalLedgerIdentifier: signedRunManifest.manifest.ledgerIdentifier,
+          role: parsedRole, signedRunManifestDigest: runManifestDigest
+        ),
       prerequisiteArtifactDigests: prerequisiteArtifactDigests,
       trustedCredentialGrantDigestsByRole: trustedCredentialGrantDigestsByRole,
-      credentialBindingDigest: binding
+      credentialBindingDigest: binding,
+      cleanupAuthorizationDigest: parsedPhase == .cleanup
+        ? cleanupAuthorizationDigest ?? actualCleanupAuthorizationDigest
+        : nil
     )
     let body = try! SecretSyncLiveHostLaunchGrantVerifier.canonicalManifestBytes(manifest)
     let signature = try! authority.signature(for: body).derRepresentation
@@ -1902,7 +2027,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     )
     let grantBytes = try! JSONEncoder().encode(grant)
     let signedRunManifestBytes = try! JSONEncoder().encode(signedRunManifest)
-    return [
+    var result = [
       SecretSyncLiveCloudKitProofConfiguration.optInKey: "1",
       SecretSyncLiveCloudKitProofConfiguration.attestationKey:
         "AUTHORIZED_U7_HOST_LAUNCH_GRANT",
@@ -1915,6 +2040,11 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       SecretSyncLiveCloudKitProofConfiguration.hostLaunchGrantKey:
         grantBytes.base64EncodedString(),
     ]
+    if let signedCleanupAuthorization {
+      result[SecretSyncLiveCloudKitProofConfiguration.cleanupAuthorizationKey]
+        = try! JSONEncoder().encode(signedCleanupAuthorization).base64EncodedString()
+    }
+    return result
   }
 
   private func cleanupValues(
@@ -1924,19 +2054,19 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     expectedLedgerContentDigest: Data? = nil,
     credentialBindingDigest: Data? = nil
   ) throws -> SecretSyncLiveCloudKitProofConfiguration.Values {
-    let references = recordIDs.map {
-      SecretSyncLiveRecordReference(
-        recordName: $0.recordName, zoneName: $0.zoneID.zoneName
-      )
-    }
     return try #require(configured(
       completeEnvironment(
         role: role.rawValue, phase: "cleanup",
         credentialBindingDigest: credentialBindingDigest,
-        ledgerDirectoryPath: directory.path, cleanupRecords: references,
-        expectedLedgerContentDigest: expectedLedgerContentDigest
+        expectedLedgerContentDigest: expectedLedgerContentDigest,
+        cleanupAuthorizationRecords: recordIDs.map {
+          SecretSyncLiveRecordReference(
+            recordName: $0.recordName, zoneName: $0.zoneID.zoneName
+          )
+        }
       ),
-      runtimePlatform: SecretSyncLivePlatformMatrix.expectedPlatform(for: role)
+      runtimePlatform: SecretSyncLivePlatformMatrix.expectedPlatform(for: role),
+      applicationSupportRoot: directory
     ))
   }
 
@@ -1947,17 +2077,17 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   }
 
   private func ledgerURL(directory: URL, namespace: String) -> URL {
-    directory.appendingPathComponent(
-      "\(SecretSyncLiveSignedRunManifestVerifier.expectedLedgerIdentifier(namespace: namespace)).json"
-    )
+    u7TestLedgerURL(applicationSupportRoot: directory, namespace: namespace)
   }
 
   private func configured(
     _ environment: [String: String],
-    runtimePlatform: SecretSyncLiveRuntimePlatform
+    runtimePlatform: SecretSyncLiveRuntimePlatform,
+    applicationSupportRoot: URL = URL(fileURLWithPath: "/tmp/u7-config-tests", isDirectory: true)
   ) -> SecretSyncLiveCloudKitProofConfiguration.Values? {
     guard case .configured(let values) = loadConfiguration(
-      environment: environment, runtimePlatform: runtimePlatform
+      environment: environment, runtimePlatform: runtimePlatform,
+      applicationSupportRoot: applicationSupportRoot
     ) else { return nil }
     return values
   }
@@ -1965,12 +2095,14 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   private func loadConfiguration(
     environment: [String: String],
     runtimePlatform: SecretSyncLiveRuntimePlatform,
-    now: Date = Date()
+    now: Date = Date(timeIntervalSince1970: 1_100),
+    applicationSupportRoot: URL = URL(fileURLWithPath: "/tmp/u7-config-tests", isDirectory: true)
   ) -> SecretSyncLiveCloudKitProofConfiguration {
     SecretSyncLiveCloudKitProofConfiguration.loadForDeterministicTesting(
       environment: environment, runtimePlatform: runtimePlatform, now: now,
       independentlyAuthenticatedHostAuthorityPublicKey:
-        hostAuthority(seed: 1).publicKey.x963Representation
+        hostAuthority(seed: 1).publicKey.x963Representation,
+      applicationSupportRoot: applicationSupportRoot
     )
   }
 }
@@ -1988,7 +2120,10 @@ struct SecretSyncLiveCloudKitProofTests {
   func externalPhase() async throws {
     let values = try requiredConfiguration()
     let ledger = try SecretSyncLiveCleanupLedger(
-      url: values.ledgerURL, namespace: values.runNamespace
+      url: values.ledgerURL, namespace: values.runNamespace,
+      logicalLedgerIdentifier: values.signedRunManifest.manifest.ledgerIdentifier,
+      role: values.deviceRole,
+      signedRunManifestDigest: values.runManifestDigest
     )
     try await ledger.admitLaunchGrant(values: values)
     if try await SecretSyncLiveCleanupEntryPoint.requiresInitialZoneAdmission(
@@ -2102,8 +2237,6 @@ struct SecretSyncLiveCloudKitProofTests {
         evidence.credential.signingPublicKey == checkpoint.signingPublicKey,
         evidence.credential.keyAgreementPublicKey
           == checkpoint.agreementPublicKey,
-        evidence.signingHandleID == checkpoint.signingHandle.rawValue,
-        evidence.agreementHandleID == checkpoint.agreementHandle.rawValue,
         try SecretSyncLiveAttestation.verify(
           evidence,
           namespace: values.runNamespace,
@@ -2251,8 +2384,6 @@ struct SecretSyncLiveCloudKitProofTests {
     return SecretSyncLiveCredentialEvidence(
       launchGrantDigest: values.launchGrantDigest,
       credential: credential,
-      signingHandleID: generation.signingHandle.rawValue,
-      agreementHandleID: generation.agreementHandle.rawValue,
       possessionTranscript: transcriptValue,
       signingChallenge: signingChallenge.canonicalBytes,
       signingProof: signing.proofBytes,
@@ -2401,6 +2532,9 @@ struct SecretSyncLiveCloudKitProofTests {
       SecretSyncLiveCredentialEvidence.self, kind: "credential",
       role: values.deviceRole, values: values
     )
+    let localCheckpoint = try #require(
+      try await ledger.credentialCheckpoint(role: values.deviceRole)
+    )
     let bound = try SecretSyncV1BoundContext(
       scopeID: rebuilt.commit.scopeID,
       scopeSnapshotDigest: rebuilt.commit.scopeSnapshotDigest,
@@ -2414,7 +2548,7 @@ struct SecretSyncLiveCloudKitProofTests {
       await #expect(throws: SecretSyncCustodyError.invalidProof) {
         _ = try await custody.openRecipientGenerationKey(
           envelope.wrappedKeyBytes,
-          privateKeyHandle: KeyAgreementPrivateKeyHandle(credential.agreementHandleID),
+          privateKeyHandle: localCheckpoint.agreementHandle,
           credentialID: credential.credential.credentialID,
           context: SecretSyncRecipientEnvelopeContext(
             boundContext: bound,
@@ -2433,7 +2567,7 @@ struct SecretSyncLiveCloudKitProofTests {
     )
     let opened = try await custody.openRecipientGenerationKey(
       envelope.wrappedKeyBytes,
-      privateKeyHandle: KeyAgreementPrivateKeyHandle(credential.agreementHandleID),
+      privateKeyHandle: localCheckpoint.agreementHandle,
       credentialID: credential.credential.credentialID,
       context: SecretSyncRecipientEnvelopeContext(
         boundContext: bound, recipientCredentialID: credential.credential.credentialID
@@ -2718,10 +2852,10 @@ struct SecretSyncLiveCloudKitProofTests {
         evidence, kind: kind, values: values, ledger: ledger
       )
     }
-    let approvedGrant = try await ledger.approvedLaunchGrant(
-      digest: envelope.launchGrantDigest
+    let credentialArtifact = try await loadArtifact(
+      SecretSyncLiveCredentialEvidence.self, kind: "credential",
+      role: .a, values: values
     )
-    let approvedCredential = try await ledger.approvedCredential(role: .a)
     guard try SecretSyncLiveSignedArtifactVerifier.verify(
       envelope,
       expectedNamespace: values.runNamespace,
@@ -2731,10 +2865,12 @@ struct SecretSyncLiveCloudKitProofTests {
       expectedRecordName: try artifactRecordID(
         kind: kind, role: .a, values: values
       ).recordName,
-      approvedLaunchGrant: approvedGrant,
-      approvedLaunchGrantDigest: envelope.launchGrantDigest,
-      approvedRunManifestDigest: values.runManifestDigest,
-      approvedCredential: approvedCredential,
+      expectedLaunchGrantDigest: envelope.launchGrantDigest,
+      expectedRunManifestDigest: values.runManifestDigest,
+      expectedPlatform: .mac,
+      expectedDestinationBindingDigest:
+        envelope.verifiedLaunchGrant.manifest.destinationBindingDigest,
+      credentialArtifact: credentialArtifact,
       trustedHostAuthorityPublicKey: values.trustedHostAuthorityPublicKey
     ) else {
       throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
@@ -2855,10 +2991,10 @@ struct SecretSyncLiveCloudKitProofTests {
       SecretSyncLiveSignedArtifactEnvelope.self, kind: kind,
       role: role, values: values
     )
-    let approvedGrant = try await ledger.approvedLaunchGrant(
-      digest: envelope.launchGrantDigest
+    let credentialArtifact = try await loadArtifact(
+      SecretSyncLiveCredentialEvidence.self, kind: "credential",
+      role: role, values: values
     )
-    let approvedCredential = try await ledger.approvedCredential(role: role)
     guard values.launchGrant.manifest.prerequisiteArtifactDigests.contains(
       try envelope.artifactDigest()
     ), try SecretSyncLiveSignedArtifactVerifier.verify(
@@ -2867,10 +3003,12 @@ struct SecretSyncLiveCloudKitProofTests {
       expectedRecordName: try artifactRecordID(
         kind: kind, role: role, values: values
       ).recordName,
-      approvedLaunchGrant: approvedGrant,
-      approvedLaunchGrantDigest: envelope.launchGrantDigest,
-      approvedRunManifestDigest: values.runManifestDigest,
-      approvedCredential: approvedCredential,
+      expectedLaunchGrantDigest: envelope.launchGrantDigest,
+      expectedRunManifestDigest: values.runManifestDigest,
+      expectedPlatform: SecretSyncLivePlatformMatrix.expectedPlatform(for: role),
+      expectedDestinationBindingDigest:
+        envelope.verifiedLaunchGrant.manifest.destinationBindingDigest,
+      credentialArtifact: credentialArtifact,
       trustedHostAuthorityPublicKey: values.trustedHostAuthorityPublicKey
     ) else {
       throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
@@ -2949,20 +3087,20 @@ struct SecretSyncLiveCloudKitProofTests {
       payload: envelope.payload, payloadDigest: envelope.payloadDigest,
       signingTranscript: transcript, signature: proof.proofBytes
     )
-    let approvedGrant = try await ledger.approvedLaunchGrant(
-      digest: values.launchGrantDigest
-    )
-    let approvedCredential = try await ledger.approvedCredential(
-      role: values.deviceRole
+    let credentialArtifact = try await loadArtifact(
+      SecretSyncLiveCredentialEvidence.self, kind: "credential",
+      role: values.deviceRole, values: values
     )
     guard try SecretSyncLiveSignedArtifactVerifier.verify(
       envelope, expectedNamespace: values.runNamespace,
       expectedRole: values.deviceRole, expectedPhase: values.phase,
       expectedKind: kind, expectedRecordName: recordName,
-      approvedLaunchGrant: approvedGrant,
-      approvedLaunchGrantDigest: values.launchGrantDigest,
-      approvedRunManifestDigest: values.runManifestDigest,
-      approvedCredential: approvedCredential,
+      expectedLaunchGrantDigest: values.launchGrantDigest,
+      expectedRunManifestDigest: values.runManifestDigest,
+      expectedPlatform: values.launchGrant.manifest.platform,
+      expectedDestinationBindingDigest:
+        values.launchGrant.manifest.destinationBindingDigest,
+      credentialArtifact: credentialArtifact,
       trustedHostAuthorityPublicKey: values.trustedHostAuthorityPublicKey
     ) else { throw SecretSyncCustodyError.invalidProof }
     return envelope
@@ -3077,20 +3215,22 @@ struct SecretSyncLiveCloudKitProofTests {
       SecretSyncLiveSignedArtifactEnvelope.self, kind: kind,
       role: role, values: values
     )
-    let approvedGrant = try await ledger.approvedLaunchGrant(
-      digest: envelope.launchGrantDigest
+    let credentialArtifact = try await loadArtifact(
+      SecretSyncLiveCredentialEvidence.self, kind: "credential",
+      role: role, values: values
     )
-    let approvedCredential = try await ledger.approvedCredential(role: role)
     guard try SecretSyncLiveSignedArtifactVerifier.verify(
       envelope, expectedNamespace: values.runNamespace,
       expectedRole: role, expectedPhase: phase, expectedKind: kind,
       expectedRecordName: try artifactRecordID(
         kind: kind, role: role, values: values
       ).recordName,
-      approvedLaunchGrant: approvedGrant,
-      approvedLaunchGrantDigest: envelope.launchGrantDigest,
-      approvedRunManifestDigest: values.runManifestDigest,
-      approvedCredential: approvedCredential,
+      expectedLaunchGrantDigest: envelope.launchGrantDigest,
+      expectedRunManifestDigest: values.runManifestDigest,
+      expectedPlatform: SecretSyncLivePlatformMatrix.expectedPlatform(for: role),
+      expectedDestinationBindingDigest:
+        envelope.verifiedLaunchGrant.manifest.destinationBindingDigest,
+      credentialArtifact: credentialArtifact,
       trustedHostAuthorityPublicKey: values.trustedHostAuthorityPublicKey
     ) else {
       throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
@@ -3348,8 +3488,7 @@ private struct SecretSyncLiveAttestationFixture {
     )
     let evidence = SecretSyncLiveCredentialEvidence(
       launchGrantDigest: launchGrantDigest,
-      credential: credential, signingHandleID: U7UUID.byte(0xA8),
-      agreementHandleID: U7UUID.byte(0xA9), possessionTranscript: transcriptValue,
+      credential: credential, possessionTranscript: transcriptValue,
       signingChallenge: signingChallenge.canonicalBytes, signingProof: signingProof,
       agreementChallenge: agreementChallenge, agreementProof: agreementProof,
       attestationTranscript: SecretSyncLiveAttestation.transcriptValue(attestation),
@@ -3380,8 +3519,6 @@ private struct SecretSyncLiveAttestationFixture {
       launchGrantDigest: mutation == .launchGrant
         ? changed(evidence.launchGrantDigest) : evidence.launchGrantDigest,
       credential: evidence.credential,
-      signingHandleID: evidence.signingHandleID,
-      agreementHandleID: evidence.agreementHandleID,
       possessionTranscript: evidence.possessionTranscript,
       signingChallenge: mutation == .signingChallenge
         ? changed(evidence.signingChallenge) : evidence.signingChallenge,
@@ -3510,8 +3647,6 @@ private enum SecretSyncLiveDistinctnessFixtures {
   ) -> SecretSyncLiveCredentialEvidence {
     SecretSyncLiveCredentialEvidence(
       launchGrantDigest: grantDigest, credential: credential,
-      signingHandleID: evidence.signingHandleID,
-      agreementHandleID: evidence.agreementHandleID,
       possessionTranscript: evidence.possessionTranscript,
       signingChallenge: evidence.signingChallenge,
       signingProof: evidence.signingProof,
@@ -3695,6 +3830,7 @@ private struct SecretSyncLiveSignedArtifactFixture {
   let grantDigest: Data
   let runManifestDigest: Data
   let credential: TrustedDeviceCredential
+  let credentialArtifact: SecretSyncLiveCredentialEvidence
   let envelope: SecretSyncLiveSignedArtifactEnvelope
 
   static func make(
@@ -3712,6 +3848,7 @@ private struct SecretSyncLiveSignedArtifactFixture {
       manifest: grantManifest(
         runManifestDigest: runManifestDigest,
         phase: phase,
+        credentialGrantDigest: credentialFixture.evidence.launchGrantDigest,
         credentialBindingDigest: phase == .credential
           ? nil
           : grantCredentialBinding
@@ -3728,7 +3865,8 @@ private struct SecretSyncLiveSignedArtifactFixture {
       authority: authority, signing: signing, agreement: agreement,
       grant: grant, grantDigest: grantDigest,
       runManifestDigest: runManifestDigest,
-      credential: credential, envelope: envelope
+      credential: credential, credentialArtifact: credentialFixture.evidence,
+      envelope: envelope
     )
   }
 
@@ -3740,10 +3878,11 @@ private struct SecretSyncLiveSignedArtifactFixture {
       expectedPhase: envelope.phase,
       expectedKind: envelope.kind,
       expectedRecordName: envelope.recordName,
-      approvedLaunchGrant: grant,
-      approvedLaunchGrantDigest: grantDigest,
-      approvedRunManifestDigest: runManifestDigest,
-      approvedCredential: credential,
+      expectedLaunchGrantDigest: grantDigest,
+      expectedRunManifestDigest: runManifestDigest,
+      expectedPlatform: grant.manifest.platform,
+      expectedDestinationBindingDigest: grant.manifest.destinationBindingDigest,
+      credentialArtifact: credentialArtifact,
       trustedHostAuthorityPublicKey: authority.publicKey.x963Representation
     )
   }
@@ -3811,21 +3950,25 @@ private struct SecretSyncLiveSignedArtifactFixture {
   private static func grantManifest(
     runManifestDigest: Data,
     phase: SecretSyncLiveCloudKitProofConfiguration.Phase,
+    credentialGrantDigest: Data,
     credentialBindingDigest: Data?
   ) -> SecretSyncLiveHostLaunchGrant.Manifest {
     SecretSyncLiveHostLaunchGrant.Manifest(
-      version: 1,
+      version: 2,
       runNamespace: "u7-00112233-4455-6677-8899-aabbccddeeff",
       role: .a,
       phase: phase,
       platform: .mac,
       nonce: U7UUID.byte(0x70),
-      expiresAtUnixSeconds: 4_000_000_000,
+      issuedAtUnixSeconds: 1_000,
+      expiresAtUnixSeconds: 1_200,
       runManifestDigest: runManifestDigest,
+      destinationBindingDigest: Data(repeating: 0xD1, count: 32),
       expectedLedgerContentDigest: Data(repeating: 0x64, count: 32),
       prerequisiteArtifactDigests: [],
-      trustedCredentialGrantDigestsByRole: [:],
-      credentialBindingDigest: credentialBindingDigest
+      trustedCredentialGrantDigestsByRole: ["A": credentialGrantDigest],
+      credentialBindingDigest: credentialBindingDigest,
+      cleanupAuthorizationDigest: nil
     )
   }
 
@@ -3844,12 +3987,15 @@ private struct SecretSyncLiveSignedArtifactFixture {
       phase: phase ?? value.phase,
       platform: value.platform,
       nonce: nonce ?? value.nonce,
+      issuedAtUnixSeconds: value.issuedAtUnixSeconds,
       expiresAtUnixSeconds: value.expiresAtUnixSeconds,
       runManifestDigest: runManifestDigest ?? value.runManifestDigest,
+      destinationBindingDigest: value.destinationBindingDigest,
       expectedLedgerContentDigest: value.expectedLedgerContentDigest,
       prerequisiteArtifactDigests: prerequisites ?? value.prerequisiteArtifactDigests,
       trustedCredentialGrantDigestsByRole: value.trustedCredentialGrantDigestsByRole,
-      credentialBindingDigest: value.credentialBindingDigest
+      credentialBindingDigest: value.credentialBindingDigest,
+      cleanupAuthorizationDigest: value.cleanupAuthorizationDigest
     )
   }
 
