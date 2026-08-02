@@ -54,7 +54,16 @@ package_directory="$(cd "${U7_PACKAGE_DIR}" 2>/dev/null && /bin/pwd -P)" \
   || fail U7_RUNNER_PACKAGE_INVALID 65
 /usr/bin/grep -q 'name:[[:space:]]*"ConvergenceKit"' \
   "${package_directory}/Package.swift" || fail U7_RUNNER_PACKAGE_INVALID 65
-readonly scheme='ConvergenceKit-Package'
+readonly project_relative='U7EntitledTestHost/U7EntitledTestHost.xcodeproj'
+readonly project="${package_directory}/${project_relative}"
+readonly scheme='U7EntitledTestHost'
+readonly mac_host_bundle_id='com.codedaptive.FulcrumMacOS'
+readonly ios_host_bundle_id='com.codedaptive.FulcrumIOS'
+readonly cloudkit_container='iCloud.com.codedaptive.simplemachines'
+[[ -d "${project}" \
+  && -f "${project}/project.pbxproj" \
+  && -f "${project}/xcshareddata/xcschemes/${scheme}.xcscheme" ]] \
+  || fail U7_RUNNER_PACKAGE_INVALID 65
 
 [[ "${U7_DEST_A}" != "${U7_DEST_B}" && "${U7_DEST_A}" != "${U7_DEST_C}" \
   && "${U7_DEST_B}" != "${U7_DEST_C}" ]] || fail U7_RUNNER_MATRIX_INVALID 65
@@ -66,6 +75,12 @@ chmod 700 "${U7_RUN_DIR}"
 run_directory="$(cd "${U7_RUN_DIR}" && /bin/pwd -P)" \
   || fail U7_RUNNER_PRIVATE_PATH_INVALID 65
 U7_RUN_DIR="${run_directory}"
+generated_resolution_artifact="${project}/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+if [[ "${runner_self_test_mode}" == 1 ]]; then
+  # The fake produces an equivalent generated artifact inside private custody;
+  # real mode always sanitizes the exact checked-in project's workspace path.
+  generated_resolution_artifact="${U7_RUN_DIR}/fake-project-workspace/Package.resolved"
+fi
 transient="$(mktemp -d "${U7_RUN_DIR}/transient.XXXXXX")"
 derived_root="${U7_RUN_DIR}/derived-data"
 mac_derived="${derived_root}/macos"
@@ -115,6 +130,33 @@ capture_checked() {
   fi
 }
 
+# Xcode local-package resolution writes this untracked file beside the project.
+# A3 requires recoverable Trash removal after every resolution/build, never an
+# ordinary unlink and never admission into the source-controlled six-file host.
+trash_generated_resolution() {
+  if [[ -e "${generated_resolution_artifact}" \
+    || -L "${generated_resolution_artifact}" ]]; then
+    [[ -f "${generated_resolution_artifact}" \
+      && ! -L "${generated_resolution_artifact}" ]] \
+      || fail U7_RUNNER_GENERATED_ARTIFACT_INVALID 65
+    if [[ "${runner_self_test_mode}" == 1 ]]; then
+      local simulated_trash="${transient}/fake-trash-$RANDOM-Package.resolved"
+      /bin/mv "${generated_resolution_artifact}" "${simulated_trash}" \
+        || fail U7_RUNNER_GENERATED_ARTIFACT_INVALID 65
+    else
+      /usr/bin/trash "${generated_resolution_artifact}" \
+        || fail U7_RUNNER_GENERATED_ARTIFACT_INVALID 65
+    fi
+  fi
+  [[ ! -e "${generated_resolution_artifact}" \
+    && ! -L "${generated_resolution_artifact}" ]] \
+    || fail U7_RUNNER_GENERATED_ARTIFACT_INVALID 65
+  if [[ "${runner_self_test_mode}" == 1 ]]; then
+    /bin/rmdir "$(/usr/bin/dirname "${generated_resolution_artifact}")" \
+      2>/dev/null || true
+  fi
+}
+
 # XCTest proof inputs are carried only in the validated xctestrun copy. Strip
 # every inherited host-shell proof variable from all Xcode subprocesses.
 sanitized_environment=(/usr/bin/env)
@@ -128,8 +170,21 @@ run_xcode_checked() {
   local code="$1"
   shift
   local log="${transient}/command-$RANDOM.log"
-  if ! (cd "${package_directory}" \
-    && "${sanitized_environment[@]}" "$@") >"${log}" 2>&1; then
+  local result=0
+  local command_environment=("${sanitized_environment[@]}")
+  if [[ "${runner_self_test_mode}" == 1 ]]; then
+    command_environment+=(
+      "U7_SELF_TEST_GENERATED_RESOLUTION_ARTIFACT=${generated_resolution_artifact}"
+    )
+  fi
+  if (cd "${package_directory}" \
+    && "${command_environment[@]}" "$@") >"${log}" 2>&1; then
+    result=0
+  else
+    result=$?
+  fi
+  trash_generated_resolution
+  if [[ "${result}" != 0 ]]; then
     fail "${code}"
   fi
 }
@@ -154,9 +209,15 @@ import plistlib
 import re
 import secrets
 import stat
+import subprocess
 import sys
 
 TARGET = "ConvergenceKitSecretSyncConformanceTests"
+HOST = "U7EntitledTestHost"
+PROJECT = "U7EntitledTestHost.xcodeproj"
+SCHEME = "U7EntitledTestHost"
+TEAM = "G94X5T5GK7"
+CONTAINER = "iCloud.com.codedaptive.simplemachines"
 PREFIX = "MOOT_SECRET_SYNC_"
 PROBE_KEYS = frozenset({
     PREFIX + "LIVE_PROOF", PREFIX + "RUN_NAMESPACE",
@@ -182,23 +243,30 @@ def beneath(path, root):
 
 def no_symlink_components(path, root):
     absolute_root = os.path.abspath(root)
+    resolved_root = os.path.realpath(absolute_root)
     absolute_path = os.path.abspath(path)
     if not beneath(absolute_path, absolute_root):
         return False
     try:
-        if os.path.commonpath([absolute_path, absolute_root]) != absolute_root:
+        if os.path.commonpath([absolute_path, absolute_root]) == absolute_root:
+            relative = os.path.relpath(absolute_path, absolute_root)
+        elif os.path.commonpath([absolute_path, resolved_root]) == resolved_root:
+            # macOS presents /tmp as /private/tmp after realpath resolution. Use the
+            # canonical private root for component inspection without treating that
+            # system-owned alias as a product-path symlink.
+            relative = os.path.relpath(absolute_path, resolved_root)
+        else:
             return False
     except ValueError:
         return False
-    relative = os.path.relpath(absolute_path, absolute_root)
-    current = absolute_root
+    current = resolved_root
     if relative == ".":
-        return not os.path.islink(current)
+        return True
     for component in relative.split(os.sep):
         current = os.path.join(current, component)
         if os.path.islink(current):
             return False
-    return True
+    return beneath(current, resolved_root)
 
 def require_regular_owned(info, mode=None):
     if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
@@ -629,7 +697,146 @@ def mutate_authority(path, mode, authority):
     finally:
         os.close(descriptor)
 
-def validate(path, root, expected_platform, authority_digest, mode=None, expected_environment=None):
+def required_host_facts(expected_platform):
+    if expected_platform == "MacOSX":
+        return (
+            "Debug", "com.codedaptive.FulcrumMacOS",
+            "__TESTROOT__/Debug/U7EntitledTestHost.app",
+            "__TESTHOST__/Contents/PlugIns/ConvergenceKitSecretSyncConformanceTests.xctest",
+            "Contents/Info.plist", "Contents/Info.plist",
+        )
+    if expected_platform == "iPhoneOS":
+        return (
+            "Debug-iphoneos", "com.codedaptive.FulcrumIOS",
+            "__TESTROOT__/Debug-iphoneos/U7EntitledTestHost.app",
+            "__TESTHOST__/PlugIns/ConvergenceKitSecretSyncConformanceTests.xctest",
+            "Info.plist", "Info.plist",
+        )
+    die()
+
+def required_entitlements(entitlements, expected_platform, bundle_identifier):
+    application_key = (
+        "com.apple.application-identifier"
+        if expected_platform == "MacOSX" else "application-identifier"
+    )
+    if (entitlements.get(application_key) != TEAM + "." + bundle_identifier
+            or entitlements.get("com.apple.developer.team-identifier") != TEAM
+            or entitlements.get("com.apple.developer.icloud-container-identifiers")
+                != [CONTAINER]
+            or entitlements.get("com.apple.developer.icloud-services")
+                != ["CloudKit"]
+            or entitlements.get("keychain-access-groups")
+                != [TEAM + "." + bundle_identifier]):
+        die()
+    if expected_platform == "MacOSX":
+        if (entitlements.get("com.apple.security.app-sandbox") is not True
+                or entitlements.get("com.apple.security.network.client") is not True):
+            die()
+
+def profile_authorizes(profile, expected_platform, bundle_identifier, live):
+    if profile.get("TeamIdentifier") != [TEAM]:
+        die()
+    entitlements = profile.get("Entitlements")
+    if not isinstance(entitlements, dict):
+        die()
+    application_key = (
+        "com.apple.application-identifier"
+        if expected_platform == "MacOSX" else "application-identifier"
+    )
+    if entitlements.get(application_key) != TEAM + "." + bundle_identifier:
+        die()
+    if CONTAINER not in entitlements.get(
+            "com.apple.developer.icloud-container-identifiers", []):
+        die()
+    services = entitlements.get("com.apple.developer.icloud-services")
+    if services != "*" and "CloudKit" not in services:
+        die()
+    groups = entitlements.get("keychain-access-groups", [])
+    expected_group = TEAM + "." + bundle_identifier
+    if expected_group not in groups and TEAM + ".*" not in groups:
+        die()
+    if live:
+        expiration = profile.get("ExpirationDate")
+        if expiration is None or expiration.timestamp() <= __import__("time").time():
+            die()
+    elif profile.get("U7FakeProfileValid") is not True:
+        die()
+
+def validate_signing(host, expected_platform, bundle_identifier, validation_mode):
+    if validation_mode == "self-test":
+        signing = read_plist(os.path.join(host, "U7FakeSigning.plist"))
+        if (signing.get("Signed") is not True or signing.get("AdHoc") is not False
+                or signing.get("Authority") != "Apple Development"
+                or signing.get("Identifier") != bundle_identifier
+                or signing.get("TeamIdentifier") != TEAM):
+            die()
+        entitlements = signing.get("Entitlements")
+        if not isinstance(entitlements, dict):
+            die()
+        required_entitlements(entitlements, expected_platform, bundle_identifier)
+        profile_authorizes(
+            signing.get("ProvisioningProfile", {}), expected_platform,
+            bundle_identifier, False
+        )
+        return
+    if validation_mode != "live":
+        die()
+    verify = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", host],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
+    if verify.returncode != 0:
+        die()
+    display = subprocess.run(
+        ["/usr/bin/codesign", "-dv", "--verbose=4", host],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False
+    )
+    details = display.stderr.decode("utf-8", "strict")
+    if (display.returncode != 0 or "Signature=adhoc" in details
+            or "Identifier=" + bundle_identifier not in details
+            or "TeamIdentifier=" + TEAM not in details
+            or "Authority=Apple Development:" not in details):
+        die()
+    entitlement_result = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--entitlements", ":-", "--xml", host],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
+    )
+    try:
+        entitlements = plistlib.loads(entitlement_result.stdout)
+    except Exception:
+        die()
+    if entitlement_result.returncode != 0 or not isinstance(entitlements, dict):
+        die()
+    required_entitlements(entitlements, expected_platform, bundle_identifier)
+    profile_name = (
+        "Contents/embedded.provisionprofile"
+        if expected_platform == "MacOSX" else "embedded.mobileprovision"
+    )
+    profile_result = subprocess.run(
+        ["/usr/bin/security", "cms", "-D", "-i", os.path.join(host, profile_name)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
+    )
+    try:
+        profile = plistlib.loads(profile_result.stdout)
+    except Exception:
+        die()
+    if profile_result.returncode != 0 or not isinstance(profile, dict):
+        die()
+    profile_authorizes(profile, expected_platform, bundle_identifier, True)
+
+def resolve_placeholder(raw, placeholder, base, root):
+    if not isinstance(raw, str) or not raw.startswith(placeholder + "/"):
+        die()
+    candidate = os.path.join(base, raw[len(placeholder) + 1:])
+    if not no_symlink_components(candidate, root):
+        die()
+    resolved = os.path.realpath(candidate)
+    if not beneath(resolved, root):
+        die()
+    return resolved
+
+def validate(path, root, expected_platform, authority_digest, validation_mode,
+             mode=None, expected_environment=None):
     if not beneath(path, root) or not no_symlink_components(path, root):
         die()
     try:
@@ -638,22 +845,44 @@ def validate(path, root, expected_platform, authority_digest, mode=None, expecte
     except Exception:
         die()
     _, _, target = target_entry(document)
-    raw_bundle = target.get("TestBundlePath")
-    if not isinstance(raw_bundle, str) or not raw_bundle.startswith("__TESTROOT__/"):
+    (configuration, bundle_identifier, expected_host_path,
+     expected_bundle_path, host_info_suffix, test_info_suffix) = required_host_facts(
+        expected_platform
+    )
+    container = document.get("ContainerInfo")
+    if (container != {"ContainerName": HOST, "SchemeName": SCHEME}
+            or target.get("BlueprintProviderName") != HOST
+            or target.get("BlueprintProviderRelativePath") != PROJECT
+            or target.get("IsAppHostedTestBundle") is not True
+            or target.get("TestHostBundleIdentifier") != bundle_identifier
+            or target.get("TestHostPath") != expected_host_path
+            or target.get("TestBundlePath") != expected_bundle_path):
         die()
-    bundle_candidate = os.path.join(os.path.dirname(path), raw_bundle[len("__TESTROOT__/"):])
-    if not no_symlink_components(bundle_candidate, root):
+    emphasis = target.get("BundleIdentifiersForCrashReportEmphasis")
+    if emphasis != [bundle_identifier, bundle_identifier + ".tests"]:
         die()
-    bundle = os.path.realpath(bundle_candidate)
-    if not beneath(bundle, root) or not os.path.isdir(bundle):
+    products = os.path.dirname(path)
+    host = resolve_placeholder(expected_host_path, "__TESTROOT__", products, root)
+    if not os.path.isdir(host):
         die()
-    suffix = ("Contents", "Info.plist") if expected_platform == "MacOSX" else ("Info.plist",)
-    info_path = os.path.join(bundle, *suffix)
-    if not beneath(info_path, root) or not no_symlink_components(info_path, root):
+    bundle = resolve_placeholder(expected_bundle_path, "__TESTHOST__", host, root)
+    if not os.path.isdir(bundle):
         die()
-    info = read_plist(info_path)
+    expected_dependencies = [
+        expected_host_path,
+        "__TESTROOT__/" + configuration + "/U7EntitledTestHost.app/"
+            + ("Contents/PlugIns/" if expected_platform == "MacOSX" else "PlugIns/")
+            + TARGET + ".xctest",
+    ]
+    if target.get("DependentProductPaths") != expected_dependencies:
+        die()
+    host_info = read_plist(os.path.join(host, host_info_suffix))
+    info = read_plist(os.path.join(bundle, test_info_suffix))
     expected_name = "macosx" if expected_platform == "MacOSX" else "iphoneos"
-    if info.get("CFBundleSupportedPlatforms") != [expected_platform]:
+    if (host_info.get("CFBundleIdentifier") != bundle_identifier
+            or host_info.get("CFBundleExecutable") != HOST
+            or host_info.get("CFBundleSupportedPlatforms") != [expected_platform]
+            or info.get("CFBundleSupportedPlatforms") != [expected_platform]):
         die()
     if info.get("DTPlatformName") not in (None, expected_name):
         die()
@@ -662,6 +891,7 @@ def validate(path, root, expected_platform, authority_digest, mode=None, expecte
             or hashlib.sha256(authority.encode("utf-8")).hexdigest()
                 != authority_digest):
         die()
+    validate_signing(host, expected_platform, bundle_identifier, validation_mode)
     if expected_environment is not None:
         actual = {
             key: value for key, value in target.get("EnvironmentVariables", {}).items()
@@ -682,7 +912,7 @@ elif action == "mutate-authority":
     authority = sys.stdin.buffer.read().decode("utf-8")
     mutate_authority(sys.argv[2], sys.argv[3], authority)
 elif action == "discover":
-    root, platform, authority_digest = sys.argv[2:5]
+    root, platform, authority_digest, validation_mode = sys.argv[2:6]
     products = os.path.join(root, "Build", "Products")
     candidates = []
     for directory, names, files in os.walk(products, followlinks=False):
@@ -690,14 +920,16 @@ elif action == "discover":
         candidates.extend(os.path.join(directory, name) for name in files if name.endswith(".xctestrun"))
     if len(candidates) != 1:
         die()
-    _, digest, identity, _ = validate(candidates[0], root, platform, authority_digest)
+    _, digest, identity, _ = validate(
+        candidates[0], root, platform, authority_digest, validation_mode
+    )
     print(digest + "\t" + identity + "\t" + os.path.realpath(candidates[0]))
 elif action == "inject":
     (source, copy, root, platform, authority_digest, environment_path,
      environment_digest, environment_identity, source_digest, source_identity,
-     injection_attack) = sys.argv[2:13]
+     injection_attack, validation_mode) = sys.argv[2:14]
     document, current_source_digest, current_source_identity, data = validate(
-        source, root, platform, authority_digest
+        source, root, platform, authority_digest, validation_mode
     )
     if (current_source_digest != source_digest or current_source_identity != source_identity
             or os.path.dirname(source) != os.path.dirname(copy)):
@@ -750,20 +982,26 @@ elif action == "inject":
         mutated = bytearray(intended)
         mutated[0] ^= 0xff
         overwrite_bound(copy, mutated, intended_identity)
-    _, digest, identity, _ = validate(copy, root, platform, authority_digest, 0o600, expected_environment)
+    _, digest, identity, _ = validate(
+        copy, root, platform, authority_digest, validation_mode, 0o600,
+        expected_environment
+    )
     if digest != intended_digest or identity != intended_identity:
         die()
     print(digest + "\t" + identity)
 elif action == "verify":
     (source, copy, root, platform, authority_digest, environment_path,
      environment_digest, environment_identity, source_digest, source_identity,
-     copy_digest, copy_identity) = sys.argv[2:14]
-    _, current_source_digest, current_source_identity, _ = validate(source, root, platform, authority_digest)
+     copy_digest, copy_identity, validation_mode) = sys.argv[2:15]
+    _, current_source_digest, current_source_identity, _ = validate(
+        source, root, platform, authority_digest, validation_mode
+    )
     expected_environment = load_environment(
         environment_path, environment_digest, environment_identity
     )
     _, current_copy_digest, current_copy_identity, _ = validate(
-        copy, root, platform, authority_digest, 0o600, expected_environment
+        copy, root, platform, authority_digest, validation_mode, 0o600,
+        expected_environment
     )
     if (current_source_digest != source_digest or current_source_identity != source_identity
             or current_copy_digest != copy_digest or current_copy_identity != copy_identity):
@@ -777,13 +1015,29 @@ else:
 PYTHON
 chmod 600 "${plist_helper}"
 
+product_validation_mode=live
+[[ "${runner_self_test_mode}" != 1 ]] || product_validation_mode=self-test
+
 discover_product() {
   local root="$1"
   local platform="$2"
   local output="$3"
   capture_checked U7_RUNNER_PRODUCT_INVALID "${output}" \
     /usr/bin/python3 "${plist_helper}" discover "${root}" "${platform}" \
-      "${authority_digest}"
+      "${authority_digest}" "${product_validation_mode}"
+}
+
+revalidate_product() {
+  local root="$1" platform="$2" expected_digest="$3"
+  local expected_identity="$4" expected_path="$5" label="$6"
+  local output="${transient}/${label}-product-revalidation.txt"
+  discover_product "${root}" "${platform}" "${output}"
+  local digest identity path
+  IFS=$'\t' read -r digest identity path <"${output}"
+  [[ "${digest}" == "${expected_digest}" \
+    && "${identity}" == "${expected_identity}" \
+    && "${path}" == "${expected_path}" ]] \
+    || fail U7_RUNNER_PRODUCT_INVALID
 }
 
 write_environment_spec() {
@@ -884,7 +1138,8 @@ prepare_invocation_copy() {
     /usr/bin/python3 "${plist_helper}" inject "${source}" "${copy}" \
       "${root}" "${platform}" "${authority_digest}" \
       "${environment_spec}" "${environment_digest}" "${environment_identity}" \
-      "${source_digest}" "${source_identity}" "${injection_attack}"
+      "${source_digest}" "${source_identity}" "${injection_attack}" \
+      "${product_validation_mode}"
   invocation_copies+=("${copy}")
   local copy_digest copy_identity
   IFS=$'\t' read -r copy_digest copy_identity <"${digest_file}"
@@ -916,7 +1171,7 @@ verify_invocation_copy() {
       "${root}" "${platform}" "${authority_digest}" \
       "${environment_spec}" "${environment_digest}" "${environment_identity}" \
       "${source_digest}" "${source_identity}" "${copy_digest}" \
-      "${copy_identity}"
+      "${copy_identity}" "${product_validation_mode}"
 }
 
 attack_invocation_copy_if_requested() {
@@ -1107,9 +1362,14 @@ apply_authority_attack_between_builds() {
 prepare_authority_build_settings() {
   local stage="$1"
   local legacy_setting_prefix='INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublic''Key='
+  local host_bundle_id="${mac_host_bundle_id}"
+  [[ "${stage}" != ios ]] || host_bundle_id="${ios_host_bundle_id}"
   authority_build_settings=(
-    GENERATE_INFOPLIST_FILE=NO
-    "INFOPLIST_FILE=${authority_plist}"
+    "U7_AUTHORITY_PLIST=${authority_plist}"
+    "U7_HOST_BUNDLE_IDENTIFIER=${host_bundle_id}"
+    DEVELOPMENT_TEAM=G94X5T5GK7
+    CODE_SIGN_STYLE=Automatic
+    "CODE_SIGN_IDENTITY=Apple Development"
   )
   if [[ "${stage}" == mac ]]; then
     case "${authority_attack}" in
@@ -1119,32 +1379,42 @@ prepare_authority_build_settings() {
       legacy-reappearance)
         authority_build_settings+=("${legacy_setting_prefix}${authority}")
         ;;
-      missing-infoplist) authority_build_settings=(GENERATE_INFOPLIST_FILE=NO) ;;
-      duplicate-infoplist) authority_build_settings+=("INFOPLIST_FILE=${authority_plist}") ;;
-      relative-infoplist) authority_build_settings[1]='INFOPLIST_FILE=relative.plist' ;;
-      empty-infoplist) authority_build_settings[1]='INFOPLIST_FILE=' ;;
-      unexpected-infoplist) authority_build_settings[1]="INFOPLIST_FILE=${authority_plist}.unexpected" ;;
-      missing-generate) authority_build_settings=("INFOPLIST_FILE=${authority_plist}") ;;
-      duplicate-generate) authority_build_settings+=(GENERATE_INFOPLIST_FILE=NO) ;;
+      missing-infoplist) authority_build_settings=("${authority_build_settings[@]:1}") ;;
+      duplicate-infoplist) authority_build_settings+=("U7_AUTHORITY_PLIST=${authority_plist}") ;;
+      relative-infoplist) authority_build_settings[0]='U7_AUTHORITY_PLIST=relative.plist' ;;
+      empty-infoplist) authority_build_settings[0]='U7_AUTHORITY_PLIST=' ;;
+      unexpected-infoplist) authority_build_settings[0]="U7_AUTHORITY_PLIST=${authority_plist}.unexpected" ;;
+      missing-generate) authority_build_settings=("${authority_build_settings[@]:0:1}" "${authority_build_settings[@]:2}") ;;
+      duplicate-generate) authority_build_settings+=("U7_HOST_BUNDLE_IDENTIFIER=${host_bundle_id}") ;;
     esac
   fi
-  local generate_count=0 plist_count=0 legacy_count=0 setting
+  local authority_count=0 bundle_count=0 team_count=0 style_count=0
+  local identity_count=0 legacy_count=0 setting
   for setting in "${authority_build_settings[@]}"; do
     case "${setting}" in
-      GENERATE_INFOPLIST_FILE=NO) generate_count=$((generate_count + 1)) ;;
-      INFOPLIST_FILE=*)
-        plist_count=$((plist_count + 1))
-        [[ "${setting}" == "INFOPLIST_FILE=${authority_plist}" ]] \
+      U7_AUTHORITY_PLIST=*)
+        authority_count=$((authority_count + 1))
+        [[ "${setting}" == "U7_AUTHORITY_PLIST=${authority_plist}" ]] \
           || fail U7_RUNNER_INFOPLIST_INVALID
         ;;
+      U7_HOST_BUNDLE_IDENTIFIER=*)
+        bundle_count=$((bundle_count + 1))
+        [[ "${setting}" == "U7_HOST_BUNDLE_IDENTIFIER=${host_bundle_id}" ]] \
+          || fail U7_RUNNER_INFOPLIST_INVALID
+        ;;
+      DEVELOPMENT_TEAM=G94X5T5GK7) team_count=$((team_count + 1)) ;;
+      CODE_SIGN_STYLE=Automatic) style_count=$((style_count + 1)) ;;
+      'CODE_SIGN_IDENTITY=Apple Development') identity_count=$((identity_count + 1)) ;;
       "${legacy_setting_prefix}"*)
         legacy_count=$((legacy_count + 1))
         ;;
       *) fail U7_RUNNER_INFOPLIST_INVALID ;;
     esac
   done
-  [[ "${#authority_build_settings[@]}" == 2 \
-    && "${generate_count}" == 1 && "${plist_count}" == 1 \
+  [[ "${#authority_build_settings[@]}" == 5 \
+    && "${authority_count}" == 1 && "${bundle_count}" == 1 \
+    && "${team_count}" == 1 && "${style_count}" == 1 \
+    && "${identity_count}" == 1 \
     && "${legacy_count}" == 0 ]] || fail U7_RUNNER_INFOPLIST_INVALID
 }
 
@@ -1175,13 +1445,15 @@ if [[ "${terminal_state}" == terminal ]]; then
   exit 0
 fi
 
+trash_generated_resolution
 create_authority_plist
 apply_authority_attack_before_mac
 validate_authority_plist
 prepare_authority_build_settings mac
 run_xcode_checked U7_RUNNER_BUILD_FAILED \
   "${U7_XCODEBUILD}" build-for-testing \
-  -scheme "${scheme}" -derivedDataPath "${mac_derived}" \
+  -project "${project}" -scheme "${scheme}" \
+  -derivedDataPath "${mac_derived}" \
   -destination "${U7_DEST_A}" \
   "${authority_build_settings[@]}"
 discover_product "${mac_derived}" MacOSX "${transient}/mac-product.txt"
@@ -1199,7 +1471,8 @@ validate_authority_plist
 prepare_authority_build_settings ios
 run_xcode_checked U7_RUNNER_BUILD_FAILED \
   "${U7_XCODEBUILD}" build-for-testing \
-  -scheme "${scheme}" -derivedDataPath "${ios_derived}" \
+  -project "${project}" -scheme "${scheme}" \
+  -derivedDataPath "${ios_derived}" \
   -destination "${U7_DEST_B}" \
   "${authority_build_settings[@]}"
 discover_product "${ios_derived}" iPhoneOS "${transient}/ios-product.txt"
@@ -1210,6 +1483,10 @@ IFS=$'\t' read -r ios_source_digest ios_source_identity ios_source \
   && -n "${ios_source}" ]] \
   || fail U7_RUNNER_PRODUCT_INVALID
 validate_authority_plist
+revalidate_product "${mac_derived}" MacOSX "${mac_source_digest}" \
+  "${mac_source_identity}" "${mac_source}" mac
+revalidate_product "${ios_derived}" iPhoneOS "${ios_source_digest}" \
+  "${ios_source_identity}" "${ios_source}" ios
 
 phases=(
   'credential:A:mac' 'credential:B:iPhone' 'credential:C:iPad'

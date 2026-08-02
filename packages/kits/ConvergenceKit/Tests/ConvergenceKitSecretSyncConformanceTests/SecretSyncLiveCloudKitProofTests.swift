@@ -1086,7 +1086,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(!source.contains("ConvergenceKit-Package"))
     #expect(!source.contains("GENERATE_INFOPLIST_FILE=NO"))
     #expect(!source.contains("INFOPLIST_FILE="))
-    #expect(!source.contains("-workspace"))
+    #expect(source.contains("U7_WORKSPACE"))
   }
 
   @Test("host inspect authenticates state manifest and retained authority bindings")
@@ -1188,7 +1188,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         additions: ["MOOT_SECRET_SYNC_INHERITED_CANARY": "must-not-reach-xctest"]
       )
     )
-    #expect(result.status == 0)
+    #expect(result.status == 0, "runner failed: \(result.stderr)")
     #expect(result.stdout.components(separatedBy: "U7_PHASE_OK:").count - 1 == 19)
     #expect(result.stdout.hasSuffix("U7_RUNNER_OK\n"))
     #expect(!result.stdout.contains("RAW-CANARY"))
@@ -1203,8 +1203,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
     ).split(separator: "\n")
     #expect(Array(commands.prefix(2)) == [
-      "build:mac:scheme=ConvergenceKit-Package:cwd=package:plist=private-current",
-      "build:iOS:scheme=ConvergenceKit-Package:cwd=package:plist=private-current",
+      "build:mac:project=U7EntitledTestHost:scheme=U7EntitledTestHost:bundle=com.codedaptive.FulcrumMacOS:team=G94X5T5GK7:plist=private-current",
+      "build:iOS:project=U7EntitledTestHost:scheme=U7EntitledTestHost:bundle=com.codedaptive.FulcrumIOS:team=G94X5T5GK7:plist=private-current",
     ])
     #expect(commands.dropFirst(2).allSatisfy {
       $0.hasPrefix("probe:") || $0.hasPrefix("phase:")
@@ -1229,6 +1229,11 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(commands.filter {
       $0.hasPrefix("probe:B:") || $0.hasPrefix("probe:C:")
     }.allSatisfy { $0.contains("platform=iPhoneOS") })
+    #expect(!FileManager.default.fileExists(
+      atPath: root.appendingPathComponent(
+        "private/fake-project-workspace/Package.resolved"
+      ).path
+    ))
     let recoveryArtifactDigest = Data(SHA256.hash(data: Data("recoveryA".utf8)))
       .base64EncodedString()
     #expect(phases.contains {
@@ -1394,8 +1399,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         ]
       )
     )
-    #expect(inheritedMode.status == 0)
-    #expect(inheritedMode.stdout.hasSuffix("U7_RUNNER_OK\n"))
+    #expect(inheritedMode.status != 0)
+    #expect(inheritedMode.stderr == "U7_RUNNER_BUILD_FAILED\n")
+    #expect(!inheritedMode.stdout.contains("U7_PHASE_OK:"))
   }
 
   @Test("runner rejects ambiguous target platform and bundle-anchor products")
@@ -3124,6 +3130,11 @@ private func u7WriteFakeRunnerTool(root: URL) throws -> URL {
 import base64, hashlib, json, os, pathlib, plistlib, shutil, stat, sys, uuid
 
 TARGET = "ConvergenceKitSecretSyncConformanceTests"
+HOST = "U7EntitledTestHost"
+PROJECT = "U7EntitledTestHost.xcodeproj"
+SCHEME = "U7EntitledTestHost"
+TEAM = "G94X5T5GK7"
+CONTAINER = "iCloud.com.codedaptive.simplemachines"
 PREFIX = "MOOT_SECRET_SYNC_"
 PROBE_TEST_IDENTIFIER = "SecretSyncLiveCloudKitProofTests/ledgerProbe()"
 PHASE_TEST_IDENTIFIER = "SecretSyncLiveCloudKitProofTests/externalPhase()"
@@ -3167,15 +3178,25 @@ def write_plist(value, path):
     with open(path, "wb") as handle:
         plistlib.dump(value, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
 
-def read_build_authority(reset_binding):
-    generate = [value for value in sys.argv if value == "GENERATE_INFOPLIST_FILE=NO"]
-    plist_arguments = [value for value in sys.argv if value.startswith("INFOPLIST_FILE=")]
+def exact_setting(name):
+    values = [value.split("=", 1)[1] for value in sys.argv if value.startswith(name + "=")]
+    if len(values) != 1 or not values[0]:
+        sys.exit(44)
+    return values[0]
+
+def read_build_authority(reset_binding, expected_bundle):
+    raw_path = exact_setting("U7_AUTHORITY_PLIST")
+    bundle_identifier = exact_setting("U7_HOST_BUNDLE_IDENTIFIER")
+    team = exact_setting("DEVELOPMENT_TEAM")
+    signing_style = exact_setting("CODE_SIGN_STYLE")
+    signing_identity = exact_setting("CODE_SIGN_IDENTITY")
     legacy = [value for value in sys.argv if value.startswith(
         "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="
     )]
-    if len(generate) != 1 or len(plist_arguments) != 1 or legacy:
+    if (bundle_identifier != expected_bundle or team != TEAM
+            or signing_style != "Automatic" or signing_identity != "Apple Development"
+            or legacy):
         sys.exit(44)
-    raw_path = plist_arguments[0].split("=", 1)[1]
     path = pathlib.Path(raw_path)
     run_root = pathlib.Path(os.environ["U7_RUN_DIR"])
     if (not raw_path or not path.is_absolute()
@@ -3247,8 +3268,27 @@ def make_products(derived, platform, authority, mode):
     if mode == "simulator-platform" and platform == "iPhoneOS":
         supported = "iPhoneSimulator"
     configuration = "Debug" if platform == "MacOSX" else "Debug-iphoneos"
-    bundle = products / configuration / (TARGET + ".xctest")
-    info = {
+    bundle_identifier = (
+        "com.codedaptive.FulcrumMacOS"
+        if platform == "MacOSX" else "com.codedaptive.FulcrumIOS"
+    )
+    host = products / configuration / (HOST + ".app")
+    host_info = {
+        "CFBundleIdentifier": (
+            "com.codedaptive.WrongHost"
+            if mode == "wrong-host-bundle-id" else bundle_identifier
+        ),
+        "CFBundleExecutable": HOST,
+        "CFBundleSupportedPlatforms": [
+            "iPhoneOS" if mode == "wrong-host-platform" and platform == "MacOSX"
+            else "MacOSX" if mode == "wrong-host-platform" else platform
+        ],
+    }
+    host_info_path = host / "Contents" / "Info.plist" if platform == "MacOSX" else host / "Info.plist"
+    write_plist(host_info, host_info_path)
+    bundle = host / ("Contents/PlugIns" if platform == "MacOSX" else "PlugIns") / (TARGET + ".xctest")
+    test_info = {
+        "CFBundleIdentifier": bundle_identifier + ".tests",
         "CFBundleSupportedPlatforms": [supported],
         "DTPlatformName": {
             "MacOSX": "macosx", "iPhoneOS": "iphoneos",
@@ -3256,14 +3296,81 @@ def make_products(derived, platform, authority, mode):
         }[supported],
     }
     if mode != "missing-anchor":
-        info["MOOTSecretSyncHostAuthorityPublicKey"] = (
+        test_info["MOOTSecretSyncHostAuthorityPublicKey"] = (
             "WRONG-ANCHOR" if mode == "wrong-anchor" else authority
         )
     info_path = bundle / "Contents" / "Info.plist" if platform == "MacOSX" else bundle / "Info.plist"
-    write_plist(info, info_path)
+    write_plist(test_info, info_path)
+    application_key = (
+        "com.apple.application-identifier"
+        if platform == "MacOSX" else "application-identifier"
+    )
+    entitlements = {
+        application_key: TEAM + "." + bundle_identifier,
+        "com.apple.developer.team-identifier": TEAM,
+        "com.apple.developer.icloud-container-identifiers": [CONTAINER],
+        "com.apple.developer.icloud-services": ["CloudKit"],
+        "keychain-access-groups": [TEAM + "." + bundle_identifier],
+    }
+    if platform == "MacOSX":
+        entitlements.update({
+            "com.apple.security.app-sandbox": True,
+            "com.apple.security.network.client": True,
+        })
+    if mode == "unentitled-host":
+        entitlements = {}
+    if mode == "wrong-container":
+        entitlements["com.apple.developer.icloud-container-identifiers"] = ["iCloud.invalid"]
+    if mode == "wrong-cloudkit-service":
+        entitlements["com.apple.developer.icloud-services"] = ["CloudDocuments"]
+    if mode == "wrong-keychain-group":
+        entitlements["keychain-access-groups"] = [TEAM + ".invalid"]
+    profile_entitlements = {
+        application_key: TEAM + "." + bundle_identifier,
+        "com.apple.developer.team-identifier": TEAM,
+        "com.apple.developer.icloud-container-identifiers": [CONTAINER],
+        "com.apple.developer.icloud-services": "*",
+        "keychain-access-groups": [TEAM + ".*"],
+    }
+    signing = {
+        "Signed": mode != "unsigned-host",
+        "AdHoc": mode == "adhoc-host",
+        "Authority": "Apple Development",
+        "Identifier": bundle_identifier,
+        "TeamIdentifier": "WRONGTEAM" if mode == "wrong-host-team" else TEAM,
+        "Entitlements": entitlements,
+        "ProvisioningProfile": {
+            "TeamIdentifier": [TEAM],
+            "Entitlements": profile_entitlements,
+            "U7FakeProfileValid": mode != "wrong-profile",
+        },
+    }
+    write_plist(signing, host / "U7FakeSigning.plist")
+    host_path = "__TESTROOT__/" + configuration + "/" + HOST + ".app"
+    bundle_suffix = (
+        "Contents/PlugIns/" if platform == "MacOSX" else "PlugIns/"
+    ) + TARGET + ".xctest"
+    bundle_path = "__TESTHOST__/" + bundle_suffix
+    if mode == "wrong-test-bundle":
+        bundle_path = "__TESTHOST__/WrongTests.xctest"
     target = {
         "BlueprintName": "WrongTarget" if mode == "missing-target" else TARGET,
-        "TestBundlePath": "__TESTROOT__/" + str(bundle.relative_to(products)),
+        "BlueprintProviderName": HOST,
+        "BlueprintProviderRelativePath": (
+            "WrongProject.xcodeproj" if mode == "wrong-container-project" else PROJECT
+        ),
+        "BundleIdentifiersForCrashReportEmphasis": [
+            bundle_identifier, bundle_identifier + ".tests",
+        ],
+        "DependentProductPaths": [
+            host_path, "__TESTROOT__/" + configuration + "/" + HOST + ".app/" + bundle_suffix,
+        ],
+        "IsAppHostedTestBundle": True,
+        "TestBundlePath": bundle_path,
+        "TestHostBundleIdentifier": (
+            "com.codedaptive.WrongHost" if mode == "wrong-test-host" else bundle_identifier
+        ),
+        "TestHostPath": host_path,
         "EnvironmentVariables": {
             "XCODE_GENERATED": "preserved",
             PREFIX + "STALE_CANONICAL": "removed",
@@ -3273,10 +3380,14 @@ def make_products(derived, platform, authority, mode):
     if mode == "duplicate-target":
         targets.append(dict(target))
     document = {
+        "ContainerInfo": {
+            "ContainerName": HOST,
+            "SchemeName": "WrongScheme" if mode == "wrong-container-scheme" else SCHEME,
+        },
         "__xctestrun_metadata__": {"FormatVersion": 2},
         "TestConfigurations": [{"Name": "Test Scheme Action", "TestTargets": targets}],
     }
-    source = products / ("ConvergenceKit-Package-" + platform + ".xctestrun")
+    source = products / (HOST + "_" + SCHEME + "_" + platform + ".xctestrun")
     write_plist(document, source)
     if mode == "duplicate-xctestrun":
         write_plist(document, products / ("Duplicate-" + platform + ".xctestrun"))
@@ -3393,48 +3504,76 @@ mode = os.environ.get("U7_FAKE_MODE", "success")
 
 if any(key.startswith(PREFIX) for key in os.environ):
     sys.exit(40)
-if any(flag in sys.argv for flag in ("-project", "-workspace")):
-    sys.exit(41)
 
 if "build-for-testing" in sys.argv:
     if pathlib.Path.cwd().resolve() != pathlib.Path(os.environ["U7_PACKAGE_DIR"]).resolve():
         sys.exit(42)
-    if "-scheme" not in sys.argv or sys.argv[sys.argv.index("-scheme") + 1] != "ConvergenceKit-Package":
+    expected_project = pathlib.Path(os.environ["U7_PACKAGE_DIR"]) / HOST / PROJECT
+    if ("-project" not in sys.argv
+            or pathlib.Path(sys.argv[sys.argv.index("-project") + 1]).resolve()
+                != expected_project.resolve()
+            or "-workspace" in sys.argv):
+        sys.exit(41)
+    if "-scheme" not in sys.argv or sys.argv[sys.argv.index("-scheme") + 1] != SCHEME:
         sys.exit(43)
     derived = arg("-derivedDataPath")
     destination = sys.argv[sys.argv.index("-destination") + 1]
-    authority = read_build_authority(destination == os.environ["U7_DEST_A"])
+    expected_bundle = (
+        "com.codedaptive.FulcrumMacOS"
+        if destination == os.environ["U7_DEST_A"]
+        else "com.codedaptive.FulcrumIOS"
+    )
+    authority = read_build_authority(
+        destination == os.environ["U7_DEST_A"], expected_bundle
+    )
     fixture_mode = mode if mode in {
         "zero-xctestrun", "duplicate-xctestrun", "missing-target",
         "duplicate-target", "missing-anchor", "wrong-anchor",
-        "wrong-platform", "simulator-platform",
+        "wrong-platform", "simulator-platform", "unentitled-host",
+        "wrong-container", "wrong-cloudkit-service", "wrong-keychain-group",
+        "wrong-test-host", "wrong-test-bundle", "wrong-container-project",
+        "wrong-container-scheme", "unsigned-host", "adhoc-host",
+        "wrong-host-bundle-id", "wrong-host-team", "wrong-profile",
+        "wrong-host-platform",
     } else "success"
     if mode.startswith("ios-"):
         fixture_mode = mode[4:] if destination == os.environ["U7_DEST_B"] else "success"
     if destination == os.environ["U7_DEST_A"]:
         matrix_path.write_text("mac\n")
         make_products(derived, "MacOSX", authority, fixture_mode)
-        append_log("build:mac:scheme=ConvergenceKit-Package:cwd=package:plist=private-current")
+        log_path.with_suffix(".mac-host").write_text(
+            str(derived / "Build" / "Products" / "Debug" / (HOST + ".app"))
+        )
+        append_log("build:mac:project=U7EntitledTestHost:scheme=U7EntitledTestHost:bundle=com.codedaptive.FulcrumMacOS:team=G94X5T5GK7:plist=private-current")
     elif destination == os.environ["U7_DEST_B"]:
         if not matrix_path.exists() or matrix_path.read_text() != "mac\n":
             sys.exit(11)
         with open(matrix_path, "a") as matrix:
             matrix.write("iOS\n")
         make_products(derived, "iPhoneOS", authority, fixture_mode)
-        append_log("build:iOS:scheme=ConvergenceKit-Package:cwd=package:plist=private-current")
+        if mode == "app-host-replacement":
+            mac_host = pathlib.Path(log_path.with_suffix(".mac-host").read_text())
+            signing_path = mac_host / "U7FakeSigning.plist"
+            signing = plistlib.loads(signing_path.read_bytes())
+            signing["Identifier"] = "com.codedaptive.ReplacedHost"
+            write_plist(signing, signing_path)
+        append_log("build:iOS:project=U7EntitledTestHost:scheme=U7EntitledTestHost:bundle=com.codedaptive.FulcrumIOS:team=G94X5T5GK7:plist=private-current")
     else:
         sys.exit(12)
+    resolution = pathlib.Path(os.environ["U7_SELF_TEST_GENERATED_RESOLUTION_ARTIFACT"])
+    resolution.parent.mkdir(parents=True, exist_ok=True)
+    resolution.write_text("generated-by-fake-xcode\n")
     sys.exit(0)
 
 if not matrix_path.exists() or matrix_path.read_text() != "mac\niOS\n":
     sys.exit(13)
 if "test-without-building" not in sys.argv or "-xctestrun" not in sys.argv:
     sys.exit(45)
-if "-scheme" in sys.argv:
+if any(flag in sys.argv for flag in ("-project", "-workspace", "-scheme")):
     sys.exit(46)
 
 xctestrun = arg("-xctestrun")
-if xctestrun.name.startswith("ConvergenceKit-Package-"):
+if xctestrun.name.startswith(HOST + "_" + SCHEME + "_"):
     sys.exit(47)
 file_mode = stat.S_IMODE(os.lstat(xctestrun).st_mode)
 if file_mode != 0o600 or xctestrun.is_symlink():
@@ -3503,8 +3642,11 @@ if resolved_copy in used:
 with open(copies_path, "a") as copies:
     copies.write(resolved_copy + "\n")
 
-bundle = pathlib.Path(str(targets[0]["TestBundlePath"]).replace(
+host = pathlib.Path(str(targets[0]["TestHostPath"]).replace(
     "__TESTROOT__", str(xctestrun.parent), 1
+)).resolve()
+bundle = pathlib.Path(str(targets[0]["TestBundlePath"]).replace(
+    "__TESTHOST__", str(host), 1
 )).resolve()
 info_path = bundle / "Contents" / "Info.plist" if (bundle / "Contents").exists() else bundle / "Info.plist"
 with open(info_path, "rb") as handle:
