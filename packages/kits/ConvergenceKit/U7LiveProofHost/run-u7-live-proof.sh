@@ -151,6 +151,7 @@ import hashlib
 import json
 import os
 import plistlib
+import secrets
 import stat
 import sys
 
@@ -322,7 +323,99 @@ def overwrite_bound(path, data, expected_identity):
     finally:
         os.close(descriptor)
 
-def validate(path, root, expected_platform, authority_path, mode=None, expected_environment=None):
+def authority_document(data, expected_authority_digest):
+    try:
+        document = plistlib.loads(data)
+    except Exception:
+        die()
+    if (not isinstance(document, dict)
+            or set(document) != {"MOOTSecretSyncHostAuthorityPublicKey"}):
+        die()
+    authority = document["MOOTSecretSyncHostAuthorityPublicKey"]
+    if (not isinstance(authority, str) or not authority
+            or hashlib.sha256(authority.encode("utf-8")).hexdigest()
+                != expected_authority_digest):
+        die()
+    return document
+
+def validate_authority(path, root, expected_digest, expected_identity,
+                       expected_authority_digest):
+    absolute_root = os.path.abspath(root)
+    absolute_path = os.path.abspath(path)
+    if (root != absolute_root or path != absolute_path
+            or os.path.normpath(path) != path
+            or os.path.realpath(root) != root
+            or not beneath(path, root) or not no_symlink_components(path, root)):
+        die()
+    relative = os.path.relpath(path, root)
+    if (relative == "." or relative.startswith(".." + os.sep)
+            or not os.path.basename(root).startswith("transient.")):
+        die()
+    data, info = read_regular_bytes(path, 0o600)
+    if (hashlib.sha256(data).hexdigest() != expected_digest
+            or stable_identity(info) != expected_identity):
+        die()
+    authority_document(data, expected_authority_digest)
+
+def create_authority(root, authority):
+    if (not authority or root != os.path.abspath(root)
+            or root != os.path.realpath(root) or os.path.islink(root)):
+        die()
+    data = plistlib.dumps(
+        {"MOOTSecretSyncHostAuthorityPublicKey": authority},
+        fmt=plistlib.FMT_BINARY, sort_keys=True
+    )
+    path = os.path.join(root, "authority-" + secrets.token_hex(16) + ".plist")
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        write_all(descriptor, data)
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        info = require_regular_owned(os.fstat(descriptor), 0o600)
+        digest = hashlib.sha256(data).hexdigest()
+        identity = stable_identity(info)
+    finally:
+        os.close(descriptor)
+    print("\t".join((
+        digest, identity, hashlib.sha256(authority.encode("utf-8")).hexdigest(), path
+    )))
+
+def mutate_authority(path, mode, authority):
+    documents = {
+        "malformed": b"not-a-plist",
+        "non-dictionary": plistlib.dumps([authority], fmt=plistlib.FMT_BINARY),
+        "extra-key": plistlib.dumps({
+            "MOOTSecretSyncHostAuthorityPublicKey": authority,
+            "Unexpected": "forbidden",
+        }, fmt=plistlib.FMT_BINARY, sort_keys=True),
+        "absent-key": plistlib.dumps({}, fmt=plistlib.FMT_BINARY),
+        "wrong-key": plistlib.dumps({
+            "MOOTSecretSyncHostAuthorityPublicKEY": authority,
+        }, fmt=plistlib.FMT_BINARY, sort_keys=True),
+        "empty-authority": plistlib.dumps({
+            "MOOTSecretSyncHostAuthorityPublicKey": "",
+        }, fmt=plistlib.FMT_BINARY, sort_keys=True),
+        "wrong-authority": plistlib.dumps({
+            "MOOTSecretSyncHostAuthorityPublicKey": "WRONG-AUTHORITY",
+        }, fmt=plistlib.FMT_BINARY, sort_keys=True),
+        "same-inode-mutation": plistlib.dumps({
+            "MOOTSecretSyncHostAuthorityPublicKey": authority + " ",
+        }, fmt=plistlib.FMT_BINARY, sort_keys=True),
+    }
+    if mode not in documents:
+        die()
+    descriptor = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        require_regular_owned(os.fstat(descriptor), 0o600)
+        os.ftruncate(descriptor, 0)
+        write_all(descriptor, documents[mode])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def validate(path, root, expected_platform, authority_digest, mode=None, expected_environment=None):
     if not beneath(path, root) or not no_symlink_components(path, root):
         die()
     try:
@@ -350,12 +443,10 @@ def validate(path, root, expected_platform, authority_path, mode=None, expected_
         die()
     if info.get("DTPlatformName") not in (None, expected_name):
         die()
-    try:
-        authority_data, _ = read_regular_bytes(authority_path, 0o600)
-        authority = authority_data.decode("utf-8").strip()
-    except Exception:
-        die()
-    if not authority or info.get("MOOTSecretSyncHostAuthorityPublicKey") != authority:
+    authority = info.get("MOOTSecretSyncHostAuthorityPublicKey")
+    if (not isinstance(authority, str) or not authority
+            or hashlib.sha256(authority.encode("utf-8")).hexdigest()
+                != authority_digest):
         die()
     if expected_environment is not None:
         actual = {
@@ -368,8 +459,16 @@ def validate(path, root, expected_platform, authority_path, mode=None, expected_
     return document, digest, stable_identity(path_info), data
 
 action = sys.argv[1]
-if action == "discover":
-    root, platform, authority_path = sys.argv[2:5]
+if action == "create-authority":
+    authority = sys.stdin.buffer.read().decode("utf-8")
+    create_authority(sys.argv[2], authority)
+elif action == "validate-authority":
+    validate_authority(*sys.argv[2:7])
+elif action == "mutate-authority":
+    authority = sys.stdin.buffer.read().decode("utf-8")
+    mutate_authority(sys.argv[2], sys.argv[3], authority)
+elif action == "discover":
+    root, platform, authority_digest = sys.argv[2:5]
     products = os.path.join(root, "Build", "Products")
     candidates = []
     for directory, names, files in os.walk(products, followlinks=False):
@@ -377,14 +476,14 @@ if action == "discover":
         candidates.extend(os.path.join(directory, name) for name in files if name.endswith(".xctestrun"))
     if len(candidates) != 1:
         die()
-    _, digest, identity, _ = validate(candidates[0], root, platform, authority_path)
+    _, digest, identity, _ = validate(candidates[0], root, platform, authority_digest)
     print(digest + "\t" + identity + "\t" + os.path.realpath(candidates[0]))
 elif action == "inject":
-    (source, copy, root, platform, authority_path, environment_path,
+    (source, copy, root, platform, authority_digest, environment_path,
      environment_digest, environment_identity, source_digest, source_identity,
      injection_attack) = sys.argv[2:13]
     document, current_source_digest, current_source_identity, data = validate(
-        source, root, platform, authority_path
+        source, root, platform, authority_digest
     )
     if (current_source_digest != source_digest or current_source_identity != source_identity
             or os.path.dirname(source) != os.path.dirname(copy)):
@@ -437,20 +536,20 @@ elif action == "inject":
         mutated = bytearray(intended)
         mutated[0] ^= 0xff
         overwrite_bound(copy, mutated, intended_identity)
-    _, digest, identity, _ = validate(copy, root, platform, authority_path, 0o600, expected_environment)
+    _, digest, identity, _ = validate(copy, root, platform, authority_digest, 0o600, expected_environment)
     if digest != intended_digest or identity != intended_identity:
         die()
     print(digest + "\t" + identity)
 elif action == "verify":
-    (source, copy, root, platform, authority_path, environment_path,
+    (source, copy, root, platform, authority_digest, environment_path,
      environment_digest, environment_identity, source_digest, source_identity,
      copy_digest, copy_identity) = sys.argv[2:14]
-    _, current_source_digest, current_source_identity, _ = validate(source, root, platform, authority_path)
+    _, current_source_digest, current_source_identity, _ = validate(source, root, platform, authority_digest)
     expected_environment = load_environment(
         environment_path, environment_digest, environment_identity
     )
     _, current_copy_digest, current_copy_identity, _ = validate(
-        copy, root, platform, authority_path, 0o600, expected_environment
+        copy, root, platform, authority_digest, 0o600, expected_environment
     )
     if (current_source_digest != source_digest or current_source_identity != source_identity
             or current_copy_digest != copy_digest or current_copy_identity != copy_identity):
@@ -468,7 +567,7 @@ discover_product() {
   local output="$3"
   capture_checked U7_RUNNER_PRODUCT_INVALID "${output}" \
     /usr/bin/python3 "${plist_helper}" discover "${root}" "${platform}" \
-      "${transient}/authority.b64"
+      "${authority_digest}"
 }
 
 write_environment_spec() {
@@ -567,7 +666,7 @@ prepare_invocation_copy() {
   fi
   capture_checked U7_RUNNER_XCTESTRUN_INVALID "${digest_file}" \
     /usr/bin/python3 "${plist_helper}" inject "${source}" "${copy}" \
-      "${root}" "${platform}" "${transient}/authority.b64" \
+      "${root}" "${platform}" "${authority_digest}" \
       "${environment_spec}" "${environment_digest}" "${environment_identity}" \
       "${source_digest}" "${source_identity}" "${injection_attack}"
   invocation_copies+=("${copy}")
@@ -598,7 +697,7 @@ verify_invocation_copy() {
   local copy_identity="${11}"
   run_checked U7_RUNNER_XCTESTRUN_INVALID \
     /usr/bin/python3 "${plist_helper}" verify "${source}" "${copy}" \
-      "${root}" "${platform}" "${transient}/authority.b64" \
+      "${root}" "${platform}" "${authority_digest}" \
       "${environment_spec}" "${environment_digest}" "${environment_identity}" \
       "${source_digest}" "${source_identity}" "${copy_digest}" \
       "${copy_identity}"
@@ -666,6 +765,162 @@ locate_attachment() {
   /usr/bin/printf '%s' "${matches}"
 }
 
+create_authority_plist() {
+  local log="${transient}/authority-plist-create.log"
+  local binding
+  if ! binding="$(/usr/bin/printf '%s' "${authority}" \
+    | /usr/bin/python3 "${plist_helper}" create-authority "${transient}" \
+      2>"${log}")"; then
+    fail U7_RUNNER_INFOPLIST_INVALID
+  fi
+  IFS=$'\t' read -r authority_plist_digest authority_plist_identity \
+    authority_digest authority_plist <<<"${binding}"
+  [[ "${authority_plist_digest}" =~ ^[0-9a-f]{64}$ \
+    && "${authority_plist_identity}" =~ ^[0-9]+:[0-9]+:[0-7]+$ \
+    && "${authority_digest}" =~ ^[0-9a-f]{64}$ \
+    && -n "${authority_plist}" ]] || fail U7_RUNNER_INFOPLIST_INVALID
+}
+
+validate_authority_plist() {
+  local log="${transient}/authority-plist-validate-$RANDOM.log"
+  if ! /usr/bin/python3 "${plist_helper}" validate-authority \
+    "${authority_plist}" "${transient}" "${authority_plist_digest}" \
+    "${authority_plist_identity}" "${authority_digest}" \
+    >"${log}" 2>&1; then
+    fail U7_RUNNER_INFOPLIST_INVALID
+  fi
+}
+
+mutate_authority_plist() {
+  local mode="$1"
+  local log="${transient}/authority-plist-mutate.log"
+  if ! /usr/bin/printf '%s' "${authority}" \
+    | /usr/bin/python3 "${plist_helper}" mutate-authority \
+      "${authority_plist}" "${mode}" >"${log}" 2>&1; then
+    fail U7_RUNNER_INFOPLIST_INVALID
+  fi
+}
+
+authority_attack=""
+if [[ "${runner_self_test_mode}" == 1 ]]; then
+  authority_attack="${U7_SELF_TEST_INFOPLIST_ATTACK:-}"
+fi
+
+apply_authority_attack_before_mac() {
+  case "${authority_attack}" in
+    ''|legacy-only|legacy-reappearance|missing-infoplist|duplicate-infoplist|relative-infoplist|empty-infoplist|unexpected-infoplist|missing-generate|duplicate-generate|between-build-replace|between-build-mutation|between-build-path|between-build-authority)
+      ;;
+    replace)
+      /bin/cp -p "${authority_plist}" "${authority_plist}.replacement"
+      /bin/mv -f "${authority_plist}.replacement" "${authority_plist}"
+      ;;
+    same-inode-mutation|malformed|non-dictionary|extra-key|absent-key|wrong-key|empty-authority|wrong-authority)
+      mutate_authority_plist "${authority_attack}"
+      ;;
+    symlink)
+      /bin/cp -p "${authority_plist}" "${authority_plist}.target"
+      /bin/rm -f -- "${authority_plist}"
+      /bin/ln -s "${authority_plist}.target" "${authority_plist}"
+      ;;
+    hardlink)
+      local alias="${U7_RUN_DIR}/../u7-retained-authority-hardlink.plist"
+      [[ ! -e "${alias}" && ! -L "${alias}" ]] \
+        || fail U7_RUNNER_INFOPLIST_INVALID
+      attack_aliases+=("${alias}")
+      /bin/ln "${authority_plist}" "${alias}" \
+        || fail U7_RUNNER_INFOPLIST_INVALID
+      ;;
+    mode)
+      /bin/chmod 400 "${authority_plist}"
+      ;;
+    lexical-traversal)
+      authority_plist="${transient}/../$(/usr/bin/basename "${transient}")/$(/usr/bin/basename "${authority_plist}")"
+      ;;
+    outside-path|stale-carrier|second-run-reuse)
+      local external="${U7_RUN_DIR}/u7-${authority_attack}.plist"
+      [[ ! -e "${external}" && ! -L "${external}" ]] \
+        || fail U7_RUNNER_INFOPLIST_INVALID
+      attack_aliases+=("${external}")
+      /bin/cp -p "${authority_plist}" "${external}"
+      authority_plist="${external}"
+      ;;
+    resolved-escape)
+      local external="${U7_RUN_DIR}/u7-resolved-escape.plist"
+      local escape="${transient}/escape"
+      [[ ! -e "${external}" && ! -L "${external}" ]] \
+        || fail U7_RUNNER_INFOPLIST_INVALID
+      attack_aliases+=("${external}")
+      /bin/cp -p "${authority_plist}" "${external}"
+      /bin/ln -s "${U7_RUN_DIR}" "${escape}"
+      authority_plist="${escape}/$(/usr/bin/basename "${external}")"
+      ;;
+    *) fail U7_RUNNER_INFOPLIST_INVALID ;;
+  esac
+}
+
+apply_authority_attack_between_builds() {
+  case "${authority_attack}" in
+    between-build-replace)
+      /bin/cp -p "${authority_plist}" "${authority_plist}.replacement"
+      /bin/mv -f "${authority_plist}.replacement" "${authority_plist}"
+      ;;
+    between-build-mutation)
+      mutate_authority_plist same-inode-mutation
+      ;;
+    between-build-path)
+      /bin/cp -p "${authority_plist}" "${authority_plist}.second"
+      authority_plist="${authority_plist}.second"
+      ;;
+    between-build-authority)
+      mutate_authority_plist wrong-authority
+      ;;
+  esac
+}
+
+prepare_authority_build_settings() {
+  local stage="$1"
+  local legacy_setting_prefix='INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublic''Key='
+  authority_build_settings=(
+    GENERATE_INFOPLIST_FILE=NO
+    "INFOPLIST_FILE=${authority_plist}"
+  )
+  if [[ "${stage}" == mac ]]; then
+    case "${authority_attack}" in
+      legacy-only)
+        authority_build_settings=("${legacy_setting_prefix}${authority}")
+        ;;
+      legacy-reappearance)
+        authority_build_settings+=("${legacy_setting_prefix}${authority}")
+        ;;
+      missing-infoplist) authority_build_settings=(GENERATE_INFOPLIST_FILE=NO) ;;
+      duplicate-infoplist) authority_build_settings+=("INFOPLIST_FILE=${authority_plist}") ;;
+      relative-infoplist) authority_build_settings[1]='INFOPLIST_FILE=relative.plist' ;;
+      empty-infoplist) authority_build_settings[1]='INFOPLIST_FILE=' ;;
+      unexpected-infoplist) authority_build_settings[1]="INFOPLIST_FILE=${authority_plist}.unexpected" ;;
+      missing-generate) authority_build_settings=("INFOPLIST_FILE=${authority_plist}") ;;
+      duplicate-generate) authority_build_settings+=(GENERATE_INFOPLIST_FILE=NO) ;;
+    esac
+  fi
+  local generate_count=0 plist_count=0 legacy_count=0 setting
+  for setting in "${authority_build_settings[@]}"; do
+    case "${setting}" in
+      GENERATE_INFOPLIST_FILE=NO) generate_count=$((generate_count + 1)) ;;
+      INFOPLIST_FILE=*)
+        plist_count=$((plist_count + 1))
+        [[ "${setting}" == "INFOPLIST_FILE=${authority_plist}" ]] \
+          || fail U7_RUNNER_INFOPLIST_INVALID
+        ;;
+      "${legacy_setting_prefix}"*)
+        legacy_count=$((legacy_count + 1))
+        ;;
+      *) fail U7_RUNNER_INFOPLIST_INVALID ;;
+    esac
+  done
+  [[ "${#authority_build_settings[@]}" == 2 \
+    && "${generate_count}" == 1 && "${plist_count}" == 1 \
+    && "${legacy_count}" == 0 ]] || fail U7_RUNNER_INFOPLIST_INVALID
+}
+
 namespace="${U7_RUN_NAMESPACE:-u7-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')}"
 capture_checked U7_RUNNER_HOST_INIT_FAILED "${transient}/host-init.out" \
   "${U7_HOST_TOOL}" init --run-dir "${U7_RUN_DIR}" --namespace "${namespace}"
@@ -693,11 +948,15 @@ if [[ "${terminal_state}" == terminal ]]; then
   exit 0
 fi
 
+create_authority_plist
+apply_authority_attack_before_mac
+validate_authority_plist
+prepare_authority_build_settings mac
 run_xcode_checked U7_RUNNER_BUILD_FAILED \
   "${U7_XCODEBUILD}" build-for-testing \
   -scheme "${scheme}" -derivedDataPath "${mac_derived}" \
   -destination "${U7_DEST_A}" \
-  "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey=${authority}"
+  "${authority_build_settings[@]}"
 discover_product "${mac_derived}" MacOSX "${transient}/mac-product.txt"
 IFS=$'\t' read -r mac_source_digest mac_source_identity mac_source \
   <"${transient}/mac-product.txt"
@@ -708,11 +967,14 @@ IFS=$'\t' read -r mac_source_digest mac_source_identity mac_source \
 
 # One authorized iPhone destination builds the shared iOS test products used
 # by both the iPhone and iPad phases; both platform builds precede every run.
+apply_authority_attack_between_builds
+validate_authority_plist
+prepare_authority_build_settings ios
 run_xcode_checked U7_RUNNER_BUILD_FAILED \
   "${U7_XCODEBUILD}" build-for-testing \
   -scheme "${scheme}" -derivedDataPath "${ios_derived}" \
   -destination "${U7_DEST_B}" \
-  "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey=${authority}"
+  "${authority_build_settings[@]}"
 discover_product "${ios_derived}" iPhoneOS "${transient}/ios-product.txt"
 IFS=$'\t' read -r ios_source_digest ios_source_identity ios_source \
   <"${transient}/ios-product.txt"
@@ -720,6 +982,7 @@ IFS=$'\t' read -r ios_source_digest ios_source_identity ios_source \
   && "${ios_source_identity}" =~ ^[0-9]+:[0-9]+:[0-7]+$ \
   && -n "${ios_source}" ]] \
   || fail U7_RUNNER_PRODUCT_INVALID
+validate_authority_plist
 
 phases=(
   'credential:A:mac' 'credential:B:iPhone' 'credential:C:iPad'

@@ -1184,8 +1184,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
     ).split(separator: "\n")
     #expect(Array(commands.prefix(2)) == [
-      "build:mac:scheme=ConvergenceKit-Package:cwd=package",
-      "build:iOS:scheme=ConvergenceKit-Package:cwd=package",
+      "build:mac:scheme=ConvergenceKit-Package:cwd=package:plist=private-current",
+      "build:iOS:scheme=ConvergenceKit-Package:cwd=package:plist=private-current",
     ])
     #expect(commands.dropFirst(2).allSatisfy {
       $0.hasPrefix("probe:") || $0.hasPrefix("phase:")
@@ -1372,6 +1372,52 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       )) ?? ""
       #expect(!trace.contains("probe:"))
       #expect(!trace.contains("phase:"))
+    }
+  }
+
+  @Test("runner rejects invalid private authority plist input before launch")
+  func runnerRejectsInvalidAuthorityPlist() throws {
+    let attacks = [
+      "legacy-only", "legacy-reappearance", "missing-infoplist",
+      "duplicate-infoplist", "relative-infoplist", "empty-infoplist",
+      "unexpected-infoplist", "missing-generate", "duplicate-generate",
+      "replace", "same-inode-mutation", "symlink", "hardlink", "mode",
+      "lexical-traversal", "outside-path", "resolved-escape",
+      "stale-carrier", "second-run-reuse", "malformed", "non-dictionary",
+      "extra-key", "absent-key", "wrong-key", "empty-authority",
+      "wrong-authority", "between-build-replace", "between-build-mutation",
+      "between-build-path", "between-build-authority",
+    ]
+    for attack in attacks {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-infoplist-\(attack)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: ["--self-test"],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_SELF_TEST_INFOPLIST_ATTACK": attack]
+        )
+      )
+      #expect(result.status != 0)
+      #expect(result.stderr == "U7_RUNNER_INFOPLIST_INVALID\n")
+      let trace = (try? String(
+        contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+      )) ?? ""
+      #expect(!trace.contains("probe:"))
+      #expect(!trace.contains("phase:"))
+      #expect(!FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("u7-retained-authority-hardlink.plist").path
+      ))
     }
   }
 
@@ -2966,7 +3012,7 @@ def write_plist(value, path):
     with open(path, "wb") as handle:
         plistlib.dump(value, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
 
-def read_build_authority():
+def read_build_authority(reset_binding):
     generate = [value for value in sys.argv if value == "GENERATE_INFOPLIST_FILE=NO"]
     plist_arguments = [value for value in sys.argv if value.startswith("INFOPLIST_FILE=")]
     legacy = [value for value in sys.argv if value.startswith(
@@ -3025,12 +3071,13 @@ def read_build_authority():
         str(path).encode() + b"\0" + authority.encode()
     ).hexdigest()
     binding_path = log_path.with_suffix(".authority-plist-binding")
-    if binding_path.exists():
+    if reset_binding:
+        binding_path.write_text(binding)
+    elif binding_path.exists():
         if binding_path.read_text() != binding:
             sys.exit(44)
-        append_log("build-binding:shared-authority-plist")
     else:
-        binding_path.write_text(binding)
+        sys.exit(44)
     return authority
 
 def make_products(derived, platform, authority, mode):
@@ -3103,7 +3150,7 @@ if "build-for-testing" in sys.argv:
         sys.exit(43)
     derived = arg("-derivedDataPath")
     destination = sys.argv[sys.argv.index("-destination") + 1]
-    authority = read_build_authority()
+    authority = read_build_authority(destination == os.environ["U7_DEST_A"])
     fixture_mode = mode if mode in {
         "zero-xctestrun", "duplicate-xctestrun", "missing-target",
         "duplicate-target", "missing-anchor", "wrong-anchor",
@@ -3114,14 +3161,14 @@ if "build-for-testing" in sys.argv:
     if destination == os.environ["U7_DEST_A"]:
         matrix_path.write_text("mac\n")
         make_products(derived, "MacOSX", authority, fixture_mode)
-        append_log("build:mac:scheme=ConvergenceKit-Package:cwd=package")
+        append_log("build:mac:scheme=ConvergenceKit-Package:cwd=package:plist=private-current")
     elif destination == os.environ["U7_DEST_B"]:
         if not matrix_path.exists() or matrix_path.read_text() != "mac\n":
             sys.exit(11)
         with open(matrix_path, "a") as matrix:
             matrix.write("iOS\n")
         make_products(derived, "iPhoneOS", authority, fixture_mode)
-        append_log("build:iOS:scheme=ConvergenceKit-Package:cwd=package")
+        append_log("build:iOS:scheme=ConvergenceKit-Package:cwd=package:plist=private-current")
     else:
         sys.exit(12)
     sys.exit(0)
