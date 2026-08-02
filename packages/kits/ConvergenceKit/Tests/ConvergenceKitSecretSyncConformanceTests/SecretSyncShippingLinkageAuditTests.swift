@@ -62,43 +62,41 @@ struct SecretSyncShippingLinkageAuditTests {
     return root
   }
 
-  private func tool(_ path: String, arguments: [String]) throws -> String {
-    let process = Process()
-    let output = Pipe()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = arguments
-    process.standardOutput = output
-    process.standardError = output
-    try process.run()
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      throw ShippingLinkageAuditError.toolFailed(String(decoding: data, as: UTF8.self))
-    }
-    return String(decoding: data, as: UTF8.self)
-  }
-
   private func demangledSymbols(in executable: URL) throws -> String {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-shipping-audit-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let rawURL = directory.appendingPathComponent("symbols.raw")
+    let demangledURL = directory.appendingPathComponent("symbols.demangled")
+    FileManager.default.createFile(atPath: rawURL.path, contents: nil)
+    FileManager.default.createFile(atPath: demangledURL.path, contents: nil)
+
     let nm = Process()
-    let demangle = Process()
-    let symbols = Pipe()
-    let output = Pipe()
     nm.executableURL = URL(fileURLWithPath: "/usr/bin/nm")
     nm.arguments = ["-gj", executable.path]
-    nm.standardOutput = symbols
+    nm.standardOutput = try FileHandle(forWritingTo: rawURL)
+    nm.standardError = FileHandle.nullDevice
+    try nm.run()
+    nm.waitUntilExit()
+    guard nm.terminationStatus == 0 else {
+      throw ShippingLinkageAuditError.toolFailed("nm failed")
+    }
+
+    let demangle = Process()
     demangle.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
     demangle.arguments = ["swift-demangle"]
-    demangle.standardInput = symbols
-    demangle.standardOutput = output
+    demangle.standardInput = try FileHandle(forReadingFrom: rawURL)
+    demangle.standardOutput = try FileHandle(forWritingTo: demangledURL)
+    demangle.standardError = FileHandle.nullDevice
     try demangle.run()
-    try nm.run()
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    nm.waitUntilExit()
     demangle.waitUntilExit()
-    guard nm.terminationStatus == 0, demangle.terminationStatus == 0 else {
-      throw ShippingLinkageAuditError.toolFailed("nm/swift-demangle pipeline failed")
+    guard demangle.terminationStatus == 0 else {
+      throw ShippingLinkageAuditError.toolFailed("swift-demangle failed")
     }
-    return String(decoding: data, as: UTF8.self)
+    return try String(contentsOf: demangledURL, encoding: .utf8)
   }
 }
 

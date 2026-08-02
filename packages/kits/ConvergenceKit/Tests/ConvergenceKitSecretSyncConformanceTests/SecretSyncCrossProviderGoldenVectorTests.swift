@@ -223,6 +223,9 @@ struct U7PolicyFixture: Sendable {
     previous: U7PolicyFixture? = nil,
     scopeID: SecretScopeID = U7GoldenVectors.scopeID
   ) throws -> U7PolicyFixture {
+    // This fixture intentionally keeps the content-addressed graph assembly in
+    // one routine: splitting policy, envelopes, signatures, and commit across
+    // mutable builders would permit impossible mixed-epoch test states.
     let digester = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
     let signatures = try SecretSyncP256SignatureProvider(suite: U7GoldenVectors.suite())
     let epoch = (previous?.entry.commit.policyEpoch ?? 0) + 1
@@ -285,7 +288,7 @@ struct U7PolicyFixture: Sendable {
     }
     let graph = try encryptedGraph(
       policy: signedPolicy,
-      recipients: [(credentialA, agreementA), (credentialB, agreementB)],
+      recipients: [credentialA, credentialB],
       recovery: recovery,
       digester: digester
     )
@@ -297,6 +300,78 @@ struct U7PolicyFixture: Sendable {
       graph: graph,
       digester: digester,
       signer: signerA,
+      signatures: signatures
+    )
+  }
+
+  /// Builds a production-valid graph whose audience records are the physical
+  /// credentials gathered on A/B/C. A separate ephemeral orchestration
+  /// authority signs graph bytes because Secure Enclave custody deliberately
+  /// exposes possession and unwrap operations, not arbitrary signing.
+  static func makeLive(
+    scopeID: SecretScopeID,
+    physicalCredentials: [TrustedDeviceCredential]
+  ) throws -> U7PolicyFixture {
+    // The live variant is likewise atomic so every externally supplied
+    // credential is closed over by the exact policy digest it is tested with.
+    guard physicalCredentials.count == 3 else {
+      throw SecretSyncInterfaceError.invalidPolicyStoreEntry
+    }
+    let digester = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+    let signatures = try SecretSyncP256SignatureProvider(suite: U7GoldenVectors.suite())
+    let authoritySigning = P256.Signing.PrivateKey()
+    let authorityAgreement = P256.KeyAgreement.PrivateKey()
+    let authority = try credential(
+      signing: authoritySigning, agreement: authorityAgreement,
+      marker: 0x63, label: "live-authority", status: .active
+    )
+    let credentials = physicalCredentials + [authority]
+    let trusts = try credentials.map { credential in
+      let credentialDigest = try digester.digest(canonicalBytes: credential.canonicalBytes())
+      let state: DeviceTrustState = credential.status == .active ? .trusted : .revoked
+      return try addressed(digester) { digest in
+        try DeviceTrustRecord(
+          recordDigest: digest, credentialDigest: credentialDigest,
+          deviceID: credential.deviceID, credentialID: credential.credentialID,
+          trustState: state, effectivePolicyEpoch: 1
+        )
+      }
+    }.sorted { $0.recordDigest.bytes.lexicographicallyPrecedes($1.recordDigest.bytes) }
+    let rootRecordID = UUID()
+    let scope = try addressed(digester) { digest in
+      try SecretScopeSnapshot(
+        scopeID: scopeID, rootRecordID: rootRecordID,
+        memberRecordIDs: [rootRecordID],
+        snapshotDigest: digest
+      )
+    }
+    let recovery = P256.KeyAgreement.PrivateKey()
+    let policy = try SecretPolicyEpoch(
+      epoch: 1, predecessorPolicyDigest: nil, scopeSnapshot: scope,
+      generationID: SecretGenerationID(UUID()),
+      authorizedRecipientCredentialIDs: physicalCredentials
+        .filter { $0.status == .active }.map(\.credentialID),
+      trustedDeviceRecordDigests: trusts.map(\.recordDigest),
+      recoveryRecipient: recoveryDescriptor(recovery),
+      signerCredentialID: authority.credentialID
+    )
+    let policySignature = try signatures.sign(
+      canonicalBytes: policy.canonicalBytes(), using: authoritySigning
+    )
+    let signedPolicy = try addressed(digester) { digest in
+      try SignedSecretPolicyEpoch(
+        recordDigest: digest, policy: policy, signature: policySignature
+      )
+    }
+    let graph = try encryptedGraph(
+      policy: signedPolicy,
+      recipients: physicalCredentials.filter { $0.status == .active },
+      recovery: recovery, digester: digester
+    )
+    return try finish(
+      previous: nil, credentials: credentials, trusts: trusts,
+      signedPolicy: signedPolicy, graph: graph, digester: digester,
+      signer: authoritySigning, signerCredentialID: authority.credentialID,
       signatures: signatures
     )
   }
@@ -328,10 +403,12 @@ struct U7PolicyFixture: Sendable {
 
   private static func encryptedGraph(
     policy: SignedSecretPolicyEpoch,
-    recipients: [(TrustedDeviceCredential, P256.KeyAgreement.PrivateKey)],
+    recipients: [TrustedDeviceCredential],
     recovery: P256.KeyAgreement.PrivateKey,
     digester: any SecretSyncDigesting
   ) throws -> EncryptedGraph {
+    // Payload plus all routine/recovery envelopes share one generated key and
+    // bound context; keeping them together makes accidental key drift visible.
     let crypto = try SecretSyncV1CryptoProvider(suite: U7GoldenVectors.suite())
     let key = SecretSyncGenerationKey.generate()
     let bound = try SecretSyncV1BoundContext(
@@ -361,7 +438,7 @@ struct U7PolicyFixture: Sendable {
         formatVersion: bound.formatVersion, ciphertextBytes: payloadBytes
       )
     }
-    let recipientEnvelopes = try recipients.map { credential, _ in
+    let recipientEnvelopes = try recipients.map { credential in
       let wrapped = try crypto.hpkeEnvelopeProvider.sealGenerationKey(
         key,
         for: credential.keyAgreementPublicKey,
@@ -402,6 +479,7 @@ struct U7PolicyFixture: Sendable {
     graph: EncryptedGraph,
     digester: any SecretSyncDigesting,
     signer: P256.Signing.PrivateKey,
+    signerCredentialID: DeviceCredentialID? = nil,
     signatures: SecretSyncP256SignatureProvider
   ) throws -> U7PolicyFixture {
     let records = try SecretControlRecords(
@@ -412,7 +490,8 @@ struct U7PolicyFixture: Sendable {
     let provisionalCommit = try commit(
       digest: U7GoldenVectors.digest(0), signature: Data([0]),
       previous: previous, credentials: credentials,
-      signedPolicy: signedPolicy, graph: graph
+      signedPolicy: signedPolicy, graph: graph,
+      signerCredentialID: signerCredentialID
     )
     let commitSignature = try signatures.sign(
       canonicalBytes: provisionalCommit.signingBytes(), using: signer
@@ -421,7 +500,8 @@ struct U7PolicyFixture: Sendable {
       try commit(
         digest: digest, signature: commitSignature,
         previous: previous, credentials: credentials,
-        signedPolicy: signedPolicy, graph: graph
+        signedPolicy: signedPolicy, graph: graph,
+        signerCredentialID: signerCredentialID
       )
     }
     let freshness = try SecretBootstrapFreshnessCommitment(
@@ -449,7 +529,8 @@ struct U7PolicyFixture: Sendable {
     previous: U7PolicyFixture?,
     credentials: [TrustedDeviceCredential],
     signedPolicy: SignedSecretPolicyEpoch,
-    graph: EncryptedGraph
+    graph: EncryptedGraph,
+    signerCredentialID: DeviceCredentialID? = nil
   ) throws -> SecretTransitionCommit {
     try SecretTransitionCommit(
       recordDigest: digest,
@@ -464,7 +545,7 @@ struct U7PolicyFixture: Sendable {
       recoveryEnvelopeDigest: graph.recoveryEnvelope.recordDigest,
       purgeRequirementDigests: [], purgeReceiptDigests: [],
       recoveryAuthorizationDigest: nil,
-      signerCredentialID: try #require(credentials.first).credentialID,
+      signerCredentialID: try signerCredentialID ?? #require(credentials.first).credentialID,
       signature: signature
     )
   }

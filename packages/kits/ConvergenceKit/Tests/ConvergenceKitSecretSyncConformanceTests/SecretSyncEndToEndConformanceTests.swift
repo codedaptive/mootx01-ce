@@ -177,6 +177,25 @@ struct SecretSyncEndToEndConformanceTests {
     }
   }
 
+  @Test("live graph builder preserves the supplied A B C credential identities")
+  func liveGraphUsesSuppliedCredentials() throws {
+    let supplied = try U7PolicyFixture.make().entry.credentials
+    let graph = try U7PolicyFixture.makeLive(
+      scopeID: SecretScopeID(UUID()), physicalCredentials: supplied
+    ).entry
+    let suppliedIDs = Set(supplied.map(\.credentialID))
+    #expect(suppliedIDs.isSubset(of: Set(graph.credentials.map(\.credentialID))))
+    #expect(
+      Set(graph.records.recipientEnvelopes.map(\.recipientCredentialID))
+        == Set(supplied.filter { $0.status == .active }.map(\.credentialID))
+    )
+    let revoked = try #require(supplied.first { $0.status == .revoked })
+    #expect(
+      graph.trustRecords.first { $0.credentialID == revoked.credentialID }?.trustState
+        == .revoked
+    )
+  }
+
   private func descriptor(
     _ key: P256.KeyAgreement.PrivateKey,
     label: String
