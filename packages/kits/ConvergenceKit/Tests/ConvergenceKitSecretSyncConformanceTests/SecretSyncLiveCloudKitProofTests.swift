@@ -1035,8 +1035,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       environment: [
         "U7_RUN_DIR": root.appendingPathComponent("private").path,
         "U7_HOST_TOOL": fake.path, "U7_XCODEBUILD": fake.path,
-        "U7_XCRESULTTOOL": fake.path, "U7_PROJECT": "authorized.xcodeproj",
-        "U7_SCHEME": "Authorized", "U7_DEST_A": "A-RAW-CANARY",
+        "U7_XCRESULTTOOL": fake.path, "U7_PACKAGE_DIR": packageRoot.path,
+        "U7_DEST_A": "A-RAW-CANARY",
         "U7_DEST_B": "B-RAW-CANARY", "U7_DEST_C": "C-RAW-CANARY",
       ]
     )
@@ -1049,6 +1049,25 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     )
     #expect(!retained.contains(where: { $0.hasPrefix("transient.") }))
     #expect(!retained.contains("command.log"))
+  }
+
+  @Test("runner accepts only explicit Swift-package xctestrun mode")
+  func runnerSourceRejectsLegacyContainerMode() throws {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let runner = packageRoot.appendingPathComponent(
+      "U7LiveProofHost/run-u7-live-proof.sh"
+    )
+    let source = try String(contentsOf: runner, encoding: .utf8)
+    #expect(!source.contains("U7_PROJECT"))
+    #expect(!source.contains("U7_WORKSPACE"))
+    #expect(!source.contains("U7_SCHEME"))
+    #expect(source.contains("U7_PACKAGE_DIR"))
+    #expect(source.contains("ConvergenceKit-Package"))
+    #expect(source.contains("-xctestrun"))
+    #expect(!source.contains("-project"))
+    #expect(!source.contains("-workspace"))
   }
 
   @Test("host inspect authenticates state manifest and retained authority bindings")
@@ -2811,12 +2830,15 @@ private func u7RunnerEnvironment(
   root: URL, host: URL, fake: URL,
   additions: [String: String] = [:]
 ) -> [String: String] {
+  let packageRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent()
+    .deletingLastPathComponent()
   let base = [
     "U7_RUN_DIR": root.appendingPathComponent("private").path,
     "U7_RUN_NAMESPACE": "u7-00112233-4455-6677-8899-aabbccddeeff",
     "U7_HOST_TOOL": host.path, "U7_XCODEBUILD": fake.path,
-    "U7_XCRESULTTOOL": fake.path, "U7_PROJECT": "authorized.xcodeproj",
-    "U7_SCHEME": "Authorized", "U7_DEST_A": "A-RAW-CANARY",
+    "U7_XCRESULTTOOL": fake.path, "U7_PACKAGE_DIR": packageRoot.path,
+    "U7_DEST_A": "A-RAW-CANARY",
     "U7_DEST_B": "B-RAW-CANARY", "U7_DEST_C": "C-RAW-CANARY",
     "U7_FAKE_LOG": root.appendingPathComponent("fake.log").path,
     "U7_RUNNER_SELF_TEST_MODE": "1",
