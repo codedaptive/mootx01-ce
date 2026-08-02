@@ -1060,9 +1060,6 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       "U7LiveProofHost/run-u7-live-proof.sh"
     )
     let source = try String(contentsOf: runner, encoding: .utf8)
-    #expect(!source.contains("U7_PROJECT"))
-    #expect(!source.contains("U7_WORKSPACE"))
-    #expect(!source.contains("U7_SCHEME"))
     #expect(source.contains("U7_PACKAGE_DIR"))
     #expect(source.contains("ConvergenceKit-Package"))
     #expect(source.contains("-xctestrun"))
@@ -1163,8 +1160,11 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       "U7LiveProofHost/run-u7-live-proof.sh"
     )
     let result = try u7RunProcess(
-      executable: runner.path, arguments: [],
-      environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
+      executable: runner.path, arguments: ["--self-test"],
+      environment: u7RunnerEnvironment(
+        root: root, host: host, fake: fake,
+        additions: ["MOOT_SECRET_SYNC_INHERITED_CANARY": "must-not-reach-xctest"]
+      )
     )
     #expect(result.status == 0)
     #expect(result.stdout.components(separatedBy: "U7_PHASE_OK:").count - 1 == 19)
@@ -1180,7 +1180,10 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let commands = try String(
       contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
     ).split(separator: "\n")
-    #expect(Array(commands.prefix(2)) == ["build:mac", "build:iOS"])
+    #expect(Array(commands.prefix(2)) == [
+      "build:mac:scheme=ConvergenceKit-Package:cwd=package",
+      "build:iOS:scheme=ConvergenceKit-Package:cwd=package",
+    ])
     #expect(commands.dropFirst(2).allSatisfy {
       $0.hasPrefix("probe:") || $0.hasPrefix("phase:")
     })
@@ -1189,13 +1192,29 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let phases = commands.filter { $0.hasPrefix("phase:") }
     #expect(phases.count == 19)
     #expect(Set(phases).count == 19)
+    let copies = try String(
+      contentsOf: root.appendingPathComponent("fake.copies"), encoding: .utf8
+    ).split(separator: "\n")
+    #expect(copies.count == 38)
+    #expect(Set(copies).count == 38)
+    #expect(copies.allSatisfy {
+      $0.contains("/private/derived-data/")
+        && $0.hasSuffix(".xctestrun")
+    })
+    #expect(commands.filter { $0.hasPrefix("probe:A:") }.allSatisfy {
+      $0.contains("platform=MacOSX")
+    })
+    #expect(commands.filter {
+      $0.hasPrefix("probe:B:") || $0.hasPrefix("probe:C:")
+    }.allSatisfy { $0.contains("platform=iPhoneOS") })
     let recoveryArtifactDigest = Data(SHA256.hash(data: Data("recoveryA".utf8)))
       .base64EncodedString()
-    #expect(phases.contains(
-      "phase:rotation:A:prerequisites=\(recoveryArtifactDigest)"
-    ))
+    #expect(phases.contains {
+      $0.hasPrefix("phase:rotation:A:platform=MacOSX:private-xctestrun:")
+        && $0.hasSuffix("prerequisites=\(recoveryArtifactDigest)")
+    })
     let terminalResume = try u7RunProcess(
-      executable: runner.path, arguments: [],
+      executable: runner.path, arguments: ["--self-test"],
       environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
     )
     #expect(terminalResume.status == 0)
@@ -1235,6 +1254,143 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       environment: environment
     )
     #expect(wrongPlatform.status != 0)
+  }
+
+  @Test("runner rejects legacy container inputs before invoking fake Xcode")
+  func runnerRejectsLegacyContainerInputs() throws {
+    for key in ["U7_PROJECT", "U7_WORKSPACE", "U7_SCHEME"] {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-legacy-\(key)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: [key: "forbidden"]
+        )
+      )
+      #expect(result.status != 0)
+      #expect(result.stderr == "U7_RUNNER_CONTAINER_MODE_FORBIDDEN\n")
+      #expect(!FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("fake.log").path
+      ))
+    }
+  }
+
+  @Test("runner rejects ambiguous target platform and bundle-anchor products")
+  func runnerRejectsInvalidXCTestrunProducts() throws {
+    let modes = [
+      "zero-xctestrun", "duplicate-xctestrun", "missing-target",
+      "duplicate-target", "missing-anchor", "wrong-anchor",
+      "wrong-platform", "simulator-platform", "ios-wrong-platform",
+      "ios-missing-anchor", "ios-wrong-anchor",
+    ]
+    for mode in modes {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-product-\(mode)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_FAKE_MODE": mode]
+        )
+      )
+      #expect(result.status != 0)
+      #expect(result.stderr == "U7_RUNNER_PRODUCT_INVALID\n")
+      let trace = (try? String(
+        contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+      )) ?? ""
+      #expect(!trace.contains("probe:"))
+      #expect(!trace.contains("phase:"))
+    }
+  }
+
+  @Test("runner rejects private-copy or canonical-source replacement before launch")
+  func runnerRejectsXCTestrunReplacement() throws {
+    for attack in ["replace", "symlink", "source-replace"] {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-attack-\(attack)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_SELF_TEST_XCTESTRUN_ATTACK": attack]
+        )
+      )
+      #expect(result.status != 0)
+      #expect(result.stderr == "U7_RUNNER_XCTESTRUN_INVALID\n")
+      let trace = (try? String(
+        contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+      )) ?? ""
+      #expect(!trace.contains("probe:"))
+      #expect(!trace.contains("phase:"))
+    }
+  }
+
+  @Test("fake launch boundary rejects non-exact phase environment dictionaries")
+  func runnerRejectsInvalidXCTestrunEnvironment() throws {
+    let modes = [
+      "missing-environment", "extra-environment", "authority-environment",
+      "cleanup-missing-authorization", "cleanup-missing-inventory",
+      "cleanup-missing-receipt", "ordinary-cleanup-key",
+    ]
+    for mode in modes {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-environment-\(mode)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_FAKE_MODE": mode]
+        )
+      )
+      #expect(result.status != 0)
+      #expect(
+        result.stderr == "U7_RUNNER_PROBE_FAILED\n"
+          || result.stderr == "U7_RUNNER_PHASE_FAILED\n"
+      )
+      #expect(!result.stdout.contains("RAW-CANARY"))
+      #expect(!result.stderr.contains("RAW-CANARY"))
+    }
   }
 
   @Test("runner resumes pending grant and accepted receipt without replay")
@@ -2671,7 +2827,22 @@ private func u7WriteFakeRunnerTool(root: URL) throws -> URL {
   let tool = root.appendingPathComponent("fake-runner-tool.py")
   let source = #"""
 #!/usr/bin/python3
-import base64, hashlib, json, os, pathlib, shutil, sys
+import base64, hashlib, json, os, pathlib, plistlib, shutil, stat, sys
+
+TARGET = "ConvergenceKitSecretSyncConformanceTests"
+PREFIX = "MOOT_SECRET_SYNC_"
+PROBE_KEYS = {
+    PREFIX + "LIVE_PROOF", PREFIX + "RUN_NAMESPACE",
+    PREFIX + "DEVICE_ROLE", PREFIX + "SIGNED_RUN_MANIFEST",
+}
+ORDINARY_KEYS = PROBE_KEYS | {
+    PREFIX + "PHASE", PREFIX + "OPERATOR_ATTESTATION",
+    PREFIX + "HOST_LAUNCH_GRANT",
+}
+CLEANUP_KEYS = ORDINARY_KEYS | {
+    PREFIX + "CLEANUP_AUTHORIZATION", PREFIX + "STAGE_INVENTORY",
+    PREFIX + "STAGE_RECEIPT",
+}
 
 def framed(domain, fields):
     value = domain.encode()
@@ -2685,6 +2856,61 @@ def canonical(value):
 def arg(name):
     return pathlib.Path(sys.argv[sys.argv.index(name) + 1])
 
+def append_log(value):
+    with open(log_path, "a") as log:
+        log.write(value + "\n")
+
+def write_plist(value, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        plistlib.dump(value, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
+
+def make_products(derived, platform, authority, mode):
+    products = derived / "Build" / "Products"
+    shutil.rmtree(products, ignore_errors=True)
+    products.mkdir(parents=True)
+    if mode == "zero-xctestrun":
+        return
+    supported = platform
+    if mode == "wrong-platform":
+        supported = "iPhoneOS" if platform == "MacOSX" else "MacOSX"
+    if mode == "simulator-platform" and platform == "iPhoneOS":
+        supported = "iPhoneSimulator"
+    configuration = "Debug" if platform == "MacOSX" else "Debug-iphoneos"
+    bundle = products / configuration / (TARGET + ".xctest")
+    info = {
+        "CFBundleSupportedPlatforms": [supported],
+        "DTPlatformName": {
+            "MacOSX": "macosx", "iPhoneOS": "iphoneos",
+            "iPhoneSimulator": "iphonesimulator",
+        }[supported],
+    }
+    if mode != "missing-anchor":
+        info["MOOTSecretSyncHostAuthorityPublicKey"] = (
+            "WRONG-ANCHOR" if mode == "wrong-anchor" else authority
+        )
+    info_path = bundle / "Contents" / "Info.plist" if platform == "MacOSX" else bundle / "Info.plist"
+    write_plist(info, info_path)
+    target = {
+        "BlueprintName": "WrongTarget" if mode == "missing-target" else TARGET,
+        "TestBundlePath": "__TESTROOT__/" + str(bundle.relative_to(products)),
+        "EnvironmentVariables": {
+            "XCODE_GENERATED": "preserved",
+            PREFIX + "STALE_CANONICAL": "removed",
+        },
+    }
+    targets = [target]
+    if mode == "duplicate-target":
+        targets.append(dict(target))
+    document = {
+        "__xctestrun_metadata__": {"FormatVersion": 2},
+        "TestConfigurations": [{"Name": "Test Scheme Action", "TestTargets": targets}],
+    }
+    source = products / ("ConvergenceKit-Package-" + platform + ".xctestrun")
+    write_plist(document, source)
+    if mode == "duplicate-xctestrun":
+        write_plist(document, products / ("Duplicate-" + platform + ".xctestrun"))
+
 if sys.argv[1:3] == ["export", "attachments"]:
     source = arg("--path")
     output = arg("--output-path")
@@ -2695,42 +2921,128 @@ if sys.argv[1:3] == ["export", "attachments"]:
 
 log_path = pathlib.Path(os.environ["U7_FAKE_LOG"])
 matrix_path = log_path.with_suffix(".matrix")
+mode = os.environ.get("U7_FAKE_MODE", "success")
+
+if any(key.startswith(PREFIX) for key in os.environ):
+    sys.exit(40)
+if any(flag in sys.argv for flag in ("-project", "-workspace")):
+    sys.exit(41)
 
 if "build-for-testing" in sys.argv:
+    if pathlib.Path.cwd().resolve() != pathlib.Path(os.environ["U7_PACKAGE_DIR"]).resolve():
+        sys.exit(42)
+    if "-scheme" not in sys.argv or sys.argv[sys.argv.index("-scheme") + 1] != "ConvergenceKit-Package":
+        sys.exit(43)
+    derived = arg("-derivedDataPath")
     destination = sys.argv[sys.argv.index("-destination") + 1]
+    authority_argument = next(
+        (value for value in sys.argv if value.startswith(
+            "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="
+        )), None
+    )
+    if authority_argument is None:
+        sys.exit(44)
+    authority = authority_argument.split("=", 1)[1]
+    fixture_mode = mode if mode in {
+        "zero-xctestrun", "duplicate-xctestrun", "missing-target",
+        "duplicate-target", "missing-anchor", "wrong-anchor",
+        "wrong-platform", "simulator-platform",
+    } else "success"
+    if mode.startswith("ios-"):
+        fixture_mode = mode[4:] if destination == os.environ["U7_DEST_B"] else "success"
     if destination == os.environ["U7_DEST_A"]:
         matrix_path.write_text("mac\n")
-        with open(log_path, "a") as log:
-            log.write("build:mac\n")
+        make_products(derived, "MacOSX", authority, fixture_mode)
+        append_log("build:mac:scheme=ConvergenceKit-Package:cwd=package")
     elif destination == os.environ["U7_DEST_B"]:
         if not matrix_path.exists() or matrix_path.read_text() != "mac\n":
             sys.exit(11)
         with open(matrix_path, "a") as matrix:
             matrix.write("iOS\n")
-        with open(log_path, "a") as log:
-            log.write("build:iOS\n")
+        make_products(derived, "iPhoneOS", authority, fixture_mode)
+        append_log("build:iOS:scheme=ConvergenceKit-Package:cwd=package")
     else:
         sys.exit(12)
     sys.exit(0)
 
 if not matrix_path.exists() or matrix_path.read_text() != "mac\niOS\n":
     sys.exit(13)
+if "test-without-building" not in sys.argv or "-xctestrun" not in sys.argv:
+    sys.exit(45)
+if "-scheme" in sys.argv:
+    sys.exit(46)
+
+xctestrun = arg("-xctestrun")
+if xctestrun.name.startswith("ConvergenceKit-Package-"):
+    sys.exit(47)
+file_mode = stat.S_IMODE(os.lstat(xctestrun).st_mode)
+if file_mode != 0o600 or xctestrun.is_symlink():
+    sys.exit(48)
+with open(xctestrun, "rb") as handle:
+    document = plistlib.load(handle)
+targets = [
+    target
+    for configuration in document.get("TestConfigurations", [])
+    for target in configuration.get("TestTargets", [])
+    if target.get("BlueprintName") == TARGET
+]
+if len(targets) != 1:
+    sys.exit(49)
+environment = targets[0].get("EnvironmentVariables", {})
+if environment.get("XCODE_GENERATED") != "preserved":
+    sys.exit(50)
+moot_environment = {key: value for key, value in environment.items() if key.startswith(PREFIX)}
+test_filter = next(value for value in sys.argv if value.startswith("-only-testing:"))
+expected_keys = PROBE_KEYS if test_filter.endswith("/ledgerProbe") else (
+    CLEANUP_KEYS if moot_environment.get(PREFIX + "PHASE") == "cleanup" else ORDINARY_KEYS
+)
+if mode == "missing-environment":
+    moot_environment.pop(PREFIX + "LIVE_PROOF", None)
+if mode == "extra-environment":
+    moot_environment[PREFIX + "UNKNOWN"] = "forbidden"
+if mode == "authority-environment":
+    moot_environment[PREFIX + "HOST_AUTHORITY_PUBLIC_KEY"] = "forbidden"
+if mode == "cleanup-missing-authorization" and moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    moot_environment.pop(PREFIX + "CLEANUP_AUTHORIZATION", None)
+if mode == "cleanup-missing-inventory" and moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    moot_environment.pop(PREFIX + "STAGE_INVENTORY", None)
+if mode == "cleanup-missing-receipt" and moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    moot_environment.pop(PREFIX + "STAGE_RECEIPT", None)
+if mode == "ordinary-cleanup-key" and moot_environment.get(PREFIX + "PHASE") != "cleanup":
+    moot_environment[PREFIX + "STAGE_RECEIPT"] = "forbidden"
+if set(moot_environment) != expected_keys:
+    sys.exit(51)
+
+copies_path = log_path.with_suffix(".copies")
+used = set(copies_path.read_text().splitlines()) if copies_path.exists() else set()
+resolved_copy = str(xctestrun.resolve())
+if resolved_copy in used:
+    sys.exit(52)
+with open(copies_path, "a") as copies:
+    copies.write(resolved_copy + "\n")
+
+bundle = pathlib.Path(str(targets[0]["TestBundlePath"]).replace(
+    "__TESTROOT__", str(xctestrun.parent), 1
+)).resolve()
+info_path = bundle / "Contents" / "Info.plist" if (bundle / "Contents").exists() else bundle / "Info.plist"
+with open(info_path, "rb") as handle:
+    platform = plistlib.load(handle)["CFBundleSupportedPlatforms"][0]
+role = moot_environment[PREFIX + "DEVICE_ROLE"]
+if (role == "A") != (platform == "MacOSX") or (role != "A" and platform != "iPhoneOS"):
+    sys.exit(53)
 
 result = arg("-resultBundlePath")
 attachments = result / "Attachments"
 attachments.mkdir(parents=True, exist_ok=True)
-mode = os.environ.get("U7_FAKE_MODE", "success")
-test_filter = next(value for value in sys.argv if value.startswith("-only-testing:"))
 if mode == "nonzero-probe" and test_filter.endswith("/ledgerProbe"):
     sys.exit(9)
 if mode == "nonzero-phase" and test_filter.endswith("/externalPhase"):
     sys.exit(9)
 
-namespace = os.environ["MOOT_SECRET_SYNC_RUN_NAMESPACE"]
-role = os.environ["MOOT_SECRET_SYNC_DEVICE_ROLE"]
+namespace = moot_environment[PREFIX + "RUN_NAMESPACE"]
 if test_filter.endswith("/ledgerProbe"):
     manifest = json.loads(base64.b64decode(
-        os.environ["MOOT_SECRET_SYNC_SIGNED_RUN_MANIFEST"]
+        moot_environment[PREFIX + "SIGNED_RUN_MANIFEST"]
     ))["manifest"]
     probe = {
         "version": 1,
@@ -2741,12 +3053,11 @@ if test_filter.endswith("/ledgerProbe"):
         "contentDigest": base64.b64encode(bytes([ord(role)]) * 32).decode(),
     }
     (attachments / "u7-ledger-probe-v1.json").write_bytes(canonical(probe))
-    with open(log_path, "a") as log:
-        log.write("probe:" + role + "\n")
+    append_log("probe:" + role + ":platform=" + platform + ":private-xctestrun")
     sys.exit(0)
 
-phase = os.environ["MOOT_SECRET_SYNC_PHASE"]
-grant = json.loads(base64.b64decode(os.environ["MOOT_SECRET_SYNC_HOST_LAUNCH_GRANT"]))
+phase = moot_environment[PREFIX + "PHASE"]
+grant = json.loads(base64.b64decode(moot_environment[PREFIX + "HOST_LAUNCH_GRANT"]))
 manifest = grant["manifest"]
 dependency_labels = {
     ("backgroundDenied", "A"): ["credentialA"],
@@ -2768,12 +3079,10 @@ if manifest["prerequisiteArtifactDigests"] != expected_prerequisites:
 authority = base64.b64decode(
     (pathlib.Path(os.environ["U7_RUN_DIR"]) / "authority-public.b64").read_text()
 )
-grant_body = canonical(manifest)
 grant_digest = framed(
     "mootx01.u7.host-launch-grant.v2",
-    [authority, grant_body, base64.b64decode(grant["signature"])],
+    [authority, canonical(manifest), base64.b64decode(grant["signature"])],
 )
-inventory = None
 inventory_digest = None
 if phase == "stage":
     inventory = {
@@ -2781,29 +3090,22 @@ if phase == "stage":
         "runManifestDigest": manifest["runManifestDigest"],
         "launchGrantDigest": base64.b64encode(grant_digest).decode(),
         "destinationBindingDigest": manifest["destinationBindingDigest"],
-        "records": [{
-            "recordName": "1" * 64,
-            "zoneName": "moot-secret-payload-v1",
-        }],
+        "records": [{"recordName": "1" * 64, "zoneName": "moot-secret-payload-v1"}],
     }
     inventory_bytes = canonical(inventory)
     inventory_digest = framed("mootx01.u7.stage-inventory.v1", [inventory_bytes])
     (attachments / "u7-stage-inventory-v1.json").write_bytes(inventory_bytes)
-
 if mode in ("skip-phase", "missing-receipt"):
     sys.exit(0)
 receipt = {
     "version": 1, "namespace": namespace,
     "role": "B" if mode == "wrong-receipt" and role != "B" else role,
-    "phase": phase,
-    "runManifestDigest": manifest["runManifestDigest"],
+    "phase": phase, "runManifestDigest": manifest["runManifestDigest"],
     "launchGrantDigest": base64.b64encode(
         bytes(32) if mode == "stale-receipt" else grant_digest
     ).decode(),
     "destinationBindingDigest": manifest["destinationBindingDigest"],
-    "artifactDigest": base64.b64encode(
-        hashlib.sha256((phase + role).encode()).digest()
-    ).decode(),
+    "artifactDigest": base64.b64encode(hashlib.sha256((phase + role).encode()).digest()).decode(),
     "inventoryDigest": base64.b64encode(
         bytes(32) if mode == "mismatch-receipt" else inventory_digest
     ).decode() if inventory_digest is not None else None,
@@ -2812,11 +3114,11 @@ receipt = {
     ).decode() if phase == "credential" else None,
 }
 (attachments / "u7-phase-receipt-v1.json").write_bytes(canonical(receipt))
-with open(log_path, "a") as log:
-    log.write(
-        "phase:" + phase + ":" + role + ":prerequisites="
-        + ",".join(manifest["prerequisiteArtifactDigests"]) + "\n"
-    )
+append_log(
+    "phase:" + phase + ":" + role + ":platform=" + platform
+    + ":private-xctestrun:prerequisites="
+    + ",".join(manifest["prerequisiteArtifactDigests"])
+)
 sys.exit(0)
 """#
   try Data(source.utf8).write(to: tool)
