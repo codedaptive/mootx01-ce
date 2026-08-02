@@ -549,7 +549,11 @@ public actor DrawerStore {
         "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
         "wikidataQidsSecondary",
-        "distilled_pipeline_version", "distilled_token_count", "distilled_at"
+        "distilled_pipeline_version", "distilled_token_count", "distilled_at",
+        // Subject trio (PR-01): the subject IS structured-tier data — it
+        // exists precisely so candidate rows can be judged without
+        // hydrating content, so the structured projection carries it.
+        "subject", "subject_pipeline_version", "subject_at"
     ]
 
     /// Batch by-id load at a chosen hydration level — the dense-first candidate
@@ -3583,7 +3587,14 @@ public actor DrawerStore {
             "distilled": d.distilled.map { TypedValue.text($0) } ?? .null,
             "distilled_pipeline_version": d.distilledPipelineVersion.map { TypedValue.text($0) } ?? .null,
             "distilled_token_count": d.distilledTokenCount.map { TypedValue.int($0) } ?? .null,
-            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null
+            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null,
+            // Subject trio (PR-01): same capture-path contract as the
+            // distilled quad — a fresh capture MAY carry a subject (the
+            // filing AI provides it at file time); backfill and the model
+            // rider populate the rest via setSubjectRepresentation.
+            "subject": d.subject.map { TypedValue.text($0) } ?? .null,
+            "subject_pipeline_version": d.subjectPipelineVersion.map { TypedValue.text($0) } ?? .null,
+            "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null
         ]
     }
 
@@ -3799,7 +3810,12 @@ public actor DrawerStore {
             distilled: optString(row["distilled"]),
             distilledPipelineVersion: optString(row["distilled_pipeline_version"]),
             distilledTokenCount: optInt64(row["distilled_token_count"]),
-            distilledAt: optDate(row["distilled_at"])
+            distilledAt: optDate(row["distilled_at"]),
+            // Subject trio (PR-01). NULL on any row not yet subjected;
+            // decodes to nil — the backfill-eligibility signal.
+            subject: optString(row["subject"]),
+            subjectPipelineVersion: optString(row["subject_pipeline_version"]),
+            subjectAt: optDate(row["subject_at"])
         )
     }
 
@@ -4776,16 +4792,20 @@ public actor DrawerStore {
 
     // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
 
-    /// The four representation columns, all NULL — merged into every UPDATE
-    /// whose values touch `content`, so a representation can never outlive
+    /// Every content-derived column, all NULL — merged into every UPDATE
+    /// whose values touch `content`, so derived text can never outlive
     /// the content it renders (the §7.3 NULL-on-edit regeneration trigger
-    /// and the erasure scrub: distilled text is content-derived, so zeroing
-    /// content must scrub it in the same statement).
+    /// and the erasure scrub: distilled text and the subject line are both
+    /// content-derived, so zeroing content must scrub them in the same
+    /// statement). Covers the distilled quad and the subject trio (PR-01).
     private static let clearedRepresentationValues: [String: TypedValue] = [
         "distilled": .null,
         "distilled_pipeline_version": .null,
         "distilled_token_count": .null,
         "distilled_at": .null,
+        "subject": .null,
+        "subject_pipeline_version": .null,
+        "subject_at": .null,
     ]
 
     /// Merge the representation-clearing NULLs into a content-writing
@@ -4858,6 +4878,93 @@ public actor DrawerStore {
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
         }
+    }
+
+    /// Write the subject line of one drawer — all three columns in ONE
+    /// atomic UPDATE (PR-01; same invariant family as the distilled quad:
+    /// NULL together or populated together).
+    ///
+    /// A subject is a deterministic-or-provenance-labeled function of
+    /// (content, producer contract) — a view, not a belief-state change —
+    /// so like `setDistilledRepresentation` this is a direct column
+    /// write: no audit event, no supersession cascade, no lifecycle or
+    /// lineage field touched, and no content digest/revision bump (the
+    /// subject is returned, never indexed, so no index job is emitted).
+    ///
+    /// Enforces the subject LENGTH CONTRACT at the storage boundary: the
+    /// AI-facing register caps the sentence at 120 characters so contact-
+    /// sheet rows keep near-uniform context cost. Enforced here — the
+    /// last common gate under every producer (filing AI, backfill AI,
+    /// model rider) — so no producer can quietly inflate the row budget.
+    ///
+    /// Mirrors Rust `set_subject_representation` (twin parity).
+    ///
+    /// - Parameters:
+    ///   - drawerId: The drawer row id (`Drawer.id`).
+    ///   - subject: The one-sentence AI-facing subject (≤ 120 characters).
+    ///   - pipelineVersion: Producer contract/provenance tier ("ai-v1",
+    ///     "minillm-v1").
+    ///   - at: Generation instant (deterministic clock — passed in, never
+    ///     read here).
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    public func setSubjectRepresentation(
+        drawerId: String,
+        subject: String,
+        pipelineVersion: String,
+        at generatedAt: Date
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(subject, label: "subject")
+        try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
+        guard subject.count <= Self.subjectLengthContract else {
+            throw LocusKitError.invalidContent(
+                "subject exceeds the \(Self.subjectLengthContract)-character length contract "
+                + "(\(subject.count) characters); the AI-facing register requires one capped sentence")
+        }
+        return try await storage.rowStore.update(
+            table: "drawers",
+            values: [
+                "subject": .text(subject),
+                "subject_pipeline_version": .text(pipelineVersion),
+                "subject_at": .timestamp(generatedAt),
+            ],
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+    }
+
+    /// The subject length contract (characters). One capped sentence in
+    /// the AI-facing register — the bound that keeps every contact-sheet
+    /// row's context cost near-uniform. Shared by both legs (Rust
+    /// `SUBJECT_LENGTH_CONTRACT`).
+    public static let subjectLengthContract = 120
+
+    /// Count of active drawers still awaiting a subject line — the
+    /// backfill-eligibility predicate as an aggregate (PR-01): not
+    /// tombstoned, non-empty content, and subject absent OR produced
+    /// under a different pipeline contract. Feeds the estate-status
+    /// subject-debt counter and the (future) subject drain lane; measured
+    /// off the rows themselves. Projected to `id` only, so no text column
+    /// is materialized. Uses `isNull(subject)` directly — the subject
+    /// trio carries no presence bit in v1 (the operational feature-flag
+    /// region is full; see PR01_SUBJECT_QUAD_BLAST_RADIUS.md), and this
+    /// count runs at status cadence, not in recall.
+    ///
+    /// Mirrors Rust `count_missing_subject`.
+    public func countMissingSubject(pipelineVersion: String) async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .neq(Column(table: "drawers", name: "content"), .text("")),
+                .or([
+                    .isNull(Column(table: "drawers", name: "subject")),
+                    .neq(Column(table: "drawers", name: "subject_pipeline_version"),
+                         .text(pipelineVersion)),
+                ]),
+            ]),
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        return rows.count
     }
 
     /// Count of active drawers still awaiting distillation — the §7.1

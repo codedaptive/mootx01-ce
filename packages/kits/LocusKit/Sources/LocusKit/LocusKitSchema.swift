@@ -83,7 +83,13 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v11 adds `operationalAND INT64 NOT NULL
+    /// Current schema version. v12 adds the subject trio to `drawers`
+    /// (`subject`, `subject_pipeline_version`, `subject_at`, all
+    /// nullable) — the one-sentence AI-facing summary that progressive
+    /// recall returns in the dense row. Nullable columns with no
+    /// backfill: NULL `subject` IS the backfill-eligibility predicate,
+    /// so existing rows are simply "subject debt" until a producer
+    /// fills them. v11 adds `operationalAND INT64 NOT NULL
     /// DEFAULT -1` to `container_fingerprints`. The AND aggregate is the
     /// per-container AND (not OR) of every active drawer's
     /// `operationalBitmap`; its AND-identity default (-1, all bits set)
@@ -102,7 +108,7 @@ public enum LocusKitSchema {
     /// REAL nullable to tunnels (NT-L5). v5 added erasure_ledger (NT-L4).
     /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
     /// (NT-L1). v2 added keys.ext. No estate data has shipped.
-    public static let version = 11
+    public static let version = 12
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -181,6 +187,20 @@ public enum LocusKitSchema {
                 Migration(fromVersion: 10, toVersion: 11, operations: [
                     .addColumn(table: "container_fingerprints",
                                column: .bitmap("operationalAND", default: Int64(-1)))
+                ]),
+                // v11 → v12: add the subject trio to drawers (progressive
+                // recall dense row). All three nullable, no backfill —
+                // NULL `subject` is the backfill-eligibility predicate,
+                // so pre-v12 rows surface as subject debt via
+                // `countMissingSubject` rather than requiring a data
+                // migration. Without the addColumns, a pre-v12 estate
+                // hits "no such column" on every drawer read after the
+                // daemon binary upgrades (same failure mode the v8 → v9
+                // migration exists to prevent).
+                Migration(fromVersion: 11, toVersion: 12, operations: [
+                    .addColumn(table: "drawers", column: .text("subject", nullable: true)),
+                    .addColumn(table: "drawers", column: .text("subject_pipeline_version", nullable: true)),
+                    .addColumn(table: "drawers", column: .timestamp("subject_at", nullable: true)),
                 ]),
             ]
         )
@@ -282,7 +302,25 @@ public enum LocusKitSchema {
             .text("distilled_pipeline_version", nullable: true),
             .int("distilled_token_count", nullable: true),
             // TEXT ISO8601 per the fleet date rule (timestamp column type).
-            .timestamp("distilled_at", nullable: true)
+            .timestamp("distilled_at", nullable: true),
+            // Subject trio (progressive recall PR-01): the one-sentence
+            // AI-facing summary of this drawer's content. Same lifecycle
+            // contract as the distilled quad above — the three columns are
+            // NULL together or populated together (one atomic UPDATE via
+            // DrawerStore.setSubjectRepresentation); every write that
+            // touches `content` NULLs all three in the same statement
+            // (regeneration trigger + erasure scrub). NULL `subject` is
+            // the backfill-eligibility predicate. The subject is RETURNED
+            // on recall rows, never indexed or searched (design ruling:
+            // ranking math is content-only), so it is excluded from the
+            // content digest/revision that feed the index pipeline.
+            // `subject_pipeline_version` carries the producer provenance
+            // tier ("ai-v1" filing/backfill AI; "minillm-v1" model rider).
+            // No token-count column: the subject is length-contracted
+            // (~120 chars) at every producer boundary.
+            .text("subject", nullable: true),
+            .text("subject_pipeline_version", nullable: true),
+            .timestamp("subject_at", nullable: true)
         ],
         primaryKey: ["id"],
         generatedColumns: [

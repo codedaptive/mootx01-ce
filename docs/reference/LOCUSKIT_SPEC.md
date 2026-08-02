@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.10.0
+version: 1.11.0
 status: active
-date: 2026-07-20
+date: 2026-08-02
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -950,9 +950,58 @@ exclusively by GLK in this cascade path; they are not intended for general direc
 Direct callers that need only belief-state withdrawal use `Estate.withdraw` / the
 normal verb surface.
 
+## § 14 — Subject representation behavioral contracts
+
+The subject is a one-sentence, AI-facing summary of a drawer's content —
+the assertion field of the progressive-recall dense row (UUID · subject ·
+FDC code · WikiQID · event_time). Schema v12 stores it as three nullable
+`drawers` columns (`subject`, `subject_pipeline_version`, `subject_at`)
+that are written and cleared together, mirroring the distilled quad's
+NULL-together lifecycle.
+
+- **B-17 (returned, never searched):** the subject is presentation data.
+  No index, no generated column, no bitmap bit, no recall filter, and no
+  container-fingerprint rollup may reference it. It exists so a consuming
+  AI can decide which rows are worth pursuing — it is never an input to
+  ranking or matching math.
+- **B-18 (length contract):** `setSubjectRepresentation` /
+  `set_subject_representation` reject an empty subject or one longer than
+  120 characters (`DrawerStore.subjectLengthContract` ↔
+  `SUBJECT_LENGTH_CONTRACT`; both ports count characters, not bytes). The
+  cap keeps the dense row's per-row cost near-uniform.
+- **B-19 (atomic set):** the trio is populated by ONE UPDATE statement.
+  `subject_pipeline_version` records producer provenance (e.g. `ai-v1`,
+  `minillm-v1`) and is the regeneration lever; `subject_at` is the
+  generation instant, passed in as a parameter (I-6 determinism — never
+  read from a clock inside the store).
+- **B-20 (content-write invalidation):** every write that changes or
+  erases `content` NULLs the trio in the same statement it NULLs the
+  distilled quad — a subject must never describe content that no longer
+  exists. Erasure paths (`expungeGated`) scrub it; dataset-content
+  updates clear it for regeneration.
+- **B-21 (NULL is the debt marker):** NULL `subject` on a live,
+  non-empty-content drawer means "subject debt" — eligible for backfill.
+  `countMissingSubject(pipelineVersion:)` / `count_missing_subject`
+  report the debt as NULL-subject rows plus rows whose
+  `subject_pipeline_version` differs from the requested producer. There
+  is no presence bit: the operational feature-flag region (bits 12–23)
+  is fully assigned, and the NULL predicate is already exact.
+
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.11.0 -- 2026-08-02
+
+Added § 14 — Subject representation behavioral contracts (progressive
+recall PR-01). Five new clauses: B-17 (subject is returned, never
+searched/indexed/mathed), B-18 (120-character length contract, both
+ports counting characters), B-19 (atomic trio set with pipeline-version
+provenance), B-20 (content-write invalidation — the trio NULLs with the
+distilled quad), B-21 (NULL subject = backfill debt; no presence bit —
+`countMissingSubject` counts NULL + producer-version mismatch). Schema
+v12 adds the three nullable `drawers` columns with a v11 → v12
+addColumn migration.
 
 ### 1.10.0 -- 2026-07-20
 

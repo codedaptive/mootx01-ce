@@ -83,7 +83,7 @@ use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::node::Node;
 use crate::node_store::T_NODES;
-use crate::drawer_store::DrawerStore;
+use crate::drawer_store::{DrawerStore, SUBJECT_LENGTH_CONTRACT};
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
@@ -159,6 +159,12 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "distilled_pipeline_version",
     "distilled_token_count",
     "distilled_at",
+    // Subject trio (PR-01): the subject IS structured-tier data — it
+    // exists precisely so candidate rows can be judged without hydrating
+    // content, so the structured projection carries all three.
+    "subject",
+    "subject_pipeline_version",
+    "subject_at",
 ];
 
 // ---------------------------------------------------------------------------
@@ -2544,6 +2550,97 @@ impl DrawerStore for DrawerStoreCore {
                 },
                 StoragePredicate::Neq(
                     Column::new(T_DRAWERS, "distilled_pipeline_version"),
+                    TypedValue::Text(pipeline_version.to_string()),
+                ),
+            ]),
+        ]);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
+    }
+
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "drawerId must not be empty".to_string(),
+            ));
+        }
+        if subject.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "subject must not be empty".to_string(),
+            ));
+        }
+        if pipeline_version.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "pipelineVersion must not be empty".to_string(),
+            ));
+        }
+        // Length contract enforced at the storage boundary — the last
+        // common gate under every producer (filing AI, backfill AI, model
+        // rider), so no producer can quietly inflate contact-sheet rows.
+        // Character count (not bytes) to match Swift `String.count`.
+        let char_count = subject.chars().count();
+        if char_count > SUBJECT_LENGTH_CONTRACT {
+            return Err(LocusKitError::InvalidContent(format!(
+                "subject exceeds the {SUBJECT_LENGTH_CONTRACT}-character length contract \
+                 ({char_count} characters); the AI-facing register requires one capped sentence"
+            )));
+        }
+        // One atomic UPDATE of the three columns. Unlike the distilled
+        // quad there is NO presence bit (feature-flag region is full; see
+        // PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
+        // rollup — the rollup exists because recall FILTERS on bit 19,
+        // and nothing filters on subject presence.
+        let row_store = self.storage.row_store();
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        let mut values = BTreeMap::new();
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text(subject.to_string()),
+        );
+        values.insert(
+            "subject_pipeline_version".to_string(),
+            TypedValue::Text(pipeline_version.to_string()),
+        );
+        values.insert(
+            "subject_at".to_string(),
+            TypedValue::Timestamp(generated_at),
+        );
+        row_store
+            .update(T_DRAWERS, values, &id_pred)
+            .map_err(map_storage_err)
+    }
+
+    /// Count of active drawers still awaiting a subject line (PR-01
+    /// backfill-eligibility aggregate): not tombstoned, non-empty
+    /// content, and subject absent OR produced under a different
+    /// pipeline contract. Uses `IsNull(subject)` directly — the subject
+    /// trio carries no presence bit in v1, and this count runs at status
+    /// cadence, not in recall. Projected to `id` only.
+    ///
+    /// Mirrors Swift `DrawerStore.countMissingSubject`.
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::Or(vec![
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+                StoragePredicate::Neq(
+                    Column::new(T_DRAWERS, "subject_pipeline_version"),
                     TypedValue::Text(pipeline_version.to_string()),
                 ),
             ]),
@@ -5246,6 +5343,19 @@ impl DrawerStore for InMemoryDrawerStore {
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_undistilled(pipeline_version)
     }
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.inner
+            .set_subject_representation(drawer_id, subject, pipeline_version, generated_at)
+    }
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.inner.count_missing_subject(pipeline_version)
+    }
     fn seal_expunge_audit(
         &self,
         event: &substrate_lib::verbs::AuditEvent,
@@ -5671,11 +5781,17 @@ impl DrawerStore for InMemoryDrawerStore {
 /// representation columns and content in one statement. Mirrors Swift
 /// `DrawerStore.withClearedRepresentation`.
 pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedValue>) {
+    // Covers every content-derived column: the distilled quad AND the
+    // subject trio (PR-01) — derived text must not outlive the content it
+    // renders, so both clear in the same content-touching statement.
     for column in [
         "distilled",
         "distilled_pipeline_version",
         "distilled_token_count",
         "distilled_at",
+        "subject",
+        "subject_pipeline_version",
+        "subject_at",
     ] {
         values
             .entry(column.to_string())
@@ -5796,6 +5912,30 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
     m.insert(
         "distilled_at".to_string(),
         d.distilled_at
+            .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
+    );
+    // Subject trio (PR-01): same capture-path contract as the distilled
+    // quad — a fresh capture MAY carry a subject (the filing AI provides
+    // it at file time); backfill and the model rider populate the rest via
+    // set_subject_representation. Mirrors Swift drawerValues.
+    m.insert(
+        "subject".to_string(),
+        d.subject
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "subject_pipeline_version".to_string(),
+        d.subject_pipeline_version
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "subject_at".to_string(),
+        d.subject_at
             .map(TypedValue::Timestamp)
             .unwrap_or(TypedValue::Null),
     );
@@ -6230,6 +6370,11 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         distilled_pipeline_version: opt_string_value_of(row.get("distilled_pipeline_version")),
         distilled_token_count: opt_int_value_of(row.get("distilled_token_count")),
         distilled_at: opt_int_value_of(row.get("distilled_at")),
+        // Subject trio (PR-01). NULL on any row not yet subjected;
+        // decodes to None — the backfill-eligibility signal.
+        subject: opt_string_value_of(row.get("subject")),
+        subject_pipeline_version: opt_string_value_of(row.get("subject_pipeline_version")),
+        subject_at: opt_int_value_of(row.get("subject_at")),
     })
 }
 

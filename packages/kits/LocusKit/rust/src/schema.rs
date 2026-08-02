@@ -52,7 +52,13 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v11 adds `operationalAND INT64 NOT NULL DEFAULT -1`
+/// Current schema version. v12 adds the subject trio to `drawers`
+/// (`subject`, `subject_pipeline_version`, `subject_at`, all nullable) —
+/// the one-sentence AI-facing summary progressive recall returns in the
+/// dense row. Nullable with no backfill: NULL `subject` IS the
+/// backfill-eligibility predicate, so pre-v12 rows are simply subject
+/// debt until a producer fills them.
+/// v11 adds `operationalAND INT64 NOT NULL DEFAULT -1`
 /// to `container_fingerprints` — the AND-reduction aggregate used by
 /// `distillItemsSweep` to skip rooms where every active drawer already
 /// has bit 19 (HAS_CURRENT_REPRESENTATION) set. Default -1 is the AND
@@ -74,7 +80,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
 /// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -107,6 +113,32 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
+            // v11 → v12: add the subject trio to drawers (progressive
+            // recall dense row). All three nullable, no backfill — NULL
+            // `subject` is the backfill-eligibility predicate, so pre-v12
+            // rows surface as subject debt via `count_missing_subject`
+            // rather than requiring a data migration. Without the
+            // addColumns, a pre-v12 estate hits "no such column" on every
+            // drawer read after the binary upgrades (the v8 → v9 failure
+            // mode). Matches the Swift v11 → v12 migration exactly.
+            Migration {
+                from_version: 11,
+                to_version: 12,
+                operations: vec![
+                    SchemaOperation::AddColumn {
+                        table: "drawers".to_string(),
+                        column: ColumnDeclaration::text("subject").nullable(),
+                    },
+                    SchemaOperation::AddColumn {
+                        table: "drawers".to_string(),
+                        column: ColumnDeclaration::text("subject_pipeline_version").nullable(),
+                    },
+                    SchemaOperation::AddColumn {
+                        table: "drawers".to_string(),
+                        column: ColumnDeclaration::timestamp("subject_at").nullable(),
+                    },
+                ],
+            },
             // v10 → v11: add operationalAND to container_fingerprints.
             // Default -1 (AND identity).  rebuildAll at estate open tightens
             // the aggregate; no data migration of existing rows needed — the
@@ -269,6 +301,21 @@ fn drawers_table() -> TableDeclaration {
             ColumnDeclaration::int("distilled_token_count").nullable(),
             // TEXT ISO8601 per the fleet date rule (timestamp column type).
             ColumnDeclaration::timestamp("distilled_at").nullable(),
+            // Subject trio (progressive recall PR-01): the one-sentence
+            // AI-facing summary. Same lifecycle contract as the distilled
+            // quad — NULL together or populated together (one atomic
+            // UPDATE via `set_subject_representation`); every write that
+            // touches `content` NULLs all three in the same statement.
+            // NULL `subject` is the backfill-eligibility predicate. The
+            // subject is RETURNED on recall rows, never indexed or
+            // searched (ranking math is content-only by ruling).
+            // `subject_pipeline_version` carries the producer provenance
+            // tier ("ai-v1" / "minillm-v1"). No token-count column: the
+            // subject is length-contracted at every producer boundary.
+            // Mirrors the Swift drawersTable declaration.
+            ColumnDeclaration::text("subject").nullable(),
+            ColumnDeclaration::text("subject_pipeline_version").nullable(),
+            ColumnDeclaration::timestamp("subject_at").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -1149,6 +1196,8 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
+    /// v12 adds the subject trio (subject, subject_pipeline_version,
+    /// subject_at) to drawers for the progressive-recall dense row.
     /// v11 adds operationalAND (AND-reduction aggregate) to container_fingerprints
     /// for distillation-sweep room skipping. v10 added associations natural-key
     /// UNIQUE constraint + v9→v10 migration (FINDING-3 duplicate-edge fix). v9
@@ -1158,20 +1207,25 @@ mod tests {
     /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_eleven() {
-        assert_eq!(SCHEMA_VERSION, 11);
-        // Two migrations: v9 → v10 (FINDING-3 dedup + unique index),
-        //                 v10 → v11 (operationalAND on container_fingerprints).
+    fn schema_version_is_twelve() {
+        assert_eq!(SCHEMA_VERSION, 12);
+        // Three migrations: v9 → v10 (FINDING-3 dedup + unique index),
+        //                   v10 → v11 (operationalAND on container_fingerprints),
+        //                   v11 → v12 (subject trio on drawers).
         let m = schema();
-        assert_eq!(m.migrations.len(), 2);
-        // v10 → v11 is listed first.
-        assert_eq!(m.migrations[0].from_version, 10);
-        assert_eq!(m.migrations[0].to_version, 11);
-        assert_eq!(m.migrations[0].operations.len(), 1);
-        // v9 → v10 is listed second.
-        assert_eq!(m.migrations[1].from_version, 9);
-        assert_eq!(m.migrations[1].to_version, 10);
-        assert_eq!(m.migrations[1].operations.len(), 2);
+        assert_eq!(m.migrations.len(), 3);
+        // v11 → v12 is listed first (newest-first order).
+        assert_eq!(m.migrations[0].from_version, 11);
+        assert_eq!(m.migrations[0].to_version, 12);
+        assert_eq!(m.migrations[0].operations.len(), 3);
+        // v10 → v11 is listed second.
+        assert_eq!(m.migrations[1].from_version, 10);
+        assert_eq!(m.migrations[1].to_version, 11);
+        assert_eq!(m.migrations[1].operations.len(), 1);
+        // v9 → v10 is listed third.
+        assert_eq!(m.migrations[2].from_version, 9);
+        assert_eq!(m.migrations[2].to_version, 10);
+        assert_eq!(m.migrations[2].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.
@@ -1339,6 +1393,9 @@ mod tests {
                 "distilled_pipeline_version",
                 "distilled_token_count",
                 "distilled_at",
+                "subject",
+                "subject_pipeline_version",
+                "subject_at",
             ]
         );
     }

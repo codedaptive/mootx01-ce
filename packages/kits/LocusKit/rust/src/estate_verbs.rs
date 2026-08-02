@@ -1375,6 +1375,30 @@ impl Estate {
         self.store.count_undistilled(pipeline_version)
     }
 
+    /// Write one drawer's subject line (PR-01). Estate-level pass-through
+    /// over `DrawerStore::set_subject_representation` — the seam the
+    /// filing surface, backfill, and the (future) subject rider write
+    /// through. Mirrors Swift `Estate.setSubjectRepresentation`.
+    pub fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.store
+            .set_subject_representation(drawer_id, subject, pipeline_version, generated_at)
+    }
+
+    /// Count of active drawers still awaiting a subject line (PR-01
+    /// backfill-eligibility aggregate — the estate-status subject-debt
+    /// counter's source). Estate-level pass-through over
+    /// `DrawerStore::count_missing_subject`. Mirrors Swift
+    /// `Estate.countMissingSubject`.
+    pub fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.store.count_missing_subject(pipeline_version)
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is

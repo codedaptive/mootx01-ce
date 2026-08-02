@@ -113,6 +113,12 @@ use substrate_types::fingerprint256::Fingerprint256;
 /// store, including minimal fakes, must implement them. Production backends —
 /// the LP-1E `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
 /// `DrawerStoreCore`) — override every method.
+/// The subject length contract (characters). One capped sentence in the
+/// AI-facing register — the bound that keeps every contact-sheet row's
+/// context cost near-uniform. Twin of Swift
+/// `DrawerStore.subjectLengthContract`.
+pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
+
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------
@@ -653,6 +659,39 @@ pub trait DrawerStore: Send + Sync {
     fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "count_undistilled not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
+
+    /// Write the subject line of one drawer — all three subject columns
+    /// in ONE atomic UPDATE (PR-01; same invariant family as the
+    /// distilled quad: NULL together or populated together). Enforces the
+    /// SUBJECT_LENGTH_CONTRACT at the storage boundary. `generated_at` is
+    /// epoch millis (deterministic clock — passed in, never read here).
+    ///
+    /// Returns the count of rows updated (0 = drawer not found;
+    /// 1 = success). Mirrors Swift `DrawerStore.setSubjectRepresentation`.
+    fn set_subject_representation(
+        &self,
+        _drawer_id: &str,
+        _subject: &str,
+        _pipeline_version: &str,
+        _generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_subject_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Count of active drawers still awaiting a subject line — the PR-01
+    /// backfill-eligibility predicate as an aggregate (not tombstoned,
+    /// non-empty content, `subject` NULL or stale pipeline version).
+    /// Feeds the estate-status subject-debt counter. Mirrors Swift
+    /// `countMissingSubject`.
+    fn count_missing_subject(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_missing_subject not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2072,6 +2111,23 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_undistilled(pipeline_version)
+    }
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        self.as_ref().set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+        )
+    }
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().count_missing_subject(pipeline_version)
     }
     fn seal_expunge_audit(
         &self,

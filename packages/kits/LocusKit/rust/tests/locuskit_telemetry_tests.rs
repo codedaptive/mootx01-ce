@@ -204,6 +204,9 @@ fn sample_drawer(label: &str) -> Drawer {
         distilled_pipeline_version: None,
         distilled_token_count: None,
         distilled_at: None,
+        subject: None,
+        subject_pipeline_version: None,
+        subject_at: None,
     }
 }
 

@@ -493,6 +493,36 @@ public actor Estate {
         try await store.countUndistilled(pipelineVersion: pipelineVersion)
     }
 
+    /// Write one drawer's subject line (PR-01). Estate-level pass-through
+    /// over `DrawerStore.setSubjectRepresentation` — the seam the filing
+    /// surface, backfill, and the (future) subject rider write through.
+    /// No container-fingerprint rollup: the rollup exists because recall
+    /// FILTERS on bit 19, and nothing filters on subject presence.
+    /// Mirrors Rust `Estate::set_subject_representation`.
+    ///
+    /// - Returns: Count of rows updated (0 = drawer not found).
+    @discardableResult
+    public func setSubjectRepresentation(
+        drawerId: String,
+        subject: String,
+        pipelineVersion: String,
+        at generatedAt: Date
+    ) async throws -> Int {
+        try await store.setSubjectRepresentation(
+            drawerId: drawerId,
+            subject: subject,
+            pipelineVersion: pipelineVersion,
+            at: generatedAt)
+    }
+
+    /// Count of active drawers still awaiting a subject line (the PR-01
+    /// backfill-eligibility predicate as an aggregate — the estate-status
+    /// subject-debt counter's source). Estate-level pass-through over
+    /// `DrawerStore.countMissingSubject`.
+    public func countMissingSubject(pipelineVersion: String) async throws -> Int {
+        try await store.countMissingSubject(pipelineVersion: pipelineVersion)
+    }
+
     // MARK: - Drawer enumeration
 
     /// Enumerate every drawer in the estate. Used by cross-row

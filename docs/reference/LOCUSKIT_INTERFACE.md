@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.14.0
+version: 1.15.0
 status: active
-date: 2026-07-20
+date: 2026-08-02
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -268,13 +268,30 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public let udcFacets: String?
     public let wikidataQID: String?
     public let wikidataQidsSecondary: String?
+    // Distilled representation quad — derived compression of `content`.
+    // NULL-together; every content-touching write clears all four.
+    public let distilled: String?
+    public let distilledPipelineVersion: String?
+    public let distilledTokenCount: Int64?
+    public let distilledAt: Date?
+    // Subject trio — one-sentence AI-facing summary returned in the
+    // progressive-recall dense row. RETURNED, never searched or indexed.
+    // NULL-together; cleared by the same content-write invalidation as
+    // the distilled quad. NULL `subject` = backfill-eligible.
+    public let subject: String?                 // ≤ 120 chars (subjectLengthContract)
+    public let subjectPipelineVersion: String?  // producer provenance: "ai-v1", "minillm-v1"
+    public let subjectAt: Date?
     public init(id: String = UUID().uuidString, content: String, parentNodeId: String,
                 sourceFile: String? = nil, chunkIndex: Int? = nil, addedBy: String,
                 filedAt: Date, eventTime: Date? = nil, embeddingModelID: String,
                 tombstonedAt: Date? = nil, removedByBatch: String? = nil,
                 provenance: Int64 = 0, adjectiveBitmap: Int64 = 0, operationalBitmap: Int64 = 0,
                 lineageID: UUID = UUID(), udcCode: String = "", udcFacets: String? = nil,
-                wikidataQID: String? = nil, wikidataQidsSecondary: String? = nil)
+                wikidataQID: String? = nil, wikidataQidsSecondary: String? = nil,
+                distilled: String? = nil, distilledPipelineVersion: String? = nil,
+                distilledTokenCount: Int64? = nil, distilledAt: Date? = nil,
+                subject: String? = nil, subjectPipelineVersion: String? = nil,
+                subjectAt: Date? = nil)
 
     // Computed accessors (no Bool stored property, I-2):
     public var sourceType: SourceType; public var confirmation: Confirmation
@@ -703,7 +720,7 @@ consumed directly by GeniusLocusKit; it is an `actor` in Swift and a `trait`
 in Rust (SPEC § 8).
 
 ```swift
-public enum LocusKitSchema { public static let kitID = "LocusKit"; public static let version = 2
+public enum LocusKitSchema { public static let kitID = "LocusKit"; public static let version = 12
                              public static var schema: SchemaDeclaration { get } }
 public actor DrawerStore {
     public init(storage: any Storage) async throws
@@ -732,6 +749,16 @@ public actor DrawerStore {
     public func markRecallTracesUsed(target: String, since: Date, now: Date) async throws -> Int
     /// Returns the total number of recall_trace rows in the estate. Used by moot_estate_status.
     public func countRecallTraces() async throws -> Int
+    /// Subject trio (progressive recall). Contract cap for `subject` length in characters.
+    public static let subjectLengthContract = 120  // = Rust SUBJECT_LENGTH_CONTRACT
+    /// Writes subject + pipelineVersion + at in ONE atomic UPDATE. Rejects empty
+    /// or > subjectLengthContract subjects. Returns rows updated (0 = unknown id).
+    /// No bitmap write, no container-fingerprint rollup — nothing filters on subject.
+    public func setSubjectRepresentation(drawerId: String, subject: String,
+                                         pipelineVersion: String, at: Date) async throws -> Int
+    /// Subject debt: live, non-empty-content drawers whose subject is NULL or
+    /// whose subject_pipeline_version differs from `pipelineVersion`.
+    public func countMissingSubject(pipelineVersion: String) async throws -> Int
     public func allTunnels() async throws -> [Tunnel]
     // Outline helpers (the node-integrity contract §11) — typed parent edges with fractional ordering
     public func outlineChildren(of parentDrawerId: String) async throws -> [Tunnel]
@@ -1023,7 +1050,7 @@ bit-identical DDL. Gaps are tracked until resolved.
 
 | Element | Swift | Rust | Status | Notes |
 |---------|-------|------|--------|-------|
-| `drawers` table | `LocusKitSchema.drawersTable` (LocusKitSchema.swift:118) | `drawers_table()` (schema.rs:91) | Present | Generated columns and indices match |
+| `drawers` table | `LocusKitSchema.drawersTable` (LocusKitSchema.swift) | `drawers_table()` (schema.rs) | Present | Generated columns and indices match; distilled quad + subject trio columns match (pinned by `drawers_column_set` and the GLK composite layout-signature fixture) |
 | `tunnels` table | `LocusKitSchema.tunnelsTable` (LocusKitSchema.swift:206) | `tunnels_table()` (schema.rs:186) | Present | `kind_id` default 1 matches |
 | `diary` table | `LocusKitSchema.diaryTable` (LocusKitSchema.swift:236) | `diary_table()` (schema.rs:222) | Present | |
 | `manifest` table | `LocusKitSchema.manifestTable` (LocusKitSchema.swift:257) | `manifest_table()` (schema.rs:250) | Present | |
@@ -1040,13 +1067,17 @@ bit-identical DDL. Gaps are tracked until resolved.
 `ColumnType::Timestamp` in Rust (emitted as TEXT ISO8601 by PersistenceKit backends),
 matching Swift's `.timestamp(...)` — never REAL (Unix timestamp).
 
-**Schema version:** both ports declare `version = 2` with no migration ladder
-(`migrations` list is empty in Rust; no `ALTER TABLE` history in Swift — each
-version re-declares the full column set fresh, as no estate data has shipped).
-v2 added the nullable `.json` `ext` forward-compat slot to the `keys` table
-(the forward-compatible ext-slot contract), completing the one-`ext`-column-per-persistent-entity convention;
-1.0 writes NULL and never reads it. The ENC-01 `keys` table was present from v1;
-this concordance row records that both ports carry the v2 `ext` column.
+**Schema version:** both ports declare `version = 12` (`LocusKitSchema.version`
+↔ `SCHEMA_VERSION`, pinned by `schema_version_is_twelve`). The base declaration
+carries every column fresh; a three-entry migration ladder covers in-development
+estates upgrading across a binary bump: v9 → v10 (associations natural-key
+dedup + UNIQUE index, FINDING-3), v10 → v11 (`operationalAND` on
+`container_fingerprints`), v11 → v12 (subject trio on `drawers`: `subject`,
+`subject_pipeline_version`, `subject_at`, all nullable, no backfill — NULL
+`subject` is the backfill-eligibility predicate). Earlier versions (v2 `keys.ext`
+forward-compat slot through v9 `content_fingerprint`) pre-date the ladder and
+live only in the base declaration; the per-version history is the
+`LocusKitSchema.version` doc comment in both ports.
 
 ### Public type surface — concept-level concordance
 
@@ -1377,6 +1408,23 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.15.0 -- 2026-08-02
+
+- Subject trio (progressive recall PR-01): documented the three new nullable
+  `drawers` columns (`subject`, `subject_pipeline_version`, `subject_at`),
+  the new `Drawer` stored fields and init parameters, and the new
+  `DrawerStore` surface — `subjectLengthContract` (120 chars),
+  `setSubjectRepresentation(drawerId:subject:pipelineVersion:at:)` (single
+  atomic UPDATE), `countMissingSubject(pipelineVersion:)` — with `Estate`
+  passthroughs and Rust twins (`SUBJECT_LENGTH_CONTRACT`,
+  `set_subject_representation`, `count_missing_subject`).
+- Brought the `Drawer` field listing current: added the previously
+  undocumented distilled representation quad (`distilled`,
+  `distilledPipelineVersion`, `distilledTokenCount`, `distilledAt`).
+- Corrected the stale schema-version paragraph: both ports declare
+  `version = 12` with a three-entry migration ladder (v9→v10, v10→v11,
+  v11→v12), superseding the `version = 2` / empty-ladder claim.
 
 ### 1.14.0 -- 2026-07-20
 
