@@ -78,11 +78,15 @@ chmod 700 "${derived_root}" "${mac_derived}" "${ios_derived}"
   && "$(cd "${ios_derived}" && /bin/pwd -P)" == "${run_directory}/derived-data/iphoneos" ]] \
   || fail U7_RUNNER_PRIVATE_PATH_INVALID 65
 invocation_copies=()
+attack_aliases=()
 cleanup_transient() {
-  local copy
+  local copy alias
   set +u
   for copy in "${invocation_copies[@]}"; do
     /bin/rm -f -- "${copy}" 2>/dev/null || true
+  done
+  for alias in "${attack_aliases[@]}"; do
+    /bin/rm -f -- "${alias}" 2>/dev/null || true
   done
   set -u
   chmod -R u+w "${transient}" 2>/dev/null || true
@@ -183,7 +187,8 @@ def no_symlink_components(path, root):
     return True
 
 def require_regular_owned(info, mode=None):
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid() or info.st_nlink != 1):
         die()
     if mode is not None and stat.S_IMODE(info.st_mode) != mode:
         die()
@@ -541,6 +546,16 @@ attack_invocation_copy_if_requested() {
     source-mode)
       /usr/bin/python3 -c 'import os, stat, sys; p=sys.argv[1]; os.chmod(p, stat.S_IMODE(os.lstat(p).st_mode) ^ stat.S_IXUSR)' \
         "${source_xctestrun}"
+      ;;
+    hardlink)
+      local copy_alias="${U7_RUN_DIR}/../u7-retained-copy-hardlink.xctestrun"
+      /bin/ln "${prepared_copy}" "${copy_alias}"
+      attack_aliases+=("${copy_alias}")
+      ;;
+    source-hardlink)
+      local source_alias="${U7_RUN_DIR}/../u7-retained-source-hardlink.xctestrun"
+      /bin/ln "${source_xctestrun}" "${source_alias}"
+      attack_aliases+=("${source_alias}")
       ;;
     source-window)
       # The embedded helper performs and restores this mutation between its

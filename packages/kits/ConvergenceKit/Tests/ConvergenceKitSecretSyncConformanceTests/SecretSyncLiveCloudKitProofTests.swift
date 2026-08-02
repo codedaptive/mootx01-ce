@@ -1376,7 +1376,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   func runnerRejectsXCTestrunReplacement() throws {
     for attack in [
       "replace", "symlink", "source-replace", "copy-mode", "source-mode",
-      "copy-window",
+      "copy-window", "hardlink", "source-hardlink",
     ] {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("u7-runner-attack-\(attack)-\(UUID().uuidString)")
@@ -1404,6 +1404,12 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       )) ?? ""
       #expect(!trace.contains("probe:"))
       #expect(!trace.contains("phase:"))
+      #expect(!FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("u7-retained-copy-hardlink.xctestrun").path
+      ))
+      #expect(!FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("u7-retained-source-hardlink.xctestrun").path
+      ))
     }
   }
 
