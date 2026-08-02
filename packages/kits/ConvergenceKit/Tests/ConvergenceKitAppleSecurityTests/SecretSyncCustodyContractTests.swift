@@ -241,6 +241,7 @@ struct SecretSyncCustodyContractTests {
     }
   }
 
+  #if os(macOS)
   @Test("signed host accepts the macOS development profile shape")
   func signedHostAcceptsMacOSDevelopmentProfileShape() throws {
     let packageRoot =
@@ -498,6 +499,7 @@ struct SecretSyncCustodyContractTests {
       )
     }
   }
+  #endif
 
   @Test("opt-in supported-hardware custody and user-presence proof")
   func supportedHardwareProof() async throws {
@@ -753,6 +755,7 @@ private func signedHostSource() throws -> String {
   )
 }
 
+#if os(macOS)
 private func signedHostProfileValidationStatus(
   script: URL,
   profile: URL,
@@ -951,6 +954,7 @@ private func signedHostResultValidationStatus(
   process.waitUntilExit()
   return process.terminationStatus
 }
+#endif
 
 private func hardwareAttributesAreLocked(
   _ generation: SecretSyncCustodyCredentialGeneration

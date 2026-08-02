@@ -806,6 +806,7 @@ private func u7TestLedger(
 
 @Suite("SecretSync live proof configuration contract")
 struct SecretSyncLiveCloudKitProofConfigurationTests {
+  #if os(macOS)
   @Test("standalone host initializes resumable private authority and signed state")
   func standaloneHostInitializesAndResumes() throws {
     let root = FileManager.default.temporaryDirectory
@@ -1617,6 +1618,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       #expect(retained.filter({ $0.hasPrefix("grant-") }).count <= 1)
     }
   }
+  #endif
 
   @Test("manifest v2 derives distinct role-local ledgers from one logical identity")
   func logicalLedgerIdentityIsRoleLocal() throws {
@@ -2918,6 +2920,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   }
 }
 
+#if os(macOS)
 private struct U7ProcessResult {
   let status: Int32
   let stdout: String
@@ -3375,6 +3378,7 @@ private func u7RunnerEnvironment(
   ]
   return base.merging(additions, uniquingKeysWith: { _, replacement in replacement })
 }
+#endif
 
 @Suite(
   "SecretSync authorized external-device private-CloudKit proof",
