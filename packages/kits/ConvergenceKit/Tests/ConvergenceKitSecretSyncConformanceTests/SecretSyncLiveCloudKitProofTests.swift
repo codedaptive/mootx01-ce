@@ -922,6 +922,10 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       (.a, .restart, .mac), (.a, .audit, .mac), (.b, .cleanup, .iPhone),
       (.c, .cleanup, .iPad), (.a, .cleanup, .mac),
     ]
+    let prerequisiteIndicesByStep = [
+      3: [0], 4: [3], 5: [4], 6: [4], 12: [10], 13: [12],
+      14: [13], 15: [14], 18: [15, 16, 17],
+    ]
     var stageInventory: SecretSyncLiveStageInventoryAttachment?
     var acceptedArtifactDigests: [Data] = []
 
@@ -957,15 +961,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         role: step.0, phase: step.1, runtimePlatform: step.2,
         now: Date(timeIntervalSince1970: 1_100)
       )
-      if index == 18 {
-        #expect(
-          grant.manifest.prerequisiteArtifactDigests
-            == [
-              acceptedArtifactDigests[15], acceptedArtifactDigests[16],
-              acceptedArtifactDigests[17],
-            ]
-        )
-      }
+      let expectedPrerequisites = (prerequisiteIndicesByStep[index] ?? [])
+        .map { acceptedArtifactDigests[$0] }
+      #expect(grant.manifest.prerequisiteArtifactDigests == expectedPrerequisites)
       if step.1 == .stage {
         stageInventory = SecretSyncLiveStageInventoryAttachment(
           version: 1, namespace: namespace, role: .a,
@@ -1160,17 +1158,64 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(retained == Set([
       ".host.lock", "authority-public.b64", "host-state.json", "run-manifest.json",
     ]))
-    let phases = try String(
+    let commands = try String(
       contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
     ).split(separator: "\n")
+    #expect(Array(commands.prefix(2)) == ["build:mac", "build:iOS"])
+    #expect(commands.dropFirst(2).allSatisfy {
+      $0.hasPrefix("probe:") || $0.hasPrefix("phase:")
+    })
+    let probes = commands.filter { $0.hasPrefix("probe:") }
+    #expect(probes.count == 19)
+    let phases = commands.filter { $0.hasPrefix("phase:") }
     #expect(phases.count == 19)
     #expect(Set(phases).count == 19)
+    let recoveryArtifactDigest = Data(SHA256.hash(data: Data("recoveryA".utf8)))
+      .base64EncodedString()
+    #expect(phases.contains(
+      "phase:rotation:A:prerequisites=\(recoveryArtifactDigest)"
+    ))
     let terminalResume = try u7RunProcess(
       executable: runner.path, arguments: [],
       environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
     )
     #expect(terminalResume.status == 0)
     #expect(terminalResume.stdout == "U7_RUNNER_OK\n")
+  }
+
+  @Test("fake xcodebuild rejects missing or wrong-platform build matrices")
+  func fakeRunnerRejectsInvalidBuildMatrix() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-runner-build-matrix-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let fake = try u7WriteFakeRunnerTool(root: root)
+    let environment = [
+      "U7_FAKE_LOG": root.appendingPathComponent("fake.log").path,
+      "U7_DEST_A": "A-RAW-CANARY", "U7_DEST_B": "B-RAW-CANARY",
+      "U7_DEST_C": "C-RAW-CANARY",
+    ]
+    let missing = try u7RunProcess(
+      executable: fake.path,
+      arguments: ["test-without-building"], environment: environment
+    )
+    #expect(missing.status != 0)
+    let wrongOrder = try u7RunProcess(
+      executable: fake.path,
+      arguments: [
+        "build-for-testing", "-destination", "B-RAW-CANARY",
+      ],
+      environment: environment
+    )
+    #expect(wrongOrder.status != 0)
+    let wrongPlatform = try u7RunProcess(
+      executable: fake.path,
+      arguments: [
+        "build-for-testing", "-destination", "C-RAW-CANARY",
+      ],
+      environment: environment
+    )
+    #expect(wrongPlatform.status != 0)
   }
 
   @Test("runner resumes pending grant and accepted receipt without replay")
@@ -1212,7 +1257,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       #expect(resumed.status == 0)
       let phases = try String(
         contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
-      ).split(separator: "\n")
+      ).split(separator: "\n").filter { $0.hasPrefix("phase:") }
       #expect(phases.count == 19)
       #expect(Set(phases).count == 19)
     }
@@ -2629,8 +2674,28 @@ if sys.argv[1:3] == ["export", "attachments"]:
         shutil.copy2(candidate, output / candidate.name)
     sys.exit(0)
 
+log_path = pathlib.Path(os.environ["U7_FAKE_LOG"])
+matrix_path = log_path.with_suffix(".matrix")
+
 if "build-for-testing" in sys.argv:
+    destination = sys.argv[sys.argv.index("-destination") + 1]
+    if destination == os.environ["U7_DEST_A"]:
+        matrix_path.write_text("mac\n")
+        with open(log_path, "a") as log:
+            log.write("build:mac\n")
+    elif destination == os.environ["U7_DEST_B"]:
+        if not matrix_path.exists() or matrix_path.read_text() != "mac\n":
+            sys.exit(11)
+        with open(matrix_path, "a") as matrix:
+            matrix.write("iOS\n")
+        with open(log_path, "a") as log:
+            log.write("build:iOS\n")
+    else:
+        sys.exit(12)
     sys.exit(0)
+
+if not matrix_path.exists() or matrix_path.read_text() != "mac\niOS\n":
+    sys.exit(13)
 
 result = arg("-resultBundlePath")
 attachments = result / "Attachments"
@@ -2657,11 +2722,30 @@ if test_filter.endswith("/ledgerProbe"):
         "contentDigest": base64.b64encode(bytes([ord(role)]) * 32).decode(),
     }
     (attachments / "u7-ledger-probe-v1.json").write_bytes(canonical(probe))
+    with open(log_path, "a") as log:
+        log.write("probe:" + role + "\n")
     sys.exit(0)
 
 phase = os.environ["MOOT_SECRET_SYNC_PHASE"]
 grant = json.loads(base64.b64decode(os.environ["MOOT_SECRET_SYNC_HOST_LAUNCH_GRANT"]))
 manifest = grant["manifest"]
+dependency_labels = {
+    ("backgroundDenied", "A"): ["credentialA"],
+    ("stage", "A"): ["backgroundDeniedA"],
+    ("conditionalHead", "A"): ["stageA"],
+    ("conditionalHead", "B"): ["stageA"],
+    ("recovery", "A"): ["offlineA"],
+    ("rotation", "A"): ["recoveryA"],
+    ("restart", "A"): ["rotationA"],
+    ("audit", "A"): ["restartA"],
+    ("cleanup", "A"): ["auditA", "cleanupB", "cleanupC"],
+}
+expected_prerequisites = [
+    base64.b64encode(hashlib.sha256(label.encode()).digest()).decode()
+    for label in dependency_labels.get((phase, role), [])
+]
+if manifest["prerequisiteArtifactDigests"] != expected_prerequisites:
+    sys.exit(10)
 authority = base64.b64decode(
     (pathlib.Path(os.environ["U7_RUN_DIR"]) / "authority-public.b64").read_text()
 )
@@ -2709,8 +2793,11 @@ receipt = {
     ).decode() if phase == "credential" else None,
 }
 (attachments / "u7-phase-receipt-v1.json").write_bytes(canonical(receipt))
-with open(os.environ["U7_FAKE_LOG"], "a") as log:
-    log.write("phase:" + phase + ":" + role + "\n")
+with open(log_path, "a") as log:
+    log.write(
+        "phase:" + phase + ":" + role + ":prerequisites="
+        + ",".join(manifest["prerequisiteArtifactDigests"]) + "\n"
+    )
 sys.exit(0)
 """#
   try Data(source.utf8).write(to: tool)

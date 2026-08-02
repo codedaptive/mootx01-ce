@@ -108,6 +108,13 @@ run_checked U7_RUNNER_BUILD_FAILED \
   -project "${U7_PROJECT}" -scheme "${U7_SCHEME}" \
   -destination "${U7_DEST_A}" \
   "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey=${authority}"
+# One authorized iPhone destination builds the shared iOS test products used
+# by both the iPhone and iPad phases; both platform builds precede every run.
+run_checked U7_RUNNER_BUILD_FAILED \
+  "${U7_XCODEBUILD}" build-for-testing \
+  -project "${U7_PROJECT}" -scheme "${U7_SCHEME}" \
+  -destination "${U7_DEST_B}" \
+  "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey=${authority}"
 
 phases=(
   'credential:A:mac' 'credential:B:iPhone' 'credential:C:iPad'

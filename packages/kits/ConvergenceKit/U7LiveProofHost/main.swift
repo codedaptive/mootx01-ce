@@ -245,6 +245,7 @@ private enum Host {
     case 4: dependencyIndices = [3]
     case 5, 6: dependencyIndices = [4]
     case 12: dependencyIndices = [10]
+    case 13: dependencyIndices = [12]
     case 14: dependencyIndices = [13]
     case 15: dependencyIndices = [14]
     case 18: dependencyIndices = [15, 16, 17]
