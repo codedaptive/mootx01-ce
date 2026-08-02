@@ -86,7 +86,7 @@ enum SecretSyncLiveAttestation {
   static func canonicalBody(
     namespace: String,
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
-    matrixIdentityDigest: Data,
+    launchGrantDigest: Data,
     credentialRecordName: String,
     verifierRecordName: String,
     credential: TrustedDeviceCredential,
@@ -111,7 +111,7 @@ enum SecretSyncLiveAttestation {
         .init(tag: 10, value: signingProof),
         .init(tag: 11, value: agreementChallenge),
         .init(tag: 12, value: agreementProof),
-        .init(tag: 13, value: matrixIdentityDigest),
+        .init(tag: 13, value: launchGrantDigest),
       ]
     )
   }
@@ -120,13 +120,13 @@ enum SecretSyncLiveAttestation {
     _ evidence: SecretSyncLiveCredentialEvidence,
     namespace: String,
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
-    expectedMatrixIdentityDigest: Data,
+    expectedLaunchGrantDigest: Data,
     credentialRecordName: String,
     verifierRecordName: String,
     agreementVerifierPrivateKey: Data
   ) throws -> Bool {
     let transcript = try evidence.possessionTranscript.productionValue()
-    guard evidence.matrixIdentityDigest == expectedMatrixIdentityDigest,
+    guard evidence.launchGrantDigest == expectedLaunchGrantDigest,
       transcript.deviceID == evidence.credential.deviceID,
       transcript.credentialID == evidence.credential.credentialID,
       transcript.signingPublicKey == evidence.credential.signingPublicKey,
@@ -150,7 +150,7 @@ enum SecretSyncLiveAttestation {
     else { return false }
     let body = try canonicalBody(
       namespace: namespace, role: role,
-      matrixIdentityDigest: evidence.matrixIdentityDigest,
+      launchGrantDigest: evidence.launchGrantDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName,
       credential: evidence.credential, transcript: evidence.possessionTranscript,
@@ -310,36 +310,66 @@ enum SecretSyncLiveCleanupPlan {
   static func deleteAndVerify(
     _ recordIDs: [CKRecord.ID],
     values: SecretSyncLiveCloudKitProofConfiguration.Values,
-    database: any CloudKitDatabaseProtocol
+    database: any CloudKitDatabaseProtocol,
+    ledger: SecretSyncLiveCleanupLedger
   ) async throws {
     try requireAuthorized(recordIDs, values: values)
+    guard !recordIDs.isEmpty else {
+      try await ledger.retainUnresolved([])
+      return
+    }
+    var unresolved = Set(recordIDs)
     for ids in Dictionary(grouping: recordIDs, by: \.zoneID).values {
       try requireAuthorized(ids, values: values)
-      let result = try await database.modifyRecords(
-        saving: [], deleting: ids,
-        savePolicy: .ifServerRecordUnchanged, atomically: false
-      )
-      guard result.saveResults.isEmpty,
-        Set(result.deleteResults.keys) == Set(ids),
-        ids.allSatisfy({ id in
-          if case .success? = result.deleteResults[id] { return true }
-          return false
-        })
-      else {
+      do {
+        let result = try await database.modifyRecords(
+          saving: [], deleting: ids,
+          savePolicy: .ifServerRecordUnchanged, atomically: false
+        )
+        guard result.saveResults.isEmpty else {
+          try await ledger.retainUnresolved(recordIDs)
+          throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+        }
+        for id in ids {
+          switch result.deleteResults[id] {
+          case .success?: unresolved.remove(id)
+          case .failure(let error)?:
+            if isUnknownItem(error) { unresolved.remove(id) }
+          case nil: break
+          }
+        }
+      } catch {
+        try await ledger.retainUnresolved(recordIDs)
         throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
       }
     }
-    let fetched = try await database.fetch(withRecordIDs: recordIDs)
-    guard Set(fetched.keys) == Set(recordIDs),
-      recordIDs.allSatisfy({ id in
-        guard case .failure(let error)? = fetched[id],
-          let cloudError = error as? CKError
-        else { return false }
-        return cloudError.code == .unknownItem
-      })
-    else {
+    try requireAuthorized(recordIDs, values: values)
+    let fetched: [CKRecord.ID: Result<CKRecord, any Error>]
+    do {
+      fetched = try await database.fetch(withRecordIDs: recordIDs)
+    } catch {
+      // A delete response is not absence proof. If verification is lost, the
+      // complete exact attempt remains retryable; already-absent deletes are
+      // harmless on the next pass.
+      try await ledger.retainUnresolved(recordIDs)
       throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
     }
+    for id in recordIDs {
+      if case .failure(let error)? = fetched[id], isUnknownItem(error) {
+        unresolved.remove(id)
+      } else {
+        unresolved.insert(id)
+      }
+    }
+    let orderedUnresolved = recordIDs.filter { unresolved.contains($0) }
+    try await ledger.retainUnresolved(orderedUnresolved)
+    guard unresolved.isEmpty else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+    }
+  }
+
+  private static func isUnknownItem(_ error: any Error) -> Bool {
+    (error as? CKError)?.code == .unknownItem
   }
 }
 
@@ -524,7 +554,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       )
         == .invalid(.rolePhaseMismatch)
     )
-    environment[SecretSyncLiveCloudKitProofConfiguration.phaseKey] = "verify"
+    environment = completeEnvironment(role: "B", phase: "verify")
     if case .configured(let values) =
       SecretSyncLiveCloudKitProofConfiguration.load(
         environment: environment, runtimePlatform: .iPhone
@@ -633,8 +663,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
-  @Test("fixed physical matrix rejects role platform and identifier substitution")
-  func fixedPhysicalMatrixAdmission() {
+  @Test("signed host launch grants reject platform substitution expiry and wrong keys")
+  func hostLaunchGrantAdmission() {
     let cases: [(
       SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
       SecretSyncLiveRuntimePlatform
@@ -652,23 +682,98 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         Issue.record("authorized matrix role must load: \(role)")
         continue
       }
-      #expect(values.matrixIdentityDigest == SecretSyncLivePhysicalMatrix.digest(for: role))
-      digests.insert(values.matrixIdentityDigest)
+      #expect(values.launchGrant.manifest.role == role)
+      #expect(values.launchGrant.manifest.platform == platform)
+      digests.insert(values.launchGrantDigest)
       #expect(
         SecretSyncLiveCloudKitProofConfiguration.load(
           environment: environment, runtimePlatform: .unsupported
         ) == .invalid(.matrixPlatformMismatch)
       )
       var substituted = environment
-      substituted[SecretSyncLiveCloudKitProofConfiguration.expectedDeviceIdentifierKey]
-        = SecretSyncLivePhysicalMatrix.expectedIdentifier(for: role == .a ? .b : .a)
+      substituted[SecretSyncLiveCloudKitProofConfiguration.roleKey]
+        = role == .a ? "B" : "A"
       #expect(
         SecretSyncLiveCloudKitProofConfiguration.load(
-          environment: substituted, runtimePlatform: platform
-        ) == .invalid(.matrixIdentityMismatch)
+          environment: substituted,
+          runtimePlatform: role == .a ? .iPhone : .mac
+        ) == .invalid(.hostLaunchGrantBindingMismatch)
       )
     }
     #expect(digests.count == 3)
+
+    var wrongKey = completeEnvironment(role: "A", phase: "credential")
+    wrongKey[SecretSyncLiveCloudKitProofConfiguration.hostAuthorityPublicKeyKey]
+      = hostAuthority(seed: 2).publicKey.x963Representation.base64EncodedString()
+    #expect(
+      SecretSyncLiveCloudKitProofConfiguration.load(
+        environment: wrongKey, runtimePlatform: .mac
+      ) == .invalid(.hostLaunchGrantSignatureInvalid)
+    )
+    let expired = completeEnvironment(
+      role: "A", phase: "credential", expiresAtUnixSeconds: 100
+    )
+    #expect(
+      SecretSyncLiveCloudKitProofConfiguration.load(
+        environment: expired, runtimePlatform: .mac,
+        now: Date(timeIntervalSince1970: 101)
+      ) == .invalid(.hostLaunchGrantExpired)
+    )
+  }
+
+  @Test("launch grant ledger rejects nonce replay and wrong credential binding")
+  func launchGrantReplayAndCredentialBinding() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-grant-ledger-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
+    let ledger = try SecretSyncLiveCleanupLedger(
+      url: directory.appendingPathComponent("ledger.json"), namespace: namespace
+    )
+    let nonce = UUID()
+    let credentialEnvironment = completeEnvironment(
+      role: "A", phase: "credential", nonce: nonce,
+      expiresAtUnixSeconds: 4_000_000_000
+    )
+    let credentialValues = try #require(configured(
+      credentialEnvironment, runtimePlatform: .mac
+    ))
+    try await ledger.admitLaunchGrant(values: credentialValues)
+
+    let replayEnvironment = completeEnvironment(
+      role: "A", phase: "credential", nonce: nonce,
+      expiresAtUnixSeconds: 4_000_000_001
+    )
+    let replayValues = try #require(configured(
+      replayEnvironment, runtimePlatform: .mac
+    ))
+    await #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.launchGrantReplay) {
+      try await ledger.admitLaunchGrant(values: replayValues)
+    }
+
+    let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
+    try await ledger.storeCredentialForCleanup(credential, role: .a)
+    #expect(try await ledger.credentialIDForCleanup(role: .a) == credential.credentialID)
+    let wrongBinding = try #require(configured(
+      completeEnvironment(
+        role: "A", phase: "stage",
+        credentialBindingDigest: Data(repeating: 0xFE, count: 32)
+      ), runtimePlatform: .mac
+    ))
+    await #expect(
+      throws: SecretSyncLiveCloudKitProofConfigurationError.launchGrantCredentialMismatch
+    ) {
+      try await ledger.admitLaunchGrant(values: wrongBinding)
+    }
+    let correctBinding = try #require(configured(
+      completeEnvironment(
+        role: "A", phase: "stage",
+        credentialBindingDigest: SecretSyncLiveCredentialBinding.digest(credential)
+      ), runtimePlatform: .mac
+    ))
+    try await ledger.admitLaunchGrant(values: correctBinding)
+    try await ledger.markCredentialRemoved(role: .a)
+    #expect(try await ledger.credentialIDForCleanup(role: .a) == nil)
   }
 
   @Test("zone admission requires both exact pre-existing canonical zones")
@@ -730,12 +835,21 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       values: values
     )
     #expect(Set(exact) == Set([artifactID, payloadID, headID]))
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-cleanup-ledger-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let ledger = try SecretSyncLiveCleanupLedger(
+      url: directory.appendingPathComponent("ledger.json"),
+      namespace: values.runNamespace
+    )
+    _ = try await ledger.prepareCleanup(including: exact)
     let database = SecretSyncLiveArtifactDatabaseFake()
     await database.seed(recordIDs: exact)
     try await SecretSyncLiveCleanupPlan.deleteAndVerify(
-      exact, values: values, database: database
+      exact, values: values, database: database, ledger: ledger
     )
     #expect(await database.deletedRecordIDs == Set(exact))
+    #expect(try await ledger.exactRecordIDs().isEmpty)
 
     for zoneName in [CKRecordZone.default().zoneID.zoneName, "preseeded-foreign-zone"] {
       let corrupted = [
@@ -749,6 +863,76 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       }
     }
     #expect(await database.deleteInvocationCount == 2)
+  }
+
+  @Test("cleanup retries only unresolved exact IDs after partial and verification loss")
+  func cleanupRetrySemantics() async throws {
+    let values = try #require(configured(
+      completeEnvironment(role: "A", phase: "cleanup"), runtimePlatform: .mac
+    ))
+    let control = CKRecord.ID(
+      recordName: "control", zoneID: values.controlZoneID
+    )
+    let payload = CKRecord.ID(
+      recordName: "payload", zoneID: values.payloadZoneID
+    )
+    let alreadyAbsent = CKRecord.ID(
+      recordName: "already-absent", zoneID: values.payloadZoneID
+    )
+    let exact = [control, payload, alreadyAbsent]
+
+    let partialDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-partial-cleanup-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: partialDirectory) }
+    let partialLedger = try SecretSyncLiveCleanupLedger(
+      url: partialDirectory.appendingPathComponent("ledger.json"),
+      namespace: values.runNamespace
+    )
+    let partialDatabase = SecretSyncLiveArtifactDatabaseFake()
+    await partialDatabase.seed(recordIDs: [control, payload])
+    await partialDatabase.setDeleteFailures([payload])
+    let firstAttempt = try await partialLedger.prepareCleanup(including: exact)
+    await #expect(
+      throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+    ) {
+      try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+        firstAttempt, values: values, database: partialDatabase,
+        ledger: partialLedger
+      )
+    }
+    #expect(try await partialLedger.exactRecordIDs() == [payload])
+    await partialDatabase.setDeleteFailures([])
+    let retry = try await partialLedger.prepareCleanup(including: exact)
+    #expect(retry == [payload])
+    try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+      retry, values: values, database: partialDatabase, ledger: partialLedger
+    )
+    #expect(try await partialLedger.exactRecordIDs().isEmpty)
+
+    let lossDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-verification-loss-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: lossDirectory) }
+    let lossLedger = try SecretSyncLiveCleanupLedger(
+      url: lossDirectory.appendingPathComponent("ledger.json"),
+      namespace: values.runNamespace
+    )
+    let lossDatabase = SecretSyncLiveArtifactDatabaseFake()
+    await lossDatabase.seed(recordIDs: [control, payload])
+    await lossDatabase.failNextAbsenceVerification()
+    let lossAttempt = try await lossLedger.prepareCleanup(including: [control, payload])
+    await #expect(
+      throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+    ) {
+      try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+        lossAttempt, values: values, database: lossDatabase, ledger: lossLedger
+      )
+    }
+    #expect(Set(try await lossLedger.exactRecordIDs()) == Set([control, payload]))
+    let lossRetry = try await lossLedger.prepareCleanup(including: [control, payload])
+    try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+      lossRetry, values: values, database: lossDatabase, ledger: lossLedger
+    )
+    #expect(try await lossLedger.exactRecordIDs().isEmpty)
   }
 
   @Test("production recovery staging reports exact break-glass and rotation outcomes")
@@ -806,7 +990,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(
       try SecretSyncLiveAttestation.verify(
         fixture.evidence, namespace: fixture.namespace, role: .a,
-        expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
+        expectedLaunchGrantDigest: fixture.launchGrantDigest,
         credentialRecordName: fixture.credentialRecordName,
         verifierRecordName: fixture.verifierRecordName,
         agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -816,7 +1000,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       #expect(
         try !SecretSyncLiveAttestation.verify(
           fixture.mutated(mutation), namespace: fixture.namespace, role: .a,
-          expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
+          expectedLaunchGrantDigest: fixture.launchGrantDigest,
           credentialRecordName: fixture.credentialRecordName,
           verifierRecordName: fixture.verifierRecordName,
           agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -826,7 +1010,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(
       try !SecretSyncLiveAttestation.verify(
         fixture.evidence, namespace: fixture.namespace, role: .a,
-        expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
+          expectedLaunchGrantDigest: fixture.launchGrantDigest,
         credentialRecordName: fixture.credentialRecordName + "-tampered",
         verifierRecordName: fixture.verifierRecordName,
         agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -835,7 +1019,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(
       try !SecretSyncLiveAttestation.verify(
         fixture.evidence, namespace: fixture.namespace, role: .a,
-        expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
+        expectedLaunchGrantDigest: fixture.launchGrantDigest,
         credentialRecordName: fixture.credentialRecordName,
         verifierRecordName: fixture.verifierRecordName + "-tampered",
         agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -843,21 +1027,65 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     )
   }
 
-  private func completeEnvironment(role: String, phase: String) -> [String: String] {
-    [
+  private func completeEnvironment(
+    role: String,
+    phase: String,
+    nonce: UUID = UUID(),
+    authoritySeed: UInt8 = 1,
+    credentialBindingDigest: Data? = nil,
+    expiresAtUnixSeconds: Int64 = 4_000_000_000
+  ) -> [String: String] {
+    let parsedRole = SecretSyncLiveCloudKitProofConfiguration.DeviceRole(rawValue: role) ?? .a
+    let parsedPhase = SecretSyncLiveCloudKitProofConfiguration.Phase(rawValue: phase) ?? .credential
+    let binding = parsedPhase == .credential
+      ? nil
+      : credentialBindingDigest ?? Data(repeating: parsedRole == .a ? 0xA1 : 0xB1, count: 32)
+    let manifest = SecretSyncLiveHostLaunchGrant.Manifest(
+      version: 1,
+      runNamespace: "u7-00112233-4455-6677-8899-aabbccddeeff",
+      role: parsedRole, phase: parsedPhase,
+      platform: SecretSyncLivePlatformMatrix.expectedPlatform(for: parsedRole),
+      nonce: nonce, expiresAtUnixSeconds: expiresAtUnixSeconds,
+      credentialBindingDigest: binding
+    )
+    let authority = hostAuthority(seed: authoritySeed)
+    let body = try! SecretSyncLiveHostLaunchGrantVerifier.canonicalManifestBytes(manifest)
+    let signature = try! authority.signature(for: body).derRepresentation
+    let grant = SecretSyncLiveHostLaunchGrant(
+      manifest: manifest, signature: signature
+    )
+    let grantBytes = try! JSONEncoder().encode(grant)
+    return [
       SecretSyncLiveCloudKitProofConfiguration.optInKey: "1",
-      SecretSyncLiveCloudKitProofConfiguration.attestationKey: "AUTHORIZED_U7_FIXED_MATRIX",
+      SecretSyncLiveCloudKitProofConfiguration.attestationKey:
+        "AUTHORIZED_U7_HOST_LAUNCH_GRANT",
       SecretSyncLiveCloudKitProofConfiguration.namespaceKey:
         "u7-00112233-4455-6677-8899-aabbccddeeff",
       SecretSyncLiveCloudKitProofConfiguration.roleKey: role,
       SecretSyncLiveCloudKitProofConfiguration.phaseKey: phase,
       SecretSyncLiveCloudKitProofConfiguration.ledgerPathKey:
         "/tmp/u7-live-proof-ledger.json",
-      SecretSyncLiveCloudKitProofConfiguration.expectedDeviceIdentifierKey:
-        SecretSyncLivePhysicalMatrix.expectedIdentifier(
-          for: SecretSyncLiveCloudKitProofConfiguration.DeviceRole(rawValue: role) ?? .a
-        ),
+      SecretSyncLiveCloudKitProofConfiguration.hostAuthorityPublicKeyKey:
+        authority.publicKey.x963Representation.base64EncodedString(),
+      SecretSyncLiveCloudKitProofConfiguration.hostLaunchGrantKey:
+        grantBytes.base64EncodedString(),
     ]
+  }
+
+  private func hostAuthority(seed: UInt8) -> P256.Signing.PrivateKey {
+    var raw = Data(repeating: 0, count: 32)
+    raw[31] = seed
+    return try! P256.Signing.PrivateKey(rawRepresentation: raw)
+  }
+
+  private func configured(
+    _ environment: [String: String],
+    runtimePlatform: SecretSyncLiveRuntimePlatform
+  ) -> SecretSyncLiveCloudKitProofConfiguration.Values? {
+    guard case .configured(let values) = SecretSyncLiveCloudKitProofConfiguration.load(
+      environment: environment, runtimePlatform: runtimePlatform
+    ) else { return nil }
+    return values
   }
 }
 
@@ -876,6 +1104,7 @@ struct SecretSyncLiveCloudKitProofTests {
     let ledger = try SecretSyncLiveCleanupLedger(
       url: values.ledgerURL, namespace: values.runNamespace
     )
+    try await ledger.admitLaunchGrant(values: values)
     try await requirePreexistingZones(values)
     switch values.phase {
     case .credential: try await proveHardwareCustody(values, ledger: ledger)
@@ -921,6 +1150,9 @@ struct SecretSyncLiveCloudKitProofTests {
     )
     try await ledger.admitDevice(
       role: values.deviceRole, evidenceID: evidence.evidenceID
+    )
+    try await ledger.storeCredentialForCleanup(
+      evidence.credential, role: values.deviceRole
     )
     try await complete(.hardwareCustody, values: values, ledger: ledger)
   }
@@ -986,7 +1218,7 @@ struct SecretSyncLiveCloudKitProofTests {
     let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
     let body = try SecretSyncLiveAttestation.canonicalBody(
       namespace: values.runNamespace, role: values.deviceRole,
-      matrixIdentityDigest: values.matrixIdentityDigest,
+      launchGrantDigest: values.launchGrantDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName, credential: credential,
       transcript: transcriptValue,
@@ -1015,7 +1247,7 @@ struct SecretSyncLiveCloudKitProofTests {
       attestationProof.proofBytes, publicKey: generation.signingPublicKey
     ) else { throw SecretSyncCustodyError.invalidProof }
     return SecretSyncLiveCredentialEvidence(
-      matrixIdentityDigest: values.matrixIdentityDigest,
+      launchGrantDigest: values.launchGrantDigest,
       credential: credential,
       signingHandleID: generation.signingHandle.rawValue,
       agreementHandleID: generation.agreementHandle.rawValue,
@@ -1315,44 +1547,36 @@ struct SecretSyncLiveCloudKitProofTests {
     _ values: SecretSyncLiveCloudKitProofConfiguration.Values,
     ledger: SecretSyncLiveCleanupLedger
   ) async throws {
-    let credential = try await loadArtifact(
-      SecretSyncLiveCredentialEvidence.self, kind: "credential",
-      role: values.deviceRole, values: values
-    )
     if values.deviceRole == .a {
       try await requirePhase(.audit, role: .a, values: values)
       try await requirePhase(.cleanup, role: .b, values: values)
       try await requirePhase(.cleanup, role: .c, values: values)
     }
-    try await SecretSyncSecureEnclaveCustody().removeCredentialForPhysicalProof(
-      credential.credential.credentialID
-    )
+    if let credentialID = try await ledger.credentialIDForCleanup(
+      role: values.deviceRole
+    ) {
+      try await SecretSyncSecureEnclaveCustody().removeCredentialForPhysicalProof(
+        credentialID
+      )
+      try await ledger.markCredentialRemoved(role: values.deviceRole)
+    }
     guard values.deviceRole == .a else {
       try await complete(
         .cleanup, relation: .none, values: values, ledger: ledger
       )
       return
     }
-    let manifest = try await loadArtifact(
-      [SecretSyncLiveRecordReference].self, kind: "manifest", role: .a,
-      values: values
+    let expected = try proofArtifactIDs(values: values) + [
+      SecretSyncHeadCAS.recordID(for: try scopeID(values))
+    ]
+    let exactIDs = try await ledger.prepareCleanup(
+      including: expected
     )
-    let exactIDs = try SecretSyncLiveCleanupPlan.authorizedRecordIDs(
-      manifest: manifest,
-      artifactIDs: try proofArtifactIDs(values: values),
-      headID: SecretSyncHeadCAS.recordID(for: try scopeID(values)),
-      values: values
-    )
+    try SecretSyncLiveCleanupPlan.requireAuthorized(exactIDs, values: values)
     let database = CKContainer(identifier: values.containerIdentifier).privateCloudDatabase
-    do {
-      try await SecretSyncLiveCleanupPlan.deleteAndVerify(
-        exactIDs, values: values, database: database
-      )
-    } catch {
-      try await ledger.retainUnresolved(exactIDs)
-      throw error
-    }
-    try await ledger.retainUnresolved([])
+    try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+      exactIDs, values: values, database: database, ledger: ledger
+    )
     try await ledger.complete(
       phase: .cleanup, role: .a,
       evidence: SecretSyncLiveEvidence(
@@ -1405,7 +1629,7 @@ struct SecretSyncLiveCloudKitProofTests {
         == cas.first(where: { $0.outcome == .advanced })?.serverHeadDigest
     else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
     var evidenceIDs = Set<String>()
-    var matrixDigests = Set<Data>()
+    var launchGrantDigests = Set<Data>()
     for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
       let credential = try await loadArtifact(
         SecretSyncLiveCredentialEvidence.self, kind: "credential", role: role,
@@ -1419,12 +1643,12 @@ struct SecretSyncLiveCloudKitProofTests {
         kind: "agreement-verifier", role: role, values: values
       )
       guard evidenceIDs.insert(credential.evidenceID).inserted,
-        matrixDigests.insert(credential.matrixIdentityDigest).inserted,
+        launchGrantDigests.insert(credential.launchGrantDigest).inserted,
         try P256.KeyAgreement.PrivateKey(rawRepresentation: verifierPrivateKey)
           .publicKey.x963Representation == verifierPublic.publicKey,
         try SecretSyncLiveAttestation.verify(
           credential, namespace: values.runNamespace, role: role,
-          expectedMatrixIdentityDigest: SecretSyncLivePhysicalMatrix.digest(for: role),
+          expectedLaunchGrantDigest: credential.launchGrantDigest,
           credentialRecordName: try artifactRecordID(
             kind: "credential", role: role, values: values
           ).recordName,
@@ -1443,7 +1667,7 @@ struct SecretSyncLiveCloudKitProofTests {
         throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
       }
     }
-    guard matrixDigests.count == 3 else {
+    guard launchGrantDigests.count == 3 else {
       throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
     }
     let floor = try await ledger.protectedCommitment()
@@ -1764,11 +1988,11 @@ private extension Sequence {
 }
 
 private struct SecretSyncLiveAttestationFixture {
-  enum Mutation: CaseIterable { case matrixIdentity, signingChallenge, signingProof, agreementChallenge
+  enum Mutation: CaseIterable { case launchGrant, signingChallenge, signingProof, agreementChallenge
     case agreementProof, attestationChallenge, attestationProof }
 
   let namespace: String
-  let matrixIdentityDigest: Data
+  let launchGrantDigest: Data
   let credentialRecordName: String
   let verifierRecordName: String
   let verifier: P256.KeyAgreement.PrivateKey
@@ -1776,7 +2000,7 @@ private struct SecretSyncLiveAttestationFixture {
 
   static func make() throws -> SecretSyncLiveAttestationFixture {
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
-    let matrixIdentityDigest = SecretSyncLivePhysicalMatrix.digest(for: .a)
+    let launchGrantDigest = Data(SHA256.hash(data: Data("host-grant-A".utf8)))
     let credentialRecordName = "\(namespace)-credential-A"
     let verifierRecordName = "\(namespace)-agreement-verifier-A"
     let signing = P256.Signing.PrivateKey()
@@ -1830,7 +2054,7 @@ private struct SecretSyncLiveAttestationFixture {
     let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
     let body = try SecretSyncLiveAttestation.canonicalBody(
       namespace: namespace, role: .a,
-      matrixIdentityDigest: matrixIdentityDigest,
+      launchGrantDigest: launchGrantDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName,
       credential: credential, transcript: transcriptValue,
@@ -1849,7 +2073,7 @@ private struct SecretSyncLiveAttestationFixture {
       canonicalBytes: attestationChallenge.canonicalBytes, using: signing
     )
     let evidence = SecretSyncLiveCredentialEvidence(
-      matrixIdentityDigest: matrixIdentityDigest,
+      launchGrantDigest: launchGrantDigest,
       credential: credential, signingHandleID: U7UUID.byte(0xA8),
       agreementHandleID: U7UUID.byte(0xA9), possessionTranscript: transcriptValue,
       signingChallenge: signingChallenge.canonicalBytes, signingProof: signingProof,
@@ -1863,7 +2087,7 @@ private struct SecretSyncLiveAttestationFixture {
       )
     )
     return SecretSyncLiveAttestationFixture(
-      namespace: namespace, matrixIdentityDigest: matrixIdentityDigest,
+      namespace: namespace, launchGrantDigest: launchGrantDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName,
       verifier: verifier, evidence: evidence
@@ -1877,8 +2101,8 @@ private struct SecretSyncLiveAttestationFixture {
       return bytes
     }
     return SecretSyncLiveCredentialEvidence(
-      matrixIdentityDigest: mutation == .matrixIdentity
-        ? changed(evidence.matrixIdentityDigest) : evidence.matrixIdentityDigest,
+      launchGrantDigest: mutation == .launchGrant
+        ? changed(evidence.launchGrantDigest) : evidence.launchGrantDigest,
       credential: evidence.credential,
       signingHandleID: evidence.signingHandleID,
       agreementHandleID: evidence.agreementHandleID,
@@ -1931,10 +2155,20 @@ private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
   private(set) var deletedRecordIDs = Set<CKRecord.ID>()
   private(set) var fetchInvocationCount = 0
   private var forceNetworkFailure = false
+  private var deleteFailures = Set<CKRecord.ID>()
+  private var failNextVerification = false
   private var records: [CKRecord.ID: CKRecord] = [:]
 
   func setNetworkFailure(_ value: Bool) {
     forceNetworkFailure = value
+  }
+
+  func setDeleteFailures(_ recordIDs: Set<CKRecord.ID>) {
+    deleteFailures = recordIDs
+  }
+
+  func failNextAbsenceVerification() {
+    failNextVerification = true
   }
 
   func seed(recordIDs: [CKRecord.ID]) {
@@ -1963,7 +2197,9 @@ private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
     if !ids.isEmpty { deleteInvocationCount += 1 }
     var deletes: [CKRecord.ID: Result<Void, any Error>] = [:]
     for id in ids {
-      if records.removeValue(forKey: id) != nil {
+      if deleteFailures.contains(id) {
+        deletes[id] = .failure(CKError(.serverRejectedRequest))
+      } else if records.removeValue(forKey: id) != nil {
         deletedRecordIDs.insert(id)
         deletes[id] = .success(())
       } else {
@@ -1978,6 +2214,10 @@ private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
   ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
     fetchInvocationCount += 1
     if forceNetworkFailure { throw CKError(.networkFailure) }
+    if failNextVerification {
+      failNextVerification = false
+      throw CKError(.networkUnavailable)
+    }
     return Dictionary(uniqueKeysWithValues: ids.map { id -> (
       CKRecord.ID, Result<CKRecord, any Error>
     ) in
