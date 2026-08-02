@@ -1063,6 +1063,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(source.contains("U7_PACKAGE_DIR"))
     #expect(source.contains("ConvergenceKit-Package"))
     #expect(source.contains("-xctestrun"))
+    #expect(source.contains("GENERATE_INFOPLIST_FILE=NO"))
+    #expect(source.contains("INFOPLIST_FILE="))
+    #expect(!source.contains("INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="))
     #expect(!source.contains("-project"))
     #expect(!source.contains("-workspace"))
   }
@@ -2963,6 +2966,73 @@ def write_plist(value, path):
     with open(path, "wb") as handle:
         plistlib.dump(value, handle, fmt=plistlib.FMT_BINARY, sort_keys=True)
 
+def read_build_authority():
+    generate = [value for value in sys.argv if value == "GENERATE_INFOPLIST_FILE=NO"]
+    plist_arguments = [value for value in sys.argv if value.startswith("INFOPLIST_FILE=")]
+    legacy = [value for value in sys.argv if value.startswith(
+        "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="
+    )]
+    if len(generate) != 1 or len(plist_arguments) != 1 or legacy:
+        sys.exit(44)
+    raw_path = plist_arguments[0].split("=", 1)[1]
+    path = pathlib.Path(raw_path)
+    run_root = pathlib.Path(os.environ["U7_RUN_DIR"])
+    if (not raw_path or not path.is_absolute()
+            or os.path.normpath(raw_path) != raw_path
+            or not run_root.is_absolute()):
+        sys.exit(44)
+    try:
+        relative = path.relative_to(run_root)
+    except ValueError:
+        sys.exit(44)
+    if len(relative.parts) < 2 or not relative.parts[0].startswith("transient."):
+        sys.exit(44)
+    current = run_root
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            sys.exit(44)
+    try:
+        path_info = os.lstat(path)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        sys.exit(44)
+    try:
+        opened = os.fstat(descriptor)
+        if ((path_info.st_dev, path_info.st_ino) != (opened.st_dev, opened.st_ino)
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid() or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != 0o600):
+            sys.exit(44)
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        document = plistlib.loads(b"".join(chunks))
+    except Exception:
+        sys.exit(44)
+    finally:
+        os.close(descriptor)
+    if (not isinstance(document, dict)
+            or set(document) != {"MOOTSecretSyncHostAuthorityPublicKey"}
+            or not isinstance(document["MOOTSecretSyncHostAuthorityPublicKey"], str)
+            or not document["MOOTSecretSyncHostAuthorityPublicKey"]):
+        sys.exit(44)
+    authority = document["MOOTSecretSyncHostAuthorityPublicKey"]
+    binding = hashlib.sha256(
+        str(path).encode() + b"\0" + authority.encode()
+    ).hexdigest()
+    binding_path = log_path.with_suffix(".authority-plist-binding")
+    if binding_path.exists():
+        if binding_path.read_text() != binding:
+            sys.exit(44)
+        append_log("build-binding:shared-authority-plist")
+    else:
+        binding_path.write_text(binding)
+    return authority
+
 def make_products(derived, platform, authority, mode):
     products = derived / "Build" / "Products"
     shutil.rmtree(products, ignore_errors=True)
@@ -3033,14 +3103,7 @@ if "build-for-testing" in sys.argv:
         sys.exit(43)
     derived = arg("-derivedDataPath")
     destination = sys.argv[sys.argv.index("-destination") + 1]
-    authority_argument = next(
-        (value for value in sys.argv if value.startswith(
-            "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="
-        )), None
-    )
-    if authority_argument is None:
-        sys.exit(44)
-    authority = authority_argument.split("=", 1)[1]
+    authority = read_build_authority()
     fixture_mode = mode if mode in {
         "zero-xctestrun", "duplicate-xctestrun", "missing-target",
         "duplicate-target", "missing-anchor", "wrong-anchor",
