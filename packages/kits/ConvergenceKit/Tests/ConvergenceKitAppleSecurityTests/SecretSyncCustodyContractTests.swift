@@ -161,6 +161,33 @@ struct SecretSyncCustodyContractTests {
     #expect(resume.lowerBound < create.lowerBound)
   }
 
+  @Test("opt-in hardware proof preserves its checkpoint until strict absence")
+  func hardwareProofStrictCleanupContract() throws {
+    let source = try String(
+      contentsOf: URL(fileURLWithPath: #filePath), encoding: .utf8
+    )
+    let proofStart = try #require(
+      source.range(of: "func supportedHardwareProof()", options: .backwards)
+    )
+    let fixtureStart = try #require(
+      source.range(
+        of: "private struct SecretSyncCustodyPersistenceFixture",
+        options: .backwards
+      )
+    )
+    let proof = String(source[proofStart.lowerBound..<fixtureStart.lowerBound])
+
+    #expect(!proof.contains("try?"))
+    #expect(!proof.contains("defer {"))
+    let absence = try #require(
+      proof.range(of: "hardwareCredentialIsAbsent")
+    )
+    let checkpointClear = try #require(
+      proof.range(of: "FileManager.default.removeItem")
+    )
+    #expect(absence.lowerBound < checkpointClear.lowerBound)
+  }
+
   @Test("signing and agreement generations stay role-distinct")
   func roleDistinctHandlesAndDescriptors() async throws {
     let provider = SecretSyncTestOnlyCustodyProvider()
@@ -487,7 +514,6 @@ struct SecretSyncCustodyContractTests {
     let provider = makeSecretSyncHardwareCustodyForCLITest()
     let checkpointDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("u7-custody-checkpoint-\(UUID().uuidString)")
-    defer { try? FileManager.default.removeItem(at: checkpointDirectory) }
     let generation = try await provider.createCredential(
       for: TrustedDeviceID(UUID()),
       checkpointBeforePersistence: { generation in
@@ -496,6 +522,7 @@ struct SecretSyncCustodyContractTests {
         )
       }
     )
+    var proofError: SecretSyncCustodyError?
     do {
       // A new provider owns new LA contexts and reloads the opaque handles
       // from the Data Protection Keychain rather than retaining key objects.
@@ -554,6 +581,16 @@ struct SecretSyncCustodyContractTests {
           challengeBytes: agreement.challenge.canonicalBytes
         )
       )
+      let crossRoleProofAccepted: Bool
+      do {
+        crossRoleProofAccepted = try agreement.verifier.verify(
+          signingProof.proofBytes,
+          challenge: agreement.challenge,
+          candidatePublicKey: generation.agreementPublicKey
+        )
+      } catch {
+        crossRoleProofAccepted = false
+      }
       guard
         try SecretSyncProofOfPossession.verifySigning(
           signingProof.proofBytes,
@@ -565,11 +602,7 @@ struct SecretSyncCustodyContractTests {
           challenge: agreement.challenge,
           candidatePublicKey: generation.agreementPublicKey
         ),
-        !((try? agreement.verifier.verify(
-          signingProof.proofBytes,
-          challenge: agreement.challenge,
-          candidatePublicKey: generation.agreementPublicKey
-        )) ?? false)
+        !crossRoleProofAccepted
       else {
         throw SecretSyncCustodyError.invalidProof
       }
@@ -602,15 +635,29 @@ struct SecretSyncCustodyContractTests {
       } catch SecretSyncCustodyError.backgroundOperationDenied {
         // Expected: the denial occurs before any Keychain/private operation.
       }
-      try await reloaded.removeCredentialForPhysicalProof(
+    } catch let error as SecretSyncCustodyError {
+      proofError = error
+    } catch {
+      proofError = .cryptographicFailure
+    }
+
+    // Cleanup failure takes precedence over a proof failure. The checkpoint is
+    // cleared only after both exact Keychain roles are independently absent.
+    do {
+      try await provider.removeCredentialForPhysicalProof(
         generation.credentialID
       )
-    } catch let error as SecretSyncCustodyError {
-      try? await provider.removeCredentialForPhysicalProof(generation.credentialID)
-      throw error
+      guard try hardwareCredentialIsAbsent(generation) else {
+        throw SecretSyncCustodyError.cryptographicFailure
+      }
+      try FileManager.default.removeItem(at: checkpointDirectory)
+    } catch let cleanupError as SecretSyncCustodyError {
+      throw cleanupError
     } catch {
-      try? await provider.removeCredentialForPhysicalProof(generation.credentialID)
       throw SecretSyncCustodyError.cryptographicFailure
+    }
+    if let proofError {
+      throw proofError
     }
   }
 }
@@ -931,6 +978,27 @@ private func hardwareAttributesAreLocked(
     else {
       return false
     }
+  }
+  return true
+}
+
+private func hardwareCredentialIsAbsent(
+  _ generation: SecretSyncCustodyCredentialGeneration
+) throws -> Bool {
+  for role in [SecretSyncStoredKeyRole.signing, .agreement] {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: role.service,
+      kSecAttrAccount as String:
+        generation.credentialID.rawValue.uuidString.lowercased(),
+      kSecAttrSynchronizable as String: kCFBooleanFalse!,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    #if os(macOS)
+      query[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue
+    #endif
+    guard SecItemCopyMatching(query as CFDictionary, nil) == errSecItemNotFound
+    else { throw SecretSyncCustodyError.cryptographicFailure }
   }
   return true
 }

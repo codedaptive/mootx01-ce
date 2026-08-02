@@ -1694,6 +1694,63 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
+  @Test("every reported audit ledger fault preserves keys and retryability")
+  func auditLedgerFaultRecovery() async throws {
+    let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
+    let fixture = try SecretSyncLiveSignedArtifactFixture.make()
+    let evidence = SecretSyncLiveEvidence(
+      timestamp: Date(timeIntervalSince1970: 1_000), deviceRole: .a,
+      operation: .configuration, resultCode: .passed, headRelation: .exact,
+      productionSeam: nil, outcomeDigest: nil
+    )
+    for fault in SecretSyncLiveAuditLedgerFault.allCases {
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-audit-fault-\(fault)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let url = ledgerURL(directory: directory, namespace: namespace)
+      let ledger = try SecretSyncLiveCleanupLedger(
+        url: url, namespace: namespace
+      )
+      for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
+        try await ledger.storeAgreementVerifierPrivateKey(
+          Data(repeating: UInt8(role.rawValue.utf8.first!), count: 32),
+          role: role
+        )
+      }
+      try await ledger.stageAuditEnvelope(fixture.envelope)
+
+      await #expect(
+        throws: SecretSyncLiveCloudKitProofConfigurationError.corruptLocalLedger
+      ) {
+        try await ledger.completeAuditAndEraseVerifierKeys(
+          evidence: evidence, injecting: fault
+        )
+      }
+      let reloaded = try SecretSyncLiveCleanupLedger(
+        url: url, namespace: namespace
+      )
+      for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
+        _ = try await reloaded.agreementVerifierPrivateKey(role: role)
+      }
+      await #expect(
+        throws: SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      ) { try await reloaded.require(.audit, role: .a) }
+
+      try await reloaded.completeAuditAndEraseVerifierKeys(evidence: evidence)
+      try await reloaded.require(.audit, role: .a)
+      for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
+        await #expect(
+          throws: SecretSyncLiveCloudKitProofConfigurationError
+            .missingPrerequisitePhase
+        ) { _ = try await reloaded.agreementVerifierPrivateKey(role: role) }
+      }
+      let residualAuditSlots = try FileManager.default
+        .contentsOfDirectory(atPath: directory.path)
+        .filter { $0.contains(".audit-") }
+      #expect(residualAuditSlots.isEmpty)
+    }
+  }
+
   @Test("restart cleanup converges after zero one or two handle inserts")
   func provisionalRestartConvergence() async throws {
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
@@ -1741,6 +1798,26 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         "independently approved context must reject \(mutation)"
       )
     }
+  }
+
+  @Test("later phases accept only the exact non-nil credential binding")
+  func laterPhaseCredentialBindingIsExact() throws {
+    let accepted = try SecretSyncLiveSignedArtifactFixture.make(phase: .verify)
+    let exactBinding = SecretSyncLiveCredentialBinding.digest(
+      accepted.credential
+    )
+    #expect(accepted.grant.manifest.credentialBindingDigest == exactBinding)
+    #expect(try accepted.verify(accepted.envelope))
+    #expect(try !accepted.verify(accepted.mutated(.credentialBinding)))
+
+    let wrongGrantBinding = try SecretSyncLiveSignedArtifactFixture.make(
+      phase: .verify,
+      grantCredentialBinding: Data(repeating: 0xEE, count: 32)
+    )
+    #expect(
+      wrongGrantBinding.grant.manifest.credentialBindingDigest != exactBinding
+    )
+    #expect(try !wrongGrantBinding.verify(wrongGrantBinding.envelope))
   }
 
   private func completeEnvironment(
@@ -3618,18 +3695,28 @@ private struct SecretSyncLiveSignedArtifactFixture {
   let credential: TrustedDeviceCredential
   let envelope: SecretSyncLiveSignedArtifactEnvelope
 
-  static func make() throws -> SecretSyncLiveSignedArtifactFixture {
+  static func make(
+    phase: SecretSyncLiveCloudKitProofConfiguration.Phase = .credential,
+    grantCredentialBinding: Data? = nil
+  ) throws -> SecretSyncLiveSignedArtifactFixture {
     let authority = P256.Signing.PrivateKey()
     let credentialFixture = try SecretSyncLiveAttestationFixture.make()
     let signing = credentialFixture.signing
     let agreement = credentialFixture.agreement
+    let credential = credentialFixture.evidence.credential
     let runManifestDigest = Data(repeating: 0x61, count: 32)
     let grant = try signedGrant(
       authority: authority,
-      manifest: grantManifest(runManifestDigest: runManifestDigest)
+      manifest: grantManifest(
+        runManifestDigest: runManifestDigest,
+        phase: phase,
+        credentialBindingDigest: phase == .credential
+          ? nil
+          : grantCredentialBinding
+            ?? SecretSyncLiveCredentialBinding.digest(credential)
+      )
     )
     let grantDigest = try digest(grant, authority: authority)
-    let credential = credentialFixture.evidence.credential
     let envelope = try makeEnvelope(
       grant: grant, grantDigest: grantDigest,
       runManifestDigest: runManifestDigest,
@@ -3661,59 +3748,74 @@ private struct SecretSyncLiveSignedArtifactFixture {
 
   func mutated(_ mutation: Mutation) throws -> SecretSyncLiveSignedArtifactEnvelope {
     var manifest = grant.manifest
-    var candidateCredential = credential
     var candidateSigning = signing
     let substituted = try SecretSyncLiveAttestationFixture.make()
+    var bindingOverride: Data?
+    var credentialIDOverride: DeviceCredentialID?
+    var signingDescriptorOverride: SigningPublicKeyDescriptor?
+    var agreementDescriptorOverride: KeyAgreementPublicKeyDescriptor?
+    var grantWasMutated = false
     switch mutation {
     case .launchGrant, .nonce:
       manifest = Self.replacing(manifest, nonce: UUID())
+      grantWasMutated = true
     case .role:
       manifest = Self.replacing(manifest, role: .b)
+      grantWasMutated = true
     case .phase:
       manifest = Self.replacing(manifest, phase: .verify)
+      grantWasMutated = true
     case .runManifestDigest:
       manifest = Self.replacing(
         manifest, runManifestDigest: Data(repeating: 0x62, count: 32)
       )
+      grantWasMutated = true
     case .prerequisites:
       manifest = Self.replacing(
         manifest, prerequisites: [Data(repeating: 0x63, count: 32)]
       )
+      grantWasMutated = true
     case .credentialBinding:
-      // Credential-phase grants correctly retain nil prior binding; changing
-      // the newly enrolled credential changes the envelope's public binding.
-      candidateSigning = substituted.signing
-      candidateCredential = substituted.evidence.credential
+      bindingOverride = Data(repeating: 0x65, count: 32)
     case .credentialID:
-      candidateSigning = substituted.signing
-      candidateCredential = substituted.evidence.credential
-    case .signingDescriptor, .signingKey:
-      candidateSigning = substituted.signing
-      candidateCredential = substituted.evidence.credential
+      credentialIDOverride = DeviceCredentialID(UUID())
+    case .signingDescriptor:
+      signingDescriptorOverride = substituted.evidence.credential.signingPublicKey
     case .agreementDescriptor:
+      agreementDescriptorOverride = substituted.evidence.credential
+        .keyAgreementPublicKey
+    case .signingKey:
       candidateSigning = substituted.signing
-      candidateCredential = substituted.evidence.credential
     }
-    let candidateGrant = try Self.signedGrant(
-      authority: authority, manifest: manifest
-    )
+    let candidateGrant = grantWasMutated
+      ? try Self.signedGrant(authority: authority, manifest: manifest)
+      : grant
+    let candidateGrantDigest = grantWasMutated
+      ? try Self.digest(candidateGrant, authority: authority)
+      : grantDigest
     return try Self.makeEnvelope(
       grant: candidateGrant,
-      grantDigest: Self.digest(candidateGrant, authority: authority),
+      grantDigest: candidateGrantDigest,
       runManifestDigest: manifest.runManifestDigest,
-      credential: candidateCredential,
-      signing: candidateSigning
+      credential: credential,
+      signing: candidateSigning,
+      credentialBindingDigest: bindingOverride,
+      transcriptCredentialID: credentialIDOverride,
+      signingPublicKey: signingDescriptorOverride,
+      agreementPublicKey: agreementDescriptorOverride
     )
   }
 
   private static func grantManifest(
-    runManifestDigest: Data
+    runManifestDigest: Data,
+    phase: SecretSyncLiveCloudKitProofConfiguration.Phase,
+    credentialBindingDigest: Data?
   ) -> SecretSyncLiveHostLaunchGrant.Manifest {
     SecretSyncLiveHostLaunchGrant.Manifest(
       version: 1,
       runNamespace: "u7-00112233-4455-6677-8899-aabbccddeeff",
       role: .a,
-      phase: .credential,
+      phase: phase,
       platform: .mac,
       nonce: U7UUID.byte(0x70),
       expiresAtUnixSeconds: 4_000_000_000,
@@ -3721,7 +3823,7 @@ private struct SecretSyncLiveSignedArtifactFixture {
       expectedLedgerContentDigest: Data(repeating: 0x64, count: 32),
       prerequisiteArtifactDigests: [],
       trustedCredentialGrantDigestsByRole: [:],
-      credentialBindingDigest: nil
+      credentialBindingDigest: credentialBindingDigest
     )
   }
 
@@ -3778,7 +3880,11 @@ private struct SecretSyncLiveSignedArtifactFixture {
     grantDigest: Data,
     runManifestDigest: Data,
     credential: TrustedDeviceCredential,
-    signing: P256.Signing.PrivateKey
+    signing: P256.Signing.PrivateKey,
+    credentialBindingDigest: Data? = nil,
+    transcriptCredentialID: DeviceCredentialID? = nil,
+    signingPublicKey: SigningPublicKeyDescriptor? = nil,
+    agreementPublicKey: KeyAgreementPublicKeyDescriptor? = nil
   ) throws -> SecretSyncLiveSignedArtifactEnvelope {
     let payload = Data("approved-phase-evidence".utf8)
     let payloadDigest = Data(SHA256.hash(data: payload))
@@ -3787,6 +3893,10 @@ private struct SecretSyncLiveSignedArtifactFixture {
     let phase = grant.manifest.phase
     let kind = "phase-\(phase.rawValue)"
     let recordName = "\(namespace)-\(kind)-\(role.rawValue)"
+    let claimedSigningPublicKey = signingPublicKey
+      ?? credential.signingPublicKey
+    let claimedAgreementPublicKey = agreementPublicKey
+      ?? credential.keyAgreementPublicKey
     func transcript(_ bodyDigest: Data) throws -> SecretSyncLivePossessionTranscript {
       SecretSyncLivePossessionTranscript(
         challengeID: U7UUID.byte(0x74),
@@ -3794,9 +3904,9 @@ private struct SecretSyncLiveSignedArtifactFixture {
         issuedAt: Date(timeIntervalSince1970: 1_000),
         expiresAt: Date(timeIntervalSince1970: 2_000),
         deviceID: credential.deviceID,
-        credentialID: credential.credentialID,
-        signingPublicKey: credential.signingPublicKey,
-        agreementPublicKey: credential.keyAgreementPublicKey,
+        credentialID: transcriptCredentialID ?? credential.credentialID,
+        signingPublicKey: claimedSigningPublicKey,
+        agreementPublicKey: claimedAgreementPublicKey,
         authorityCredentialID: DeviceCredentialID(grant.manifest.nonce),
         freshnessCommitment: try SecretBootstrapFreshnessCommitment(
           scopeID: U7GoldenVectors.scopeID,
@@ -3818,9 +3928,10 @@ private struct SecretSyncLiveSignedArtifactFixture {
       launchGrantDigest: grantDigest,
       runManifestDigest: runManifestDigest,
       prerequisiteArtifactDigests: grant.manifest.prerequisiteArtifactDigests,
-      credentialBindingDigest: SecretSyncLiveCredentialBinding.digest(credential),
-      signingPublicKey: credential.signingPublicKey,
-      agreementPublicKey: credential.keyAgreementPublicKey,
+      credentialBindingDigest: credentialBindingDigest
+        ?? SecretSyncLiveCredentialBinding.digest(credential),
+      signingPublicKey: claimedSigningPublicKey,
+      agreementPublicKey: claimedAgreementPublicKey,
       payload: payload,
       payloadDigest: payloadDigest,
       signingTranscript: try transcript(Data(repeating: 0, count: 32)),

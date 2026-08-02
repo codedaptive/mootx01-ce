@@ -541,6 +541,13 @@ enum SecretSyncLiveCredentialBinding {
   }
 }
 
+enum SecretSyncLiveAuditLedgerFault: String, CaseIterable, Sendable {
+  case serialization
+  case fileSync
+  case rename
+  case directorySync
+}
+
 actor SecretSyncLiveCleanupLedger {
   struct CredentialCheckpoint: Codable, Sendable, Equatable {
     let deviceID: TrustedDeviceID
@@ -997,6 +1004,31 @@ actor SecretSyncLiveCleanupLedger {
     writeBack: Bool = true,
     _ body: (inout State) throws -> T
   ) throws -> T {
+    try withLockedDirectory { directoryDescriptor in
+      try Self.materializeCommittedAudit(
+        name: url.lastPathComponent,
+        namespace: namespace,
+        directoryDescriptor: directoryDescriptor
+      )
+      var state = try Self.loadState(
+        name: url.lastPathComponent,
+        namespace: namespace,
+        directoryDescriptor: directoryDescriptor
+      )
+      let result = try body(&state)
+      if writeBack {
+        try Self.replace(
+          try Self.encode(state), name: url.lastPathComponent,
+          directoryDescriptor: directoryDescriptor
+        )
+      }
+      return result
+    }
+  }
+
+  private func withLockedDirectory<T>(
+    _ body: (Int32) throws -> T
+  ) throws -> T {
     let directoryURL = url.deletingLastPathComponent()
     try Self.requirePrivateDirectory(directoryURL)
     let directoryDescriptor = open(
@@ -1021,36 +1053,105 @@ actor SecretSyncLiveCleanupLedger {
       _ = flock(lockDescriptor, LOCK_UN)
       close(lockDescriptor)
     }
+    return try body(directoryDescriptor)
+  }
 
-    let ledgerDescriptor = openat(
-      directoryDescriptor, url.lastPathComponent, O_RDONLY | O_NOFOLLOW
+  private static func loadState(
+    name: String,
+    namespace: String,
+    directoryDescriptor: Int32
+  ) throws -> State {
+    let descriptor = openat(
+      directoryDescriptor, name, O_RDONLY | O_NOFOLLOW
     )
-    var state: State
-    if ledgerDescriptor >= 0 {
-      defer { close(ledgerDescriptor) }
-      guard Self.requirePrivateRegularFile(ledgerDescriptor) else { throw corrupt() }
-      state = try JSONDecoder().decode(
-        State.self, from: Self.readAll(from: ledgerDescriptor)
+    if descriptor >= 0 {
+      defer { close(descriptor) }
+      guard requirePrivateRegularFile(descriptor) else { throw corrupt() }
+      let state = try JSONDecoder().decode(
+        State.self, from: readAll(from: descriptor)
       )
       guard state.namespace == namespace else {
         throw SecretSyncLiveCloudKitProofConfigurationError.ledgerNamespaceMismatch
       }
-    } else if errno == ENOENT {
-      state = Self.initialState(namespace: namespace)
-    } else {
-      throw corrupt()
+      return state
     }
+    guard errno == ENOENT else { throw corrupt() }
+    return initialState(namespace: namespace)
+  }
 
-    let result = try body(&state)
-    if writeBack {
-      let encoder = JSONEncoder()
-      encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-      try Self.replace(
-        try encoder.encode(state), name: url.lastPathComponent,
-        directoryDescriptor: directoryDescriptor
-      )
+  private static func encode(_ state: State) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return try encoder.encode(state)
+  }
+
+  private static func auditCandidateName(_ name: String) -> String {
+    ".\(name).audit-next"
+  }
+
+  private static func auditPreparedName(_ name: String) -> String {
+    ".\(name).audit-prepared"
+  }
+
+  private static func auditCommittedName(_ name: String) -> String {
+    ".\(name).audit-committed"
+  }
+
+  private static let auditJournalBytes = Data(
+    "mootx01.u7.audit-ledger-commit.v1".utf8
+  )
+
+  /// A committed marker selects the key-erased candidate. The canonical
+  /// key-bearing slot remains authoritative while only PREPARED exists.
+  private static func materializeCommittedAudit(
+    name: String,
+    namespace: String,
+    directoryDescriptor: Int32
+  ) throws {
+    let committedName = auditCommittedName(name)
+    let committedDescriptor = openat(
+      directoryDescriptor, committedName, O_RDONLY | O_NOFOLLOW
+    )
+    if committedDescriptor < 0 {
+      guard errno == ENOENT else { throw corrupt() }
+      return
     }
-    return result
+    defer { close(committedDescriptor) }
+    guard requirePrivateRegularFile(committedDescriptor),
+      try readAll(from: committedDescriptor) == auditJournalBytes
+    else { throw corrupt() }
+
+    let candidateName = auditCandidateName(name)
+    let candidateDescriptor = openat(
+      directoryDescriptor, candidateName, O_RDONLY | O_NOFOLLOW
+    )
+    guard candidateDescriptor >= 0 else { throw corrupt() }
+    defer { close(candidateDescriptor) }
+    guard requirePrivateRegularFile(candidateDescriptor) else { throw corrupt() }
+    let candidateBytes = try readAll(from: candidateDescriptor)
+    let candidate = try JSONDecoder().decode(State.self, from: candidateBytes)
+    let audit = SecretSyncLiveCloudKitProofConfiguration.Phase.audit.rawValue
+    guard candidate.namespace == namespace,
+      candidate.completedPhasesByRole[
+        SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a.rawValue,
+        default: []
+      ].contains(audit),
+      candidate.agreementVerifierPrivateKeysByRole.isEmpty
+    else { throw corrupt() }
+
+    // The committed marker and candidate remain recoverable until the
+    // canonical replacement and its directory entry are both durable.
+    try replace(
+      candidateBytes, name: name,
+      directoryDescriptor: directoryDescriptor
+    )
+    try unlinkIfPresent(committedName, directoryDescriptor: directoryDescriptor)
+    guard fsync(directoryDescriptor) == 0 else { throw corrupt() }
+    try unlinkIfPresent(candidateName, directoryDescriptor: directoryDescriptor)
+    try unlinkIfPresent(
+      auditPreparedName(name), directoryDescriptor: directoryDescriptor
+    )
+    guard fsync(directoryDescriptor) == 0 else { throw corrupt() }
   }
 
   private static func initialState(namespace: String) -> State {
@@ -1114,7 +1215,10 @@ actor SecretSyncLiveCleanupLedger {
   }
 
   private static func replace(
-    _ data: Data, name: String, directoryDescriptor: Int32
+    _ data: Data,
+    name: String,
+    directoryDescriptor: Int32,
+    failBeforeFileSync: Bool = false
   ) throws {
     let temporaryName = ".\(name).\(UUID().uuidString.lowercased()).tmp"
     let descriptor = openat(
@@ -1137,11 +1241,21 @@ actor SecretSyncLiveCleanupLedger {
         pointer = pointer.advanced(by: count)
       }
     }
-    guard fsync(descriptor) == 0,
+    guard !failBeforeFileSync,
+      fsync(descriptor) == 0,
       renameat(directoryDescriptor, temporaryName, directoryDescriptor, name) == 0,
       fsync(directoryDescriptor) == 0
     else { throw corrupt() }
     succeeded = true
+  }
+
+  private static func unlinkIfPresent(
+    _ name: String,
+    directoryDescriptor: Int32
+  ) throws {
+    if unlinkat(directoryDescriptor, name, 0) != 0, errno != ENOENT {
+      throw corrupt()
+    }
   }
 
   private static func corrupt() -> SecretSyncLiveCloudKitProofConfigurationError {
@@ -1212,29 +1326,90 @@ actor SecretSyncLiveCleanupLedger {
     try transaction(writeBack: false) { state in state.pendingAuditEnvelope }
   }
 
-  /// Atomically records audit completion/evidence and destroys the complete
-  /// verifier-key set. Any durability failure leaves the prior ledger intact.
+  /// Commits audit completion and verifier-key erasure through a two-slot
+  /// journal. Until COMMITTED is directory-durable, the prior key-bearing
+  /// canonical slot remains authoritative and a retry can safely converge.
   func completeAuditAndEraseVerifierKeys(
-    evidence: SecretSyncLiveEvidence
+    evidence: SecretSyncLiveEvidence,
+    injecting fault: SecretSyncLiveAuditLedgerFault? = nil
   ) throws {
-    try transaction { state in
+    try withLockedDirectory { directoryDescriptor in
+      let name = url.lastPathComponent
+      try Self.materializeCommittedAudit(
+        name: name, namespace: namespace,
+        directoryDescriptor: directoryDescriptor
+      )
+      var state = try Self.loadState(
+        name: name, namespace: namespace,
+        directoryDescriptor: directoryDescriptor
+      )
+      let audit = SecretSyncLiveCloudKitProofConfiguration.Phase.audit.rawValue
+      let role = SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a.rawValue
+      if state.completedPhasesByRole[role, default: []].contains(audit) {
+        guard state.agreementVerifierPrivateKeysByRole.isEmpty else {
+          throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+        }
+        return
+      }
       guard state.pendingAuditEnvelope != nil else {
         throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
       }
-      var phases = state.completedPhasesByRole[
-        SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a.rawValue,
-        default: []
-      ]
-      let audit = SecretSyncLiveCloudKitProofConfiguration.Phase.audit.rawValue
+      var phases = state.completedPhasesByRole[role, default: []]
       if !phases.contains(audit) {
         phases.append(audit)
-        state.completedPhasesByRole[
-          SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a.rawValue
-        ] = phases
+        state.completedPhasesByRole[role] = phases
         state.evidence.append(evidence)
       }
       state.agreementVerifierPrivateKeysByRole.removeAll(
         keepingCapacity: false
+      )
+
+      guard fault != .serialization else { throw Self.corrupt() }
+      let candidateBytes = try Self.encode(state)
+      let candidateName = Self.auditCandidateName(name)
+      let preparedName = Self.auditPreparedName(name)
+      let committedName = Self.auditCommittedName(name)
+
+      // An interrupted prior attempt can leave only PREPARED artifacts. They
+      // never override canonical state and are safe to replace under the lock.
+      try Self.unlinkIfPresent(preparedName, directoryDescriptor: directoryDescriptor)
+      try Self.unlinkIfPresent(candidateName, directoryDescriptor: directoryDescriptor)
+      guard fsync(directoryDescriptor) == 0 else { throw Self.corrupt() }
+      try Self.replace(
+        candidateBytes, name: candidateName,
+        directoryDescriptor: directoryDescriptor,
+        failBeforeFileSync: fault == .fileSync
+      )
+      try Self.replace(
+        Self.auditJournalBytes, name: preparedName,
+        directoryDescriptor: directoryDescriptor
+      )
+      guard fault != .rename,
+        renameat(
+          directoryDescriptor, preparedName,
+          directoryDescriptor, committedName
+        ) == 0
+      else { throw Self.corrupt() }
+
+      if fault == .directorySync || fsync(directoryDescriptor) != 0 {
+        // A failed final directory sync cannot authorize the key-erased slot.
+        // Roll the selector back before reporting the failure. If the host
+        // dies first, recovery sees either PREPARED (old state) or COMMITTED
+        // (durable candidate), both of which are deterministic and retry-safe.
+        guard renameat(
+          directoryDescriptor, committedName,
+          directoryDescriptor, preparedName
+        ) == 0,
+          fsync(directoryDescriptor) == 0
+        else { throw Self.corrupt() }
+        throw Self.corrupt()
+      }
+      // The selector is now durable, so replacing canonical cannot lose the
+      // commit. Finish by removing the prior key-bearing snapshot before the
+      // successful call returns; any interruption is recovered from COMMITTED.
+      try Self.materializeCommittedAudit(
+        name: name, namespace: namespace,
+        directoryDescriptor: directoryDescriptor
       )
     }
   }
