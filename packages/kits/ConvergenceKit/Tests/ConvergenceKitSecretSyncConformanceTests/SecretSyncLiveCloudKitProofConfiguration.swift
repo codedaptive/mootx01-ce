@@ -126,6 +126,7 @@ enum SecretSyncLiveCloudKitProofConfigurationError: Error, Sendable, Equatable {
   case unresolvedCleanupRecords
   case incompleteAudit
   case requiredZoneMissing
+  case unauthorizedArtifactZone
   case zoneMutationProhibited
 }
 

@@ -209,6 +209,9 @@ enum SecretSyncLiveImmutableArtifactStore {
     _ record: CKRecord,
     database: any CloudKitDatabaseProtocol
   ) async throws {
+    try SecretSyncLiveArtifactRecordID.requireAuthorized(
+      record.recordID, controlZoneID: SecretSyncCloudKitZones.controlZoneID
+    )
     let result = try await database.modifyRecords(
       saving: [record], deleting: [],
       savePolicy: .ifServerRecordUnchanged, atomically: true
@@ -217,6 +220,39 @@ enum SecretSyncLiveImmutableArtifactStore {
       Set(result.saveResults.keys) == [record.recordID],
       case .success? = result.saveResults[record.recordID]
     else { throw SecretSyncCloudKitError.incompleteModifyResults }
+  }
+}
+
+enum SecretSyncLiveArtifactRecordID {
+  static func make(
+    kind: String,
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    values: SecretSyncLiveCloudKitProofConfiguration.Values
+  ) throws -> CKRecord.ID {
+    let recordID = CKRecord.ID(
+      recordName: "\(values.runNamespace)-\(kind)-\(role.rawValue)",
+      zoneID: values.controlZoneID
+    )
+    try requireAuthorized(recordID, values: values)
+    return recordID
+  }
+
+  static func requireAuthorized(
+    _ recordID: CKRecord.ID,
+    values: SecretSyncLiveCloudKitProofConfiguration.Values
+  ) throws {
+    try requireAuthorized(recordID, controlZoneID: values.controlZoneID)
+  }
+
+  static func requireAuthorized(
+    _ recordID: CKRecord.ID,
+    controlZoneID: CKRecordZone.ID
+  ) throws {
+    guard recordID.zoneID == controlZoneID,
+      recordID.zoneID != CKRecordZone.default().zoneID
+    else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone
+    }
   }
 }
 
@@ -291,7 +327,10 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   @Test("proof artifacts are create-only and reject overwrite")
   func immutableArtifactSemantics() async throws {
     let database = SecretSyncLiveArtifactDatabaseFake()
-    let recordID = CKRecord.ID(recordName: "immutable-proof")
+    let recordID = CKRecord.ID(
+      recordName: "immutable-proof",
+      zoneID: SecretSyncCloudKitZones.controlZoneID
+    )
     let record = CKRecord(recordType: "U7SecretSyncProof", recordID: recordID)
     record["payload"] = Data("first".utf8) as CKRecordValue
     try await SecretSyncLiveImmutableArtifactStore.create(record, database: database)
@@ -305,6 +344,58 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
     #expect(await database.savePolicies == [.ifServerRecordUnchanged, .ifServerRecordUnchanged])
     #expect(await database.zoneMutationCount == 0)
+
+    let unauthorized = CKRecord(
+      recordType: "U7SecretSyncProof",
+      recordID: CKRecord.ID(
+        recordName: "unauthorized-default-zone",
+        zoneID: CKRecordZone.default().zoneID
+      )
+    )
+    await #expect(
+      throws: SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone
+    ) {
+      try await SecretSyncLiveImmutableArtifactStore.create(
+        unauthorized, database: database
+      )
+    }
+    #expect(await database.savePolicies.count == 2)
+  }
+
+  @Test("every proof artifact ID uses only the authorized canonical control zone")
+  func authorizedArtifactZones() throws {
+    guard case .configured(let values) =
+      SecretSyncLiveCloudKitProofConfiguration.load(
+        environment: completeEnvironment(role: "A", phase: "credential")
+      )
+    else {
+      Issue.record("complete proof configuration must load")
+      return
+    }
+    let kinds = [
+      "agreement-verifier", "credential", "phase-credential", "phase-verify",
+      "phase-backgroundDenied", "candidate", "manifest", "phase-stage", "cas",
+      "phase-conditionalHead", "phase-revoke", "phase-offline", "phase-recovery",
+      "phase-rotation", "phase-restart", "phase-audit", "phase-cleanup",
+    ]
+    for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
+      for kind in kinds {
+        let recordID = try SecretSyncLiveArtifactRecordID.make(
+          kind: kind, role: role, values: values
+        )
+        #expect(recordID.zoneID == SecretSyncCloudKitZones.controlZoneID)
+        #expect(recordID.zoneID != CKRecordZone.default().zoneID)
+      }
+    }
+    #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone) {
+      try SecretSyncLiveArtifactRecordID.requireAuthorized(
+        CKRecord.ID(
+          recordName: "unauthorized-default-zone",
+          zoneID: CKRecordZone.default().zoneID
+        ),
+        values: values
+      )
+    }
   }
 
   @Test("zone admission requires both exact pre-existing canonical zones")
@@ -505,10 +596,10 @@ struct SecretSyncLiveCloudKitProofTests {
         )
       )
     )
-    let credentialRecordName = artifactRecordID(
+    let credentialRecordName = try artifactRecordID(
       kind: "credential", role: values.deviceRole, values: values
     ).recordName
-    let verifierRecordName = artifactRecordID(
+    let verifierRecordName = try artifactRecordID(
       kind: "agreement-verifier", role: values.deviceRole, values: values
     ).recordName
     let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
@@ -884,7 +975,7 @@ struct SecretSyncLiveCloudKitProofTests {
         )
       )
     }
-    exactIDs.append(contentsOf: proofArtifactIDs(values: values))
+    exactIDs.append(contentsOf: try proofArtifactIDs(values: values))
     exactIDs = Array(Set(exactIDs))
     let database = CKContainer(identifier: values.containerIdentifier).privateCloudDatabase
     var unresolved: [CKRecord.ID] = []
@@ -924,7 +1015,7 @@ struct SecretSyncLiveCloudKitProofTests {
 
   private func proofArtifactIDs(
     values: SecretSyncLiveCloudKitProofConfiguration.Values
-  ) -> [CKRecord.ID] {
+  ) throws -> [CKRecord.ID] {
     var pairs: [(String, SecretSyncLiveCloudKitProofConfiguration.DeviceRole)] = []
     for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
       pairs.append(("agreement-verifier", role))
@@ -940,7 +1031,9 @@ struct SecretSyncLiveCloudKitProofTests {
       ("phase-rotation", .a), ("phase-restart", .a), ("phase-audit", .a),
       ("phase-cleanup", .b), ("phase-cleanup", .c),
     ]
-    return pairs.map { artifactRecordID(kind: $0.0, role: $0.1, values: values) }
+    return try pairs.map {
+      try artifactRecordID(kind: $0.0, role: $0.1, values: values)
+    }
   }
 
   private func audit(
@@ -979,10 +1072,10 @@ struct SecretSyncLiveCloudKitProofTests {
           .publicKey.x963Representation == verifierPublic.publicKey,
         try SecretSyncLiveAttestation.verify(
           credential, namespace: values.runNamespace, role: role,
-          credentialRecordName: artifactRecordID(
+          credentialRecordName: try artifactRecordID(
             kind: "credential", role: role, values: values
           ).recordName,
-          verifierRecordName: artifactRecordID(
+          verifierRecordName: try artifactRecordID(
             kind: "agreement-verifier", role: role, values: values
           ).recordName,
           agreementVerifierPrivateKey: verifierPrivateKey
@@ -1099,7 +1192,7 @@ struct SecretSyncLiveCloudKitProofTests {
     values: SecretSyncLiveCloudKitProofConfiguration.Values,
     ledger: SecretSyncLiveCleanupLedger
   ) async throws {
-    let recordID = artifactRecordID(kind: kind, role: role, values: values)
+    let recordID = try artifactRecordID(kind: kind, role: role, values: values)
     let record = CKRecord(recordType: "U7SecretSyncProof", recordID: recordID)
     record["namespace"] = values.runNamespace as CKRecordValue
     record["kind"] = kind as CKRecordValue
@@ -1119,7 +1212,7 @@ struct SecretSyncLiveCloudKitProofTests {
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
     values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) async throws -> T {
-    let recordID = artifactRecordID(kind: kind, role: role, values: values)
+    let recordID = try artifactRecordID(kind: kind, role: role, values: values)
     let results = try await CKContainer(identifier: values.containerIdentifier)
       .privateCloudDatabase.fetch(withRecordIDs: [recordID])
     guard case .success(let record)? = results[recordID],
@@ -1134,12 +1227,9 @@ struct SecretSyncLiveCloudKitProofTests {
     kind: String,
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
     values: SecretSyncLiveCloudKitProofConfiguration.Values
-  ) -> CKRecord.ID {
-    CKRecord.ID(
-      recordName: "\(values.runNamespace)-\(kind)-\(role.rawValue)",
-      // Proof records use the private default zone so this harness never
-      // mutates or assumes ownership of SecretSync's canonical zones.
-      zoneID: CKRecordZone.default().zoneID
+  ) throws -> CKRecord.ID {
+    try SecretSyncLiveArtifactRecordID.make(
+      kind: kind, role: role, values: values
     )
   }
 
