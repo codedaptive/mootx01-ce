@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme
+   LastUpgradeVersion = "2700"
+   version = "1.7">
+   <BuildAction
+      parallelizeBuildables = "YES"
+      buildImplicitDependencies = "YES">
+      <BuildActionEntries>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B20000000000000000000001"
+               BuildableName = "U7EntitledTestHost.app"
+               BlueprintName = "U7EntitledTestHost"
+               ReferencedContainer = "container:U7EntitledTestHost.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B20000000000000000000006"
+               BuildableName = "ConvergenceKitSecretSyncConformanceTests.xctest"
+               BlueprintName = "ConvergenceKitSecretSyncConformanceTests"
+               ReferencedContainer = "container:U7EntitledTestHost.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      shouldAutocreateTestPlan = "YES">
+      <Testables>
+         <TestableReference skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B20000000000000000000006"
+               BuildableName = "ConvergenceKitSecretSyncConformanceTests.xctest"
+               BlueprintName = "ConvergenceKitSecretSyncConformanceTests"
+               ReferencedContainer = "container:U7EntitledTestHost.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "B20000000000000000000001"
+            BuildableName = "U7EntitledTestHost.app"
+            BlueprintName = "U7EntitledTestHost"
+            ReferencedContainer = "container:U7EntitledTestHost.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
+   </TestAction>
+</Scheme>
