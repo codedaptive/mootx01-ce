@@ -151,6 +151,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import secrets
 import stat
 import sys
@@ -232,6 +233,216 @@ def read_regular_bytes(path, mode=None):
         return b"".join(chunks), opened
     finally:
         os.close(descriptor)
+
+def open_bound_directory(path, custody_root):
+    absolute_path = os.path.abspath(path)
+    absolute_root = os.path.abspath(custody_root)
+    if (path != absolute_path or custody_root != absolute_root
+            or os.path.normpath(path) != path
+            or os.path.realpath(custody_root) != custody_root
+            or not beneath(path, custody_root)
+            or not no_symlink_components(path, custody_root)):
+        die()
+    try:
+        path_info = os.lstat(path)
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+    except OSError:
+        die()
+    try:
+        opened = os.fstat(descriptor)
+        if ((path_info.st_dev, path_info.st_ino) != (opened.st_dev, opened.st_ino)
+                or stat.S_ISLNK(opened.st_mode)
+                or not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) & 0o077):
+            die()
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+def read_directory_entry(directory_descriptor, name):
+    try:
+        path_info = os.stat(
+            name, dir_fd=directory_descriptor, follow_symlinks=False
+        )
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_descriptor
+        )
+    except OSError:
+        die()
+    try:
+        opened = require_regular_owned(os.fstat(descriptor))
+        if ((path_info.st_dev, path_info.st_ino)
+                != (opened.st_dev, opened.st_ino)):
+            die()
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+def write_private_entry(directory_descriptor, name, data):
+    try:
+        descriptor = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=directory_descriptor
+        )
+    except OSError:
+        die()
+    try:
+        write_all(descriptor, data)
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        require_regular_owned(os.fstat(descriptor), 0o600)
+    finally:
+        os.close(descriptor)
+
+def reject_duplicate_object_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            die()
+        value[key] = item
+    return value
+
+def admit_evidence(export_directory, custody_root, expected_identifier,
+                   evidence_kind, output_directory):
+    expected_labels = {
+        "probe": ("probe",),
+        "ordinary": ("receipt",),
+        "stage": ("receipt", "inventory"),
+    }
+    logical_patterns = {
+        "probe": re.compile(
+            r"u7-ledger-probe-v1_0_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-"
+            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\.json"
+        ),
+        "receipt": re.compile(
+            r"u7-phase-receipt-v1_0_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-"
+            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\.json"
+        ),
+        "inventory": re.compile(
+            r"u7-stage-inventory-v1_0_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-"
+            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\.json"
+        ),
+    }
+    if evidence_kind not in expected_labels or not expected_identifier:
+        die()
+    export_descriptor = open_bound_directory(export_directory, custody_root)
+    output_descriptor = open_bound_directory(output_directory, custody_root)
+    try:
+        if os.listdir(output_descriptor):
+            die()
+        try:
+            manifest = json.loads(
+                read_directory_entry(export_descriptor, "manifest.json")
+                .decode("utf-8"), object_pairs_hook=reject_duplicate_object_keys
+            )
+        except Exception:
+            die()
+        if not isinstance(manifest, list) or len(manifest) != 1:
+            die()
+        group = manifest[0]
+        if (not isinstance(group, dict)
+                or not {"testIdentifier", "attachments"}.issubset(group)
+                or not set(group).issubset({
+                    "testIdentifier", "testIdentifierURL", "attachments"
+                })
+                or group["testIdentifier"] != expected_identifier
+                or not isinstance(group["testIdentifier"], str)
+                or ("testIdentifierURL" in group
+                    and not isinstance(group["testIdentifierURL"], str))
+                or not isinstance(group["attachments"], list)):
+            die()
+        required_attachment_keys = {
+            "exportedFileName", "suggestedHumanReadableName",
+            "isAssociatedWithFailure", "configurationName",
+            "deviceName", "deviceId",
+        }
+        optional_attachment_keys = {
+            "timestamp", "repetitionNumber", "arguments",
+        }
+        expected = expected_labels[evidence_kind]
+        admitted = {}
+        exported_names = set()
+        for attachment in group["attachments"]:
+            if (not isinstance(attachment, dict)
+                    or not required_attachment_keys.issubset(attachment)
+                    or not set(attachment).issubset(
+                        required_attachment_keys | optional_attachment_keys
+                    )):
+                die()
+            for key in (
+                "exportedFileName", "suggestedHumanReadableName",
+                "configurationName", "deviceName", "deviceId",
+            ):
+                if not isinstance(attachment[key], str) or not attachment[key]:
+                    die()
+            if attachment["isAssociatedWithFailure"] is not False:
+                die()
+            if ("repetitionNumber" in attachment
+                    and (not isinstance(attachment["repetitionNumber"], int)
+                         or isinstance(attachment["repetitionNumber"], bool))):
+                die()
+            if ("timestamp" in attachment
+                    and (isinstance(attachment["timestamp"], bool)
+                         or not isinstance(
+                             attachment["timestamp"], (int, float, str)
+                         ))):
+                die()
+            if ("arguments" in attachment
+                    and (not isinstance(attachment["arguments"], list)
+                         or not all(
+                             isinstance(value, str)
+                             for value in attachment["arguments"]
+                         ))):
+                die()
+            exported_name = attachment["exportedFileName"]
+            if (exported_name in (".", "..", "manifest.json")
+                    or exported_name != os.path.basename(exported_name)
+                    or os.path.normpath(exported_name) != exported_name
+                    or "/" in exported_name or "\\" in exported_name
+                    or exported_name in exported_names):
+                die()
+            exported_names.add(exported_name)
+            suggested_name = attachment["suggestedHumanReadableName"]
+            labels = [
+                label for label, pattern in logical_patterns.items()
+                if pattern.fullmatch(suggested_name)
+            ]
+            if len(labels) != 1 or labels[0] not in expected or labels[0] in admitted:
+                die()
+            admitted[labels[0]] = read_directory_entry(
+                export_descriptor, exported_name
+            )
+        if tuple(label for label in expected if label in admitted) != expected:
+            die()
+        if len(group["attachments"]) != len(expected):
+            die()
+        if set(os.listdir(export_descriptor)) != exported_names | {"manifest.json"}:
+            die()
+        output_names = {
+            "probe": "probe.json",
+            "receipt": "receipt.json",
+            "inventory": "inventory.json",
+        }
+        output_paths = []
+        for label in expected:
+            name = output_names[label]
+            write_private_entry(output_descriptor, name, admitted[label])
+            output_paths.append(os.path.join(output_directory, name))
+        os.fsync(output_descriptor)
+        return output_paths
+    finally:
+        os.close(export_descriptor)
+        os.close(output_descriptor)
 
 def read_plist(path):
     try:
@@ -556,6 +767,8 @@ elif action == "verify":
         die()
     if os.path.dirname(source) != os.path.dirname(copy):
         die()
+elif action == "admit-evidence":
+    print("\t".join(admit_evidence(*sys.argv[2:7])))
 else:
     die()
 PYTHON
@@ -755,14 +968,25 @@ attack_invocation_copy_if_requested() {
   esac
 }
 
-locate_attachment() {
+admit_evidence() {
   local directory="$1"
-  local filename="$2"
-  local matches
-  matches="$(/usr/bin/find "${directory}" -type f -name "${filename}" -print)"
-  [[ -n "${matches}" && "${matches}" != *$'\n'* ]] \
-    || fail U7_RUNNER_EVIDENCE_MISSING
-  /usr/bin/printf '%s' "${matches}"
+  local test_identifier="$2"
+  local evidence_kind="$3"
+  local output="$4"
+  local binding_file="${transient}/evidence-$RANDOM.txt"
+  mkdir "${output}"
+  chmod 700 "${output}"
+  capture_checked U7_RUNNER_EVIDENCE_MISSING "${binding_file}" \
+    /usr/bin/python3 "${plist_helper}" admit-evidence \
+      "${directory}" "${transient}" "${test_identifier}" \
+      "${evidence_kind}" "${output}"
+  IFS=$'\t' read -r admitted_primary admitted_secondary <"${binding_file}"
+  [[ -n "${admitted_primary}" ]] || fail U7_RUNNER_EVIDENCE_MISSING
+  if [[ "${evidence_kind}" == stage ]]; then
+    [[ -n "${admitted_secondary}" ]] || fail U7_RUNNER_EVIDENCE_MISSING
+  else
+    [[ -z "${admitted_secondary}" ]] || fail U7_RUNNER_EVIDENCE_MISSING
+  fi
 }
 
 create_authority_plist() {
@@ -1032,8 +1256,11 @@ recover_stage_material() {
     "${U7_XCRESULTTOOL}" export attachments --path "${result}" \
       --output-path "${output}"
   local receipt inventory
-  receipt="$(locate_attachment "${output}" 'u7-phase-receipt-v1.json')"
-  inventory="$(locate_attachment "${output}" 'u7-stage-inventory-v1.json')"
+  admit_evidence "${output}" \
+    'ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase()' \
+    stage "${output}/admitted"
+  receipt="${admitted_primary}"
+  inventory="${admitted_secondary}"
   /bin/cp "${receipt}" "${U7_RUN_DIR}/stage-receipt.json"
   /bin/cp "${inventory}" "${U7_RUN_DIR}/stage-inventory.json"
   chmod 600 "${U7_RUN_DIR}/stage-receipt.json" \
@@ -1137,11 +1364,14 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       "${U7_XCODEBUILD}" test-without-building \
         -xctestrun "${prepared_copy}" \
         -destination "${destination}" -resultBundlePath "${probe_result}" \
-        -only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/ledgerProbe
+        '-only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/ledgerProbe()'
     run_checked U7_RUNNER_PROBE_EXPORT_FAILED \
       "${U7_XCRESULTTOOL}" export attachments --path "${probe_result}" \
         --output-path "${phase_directory}/probe-attachments"
-    probe="$(locate_attachment "${phase_directory}/probe-attachments" 'u7-ledger-probe-v1.json')"
+    admit_evidence "${phase_directory}/probe-attachments" \
+      'ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/ledgerProbe()' \
+      probe "${phase_directory}/probe-admitted"
+    probe="${admitted_primary}"
     interrupt_if_requested U7_SELF_TEST_INTERRUPT_BEFORE_GRANT_INDEX "${index}"
     run_checked U7_RUNNER_GRANT_FAILED \
       "${U7_HOST_TOOL}" issue-grant --run-dir "${U7_RUN_DIR}" \
@@ -1186,7 +1416,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       "${U7_XCODEBUILD}" test-without-building \
       -xctestrun "${prepared_copy}" \
       -destination "${destination}" -resultBundlePath "${phase_result}" \
-      -only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase \
+      '-only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase()' \
       ) >"${phase_log}" 2>&1; then
       /bin/rm -rf -- "${phase_result}"
       fail U7_RUNNER_PHASE_FAILED
@@ -1196,23 +1426,13 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
   run_checked U7_RUNNER_PHASE_EXPORT_FAILED \
     "${U7_XCRESULTTOOL}" export attachments --path "${phase_result}" \
       --output-path "${phase_directory}/phase-attachments"
-  receipt_matches="$(/usr/bin/find "${phase_directory}/phase-attachments" \
-    -type f -name 'u7-phase-receipt-v1.json' -print)"
-  if [[ -z "${receipt_matches}" || "${receipt_matches}" == *$'\n'* ]]; then
-    /bin/rm -rf -- "${phase_result}"
-    fail U7_RUNNER_EVIDENCE_MISSING
-  fi
-  receipt="${receipt_matches}"
-  inventory=""
-  if [[ "${phase}" == stage ]]; then
-    inventory_matches="$(/usr/bin/find "${phase_directory}/phase-attachments" \
-      -type f -name 'u7-stage-inventory-v1.json' -print)"
-    if [[ -z "${inventory_matches}" || "${inventory_matches}" == *$'\n'* ]]; then
-      /bin/rm -rf -- "${phase_result}"
-      fail U7_RUNNER_EVIDENCE_MISSING
-    fi
-    inventory="${inventory_matches}"
-  fi
+  evidence_kind=ordinary
+  [[ "${phase}" != stage ]] || evidence_kind=stage
+  admit_evidence "${phase_directory}/phase-attachments" \
+    'ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase()' \
+    "${evidence_kind}" "${phase_directory}/phase-admitted"
+  receipt="${admitted_primary}"
+  inventory="${admitted_secondary}"
   /bin/cp "${receipt}" "${U7_RUN_DIR}/pending-receipt-${number}.json"
   chmod 600 "${U7_RUN_DIR}/pending-receipt-${number}.json"
   receipt_log="${transient}/receipt-${number}.log"
