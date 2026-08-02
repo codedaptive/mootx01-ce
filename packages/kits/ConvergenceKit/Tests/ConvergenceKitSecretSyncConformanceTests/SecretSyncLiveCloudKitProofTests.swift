@@ -373,6 +373,125 @@ enum SecretSyncLiveCleanupPlan {
   }
 }
 
+enum SecretSyncLiveCleanupMarkerStore {
+  static func publishOrValidate(
+    _ marker: SecretSyncLiveEvidence,
+    values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    database: any CloudKitDatabaseProtocol,
+    ledger: SecretSyncLiveCleanupLedger
+  ) async throws {
+    let kind = "phase-cleanup"
+    let recordID = try SecretSyncLiveArtifactRecordID.make(
+      kind: kind, role: values.deviceRole, values: values
+    )
+    let payload = try JSONEncoder().encode(marker)
+    let record = CKRecord(recordType: "U7SecretSyncProof", recordID: recordID)
+    record["namespace"] = values.runNamespace as CKRecordValue
+    record["kind"] = kind as CKRecordValue
+    record["role"] = values.deviceRole.rawValue as CKRecordValue
+    record["payload"] = payload as CKRecordValue
+    try await ledger.recordBeforeSave(recordID)
+    do {
+      try await SecretSyncLiveImmutableArtifactStore.create(
+        record, database: database
+      )
+    } catch {
+      let fetched = try await database.fetch(withRecordIDs: [recordID])
+      guard case .success(let existing)? = fetched[recordID],
+        existing["namespace"] as? String == values.runNamespace,
+        existing["kind"] as? String == kind,
+        existing["role"] as? String == values.deviceRole.rawValue,
+        let existingPayload = existing["payload"] as? Data,
+        try JSONDecoder().decode(
+          SecretSyncLiveEvidence.self, from: existingPayload
+        ) == marker
+      else { throw error }
+    }
+  }
+}
+
+/// The production cleanup entry boundary. Its ordering is the contract: A
+/// checkpoints prerequisites plus the frozen set before any deletion; retries
+/// resume that exact unresolved set without reloading CloudKit prerequisites.
+enum SecretSyncLiveCleanupEntryPoint {
+  static func requiresInitialZoneAdmission(
+    values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    ledger: SecretSyncLiveCleanupLedger
+  ) async throws -> Bool {
+    guard values.phase == .cleanup, values.deviceRole == .a else { return true }
+    return try await ledger.preparedCleanupRecordIDs() == nil
+  }
+
+  static func run(
+    values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    ledger: SecretSyncLiveCleanupLedger,
+    database: any CloudKitDatabaseProtocol,
+    expectedRecordIDs: () throws -> [CKRecord.ID],
+    verifyAPrerequisites: () async throws -> Void,
+    removeCredential: (DeviceCredentialID) async throws -> Void,
+    publishOrValidateMarker: (SecretSyncLiveEvidence) async throws -> Void
+  ) async throws {
+    guard !(try await ledger.localCleanupCompleted(role: values.deviceRole)) else {
+      return
+    }
+
+    var aRecordIDs: [CKRecord.ID] = []
+    if values.deviceRole == .a {
+      if let prepared = try await ledger.preparedCleanupRecordIDs() {
+        aRecordIDs = prepared
+      } else {
+        try await verifyAPrerequisites()
+        let expected = try expectedRecordIDs()
+        try SecretSyncLiveCleanupPlan.requireAuthorized(expected, values: values)
+        aRecordIDs = try await ledger.checkpointCleanupPrerequisites(
+          including: expected
+        )
+      }
+    }
+
+    if let credentialID = try await ledger.credentialIDForCleanup(
+      role: values.deviceRole
+    ) {
+      do {
+        try await removeCredential(credentialID)
+      } catch SecretSyncCustodyError.missingHandle {
+        // Strict deletion reports missingHandle when both role records are
+        // already absent. For cleanup retry that is the desired end state.
+      }
+      try await ledger.markCredentialRemoved(role: values.deviceRole)
+    }
+
+    let marker = try await ledger.cleanupMarker(role: values.deviceRole)
+    if values.deviceRole == .a {
+      try SecretSyncLiveCleanupPlan.requireAuthorized(aRecordIDs, values: values)
+      try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+        aRecordIDs, values: values, database: database, ledger: ledger
+      )
+    } else {
+      try await publishOrValidateMarker(marker)
+    }
+    try await ledger.checkpointLocalCleanupCompletion(
+      role: values.deviceRole, evidence: marker
+    )
+  }
+}
+
+enum SecretSyncLiveCredentialDistinctness {
+  static func require(_ evidence: [SecretSyncLiveCredentialEvidence]) throws {
+    guard evidence.count == 3,
+      Set(evidence.map(\.evidenceID)).count == 3,
+      Set(evidence.map(\.launchGrantDigest)).count == 3,
+      Set(evidence.map { $0.credential.credentialID }).count == 3,
+      Set(evidence.map { $0.credential.signingPublicKey }).count == 3,
+      Set(evidence.map { $0.credential.signingPublicKey.keyIdentifier }).count == 3,
+      Set(evidence.map { $0.credential.signingPublicKey.publicKeyBytes }).count == 3,
+      Set(evidence.map { $0.credential.keyAgreementPublicKey }).count == 3,
+      Set(evidence.map { $0.credential.keyAgreementPublicKey.keyIdentifier }).count == 3,
+      Set(evidence.map { $0.credential.keyAgreementPublicKey.publicKeyBytes }).count == 3
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
+  }
+}
+
 private struct SecretSyncLiveProtectedFloor: SecretSyncProtectedHeadProviding {
   let commitment: SecretBootstrapFreshnessCommitment
 
@@ -739,6 +858,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       credentialEnvironment, runtimePlatform: .mac
     ))
     try await ledger.admitLaunchGrant(values: credentialValues)
+    await #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.launchGrantReplay) {
+      try await ledger.admitLaunchGrant(values: credentialValues)
+    }
 
     let replayEnvironment = completeEnvironment(
       role: "A", phase: "credential", nonce: nonce,
@@ -774,6 +896,25 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     try await ledger.admitLaunchGrant(values: correctBinding)
     try await ledger.markCredentialRemoved(role: .a)
     #expect(try await ledger.credentialIDForCleanup(role: .a) == nil)
+  }
+
+  @Test("final audit rejects reused credential signing and agreement identities")
+  func finalAuditCredentialDistinctness() throws {
+    let distinct = try SecretSyncLiveDistinctnessFixtures.make()
+    try SecretSyncLiveCredentialDistinctness.require(distinct)
+    for reuse in [
+      SecretSyncLiveDistinctnessFixtures.Reuse.credentialID,
+      .signingDescriptor, .signingKeyID, .signingKeyBytes,
+      .agreementDescriptor, .agreementKeyID, .agreementKeyBytes,
+    ] {
+      var candidate = distinct
+      candidate[1] = try SecretSyncLiveDistinctnessFixtures.reusing(
+        reuse, from: distinct[0], in: distinct[1]
+      )
+      #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit) {
+        try SecretSyncLiveCredentialDistinctness.require(candidate)
+      }
+    }
   }
 
   @Test("zone admission requires both exact pre-existing canonical zones")
@@ -842,7 +983,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       url: directory.appendingPathComponent("ledger.json"),
       namespace: values.runNamespace
     )
-    _ = try await ledger.prepareCleanup(including: exact)
+    _ = try await ledger.checkpointCleanupPrerequisites(including: exact)
     let database = SecretSyncLiveArtifactDatabaseFake()
     await database.seed(recordIDs: exact)
     try await SecretSyncLiveCleanupPlan.deleteAndVerify(
@@ -891,7 +1032,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let partialDatabase = SecretSyncLiveArtifactDatabaseFake()
     await partialDatabase.seed(recordIDs: [control, payload])
     await partialDatabase.setDeleteFailures([payload])
-    let firstAttempt = try await partialLedger.prepareCleanup(including: exact)
+    let firstAttempt = try await partialLedger.checkpointCleanupPrerequisites(
+      including: exact
+    )
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
     ) {
@@ -902,7 +1045,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
     #expect(try await partialLedger.exactRecordIDs() == [payload])
     await partialDatabase.setDeleteFailures([])
-    let retry = try await partialLedger.prepareCleanup(including: exact)
+    let retry = try #require(try await partialLedger.preparedCleanupRecordIDs())
     #expect(retry == [payload])
     try await SecretSyncLiveCleanupPlan.deleteAndVerify(
       retry, values: values, database: partialDatabase, ledger: partialLedger
@@ -919,7 +1062,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let lossDatabase = SecretSyncLiveArtifactDatabaseFake()
     await lossDatabase.seed(recordIDs: [control, payload])
     await lossDatabase.failNextAbsenceVerification()
-    let lossAttempt = try await lossLedger.prepareCleanup(including: [control, payload])
+    let lossAttempt = try await lossLedger.checkpointCleanupPrerequisites(
+      including: [control, payload]
+    )
     await #expect(
       throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
     ) {
@@ -928,11 +1073,129 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       )
     }
     #expect(Set(try await lossLedger.exactRecordIDs()) == Set([control, payload]))
-    let lossRetry = try await lossLedger.prepareCleanup(including: [control, payload])
+    let lossRetry = try #require(try await lossLedger.preparedCleanupRecordIDs())
     try await SecretSyncLiveCleanupPlan.deleteAndVerify(
       lossRetry, values: values, database: lossDatabase, ledger: lossLedger
     )
     #expect(try await lossLedger.exactRecordIDs().isEmpty)
+  }
+
+  @Test("A cleanup entry retries from its frozen checkpoint without prerequisite reloads")
+  func cleanupEntryPointResumesFrozenSet() async throws {
+    let values = try #require(configured(
+      completeEnvironment(role: "A", phase: "cleanup"), runtimePlatform: .mac
+    ))
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-entry-a-cleanup-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let ledger = try SecretSyncLiveCleanupLedger(
+      url: directory.appendingPathComponent("ledger.json"),
+      namespace: values.runNamespace
+    )
+    let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
+    try await ledger.storeCredentialForCleanup(credential, role: .a)
+    let exact = [
+      CKRecord.ID(recordName: "control", zoneID: values.controlZoneID),
+      CKRecord.ID(recordName: "payload", zoneID: values.payloadZoneID),
+    ]
+    let database = SecretSyncLiveArtifactDatabaseFake()
+    await database.seed(recordIDs: exact)
+    await database.failNextAbsenceVerification()
+    let probe = SecretSyncLiveCleanupEntryProbe()
+    #expect(try await SecretSyncLiveCleanupEntryPoint.requiresInitialZoneAdmission(
+      values: values, ledger: ledger
+    ))
+
+    await #expect(
+      throws: SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+    ) {
+      try await SecretSyncLiveCleanupEntryPoint.run(
+        values: values, ledger: ledger, database: database,
+        expectedRecordIDs: { exact },
+        verifyAPrerequisites: { await probe.recordPrerequisiteVerification() },
+        removeCredential: { _ in await probe.recordCredentialRemoval() },
+        publishOrValidateMarker: { _ in Issue.record("A never publishes a marker") }
+      )
+    }
+    #expect(Set(try await ledger.frozenCleanupRecordIDs()) == Set(exact))
+    #expect(Set(try #require(try await ledger.preparedCleanupRecordIDs())) == Set(exact))
+    #expect(!(try await SecretSyncLiveCleanupEntryPoint.requiresInitialZoneAdmission(
+      values: values, ledger: ledger
+    )))
+
+    try await SecretSyncLiveCleanupEntryPoint.run(
+      values: values, ledger: ledger, database: database,
+      expectedRecordIDs: {
+        Issue.record("retry must not rebuild the frozen cleanup set")
+        return []
+      },
+      verifyAPrerequisites: {
+        Issue.record("retry must not reload CloudKit prerequisites")
+      },
+      removeCredential: { _ in
+        Issue.record("retry must not remove an already-removed credential")
+      },
+      publishOrValidateMarker: { _ in Issue.record("A never publishes a marker") }
+    )
+    #expect(await probe.prerequisiteVerificationCount == 1)
+    #expect(await probe.credentialRemovalCount == 1)
+    #expect(try await ledger.localCleanupCompleted(role: .a))
+    #expect(try await ledger.exactRecordIDs().isEmpty)
+  }
+
+  @Test("B cleanup entry accepts an absent key and validates an existing exact marker")
+  func cleanupEntryPointRetriesExistingMarker() async throws {
+    let values = try #require(configured(
+      completeEnvironment(role: "B", phase: "cleanup"), runtimePlatform: .iPhone
+    ))
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-entry-b-cleanup-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let ledger = try SecretSyncLiveCleanupLedger(
+      url: directory.appendingPathComponent("ledger.json"),
+      namespace: values.runNamespace
+    )
+    let credential = try SecretSyncLiveAttestationFixture.make().evidence.credential
+    try await ledger.storeCredentialForCleanup(credential, role: .b)
+    let database = SecretSyncLiveArtifactDatabaseFake()
+    let probe = SecretSyncLiveCleanupEntryProbe()
+
+    await #expect(throws: SecretSyncLiveArtifactFakeError.postSaveCrash) {
+      try await SecretSyncLiveCleanupEntryPoint.run(
+        values: values, ledger: ledger, database: database,
+        expectedRecordIDs: { [] }, verifyAPrerequisites: {},
+        removeCredential: { _ in
+          await probe.recordCredentialRemoval()
+          throw SecretSyncCustodyError.missingHandle
+        },
+        publishOrValidateMarker: { marker in
+          try await SecretSyncLiveCleanupMarkerStore.publishOrValidate(
+            marker, values: values, database: database, ledger: ledger
+          )
+          if await probe.shouldCrashAfterFirstMarkerSave() {
+            throw SecretSyncLiveArtifactFakeError.postSaveCrash
+          }
+        }
+      )
+    }
+    #expect(!(try await ledger.localCleanupCompleted(role: .b)))
+
+    try await SecretSyncLiveCleanupEntryPoint.run(
+      values: values, ledger: ledger, database: database,
+      expectedRecordIDs: { [] }, verifyAPrerequisites: {},
+      removeCredential: { _ in
+        Issue.record("retry must accept the already-removed local credential")
+      },
+      publishOrValidateMarker: { marker in
+        try await SecretSyncLiveCleanupMarkerStore.publishOrValidate(
+          marker, values: values, database: database, ledger: ledger
+        )
+        _ = await probe.shouldCrashAfterFirstMarkerSave()
+      }
+    )
+    #expect(await probe.credentialRemovalCount == 1)
+    #expect(await probe.markerSaveCount == 2)
+    #expect(try await ledger.localCleanupCompleted(role: .b))
   }
 
   @Test("production recovery staging reports exact break-glass and rotation outcomes")
@@ -1105,7 +1368,11 @@ struct SecretSyncLiveCloudKitProofTests {
       url: values.ledgerURL, namespace: values.runNamespace
     )
     try await ledger.admitLaunchGrant(values: values)
-    try await requirePreexistingZones(values)
+    if try await SecretSyncLiveCleanupEntryPoint.requiresInitialZoneAdmission(
+      values: values, ledger: ledger
+    ) {
+      try await requirePreexistingZones(values)
+    }
     switch values.phase {
     case .credential: try await proveHardwareCustody(values, ledger: ledger)
     case .backgroundDenied: try await proveBackgroundDenial(values, ledger: ledger)
@@ -1547,43 +1814,29 @@ struct SecretSyncLiveCloudKitProofTests {
     _ values: SecretSyncLiveCloudKitProofConfiguration.Values,
     ledger: SecretSyncLiveCleanupLedger
   ) async throws {
-    if values.deviceRole == .a {
-      try await requirePhase(.audit, role: .a, values: values)
-      try await requirePhase(.cleanup, role: .b, values: values)
-      try await requirePhase(.cleanup, role: .c, values: values)
-    }
-    if let credentialID = try await ledger.credentialIDForCleanup(
-      role: values.deviceRole
-    ) {
-      try await SecretSyncSecureEnclaveCustody().removeCredentialForPhysicalProof(
-        credentialID
-      )
-      try await ledger.markCredentialRemoved(role: values.deviceRole)
-    }
-    guard values.deviceRole == .a else {
-      try await complete(
-        .cleanup, relation: .none, values: values, ledger: ledger
-      )
-      return
-    }
-    let expected = try proofArtifactIDs(values: values) + [
-      SecretSyncHeadCAS.recordID(for: try scopeID(values))
-    ]
-    let exactIDs = try await ledger.prepareCleanup(
-      including: expected
-    )
-    try SecretSyncLiveCleanupPlan.requireAuthorized(exactIDs, values: values)
     let database = CKContainer(identifier: values.containerIdentifier).privateCloudDatabase
-    try await SecretSyncLiveCleanupPlan.deleteAndVerify(
-      exactIDs, values: values, database: database, ledger: ledger
-    )
-    try await ledger.complete(
-      phase: .cleanup, role: .a,
-      evidence: SecretSyncLiveEvidence(
-        timestamp: Date(), deviceRole: .a, operation: .cleanup,
-        resultCode: .passed, headRelation: .none,
-        productionSeam: nil, outcomeDigest: nil
-      )
+    try await SecretSyncLiveCleanupEntryPoint.run(
+      values: values, ledger: ledger, database: database,
+      expectedRecordIDs: {
+        try proofArtifactIDs(values: values) + [
+          SecretSyncHeadCAS.recordID(for: try scopeID(values))
+        ]
+      },
+      verifyAPrerequisites: {
+        try await requirePhase(.audit, role: .a, values: values)
+        try await requirePhase(.cleanup, role: .b, values: values)
+        try await requirePhase(.cleanup, role: .c, values: values)
+      },
+      removeCredential: { credentialID in
+        try await SecretSyncSecureEnclaveCustody().removeCredentialForPhysicalProof(
+          credentialID
+        )
+      },
+      publishOrValidateMarker: { marker in
+        try await SecretSyncLiveCleanupMarkerStore.publishOrValidate(
+          marker, values: values, database: database, ledger: ledger
+        )
+      }
     )
   }
 
@@ -1628,8 +1881,7 @@ struct SecretSyncLiveCloudKitProofTests {
       cas.first(where: { $0.outcome == .forkDetected })?.serverHeadDigest
         == cas.first(where: { $0.outcome == .advanced })?.serverHeadDigest
     else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
-    var evidenceIDs = Set<String>()
-    var launchGrantDigests = Set<Data>()
+    var credentialEvidence: [SecretSyncLiveCredentialEvidence] = []
     for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
       let credential = try await loadArtifact(
         SecretSyncLiveCredentialEvidence.self, kind: "credential", role: role,
@@ -1642,9 +1894,7 @@ struct SecretSyncLiveCloudKitProofTests {
         SecretSyncLiveAgreementVerifierPublic.self,
         kind: "agreement-verifier", role: role, values: values
       )
-      guard evidenceIDs.insert(credential.evidenceID).inserted,
-        launchGrantDigests.insert(credential.launchGrantDigest).inserted,
-        try P256.KeyAgreement.PrivateKey(rawRepresentation: verifierPrivateKey)
+      guard try P256.KeyAgreement.PrivateKey(rawRepresentation: verifierPrivateKey)
           .publicKey.x963Representation == verifierPublic.publicKey,
         try SecretSyncLiveAttestation.verify(
           credential, namespace: values.runNamespace, role: role,
@@ -1658,6 +1908,7 @@ struct SecretSyncLiveCloudKitProofTests {
           agreementVerifierPrivateKey: verifierPrivateKey
         )
       else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
+      credentialEvidence.append(credential)
       let proof = try await loadArtifact(
         SecretSyncLiveEvidence.self, kind: "phase-verify", role: role,
         values: values
@@ -1667,9 +1918,7 @@ struct SecretSyncLiveCloudKitProofTests {
         throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
       }
     }
-    guard launchGrantDigests.count == 3 else {
-      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
-    }
+    try SecretSyncLiveCredentialDistinctness.require(credentialEvidence)
     let floor = try await ledger.protectedCommitment()
     let offline = try await loadArtifact(
       SecretSyncLiveEvidence.self, kind: "phase-offline", role: .a,
@@ -2148,6 +2397,106 @@ private struct SecretSyncLiveAttestationFixture {
   }
 }
 
+private enum SecretSyncLiveDistinctnessFixtures {
+  enum Reuse: Equatable {
+    case credentialID
+    case signingDescriptor
+    case signingKeyID
+    case signingKeyBytes
+    case agreementDescriptor
+    case agreementKeyID
+    case agreementKeyBytes
+  }
+
+  static func make() throws -> [SecretSyncLiveCredentialEvidence] {
+    let template = try SecretSyncLiveAttestationFixture.make().evidence
+    return try (0..<3).map { index in
+      let signing = P256.Signing.PrivateKey()
+      let agreement = P256.KeyAgreement.PrivateKey()
+      let credential = try TrustedDeviceCredential(
+        deviceID: TrustedDeviceID(UUID()), credentialID: DeviceCredentialID(UUID()),
+        credentialVersion: 1, status: .active,
+        signingPublicKey: SigningPublicKeyDescriptor(
+          algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+          keyIdentifier: Data("distinct-signing-\(index)".utf8),
+          publicKeyBytes: signing.publicKey.x963Representation
+        ),
+        keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+          algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+          keyIdentifier: Data("distinct-agreement-\(index)".utf8),
+          publicKeyBytes: agreement.publicKey.x963Representation
+        ),
+        enrollmentProof: template.credential.enrollmentProof
+      )
+      return replacing(
+        template, credential: credential,
+        evidenceID: "distinct-evidence-\(index)",
+        grantDigest: Data(SHA256.hash(data: Data("distinct-grant-\(index)".utf8)))
+      )
+    }
+  }
+
+  static func reusing(
+    _ reuse: Reuse,
+    from source: SecretSyncLiveCredentialEvidence,
+    in target: SecretSyncLiveCredentialEvidence
+  ) throws -> SecretSyncLiveCredentialEvidence {
+    let signing = try SigningPublicKeyDescriptor(
+      algorithmIdentifier: target.credential.signingPublicKey.algorithmIdentifier,
+      keyIdentifier: reuse == .signingDescriptor || reuse == .signingKeyID
+        ? source.credential.signingPublicKey.keyIdentifier
+        : target.credential.signingPublicKey.keyIdentifier,
+      publicKeyBytes: reuse == .signingDescriptor || reuse == .signingKeyBytes
+        ? source.credential.signingPublicKey.publicKeyBytes
+        : target.credential.signingPublicKey.publicKeyBytes
+    )
+    let agreement = try KeyAgreementPublicKeyDescriptor(
+      algorithmIdentifier: target.credential.keyAgreementPublicKey.algorithmIdentifier,
+      keyIdentifier: reuse == .agreementDescriptor || reuse == .agreementKeyID
+        ? source.credential.keyAgreementPublicKey.keyIdentifier
+        : target.credential.keyAgreementPublicKey.keyIdentifier,
+      publicKeyBytes: reuse == .agreementDescriptor || reuse == .agreementKeyBytes
+        ? source.credential.keyAgreementPublicKey.publicKeyBytes
+        : target.credential.keyAgreementPublicKey.publicKeyBytes
+    )
+    let credential = try TrustedDeviceCredential(
+      deviceID: target.credential.deviceID,
+      credentialID: reuse == .credentialID
+        ? source.credential.credentialID : target.credential.credentialID,
+      credentialVersion: target.credential.credentialVersion,
+      status: target.credential.status,
+      signingPublicKey: signing,
+      keyAgreementPublicKey: agreement,
+      enrollmentProof: target.credential.enrollmentProof
+    )
+    return replacing(
+      target, credential: credential, evidenceID: target.evidenceID,
+      grantDigest: target.launchGrantDigest
+    )
+  }
+
+  private static func replacing(
+    _ evidence: SecretSyncLiveCredentialEvidence,
+    credential: TrustedDeviceCredential,
+    evidenceID: String,
+    grantDigest: Data
+  ) -> SecretSyncLiveCredentialEvidence {
+    SecretSyncLiveCredentialEvidence(
+      launchGrantDigest: grantDigest, credential: credential,
+      signingHandleID: evidence.signingHandleID,
+      agreementHandleID: evidence.agreementHandleID,
+      possessionTranscript: evidence.possessionTranscript,
+      signingChallenge: evidence.signingChallenge,
+      signingProof: evidence.signingProof,
+      agreementChallenge: evidence.agreementChallenge,
+      agreementProof: evidence.agreementProof,
+      attestationTranscript: evidence.attestationTranscript,
+      attestationChallenge: evidence.attestationChallenge,
+      attestationProof: evidence.attestationProof, evidenceID: evidenceID
+    )
+  }
+}
+
 private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
   private(set) var savePolicies: [CKModifyRecordsOperation.RecordSavePolicy] = []
   private(set) var zoneMutationCount = 0
@@ -2254,4 +2603,26 @@ private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
   ) { ([:], [:]) }
 }
 
-private enum SecretSyncLiveArtifactFakeError: Error { case exists }
+private actor SecretSyncLiveCleanupEntryProbe {
+  private(set) var prerequisiteVerificationCount = 0
+  private(set) var credentialRemovalCount = 0
+  private(set) var markerSaveCount = 0
+
+  func recordPrerequisiteVerification() {
+    prerequisiteVerificationCount += 1
+  }
+
+  func recordCredentialRemoval() {
+    credentialRemovalCount += 1
+  }
+
+  func shouldCrashAfterFirstMarkerSave() -> Bool {
+    markerSaveCount += 1
+    return markerSaveCount == 1
+  }
+}
+
+private enum SecretSyncLiveArtifactFakeError: Error {
+  case exists
+  case postSaveCrash
+}

@@ -329,6 +329,10 @@ actor SecretSyncLiveCleanupLedger {
     var credentialIDByRole: [String: UUID]?
     var removedCredentialRoles: Set<String>?
     var cleanupPrepared: Bool?
+    var frozenCleanupRecordNamesByZone: [String: [String]]?
+    var cleanupPrerequisitesCheckpointed: Bool?
+    var cleanupMarkersByRole: [String: SecretSyncLiveEvidence]?
+    var locallyCompletedCleanupRoles: Set<String>?
   }
 
   private let url: URL
@@ -375,9 +379,9 @@ actor SecretSyncLiveCleanupLedger {
     }
   }
 
-  /// Freezes the first exact cleanup set. Retries consume only the unresolved
-  /// remainder and cannot re-add records that a prior attempt proved absent.
-  func prepareCleanup(
+  /// Atomically records successful prerequisite verification and freezes the
+  /// first exact cleanup set before any local or CloudKit deletion begins.
+  func checkpointCleanupPrerequisites(
     including recordIDs: [CKRecord.ID]
   ) throws -> [CKRecord.ID] {
     try transaction { state in
@@ -388,8 +392,33 @@ actor SecretSyncLiveCleanupLedger {
           state.recordNamesByZone[recordID.zoneID.zoneName] = names
         }
         state.cleanupPrepared = true
+        state.cleanupPrerequisitesCheckpointed = true
+        state.frozenCleanupRecordNamesByZone = state.recordNamesByZone
       }
       return Self.recordIDs(from: state)
+    }
+  }
+
+  /// Returns the unresolved remainder only after the prerequisite+freeze
+  /// checkpoint is durable. A retry uses this without touching CloudKit first.
+  func preparedCleanupRecordIDs() throws -> [CKRecord.ID]? {
+    try transaction { state in
+      guard state.cleanupPrepared == true,
+        state.cleanupPrerequisitesCheckpointed == true,
+        state.frozenCleanupRecordNamesByZone != nil
+      else { return nil }
+      return Self.recordIDs(from: state)
+    }
+  }
+
+  func frozenCleanupRecordIDs() throws -> [CKRecord.ID] {
+    try transaction { state in
+      guard let frozen = state.frozenCleanupRecordNamesByZone else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      }
+      var copy = state
+      copy.recordNamesByZone = frozen
+      return Self.recordIDs(from: copy)
     }
   }
 
@@ -408,7 +437,7 @@ actor SecretSyncLiveCleanupLedger {
       }
       var grants = state.launchGrantDigestByNonce ?? [:]
       let nonce = values.launchGrant.manifest.nonce.uuidString.lowercased()
-      if let prior = grants[nonce], prior != values.launchGrantDigest {
+      if grants[nonce] != nil {
         throw SecretSyncLiveCloudKitProofConfigurationError.launchGrantReplay
       }
       grants[nonce] = values.launchGrantDigest
@@ -466,6 +495,52 @@ actor SecretSyncLiveCleanupLedger {
       var roles = state.removedCredentialRoles ?? []
       roles.insert(role.rawValue)
       state.removedCredentialRoles = roles
+    }
+  }
+
+  /// Persists one stable create-only cleanup marker before publication so a
+  /// post-save crash can retry by validating the exact same payload.
+  func cleanupMarker(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    now: Date = Date()
+  ) throws -> SecretSyncLiveEvidence {
+    try transaction { state in
+      var markers = state.cleanupMarkersByRole ?? [:]
+      if let existing = markers[role.rawValue] { return existing }
+      let marker = SecretSyncLiveEvidence(
+        timestamp: now, deviceRole: role, operation: .cleanup,
+        resultCode: .passed, headRelation: .none,
+        productionSeam: nil, outcomeDigest: nil
+      )
+      markers[role.rawValue] = marker
+      state.cleanupMarkersByRole = markers
+      return marker
+    }
+  }
+
+  func checkpointLocalCleanupCompletion(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    evidence: SecretSyncLiveEvidence
+  ) throws {
+    try transaction { state in
+      var completed = state.locallyCompletedCleanupRoles ?? []
+      guard !completed.contains(role.rawValue) else { return }
+      completed.insert(role.rawValue)
+      state.locallyCompletedCleanupRoles = completed
+      var phases = state.completedPhasesByRole[role.rawValue, default: []]
+      if !phases.contains(SecretSyncLiveCloudKitProofConfiguration.Phase.cleanup.rawValue) {
+        phases.append(SecretSyncLiveCloudKitProofConfiguration.Phase.cleanup.rawValue)
+      }
+      state.completedPhasesByRole[role.rawValue] = phases
+      state.evidence.append(evidence)
+    }
+  }
+
+  func localCleanupCompleted(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws -> Bool {
+    try transaction { state in
+      (state.locallyCompletedCleanupRoles ?? []).contains(role.rawValue)
     }
   }
 
@@ -548,7 +623,9 @@ actor SecretSyncLiveCleanupLedger {
         transitionOutcomeBytesByPhase: [:], hostAuthorityPublicKey: nil,
         launchGrantDigestByNonce: nil, credentialBindingDigestByRole: nil,
         credentialIDByRole: nil, removedCredentialRoles: nil,
-        cleanupPrepared: nil
+        cleanupPrepared: nil, frozenCleanupRecordNamesByZone: nil,
+        cleanupPrerequisitesCheckpointed: nil, cleanupMarkersByRole: nil,
+        locallyCompletedCleanupRoles: nil
       )
     }
     let result = try body(&state)
