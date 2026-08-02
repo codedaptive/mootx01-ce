@@ -292,10 +292,11 @@ fn file_memory_tool() -> serde_json::Value {
 fn memory_search_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_search",
-        "description": "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) — a relative-gap confidence estimate of how clearly the top result separates from the rest, with a saturation discount when the semantic lane is dark. Low discrimination on small estates is expected for broad or associative searches; prefer moot_recall_precise for precision retrieval.",
+        "description": "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "query": string_schema("Natural-language search query."),
+                "query": string_schema("Natural-language search query. Provide query OR near — exactly one."),
+                "near": string_schema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
                 "limit": integer_schema("Max results to return (default 20). Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
@@ -303,7 +304,7 @@ fn memory_search_tool() -> serde_json::Value {
                 "scoring": string_schema("Scoring mode: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
             }),
-            json!(["query"])
+            json!([])
         )))
     })
 }
@@ -329,9 +330,15 @@ fn memory_get_tool() -> serde_json::Value {
         "description": "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "id": string_schema("Memory row identifier (drawer UUID).")
+                "id": string_schema("Memory row identifier (drawer UUID). Provide id or ids."),
+                "ids": {
+                    "type": "array",
+                    "description": "Batch form: array of drawer UUIDs. With depth:subject or depth:distilled this is the one-call winnow — judge a shortlist without hauling full text. Gated/absent rows come back as 'not found: <id>' lines.",
+                    "items": { "type": "string", "description": "Memory row identifier (drawer UUID)." }
+                },
+                "depth": string_schema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid.")
             }),
-            json!(["id"])
+            json!([])
         )))
     })
 }
@@ -784,7 +791,7 @@ fn run_migration_tool() -> serde_json::Value {
 fn recall_precise_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_precise",
-        "description": "Precise recall: coarse-grab a generous candidate pool then re-rank by a named reduction composition (the ablation selector) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search including a discrimination signal. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
+        "description": "Precise recall: coarse-grab a generous candidate pool then re-rank by a named reduction composition (the ablation selector) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns dense rows in the same shape as moot_memory_search; a discrimination line appears only when the signal is low/medium. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("The search query text — drives BM25 + vector recall and the precision re-rank."),
@@ -839,10 +846,11 @@ fn recall_shaped_tool() -> serde_json::Value {
         .collect();
     json!({
         "name": "moot_recall_shaped",
-        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that produce narrower relative score gaps on small estates, so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision."),
+        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Accepts near:<uuid> instead of query to fan out from an anchor memory under the chosen preset. Returns dense rows in the same shape as moot_memory_search; a discrimination line appears only when the signal is low/medium (expected for associative/conceptual presets on small estates — switch to moot_recall_precise for precision)."),
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "query": string_schema("The search query text — drives BM25 + vector recall."),
+                "query": string_schema("The search query text — drives BM25 + vector recall. Provide query OR near — exactly one."),
+                "near": string_schema("UUID of an anchor memory — returns the memories most similar to it under the preset (the anchor itself is excluded). Alternative to query; pass exactly one of the two."),
                 "preset": {
                     "type": "string",
                     "description": "The RecallShape preset to apply (how to steer the fusion). One of the roster names. balanced (or an omitted preset) is the unsteered default. Unknown names are rejected.",
@@ -852,7 +860,7 @@ fn recall_shaped_tool() -> serde_json::Value {
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
-            json!(["query"])
+            json!([])
         )))
     })
 }

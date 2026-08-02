@@ -59,7 +59,11 @@ struct SearchRedactionTests {
             latticeAnchor: .udc("004"),
             addedBy: "aria-mcp-tests",
             embeddingModelID: "test-model-v1",
-            provenanceSensitivity: provenanceSensitivity
+            provenanceSensitivity: provenanceSensitivity,
+            // Subject = capped content: normal/elevated rows surface it in
+            // the dense row; restricted/secret rows get the redaction
+            // marker IN PLACE of it — exactly what this suite pins.
+            subject: String(content.prefix(120))
         )
         return try await kit.capture(handle, frame)
     }

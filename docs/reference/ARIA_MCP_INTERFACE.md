@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.24.0
+version: 1.25.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1154,6 +1154,18 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.25.0 -- 2026-08-02
+
+- Dense-row reply surface (PR-03): documented the five-field dense row
+  as the default hit/citation shape across the recall family, the
+  deviation-only narration contract, the `near:` anchor pivot on
+  moot_memory_search + moot_recall_shaped (query no longer
+  schema-required — exactly-one enforced at runtime), and
+  moot_memory_get `ids:`/`depth:` (subject|distilled|full). Teachme
+  guides for the recall family rewritten in both ports. Cross-port
+  byte-identical goldens: DenseRowGoldenTests.swift ↔
+  dense_row_golden.rs.
 
 ### 1.24.0 -- 2026-08-02
 

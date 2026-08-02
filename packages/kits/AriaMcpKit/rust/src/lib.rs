@@ -43,6 +43,7 @@
 pub mod build_serial;
 pub mod coaching_engine;
 pub mod dataset_tools;
+pub mod dense_row;
 pub mod dispatch;
 pub mod dispatcher;
 // monitoring_control: injection seam for daemon telemetry monitoring state.

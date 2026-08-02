@@ -401,32 +401,22 @@ fn run_vague_recall_tool(
             )
         })?;
 
-    let parent_ids: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        out.vague_hits.iter().chain(out.constituents.iter())
-            .filter(|d| seen.insert(d.parent_node_id.clone()))
-            .map(|d| d.parent_node_id.clone())
-            .collect()
-    };
-    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
-    let room = |parent: &str| -> String {
-        node_names.get(parent)
-            .map(|(w, r)| format!("{w}/{r}"))
-            .unwrap_or_else(|| if parent.is_empty() { "?".to_string() } else { parent.to_string() })
-    };
-
+    // Dense-row reply (PR-03): both the vague hits and the hydrated
+    // originals travel as dense rows — the AI winnows on subjects and
+    // pinpoints via moot_memory_get depth:distilled/full. The vague hits
+    // keep a [vague L<n>] tier marker. Mirrors Swift runVagueRecall.
     let mut lines: Vec<String> = vec![format!(
         "found {} vague summary(ies), {} hydrated original(s)",
         out.vague_hits.len(), out.constituents.len())];
     for hit in &out.vague_hits {
         lines.push(format!(
-            "{}  [{}]  [vague L{}]  {}",
-            hit.id, room(&hit.parent_node_id), hit.vague_level(), hit.content));
+            "{}  [vague L{}]",
+            crate::dense_row::render(hit), hit.vague_level()));
     }
     if !out.constituents.is_empty() {
         lines.push("originals:".to_string());
         for c in &out.constituents {
-            lines.push(format!("{}  [{}]  {}", c.id, room(&c.parent_node_id), c.content));
+            lines.push(crate::dense_row::render(c));
         }
     }
     if out.vague_hits.is_empty() {
@@ -538,15 +528,28 @@ fn run_precise_recall_tool(
     let precise_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
     let discrimination = crate::recall_discrimination::classify(&precise_scores);
 
-    // m.room is the resolved room display name, populated by from_hit
-    // using the node_names map built above.
+    // Dense-row reply (PR-03): same row shape as moot_memory_search.
+    // Drawer lookups come from the already-loaded all_drawers set.
+    // Mirrors Swift runPreciseRecall.
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
     for m in matches.iter().take(50) {
-        let preview: String = m.content.chars().take(120).collect();
-        let room = if m.room.is_empty() { "?" } else { &m.room };
-        lines.push(format!("{}  [{}]  {}", m.id, room, preview));
+        lines.push(
+            by_id.get(m.id.as_str())
+                .map(|d| crate::dense_row::render(d))
+                .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
     }
-    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    // Deviation-only narration (PR-03): line only on low/medium; the
+    // zero-result containment-gate path above keeps its explicit
+    // not_found line (that IS a deviation).
+    if matches!(
+        discrimination,
+        crate::recall_discrimination::DiscriminationLevel::Low
+            | crate::recall_discrimination::DiscriminationLevel::Medium
+    ) {
+        lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    }
     if !has_distinctive {
         // Coaching hint: query has no distinctive tokens (numbers or proper nouns),
         // so exact containment cannot be verified. Results may include near-duplicates
@@ -580,7 +583,52 @@ fn run_shaped_recall_tool(
 ) -> Result<serde_json::Value, JSONRPCError> {
     use locus_kit::filter::Filter;
     let estate = registry.resolve_direct(args)?;
-    let query = require_string(args, "query")?;
+    // Anchor pivot (PR-03): near:<uuid> as an alternative to query:, same
+    // contract as moot_memory_search — the anchor's content runs through
+    // the SAME shaped pipeline (preset/filter/limit inherited); the anchor
+    // row is excluded from the reply; a gated anchor reads as not-found
+    // (default containment gate, no grant lift — oracle-free). Mirrors
+    // Swift runShapedRecall.
+    let query_arg = optional_string(args, "query")?.map(|s| s.to_string());
+    let near_arg = optional_string(args, "near")?.map(|s| s.to_string());
+    let (query, anchor_id): (String, Option<String>) = match (query_arg, near_arg) {
+        (None, None) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "Provide either query (text search) or near (UUID of an anchor memory — \
+                 returns the memories most similar to it under the preset)."
+                    .to_string(),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "query and near are mutually exclusive — pass exactly one.".to_string(),
+            ));
+        }
+        (Some(q), None) => (q, None),
+        (None, Some(anchor)) => {
+            let coord = estate.coord.lock().unwrap();
+            let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
+                JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+            })?;
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+            let fetched = locus_estate
+                .get_drawers_matching_frame(&[anchor.clone()], &frame)
+                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
+            drop(coord);
+            let anchor_drawer = fetched
+                .admissible
+                .into_iter()
+                .find(|d| !d.content.is_empty())
+                .ok_or_else(|| JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("near: anchor memory not found: {anchor}"),
+                ))?;
+            (anchor_drawer.content, Some(anchor))
+        }
+    };
     // Clamp to [1, 500]: reject negative/zero, cap absurdly-large values.
     // DoS prevention at the MCP boundary before the substrate is touched.
     // Parity: Swift runShapedRecall uses ToolDispatcher.clampLimit.
@@ -632,13 +680,29 @@ fn run_shaped_recall_tool(
 
     // m.room is the resolved room display name, populated by from_hit
     // using the node_names map built above.
-    let mut lines = vec![format!("found {} memory(s)", out.matches.len())];
-    for m in out.matches.iter().take(50) {
-        let preview: String = m.content.chars().take(120).collect();
-        let room = if m.room.is_empty() { "?" } else { &m.room };
-        lines.push(format!("{}  [{}]  {}", m.id, room, preview));
+    // Dense-row reply (PR-03): same row shape as moot_memory_search;
+    // anchor excluded when near: pivoted. Drawer lookups come from the
+    // already-loaded all_drawers set. Mirrors Swift runShapedRecall.
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+    let shown: Vec<_> = out.matches.iter()
+        .filter(|m| anchor_id.as_deref().map(|a| m.id != a).unwrap_or(true))
+        .collect();
+    let mut lines = vec![format!("found {} memory(s)", shown.len())];
+    for m in shown.iter().take(50) {
+        lines.push(
+            by_id.get(m.id.as_str())
+                .map(|d| crate::dense_row::render(d))
+                .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
     }
-    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    // Deviation-only narration (PR-03): line only on low/medium.
+    if matches!(
+        discrimination,
+        crate::recall_discrimination::DiscriminationLevel::Low
+            | crate::recall_discrimination::DiscriminationLevel::Medium
+    ) {
+        lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    }
     Ok(text_result(&lines.join("\n")))
 }
 
@@ -1283,53 +1347,67 @@ fn run_recall_distilled_tool(
             )
         })?;
 
-    // Resolve room display names via the node tree, matching
-    // run_memory_search's resolution path.
-    let node_ids: Vec<String> = out.matches.iter().map(|m| m.parent_node_id.clone()).collect();
-    let node_names = coord.resolve_drawer_node_names(&estate.handle, &node_ids);
+    // Dense-row reply (PR-03): dense row THEN the distilled text — this
+    // verb is the "confirm on distilled" tier, so the text stays, but the
+    // [distilled] header tag and per-hit tokens:/source: metadata lines are
+    // gone (deviation-only: distilled service is the NORM here; only the
+    // fallback deviation gets a marker). Drawer lookups for the dense rows
+    // ride the same structured-tier by-id fetch as memory_get. Mirrors
+    // Swift runRecallDistilled.
+    let dense_by_id: BTreeMap<String, String> = {
+        let ids: Vec<String> = out.matches.iter().take(50).map(|m| m.id.clone()).collect();
+        if ids.is_empty() {
+            BTreeMap::new()
+        } else {
+            match coord.estate_for(&estate.handle) {
+                Ok(locus_estate) => {
+                    let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+                    frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+                    locus_estate
+                        .get_drawers_matching_frame(&ids, &frame)
+                        .map(|f| f.admissible.into_iter()
+                            .map(|d| { let row = crate::dense_row::render(&d); (d.id.clone(), row) })
+                            .collect())
+                        .unwrap_or_default()
+                }
+                Err(_) => BTreeMap::new(),
+            }
+        }
+    };
 
     let header = if echo_query {
-        format!("found {} memory(s) [distilled] for: {}", out.matches.len(), query)
+        format!("found {} memory(s) for: {}", out.matches.len(), query)
     } else {
-        format!("found {} memory(s) [distilled]", out.matches.len())
+        format!("found {} memory(s)", out.matches.len())
     };
     let mut lines = vec![header];
     let mut any_fallback = false;
     for m in out.matches.iter().take(50) {
-        let room = node_names
-            .get(&m.parent_node_id)
-            .map(|(_, room)| room.clone())
-            .unwrap_or_else(|| {
-                if m.parent_node_id.is_empty() { "?".to_string() } else { m.parent_node_id.clone() }
-            });
-        lines.push(format!("{}  [{}]  {}", m.id, room, m.text));
-        // Per-hit metadata: token count (§6 budgeting) and the §10.2
-        // served-from marker so clients can distinguish "distilled
-        // representation" from "fallback".
+        lines.push(dense_by_id.get(&m.id).cloned()
+            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
         if m.served_from_content {
             any_fallback = true;
-            lines.push("    tokens: — | source: content (not yet distilled)".to_string());
-        } else {
-            let tokens = m.token_count.map(|t| t.to_string()).unwrap_or_else(|| "—".to_string());
-            lines.push(format!("    tokens: {tokens} | source: distilled"));
+            // Fallback marker on fallback hits ONLY (§10.2): the text below
+            // is verbatim content, not a distillate.
+            lines.push("source: content (not yet distilled)".to_string());
         }
+        lines.push(m.text.clone());
     }
-    // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
-    // geometry over originals). Wire prefix matches moot_memory_search phrasing;
-    // wording unified with the recall_discrimination main ladder.
-    let discrimination_line = match out.discrimination {
-        cognition_kit::DistilledDiscriminationLevel::Single =>
-            "discrimination: n/a — single/zero results.",
-        cognition_kit::DistilledDiscriminationLevel::High =>
-            "discrimination: high — clear top result.",
-        cognition_kit::DistilledDiscriminationLevel::Medium =>
-            "discrimination: medium — partial separation.",
-        cognition_kit::DistilledDiscriminationLevel::Low =>
-            "discrimination: low — top results are within epsilon; treat as effectively unranked. \
+    // Deviation-only narration (PR-03): discrimination line only on
+    // low/medium; clear and single/zero stay silent.
+    match out.discrimination {
+        cognition_kit::DistilledDiscriminationLevel::Medium => {
+            lines.push("discrimination: medium — partial separation.".to_string());
+        }
+        cognition_kit::DistilledDiscriminationLevel::Low => {
+            lines.push(
+                "discrimination: low — top results are within epsilon; treat as effectively unranked. \
              Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for \
-             precision, or widen the query.",
-    };
-    lines.push(discrimination_line.to_owned());
+             precision, or widen the query.".to_string());
+        }
+        cognition_kit::DistilledDiscriminationLevel::High
+        | cognition_kit::DistilledDiscriminationLevel::Single => {}
+    }
     if any_fallback {
         // SPEC §10.3 fallback notice: results still return, served from
         // content, with a hint to populate the representations.

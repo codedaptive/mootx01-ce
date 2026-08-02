@@ -85,38 +85,47 @@ enum TeachmeGuides {
         """
 
     private static let memorySearchGuide = """
-        moot_memory_search — Search the estate for memories matching a query.
+        moot_memory_search — Search the estate for memories matching a query,
+        or pivot from an anchor with near:<uuid>.
 
-        Uses hybrid BM25+vector recall. Returns ranked memory rows with
-        content previews. This is the primary way to retrieve filed memories.
+        Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — the
+        address plus the assertion, no content hauling. Travel on subjects,
+        confirm on distilled, read full text only at the end:
+        moot_memory_get with depth:subject|distilled|full is the next hop.
 
         When to use vs siblings:
           - moot_estate_map — when browsing structure rather than searching content
           - moot_fact_search — when looking for structured KG assertions
           - moot_read_journal — when retrieving agent diary entries
-          - moot_memory_get — when you already have a specific id and need
-            the full verbatim content and metadata, not a ranked preview
+          - moot_memory_get — when you already have ids and need deeper tiers
 
         Example:
-          { "query": "actor isolation concurrency decisions",
-            "limit": 10 }
+          { "query": "actor isolation concurrency decisions", "limit": 10 }
+          { "near": "<uuid of an interesting memory>" }   ← similar-to-this pivot
 
         Response:
           found N memory(s)
-          <uuid>  [room]  <content preview…>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
+
+        A "(no subject)" row is subject debt — the memory predates subjects;
+        judge it by its lattice coordinates or fetch it by id. A
+        discrimination line appears ONLY when the ranking is not clear
+        (low/medium); a recall_provenance line appears ONLY when the dense
+        lane was dark or stages degraded. Silence means nominal.
 
         Common mistakes:
           - Using a query over 200 chars. Queries work best as keywords or a
             short question under 50 words. Long queries dilute the semantic signal.
-          - Calling without a query arg. Use moot_estate_map to browse structure.
+          - Passing both query and near — they are mutually exclusive.
           - Omitting limit when expecting many results; default is 20.
         """
 
     private static let memoryListGuide = """
         moot_memory_list — Enumerate all memory drawer IDs in a wing.
 
-        Returns each drawer's ID, room, and an 80-character content preview.
-        Capped at 200 results. Use for structural inventory, not semantic search.
+        Returns one dense row per drawer — uuid · subject · fdc · qid ·
+        event_time. Capped at 200 results. Use for structural inventory,
+        not semantic search.
 
         When to use vs siblings:
           - moot_memory_search — when you need ranked semantic results by query
@@ -130,7 +139,7 @@ enum TeachmeGuides {
 
         Response:
           drawers in wing Agentic Memory: N
-          <uuid>  [room]  <80-char preview>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
 
         filter:missing_subject is the subject-debt enumerator: it lists
         only live drawers with no subject line, id-only (no preview), so a
@@ -145,11 +154,21 @@ enum TeachmeGuides {
         """
 
     private static let memoryGetGuide = """
-        moot_memory_get — Fetch one memory drawer by id, in full.
+        moot_memory_get — Fetch memory drawers by id, at a chosen depth.
 
-        Returns verbatim content (never truncated), room/wing, filed_at and
-        event_time, the adjective-axis metadata (state, trust, sensitivity,
-        exportability, confirmation), lineage, and a linked-tunnel summary.
+        One hydration verb, three tiers (depth argument):
+          subject   — dense row only (travel tier; cheapest)
+          distilled — dense row + distilled text (confirm tier; rows still
+                      owing a distillate fall back to verbatim content
+                      behind a "source: content (not yet distilled)" marker)
+          full      — the complete record (terminal tier; the default)
+        Batch with ids:[…] to winnow a shortlist in ONE call — judge at
+        depth:subject/distilled, then fetch the winner at depth:full.
+
+        At depth:full, returns verbatim content (never truncated), room/wing,
+        subject (when present), filed_at and event_time, the adjective-axis
+        metadata (state, trust, sensitivity, exportability, confirmation),
+        lineage, and a linked-tunnel summary.
         Applies the same default gate as moot_memory_search — a drawer that
         exists but is contested/withdrawn/rejected, untrustworthy, or
         restricted/secret is reported not-found, identical to a genuinely
@@ -857,7 +876,7 @@ enum TeachmeGuides {
 
         Response:
           estate <name> [<uuid>] — grant <uuid>, N row(s)
-          <uuid>  [room]  <content preview…>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
 
         Common mistakes:
           - Supplying a requesterEstateID that doesn't match the default estate.
@@ -1103,9 +1122,9 @@ enum TeachmeGuides {
           { "query": "the indemnity was 46 million marks",
             "limit": 10, "pool": 30, "filter": "unconfirmed" }
 
-        Response (same shape as moot_memory_search):
+        Response (same dense-row shape as moot_memory_search):
           found N memory(s)
-          <id>  [room]  <preview>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
           ...
 
         Common mistakes:

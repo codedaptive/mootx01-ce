@@ -68,7 +68,7 @@ fn seed_in_source(
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::estate_types::LatticeAnchor;
     use locus_kit::frames::CaptureFrame;
-    let frame = CaptureFrame::new(
+    let mut frame = CaptureFrame::new(
         content,
         CaptureChannel::Typed,
         room,
@@ -76,6 +76,9 @@ fn seed_in_source(
         "aria-mcp-tests",
         "default",
     );
+    // Subject = capped content so PR-03 dense-row replies carry the text
+    // these tests assert on (dense rows show subjects, never content).
+    frame.subject = Some(content.chars().take(120).collect());
     let now = aria_mcp::dispatch::wall_now();
     let coord = registry.coord.lock().unwrap();
     coord

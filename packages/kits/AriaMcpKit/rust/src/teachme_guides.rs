@@ -97,25 +97,36 @@ Mistakes:
   — Truncating the subject mid-sentence: compress the claim, don't cut it.";
 
 const GUIDE_MEMORY_SEARCH: &str = "\
-moot_memory_search — search memories by keyword
+moot_memory_search — search memories by keyword, or pivot with near:<uuid>
 
-Required args:
-  query (string) keyword or phrase to match against content and room
+Args (exactly one of):
+  query (string) keyword or phrase — hybrid BM25+vector recall
+  near  (string) UUID of an anchor memory — returns the memories most
+        similar to it (the anchor itself is excluded)
 
 Example:
   { \"query\": \"meeting notes\" }
+  { \"near\": \"<uuid>\" }
 
-Response: \"found N memory(s)\\n<id>  [<room>]  <content_preview>\"
+Response: \"found N memory(s)\" then one DENSE ROW per hit:
+  <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
+Travel on subjects; fetch bodies via moot_memory_get
+(depth:subject|distilled|full). \"(no subject)\" rows are subject debt.
+A discrimination line appears ONLY when the ranking is not clear
+(low/medium); a recall_provenance line ONLY when the dense lane was dark
+or stages degraded. Silence means nominal.
 
 Mistakes:
   — Queries over 200 characters trigger a hint to shorten the query.
+  — Passing both query and near: they are mutually exclusive.
   — Zero results usually means the estate is empty or the query is too specific.";
 
 const GUIDE_MEMORY_LIST: &str = "\
 moot_memory_list — enumerate all memory drawer IDs in a wing
 
-Returns each drawer's ID, room, and an 80-character content preview.
-Capped at 200 results. Use for structural inventory, not semantic search.
+Returns one dense row per drawer — uuid · subject · fdc · qid ·
+event_time. Capped at 200 results. Use for structural inventory, not
+semantic search.
 
 When to use vs siblings:
   — moot_memory_search: when you need ranked semantic results by query
@@ -137,7 +148,7 @@ Example:
   { \"wing\": \"Agentic Memory\", \"room\": \"architecture\" }
   { \"wing\": \"Agentic Memory\", \"filter\": \"missing_subject\" }
 
-Response: \"drawers in wing <wing>: N\\n<uuid>  [<room>]  <80-char preview>\"
+Response: \"drawers in wing <wing>: N\" then one dense row per drawer.
 
 Mistakes:
   — Calling without wing: wing is required; omitting it returns an error.
@@ -146,11 +157,18 @@ Mistakes:
   — Expecting more than 200 results: for large wings, filter by room.";
 
 const GUIDE_MEMORY_GET: &str = "\
-moot_memory_get — fetch one memory drawer by id, in full
+moot_memory_get — fetch memory drawers by id, at a chosen depth
 
-Returns verbatim content (never truncated), room/wing, filed_at and
-event_time, the adjective-axis metadata (state, trust, sensitivity,
-exportability, confirmation), lineage, and a linked-tunnel summary.
+One hydration verb, three tiers (depth argument): subject (dense row
+only — travel), distilled (dense row + distilled text; fallback rows
+carry \"source: content (not yet distilled)\" then verbatim content),
+full (default — the complete record). Batch with ids:[…] to winnow a
+shortlist in ONE call.
+
+At depth:full, returns verbatim content (never truncated), room/wing,
+subject (when present), filed_at and event_time, the adjective-axis
+metadata (state, trust, sensitivity, exportability, confirmation),
+lineage, and a linked-tunnel summary.
 Applies the same default gate as moot_memory_search — a drawer that
 exists but is contested/withdrawn/rejected, untrustworthy, or
 restricted/secret is reported not-found, identical to a genuinely

@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.20.0
+version: 1.21.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -878,6 +878,37 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.21.0 -- 2026-08-02
+
+- Recall surface (progressive recall PR-03). The DEFAULT reply row for
+  every recall-family hit and citation is the DENSE ROW:
+  `uuid · subject · fdc:<code> · qid:<QID> · <event_time ISO8601>` —
+  adopted by moot_memory_search, moot_recall_precise, moot_recall_shaped,
+  moot_recall_vague (hits and originals), moot_recall_distilled (row then
+  distilled text), moot_federated_search, moot_memory_list, and
+  moot_connection_search/map citations. Absence markers are uniform and
+  fixed ("(no subject)", "-"); redaction markers replace the subject on
+  provenance restricted/secret rows. Narration is DEVIATION-ONLY: the
+  "found N memory(s)" header stays (fail-loud harness contract); the
+  [distilled] tag and per-hit tokens:/source: metadata lines are removed
+  ("source: content (not yet distilled)" appears on fallback hits ONLY);
+  the discrimination line appears only at effective low/medium; the
+  recall_provenance line appears only when the dense lane is dark or
+  stages degraded — absence means nominal.
+- Anchor pivot: moot_memory_search and moot_recall_shaped accept
+  `near:<uuid>` as an alternative to `query:` (exactly one required,
+  runtime-enforced) — the anchor's content re-queries the same scored
+  pipeline, the anchor is excluded from its own neighbors, and a gated
+  anchor reads as not-found (oracle-free, no grant lift).
+- Hydration depth: moot_memory_get gains `ids:[...]` batch and
+  `depth: subject|distilled|full` (default full — the single-id full
+  record keeps its original shape, now with a `subject:` line when
+  present). Batch gate failures render as per-row "not found:" lines.
+- BitmapOnly hydration now strips the distilled quad and subject trio in
+  BOTH ports (the Rust leg previously cleared only `content` — a
+  pre-existing parity divergence surfaced by the dense row on federated
+  bitmapOnly reads).
 
 ### 1.20.0 -- 2026-08-02
 

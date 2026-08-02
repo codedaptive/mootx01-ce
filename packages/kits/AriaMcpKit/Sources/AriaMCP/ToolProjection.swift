@@ -190,10 +190,11 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_memory_search",
-                description: "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) — a relative-gap confidence estimate of how clearly the top result separates from the rest, with a saturation discount when the semantic lane is dark. Low discrimination on small estates is expected for broad or associative searches; prefer moot_recall_precise for precision retrieval.",
+                description: "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
-                        "query": stringSchema("Natural-language search query."),
+                        "query": stringSchema("Natural-language search query. Provide query OR near — exactly one."),
+                        "near": stringSchema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
                         "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
                         "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained, pinned. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. \"pinned\" constrains to user-pinned drawers (rooms without a pinned drawer are pruned from the search). null is invalid."),
                         "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
@@ -202,7 +203,7 @@ public enum ToolProjection {
                         "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
                     ],
-                    required: ["query"]
+                    required: []
                 )),
                 provenance: .interface
             ),
@@ -224,9 +225,11 @@ public enum ToolProjection {
                 description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
-                        "id": stringSchema("Memory row identifier (drawer UUID)."),
+                        "id": stringSchema("Memory row identifier (drawer UUID). Provide id or ids."),
+                        "ids": arraySchema("Batch form: array of drawer UUIDs. With depth:subject or depth:distilled this is the one-call winnow — judge a shortlist without hauling full text. Gated/absent rows come back as 'not found: <id>' lines.", itemDescription: "Memory row identifier (drawer UUID)."),
+                        "depth": stringSchema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid."),
                     ],
-                    required: ["id"]
+                    required: []
                 )),
                 provenance: .interface
             ),
@@ -643,6 +646,18 @@ public enum ToolProjection {
         .object([
             "type": .string("string"),
             "description": .string(description),
+        ])
+    }
+
+    /// Array-of-strings schema (PR-03: the memory_get `ids` batch arg).
+    static func arraySchema(_ description: String, itemDescription: String) -> JSONValue {
+        .object([
+            "type": .string("array"),
+            "description": .string(description),
+            "items": .object([
+                "type": .string("string"),
+                "description": .string(itemDescription),
+            ]),
         ])
     }
 

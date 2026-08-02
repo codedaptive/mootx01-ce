@@ -3,17 +3,19 @@
 //! line in the tool response, and that the dense-lane token correctly reflects
 //! retrieval quality.
 //!
-//! # What these tests prove
+//! # What these tests prove (PR-03 deviation-only contract)
 //!
-//! 1. `provenance_line_always_present_deterministic_provider` — a search over an
-//!    estate wired with the deterministic provider always returns a response that
-//!    includes a `recall_provenance:` line. The field is never absent, never blank.
+//! The recall_provenance line is DEVIATION-ONLY: it appears when the dense
+//! lane is dark or stages degraded, and its ABSENCE means nominal.
 //!
-//! 2. `dense_lane_active_when_corpus_wired_and_ingested` — when a corpus with
-//!    the deterministic provider is registered and a document has been impatient-
-//!    captured (float rows written), the recall_provenance line carries
-//!    "dense_lane:active". This proves Lane D's status is correctly read from
-//!    `GLKRecallResult.dense_lane_status` (None = active).
+//! 1. `provenance_line_absent_on_nominal_recall` — a search over an estate
+//!    wired with the deterministic provider (Lane D live, nothing degraded)
+//!    emits NO recall_provenance: line. Absence IS the nominal signal.
+//!
+//! 2. `dense_lane_active_when_corpus_wired_and_ingested` — when a corpus
+//!    with the deterministic provider is registered and a document has been
+//!    impatient-captured (float rows written), Lane D is live and the line
+//!    is absent — proving dense_lane_status None maps to silence.
 //!
 //! 3. `degraded_stages_none_on_happy_path` — a successful recall with no
 //!    pipeline failures surfaces "degraded_stages:none". This proves the
@@ -73,7 +75,7 @@ fn content_text(result: &serde_json::Value) -> &str {
 ///
 /// Mirrors Swift test A: provenanceLineAlwaysPresentDeterministicProvider.
 #[test]
-fn provenance_line_always_present_deterministic_provider() {
+fn provenance_line_absent_on_nominal_recall() {
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
@@ -102,18 +104,11 @@ fn provenance_line_always_present_deterministic_provider() {
     );
 
     let text = content_text(&search_result);
+    // PR-03 deviation-only contract: nominal recall (Lane D live, nothing
+    // degraded) emits NO provenance line — absence IS the signal.
     assert!(
-        text.contains("recall_provenance:"),
-        "moot_memory_search must always include a recall_provenance: status line; got: {text}"
-    );
-    // Provenance line must carry both required tokens.
-    assert!(
-        text.contains("dense_lane:"),
-        "recall_provenance line must include dense_lane: token; got: {text}"
-    );
-    assert!(
-        text.contains("degraded_stages:"),
-        "recall_provenance line must include degraded_stages: token; got: {text}"
+        !text.contains("recall_provenance:"),
+        "nominal recall must NOT include a recall_provenance: line (deviation-only); got: {text}"
     );
 }
 
@@ -152,19 +147,12 @@ fn dense_lane_active_when_corpus_wired_and_ingested() {
     assert!(is_success(&search_result), "search must succeed; got: {search_result:?}");
 
     let text = content_text(&search_result);
-    // Extract the provenance line.
-    let provenance_line = text
-        .lines()
-        .find(|l| l.starts_with("recall_provenance:"))
-        .unwrap_or("");
-
-    // When corpus is wired with the deterministic provider and documents are
-    // ingested, Lane D is live (dense_lane_status is None). The surfaced token
-    // must be "dense_lane:active".
+    // When the corpus is wired with the deterministic provider and documents
+    // are ingested, Lane D is live (dense_lane_status None) — under the
+    // PR-03 deviation-only contract that means NO provenance line at all.
     assert!(
-        provenance_line.contains("dense_lane:active"),
-        "Lane D must be active when corpus wired with deterministic provider and docs ingested; \
-         provenance line: {provenance_line}"
+        !text.contains("recall_provenance:"),
+        "Lane D live must render as ABSENCE of the provenance line; got: {text}"
     );
 }
 
@@ -199,16 +187,11 @@ fn degraded_stages_none_on_happy_path() {
     assert!(is_success(&search_result));
 
     let text = content_text(&search_result);
-    let provenance_line = text
-        .lines()
-        .find(|l| l.starts_with("recall_provenance:"))
-        .unwrap_or("");
-
-    // Happy path: every pipeline stage succeeded, so degraded_stages is empty.
-    // The surfaced token must be "degraded_stages:none".
+    // Happy path: every pipeline stage succeeded and Lane D is live — under
+    // the PR-03 deviation-only contract the provenance line is absent.
     assert!(
-        provenance_line.contains("degraded_stages:none"),
-        "Happy-path recall must surface degraded_stages:none; provenance line: {provenance_line}"
+        !text.contains("recall_provenance:"),
+        "Happy-path recall must omit the provenance line entirely; got: {text}"
     );
 }
 

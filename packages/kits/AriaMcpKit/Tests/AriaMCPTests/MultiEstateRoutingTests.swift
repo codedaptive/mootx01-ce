@@ -61,7 +61,10 @@ struct MultiEstateRoutingTests {
             room: location,
             latticeAnchor: .udc("004"),
             addedBy: "aria-mcp-tests",
-            embeddingModelID: "test-model-v1")
+            embeddingModelID: "test-model-v1",
+            // Subject = capped content so PR-03 dense-row replies carry
+            // the text these tests assert on.
+            subject: String(content.prefix(120)))
         _ = try await kit.capture(handle, frame)
     }
 
