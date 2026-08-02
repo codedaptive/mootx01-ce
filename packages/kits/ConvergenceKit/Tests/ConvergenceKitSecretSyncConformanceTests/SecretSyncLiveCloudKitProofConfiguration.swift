@@ -25,9 +25,11 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     let deviceRole: DeviceRole
     let phase: Phase
     let ledgerURL: URL
+    let signedRunManifest: SecretSyncLiveSignedRunManifest
+    let runManifestDigest: Data
     let launchGrant: SecretSyncLiveHostLaunchGrant
     let launchGrantDigest: Data
-    let hostAuthorityPublicKey: Data
+    let trustedHostAuthorityPublicKey: Data
   }
 
   enum DeviceRole: String, Codable, Sendable, CaseIterable {
@@ -56,16 +58,44 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
   static let roleKey = "MOOT_SECRET_SYNC_DEVICE_ROLE"
   static let phaseKey = "MOOT_SECRET_SYNC_PHASE"
   static let attestationKey = "MOOT_SECRET_SYNC_OPERATOR_ATTESTATION"
-  static let ledgerPathKey = "MOOT_SECRET_SYNC_LEDGER_PATH"
-  static let hostAuthorityPublicKeyKey =
-    "MOOT_SECRET_SYNC_HOST_AUTHORITY_PUBLIC_KEY"
+  static let signedRunManifestKey = "MOOT_SECRET_SYNC_SIGNED_RUN_MANIFEST"
   static let hostLaunchGrantKey = "MOOT_SECRET_SYNC_HOST_LAUNCH_GRANT"
+  static let hostAuthorityBundleKey = "MOOTSecretSyncHostAuthorityPublicKey"
   static let canonicalContainerIdentifier = "iCloud.com.codedaptive.simplemachines"
 
   static func load(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     runtimePlatform: SecretSyncLiveRuntimePlatform = .current,
     now: Date = Date()
+  ) -> SecretSyncLiveCloudKitProofConfiguration {
+    guard let anchor = SecretSyncLiveHostAuthorityTrustAnchor.signedTestBundlePublicKey()
+    else { return .invalid(.hostAuthorityMissing) }
+    return load(
+      environment: environment, runtimePlatform: runtimePlatform, now: now,
+      independentlyAuthenticatedHostAuthorityPublicKey: anchor
+    )
+  }
+
+  /// Deterministic tests inject an authority directly; the live entry point
+  /// above can only obtain authority from the code-signed XCTest bundle.
+  static func loadForDeterministicTesting(
+    environment: [String: String],
+    runtimePlatform: SecretSyncLiveRuntimePlatform,
+    now: Date = Date(),
+    independentlyAuthenticatedHostAuthorityPublicKey: Data
+  ) -> SecretSyncLiveCloudKitProofConfiguration {
+    load(
+      environment: environment, runtimePlatform: runtimePlatform, now: now,
+      independentlyAuthenticatedHostAuthorityPublicKey:
+        independentlyAuthenticatedHostAuthorityPublicKey
+    )
+  }
+
+  private static func load(
+    environment: [String: String],
+    runtimePlatform: SecretSyncLiveRuntimePlatform,
+    now: Date,
+    independentlyAuthenticatedHostAuthorityPublicKey authorityPublicKey: Data
   ) -> SecretSyncLiveCloudKitProofConfiguration {
     guard environment[optInKey] == "1" else { return .disabled }
     guard environment[attestationKey] == "AUTHORIZED_U7_HOST_LAUNCH_GRANT" else {
@@ -80,12 +110,23 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     guard let rawPhase = environment[phaseKey], let phase = Phase(rawValue: rawPhase) else {
       return .invalid(.invalidPhase)
     }
-    guard let ledgerPath = environment[ledgerPathKey], ledgerPath.hasPrefix("/") else {
-      return .invalid(.invalidLedgerPath)
+    guard let runManifestText = environment[signedRunManifestKey],
+      let runManifestData = Data(base64Encoded: runManifestText),
+      let signedRunManifest = try? JSONDecoder().decode(
+        SecretSyncLiveSignedRunManifest.self, from: runManifestData
+      )
+    else { return .invalid(.signedRunManifestMissing) }
+    let runManifestDigest: Data
+    do {
+      runManifestDigest = try SecretSyncLiveSignedRunManifestVerifier.verify(
+        signedRunManifest, trustedAuthorityPublicKey: authorityPublicKey,
+        namespace: namespace
+      )
+    } catch let error as SecretSyncLiveCloudKitProofConfigurationError {
+      return .invalid(error)
+    } catch {
+      return .invalid(.signedRunManifestMalformed)
     }
-    guard let authorityText = environment[hostAuthorityPublicKeyKey],
-      let authorityPublicKey = Data(base64Encoded: authorityText)
-    else { return .invalid(.hostAuthorityMissing) }
     guard let grantText = environment[hostLaunchGrantKey],
       let grantData = Data(base64Encoded: grantText),
       let grant = try? JSONDecoder().decode(SecretSyncLiveHostLaunchGrant.self, from: grantData)
@@ -94,6 +135,7 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     do {
       launchGrantDigest = try SecretSyncLiveHostLaunchGrantVerifier.verify(
         grant, trustedAuthorityPublicKey: authorityPublicKey,
+        expectedRunManifestDigest: runManifestDigest,
         namespace: namespace, role: role, phase: phase,
         runtimePlatform: runtimePlatform, now: now
       )
@@ -112,9 +154,11 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
         runNamespace: namespace,
         deviceRole: role,
         phase: phase,
-        ledgerURL: URL(fileURLWithPath: ledgerPath), launchGrant: grant,
+        ledgerURL: signedRunManifest.manifest.ledgerURL,
+        signedRunManifest: signedRunManifest,
+        runManifestDigest: runManifestDigest, launchGrant: grant,
         launchGrantDigest: launchGrantDigest,
-        hostAuthorityPublicKey: authorityPublicKey
+        trustedHostAuthorityPublicKey: authorityPublicKey
       )
     )
   }
@@ -129,6 +173,19 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     return UUID(uuidString: String(suffix)) != nil
   }
 
+}
+
+private final class SecretSyncLiveProofBundleToken {}
+
+enum SecretSyncLiveHostAuthorityTrustAnchor {
+  static func signedTestBundlePublicKey() -> Data? {
+    let bundle = Bundle(for: SecretSyncLiveProofBundleToken.self)
+    guard let encoded = bundle.object(
+      forInfoDictionaryKey: SecretSyncLiveCloudKitProofConfiguration
+        .hostAuthorityBundleKey
+    ) as? String else { return nil }
+    return Data(base64Encoded: encoded)
+  }
 }
 
 extension SecretSyncLiveCloudKitProofConfiguration.Phase {
@@ -152,6 +209,10 @@ enum SecretSyncLiveCloudKitProofConfigurationError: Error, Sendable, Equatable {
   case invalidPhase
   case invalidLedgerPath
   case hostAuthorityMissing
+  case signedRunManifestMissing
+  case signedRunManifestMalformed
+  case signedRunManifestSignatureInvalid
+  case signedRunManifestBindingMismatch
   case hostLaunchGrantMissing
   case hostLaunchGrantMalformed
   case hostLaunchGrantSignatureInvalid
@@ -167,6 +228,8 @@ enum SecretSyncLiveCloudKitProofConfigurationError: Error, Sendable, Equatable {
   case missingPrerequisitePhase
   case backgroundAuthorizationGranted
   case corruptLocalLedger
+  case ledgerAuthenticationFailed
+  case unauthorizedRunRecord
   case unresolvedCleanupRecords
   case incompleteAudit
   case requiredZoneMissing
@@ -208,6 +271,164 @@ enum SecretSyncLivePlatformMatrix {
 
 }
 
+struct SecretSyncLiveSignedRunManifest: Codable, Sendable, Equatable {
+  struct Manifest: Codable, Sendable, Equatable {
+    let version: Int
+    let runNamespace: String
+    let ledgerDirectoryPath: String
+    let ledgerIdentifier: String
+    let artifactRecordNames: [String]
+    let cleanupRecords: [SecretSyncLiveRecordReference]
+
+    var ledgerURL: URL {
+      URL(fileURLWithPath: ledgerDirectoryPath, isDirectory: true)
+        .appendingPathComponent("\(ledgerIdentifier).json", isDirectory: false)
+    }
+  }
+
+  let manifest: Manifest
+  let signature: Data
+}
+
+enum SecretSyncLiveSignedRunManifestVerifier {
+  static func verify(
+    _ signed: SecretSyncLiveSignedRunManifest,
+    trustedAuthorityPublicKey: Data,
+    namespace: String
+  ) throws -> Data {
+    let manifest = signed.manifest
+    guard manifest.version == 1, manifest.runNamespace == namespace,
+      manifest.ledgerDirectoryPath.hasPrefix("/"),
+      manifest.ledgerIdentifier == expectedLedgerIdentifier(namespace: namespace),
+      Set(manifest.artifactRecordNames).count == manifest.artifactRecordNames.count,
+      Set(manifest.cleanupRecords).count == manifest.cleanupRecords.count
+    else {
+      throw SecretSyncLiveCloudKitProofConfigurationError
+        .signedRunManifestBindingMismatch
+    }
+    for recordName in manifest.artifactRecordNames {
+      try SecretSyncLiveRunOwnedRecordGrammar.requireArtifact(
+        recordName: recordName, namespace: namespace
+      )
+    }
+    for reference in manifest.cleanupRecords {
+      try SecretSyncLiveRunOwnedRecordGrammar.requireCleanup(
+        reference, namespace: namespace
+      )
+    }
+    let publicKey: P256.Signing.PublicKey
+    let signature: P256.Signing.ECDSASignature
+    do {
+      publicKey = try P256.Signing.PublicKey(
+        x963Representation: trustedAuthorityPublicKey
+      )
+      signature = try P256.Signing.ECDSASignature(
+        derRepresentation: signed.signature
+      )
+    } catch {
+      throw SecretSyncLiveCloudKitProofConfigurationError
+        .signedRunManifestMalformed
+    }
+    let body = try canonicalManifestBytes(manifest)
+    guard publicKey.isValidSignature(signature, for: body) else {
+      throw SecretSyncLiveCloudKitProofConfigurationError
+        .signedRunManifestSignatureInvalid
+    }
+    return digest(manifestBytes: body, signature: signed.signature)
+  }
+
+  static func canonicalManifestBytes(
+    _ manifest: SecretSyncLiveSignedRunManifest.Manifest
+  ) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return try encoder.encode(manifest)
+  }
+
+  static func digest(manifestBytes: Data, signature: Data) -> Data {
+    SecretSyncLiveFraming.digest(
+      domain: "mootx01.u7.signed-run-manifest.v1",
+      fields: [manifestBytes, signature]
+    )
+  }
+
+  static func expectedLedgerIdentifier(namespace: String) -> String {
+    let digest = SHA256.hash(data: Data(namespace.utf8))
+      .map { String(format: "%02x", $0) }.joined()
+    return "u7-ledger-\(digest)"
+  }
+}
+
+enum SecretSyncLiveRunOwnedRecordGrammar {
+  private static let artifactKinds: Set<String> = [
+    "agreement-verifier", "credential", "phase-credential",
+    "phase-backgroundDenied", "candidate", "manifest", "phase-stage",
+    "cas", "phase-conditionalHead", "phase-verify", "phase-revoke",
+    "phase-offline", "phase-recovery", "phase-rotation", "phase-restart",
+    "phase-audit", "phase-cleanup",
+  ]
+
+  static func requireArtifact(recordName: String, namespace: String) throws {
+    let role = try requiredRoleSuffix(recordName)
+    let prefix = "\(namespace)-"
+    guard recordName.hasPrefix(prefix) else { throw unauthorized() }
+    let kindEnd = recordName.index(
+      recordName.endIndex, offsetBy: -(role.rawValue.count + 1)
+    )
+    let kindStart = recordName.index(recordName.startIndex, offsetBy: prefix.count)
+    let kind = String(recordName[kindStart..<kindEnd])
+    guard artifactKinds.contains(kind) else { throw unauthorized() }
+  }
+
+  static func requireCleanup(
+    _ reference: SecretSyncLiveRecordReference,
+    namespace: String
+  ) throws {
+    if reference.zoneName == SecretSyncCloudKitZones.controlZoneID.zoneName {
+      if reference.recordName.hasPrefix("\(namespace)-") {
+        try requireArtifact(recordName: reference.recordName, namespace: namespace)
+      } else {
+        try requireLowercaseHex(reference.recordName)
+      }
+    } else if reference.zoneName == SecretSyncCloudKitZones.payloadZoneID.zoneName {
+      try requireLowercaseHex(reference.recordName)
+    } else {
+      throw unauthorized()
+    }
+  }
+
+  private static func requiredRoleSuffix(
+    _ recordName: String
+  ) throws -> SecretSyncLiveCloudKitProofConfiguration.DeviceRole {
+    guard let role = SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases
+      .first(where: { recordName.hasSuffix("-\($0.rawValue)") })
+    else { throw unauthorized() }
+    return role
+  }
+
+  private static func requireLowercaseHex(_ value: String) throws {
+    guard (value.count == 32 || value.count == 64),
+      value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+    else { throw unauthorized() }
+  }
+
+  private static func unauthorized() -> SecretSyncLiveCloudKitProofConfigurationError {
+    .unauthorizedRunRecord
+  }
+}
+
+enum SecretSyncLiveFraming {
+  static func digest(domain: String, fields: [Data]) -> Data {
+    var framed = Data(domain.utf8)
+    for field in fields {
+      var length = UInt64(field.count).bigEndian
+      withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
+      framed.append(field)
+    }
+    return Data(SHA256.hash(data: framed))
+  }
+}
+
 /// A host-issued authorization for one exact external-device test launch.
 /// Physical device selection remains host evidence in the G-RUNTIME log; the
 /// in-device process proves only this signed grant and its runtime idiom.
@@ -220,6 +441,10 @@ struct SecretSyncLiveHostLaunchGrant: Codable, Sendable, Equatable {
     let platform: SecretSyncLiveRuntimePlatform
     let nonce: UUID
     let expiresAtUnixSeconds: Int64
+    let runManifestDigest: Data
+    let expectedLedgerContentDigest: Data
+    let prerequisiteArtifactDigests: [Data]
+    let trustedCredentialGrantDigestsByRole: [String: Data]
     let credentialBindingDigest: Data?
   }
 
@@ -231,6 +456,7 @@ enum SecretSyncLiveHostLaunchGrantVerifier {
   static func verify(
     _ grant: SecretSyncLiveHostLaunchGrant,
     trustedAuthorityPublicKey: Data,
+    expectedRunManifestDigest: Data,
     namespace: String,
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
     phase: SecretSyncLiveCloudKitProofConfiguration.Phase,
@@ -239,7 +465,13 @@ enum SecretSyncLiveHostLaunchGrantVerifier {
   ) throws -> Data {
     let manifest = grant.manifest
     guard manifest.version == 1, manifest.runNamespace == namespace,
-      manifest.role == role, manifest.phase == phase
+      manifest.role == role, manifest.phase == phase,
+      manifest.runManifestDigest == expectedRunManifestDigest,
+      manifest.expectedLedgerContentDigest.count == SHA256.byteCount,
+      manifest.prerequisiteArtifactDigests.allSatisfy({ $0.count == SHA256.byteCount }),
+      manifest.trustedCredentialGrantDigestsByRole.values.allSatisfy({
+        $0.count == SHA256.byteCount
+      })
     else {
       throw SecretSyncLiveCloudKitProofConfigurationError.hostLaunchGrantBindingMismatch
     }
@@ -281,13 +513,10 @@ enum SecretSyncLiveHostLaunchGrantVerifier {
   static func digest(
     authorityPublicKey: Data, manifestBytes: Data, signature: Data
   ) -> Data {
-    var framed = Data("mootx01.u7.host-launch-grant.v1".utf8)
-    for field in [authorityPublicKey, manifestBytes, signature] {
-      var length = UInt64(field.count).bigEndian
-      withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
-      framed.append(field)
-    }
-    return Data(SHA256.hash(data: framed))
+    SecretSyncLiveFraming.digest(
+      domain: "mootx01.u7.host-launch-grant.v1",
+      fields: [authorityPublicKey, manifestBytes, signature]
+    )
   }
 }
 
@@ -313,6 +542,16 @@ enum SecretSyncLiveCredentialBinding {
 }
 
 actor SecretSyncLiveCleanupLedger {
+  struct CredentialCheckpoint: Codable, Sendable, Equatable {
+    let deviceID: TrustedDeviceID
+    let credentialID: DeviceCredentialID
+    let signingHandle: SigningPrivateKeyHandle
+    let agreementHandle: KeyAgreementPrivateKeyHandle
+    let signingPublicKey: SigningPublicKeyDescriptor
+    let agreementPublicKey: KeyAgreementPublicKeyDescriptor
+    var published: Bool
+  }
+
   struct State: Codable, Sendable {
     var namespace: String
     var deviceEvidenceByRole: [String: String]
@@ -322,8 +561,7 @@ actor SecretSyncLiveCleanupLedger {
     var agreementVerifierPrivateKeysByRole: [String: Data]
     var protectedCommitment: SecretBootstrapFreshnessCommitment?
     var transitionOutcomeBytesByPhase: [String: Data]
-    // Optional fields keep a locally retained pre-correction ledger readable.
-    var hostAuthorityPublicKey: Data?
+    var signedRunManifestDigest: Data?
     var launchGrantDigestByNonce: [String: Data]?
     var credentialBindingDigestByRole: [String: Data]?
     var credentialIDByRole: [String: UUID]?
@@ -333,6 +571,8 @@ actor SecretSyncLiveCleanupLedger {
     var cleanupPrerequisitesCheckpointed: Bool?
     var cleanupMarkersByRole: [String: SecretSyncLiveEvidence]?
     var locallyCompletedCleanupRoles: Set<String>?
+    var credentialCheckpointsByRole: [String: CredentialCheckpoint]?
+    var activeSignedCleanupRecords: [SecretSyncLiveRecordReference]?
   }
 
   private let url: URL
@@ -341,11 +581,21 @@ actor SecretSyncLiveCleanupLedger {
   init(url: URL, namespace: String) throws {
     self.url = url
     self.namespace = namespace
+    guard url.isFileURL, url.path.hasPrefix("/"),
+      url.lastPathComponent
+        == "\(SecretSyncLiveSignedRunManifestVerifier.expectedLedgerIdentifier(namespace: namespace)).json"
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.invalidLedgerPath }
   }
 
   /// Records an exact run-owned ID before any live save is issued.
   func recordBeforeSave(_ recordID: CKRecord.ID) throws {
-    try transaction { state in
+    try SecretSyncLiveRunOwnedRecordGrammar.requireCleanup(
+      SecretSyncLiveRecordReference(
+        recordName: recordID.recordName, zoneName: recordID.zoneID.zoneName
+      ),
+      namespace: namespace
+    )
+    return try transaction { state in
       var names = state.recordNamesByZone[recordID.zoneID.zoneName, default: []]
       if !names.contains(recordID.recordName) { names.append(recordID.recordName) }
       state.recordNamesByZone[recordID.zoneID.zoneName] = names
@@ -382,9 +632,29 @@ actor SecretSyncLiveCleanupLedger {
   /// Atomically records successful prerequisite verification and freezes the
   /// first exact cleanup set before any local or CloudKit deletion begins.
   func checkpointCleanupPrerequisites(
-    including recordIDs: [CKRecord.ID]
+    including recordIDs: [CKRecord.ID],
+    signedRunManifest: SecretSyncLiveSignedRunManifest
   ) throws -> [CKRecord.ID] {
-    try transaction { state in
+    let signedReferences = Set(signedRunManifest.manifest.cleanupRecords)
+    let candidateReferences = Set(recordIDs.map {
+      SecretSyncLiveRecordReference(
+        recordName: $0.recordName, zoneName: $0.zoneID.zoneName
+      )
+    })
+    guard candidateReferences == signedReferences else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.unauthorizedRunRecord
+    }
+    for reference in candidateReferences {
+      try SecretSyncLiveRunOwnedRecordGrammar.requireCleanup(
+        reference, namespace: namespace
+      )
+    }
+    return try transaction { state in
+      guard state.signedRunManifestDigest != nil,
+        state.activeSignedCleanupRecords.map(Set.init) == signedReferences
+      else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.ledgerAuthenticationFailed
+      }
       if state.cleanupPrepared != true {
         for recordID in recordIDs {
           var names = state.recordNamesByZone[recordID.zoneID.zoneName, default: []]
@@ -428,20 +698,32 @@ actor SecretSyncLiveCleanupLedger {
     values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) throws {
     try transaction { state in
-      if let pinned = state.hostAuthorityPublicKey {
-        guard pinned == values.hostAuthorityPublicKey else {
-          throw SecretSyncLiveCloudKitProofConfigurationError.hostLaunchGrantSignatureInvalid
+      guard url.standardizedFileURL == values.ledgerURL.standardizedFileURL else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.invalidLedgerPath
+      }
+      if let pinned = state.signedRunManifestDigest {
+        guard pinned == values.runManifestDigest else {
+          throw SecretSyncLiveCloudKitProofConfigurationError
+            .signedRunManifestBindingMismatch
         }
-      } else {
-        state.hostAuthorityPublicKey = values.hostAuthorityPublicKey
       }
       var grants = state.launchGrantDigestByNonce ?? [:]
       let nonce = values.launchGrant.manifest.nonce.uuidString.lowercased()
       if grants[nonce] != nil {
         throw SecretSyncLiveCloudKitProofConfigurationError.launchGrantReplay
       }
+      guard Self.contentDigest(state) == values.launchGrant.manifest
+        .expectedLedgerContentDigest
+      else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.ledgerAuthenticationFailed
+      }
+      state.signedRunManifestDigest = values.runManifestDigest
       grants[nonce] = values.launchGrantDigest
       state.launchGrantDigestByNonce = grants
+      if values.phase == .cleanup {
+        state.activeSignedCleanupRecords = values.signedRunManifest.manifest
+          .cleanupRecords
+      }
       if values.phase != .credential {
         let expected = (state.credentialBindingDigestByRole ?? [:])[
           values.deviceRole.rawValue
@@ -452,6 +734,64 @@ actor SecretSyncLiveCleanupLedger {
           throw SecretSyncLiveCloudKitProofConfigurationError.launchGrantCredentialMismatch
         }
       }
+    }
+  }
+
+  static func initialContentDigest(namespace: String) -> Data {
+    contentDigest(initialState(namespace: namespace))
+  }
+
+  func currentContentDigest() throws -> Data {
+    try transaction(writeBack: false) { state in Self.contentDigest(state) }
+  }
+
+  func checkpointProvisionalCredential(
+    _ generation: SecretSyncCustodyCredentialGeneration,
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws {
+    try transaction { state in
+      var checkpoints = state.credentialCheckpointsByRole ?? [:]
+      guard checkpoints[role.rawValue] == nil else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.deviceEvidenceReused
+      }
+      checkpoints[role.rawValue] = CredentialCheckpoint(
+        deviceID: generation.deviceID, credentialID: generation.credentialID,
+        signingHandle: generation.signingHandle,
+        agreementHandle: generation.agreementHandle,
+        signingPublicKey: generation.signingPublicKey,
+        agreementPublicKey: generation.agreementPublicKey, published: false
+      )
+      state.credentialCheckpointsByRole = checkpoints
+    }
+  }
+
+  func credentialCheckpoint(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws -> CredentialCheckpoint? {
+    try transaction(writeBack: false) { state in
+      (state.credentialCheckpointsByRole ?? [:])[role.rawValue]
+    }
+  }
+
+  func markCredentialPublished(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws {
+    try transaction { state in
+      guard var checkpoint = (state.credentialCheckpointsByRole ?? [:])[
+        role.rawValue
+      ] else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      }
+      checkpoint.published = true
+      state.credentialCheckpointsByRole?[role.rawValue] = checkpoint
+    }
+  }
+
+  func clearCredentialCheckpoint(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws {
+    _ = try transaction { state in
+      state.credentialCheckpointsByRole?.removeValue(forKey: role.rawValue)
     }
   }
 
@@ -485,6 +825,19 @@ actor SecretSyncLiveCleanupLedger {
         throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
       }
       return DeviceCredentialID(rawValue)
+    }
+  }
+
+  func credentialBindingDigest(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws -> Data {
+    try transaction(writeBack: false) { state in
+      guard let digest = (state.credentialBindingDigestByRole ?? [:])[
+        role.rawValue
+      ] else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      }
+      return digest
     }
   }
 
@@ -594,46 +947,162 @@ actor SecretSyncLiveCleanupLedger {
 
   /// Reloads under a POSIX lock for every operation; actor isolation alone does
   /// not protect two independently launched XCTest processes on one host.
-  private func transaction<T>(_ body: (inout State) throws -> T) throws -> T {
-    try FileManager.default.createDirectory(
-      at: url.deletingLastPathComponent(),
-      withIntermediateDirectories: true
+  private func transaction<T>(
+    writeBack: Bool = true,
+    _ body: (inout State) throws -> T
+  ) throws -> T {
+    let directoryURL = url.deletingLastPathComponent()
+    try Self.requirePrivateDirectory(directoryURL)
+    let directoryDescriptor = open(
+      directoryURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW
     )
-    let lockURL = URL(fileURLWithPath: url.path + ".lock")
-    let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-    guard descriptor >= 0, flock(descriptor, LOCK_EX) == 0 else {
-      if descriptor >= 0 { close(descriptor) }
-      throw SecretSyncLiveCloudKitProofConfigurationError.corruptLocalLedger
+    guard directoryDescriptor >= 0 else { throw corrupt() }
+    defer { close(directoryDescriptor) }
+
+    let lockName = url.lastPathComponent + ".lock"
+    let lockDescriptor = openat(
+      directoryDescriptor, lockName, O_CREAT | O_RDWR | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR
+    )
+    guard lockDescriptor >= 0,
+      Self.requirePrivateRegularFile(lockDescriptor),
+      flock(lockDescriptor, LOCK_EX) == 0
+    else {
+      if lockDescriptor >= 0 { close(lockDescriptor) }
+      throw corrupt()
     }
     defer {
-      _ = flock(descriptor, LOCK_UN)
-      close(descriptor)
+      _ = flock(lockDescriptor, LOCK_UN)
+      close(lockDescriptor)
     }
+
+    let ledgerDescriptor = openat(
+      directoryDescriptor, url.lastPathComponent, O_RDONLY | O_NOFOLLOW
+    )
     var state: State
-    if FileManager.default.fileExists(atPath: url.path) {
-      state = try JSONDecoder().decode(State.self, from: Data(contentsOf: url))
+    if ledgerDescriptor >= 0 {
+      defer { close(ledgerDescriptor) }
+      guard Self.requirePrivateRegularFile(ledgerDescriptor) else { throw corrupt() }
+      state = try JSONDecoder().decode(
+        State.self, from: Self.readAll(from: ledgerDescriptor)
+      )
       guard state.namespace == namespace else {
         throw SecretSyncLiveCloudKitProofConfigurationError.ledgerNamespaceMismatch
       }
+    } else if errno == ENOENT {
+      state = Self.initialState(namespace: namespace)
     } else {
-      state = State(
-        namespace: namespace, deviceEvidenceByRole: [:],
-        completedPhasesByRole: [:], recordNamesByZone: [:], evidence: [],
-        agreementVerifierPrivateKeysByRole: [:], protectedCommitment: nil,
-        transitionOutcomeBytesByPhase: [:], hostAuthorityPublicKey: nil,
-        launchGrantDigestByNonce: nil, credentialBindingDigestByRole: nil,
-        credentialIDByRole: nil, removedCredentialRoles: nil,
-        cleanupPrepared: nil, frozenCleanupRecordNamesByZone: nil,
-        cleanupPrerequisitesCheckpointed: nil, cleanupMarkersByRole: nil,
-        locallyCompletedCleanupRoles: nil
+      throw corrupt()
+    }
+
+    let result = try body(&state)
+    if writeBack {
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+      try Self.replace(
+        try encoder.encode(state), name: url.lastPathComponent,
+        directoryDescriptor: directoryDescriptor
       )
     }
-    let result = try body(&state)
-    try JSONEncoder().encode(state).write(to: url, options: .atomic)
-    guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
-      throw SecretSyncLiveCloudKitProofConfigurationError.corruptLocalLedger
-    }
     return result
+  }
+
+  private static func initialState(namespace: String) -> State {
+    State(
+      namespace: namespace, deviceEvidenceByRole: [:],
+      completedPhasesByRole: [:], recordNamesByZone: [:], evidence: [],
+      agreementVerifierPrivateKeysByRole: [:], protectedCommitment: nil,
+      transitionOutcomeBytesByPhase: [:], signedRunManifestDigest: nil,
+      launchGrantDigestByNonce: nil, credentialBindingDigestByRole: nil,
+      credentialIDByRole: nil, removedCredentialRoles: nil,
+      cleanupPrepared: nil, frozenCleanupRecordNamesByZone: nil,
+      cleanupPrerequisitesCheckpointed: nil, cleanupMarkersByRole: nil,
+      locallyCompletedCleanupRoles: nil, credentialCheckpointsByRole: nil,
+      activeSignedCleanupRecords: nil
+    )
+  }
+
+  private static func contentDigest(_ state: State) -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return SecretSyncLiveFraming.digest(
+      domain: "mootx01.u7.cleanup-ledger-content.v1",
+      fields: [(try? encoder.encode(state)) ?? Data()]
+    )
+  }
+
+  private static func requirePrivateDirectory(_ directoryURL: URL) throws {
+    do {
+      try FileManager.default.createDirectory(
+        at: directoryURL, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: NSNumber(value: 0o700)]
+      )
+    } catch { throw corrupt() }
+    var status = stat()
+    guard lstat(directoryURL.path, &status) == 0,
+      (status.st_mode & S_IFMT) == S_IFDIR,
+      status.st_uid == geteuid(),
+      (status.st_mode & 0o777) == 0o700
+    else { throw corrupt() }
+  }
+
+  private static func requirePrivateRegularFile(_ descriptor: Int32) -> Bool {
+    var status = stat()
+    return fstat(descriptor, &status) == 0
+      && (status.st_mode & S_IFMT) == S_IFREG
+      && status.st_uid == geteuid()
+      && (status.st_mode & 0o777) == 0o600
+  }
+
+  private static func readAll(from descriptor: Int32) throws -> Data {
+    guard lseek(descriptor, 0, SEEK_SET) >= 0 else { throw corrupt() }
+    var result = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+      let count = read(descriptor, &buffer, buffer.count)
+      if count == 0 { return result }
+      guard count > 0 else { throw corrupt() }
+      result.append(contentsOf: buffer.prefix(Int(count)))
+    }
+  }
+
+  private static func replace(
+    _ data: Data, name: String, directoryDescriptor: Int32
+  ) throws {
+    let temporaryName = ".\(name).\(UUID().uuidString.lowercased()).tmp"
+    let descriptor = openat(
+      directoryDescriptor, temporaryName,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR
+    )
+    guard descriptor >= 0 else { throw corrupt() }
+    var succeeded = false
+    defer {
+      close(descriptor)
+      if !succeeded { _ = unlinkat(directoryDescriptor, temporaryName, 0) }
+    }
+    try data.withUnsafeBytes { rawBuffer in
+      guard var pointer = rawBuffer.baseAddress else { return }
+      var remaining = rawBuffer.count
+      while remaining > 0 {
+        let count = write(descriptor, pointer, remaining)
+        guard count > 0 else { throw corrupt() }
+        remaining -= count
+        pointer = pointer.advanced(by: count)
+      }
+    }
+    guard fsync(descriptor) == 0,
+      renameat(directoryDescriptor, temporaryName, directoryDescriptor, name) == 0,
+      fsync(directoryDescriptor) == 0
+    else { throw corrupt() }
+    succeeded = true
+  }
+
+  private static func corrupt() -> SecretSyncLiveCloudKitProofConfigurationError {
+    .corruptLocalLedger
+  }
+
+  private func corrupt() -> SecretSyncLiveCloudKitProofConfigurationError {
+    Self.corrupt()
   }
 
   private static func recordIDs(from state: State) -> [CKRecord.ID] {
@@ -674,6 +1143,20 @@ actor SecretSyncLiveCleanupLedger {
         throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
       }
       return key
+    }
+  }
+
+  func eraseAgreementVerifierPrivateKey(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws {
+    _ = try transaction { state in
+      state.agreementVerifierPrivateKeysByRole.removeValue(forKey: role.rawValue)
+    }
+  }
+
+  func eraseAllAgreementVerifierPrivateKeys() throws {
+    try transaction { state in
+      state.agreementVerifierPrivateKeysByRole.removeAll(keepingCapacity: false)
     }
   }
 
@@ -762,6 +1245,137 @@ struct SecretSyncLiveEvidence: Codable, Sendable, Equatable {
   let outcomeDigest: Data?
 }
 
+struct SecretSyncLiveSignedArtifactEnvelope: Codable, Sendable, Equatable {
+  let version: Int
+  let namespace: String
+  let role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  let phase: SecretSyncLiveCloudKitProofConfiguration.Phase
+  let kind: String
+  let recordName: String
+  let launchNonce: UUID
+  let verifiedLaunchGrant: SecretSyncLiveHostLaunchGrant
+  let launchGrantDigest: Data
+  let runManifestDigest: Data
+  let prerequisiteArtifactDigests: [Data]
+  let credentialBindingDigest: Data
+  let signingPublicKey: SigningPublicKeyDescriptor
+  let agreementPublicKey: KeyAgreementPublicKeyDescriptor
+  let payload: Data
+  let payloadDigest: Data
+  let signingTranscript: SecretSyncLivePossessionTranscript
+  let signature: Data
+
+  func canonicalBody() throws -> Data {
+    try SecretSyncCanonicalEncoding.encode(
+      domain: .deviceEnrollmentProof,
+      fields: [
+        .init(tag: 1, value: Self.uint16(UInt16(version))),
+        .init(tag: 2, value: Data("secret-sync/u7-phase-artifact/v1".utf8)),
+        .init(tag: 3, value: Data(namespace.utf8)),
+        .init(tag: 4, value: Data(role.rawValue.utf8)),
+        .init(tag: 5, value: Data(phase.rawValue.utf8)),
+        .init(tag: 6, value: Data(kind.utf8)),
+        .init(tag: 7, value: Data(recordName.utf8)),
+        .init(tag: 8, value: Data(launchNonce.uuidString.lowercased().utf8)),
+        .init(tag: 9, value: launchGrantDigest),
+        .init(tag: 10, value: runManifestDigest),
+        .init(tag: 11, value: Self.frame(prerequisiteArtifactDigests)),
+        .init(tag: 12, value: credentialBindingDigest),
+        .init(tag: 13, value: signingPublicKey.publicKeyBytes),
+        .init(tag: 14, value: agreementPublicKey.publicKeyBytes),
+        .init(tag: 15, value: payloadDigest),
+      ]
+    )
+  }
+
+  func artifactDigest() throws -> Data {
+    SecretSyncLiveFraming.digest(
+      domain: "mootx01.u7.signed-phase-artifact.v1",
+      fields: [try canonicalBody(), signature]
+    )
+  }
+
+  private static func frame(_ fields: [Data]) -> Data {
+    var result = Data()
+    for field in fields {
+      var length = UInt64(field.count).bigEndian
+      withUnsafeBytes(of: &length) { result.append(contentsOf: $0) }
+      result.append(field)
+    }
+    return result
+  }
+
+  private static func uint16(_ value: UInt16) -> Data {
+    var value = value.bigEndian
+    return withUnsafeBytes(of: &value) { Data($0) }
+  }
+}
+
+enum SecretSyncLiveSignedArtifactVerifier {
+  static func verify(
+    _ envelope: SecretSyncLiveSignedArtifactEnvelope,
+    expectedNamespace: String,
+    expectedRole: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    expectedPhase: SecretSyncLiveCloudKitProofConfiguration.Phase,
+    expectedKind: String,
+    expectedRecordName: String,
+    verifiedLaunchGrant: SecretSyncLiveHostLaunchGrant,
+    verifiedLaunchGrantDigest: Data,
+    verifiedRunManifestDigest: Data,
+    trustedHostAuthorityPublicKey: Data
+  ) throws -> Bool {
+    let manifest = verifiedLaunchGrant.manifest
+    let embeddedBody = try SecretSyncLiveHostLaunchGrantVerifier
+      .canonicalManifestBytes(envelope.verifiedLaunchGrant.manifest)
+    let embeddedSignature = try P256.Signing.ECDSASignature(
+      derRepresentation: envelope.verifiedLaunchGrant.signature
+    )
+    let authority = try P256.Signing.PublicKey(
+      x963Representation: trustedHostAuthorityPublicKey
+    )
+    let embeddedDigest = SecretSyncLiveHostLaunchGrantVerifier.digest(
+      authorityPublicKey: trustedHostAuthorityPublicKey,
+      manifestBytes: embeddedBody,
+      signature: envelope.verifiedLaunchGrant.signature
+    )
+    guard envelope.version == 1,
+      authority.isValidSignature(embeddedSignature, for: embeddedBody),
+      envelope.verifiedLaunchGrant.manifest.runManifestDigest
+        == verifiedRunManifestDigest,
+      embeddedDigest == envelope.launchGrantDigest,
+      envelope.namespace == expectedNamespace,
+      envelope.role == expectedRole,
+      envelope.phase == expectedPhase,
+      envelope.kind == expectedKind,
+      envelope.recordName == expectedRecordName,
+      envelope.launchNonce == manifest.nonce,
+      envelope.launchGrantDigest == verifiedLaunchGrantDigest,
+      envelope.runManifestDigest == verifiedRunManifestDigest,
+      envelope.prerequisiteArtifactDigests == manifest.prerequisiteArtifactDigests,
+      (manifest.phase == .credential
+        ? manifest.credentialBindingDigest == nil
+        : envelope.credentialBindingDigest == manifest.credentialBindingDigest),
+      envelope.payloadDigest == Data(SHA256.hash(data: envelope.payload)),
+      envelope.signingTranscript.signingPublicKey == envelope.signingPublicKey,
+      envelope.signingTranscript.agreementPublicKey == envelope.agreementPublicKey,
+      envelope.signingTranscript.freshnessCommitment.headCommitDigest.bytes
+        == Data(SHA256.hash(data: try envelope.canonicalBody())),
+      envelope.signingTranscript.freshnessCommitment.policyDigest.bytes
+        == envelope.payloadDigest
+    else { return false }
+    let challenge = try SecretSyncSigningProofChallenge(
+      transcript: envelope.signingTranscript.productionValue()
+    )
+    let key = try P256.Signing.PublicKey(
+      x963Representation: envelope.signingPublicKey.publicKeyBytes
+    )
+    let signature = try P256.Signing.ECDSASignature(
+      rawRepresentation: envelope.signature
+    )
+    return key.isValidSignature(signature, for: challenge.canonicalBytes)
+  }
+}
+
 struct SecretSyncLiveCredentialEvidence: Codable, Sendable, Equatable {
   /// Digest of the signed host launch grant. Raw host device selectors remain
   /// exclusively in the external G-RUNTIME evidence.
@@ -823,7 +1437,7 @@ struct SecretSyncLiveCASResult: Codable, Sendable, Equatable {
   let serverHeadDigest: Data
 }
 
-struct SecretSyncLiveRecordReference: Codable, Sendable, Equatable {
+struct SecretSyncLiveRecordReference: Codable, Sendable, Hashable {
   let recordName: String
   let zoneName: String
 }
