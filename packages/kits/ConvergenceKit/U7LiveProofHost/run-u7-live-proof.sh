@@ -7,9 +7,9 @@ fail() {
   exit "${2:-66}"
 }
 
+runner_self_test_mode=0
 if [[ "${1:-}" == "--self-test" ]]; then
-  U7_RUNNER_SELF_TEST_MODE=1
-  export U7_RUNNER_SELF_TEST_MODE
+  runner_self_test_mode=1
   shift
   [[ "$#" == 0 ]] || fail U7_RUNNER_SELF_TEST_INVALID 64
   if [[ -z "${U7_RUN_DIR:-}" ]]; then
@@ -26,6 +26,21 @@ fi
 : "${U7_DEST_A:?U7_DEST_A is required}"
 : "${U7_DEST_B:?U7_DEST_B is required}"
 : "${U7_DEST_C:?U7_DEST_C is required}"
+
+# Self-test execution is admitted only through the explicit argument and only
+# with a tool that implements the deliberately non-Xcode attestation command.
+# Real xcodebuild rejects this command, keeping tests incapable of crossing the
+# live build boundary even when the caller accidentally supplies its path.
+if [[ "${runner_self_test_mode}" == 1 ]]; then
+  for self_test_tool in "${U7_XCODEBUILD}" "${U7_XCRESULTTOOL}"; do
+    [[ -f "${self_test_tool}" && ! -L "${self_test_tool}" \
+      && -x "${self_test_tool}" ]] || fail U7_RUNNER_SELF_TEST_TOOL_INVALID 65
+    self_test_attestation="$("${self_test_tool}" --u7-self-test-attest 2>/dev/null)" \
+      || fail U7_RUNNER_SELF_TEST_TOOL_INVALID 65
+    [[ "${self_test_attestation}" == U7_FAKE_XCODEBUILD_V1 ]] \
+      || fail U7_RUNNER_SELF_TEST_TOOL_INVALID 65
+  done
+fi
 
 [[ -z "${U7_PROJECT+x}" && -z "${U7_WORKSPACE+x}" \
   && -z "${U7_SCHEME+x}" ]] || fail U7_RUNNER_CONTAINER_MODE_FORBIDDEN 65
@@ -235,8 +250,11 @@ def load_environment(path):
         die()
     return value
 
+def stable_identity(info):
+    return "{}:{}:{:o}".format(info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+
 def validate(path, root, expected_platform, authority_path, mode=None, expected_environment=None):
-    regular_owned(path, mode)
+    path_info = regular_owned(path, mode)
     if not beneath(path, root) or not no_symlink_components(path, root):
         die()
     document = read_plist(path)
@@ -273,7 +291,7 @@ def validate(path, root, expected_platform, authority_path, mode=None, expected_
             die()
     with open(path, "rb") as handle:
         digest = hashlib.sha256(handle.read()).hexdigest()
-    return document, digest
+    return document, digest, stable_identity(path_info)
 
 action = sys.argv[1]
 if action == "discover":
@@ -285,12 +303,13 @@ if action == "discover":
         candidates.extend(os.path.join(directory, name) for name in files if name.endswith(".xctestrun"))
     if len(candidates) != 1:
         die()
-    _, digest = validate(candidates[0], root, platform, authority_path)
-    print(digest + "\t" + os.path.realpath(candidates[0]))
+    _, digest, identity = validate(candidates[0], root, platform, authority_path)
+    print(digest + "\t" + identity + "\t" + os.path.realpath(candidates[0]))
 elif action == "inject":
-    source, copy, root, platform, authority_path, environment_path, source_digest = sys.argv[2:9]
-    _, current_source_digest = validate(source, root, platform, authority_path)
-    if current_source_digest != source_digest or os.path.dirname(source) != os.path.dirname(copy):
+    source, copy, root, platform, authority_path, environment_path, source_digest, source_identity = sys.argv[2:10]
+    _, current_source_digest, current_source_identity = validate(source, root, platform, authority_path)
+    if (current_source_digest != source_digest or current_source_identity != source_identity
+            or os.path.dirname(source) != os.path.dirname(copy)):
         die()
     if os.path.lexists(copy) or not beneath(copy, root):
         die()
@@ -344,14 +363,18 @@ elif action == "inject":
         os.fsync(directory_descriptor)
     finally:
         os.close(directory_descriptor)
-    _, digest = validate(copy, root, platform, authority_path, 0o600, expected_environment)
-    print(digest)
+    _, digest, identity = validate(copy, root, platform, authority_path, 0o600, expected_environment)
+    print(digest + "\t" + identity)
 elif action == "verify":
-    source, copy, root, platform, authority_path, environment_path, source_digest, copy_digest = sys.argv[2:10]
-    _, current_source_digest = validate(source, root, platform, authority_path)
+    (source, copy, root, platform, authority_path, environment_path,
+     source_digest, source_identity, copy_digest, copy_identity) = sys.argv[2:12]
+    _, current_source_digest, current_source_identity = validate(source, root, platform, authority_path)
     expected_environment = load_environment(environment_path)
-    _, current_copy_digest = validate(copy, root, platform, authority_path, 0o600, expected_environment)
-    if current_source_digest != source_digest or current_copy_digest != copy_digest:
+    _, current_copy_digest, current_copy_identity = validate(
+        copy, root, platform, authority_path, 0o600, expected_environment
+    )
+    if (current_source_digest != source_digest or current_source_identity != source_identity
+            or current_copy_digest != copy_digest or current_copy_identity != copy_identity):
         die()
     if os.path.dirname(source) != os.path.dirname(copy):
         die()
@@ -399,10 +422,11 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
 prepare_invocation_copy() {
   local source="$1"
   local source_digest="$2"
-  local root="$3"
-  local platform="$4"
-  local label="$5"
-  shift 5
+  local source_identity="$3"
+  local root="$4"
+  local platform="$5"
+  local label="$6"
+  shift 6
   local copy="$(/usr/bin/dirname "${source}")/.u7-${label}-$(/usr/bin/basename "${transient}").xctestrun"
   local environment_spec="${transient}/${label}-environment.json"
   local digest_file="${transient}/${label}-digest.txt"
@@ -410,14 +434,17 @@ prepare_invocation_copy() {
   capture_checked U7_RUNNER_XCTESTRUN_INVALID "${digest_file}" \
     /usr/bin/python3 "${plist_helper}" inject "${source}" "${copy}" \
       "${root}" "${platform}" "${transient}/authority.b64" \
-      "${environment_spec}" "${source_digest}"
+      "${environment_spec}" "${source_digest}" "${source_identity}"
   invocation_copies+=("${copy}")
-  local copy_digest
-  copy_digest="$(/usr/bin/tr -d '\n' <"${digest_file}")"
-  [[ "${copy_digest}" =~ ^[0-9a-f]{64}$ ]] || fail U7_RUNNER_XCTESTRUN_INVALID
+  local copy_digest copy_identity
+  IFS=$'\t' read -r copy_digest copy_identity <"${digest_file}"
+  [[ "${copy_digest}" =~ ^[0-9a-f]{64}$ \
+    && "${copy_identity}" =~ ^[0-9]+:[0-9]+:[0-7]+$ ]] \
+    || fail U7_RUNNER_XCTESTRUN_INVALID
   prepared_copy="${copy}"
   prepared_environment_spec="${environment_spec}"
   prepared_copy_digest="${copy_digest}"
+  prepared_copy_identity="${copy_identity}"
 }
 
 verify_invocation_copy() {
@@ -427,27 +454,39 @@ verify_invocation_copy() {
   local platform="$4"
   local environment_spec="$5"
   local source_digest="$6"
-  local copy_digest="$7"
+  local source_identity="$7"
+  local copy_digest="$8"
+  local copy_identity="$9"
   run_checked U7_RUNNER_XCTESTRUN_INVALID \
     /usr/bin/python3 "${plist_helper}" verify "${source}" "${copy}" \
       "${root}" "${platform}" "${transient}/authority.b64" \
-      "${environment_spec}" "${source_digest}" "${copy_digest}"
+      "${environment_spec}" "${source_digest}" "${source_identity}" \
+      "${copy_digest}" "${copy_identity}"
 }
 
 attack_invocation_copy_if_requested() {
-  [[ "${U7_RUNNER_SELF_TEST_MODE:-0}" == 1 ]] || return 0
+  [[ "${runner_self_test_mode}" == 1 ]] || return 0
   case "${U7_SELF_TEST_XCTESTRUN_ATTACK:-}" in
     '')
       ;;
     replace)
-      /usr/bin/printf 'replacement' >>"${prepared_copy}"
+      /bin/cp -p "${prepared_copy}" "${prepared_copy}.replacement"
+      /bin/mv -f "${prepared_copy}.replacement" "${prepared_copy}"
       ;;
     symlink)
       /bin/rm -f -- "${prepared_copy}"
       /bin/ln -s "${source_xctestrun}" "${prepared_copy}"
       ;;
     source-replace)
-      /usr/bin/printf 'replacement' >>"${source_xctestrun}"
+      /bin/cp -p "${source_xctestrun}" "${source_xctestrun}.replacement"
+      /bin/mv -f "${source_xctestrun}.replacement" "${source_xctestrun}"
+      ;;
+    copy-mode)
+      chmod 400 "${prepared_copy}"
+      ;;
+    source-mode)
+      /usr/bin/python3 -c 'import os, stat, sys; p=sys.argv[1]; os.chmod(p, stat.S_IMODE(os.lstat(p).st_mode) ^ stat.S_IXUSR)' \
+        "${source_xctestrun}"
       ;;
     *)
       fail U7_RUNNER_XCTESTRUN_INVALID
@@ -498,9 +537,11 @@ run_xcode_checked U7_RUNNER_BUILD_FAILED \
   -destination "${U7_DEST_A}" \
   "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey=${authority}"
 discover_product "${mac_derived}" MacOSX "${transient}/mac-product.txt"
-IFS=$'\t' read -r mac_source_digest mac_source \
+IFS=$'\t' read -r mac_source_digest mac_source_identity mac_source \
   <"${transient}/mac-product.txt"
-[[ "${mac_source_digest}" =~ ^[0-9a-f]{64}$ && -n "${mac_source}" ]] \
+[[ "${mac_source_digest}" =~ ^[0-9a-f]{64}$ \
+  && "${mac_source_identity}" =~ ^[0-9]+:[0-9]+:[0-7]+$ \
+  && -n "${mac_source}" ]] \
   || fail U7_RUNNER_PRODUCT_INVALID
 
 # One authorized iPhone destination builds the shared iOS test products used
@@ -511,9 +552,11 @@ run_xcode_checked U7_RUNNER_BUILD_FAILED \
   -destination "${U7_DEST_B}" \
   "INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey=${authority}"
 discover_product "${ios_derived}" iPhoneOS "${transient}/ios-product.txt"
-IFS=$'\t' read -r ios_source_digest ios_source \
+IFS=$'\t' read -r ios_source_digest ios_source_identity ios_source \
   <"${transient}/ios-product.txt"
-[[ "${ios_source_digest}" =~ ^[0-9a-f]{64}$ && -n "${ios_source}" ]] \
+[[ "${ios_source_digest}" =~ ^[0-9a-f]{64}$ \
+  && "${ios_source_identity}" =~ ^[0-9]+:[0-9]+:[0-7]+$ \
+  && -n "${ios_source}" ]] \
   || fail U7_RUNNER_PRODUCT_INVALID
 
 phases=(
@@ -539,7 +582,7 @@ stage_receipt=""
 interrupt_if_requested() {
   local key="$1"
   local candidate="$2"
-  if [[ "${U7_RUNNER_SELF_TEST_MODE:-0}" == 1 \
+  if [[ "${runner_self_test_mode}" == 1 \
     && "${!key:-}" == "${candidate}" ]]; then
     fail U7_RUNNER_SELF_TEST_INTERRUPT 75
   fi
@@ -616,6 +659,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       destination="${U7_DEST_A}"
       source_xctestrun="${mac_source}"
       source_digest="${mac_source_digest}"
+      source_identity="${mac_source_identity}"
       source_root="${mac_derived}"
       product_platform=MacOSX
       ;;
@@ -623,6 +667,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       destination="${U7_DEST_B}"
       source_xctestrun="${ios_source}"
       source_digest="${ios_source_digest}"
+      source_identity="${ios_source_identity}"
       source_root="${ios_derived}"
       product_platform=iPhoneOS
       ;;
@@ -630,6 +675,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       destination="${U7_DEST_C}"
       source_xctestrun="${ios_source}"
       source_digest="${ios_source_digest}"
+      source_identity="${ios_source_identity}"
       source_root="${ios_derived}"
       product_platform=iPhoneOS
       ;;
@@ -649,7 +695,7 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
       || fail U7_RUNNER_INSPECT_FAILED
   else
     prepare_invocation_copy \
-      "${source_xctestrun}" "${source_digest}" "${source_root}" \
+      "${source_xctestrun}" "${source_digest}" "${source_identity}" "${source_root}" \
       "${product_platform}" "${number}-probe-${role}" \
       MOOT_SECRET_SYNC_LIVE_PROOF=1 \
       MOOT_SECRET_SYNC_RUN_NAMESPACE="${namespace}" \
@@ -659,7 +705,8 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
     verify_invocation_copy \
       "${source_xctestrun}" "${prepared_copy}" "${source_root}" \
       "${product_platform}" "${prepared_environment_spec}" \
-      "${source_digest}" "${prepared_copy_digest}"
+      "${source_digest}" "${source_identity}" "${prepared_copy_digest}" \
+      "${prepared_copy_identity}"
     run_xcode_checked U7_RUNNER_PROBE_FAILED \
       "${U7_XCODEBUILD}" test-without-building \
         -xctestrun "${prepared_copy}" \
@@ -698,13 +745,14 @@ while [[ "${index}" -lt "${#phases[@]}" ]]; do
   fi
   if [[ ! -d "${phase_result}" ]]; then
     prepare_invocation_copy \
-      "${source_xctestrun}" "${source_digest}" "${source_root}" \
+      "${source_xctestrun}" "${source_digest}" "${source_identity}" "${source_root}" \
       "${product_platform}" "${number}-phase-${phase}-${role}" \
       "${phase_environment[@]}"
     verify_invocation_copy \
       "${source_xctestrun}" "${prepared_copy}" "${source_root}" \
       "${product_platform}" "${prepared_environment_spec}" \
-      "${source_digest}" "${prepared_copy_digest}"
+      "${source_digest}" "${source_identity}" "${prepared_copy_digest}" \
+      "${prepared_copy_identity}"
     phase_log="${transient}/phase-${number}.log"
     if ! (cd "${package_directory}" \
       && "${sanitized_environment[@]}" \

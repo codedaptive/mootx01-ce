@@ -1272,7 +1272,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         "U7LiveProofHost/run-u7-live-proof.sh"
       )
       let result = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(
           root: root, host: host, fake: fake,
           additions: [key: "forbidden"]
@@ -1284,6 +1284,54 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         atPath: root.appendingPathComponent("fake.log").path
       ))
     }
+  }
+
+  @Test("self-test requires explicit entry and an attested fake Xcode tool")
+  func runnerRequiresAttestedSelfTestTool() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-runner-attestation-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let unattested = root.appendingPathComponent("unattested-tool.sh")
+    try Data("#!/bin/bash\nexit 0\n".utf8).write(to: unattested)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: unattested.path
+    )
+    let packageRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let runner = packageRoot.appendingPathComponent(
+      "U7LiveProofHost/run-u7-live-proof.sh"
+    )
+    let result = try u7RunProcess(
+      executable: runner.path, arguments: ["--self-test"],
+      environment: [
+        "U7_RUN_DIR": root.appendingPathComponent("private").path,
+        "U7_HOST_TOOL": unattested.path,
+        "U7_XCODEBUILD": unattested.path,
+        "U7_XCRESULTTOOL": unattested.path,
+        "U7_PACKAGE_DIR": packageRoot.path,
+        "U7_DEST_A": "A-RAW-CANARY", "U7_DEST_B": "B-RAW-CANARY",
+        "U7_DEST_C": "C-RAW-CANARY",
+      ]
+    )
+    #expect(result.status != 0)
+    #expect(result.stderr == "U7_RUNNER_SELF_TEST_TOOL_INVALID\n")
+
+    let host = try u7CompileStandaloneHost(root: root)
+    let fake = try u7WriteFakeRunnerTool(root: root)
+    let inheritedMode = try u7RunProcess(
+      executable: runner.path, arguments: [],
+      environment: u7RunnerEnvironment(
+        root: root, host: host, fake: fake,
+        additions: [
+          "U7_RUNNER_SELF_TEST_MODE": "1",
+          "U7_SELF_TEST_XCTESTRUN_ATTACK": "forbidden-inherited-hook",
+        ]
+      )
+    )
+    #expect(inheritedMode.status == 0)
+    #expect(inheritedMode.stdout.hasSuffix("U7_RUNNER_OK\n"))
   }
 
   @Test("runner rejects ambiguous target platform and bundle-anchor products")
@@ -1308,7 +1356,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         "U7LiveProofHost/run-u7-live-proof.sh"
       )
       let result = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(
           root: root, host: host, fake: fake,
           additions: ["U7_FAKE_MODE": mode]
@@ -1326,7 +1374,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
 
   @Test("runner rejects private-copy or canonical-source replacement before launch")
   func runnerRejectsXCTestrunReplacement() throws {
-    for attack in ["replace", "symlink", "source-replace"] {
+    for attack in [
+      "replace", "symlink", "source-replace", "copy-mode", "source-mode",
+    ] {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("u7-runner-attack-\(attack)-\(UUID().uuidString)")
       defer { try? FileManager.default.removeItem(at: root) }
@@ -1340,7 +1390,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         "U7LiveProofHost/run-u7-live-proof.sh"
       )
       let result = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(
           root: root, host: host, fake: fake,
           additions: ["U7_SELF_TEST_XCTESTRUN_ATTACK": attack]
@@ -1362,6 +1412,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       "missing-environment", "extra-environment", "authority-environment",
       "cleanup-missing-authorization", "cleanup-missing-inventory",
       "cleanup-missing-receipt", "ordinary-cleanup-key",
+      "cleanup-extra-environment", "cleanup-wrong-inventory",
+      "cleanup-wrong-receipt",
     ]
     for mode in modes {
       let root = FileManager.default.temporaryDirectory
@@ -1377,7 +1429,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         "U7LiveProofHost/run-u7-live-proof.sh"
       )
       let result = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(
           root: root, host: host, fake: fake,
           additions: ["U7_FAKE_MODE": mode]
@@ -1417,7 +1469,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       )
       let interruptIndex = hook.contains("AUTHORIZATION") ? "4" : "7"
       let interrupted = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(
           root: root, host: host, fake: fake,
           additions: [hook: interruptIndex]
@@ -1426,7 +1478,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       #expect(interrupted.status != 0)
       #expect(interrupted.stderr == "U7_RUNNER_SELF_TEST_INTERRUPT\n")
       let resumed = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
       )
       #expect(resumed.status == 0)
@@ -1458,7 +1510,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         "U7LiveProofHost/run-u7-live-proof.sh"
       )
       let result = try u7RunProcess(
-        executable: runner.path, arguments: [],
+        executable: runner.path, arguments: ["--self-test"],
         environment: u7RunnerEnvironment(
           root: root, host: host, fake: fake,
           additions: ["U7_FAKE_MODE": mode]
@@ -2844,6 +2896,10 @@ CLEANUP_KEYS = ORDINARY_KEYS | {
     PREFIX + "STAGE_RECEIPT",
 }
 
+if sys.argv[1:] == ["--u7-self-test-attest"]:
+    print("U7_FAKE_XCODEBUILD_V1")
+    sys.exit(0)
+
 def framed(domain, fields):
     value = domain.encode()
     for field in fields:
@@ -3010,8 +3066,21 @@ if mode == "cleanup-missing-receipt" and moot_environment.get(PREFIX + "PHASE") 
     moot_environment.pop(PREFIX + "STAGE_RECEIPT", None)
 if mode == "ordinary-cleanup-key" and moot_environment.get(PREFIX + "PHASE") != "cleanup":
     moot_environment[PREFIX + "STAGE_RECEIPT"] = "forbidden"
+if mode == "cleanup-extra-environment" and moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    moot_environment[PREFIX + "CLEANUP_UNKNOWN"] = "forbidden"
+if mode == "cleanup-wrong-inventory" and moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    moot_environment[PREFIX + "STAGE_INVENTORY"] = "wrong"
+if mode == "cleanup-wrong-receipt" and moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    moot_environment[PREFIX + "STAGE_RECEIPT"] = "wrong"
 if set(moot_environment) != expected_keys:
     sys.exit(51)
+if moot_environment.get(PREFIX + "PHASE") == "cleanup":
+    inventory_path = log_path.with_suffix(".stage-inventory")
+    receipt_path = log_path.with_suffix(".stage-receipt")
+    if (not inventory_path.exists() or not receipt_path.exists()
+            or moot_environment[PREFIX + "STAGE_INVENTORY"] != inventory_path.read_text()
+            or moot_environment[PREFIX + "STAGE_RECEIPT"] != receipt_path.read_text()):
+        sys.exit(54)
 
 copies_path = log_path.with_suffix(".copies")
 used = set(copies_path.read_text().splitlines()) if copies_path.exists() else set()
@@ -3113,7 +3182,15 @@ receipt = {
         hashlib.sha256(("credential-" + role).encode()).digest()
     ).decode() if phase == "credential" else None,
 }
-(attachments / "u7-phase-receipt-v1.json").write_bytes(canonical(receipt))
+receipt_bytes = canonical(receipt)
+(attachments / "u7-phase-receipt-v1.json").write_bytes(receipt_bytes)
+if phase == "stage":
+    log_path.with_suffix(".stage-inventory").write_text(
+        base64.b64encode(inventory_bytes).decode()
+    )
+    log_path.with_suffix(".stage-receipt").write_text(
+        base64.b64encode(receipt_bytes).decode()
+    )
 append_log(
     "phase:" + phase + ":" + role + ":platform=" + platform
     + ":private-xctestrun:prerequisites="
@@ -3143,7 +3220,6 @@ private func u7RunnerEnvironment(
     "U7_DEST_A": "A-RAW-CANARY",
     "U7_DEST_B": "B-RAW-CANARY", "U7_DEST_C": "C-RAW-CANARY",
     "U7_FAKE_LOG": root.appendingPathComponent("fake.log").path,
-    "U7_RUNNER_SELF_TEST_MODE": "1",
   ]
   return base.merging(additions, uniquingKeysWith: { _, replacement in replacement })
 }
