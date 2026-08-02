@@ -299,7 +299,8 @@ fn rejected_memory_not_counted_as_active() {
     // File a memory — lands in cluster A (active state).
     let file_result = dispatch_tool(
         "moot_file_memory",
-        &args!["content" => "believed-count test fixture", "location" => "test/room"],
+        &args!["content" => "believed-count test fixture",
+        "subject" => "believed-count test fixture", "location" => "test/room"],
         &registry,
         &ledger,
     )

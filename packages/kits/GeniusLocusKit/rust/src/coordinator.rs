@@ -3217,6 +3217,10 @@ impl EstateCoordinator {
             if level > config.vague_level_cap {
                 continue;
             }
+            // Fold-in v2 is a fresh derived row: same subject rule as the
+            // new-cluster path — never born as debt (PR-02). Computed before
+            // `rendering` moves into the constructor.
+            let v2_subject_line = crate::brain::consolidation_cycle::vague_subject(&rendering);
             let mut v2 = locus_kit::drawer::Drawer::new(
                 uuid::Uuid::new_v4().to_string(),
                 rendering,
@@ -3226,6 +3230,9 @@ impl EstateCoordinator {
                 vague_item.embedding_model_id.clone(),
             );
             v2.lineage_id = vague_item.lineage_id;
+            v2.subject = Some(v2_subject_line);
+            v2.subject_pipeline_version = Some(crate::brain::consolidation_cycle::CONSOLIDATION_SUBJECT_PIPELINE.to_string());
+            v2.subject_at = Some(now);
             v2.operational_bitmap = DrawerFeatureFlags::IS_VAGUE
                 | (((level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
             // Sensitivity inheritance (§D.1 monotone ceiling): fold-in v2 carries the MAX
@@ -3314,6 +3321,11 @@ impl EstateCoordinator {
                 };
             let vague_bitmap: i64 = DrawerFeatureFlags::IS_VAGUE
                 | (((product_level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
+            // Derived writers emit their own subject at creation (PR-02): a
+            // vague item must never be born as subject debt. Computed before
+            // `rendering` moves into the constructor. Mirrors Swift
+            // vagueSubject/consolidationSubjectPipeline.
+            let vague_subject_line = crate::brain::consolidation_cycle::vague_subject(&rendering);
             let mut vague = locus_kit::drawer::Drawer::new(
                 uuid::Uuid::new_v4().to_string(),
                 rendering,
@@ -3323,6 +3335,9 @@ impl EstateCoordinator {
                 constituents[0].embedding_model_id.clone(),
             );
             vague.operational_bitmap = vague_bitmap;
+            vague.subject = Some(vague_subject_line);
+            vague.subject_pipeline_version = Some(crate::brain::consolidation_cycle::CONSOLIDATION_SUBJECT_PIPELINE.to_string());
+            vague.subject_at = Some(now);
             // Sensitivity inheritance (§D.1): the new vague drawer carries the MAX adjective
             // and provenance sensitivity over all constituents — cookbook §2.3 bits 6–11
             // (adjective) and §2.5 bits 30–35 (provenance at capture). Source tier flows to

@@ -114,6 +114,7 @@ fn sqlite_impatient_capture_then_search_returns_result() {
     // File a memory using impatient mode — inlines directly into the Corpus.
     let capture_args = args![
         "content" => "the kingfisher dives from a willow branch",
+        "subject" => "the kingfisher dives from a willow branch",
         "location" => "memories/birds",
         "impatient" => true,
     ];
@@ -169,6 +170,7 @@ fn sqlite_regular_capture_drain_then_search_returns_result() {
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     let capture_args = args![
         "content" => "the osprey circles above the reservoir",
+        "subject" => "the osprey circles above the reservoir",
         "location" => "memories/birds",
     ];
     let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
@@ -239,6 +241,7 @@ fn inmemory_semantic_recall_is_wired() {
     // Impatient capture → search via BM25 lane must return the content.
     let capture_args = args![
         "content" => "heron standing in shallow water marshland",
+        "subject" => "heron standing in shallow water marshland",
         "location" => "memories/birds",
         "impatient" => true,
     ];
@@ -439,6 +442,7 @@ fn sqlite_encrypted_estate_semantic_lanes_lit() {
     // Impatient capture → immediate BM25 search via the shared encrypted storage.
     let capture_args = args![
         "content" => "the barn owl hunts at dusk over open fields",
+        "subject" => "the barn owl hunts at dusk over open fields",
         "location" => "memories/birds",
         "impatient" => true,
     ];

@@ -119,6 +119,13 @@ use substrate_types::fingerprint256::Fingerprint256;
 /// `DrawerStore.subjectLengthContract`.
 pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
 
+/// Pipeline-version tag for subjects authored by a calling AI at the
+/// capture/mutate boundary (as opposed to the future miniLLM producer,
+/// `minillm-v1`). Stored in `subject_pipeline_version` as provenance and
+/// as the regeneration lever (SPEC B-19). Twin of Swift
+/// `DrawerStore.subjectPipelineAIV1`.
+pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
+
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------

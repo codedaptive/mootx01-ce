@@ -58,7 +58,8 @@ fn known_good_call_produces_no_hint() {
     // A call with only declared argument keys must NOT trigger the hint.
     let result = dispatch(
         "moot_file_memory",
-        &args!["content" => "baseline test memory", "location" => "unk-arg-tests"],
+        &args!["content" => "baseline test memory",
+        "subject" => "baseline test memory", "location" => "unk-arg-tests"],
     );
     assert!(is_success(&result));
     let text = content_text(&result);
@@ -78,6 +79,7 @@ fn bogus_arg_produces_hint_and_tool_succeeds() {
         "moot_file_memory",
         &args![
             "content" => "bogus arg test",
+        "subject" => "bogus arg test",
             "location" => "unk-arg-tests",
             "totally_fake_arg" => "flagged"
         ],
@@ -105,6 +107,7 @@ fn regression_n_arg_to_file_memory_should_hint() {
         "moot_file_memory",
         &args![
             "content" => "impatient regression test",
+        "subject" => "impatient regression test",
             "location" => "unk-arg-tests",
             "n" => true          // wrong key — should have been "impatient"
         ],
@@ -156,6 +159,7 @@ fn multiple_unrecognized_keys_are_sorted_in_hint() {
         "moot_file_memory",
         &args![
             "content" => "multi-unrecognized test",
+        "subject" => "multi-unrecognized test",
             "location" => "unk-arg-tests",
             "zzz_last" => "z",
             "aaa_first" => "a"

@@ -250,6 +250,7 @@ struct ServerTests {
                 "name": .string("moot_file_memory"),
                 "arguments": .object([
                     "content": .string("aria-mcp end-to-end test row"),
+                    "subject": .string("aria-mcp end-to-end test row"),
                     "location": .string("aria-mcp-tests"),
                 ]),
             ])

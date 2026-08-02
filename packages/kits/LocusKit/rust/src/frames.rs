@@ -128,6 +128,16 @@ pub struct CaptureFrame {
     /// to route a drawer into a specific wing at capture time.
     /// Mirrors Swift `CaptureFrame.wing: String?`.
     pub wing: Option<String>,
+
+    /// One-sentence AI-facing subject for the progressive-recall dense
+    /// row (SPEC § 14). Optional at the frame level: intake/import paths
+    /// deliberately leave it `None` so the row is born as subject debt
+    /// (B-21); the ARIA `moot_file_memory` boundary REQUIRES it. When
+    /// present, the capture verb writes the trio at insert with pipeline
+    /// version `ai-v1` and `subject_at = now`, enforcing the 120-char
+    /// contract (B-18) before the row exists. Mirrors Swift
+    /// `CaptureFrame.subject: String?`.
+    pub subject: Option<String>,
 }
 
 impl CaptureFrame {
@@ -167,6 +177,9 @@ impl CaptureFrame {
             // default None → estate_verbs falls through to
             // DEFAULT_WING_NAME, keeping existing callers byte-identical.
             wing: None,
+            // default None → born as subject debt (B-21); the ARIA
+            // file_memory boundary supplies a real subject.
+            subject: None,
         }
     }
 }
@@ -301,6 +314,15 @@ pub enum MutationKind {
     /// exportability write side (DEBT-1). Mirrors Swift
     /// `MutationKind.correctExportability`.
     CorrectExportability(AdjectiveExportability),
+    /// Set (or replace) the row's subject line — the backfill/correction
+    /// write path for the progressive-recall dense row (SPEC § 14). The
+    /// payload is the subject text itself (1–120 chars, AI-facing
+    /// register); `Estate::mutate` routes it to
+    /// `set_subject_representation` with pipeline version
+    /// `SUBJECT_PIPELINE_AI_V1`. Unlike the state mutations above this
+    /// touches no bitmap — it writes only the subject trio. Mirrors
+    /// Swift `MutationKind.setSubject(String)`.
+    SetSubject(String),
 }
 
 // MARK: - LearnFrame

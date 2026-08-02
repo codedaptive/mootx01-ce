@@ -63,6 +63,7 @@ struct UnknownArgHintTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("baseline test memory"),
+                "subject": .string("baseline test memory"),
                 "location": .string("unk-arg-tests"),
             ]))
 
@@ -86,6 +87,7 @@ struct UnknownArgHintTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("bogus arg test memory"),
+                "subject": .string("bogus arg test memory"),
                 "location": .string("unk-arg-tests"),
                 "totally_fake_arg": .string("should be flagged"),
             ]))
@@ -114,6 +116,7 @@ struct UnknownArgHintTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("impatient regression test"),
+                "subject": .string("impatient regression test"),
                 "location": .string("unk-arg-tests"),
                 "n": .bool(true),   // wrong key — should have been "impatient"
             ]))
@@ -167,6 +170,7 @@ struct UnknownArgHintTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("multi-unrecognized-arg test"),
+                "subject": .string("multi-unrecognized-arg test"),
                 "location": .string("unk-arg-tests"),
                 "zzz_last": .string("z"),
                 "aaa_first": .string("a"),

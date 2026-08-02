@@ -271,10 +271,11 @@ create, str_replace, insert, delete, rename.",
 fn file_memory_tool() -> serde_json::Value {
     json!({
         "name": "moot_file_memory",
-        "description": "File a memory into the estate. Requires content and a location path (wing/room or room).",
+        "description": "File a memory into the estate. Requires content, a one-sentence subject, and a location path (wing/room or room).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "content": string_schema("Verbatim content to file."),
+                "subject": string_schema("REQUIRED. One sentence (≤120 chars) stating what this memory asserts. Write it for the NEXT AI that will scan it in a result list — telegraphic register, entities and claims front-loaded, no narrative framing. It is returned in recall rows, never searched. Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""),
                 "location": string_schema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
                 "wing": string_schema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                 "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
@@ -283,7 +284,7 @@ fn file_memory_tool() -> serde_json::Value {
                 "event_time": string_schema("Optional ISO8601 event timestamp to attach. Omit for capture time; null is invalid."),
                 "impatient": boolean_schema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens on the encode drain. Omit to use the default; null is invalid.")
             }),
-            json!(["content", "location"])
+            json!(["content", "subject", "location"])
         )))
     })
 }
@@ -310,11 +311,12 @@ fn memory_search_tool() -> serde_json::Value {
 fn memory_list_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_list",
-        "description": "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results.",
+        "description": "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results. filter:missing_subject enumerates subject-debt rows (id-only, no preview) for interactive backfill via moot_update_memory mutation=setSubject.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "wing": string_schema("Wing name to list (required). Example: \"Agentic Memory\", \"CodexSecurity\"."),
-                "room": string_schema("Optional room name to narrow within the wing. Omit to list all rooms in the wing.")
+                "room": string_schema("Optional room name to narrow within the wing. Omit to list all rooms in the wing."),
+                "filter": string_schema("Optional filter: missing_subject — only live drawers with no subject line, listed id-only (the subject-debt backfill enumerator). Omit to list all drawers with previews. null is invalid.")
             }),
             json!(["wing"])
         )))
@@ -337,12 +339,13 @@ fn memory_get_tool() -> serde_json::Value {
 fn update_memory_tool() -> serde_json::Value {
     json!({
         "name": "moot_update_memory",
-        "description": "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public, correctExportability(private) revokes public status.",
+        "description": "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public, correctExportability(private) revokes public status. Subject mutation: setSubject writes or replaces the memory's one-sentence subject line (pass the text in the `subject` argument) — the backfill/correction path for subject-debt rows found via moot_memory_list filter:missing_subject.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "id": string_schema("UUID of the memory to update."),
-                "mutation": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private)."),
-                "note": string_schema("Optional note to attach to the mutation.")
+                "mutation": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private), setSubject."),
+                "note": string_schema("Optional note to attach to the mutation."),
+                "subject": string_schema("Required for mutation=setSubject, ignored otherwise: one sentence (≤120 chars) in the AI-facing register — telegraphic, entities and claims front-loaded. Returned in recall rows, never searched.")
             }),
             json!(["id", "mutation"])
         )))

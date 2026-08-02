@@ -56,6 +56,7 @@ struct OrderingDispatchTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
                 "location": .string(location),
             ])
         )

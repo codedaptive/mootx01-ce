@@ -168,7 +168,12 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
                 eventTime: row.eventTime,
                 featureFlags: row.featureFlags,
                 exportability: row.exportability,
-                wing: wingName
+                wing: wingName,
+                // Subject carries over: promotion copies identical content,
+                // so the source drawer's subject stays true. The capture
+                // verb restamps pipeline/at (a carried subject re-enters as
+                // a fresh assertion); a source without one stays debt.
+                subject: row.subject
             )
             let stored = try await estate.capture(frame)
             ids.insert(stored.id)

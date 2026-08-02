@@ -85,7 +85,10 @@ fn seed_in_source(
 
 /// File a memory into the default estate and return its id.
 fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> String {
-    let a = args!["content" => content, "location" => location];
+    // Subject is required at the file_memory boundary (PR-02); the capped
+    // content prefix is a good-enough test subject.
+    let subject: String = content.chars().take(120).collect();
+    let a = args!["content" => content, "subject" => subject.as_str(), "location" => location];
     let result = dispatch_tool("moot_file_memory", &a, registry, &SurfacedRecallLedger::new()).expect("file_memory must succeed");
     assert!(is_success(&result), "file_memory should succeed; got: {result:?}");
     let text = content_text(&result);
@@ -1050,6 +1053,7 @@ fn file_memory_with_kind_code_persists_content_kind_code() {
         "moot_file_memory",
         &args![
             "content" => "fn main() { println!(\"hello\"); }",
+        "subject" => "fn main() { println!(\"hello\"); }",
             "location" => "code/snippet",
             "kind" => "code"
         ],
@@ -1087,6 +1091,7 @@ fn file_memory_with_sensitivity_restricted_persists_restricted() {
         "moot_file_memory",
         &args![
             "content" => "top-secret plan details",
+        "subject" => "top-secret plan details",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -1124,6 +1129,7 @@ fn file_memory_unknown_kind_returns_invalid_params() {
         "moot_file_memory",
         &args![
             "content" => "some content",
+        "subject" => "some content",
             "location" => "test/room",
             "kind" => "notAKind"
         ],
@@ -1140,6 +1146,7 @@ fn file_memory_unknown_sensitivity_returns_invalid_params() {
         "moot_file_memory",
         &args![
             "content" => "some content",
+        "subject" => "some content",
             "location" => "test/room",
             "sensitivity" => "topSecret"
         ],
@@ -1167,6 +1174,7 @@ fn file_memory_sets_capture_channel_to_actuator() {
         "moot_file_memory",
         &args![
             "content" => "channel verification content",
+        "subject" => "channel verification content",
             "location" => "channel/test"
         ],
         &registry,
@@ -1916,6 +1924,7 @@ fn move_memory_with_wing_reanchors_to_target_wing() {
         "moot_file_memory",
         &args![
             "content" => "cross-wing-rust-test unique zeta omega unique-payload",
+        "subject" => "cross-wing-rust-test unique zeta omega unique-payload",
             "location" => "origin-room",
             "wing" => "OriginWing"
         ],
@@ -2006,6 +2015,7 @@ fn search_with_results_does_not_emit_no_results_hint() {
         "moot_file_memory",
         &args![
             "content" => "rust-hint-test unique alpha bravo charlie unique-payload",
+        "subject" => "rust-hint-test unique alpha bravo charlie unique-payload",
             "location" => "hint-test-room"
         ],
         &registry,
@@ -5702,6 +5712,7 @@ fn file_memory_with_event_time_is_accepted() {
         "moot_file_memory",
         &args![
             "content" => "back-dated event content",
+        "subject" => "back-dated event content",
             "location" => "temporal/test",
             "event_time" => "2020-01-01T00:00:00Z"
         ],
@@ -5746,6 +5757,7 @@ fn file_memory_with_invalid_event_time_returns_invalid_params() {
         "moot_file_memory",
         &args![
             "content" => "some content",
+        "subject" => "some content",
             "location" => "test/room",
             "event_time" => "not-a-date"
         ],
@@ -6036,6 +6048,7 @@ fn estate_map_surfaces_hint_room_as_normal_room_count() {
     // HINT_ROOM == "AI_Charter_Hint" — same room hint drawers are seeded into.
     let a = args![
         "content" => "The AI's own observations, inferences, decisions, session learnings.",
+        "subject" => "The AI's own observations, inferences, decisions, session learnings.",
         "location" => "AI_Charter_Hint"
     ];
     let file_result = dispatch_tool("moot_file_memory", &a, &registry, &ledger)
@@ -6078,6 +6091,7 @@ fn estate_map_does_not_reference_old_charter_room_name() {
     // File a hint-style memory so there is at least one drawer in the estate.
     let a = args![
         "content" => "Wing role description",
+        "subject" => "Wing role description",
         "location" => "AI_Charter_Hint"
     ];
     dispatch_tool("moot_file_memory", &a, &registry, &ledger)
@@ -7034,6 +7048,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
         "moot_file_memory",
         &args![
             "content" => "unlock-marker-restricted classified briefing",
+            "subject" => "unlock-marker-restricted classified briefing",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -7086,6 +7101,7 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
         "moot_file_memory",
         &args![
             "content" => "unlock-get-marker restricted content body",
+            "subject" => "unlock-get-marker restricted content body",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -7130,6 +7146,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
         "moot_file_memory",
         &args![
             "content" => "audit-search-marker restricted content",
+            "subject" => "audit-search-marker restricted content",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -7163,7 +7180,7 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     let registry = EstateRegistry::new_inmemory();
     dispatch_tool(
         "moot_file_memory",
-        &args!["content" => "audit-normal-marker ordinary content", "location" => "vault/plans"],
+        &args!["content" => "audit-normal-marker ordinary content", "subject" => "audit-normal-marker ordinary content", "location" => "vault/plans"],
         &registry,
         &SurfacedRecallLedger::new(),
     ).expect("file_memory must succeed");

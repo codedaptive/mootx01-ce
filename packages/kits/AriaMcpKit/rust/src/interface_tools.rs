@@ -39,6 +39,7 @@ use uuid::Uuid;
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     default_wings::DEFAULT_WING_NAME,
+    drawer_store::SUBJECT_LENGTH_CONTRACT,
     estate_types::LatticeAnchor,
     filter::RecallFrame,
     frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
@@ -420,6 +421,39 @@ fn run_file_memory(
     let estate = registry.resolve_direct(args)?;
     let content = require_string(args, "content")?;
     let location = require_string(args, "location")?;
+    // Subject is REQUIRED at this boundary (PR-02): the calling AI is the
+    // only party that knows what the content asserts, and a subject written
+    // at capture is the cheapest one the estate will ever get. The error is
+    // instructive rather than the generic missing-argument text because the
+    // fix is a register, not just a field. Mirrors Swift runFileMemory.
+    let subject = match args.get("subject").and_then(|v| v.as_str()) {
+        Some(s) => s.trim().to_string(),
+        None => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "Missing required argument: subject. Provide one sentence \
+                     (≤{SUBJECT_LENGTH_CONTRACT} chars) stating what this memory asserts, \
+                     written for the NEXT AI that will scan it — telegraphic, entities and \
+                     claims front-loaded, no narrative framing. Example: \"Quarterly \
+                     planning moved to Thursday; Sarah sends invites Monday.\""
+                ),
+            ));
+        }
+    };
+    {
+        let n = subject.chars().count();
+        if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
+                     One telegraphic sentence in the AI-facing register — compress, \
+                     don't truncate."
+                ),
+            ));
+        }
+    }
     let exportability = decode_exportability(args)?;
 
     // Decode caller-supplied adjectives. Absent → keep CaptureFrame defaults.
@@ -461,6 +495,9 @@ fn run_file_memory(
     // Provenance channel: marks this row as MCP-agent-sourced in the provenance
     // bitmap (§2.5). Mirrors Swift's `provenanceChannel: .mcpAgent`.
     frame.provenance_channel = Channel::McpAgent;
+    // Subject trio threading (PR-02): boundary-validated above; the LocusKit
+    // capture verb stamps pipeline ai-v1 + subject_at from this slot.
+    frame.subject = Some(subject);
     // optional `wing` argument routes this memory into a specific wing.
     // When supplied, the drawer files into that wing.
     // When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory") — the AI's
@@ -1173,7 +1210,38 @@ fn run_update_memory(
     let id = require_string(args, "id")?;
     let mutation_str = require_string(args, "mutation")?;
 
-    let kind = decode_mutation_kind(mutation_str)?;
+    let kind = if mutation_str == "setSubject" {
+        // setSubject carries its payload in a dedicated `subject` arg (the
+        // `note` arg stays an audit annotation, as for every other
+        // mutation). Boundary-validated here so the caller gets the register
+        // guidance, not the bare store error. Mirrors Swift runUpdateMemory.
+        let subject = match args.get("subject").and_then(|v| v.as_str()) {
+            Some(s) => s.trim().to_string(),
+            None => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!(
+                        "mutation=setSubject requires a `subject` argument: one sentence \
+                         (≤{SUBJECT_LENGTH_CONTRACT} chars) in the AI-facing register — \
+                         telegraphic, entities and claims front-loaded."
+                    ),
+                ));
+            }
+        };
+        let n = subject.chars().count();
+        if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
+                     Compress, don't truncate."
+                ),
+            ));
+        }
+        MutationKind::SetSubject(subject)
+    } else {
+        decode_mutation_kind(mutation_str)?
+    };
     // Note usage before acquiring the coord lock so note_usage can also lock.
     note_usage(id, &estate, ledger);
     let coord = estate.coord.lock().unwrap();
@@ -2229,6 +2297,21 @@ fn run_memory_list(
     let estate = registry.resolve_direct(args)?;
     let wing = require_string(args, "wing")?;
     let room_filter = optional_string(args, "room")?;
+    // Optional filter. `missing_subject` is the subject-debt backfill
+    // enumerator (PR-02): id-only rows of live drawers whose subject is
+    // NULL, so a consenting backfill session can walk them with
+    // moot_update_memory mutation=setSubject without hauling content.
+    // Mirrors Swift runMemoryList.
+    let missing_subject_only = match optional_string(args, "filter")? {
+        None => false,
+        Some("missing_subject") => true,
+        Some(other) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("Unknown filter: {other}. Accepted: missing_subject"),
+            ));
+        }
+    };
     let coord = estate.coord.lock().unwrap();
 
     let all = coord
@@ -2251,6 +2334,7 @@ fn run_memory_list(
 
     let mut matches: Vec<(String, String, String)> = Vec::new();
     for d in &drawers {
+        if missing_subject_only && d.subject.is_some() { continue; }
         let (d_wing, d_room) = node_names
             .get(&d.parent_node_id)
             .cloned()
@@ -2266,17 +2350,27 @@ fn run_memory_list(
 
     let total = matches.len();
     matches.truncate(200);
+    let filter_suffix = if missing_subject_only { " [filter: missing_subject]" } else { "" };
     let mut lines = vec![format!(
-        "memory_list: {} drawer(s) in {}{}",
+        "memory_list: {} drawer(s) in {}{}{}",
         matches.len(),
         wing,
-        room_filter.as_ref().map(|r| format!("/{}", r)).unwrap_or_default()
+        room_filter.as_ref().map(|r| format!("/{}", r)).unwrap_or_default(),
+        filter_suffix
     )];
     if total > 200 {
         lines.push(format!("(showing first 200 of {})", total));
     }
     for (id, room, preview) in &matches {
-        lines.push(format!("  {} [{}] {}", id, room, preview));
+        // Debt enumeration is id-only by design: the backfill walker fetches
+        // content per-row via moot_memory_get when it is ready to write a
+        // subject; a preview here would haul content for rows the walker may
+        // never reach. Mirrors Swift runMemoryList.
+        if missing_subject_only {
+            lines.push(format!("  {} [{}]", id, room));
+        } else {
+            lines.push(format!("  {} [{}] {}", id, room, preview));
+        }
     }
     Ok(text_result(&lines.join("\n")))
 }
@@ -3228,7 +3322,8 @@ fn decode_mutation_kind(s: &str) -> Result<MutationKind, JSONRPCError> {
             JSONRPCErrorCode::INVALID_PARAMS,
             format!(
                 "Unknown mutation: {s}. Valid: confirm, reject, contest, resolve, \
-                 supersede, revive, accept, correctExportability(public), correctExportability(private)"
+                 supersede, revive, accept, correctExportability(public), \
+                 correctExportability(private), setSubject (with a `subject` argument)"
             ),
         )),
     }

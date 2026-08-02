@@ -100,6 +100,7 @@ struct DurableSemanticRecallTests {
         let content = "peregrine falcon stooping dive raptor velocity record"
         _ = try await dispatcher.runFileMemory([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("birds"),
             "impatient": .bool(true),
         ])
@@ -125,6 +126,7 @@ struct DurableSemanticRecallTests {
             let content = "basalt obsidian rhyolite volcanic rock classification notes"
             _ = try await dispatcher.runFileMemory([
                 "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
                 "location": .string("geology"),
                 "impatient": .bool(true),
             ])

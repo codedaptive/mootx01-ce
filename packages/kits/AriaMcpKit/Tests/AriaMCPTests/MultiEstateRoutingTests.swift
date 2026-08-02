@@ -74,6 +74,7 @@ struct MultiEstateRoutingTests {
     ) -> JSONValue {
         var args: [String: JSONValue] = [
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string(location),
         ]
         if let estateID { args["estateID"] = .string(estateID.uuidString) }

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.23.0
+version: 1.24.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-08-02
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -190,8 +190,10 @@ All interface tools accept an optional `estateID` (UUID string) to address a
 registered non-default estate and an optional `teachme` (boolean) to request a
 usage guide instead of executing. Infrastructure fields (`latticeAnchor`,
 `embeddingModelID`, `addedBy`, `channel`) are server-owned and never exposed
-to AI clients. Required caller fields: `content` + `location` for
-`moot_file_memory`; `query` for `moot_memory_search`; `id` for
+to AI clients. Required caller fields: `content` + `subject` + `location` for
+`moot_file_memory` (the subject is one sentence ≤120 chars in the AI-facing
+register — telegraphic, entities and claims front-loaded; returned in recall
+rows, never searched — LocusKit SPEC § 14); `query` for `moot_memory_search`; `id` for
 `moot_memory_get` (drawer UUID — no `query`, this tool fetches an exact row,
 not a ranked set); `subject`, `predicate`,
 `object` for `moot_file_fact`; `entry` for `moot_write_journal` (note: `entry`,
@@ -212,6 +214,13 @@ for semantic knobs such as `estateID`, `teachme`, `filter`, `limit`, `scoring`,
 `ordering`, `sensitivity`, `exportability`, `kind`, `impatient`, `agent`, and
 similar optional primitive fields. This keeps AI clients from forcing the server
 to guess whether `null` meant "default", "unset", or a bug in the caller.
+
+`moot_update_memory` accepts `mutation=setSubject` with a dedicated `subject`
+argument (same register and 120-char contract as capture) — the
+backfill/correction write path for subject-debt rows. `moot_memory_list`
+accepts an optional `filter=missing_subject` — the subject-debt enumerator:
+only live drawers with no subject line, listed id-only (no content preview),
+sized for a consent-gated interactive backfill walk.
 
 `moot_file_memory` also accepts an optional `classificationScheme` (string,
 default `"udc"`) that identifies the classification scheme of the supplied
@@ -1145,6 +1154,15 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.24.0 -- 2026-08-02
+
+- Subject surface (progressive recall PR-02): documented the required
+  `subject` argument on `moot_file_memory` (AI-facing register, 120-char
+  contract), `moot_update_memory` `mutation=setSubject` + `subject`
+  argument, and `moot_memory_list` `filter=missing_subject` (id-only
+  subject-debt enumerator). Teachme guides for all three verbs updated in
+  both ports.
 
 ### 1.23.0 -- 2026-07-20
 

@@ -37,6 +37,7 @@ struct RecipeToolsTests {
     private func fileArgs(content: String) -> JSONValue {
         .object([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("recipe-tests"),
         ])
     }
@@ -405,11 +406,13 @@ struct RecipeToolsTests {
                 .object([
                     "id": .string("a"),
                     "content": .string("alpha topic about felines"),
+                    "subject": .string("alpha topic about felines"),
                     "tags": .array([]),
                 ]),
                 .object([
                     "id": .string("b"),
                     "content": .string("beta topic about canines"),
+                    "subject": .string("beta topic about canines"),
                     "tags": .array([]),
                 ]),
             ]),
@@ -520,6 +523,7 @@ struct RecipeToolsTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content": .string(text),
+                    "subject": .string(String(text.prefix(120))),
                     "location": .string("history/treaty"),
                 ]))
         }
@@ -594,6 +598,7 @@ struct RecipeToolsTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content": .string("study content"),
+                    "subject": .string("study content"),
                     "location": .string("study"),
                 ]))
         }
@@ -639,6 +644,7 @@ struct RecipeToolsTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content": .string("study content"),
+                    "subject": .string("study content"),
                     "location": .string("study"),
                 ]))
         }

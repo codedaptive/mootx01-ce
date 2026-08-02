@@ -89,3 +89,26 @@ pub struct VagueRecallResult {
     /// total (D12).
     pub constituents: Vec<locus_kit::drawer::Drawer>,
 }
+
+/// Pipeline-version tag for subjects the consolidation daemon writes on
+/// vague items. Deliberately NOT `ai-v1`: these subjects are deterministic
+/// first-line caps, not AI-authored assertions, and the distinct tag lets a
+/// future miniLLM regeneration sweep target exactly this producer via
+/// `count_missing_subject(pipeline_version)`. Twin of Swift
+/// `GeniusLocusKit.consolidationSubjectPipeline`.
+pub const CONSOLIDATION_SUBJECT_PIPELINE: &str = "consolidation-v1";
+
+/// Deterministic subject for a vague item: the rendering's first non-empty
+/// line, character-capped to the store contract. Never returns empty for
+/// the renderings `compose_and_distill` produces (it rejects all-blank
+/// clusters). Twin of Swift `GeniusLocusKit.vagueSubject(from:)`.
+pub fn vague_subject(rendering: &str) -> String {
+    let first_line = rendering
+        .lines()
+        .find(|l| !l.is_empty())
+        .unwrap_or(rendering);
+    first_line
+        .chars()
+        .take(locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)
+        .collect()
+}

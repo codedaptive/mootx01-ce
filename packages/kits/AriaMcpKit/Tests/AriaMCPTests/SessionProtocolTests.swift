@@ -54,6 +54,7 @@ struct SessionProtocolTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("session protocol test memory"),
+                "subject": .string("session protocol test memory"),
                 "location": .string("sp-tests"),
             ]))
 
@@ -210,6 +211,7 @@ struct SessionProtocolTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("state-change between calls"),
+                "subject": .string("state-change between calls"),
                 "location": .string("sp-tests"),
             ]))
         let second = try await dispatcher.dispatch(

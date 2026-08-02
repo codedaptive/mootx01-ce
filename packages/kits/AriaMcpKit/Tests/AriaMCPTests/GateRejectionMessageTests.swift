@@ -47,6 +47,7 @@ struct GateRejectionMessageTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("gate-rejection test fixture"),
+                "subject": .string("gate-rejection test fixture"),
                 "location": .string("General"),
             ])
         )
@@ -197,6 +198,7 @@ struct GateRejectionMessageTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("test content"),
+                "subject": .string("test content"),
                 "location": .string(""),  // empty location triggers InvalidContent from substrate
             ])
         )

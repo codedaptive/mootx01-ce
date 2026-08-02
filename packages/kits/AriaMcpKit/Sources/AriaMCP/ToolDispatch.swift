@@ -947,7 +947,7 @@ public struct ToolDispatcher: Sendable {
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
-                message: "Unsupported mutation kind: \(name). Accepted: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(private), correctExportability(public)"
+                message: "Unsupported mutation kind: \(name). Accepted: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(private), correctExportability(public), setSubject (with a `subject` argument)"
             )
         }
     }
@@ -1255,6 +1255,30 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let content = try requireString(args, "content")
         let location = try requireString(args, "location")
+        // Subject is REQUIRED at this boundary (PR-02): the calling AI is the
+        // only party that knows what the content asserts, and a subject
+        // written at capture is the cheapest one the estate will ever get.
+        // The error is instructive rather than the generic missing-argument
+        // text because the fix is a register, not just a field.
+        guard let subject = args["subject"]?.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Missing required argument: subject. Provide one sentence "
+                    + "(≤\(DrawerStore.subjectLengthContract) chars) stating what this memory "
+                    + "asserts, written for the NEXT AI that will scan it — telegraphic, "
+                    + "entities and claims front-loaded, no narrative framing. "
+                    + "Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""
+            )
+        }
+        let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSubject.isEmpty, trimmedSubject.count <= DrawerStore.subjectLengthContract else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                    + "(got \(trimmedSubject.count)). One telegraphic sentence in the AI-facing "
+                    + "register — compress, don't truncate."
+            )
+        }
         let sensitivity = try decodeSensitivity(args["sensitivity"])
         let exportability = try decodeExportability(args["exportability"])
         let kind = try decodeContentKind(args["kind"])
@@ -1304,7 +1328,8 @@ extension ToolDispatcher {
             sourceType: .imported,
             eventTime: eventTime,
             exportability: exportability,
-            wing: wing
+            wing: wing,
+            subject: trimmedSubject
         )
         // Mode-aware capture: regular enqueues the encode job (background
         // semantic indexing); impatient encodes inline before returning.
@@ -1829,7 +1854,32 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
         let mutationName = try requireString(args, "mutation")
-        let kind = try decodeMutationKind(mutationName)
+        let kind: MutationKind
+        if mutationName == "setSubject" {
+            // setSubject carries its payload in a dedicated `subject` arg
+            // (the `note` arg stays an audit annotation, as for every other
+            // mutation). Boundary-validated here so the caller gets the
+            // register guidance, not the bare store error.
+            guard let subject = args["subject"]?.stringValue else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "mutation=setSubject requires a `subject` argument: one sentence "
+                        + "(≤\(DrawerStore.subjectLengthContract) chars) in the AI-facing register — "
+                        + "telegraphic, entities and claims front-loaded."
+                )
+            }
+            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.count <= DrawerStore.subjectLengthContract else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                        + "(got \(trimmed.count)). Compress, don't truncate."
+                )
+            }
+            kind = .setSubject(trimmed)
+        } else {
+            kind = try decodeMutationKind(mutationName)
+        }
         let payload = try optionalString(args["note"], argument: "note")
         // Note usage before the primary verb so reward marking is attempted even
         // if the primary verb fails (surfaced id was found, user tried to act on it).
@@ -2642,6 +2692,21 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let wing = try requireString(args, "wing")
         let room = try optionalString(args["room"], argument: "room")
+        // Optional filter. `missing_subject` is the subject-debt backfill
+        // enumerator (PR-02): id-only rows of live drawers whose subject is
+        // NULL, so a consenting backfill session can walk them with
+        // moot_update_memory mutation=setSubject without hauling content.
+        let filterName = try optionalString(args["filter"], argument: "filter")
+        let missingSubjectOnly: Bool
+        switch filterName {
+        case nil: missingSubjectOnly = false
+        case "missing_subject": missingSubjectOnly = true
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown filter: \(filterName ?? ""). Accepted: missing_subject"
+            )
+        }
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
         // Filter to Cluster A (currently-believed) only (#9): withdrawn,
@@ -2658,6 +2723,7 @@ extension ToolDispatcher {
 
         var matches: [(id: String, room: String, preview: String)] = []
         for d in visible {
+            if missingSubjectOnly, d.subject != nil { continue }
             let names = nodeNames[d.parentNodeId]
             let dWing = names?.wing ?? ""
             let dRoom = names?.room ?? ""
@@ -2669,12 +2735,21 @@ extension ToolDispatcher {
         }
 
         let capped = matches.prefix(200)
-        var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")"]
+        let filterSuffix = missingSubjectOnly ? " [filter: missing_subject]" : ""
+        var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")\(filterSuffix)"]
         if matches.count > 200 {
             lines.append("(showing first 200 of \(matches.count))")
         }
         for m in capped {
-            lines.append("  \(m.id) [\(m.room)] \(m.preview)")
+            // Debt enumeration is id-only by design: the backfill walker
+            // fetches content per-row via moot_memory_get when it is ready
+            // to write a subject; a preview here would haul content for
+            // rows the walker may never reach.
+            if missingSubjectOnly {
+                lines.append("  \(m.id) [\(m.room)]")
+            } else {
+                lines.append("  \(m.id) [\(m.room)] \(m.preview)")
+            }
         }
         return Self.textResult(lines.joined(separator: "\n"))
     }

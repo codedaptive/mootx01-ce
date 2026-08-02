@@ -103,6 +103,7 @@ struct RecallProvenanceSurfacingTests {
         // Capture a memory and drain so it is searchable.
         _ = try await dispatcher.runFileMemory([
             "content": .string("peregrine falcon stoop dive speed aerial predator"),
+            "subject": .string("peregrine falcon stoop dive speed aerial predator"),
             "location": .string("birds/falcons"),
             "impatient": .bool(true),
         ])
@@ -138,6 +139,7 @@ struct RecallProvenanceSurfacingTests {
 
         _ = try await dispatcher.runFileMemory([
             "content": .string("hobby falcon aerial insect hunting speed agility"),
+            "subject": .string("hobby falcon aerial insect hunting speed agility"),
             "location": .string("birds/falcons"),
             "impatient": .bool(true),
         ])
@@ -189,6 +191,7 @@ struct RecallProvenanceSurfacingTests {
         // Impatient capture writes directly into Corpus (BM25 + float rows).
         _ = try await dispatcher.runFileMemory([
             "content": .string("merlin small falcon moorland heather hunting pipits"),
+            "subject": .string("merlin small falcon moorland heather hunting pipits"),
             "location": .string("birds/falcons"),
             "impatient": .bool(true),
         ])
@@ -253,6 +256,7 @@ struct RecallProvenanceSurfacingTests {
         // File a memory to ensure there is something to recall.
         _ = try await dispatcher.runFileMemory([
             "content": .string("buzzard soaring thermal upland woodland edges"),
+            "subject": .string("buzzard soaring thermal upland woodland edges"),
             "location": .string("birds/raptors"),
             "impatient": .bool(true),
         ])

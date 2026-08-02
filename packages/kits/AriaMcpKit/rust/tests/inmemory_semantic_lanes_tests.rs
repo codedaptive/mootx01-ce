@@ -76,6 +76,7 @@ fn inmemory_impatient_capture_then_search_returns_result() {
     // Impatient capture — inlines directly into the Corpus's BM25 index.
     let capture_args = args![
         "content" => "swift nest aperture cliff face breeding colony aerial feeder",
+        "subject" => "swift nest aperture cliff face breeding colony aerial feeder",
         "location" => "memories/birds",
         "impatient" => true,
     ];
@@ -122,6 +123,7 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     let capture_args = args![
         "content" => "nightjar cryptic plumage crepuscular insectivore churring call",
+        "subject" => "nightjar cryptic plumage crepuscular insectivore churring call",
         "location" => "memories/birds",
     ];
     let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
@@ -254,6 +256,7 @@ fn postgres_wiring_shape_proof() {
 
     let capture_args = args![
         "content" => "marsh harrier reed bed habitat lowland wetland Britain breeding",
+        "subject" => "marsh harrier reed bed habitat lowland wetland Britain breeding",
         "location" => "memories/birds",
         "impatient" => true,
     ];

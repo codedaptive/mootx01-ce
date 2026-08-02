@@ -993,6 +993,7 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
     let capture_result = dispatch_tool(
         "moot_file_memory",
         &args!["content" => "flamingo wades through brackish water estuary",
+               "subject" => "Flamingo wades through brackish estuary water.",
                "location" => "memories/birds"],
         &registry,
         &ledger,
@@ -1055,6 +1056,7 @@ fn ag17_impatient_capture_is_immediately_searchable_no_tick_needed() {
     let capture_result = dispatch_tool(
         "moot_file_memory",
         &args!["content" => "avocet probes mud at low tide estuary",
+               "subject" => "Avocet probes mud at low tide.",
                "location" => "memories/birds",
                "impatient" => true],
         &registry,
@@ -1097,6 +1099,7 @@ fn ag19_two_regular_captures_both_searchable_after_drain() {
     dispatch_tool(
         "moot_file_memory",
         &args!["content" => "spoonbill sweeps bill through water feeding",
+               "subject" => "Spoonbill sweeps bill through water while feeding.",
                "location" => "memories/birds"],
         &registry, &ledger,
     ).expect("capture 1 must succeed");
@@ -1104,6 +1107,7 @@ fn ag19_two_regular_captures_both_searchable_after_drain() {
     dispatch_tool(
         "moot_file_memory",
         &args!["content" => "ibis probes soil with curved beak savanna",
+               "subject" => "Ibis probes savanna soil with curved beak.",
                "location" => "memories/birds"],
         &registry, &ledger,
     ).expect("capture 2 must succeed");

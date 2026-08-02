@@ -45,7 +45,15 @@ enum TeachmeGuides {
         moot_file_memory — Store a memory in the estate.
 
         Use this to file any content worth keeping. The server assigns
-        classification and embedding; you supply content and location.
+        classification and embedding; you supply content, subject, and
+        location.
+
+        The subject is one sentence (≤120 chars) stating what the memory
+        asserts. Write it for the NEXT AI that will scan it in a result
+        list — telegraphic register, entities and claims front-loaded, no
+        narrative framing. It is returned in recall rows, never searched,
+        so optimise it for a reader deciding "is this row worth opening?",
+        not for keyword matching.
 
         When to use vs siblings:
           - moot_update_memory — when the memory already exists and needs revision
@@ -54,6 +62,7 @@ enum TeachmeGuides {
 
         Example:
           { "content": "Decided to use actor isolation for all estate writes.",
+            "subject": "Estate writes: actor isolation adopted for all paths.",
             "location": "mootx01/architecture",
             "kind": "prose" }
 
@@ -68,6 +77,11 @@ enum TeachmeGuides {
           - Using moot_file_memory to update existing content. Use
             moot_update_memory with the existing id instead.
           - Omitting location. The estate has no structure without it.
+          - Writing the subject as a title ("Meeting notes") instead of an
+            assertion ("Quarterly planning moved to Thursday"). A subject
+            that states nothing helps no one triage.
+          - Truncating content to fit the subject cap. Compress the claim,
+            don't cut it mid-sentence.
         """
 
     private static let memorySearchGuide = """
@@ -112,10 +126,16 @@ enum TeachmeGuides {
         Example:
           { "wing": "Agentic Memory" }
           { "wing": "Agentic Memory", "room": "architecture" }
+          { "wing": "Agentic Memory", "filter": "missing_subject" }
 
         Response:
           drawers in wing Agentic Memory: N
           <uuid>  [room]  <80-char preview>
+
+        filter:missing_subject is the subject-debt enumerator: it lists
+        only live drawers with no subject line, id-only (no preview), so a
+        backfill session can walk them — fetch each with moot_memory_get,
+        then write the subject via moot_update_memory mutation=setSubject.
 
         Common mistakes:
           - Calling without wing. Wing is required; omitting it returns an error.
@@ -171,8 +191,10 @@ enum TeachmeGuides {
     private static let updateMemoryGuide = """
         moot_update_memory — Apply a named mutation to an existing memory.
 
-        Mutations: confirm, reject, contest, resolve, supersede, revive, accept.
-        Use to change a memory's trust state without rewriting its content.
+        Mutations: confirm, reject, contest, resolve, supersede, revive, accept,
+        correctExportability(public|private), setSubject.
+        Use to change a memory's trust state — or its subject line — without
+        rewriting its content.
 
         When to use vs siblings:
           - moot_file_memory — when filing new content (no existing id)
@@ -183,6 +205,13 @@ enum TeachmeGuides {
           { "id": "abc-123", "mutation": "confirm",
             "note": "Verified against implementation on 2026-06-05." }
 
+        setSubject example (the subject-debt backfill path):
+          { "id": "abc-123", "mutation": "setSubject",
+            "subject": "Deploy pipeline: staging gate now requires two approvals." }
+        The subject is one sentence (≤120 chars) in the AI-facing register —
+        telegraphic, entities and claims front-loaded. Find debt rows with
+        moot_memory_list filter:missing_subject.
+
         Response:
           updated memory abc-123 (confirm)
 
@@ -190,6 +219,8 @@ enum TeachmeGuides {
           - Using supersede to soft-delete. Use moot_withdraw_memory instead.
           - Calling with an id that does not exist. Verify with moot_memory_search first.
           - Omitting note for contest or resolve mutations; a note is good practice.
+          - Passing the subject text in `note` for setSubject — it goes in the
+            dedicated `subject` argument.
         """
 
     private static let withdrawMemoryGuide = """

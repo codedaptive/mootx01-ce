@@ -88,6 +88,18 @@ public extension Estate {
         guard !frame.embeddingModelID.isEmpty else {
             throw LocusKitError.invalidContent("embeddingModelID must not be empty")
         }
+        // Subject length contract (SPEC B-18) checked at the frame boundary
+        // so the error surfaces before any row exists. Empty-string subjects
+        // are rejected the same way — a caller that has no subject passes nil
+        // (subject debt, B-21), never "".
+        if let subject = frame.subject {
+            guard !subject.isEmpty, subject.count <= DrawerStore.subjectLengthContract else {
+                throw LocusKitError.invalidContent(
+                    "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                    + "(got \(subject.count)); omit it entirely to file as subject debt"
+                )
+            }
+        }
 
         // Operational bitmap assembly:
         //   bits 0–5   capture_channel (contiguous raw 0…5)
@@ -187,7 +199,13 @@ public extension Estate {
             udcCode: frame.latticeAnchor.udcCode,
             udcFacets: frame.latticeAnchor.udcFacets,
             wikidataQID: frame.latticeAnchor.wikidataQID,
-            wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
+            wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
+            // Subject trio at birth (SPEC § 14). The producer at the capture
+            // boundary is the calling AI, so the pipeline version is ai-v1;
+            // a nil frame subject leaves the whole trio NULL (debt, B-21).
+            subject: frame.subject,
+            subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
+            subjectAt: frame.subject == nil ? nil : now
         )
         // Route through the covered chokepoint so coverage is structurally
         // guaranteed (spec § 11.5 Option B). addDrawerCovered bundles
@@ -260,6 +278,16 @@ public extension Estate {
             }
             guard !frame.embeddingModelID.isEmpty else {
                 throw LocusKitError.invalidContent("embeddingModelID must not be empty")
+            }
+            // Same subject contract as capture() (SPEC B-18): 1–120 chars
+            // when present; nil files as subject debt (B-21).
+            if let subject = frame.subject {
+                guard !subject.isEmpty, subject.count <= DrawerStore.subjectLengthContract else {
+                    throw LocusKitError.invalidContent(
+                        "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                        + "(got \(subject.count)); omit it entirely to file as subject debt"
+                    )
+                }
             }
         }
 
@@ -351,7 +379,11 @@ public extension Estate {
                 udcCode: frame.latticeAnchor.udcCode,
                 udcFacets: frame.latticeAnchor.udcFacets,
                 wikidataQID: frame.latticeAnchor.wikidataQID,
-                wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
+                wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
+                // Subject trio at birth — identical translation to capture().
+                subject: frame.subject,
+                subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
+                subjectAt: frame.subject == nil ? nil : now
             )
             prepared.append(PreparedItem(drawer: drawer, wing: triple.wing, room: triple.room))
         }
@@ -1540,6 +1572,23 @@ public extension Estate {
                 reason: payload ?? "exportability corrected via Estate.mutate",
                 now: Date()
             )
+
+        case .setSubject(let subject):
+            guard try await store.getDrawer(id: rowID) != nil else {
+                throw LocusKitError.drawerNotFound(id: rowID)
+            }
+            // Backfill/correction write path for the subject trio
+            // (SPEC § 14). No bitmap, no state transition, no
+            // container-fingerprint rollup — the store verb writes the
+            // three columns in one UPDATE and enforces the 1–120-char
+            // contract (B-18). The producer at this boundary is the
+            // calling AI, so the pipeline version is ai-v1.
+            _ = try await store.setSubjectRepresentation(
+                drawerId: rowID,
+                subject: subject,
+                pipelineVersion: DrawerStore.subjectPipelineAIV1,
+                at: Date()
+            )
         }
     }
 
@@ -2075,7 +2124,15 @@ public extension Estate {
             addedBy: addedBy,
             filedAt: now,
             embeddingModelID: embeddingModelID,
-            udcCode: hintUDCCode
+            udcCode: hintUDCCode,
+            // Structural seeds emit their own subject (SPEC § 14): a hint
+            // drawer exists in EVERY estate, so a NULL subject here would be
+            // permanent, unpayable debt in every debt count. Deterministic —
+            // the wing name states exactly what the hint asserts. Distinct
+            // pipeline tag so a regeneration sweep can target seeds.
+            subject: String("Charter hint: how to use the \(wingName) wing.".prefix(DrawerStore.subjectLengthContract)),
+            subjectPipelineVersion: "seed-v1",
+            subjectAt: now
         )
         // Route through the covered chokepoint so the container fingerprint
         // is maintained — same structural guarantee as ordinary capture.

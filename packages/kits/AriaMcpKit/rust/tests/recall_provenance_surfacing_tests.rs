@@ -80,6 +80,7 @@ fn provenance_line_always_present_deterministic_provider() {
     // Impatient capture so content is immediately in BM25/vector lanes.
     let capture_args = args![
         "content" => "peregrine falcon stoop dive speed aerial predator",
+        "subject" => "peregrine falcon stoop dive speed aerial predator",
         "location" => "birds/falcons",
         "impatient" => true,
     ];
@@ -136,6 +137,7 @@ fn dense_lane_active_when_corpus_wired_and_ingested() {
     // Impatient capture writes directly into the Corpus (BM25 + float rows).
     let capture_args = args![
         "content" => "merlin small falcon moorland heather hunting pipits",
+        "subject" => "merlin small falcon moorland heather hunting pipits",
         "location" => "birds/falcons",
         "impatient" => true,
     ];
@@ -182,6 +184,7 @@ fn degraded_stages_none_on_happy_path() {
 
     let capture_args = args![
         "content" => "hobby falcon aerial insect hunting speed agility summer visitor",
+        "subject" => "hobby falcon aerial insect hunting speed agility summer visitor",
         "location" => "birds/falcons",
         "impatient" => true,
     ];

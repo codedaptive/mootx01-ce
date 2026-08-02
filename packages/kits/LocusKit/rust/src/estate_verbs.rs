@@ -49,6 +49,7 @@ use crate::default_wings::{
 };
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
+use crate::drawer_store::{SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::estate_types::LatticeAnchor;
@@ -241,6 +242,19 @@ impl Estate {
                 "embeddingModelID must not be empty".to_string(),
             ));
         }
+        // Subject length contract (SPEC B-18) checked at the frame boundary
+        // so the error surfaces before any row exists. Empty-string subjects
+        // are rejected the same way — a caller with no subject passes None
+        // (subject debt, B-21), never "". Mirrors Swift capture().
+        if let Some(ref subject) = frame.subject {
+            let n = subject.chars().count();
+            if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+                return Err(LocusKitError::InvalidContent(format!(
+                    "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
+                     omit it entirely to file as subject debt"
+                )));
+            }
+        }
 
         // Operational bitmap assembly (cookbook §2.4 v0.6 layout):
         //   bits 0–5   capture_channel (contiguous raw 0..5)
@@ -356,6 +370,15 @@ impl Estate {
         // eagerly: CaptureFrame.event_time is Option (legitimately optional
         // input frame), but Drawer.event_time is non-optional — fold here.
         drawer.event_time = frame.event_time.unwrap_or(now);
+        // Subject trio at birth (SPEC § 14). The producer at the capture
+        // boundary is the calling AI, so the pipeline version is ai-v1; a
+        // None frame subject leaves the whole trio NULL (debt, B-21).
+        // Mirrors the Swift capture() translation.
+        if let Some(subject) = frame.subject {
+            drawer.subject = Some(subject);
+            drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
+            drawer.subject_at = Some(now);
+        }
 
         // add_drawer atomically maintains the per-container OR aggregate
         // (spec § 11.5 Option B): coverage is now structurally guaranteed
@@ -449,6 +472,17 @@ impl Estate {
                     "embeddingModelID must not be empty".to_string(),
                 ));
             }
+            // Same subject contract as capture() (SPEC B-18): 1–120 chars
+            // when present; None files as subject debt (B-21).
+            if let Some(ref subject) = frame.subject {
+                let n = subject.chars().count();
+                if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+                    return Err(LocusKitError::InvalidContent(format!(
+                        "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
+                         omit it entirely to file as subject debt"
+                    )));
+                }
+            }
 
             // Bitmap assembly (same layout as capture verb, spec §§ 5.6 / 2.3 / 2.5).
             let op_bitmap = bit_field::write_field(
@@ -521,6 +555,12 @@ impl Estate {
             drawer.udc_facets = frame.lattice_anchor.udc_facets;
             drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
             drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
+            // Subject trio at birth — identical translation to capture().
+            if let Some(subject) = frame.subject {
+                drawer.subject = Some(subject);
+                drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
+                drawer.subject_at = Some(now);
+            }
             drawer.event_time = frame.event_time.unwrap_or(now);
 
             // Store drawer. Unlike capture, rollup_merkle_roots is deliberately omitted —
@@ -609,6 +649,19 @@ impl Estate {
         );
         drawer.udc_code = lattice_anchor.udc_code;
         drawer.udc_facets = lattice_anchor.udc_facets;
+        // Structural seeds emit their own subject (SPEC § 14): a hint drawer
+        // exists in EVERY estate, so a NULL subject here would be permanent,
+        // unpayable debt in every debt count. Deterministic — the wing name
+        // states exactly what the hint asserts. Distinct pipeline tag so a
+        // regeneration sweep can target seeds. Mirrors Swift seedWing.
+        drawer.subject = Some(
+            format!("Charter hint: how to use the {wing_name} wing.")
+                .chars()
+                .take(SUBJECT_LENGTH_CONTRACT)
+                .collect(),
+        );
+        drawer.subject_pipeline_version = Some("seed-v1".to_string());
+        drawer.subject_at = Some(now);
         // add_drawer maintains the container fingerprint OR aggregate
         // (spec § 11.5), identical to the capture path. No separate
         // fingerprint call needed — coverage is structurally guaranteed.
@@ -2668,6 +2721,24 @@ impl Estate {
                     Some(_payload.unwrap_or("exportability corrected via Estate.mutate")),
                     now,
                 )
+            }
+            MutationKind::SetSubject(subject) => {
+                if self.store.get_drawer(row_id)?.is_none() {
+                    return Err(LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    });
+                }
+                // Backfill/correction write path for the subject trio
+                // (SPEC § 14). No bitmap, no state transition, no
+                // container-fingerprint rollup — the store verb writes the
+                // three columns in one UPDATE and enforces the 1–120-char
+                // contract (B-18). The producer at this boundary is the
+                // calling AI, so the pipeline version is ai-v1. Mirrors
+                // Swift MutationKind.setSubject in EstateVerbs.swift.
+                let now = Self::now_secs();
+                self.store
+                    .set_subject_representation(row_id, &subject, SUBJECT_PIPELINE_AI_V1, now)
+                    .map(|_| ())
             }
         }
     }

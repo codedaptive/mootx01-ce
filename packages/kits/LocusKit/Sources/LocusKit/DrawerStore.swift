@@ -4938,6 +4938,13 @@ public actor DrawerStore {
     /// `SUBJECT_LENGTH_CONTRACT`).
     public static let subjectLengthContract = 120
 
+    /// Pipeline-version tag for subjects authored by a calling AI at the
+    /// capture/mutate boundary (as opposed to the future miniLLM producer,
+    /// `minillm-v1`). Stored in `subject_pipeline_version` as provenance
+    /// and as the regeneration lever (SPEC B-19). Shared by both legs
+    /// (Rust `SUBJECT_PIPELINE_AI_V1`).
+    public static let subjectPipelineAIV1 = "ai-v1"
+
     /// Count of active drawers still awaiting a subject line — the
     /// backfill-eligibility predicate as an aggregate (PR-01): not
     /// tombstoned, non-empty content, and subject absent OR produced

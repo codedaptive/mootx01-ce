@@ -75,16 +75,26 @@ moot_file_memory — store a memory in the estate
 
 Required args:
   content  (string) the text to store
+  subject  (string) one sentence (≤120 chars) stating what the memory
+           asserts — written for the NEXT AI that will scan it in a
+           result list: telegraphic register, entities and claims
+           front-loaded, no narrative framing. Returned in recall rows,
+           never searched.
   location (string) room path, e.g. \"projects/notes\"
 
 Example:
-  { \"content\": \"Meeting notes from standup\", \"location\": \"work/meetings\" }
+  { \"content\": \"Meeting notes from standup\",
+    \"subject\": \"Standup: release slips one week; QA owns the gate.\",
+    \"location\": \"work/meetings\" }
 
 Response: \"filed memory <id>\\nroom: <room>\\nlineage: <uuid>\"
 
 Mistakes:
   — Sending udcCode, embeddingModelID, or latticeAnchor: server owns these fields.
-  — Sending an empty content string (rejected by substrate).";
+  — Sending an empty content string (rejected by substrate).
+  — Writing the subject as a title (\"Meeting notes\") instead of an
+    assertion (\"Release slips one week\").
+  — Truncating the subject mid-sentence: compress the claim, don't cut it.";
 
 const GUIDE_MEMORY_SEARCH: &str = "\
 moot_memory_search — search memories by keyword
@@ -116,11 +126,16 @@ Required args:
   wing (string) wing name to enumerate, e.g. \"Agentic Memory\"
 
 Optional args:
-  room (string) further narrow to a single room within the wing
+  room   (string) further narrow to a single room within the wing
+  filter (string) missing_subject — the subject-debt enumerator: lists
+         only live drawers with no subject line, id-only (no preview).
+         Walk them with moot_memory_get, then write each subject via
+         moot_update_memory mutation=setSubject.
 
 Example:
   { \"wing\": \"Agentic Memory\" }
   { \"wing\": \"Agentic Memory\", \"room\": \"architecture\" }
+  { \"wing\": \"Agentic Memory\", \"filter\": \"missing_subject\" }
 
 Response: \"drawers in wing <wing>: N\\n<uuid>  [<room>]  <80-char preview>\"
 
@@ -170,16 +185,29 @@ moot_update_memory — apply a named mutation to a memory
 
 Required args:
   id       (string) drawer ID returned by moot_file_memory
-  mutation (string) one of: confirm, reject, contest, resolve, supersede, revive, accept
+  mutation (string) one of: confirm, reject, contest, resolve, supersede,
+           revive, accept, correctExportability(public),
+           correctExportability(private), setSubject
+
+Optional args:
+  subject (string) required for mutation=setSubject, ignored otherwise:
+          one sentence (≤120 chars) in the AI-facing register —
+          telegraphic, entities and claims front-loaded. This is the
+          backfill/correction path for subject-debt rows found via
+          moot_memory_list filter:missing_subject.
 
 Example:
   { \"id\": \"<uuid>\", \"mutation\": \"confirm\" }
+  { \"id\": \"<uuid>\", \"mutation\": \"setSubject\",
+    \"subject\": \"Deploy pipeline: staging gate now requires two approvals.\" }
 
 Response: \"updated memory <id> (<mutation>)\"
 
 Mistakes:
   — Using unknown mutation names returns invalidParams.
-  — The preferred path for user confirmation is moot_confirm_memory.";
+  — The preferred path for user confirmation is moot_confirm_memory.
+  — Passing the subject text in `note` for setSubject: it goes in the
+    dedicated `subject` argument.";
 
 const GUIDE_WITHDRAW_MEMORY: &str = "\
 moot_withdraw_memory — soft-delete a memory (reversible via revive)

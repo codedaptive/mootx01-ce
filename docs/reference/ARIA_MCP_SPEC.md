@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.19.0
+version: 1.20.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-08-02
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -294,7 +294,7 @@ protocol:
   — Call moot_list_lenses to see available cognition tools.
   — Add teachme:true to any tool to learn it before using it.
   — Watch for hint: lines in responses — they contain coaching for better results.
-  — File memories: moot_file_memory (content + location required).
+  — File memories: moot_file_memory (content + subject + location required).
   — Search memories: moot_memory_search (query required).
   — Write journal entries: moot_write_journal after meaningful sessions.
   — Store structured facts: moot_file_fact (subject + predicate + object).
@@ -878,6 +878,19 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.20.0 -- 2026-08-02
+
+- Subject surface (progressive recall PR-02): `moot_file_memory` now REQUIRES
+  a `subject` argument (one sentence ≤120 chars, AI-facing register —
+  returned in recall rows, never searched; LocusKit SPEC § 14).
+  `moot_update_memory` gains `mutation=setSubject` with a dedicated `subject`
+  argument (the backfill/correction path). `moot_memory_list` gains
+  `filter=missing_subject` (id-only subject-debt enumerator). Intake verbs
+  (palace_import, vault_import, file_dataset, file_packet) deliberately file
+  NULL subjects — absence flows to the debt counter. The consolidation
+  vague-tier writer emits its own deterministic subject at creation
+  (pipeline `consolidation-v1`). Session protocol line updated.
 
 ### 1.19.0 -- 2026-07-20
 

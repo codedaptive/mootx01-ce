@@ -66,6 +66,7 @@ fn empty_location_error_contains_reason_not_rust_type_name() {
 
     let a = args![
         "content"  => "some content",
+        "subject"  => "some content",
         "location" => ""           // empty room — estate rejects this
     ];
     let result =
@@ -151,6 +152,7 @@ fn file_memory_with_classifiable_content_sets_real_udc_code() {
     let classifiable = "Biology is the scientific study of life and living organisms, including their physical structure, chemical processes, molecular interactions, physiological mechanisms, and evolution.";
     let a = args![
         "content"  => classifiable,
+        "subject"  => "Photosynthesis chemistry classifiable fixture.",
         "location" => "science-room"
     ];
     let result =
@@ -213,6 +215,7 @@ fn empty_location_error_does_not_expose_invalid_content_prefix() {
 
     let a = args![
         "content"  => "some content",
+        "subject"  => "some content",
         "location" => ""   // empty room triggers InvalidContent from substrate
     ];
     let result =
@@ -254,6 +257,7 @@ fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
     let noise = "zzq xkj blrt fnp";
     let a = args![
         "content"  => noise,
+        "subject"  => "Unclassifiable noise fixture.",
         "location" => "noise-room"
     ];
     let result =
@@ -312,7 +316,8 @@ fn file_memory_and_direct_capture_produce_same_udc_code() {
     // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
     // so drawers1[0] is this test's drawer.
     let registry1 = EstateRegistry::new_inmemory_bare();
-    let a = args!["content" => classifiable, "location" => "science-room"];
+    let subject: String = classifiable.chars().take(120).collect();
+    let a = args!["content" => classifiable, "subject" => subject.as_str(), "location" => "science-room"];
     dispatch_tool("moot_file_memory", &a, &registry1, &SurfacedRecallLedger::new())
         .expect("file_memory must succeed");
 
@@ -441,7 +446,8 @@ fn reviewed_computing_aliases_survive_the_capture_seam() {
         // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint
         // drawers, so the "one drawer per content item" read-back is exact.
         let registry = EstateRegistry::new_inmemory_bare();
-        let a = args!["content" => *content, "location" => *location];
+        let subject: String = content.chars().take(120).collect();
+        let a = args!["content" => *content, "subject" => subject.as_str(), "location" => *location];
         let result =
             dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
                 .expect("file_memory must succeed for high-frequency content");
