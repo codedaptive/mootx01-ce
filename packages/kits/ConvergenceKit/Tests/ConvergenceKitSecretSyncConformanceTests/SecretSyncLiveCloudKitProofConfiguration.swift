@@ -1103,6 +1103,8 @@ actor SecretSyncLiveCleanupLedger {
 
   /// A committed marker selects the key-erased candidate. The canonical
   /// key-bearing slot remains authoritative while only PREPARED exists.
+  /// This remains one cohesive lock-held recovery transition so validation,
+  /// canonical replacement, and journal cleanup expose no intermediate seam.
   private static func materializeCommittedAudit(
     name: String,
     namespace: String,

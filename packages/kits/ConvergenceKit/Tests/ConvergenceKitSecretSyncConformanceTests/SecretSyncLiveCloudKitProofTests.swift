@@ -1694,6 +1694,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
+  /// This remains one cohesive table-driven recovery proof so every injected
+  /// fault follows the same seed, fail, reload, verify, retry, and erase path.
   @Test("every reported audit ledger fault preserves keys and retryability")
   func auditLedgerFaultRecovery() async throws {
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
