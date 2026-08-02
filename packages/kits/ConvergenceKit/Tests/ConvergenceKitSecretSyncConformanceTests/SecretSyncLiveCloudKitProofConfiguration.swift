@@ -1,5 +1,6 @@
 import CloudKit
 import ConvergenceKit
+import ConvergenceKitAppleSecurity
 import ConvergenceKitCloudKit
 import Darwin
 import Foundation
@@ -124,6 +125,8 @@ enum SecretSyncLiveCloudKitProofConfigurationError: Error, Sendable, Equatable {
   case corruptLocalLedger
   case unresolvedCleanupRecords
   case incompleteAudit
+  case requiredZoneMissing
+  case zoneMutationProhibited
 }
 
 actor SecretSyncLiveCleanupLedger {
@@ -133,6 +136,7 @@ actor SecretSyncLiveCleanupLedger {
     var completedPhasesByRole: [String: [String]]
     var recordNamesByZone: [String: [String]]
     var evidence: [SecretSyncLiveEvidence]
+    var agreementVerifierPrivateKeysByRole: [String: Data]
   }
 
   private let url: URL
@@ -253,12 +257,39 @@ actor SecretSyncLiveCleanupLedger {
     } else {
       state = State(
         namespace: namespace, deviceEvidenceByRole: [:],
-        completedPhasesByRole: [:], recordNamesByZone: [:], evidence: []
+        completedPhasesByRole: [:], recordNamesByZone: [:], evidence: [],
+        agreementVerifierPrivateKeysByRole: [:]
       )
     }
     let result = try body(&state)
     try JSONEncoder().encode(state).write(to: url, options: .atomic)
+    guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.corruptLocalLedger
+    }
     return result
+  }
+
+  func storeAgreementVerifierPrivateKey(
+    _ key: Data,
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws {
+    try transaction { state in
+      guard state.agreementVerifierPrivateKeysByRole[role.rawValue] == nil else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.deviceEvidenceReused
+      }
+      state.agreementVerifierPrivateKeysByRole[role.rawValue] = key
+    }
+  }
+
+  func agreementVerifierPrivateKey(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws -> Data {
+    try transaction { state in
+      guard let key = state.agreementVerifierPrivateKeysByRole[role.rawValue] else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      }
+      return key
+    }
   }
 }
 
@@ -303,11 +334,44 @@ struct SecretSyncLiveCredentialEvidence: Codable, Sendable, Equatable {
   let credential: TrustedDeviceCredential
   let signingHandleID: UUID
   let agreementHandleID: UUID
+  let possessionTranscript: SecretSyncLivePossessionTranscript
   let signingChallenge: Data
   let signingProof: Data
   let agreementChallenge: Data
   let agreementProof: Data
+  let attestationTranscript: SecretSyncLivePossessionTranscript
+  let attestationChallenge: Data
+  let attestationProof: Data
   let evidenceID: String
+}
+
+struct SecretSyncLiveAgreementVerifierPublic: Codable, Sendable, Equatable {
+  let publicKey: Data
+}
+
+struct SecretSyncLivePossessionTranscript: Codable, Sendable, Equatable {
+  let challengeID: UUID
+  let sessionID: UUID
+  let issuedAt: Date
+  let expiresAt: Date
+  let deviceID: TrustedDeviceID
+  let credentialID: DeviceCredentialID
+  let signingPublicKey: SigningPublicKeyDescriptor
+  let agreementPublicKey: KeyAgreementPublicKeyDescriptor
+  let authorityCredentialID: DeviceCredentialID
+  let freshnessCommitment: SecretBootstrapFreshnessCommitment
+
+  func productionValue() throws -> SecretSyncProofOfPossessionTranscript {
+    try SecretSyncProofOfPossessionTranscript(
+      challengeID: challengeID, sessionID: sessionID,
+      issuedAt: issuedAt, expiresAt: expiresAt,
+      deviceID: deviceID, credentialID: credentialID,
+      signingPublicKey: signingPublicKey,
+      agreementPublicKey: agreementPublicKey,
+      authorityCredentialID: authorityCredentialID,
+      freshnessCommitment: freshnessCommitment
+    )
+  }
 }
 
 struct SecretSyncLiveCandidateReference: Codable, Sendable, Equatable {

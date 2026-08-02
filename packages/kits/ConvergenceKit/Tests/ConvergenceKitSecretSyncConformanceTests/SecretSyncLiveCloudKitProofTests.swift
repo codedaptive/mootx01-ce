@@ -1,10 +1,238 @@
 import CloudKit
 import ConvergenceKit
-@_spi(SecretSyncPhysicalProof) import ConvergenceKitAppleSecurity
+@_spi(SecretSyncPhysicalProof) @testable import ConvergenceKitAppleSecurity
 import ConvergenceKitCloudKit
 import CryptoKit
 import Foundation
 import Testing
+
+enum SecretSyncLiveAttestation {
+  static let label = "u7-live-credential-attestation/v1"
+
+  static func transcriptValue(
+    _ transcript: SecretSyncProofOfPossessionTranscript
+  ) -> SecretSyncLivePossessionTranscript {
+    SecretSyncLivePossessionTranscript(
+      challengeID: transcript.challengeID, sessionID: transcript.sessionID,
+      issuedAt: transcript.issuedAt, expiresAt: transcript.expiresAt,
+      deviceID: transcript.deviceID, credentialID: transcript.credentialID,
+      signingPublicKey: transcript.signingPublicKey,
+      agreementPublicKey: transcript.agreementPublicKey,
+      authorityCredentialID: transcript.authorityCredentialID,
+      freshnessCommitment: transcript.freshnessCommitment
+    )
+  }
+
+  static func agreementChallenge(
+    transcript: SecretSyncProofOfPossessionTranscript,
+    verifierPublicKey: Data
+  ) throws -> Data {
+    try SecretSyncCanonicalEncoding.encode(
+      domain: .deviceEnrollmentProof,
+      fields: [
+        .init(tag: 1, value: uint16(1)),
+        .init(tag: 2, value: Data("secret-sync/agreement-possession/v1".utf8)),
+        .init(tag: 3, value: try transcriptBytes(transcript)),
+        .init(tag: 4, value: verifierPublicKey),
+      ]
+    )
+  }
+
+  static func verifyAgreement(
+    proof: Data,
+    challenge: Data,
+    verifierPrivateKey: Data,
+    credential: TrustedDeviceCredential,
+    transcript: SecretSyncProofOfPossessionTranscript
+  ) throws -> Bool {
+    let verifier = try P256.KeyAgreement.PrivateKey(
+      rawRepresentation: verifierPrivateKey
+    )
+    let expectedChallenge = try agreementChallenge(
+      transcript: transcript,
+      verifierPublicKey: verifier.publicKey.x963Representation
+    )
+    guard challenge == expectedChallenge else { return false }
+    let candidate = try P256.KeyAgreement.PublicKey(
+      x963Representation: credential.keyAgreementPublicKey.publicKeyBytes
+    )
+    let shared = try verifier.sharedSecretFromKeyAgreement(with: candidate)
+    let key = shared.hkdfDerivedSymmetricKey(
+      using: SHA256.self, salt: Data(), sharedInfo: challenge,
+      outputByteCount: 32
+    )
+    let expected = Data(
+      HMAC<SHA256>.authenticationCode(for: challenge, using: key)
+    )
+    return constantTimeEqual(proof, expected)
+  }
+
+  static func agreementResponse(
+    challenge: Data,
+    credentialPrivateKey: P256.KeyAgreement.PrivateKey,
+    verifierPublicKey: Data
+  ) throws -> Data {
+    let verifier = try P256.KeyAgreement.PublicKey(
+      x963Representation: verifierPublicKey
+    )
+    let shared = try credentialPrivateKey.sharedSecretFromKeyAgreement(with: verifier)
+    let key = shared.hkdfDerivedSymmetricKey(
+      using: SHA256.self, salt: Data(), sharedInfo: challenge,
+      outputByteCount: 32
+    )
+    return Data(HMAC<SHA256>.authenticationCode(for: challenge, using: key))
+  }
+
+  static func canonicalBody(
+    namespace: String,
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    credentialRecordName: String,
+    verifierRecordName: String,
+    credential: TrustedDeviceCredential,
+    transcript: SecretSyncLivePossessionTranscript,
+    signingChallenge: Data,
+    signingProof: Data,
+    agreementChallenge: Data,
+    agreementProof: Data
+  ) throws -> Data {
+    try SecretSyncCanonicalEncoding.encode(
+      domain: .deviceEnrollmentProof,
+      fields: [
+        .init(tag: 1, value: uint16(1)),
+        .init(tag: 2, value: Data(label.utf8)),
+        .init(tag: 3, value: Data(namespace.utf8)),
+        .init(tag: 4, value: Data(role.rawValue.utf8)),
+        .init(tag: 5, value: Data(credentialRecordName.utf8)),
+        .init(tag: 6, value: Data(verifierRecordName.utf8)),
+        .init(tag: 7, value: try credential.canonicalBytes()),
+        .init(tag: 8, value: try transcriptBytes(transcript.productionValue())),
+        .init(tag: 9, value: signingChallenge),
+        .init(tag: 10, value: signingProof),
+        .init(tag: 11, value: agreementChallenge),
+        .init(tag: 12, value: agreementProof),
+      ]
+    )
+  }
+
+  static func verify(
+    _ evidence: SecretSyncLiveCredentialEvidence,
+    namespace: String,
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    credentialRecordName: String,
+    verifierRecordName: String,
+    agreementVerifierPrivateKey: Data
+  ) throws -> Bool {
+    let transcript = try evidence.possessionTranscript.productionValue()
+    guard transcript.deviceID == evidence.credential.deviceID,
+      transcript.credentialID == evidence.credential.credentialID,
+      transcript.signingPublicKey == evidence.credential.signingPublicKey,
+      transcript.agreementPublicKey == evidence.credential.keyAgreementPublicKey
+    else { return false }
+    let signing = try SecretSyncSigningProofChallenge(transcript: transcript)
+    let signatures = try SecretSyncP256SignatureProvider(suite: U7GoldenVectors.suite())
+    guard signing.canonicalBytes == evidence.signingChallenge,
+      try signatures.verify(
+        signature: evidence.signingProof,
+        canonicalBytes: signing.canonicalBytes,
+        signingPublicKey: evidence.credential.signingPublicKey
+      ),
+      try verifyAgreement(
+        proof: evidence.agreementProof,
+        challenge: evidence.agreementChallenge,
+        verifierPrivateKey: agreementVerifierPrivateKey,
+        credential: evidence.credential,
+        transcript: transcript
+      )
+    else { return false }
+    let body = try canonicalBody(
+      namespace: namespace, role: role,
+      credentialRecordName: credentialRecordName,
+      verifierRecordName: verifierRecordName,
+      credential: evidence.credential, transcript: evidence.possessionTranscript,
+      signingChallenge: evidence.signingChallenge,
+      signingProof: evidence.signingProof,
+      agreementChallenge: evidence.agreementChallenge,
+      agreementProof: evidence.agreementProof
+    )
+    let bodyDigest = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+      .digest(canonicalBytes: body)
+    let attestation = try evidence.attestationTranscript.productionValue()
+    guard attestation.deviceID == evidence.credential.deviceID,
+      attestation.credentialID == evidence.credential.credentialID,
+      attestation.signingPublicKey == evidence.credential.signingPublicKey,
+      attestation.agreementPublicKey == evidence.credential.keyAgreementPublicKey,
+      attestation.freshnessCommitment.scopeID.rawValue
+        == UUID(uuidString: String(namespace.dropFirst(3))),
+      attestation.freshnessCommitment.headCommitDigest == bodyDigest,
+      attestation.freshnessCommitment.policyDigest == bodyDigest
+    else { return false }
+    let challenge = try SecretSyncSigningProofChallenge(transcript: attestation)
+    guard challenge.canonicalBytes == evidence.attestationChallenge,
+      try signatures.verify(
+        signature: evidence.attestationProof,
+        canonicalBytes: challenge.canonicalBytes,
+        signingPublicKey: evidence.credential.signingPublicKey
+      )
+    else { return false }
+    return evidence.evidenceID == evidenceID(
+      body: body, challenge: challenge.canonicalBytes,
+      proof: evidence.attestationProof
+    )
+  }
+
+  static func evidenceID(body: Data, challenge: Data, proof: Data) -> String {
+    var bytes = body
+    bytes.append(challenge)
+    bytes.append(proof)
+    return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+  }
+
+  static func transcriptBytes(
+    _ transcript: SecretSyncProofOfPossessionTranscript
+  ) throws -> Data {
+    try transcript.canonicalBytes
+  }
+
+  private static func uint16(_ value: UInt16) -> Data {
+    var value = value.bigEndian
+    return withUnsafeBytes(of: &value) { Data($0) }
+  }
+
+  private static func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+    guard lhs.count == rhs.count else { return false }
+    return zip(lhs, rhs).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
+  }
+}
+
+enum SecretSyncLiveImmutableArtifactStore {
+  static func create(
+    _ record: CKRecord,
+    database: any CloudKitDatabaseProtocol
+  ) async throws {
+    let result = try await database.modifyRecords(
+      saving: [record], deleting: [],
+      savePolicy: .ifServerRecordUnchanged, atomically: true
+    )
+    guard result.deleteResults.isEmpty,
+      Set(result.saveResults.keys) == [record.recordID],
+      case .success? = result.saveResults[record.recordID]
+    else { throw SecretSyncCloudKitError.incompleteModifyResults }
+  }
+}
+
+enum SecretSyncLiveZoneAdmission {
+  static func requirePreexisting(
+    observed: [CKRecordZone.ID],
+    control: CKRecordZone.ID,
+    payload: CKRecordZone.ID
+  ) throws {
+    let observed = Set(observed)
+    guard control.zoneName == "moot-secret-control-v1",
+      payload.zoneName == "moot-secret-payload-v1",
+      observed.contains(control), observed.contains(payload)
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.requiredZoneMissing }
+  }
+}
 
 @Suite("SecretSync live proof configuration contract")
 struct SecretSyncLiveCloudKitProofConfigurationTests {
@@ -55,6 +283,96 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       CKRecord.ID(recordName: "two", zoneID: SecretSyncCloudKitZones.payloadZoneID)
     )
     #expect(Set(try await first.exactRecordIDs().map(\.recordName)) == ["one", "two"])
+    let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
+      as? NSNumber
+    #expect(permissions?.intValue == 0o600)
+  }
+
+  @Test("proof artifacts are create-only and reject overwrite")
+  func immutableArtifactSemantics() async throws {
+    let database = SecretSyncLiveArtifactDatabaseFake()
+    let recordID = CKRecord.ID(recordName: "immutable-proof")
+    let record = CKRecord(recordType: "U7SecretSyncProof", recordID: recordID)
+    record["payload"] = Data("first".utf8) as CKRecordValue
+    try await SecretSyncLiveImmutableArtifactStore.create(record, database: database)
+
+    let replacement = CKRecord(recordType: "U7SecretSyncProof", recordID: recordID)
+    replacement["payload"] = Data("replacement".utf8) as CKRecordValue
+    await #expect(throws: SecretSyncCloudKitError.incompleteModifyResults) {
+      try await SecretSyncLiveImmutableArtifactStore.create(
+        replacement, database: database
+      )
+    }
+    #expect(await database.savePolicies == [.ifServerRecordUnchanged, .ifServerRecordUnchanged])
+    #expect(await database.zoneMutationCount == 0)
+  }
+
+  @Test("zone admission requires both exact pre-existing canonical zones")
+  func preexistingZoneAdmission() throws {
+    let control = SecretSyncCloudKitZones.controlZoneID
+    let payload = SecretSyncCloudKitZones.payloadZoneID
+    try SecretSyncLiveZoneAdmission.requirePreexisting(
+      observed: [control, payload], control: control, payload: payload
+    )
+    #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.requiredZoneMissing) {
+      try SecretSyncLiveZoneAdmission.requirePreexisting(
+        observed: [control], control: control, payload: payload
+      )
+    }
+    #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.requiredZoneMissing) {
+      try SecretSyncLiveZoneAdmission.requirePreexisting(
+        observed: [control, CKRecordZone.ID(zoneName: "wrong-payload")],
+        control: control, payload: payload
+      )
+    }
+    #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.requiredZoneMissing) {
+      try SecretSyncLiveZoneAdmission.requirePreexisting(
+        observed: [
+          control,
+          CKRecordZone.ID(zoneName: payload.zoneName, ownerName: "wrong-owner"),
+        ],
+        control: control, payload: payload
+      )
+    }
+  }
+
+  @Test("canonical credential attestation rejects every proof mutation")
+  func completeAttestationVerification() throws {
+    let fixture = try SecretSyncLiveAttestationFixture.make()
+    #expect(
+      try SecretSyncLiveAttestation.verify(
+        fixture.evidence, namespace: fixture.namespace, role: .a,
+        credentialRecordName: fixture.credentialRecordName,
+        verifierRecordName: fixture.verifierRecordName,
+        agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
+      )
+    )
+    for mutation in SecretSyncLiveAttestationFixture.Mutation.allCases {
+      #expect(
+        try !SecretSyncLiveAttestation.verify(
+          fixture.mutated(mutation), namespace: fixture.namespace, role: .a,
+          credentialRecordName: fixture.credentialRecordName,
+          verifierRecordName: fixture.verifierRecordName,
+          agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
+        ), "mutation must reject: \(mutation)"
+      )
+    }
+    #expect(
+      try !SecretSyncLiveAttestation.verify(
+        fixture.evidence, namespace: fixture.namespace, role: .a,
+        credentialRecordName: fixture.credentialRecordName + "-tampered",
+        verifierRecordName: fixture.verifierRecordName,
+        agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
+      )
+    )
+    #expect(
+      try !SecretSyncLiveAttestation.verify(
+        fixture.evidence, namespace: fixture.namespace, role: .a,
+        credentialRecordName: fixture.credentialRecordName,
+        verifierRecordName: fixture.verifierRecordName + "-tampered",
+        agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
+      )
+    )
   }
 
   private func completeEnvironment(role: String, phase: String) -> [String: String] {
@@ -86,6 +404,7 @@ struct SecretSyncLiveCloudKitProofTests {
     let ledger = try SecretSyncLiveCleanupLedger(
       url: values.ledgerURL, namespace: values.runNamespace
     )
+    try await requirePreexistingZones(values)
     switch values.phase {
     case .credential: try await proveHardwareCustody(values, ledger: ledger)
     case .backgroundDenied: try await proveBackgroundDenial(values, ledger: ledger)
@@ -110,11 +429,19 @@ struct SecretSyncLiveCloudKitProofTests {
       throw SecretSyncCustodyError.hardwareUnavailable
     }
     let custody = SecretSyncSecureEnclaveCustody()
+    if values.deviceRole == .a {
+      try await provisionAgreementVerifiers(values, ledger: ledger)
+    }
+    let verifier = try await loadArtifact(
+      SecretSyncLiveAgreementVerifierPublic.self, kind: "agreement-verifier",
+      role: values.deviceRole, values: values
+    )
     let generation = try await custody.createCredential(for: TrustedDeviceID(UUID()))
     // Deliberately retain the exact Keychain handles until this role's cleanup
     // phase. A/B still need them to unwrap and C needs its key to prove reject.
     let evidence = try await verifyHardwareProof(
-      custody: custody, generation: generation, values: values
+      custody: custody, generation: generation,
+      agreementVerifierPublicKey: verifier.publicKey, values: values
     )
     try await saveArtifact(
       evidence, kind: "credential", role: values.deviceRole,
@@ -129,11 +456,14 @@ struct SecretSyncLiveCloudKitProofTests {
   private func verifyHardwareProof(
     custody: SecretSyncSecureEnclaveCustody,
     generation: SecretSyncCustodyCredentialGeneration,
+    agreementVerifierPublicKey: Data,
     values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) async throws -> SecretSyncLiveCredentialEvidence {
     let transcript = try possessionTranscript(generation, values: values)
     let signingChallenge = try SecretSyncSigningProofChallenge(transcript: transcript)
-    let agreement = try SecretSyncAgreementProofChallenge.create(transcript: transcript)
+    let agreementChallenge = try SecretSyncLiveAttestation.agreementChallenge(
+      transcript: transcript, verifierPublicKey: agreementVerifierPublicKey
+    )
     let signing = try await custody.proveSigningKeyPossession(
       SigningProofOfPossessionRequest(
         credentialID: generation.credentialID,
@@ -147,18 +477,13 @@ struct SecretSyncLiveCloudKitProofTests {
         credentialID: generation.credentialID,
         privateKeyHandle: generation.agreementHandle,
         challengeID: transcript.challengeID,
-        challengeBytes: agreement.challenge.canonicalBytes
+        challengeBytes: agreementChallenge
       )
     )
     guard
       try signingChallenge.verify(
         signing.proofBytes,
         publicKey: generation.signingPublicKey
-      ),
-      try agreement.verifier.verify(
-        agreementProof.proofBytes,
-        challenge: agreement.challenge,
-        candidatePublicKey: generation.agreementPublicKey
       )
     else { throw SecretSyncCustodyError.invalidProof }
     let status: TrustedDeviceCredentialStatus = values.deviceRole == .c ? .revoked : .active
@@ -180,21 +505,59 @@ struct SecretSyncLiveCloudKitProofTests {
         )
       )
     )
+    let credentialRecordName = artifactRecordID(
+      kind: "credential", role: values.deviceRole, values: values
+    ).recordName
+    let verifierRecordName = artifactRecordID(
+      kind: "agreement-verifier", role: values.deviceRole, values: values
+    ).recordName
+    let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
+    let body = try SecretSyncLiveAttestation.canonicalBody(
+      namespace: values.runNamespace, role: values.deviceRole,
+      credentialRecordName: credentialRecordName,
+      verifierRecordName: verifierRecordName, credential: credential,
+      transcript: transcriptValue,
+      signingChallenge: signingChallenge.canonicalBytes,
+      signingProof: signing.proofBytes,
+      agreementChallenge: agreementChallenge,
+      agreementProof: agreementProof.proofBytes
+    )
+    let bodyDigest = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+      .digest(canonicalBytes: body)
+    let attestationTranscript = try possessionTranscript(
+      generation, values: values, boundDigest: bodyDigest
+    )
+    let attestationChallenge = try SecretSyncSigningProofChallenge(
+      transcript: attestationTranscript
+    )
+    let attestationProof = try await custody.proveSigningKeyPossession(
+      SigningProofOfPossessionRequest(
+        credentialID: generation.credentialID,
+        privateKeyHandle: generation.signingHandle,
+        challengeID: attestationTranscript.challengeID,
+        challengeBytes: attestationChallenge.canonicalBytes
+      )
+    )
+    guard try attestationChallenge.verify(
+      attestationProof.proofBytes, publicKey: generation.signingPublicKey
+    ) else { throw SecretSyncCustodyError.invalidProof }
     return SecretSyncLiveCredentialEvidence(
       credential: credential,
       signingHandleID: generation.signingHandle.rawValue,
       agreementHandleID: generation.agreementHandle.rawValue,
+      possessionTranscript: transcriptValue,
       signingChallenge: signingChallenge.canonicalBytes,
       signingProof: signing.proofBytes,
-      agreementChallenge: agreement.challenge.canonicalBytes,
+      agreementChallenge: agreementChallenge,
       agreementProof: agreementProof.proofBytes,
-      evidenceID: try credentialEvidenceID(
-        credential: credential,
-        signingChallenge: signingChallenge.canonicalBytes,
-        signingProof: signing.proofBytes,
-        agreementChallenge: agreement.challenge.canonicalBytes,
-        agreementProof: agreementProof.proofBytes,
-        role: values.deviceRole, values: values
+      attestationTranscript: SecretSyncLiveAttestation.transcriptValue(
+        attestationTranscript
+      ),
+      attestationChallenge: attestationChallenge.canonicalBytes,
+      attestationProof: attestationProof.proofBytes,
+      evidenceID: SecretSyncLiveAttestation.evidenceID(
+        body: body, challenge: attestationChallenge.canonicalBytes,
+        proof: attestationProof.proofBytes
       )
     )
   }
@@ -211,7 +574,6 @@ struct SecretSyncLiveCloudKitProofTests {
           values: values
         ).credential
       }
-    try await ensureSecretSyncZones(values)
     let context = try liveStore(values, ledger: ledger)
     for role in [SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a, .b] {
       let fixture = try U7PolicyFixture.makeLive(
@@ -565,6 +927,7 @@ struct SecretSyncLiveCloudKitProofTests {
   ) -> [CKRecord.ID] {
     var pairs: [(String, SecretSyncLiveCloudKitProofConfiguration.DeviceRole)] = []
     for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
+      pairs.append(("agreement-verifier", role))
       pairs.append(("credential", role))
       pairs.append(("phase-credential", role))
       pairs.append(("phase-verify", role))
@@ -604,19 +967,25 @@ struct SecretSyncLiveCloudKitProofTests {
         SecretSyncLiveCredentialEvidence.self, kind: "credential", role: role,
         values: values
       )
+      let verifierPrivateKey = try await ledger.agreementVerifierPrivateKey(
+        role: role
+      )
+      let verifierPublic = try await loadArtifact(
+        SecretSyncLiveAgreementVerifierPublic.self,
+        kind: "agreement-verifier", role: role, values: values
+      )
       guard evidenceIDs.insert(credential.evidenceID).inserted,
-        credential.evidenceID == (try credentialEvidenceID(
-          credential: credential.credential,
-          signingChallenge: credential.signingChallenge,
-          signingProof: credential.signingProof,
-          agreementChallenge: credential.agreementChallenge,
-          agreementProof: credential.agreementProof,
-          role: role, values: values
-        )),
-        try SecretSyncP256SignatureProvider(suite: U7GoldenVectors.suite()).verify(
-          signature: credential.signingProof,
-          canonicalBytes: credential.signingChallenge,
-          signingPublicKey: credential.credential.signingPublicKey
+        try P256.KeyAgreement.PrivateKey(rawRepresentation: verifierPrivateKey)
+          .publicKey.x963Representation == verifierPublic.publicKey,
+        try SecretSyncLiveAttestation.verify(
+          credential, namespace: values.runNamespace, role: role,
+          credentialRecordName: artifactRecordID(
+            kind: "credential", role: role, values: values
+          ).recordName,
+          verifierRecordName: artifactRecordID(
+            kind: "agreement-verifier", role: role, values: values
+          ).recordName,
+          agreementVerifierPrivateKey: verifierPrivateKey
         )
       else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
       let proof = try await loadArtifact(
@@ -646,9 +1015,18 @@ struct SecretSyncLiveCloudKitProofTests {
 
   private func possessionTranscript(
     _ generation: SecretSyncCustodyCredentialGeneration,
-    values: SecretSyncLiveCloudKitProofConfiguration.Values
+    values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    boundDigest: SecretRecordDigest? = nil
   ) throws -> SecretSyncProofOfPossessionTranscript {
     let now = Date()
+    let digestProvider = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+    let roleBinding = Data(
+      "\(values.runNamespace)|\(values.deviceRole.rawValue)|possession".utf8
+    )
+    let headDigest = try boundDigest ?? digestProvider.digest(canonicalBytes: roleBinding)
+    let policyDigest = try boundDigest ?? digestProvider.digest(
+      canonicalBytes: roleBinding + Data("|policy".utf8)
+    )
     return try SecretSyncProofOfPossessionTranscript(
       challengeID: UUID(), sessionID: UUID(),
       issuedAt: now.addingTimeInterval(-1), expiresAt: now.addingTimeInterval(300),
@@ -658,10 +1036,28 @@ struct SecretSyncLiveCloudKitProofTests {
       authorityCredentialID: DeviceCredentialID(UUID()),
       freshnessCommitment: SecretBootstrapFreshnessCommitment(
         scopeID: scopeID(values), latestPolicyEpoch: 1,
-        headCommitDigest: U7GoldenVectors.digest(0xF1),
-        policyDigest: U7GoldenVectors.digest(0xF2)
+        headCommitDigest: headDigest, policyDigest: policyDigest
       )
     )
+  }
+
+  private func provisionAgreementVerifiers(
+    _ values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    ledger: SecretSyncLiveCleanupLedger
+  ) async throws {
+    for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
+      let key = P256.KeyAgreement.PrivateKey()
+      try await ledger.storeAgreementVerifierPrivateKey(
+        key.rawRepresentation, role: role
+      )
+      try await saveArtifact(
+        SecretSyncLiveAgreementVerifierPublic(
+          publicKey: key.publicKey.x963Representation
+        ),
+        kind: "agreement-verifier", role: role,
+        values: values, ledger: ledger
+      )
+    }
   }
 
   private func complete(
@@ -710,13 +1106,11 @@ struct SecretSyncLiveCloudKitProofTests {
     record["role"] = role.rawValue as CKRecordValue
     record["payload"] = try JSONEncoder().encode(artifact) as CKRecordValue
     try await ledger.recordBeforeSave(recordID)
-    let result = try await CKContainer(identifier: values.containerIdentifier)
-      .privateCloudDatabase.modifyRecords(
-        saving: [record], deleting: [], savePolicy: .allKeys, atomically: true
-      )
-    guard case .success? = result.saveResults[recordID] else {
-      throw SecretSyncCloudKitError.incompleteModifyResults
-    }
+    try await SecretSyncLiveImmutableArtifactStore.create(
+      record,
+      database: CKContainer(identifier: values.containerIdentifier)
+        .privateCloudDatabase
+    )
   }
 
   private func loadArtifact<T: Decodable>(
@@ -743,42 +1137,21 @@ struct SecretSyncLiveCloudKitProofTests {
   ) -> CKRecord.ID {
     CKRecord.ID(
       recordName: "\(values.runNamespace)-\(kind)-\(role.rawValue)",
-      // Coordination begins before the SecretSync custom zones exist. The
-      // private default zone is therefore the portable rendezvous surface.
+      // Proof records use the private default zone so this harness never
+      // mutates or assumes ownership of SecretSync's canonical zones.
       zoneID: CKRecordZone.default().zoneID
     )
   }
 
-  private func credentialEvidenceID(
-    credential: TrustedDeviceCredential,
-    signingChallenge: Data,
-    signingProof: Data,
-    agreementChallenge: Data,
-    agreementProof: Data,
-    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
-    values: SecretSyncLiveCloudKitProofConfiguration.Values
-  ) throws -> String {
-    var bound = try credential.canonicalBytes()
-    for value in [signingChallenge, signingProof, agreementChallenge, agreementProof] {
-      bound.append(value)
-    }
-    bound.append(Data(values.runNamespace.utf8))
-    bound.append(Data(role.rawValue.utf8))
-    let digest = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
-      .digest(canonicalBytes: bound)
-    return digest.bytes.map { String(format: "%02x", $0) }.joined()
-  }
-
-  private func ensureSecretSyncZones(
+  private func requirePreexistingZones(
     _ values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) async throws {
-    let zones = [CKRecordZone(zoneID: values.controlZoneID), CKRecordZone(zoneID: values.payloadZoneID)]
-    let result = try await CKContainer(identifier: values.containerIdentifier)
-      .privateCloudDatabase.modifyRecordZones(saving: zones, deleting: [])
-    guard zones.allSatisfy({ zone in
-      if case .success? = result.saveResults[zone.zoneID] { return true }
-      return false
-    }) else { throw SecretSyncCloudKitError.incompleteModifyResults }
+    let database = CKContainer(identifier: values.containerIdentifier)
+      .privateCloudDatabase
+    try SecretSyncLiveZoneAdmission.requirePreexisting(
+      observed: try await database.allRecordZones().map(\.zoneID),
+      control: values.controlZoneID, payload: values.payloadZoneID
+    )
   }
 
   private func commitment(
@@ -849,7 +1222,7 @@ private struct SecretSyncLiveRecordingDatabase: CloudKitDatabaseProtocol {
     saveResults: [CKRecordZone.ID: Result<CKRecordZone, any Error>],
     deleteResults: [CKRecordZone.ID: Result<Void, any Error>]
   ) {
-    try await database.modifyRecordZones(saving: zones, deleting: ids)
+    throw SecretSyncLiveCloudKitProofConfigurationError.zoneMutationProhibited
   }
 
   func modifySubscriptions(
@@ -872,3 +1245,218 @@ private extension Sequence {
     return values
   }
 }
+
+private struct SecretSyncLiveAttestationFixture {
+  enum Mutation: CaseIterable { case signingChallenge, signingProof, agreementChallenge
+    case agreementProof, attestationChallenge, attestationProof }
+
+  let namespace: String
+  let credentialRecordName: String
+  let verifierRecordName: String
+  let verifier: P256.KeyAgreement.PrivateKey
+  let evidence: SecretSyncLiveCredentialEvidence
+
+  static func make() throws -> SecretSyncLiveAttestationFixture {
+    let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
+    let credentialRecordName = "\(namespace)-credential-A"
+    let verifierRecordName = "\(namespace)-agreement-verifier-A"
+    let signing = P256.Signing.PrivateKey()
+    let agreement = P256.KeyAgreement.PrivateKey()
+    let verifier = P256.KeyAgreement.PrivateKey()
+    let signingPublic = try SigningPublicKeyDescriptor(
+      algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+      keyIdentifier: Data("fixture-signing".utf8),
+      publicKeyBytes: signing.publicKey.x963Representation
+    )
+    let agreementPublic = try KeyAgreementPublicKeyDescriptor(
+      algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+      keyIdentifier: Data("fixture-agreement".utf8),
+      publicKeyBytes: agreement.publicKey.x963Representation
+    )
+    let transcript = try transcript(
+      signing: signingPublic, agreement: agreementPublic,
+      head: U7GoldenVectors.digest(0xA1), policy: U7GoldenVectors.digest(0xA2),
+      challenge: U7UUID.byte(0xA3), session: U7UUID.byte(0xA4)
+    )
+    let signingChallenge = try SecretSyncSigningProofChallenge(transcript: transcript)
+    let signatures = try SecretSyncP256SignatureProvider(suite: U7GoldenVectors.suite())
+    let signingProof = try signatures.sign(
+      canonicalBytes: signingChallenge.canonicalBytes, using: signing
+    )
+    let agreementChallenge = try SecretSyncLiveAttestation.agreementChallenge(
+      transcript: transcript,
+      verifierPublicKey: verifier.publicKey.x963Representation
+    )
+    let agreementProof = try SecretSyncLiveAttestation.agreementResponse(
+      challenge: agreementChallenge, credentialPrivateKey: agreement,
+      verifierPublicKey: verifier.publicKey.x963Representation
+    )
+    let credential = try TrustedDeviceCredential(
+      deviceID: transcript.deviceID, credentialID: transcript.credentialID,
+      credentialVersion: 1, status: .active,
+      signingPublicKey: signingPublic, keyAgreementPublicKey: agreementPublic,
+      enrollmentProof: DeviceCredentialEnrollmentProof(
+        challengeID: transcript.challengeID,
+        challengeBytes: signingChallenge.canonicalBytes,
+        signingProofBytes: signingProof,
+        keyAgreementProofBytes: agreementProof,
+        provenance: .globalRecovery(
+          GlobalRecoveryEnrollmentAuthority(
+            requestID: transcript.sessionID,
+            recoveryRecipientID: U7UUID.byte(0xA5)
+          )
+        )
+      )
+    )
+    let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
+    let body = try SecretSyncLiveAttestation.canonicalBody(
+      namespace: namespace, role: .a,
+      credentialRecordName: credentialRecordName,
+      verifierRecordName: verifierRecordName,
+      credential: credential, transcript: transcriptValue,
+      signingChallenge: signingChallenge.canonicalBytes, signingProof: signingProof,
+      agreementChallenge: agreementChallenge, agreementProof: agreementProof
+    )
+    let bodyDigest = try SecretSyncSHA256DigestProvider(suite: U7GoldenVectors.suite())
+      .digest(canonicalBytes: body)
+    let attestation = try Self.transcript(
+      signing: signingPublic, agreement: agreementPublic,
+      head: bodyDigest, policy: bodyDigest,
+      challenge: U7UUID.byte(0xA6), session: U7UUID.byte(0xA7)
+    )
+    let attestationChallenge = try SecretSyncSigningProofChallenge(transcript: attestation)
+    let attestationProof = try signatures.sign(
+      canonicalBytes: attestationChallenge.canonicalBytes, using: signing
+    )
+    let evidence = SecretSyncLiveCredentialEvidence(
+      credential: credential, signingHandleID: U7UUID.byte(0xA8),
+      agreementHandleID: U7UUID.byte(0xA9), possessionTranscript: transcriptValue,
+      signingChallenge: signingChallenge.canonicalBytes, signingProof: signingProof,
+      agreementChallenge: agreementChallenge, agreementProof: agreementProof,
+      attestationTranscript: SecretSyncLiveAttestation.transcriptValue(attestation),
+      attestationChallenge: attestationChallenge.canonicalBytes,
+      attestationProof: attestationProof,
+      evidenceID: SecretSyncLiveAttestation.evidenceID(
+        body: body, challenge: attestationChallenge.canonicalBytes,
+        proof: attestationProof
+      )
+    )
+    return SecretSyncLiveAttestationFixture(
+      namespace: namespace, credentialRecordName: credentialRecordName,
+      verifierRecordName: verifierRecordName,
+      verifier: verifier, evidence: evidence
+    )
+  }
+
+  func mutated(_ mutation: Mutation) -> SecretSyncLiveCredentialEvidence {
+    func changed(_ bytes: Data) -> Data {
+      var bytes = bytes
+      bytes[bytes.startIndex] ^= 1
+      return bytes
+    }
+    return SecretSyncLiveCredentialEvidence(
+      credential: evidence.credential,
+      signingHandleID: evidence.signingHandleID,
+      agreementHandleID: evidence.agreementHandleID,
+      possessionTranscript: evidence.possessionTranscript,
+      signingChallenge: mutation == .signingChallenge
+        ? changed(evidence.signingChallenge) : evidence.signingChallenge,
+      signingProof: mutation == .signingProof
+        ? changed(evidence.signingProof) : evidence.signingProof,
+      agreementChallenge: mutation == .agreementChallenge
+        ? changed(evidence.agreementChallenge) : evidence.agreementChallenge,
+      agreementProof: mutation == .agreementProof
+        ? changed(evidence.agreementProof) : evidence.agreementProof,
+      attestationTranscript: evidence.attestationTranscript,
+      attestationChallenge: mutation == .attestationChallenge
+        ? changed(evidence.attestationChallenge) : evidence.attestationChallenge,
+      attestationProof: mutation == .attestationProof
+        ? changed(evidence.attestationProof) : evidence.attestationProof,
+      evidenceID: evidence.evidenceID
+    )
+  }
+
+  private static func transcript(
+    signing: SigningPublicKeyDescriptor,
+    agreement: KeyAgreementPublicKeyDescriptor,
+    head: SecretRecordDigest,
+    policy: SecretRecordDigest,
+    challenge: UUID,
+    session: UUID
+  ) throws -> SecretSyncProofOfPossessionTranscript {
+    try SecretSyncProofOfPossessionTranscript(
+      challengeID: challenge, sessionID: session,
+      issuedAt: Date(timeIntervalSince1970: 1_000),
+      expiresAt: Date(timeIntervalSince1970: 2_000),
+      deviceID: TrustedDeviceID(U7UUID.byte(0xB1)),
+      credentialID: DeviceCredentialID(U7UUID.byte(0xB2)),
+      signingPublicKey: signing, agreementPublicKey: agreement,
+      authorityCredentialID: DeviceCredentialID(U7UUID.byte(0xB3)),
+      freshnessCommitment: SecretBootstrapFreshnessCommitment(
+        scopeID: U7GoldenVectors.scopeID, latestPolicyEpoch: 1,
+        headCommitDigest: head, policyDigest: policy
+      )
+    )
+  }
+}
+
+private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
+  private(set) var savePolicies: [CKModifyRecordsOperation.RecordSavePolicy] = []
+  private(set) var zoneMutationCount = 0
+  private var records: [CKRecord.ID: CKRecord] = [:]
+
+  func modifyRecords(
+    saving values: [CKRecord], deleting ids: [CKRecord.ID],
+    savePolicy: CKModifyRecordsOperation.RecordSavePolicy, atomically: Bool
+  ) async throws -> (
+    saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
+    deleteResults: [CKRecord.ID: Result<Void, any Error>]
+  ) {
+    savePolicies.append(savePolicy)
+    var saves: [CKRecord.ID: Result<CKRecord, any Error>] = [:]
+    for value in values {
+      if records[value.recordID] == nil {
+        records[value.recordID] = value
+        saves[value.recordID] = .success(value)
+      } else {
+        saves[value.recordID] = .failure(SecretSyncLiveArtifactFakeError.exists)
+      }
+    }
+    return (saves, Dictionary(uniqueKeysWithValues: ids.map { ($0, .success(())) }))
+  }
+
+  func fetch(
+    withRecordIDs ids: [CKRecord.ID]
+  ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
+    Dictionary(uniqueKeysWithValues: ids.compactMap { id in
+      records[id].map { (id, .success($0)) }
+    })
+  }
+
+  func fetchZoneChanges(
+    inZoneWith zoneID: CKRecordZone.ID, since token: CKServerChangeToken?
+  ) async throws -> CloudKitZoneChanges {
+    CloudKitZoneChanges(
+      modifiedRecords: [], deletedRecordIDs: [], changeToken: token
+    )
+  }
+
+  func modifyRecordZones(
+    saving zones: [CKRecordZone], deleting ids: [CKRecordZone.ID]
+  ) async throws -> (
+    saveResults: [CKRecordZone.ID: Result<CKRecordZone, any Error>],
+    deleteResults: [CKRecordZone.ID: Result<Void, any Error>]
+  ) {
+    zoneMutationCount += 1
+    return ([:], [:])
+  }
+
+  func modifySubscriptions(
+    saving subscriptions: [CKSubscription], deleting ids: [CKSubscription.ID]
+  ) async throws -> (
+    saveResults: [CKSubscription.ID: Result<CKSubscription, any Error>],
+    deleteResults: [CKSubscription.ID: Result<Void, any Error>]
+  ) { ([:], [:]) }
+}
+
+private enum SecretSyncLiveArtifactFakeError: Error { case exists }
