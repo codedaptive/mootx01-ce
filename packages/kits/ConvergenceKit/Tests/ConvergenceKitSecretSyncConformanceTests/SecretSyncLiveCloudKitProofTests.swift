@@ -1052,8 +1052,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(!retained.contains("command.log"))
   }
 
-  @Test("runner accepts only explicit Swift-package xctestrun mode")
-  func runnerSourceRejectsLegacyContainerMode() throws {
+  @Test("runner binds only the canonical entitled hosted-XCTest project")
+  func runnerSourceRequiresCanonicalHostedProject() throws {
     let packageRoot = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent().deletingLastPathComponent()
       .deletingLastPathComponent()
@@ -1062,10 +1062,17 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     )
     let source = try String(contentsOf: runner, encoding: .utf8)
     #expect(source.contains("U7_PACKAGE_DIR"))
-    #expect(source.contains("ConvergenceKit-Package"))
+    #expect(source.contains("U7EntitledTestHost/U7EntitledTestHost.xcodeproj"))
+    #expect(source.contains("readonly scheme='U7EntitledTestHost'"))
     #expect(source.contains("-xctestrun"))
-    #expect(source.contains("GENERATE_INFOPLIST_FILE=NO"))
-    #expect(source.contains("INFOPLIST_FILE="))
+    #expect(source.contains("-project"))
+    #expect(source.contains("U7_AUTHORITY_PLIST="))
+    #expect(source.contains("U7_HOST_BUNDLE_IDENTIFIER="))
+    #expect(source.contains("DEVELOPMENT_TEAM=G94X5T5GK7"))
+    #expect(source.contains("CODE_SIGN_STYLE=Automatic"))
+    #expect(source.contains("CODE_SIGN_IDENTITY=Apple Development"))
+    #expect(source.contains("Package.resolved"))
+    #expect(source.contains("/usr/bin/trash"))
     #expect(source.contains(
       "-only-testing:ConvergenceKitSecretSyncConformanceTests/"
         + "SecretSyncLiveCloudKitProofTests/ledgerProbe()"
@@ -1076,7 +1083,9 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     ))
     #expect(source.contains("manifest.json"))
     #expect(!source.contains("INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="))
-    #expect(!source.contains("-project"))
+    #expect(!source.contains("ConvergenceKit-Package"))
+    #expect(!source.contains("GENERATE_INFOPLIST_FILE=NO"))
+    #expect(!source.contains("INFOPLIST_FILE="))
     #expect(!source.contains("-workspace"))
   }
 
@@ -1418,6 +1427,45 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         )
       )
       #expect(result.status != 0)
+      #expect(result.stderr == "U7_RUNNER_PRODUCT_INVALID\n")
+      let trace = (try? String(
+        contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+      )) ?? ""
+      #expect(!trace.contains("probe:"))
+      #expect(!trace.contains("phase:"))
+    }
+  }
+
+  @Test("runner rejects every invalid hosted application boundary before probe zero")
+  func runnerRejectsInvalidHostedApplicationProducts() throws {
+    let modes = [
+      "unentitled-host", "wrong-container", "wrong-cloudkit-service",
+      "wrong-keychain-group", "wrong-test-host", "wrong-test-bundle",
+      "wrong-container-project", "wrong-container-scheme", "unsigned-host",
+      "adhoc-host", "wrong-host-bundle-id", "wrong-host-team",
+      "wrong-profile", "wrong-host-platform", "app-host-replacement",
+    ]
+    for mode in modes {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-hosted-\(mode)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: ["--self-test"],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_FAKE_MODE": mode]
+        )
+      )
+      #expect(result.status != 0, "host attack unexpectedly admitted: \(mode)")
       #expect(result.stderr == "U7_RUNNER_PRODUCT_INVALID\n")
       let trace = (try? String(
         contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
