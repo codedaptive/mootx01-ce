@@ -1,7 +1,7 @@
 import CloudKit
 import ConvergenceKit
 @_spi(SecretSyncPhysicalProof) @testable import ConvergenceKitAppleSecurity
-import ConvergenceKitCloudKit
+@testable import ConvergenceKitCloudKit
 import CryptoKit
 import Foundation
 import Testing
@@ -86,6 +86,7 @@ enum SecretSyncLiveAttestation {
   static func canonicalBody(
     namespace: String,
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    matrixIdentityDigest: Data,
     credentialRecordName: String,
     verifierRecordName: String,
     credential: TrustedDeviceCredential,
@@ -110,6 +111,7 @@ enum SecretSyncLiveAttestation {
         .init(tag: 10, value: signingProof),
         .init(tag: 11, value: agreementChallenge),
         .init(tag: 12, value: agreementProof),
+        .init(tag: 13, value: matrixIdentityDigest),
       ]
     )
   }
@@ -118,12 +120,14 @@ enum SecretSyncLiveAttestation {
     _ evidence: SecretSyncLiveCredentialEvidence,
     namespace: String,
     role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    expectedMatrixIdentityDigest: Data,
     credentialRecordName: String,
     verifierRecordName: String,
     agreementVerifierPrivateKey: Data
   ) throws -> Bool {
     let transcript = try evidence.possessionTranscript.productionValue()
-    guard transcript.deviceID == evidence.credential.deviceID,
+    guard evidence.matrixIdentityDigest == expectedMatrixIdentityDigest,
+      transcript.deviceID == evidence.credential.deviceID,
       transcript.credentialID == evidence.credential.credentialID,
       transcript.signingPublicKey == evidence.credential.signingPublicKey,
       transcript.agreementPublicKey == evidence.credential.keyAgreementPublicKey
@@ -146,6 +150,7 @@ enum SecretSyncLiveAttestation {
     else { return false }
     let body = try canonicalBody(
       namespace: namespace, role: role,
+      matrixIdentityDigest: evidence.matrixIdentityDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName,
       credential: evidence.credential, transcript: evidence.possessionTranscript,
@@ -270,6 +275,231 @@ enum SecretSyncLiveZoneAdmission {
   }
 }
 
+enum SecretSyncLiveCleanupPlan {
+  static func authorizedRecordIDs(
+    manifest: [SecretSyncLiveRecordReference],
+    artifactIDs: [CKRecord.ID],
+    headID: CKRecord.ID,
+    values: SecretSyncLiveCloudKitProofConfiguration.Values
+  ) throws -> [CKRecord.ID] {
+    var recordIDs = manifest.map {
+      CKRecord.ID(
+        recordName: $0.recordName,
+        zoneID: CKRecordZone.ID(
+          zoneName: $0.zoneName, ownerName: CKCurrentUserDefaultName
+        )
+      )
+    }
+    recordIDs.append(contentsOf: artifactIDs)
+    recordIDs.append(headID)
+    let exact = Array(Set(recordIDs))
+    try requireAuthorized(exact, values: values)
+    return exact
+  }
+
+  static func requireAuthorized(
+    _ recordIDs: [CKRecord.ID],
+    values: SecretSyncLiveCloudKitProofConfiguration.Values
+  ) throws {
+    let allowed = Set([values.controlZoneID, values.payloadZoneID])
+    guard recordIDs.allSatisfy({ allowed.contains($0.zoneID) }) else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone
+    }
+  }
+
+  static func deleteAndVerify(
+    _ recordIDs: [CKRecord.ID],
+    values: SecretSyncLiveCloudKitProofConfiguration.Values,
+    database: any CloudKitDatabaseProtocol
+  ) async throws {
+    try requireAuthorized(recordIDs, values: values)
+    for ids in Dictionary(grouping: recordIDs, by: \.zoneID).values {
+      try requireAuthorized(ids, values: values)
+      let result = try await database.modifyRecords(
+        saving: [], deleting: ids,
+        savePolicy: .ifServerRecordUnchanged, atomically: false
+      )
+      guard result.saveResults.isEmpty,
+        Set(result.deleteResults.keys) == Set(ids),
+        ids.allSatisfy({ id in
+          if case .success? = result.deleteResults[id] { return true }
+          return false
+        })
+      else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+      }
+    }
+    let fetched = try await database.fetch(withRecordIDs: recordIDs)
+    guard Set(fetched.keys) == Set(recordIDs),
+      recordIDs.allSatisfy({ id in
+        guard case .failure(let error)? = fetched[id],
+          let cloudError = error as? CKError
+        else { return false }
+        return cloudError.code == .unknownItem
+      })
+    else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
+    }
+  }
+}
+
+private struct SecretSyncLiveProtectedFloor: SecretSyncProtectedHeadProviding {
+  let commitment: SecretBootstrapFreshnessCommitment
+
+  func protectedHead(
+    for scopeID: SecretScopeID
+  ) async throws -> SecretBootstrapFreshnessCommitment {
+    guard commitment.scopeID == scopeID else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    return commitment
+  }
+}
+
+private struct SecretSyncLiveExactFreshnessAnchor: ExternalBootstrapFreshnessAnchor {
+  let commitment: SecretBootstrapFreshnessCommitment
+
+  func latestCommitment(
+    for scopeID: SecretScopeID
+  ) async throws -> SecretBootstrapFreshnessCommitment {
+    guard commitment.scopeID == scopeID else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    return commitment
+  }
+}
+
+enum SecretSyncLiveRecoveryExercise {
+  struct Outcome: Sendable, Equatable {
+    let seam: String
+    let requestID: UUID
+    let evidenceBytes: Data
+    let digest: Data
+  }
+
+  static func stageBreakGlass(
+    commitment: SecretBootstrapFreshnessCommitment,
+    generationID: SecretGenerationID
+  ) async throws -> Outcome {
+    let custody = SecretSyncRecoveryKeyCustody()
+    let enrolled = try await enroll(custody)
+    let handle = try await custody.beginBreakGlass(
+      requestID: UUID(), scopeID: commitment.scopeID,
+      currentRecoveryRecipient: enrolled.descriptor,
+      sealedGenerationID: generationID,
+      expectedFreshnessCommitment: commitment
+    )
+    let confirmation = try await custody.confirm(handle, phrase: enrolled.phrase)
+    let request = try BreakGlassRecoveryRequest(
+      requestID: handle.requestID, scopeID: commitment.scopeID,
+      recoveryRecipientID: enrolled.descriptor.recoveryRecipientID,
+      sealedGenerationID: generationID,
+      expectedFreshnessCommitment: commitment,
+      blindConfirmation: confirmation
+    )
+    let evidence = try await custody.stageBreakGlass(
+      request, freshnessAnchor: SecretSyncLiveExactFreshnessAnchor(
+        commitment: commitment
+      )
+    )
+    return try validatedOutcome(
+      evidence, operation: .breakGlass,
+      seam: "SecretSyncRecoveryKeyCustody.stageBreakGlass"
+    )
+  }
+
+  static func stageRotation(
+    commitment: SecretBootstrapFreshnessCommitment,
+    currentGenerationID: SecretGenerationID
+  ) async throws -> Outcome {
+    let custody = SecretSyncRecoveryKeyCustody()
+    let enrolled = try await enroll(custody)
+    let replacementGenerationID = SecretGenerationID(UUID())
+    let handle = try await custody.beginRotation(
+      requestID: UUID(), scopeID: commitment.scopeID,
+      currentRecoveryRecipientID: enrolled.descriptor.recoveryRecipientID,
+      currentGenerationID: currentGenerationID,
+      replacementGenerationID: replacementGenerationID,
+      expectedFreshnessCommitment: commitment
+    )
+    let phrase = try await custody.revealPhrase(for: handle)
+    let confirmation = try await custody.confirm(handle, phrase: phrase)
+    let request = try RecoveryRotationRequest(
+      requestID: handle.requestID, scopeID: commitment.scopeID,
+      currentRecoveryRecipientID: enrolled.descriptor.recoveryRecipientID,
+      replacementRecoveryRecipient: handle.recoveryRecipient,
+      currentGenerationID: currentGenerationID,
+      replacementGenerationID: replacementGenerationID,
+      expectedFreshnessCommitment: commitment,
+      blindConfirmation: confirmation
+    )
+    let evidence = try await custody.stageRotation(
+      request, freshnessAnchor: SecretSyncLiveExactFreshnessAnchor(
+        commitment: commitment
+      )
+    )
+    guard try await custody.globalRecoveryRecipient() == handle.recoveryRecipient else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    return try validatedOutcome(
+      evidence, operation: .rotation,
+      seam: "SecretSyncRecoveryKeyCustody.stageRotation"
+    )
+  }
+
+  static func validateStored(
+    _ bytes: Data,
+    operation: SecretSyncRecoveryConfirmationOperation,
+    seam: String
+  ) throws -> Outcome {
+    let fields = try SecretSyncRecoveryFrame.decode(bytes)
+    guard fields.map(\.tag) == [1, 2, 3, 4, 5],
+      fields[0].value == Data("mootx01.secret-recovery.operation-evidence.v1".utf8),
+      fields[1].value == Data(operation.rawValue.utf8)
+    else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    return Outcome(
+      seam: seam,
+      requestID: try SecretSyncRecoveryFrame.uuid(from: fields[2].value),
+      evidenceBytes: bytes,
+      digest: Data(SHA256.hash(data: bytes))
+    )
+  }
+
+  private static func enroll(
+    _ custody: SecretSyncRecoveryKeyCustody
+  ) async throws -> (descriptor: RecoveryRecipientDescriptor, phrase: String) {
+    let handle = try await custody.beginEnrollment(requestID: UUID())
+    let phrase = try await custody.revealPhrase(for: handle)
+    let confirmation = try await custody.confirm(handle, phrase: phrase)
+    let request = try RecoveryEnrollmentRequest(
+      requestID: handle.requestID,
+      recoveryRecipient: handle.recoveryRecipient,
+      blindConfirmation: confirmation
+    )
+    _ = try await custody.stageEnrollment(request)
+    guard try await custody.globalRecoveryRecipient() == handle.recoveryRecipient else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    return (handle.recoveryRecipient, phrase)
+  }
+
+  private static func validatedOutcome(
+    _ evidence: RecoveryOperationEvidence,
+    operation: SecretSyncRecoveryConfirmationOperation,
+    seam: String
+  ) throws -> Outcome {
+    let outcome = try validateStored(
+      evidence.evidenceBytes, operation: operation, seam: seam
+    )
+    guard outcome.requestID == evidence.requestID else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    return outcome
+  }
+}
+
 @Suite("SecretSync live proof configuration contract")
 struct SecretSyncLiveCloudKitProofConfigurationTests {
   @Test("normal prompt-free runs remain explicitly non-proof")
@@ -289,12 +519,16 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   func externalRolePhaseBoundary() {
     var environment = completeEnvironment(role: "B", phase: "stage")
     #expect(
-      SecretSyncLiveCloudKitProofConfiguration.load(environment: environment)
+      SecretSyncLiveCloudKitProofConfiguration.load(
+        environment: environment, runtimePlatform: .iPhone
+      )
         == .invalid(.rolePhaseMismatch)
     )
     environment[SecretSyncLiveCloudKitProofConfiguration.phaseKey] = "verify"
     if case .configured(let values) =
-      SecretSyncLiveCloudKitProofConfiguration.load(environment: environment)
+      SecretSyncLiveCloudKitProofConfiguration.load(
+        environment: environment, runtimePlatform: .iPhone
+      )
     {
       #expect(values.databaseScope == .private)
       #expect(values.deviceRole == .b)
@@ -366,7 +600,8 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
   func authorizedArtifactZones() throws {
     guard case .configured(let values) =
       SecretSyncLiveCloudKitProofConfiguration.load(
-        environment: completeEnvironment(role: "A", phase: "credential")
+        environment: completeEnvironment(role: "A", phase: "credential"),
+        runtimePlatform: .mac
       )
     else {
       Issue.record("complete proof configuration must load")
@@ -398,6 +633,44 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
+  @Test("fixed physical matrix rejects role platform and identifier substitution")
+  func fixedPhysicalMatrixAdmission() {
+    let cases: [(
+      SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+      SecretSyncLiveRuntimePlatform
+    )] = [(.a, .mac), (.b, .iPhone), (.c, .iPad)]
+    var digests = Set<Data>()
+    for (role, platform) in cases {
+      let environment = completeEnvironment(
+        role: role.rawValue, phase: "credential"
+      )
+      guard case .configured(let values) =
+        SecretSyncLiveCloudKitProofConfiguration.load(
+          environment: environment, runtimePlatform: platform
+        )
+      else {
+        Issue.record("authorized matrix role must load: \(role)")
+        continue
+      }
+      #expect(values.matrixIdentityDigest == SecretSyncLivePhysicalMatrix.digest(for: role))
+      digests.insert(values.matrixIdentityDigest)
+      #expect(
+        SecretSyncLiveCloudKitProofConfiguration.load(
+          environment: environment, runtimePlatform: .unsupported
+        ) == .invalid(.matrixPlatformMismatch)
+      )
+      var substituted = environment
+      substituted[SecretSyncLiveCloudKitProofConfiguration.expectedDeviceIdentifierKey]
+        = SecretSyncLivePhysicalMatrix.expectedIdentifier(for: role == .a ? .b : .a)
+      #expect(
+        SecretSyncLiveCloudKitProofConfiguration.load(
+          environment: substituted, runtimePlatform: platform
+        ) == .invalid(.matrixIdentityMismatch)
+      )
+    }
+    #expect(digests.count == 3)
+  }
+
   @Test("zone admission requires both exact pre-existing canonical zones")
   func preexistingZoneAdmission() throws {
     let control = SecretSyncCloudKitZones.controlZoneID
@@ -427,12 +700,113 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
+  @Test("cleanup includes and verifies the production head under an exact two-zone allowlist")
+  func authorizedCleanupIncludesHead() async throws {
+    guard case .configured(let values) =
+      SecretSyncLiveCloudKitProofConfiguration.load(
+        environment: completeEnvironment(role: "A", phase: "cleanup"),
+        runtimePlatform: .mac
+      )
+    else {
+      Issue.record("complete cleanup configuration must load")
+      return
+    }
+    let headID = SecretSyncHeadCAS.recordID(for: SecretScopeID(
+      UUID(uuidString: "00112233-4455-6677-8899-aabbccddeeff")!
+    ))
+    let artifactID = try SecretSyncLiveArtifactRecordID.make(
+      kind: "manifest", role: .a, values: values
+    )
+    let payloadID = CKRecord.ID(
+      recordName: "payload-record", zoneID: values.payloadZoneID
+    )
+    let manifest = [
+      SecretSyncLiveRecordReference(
+        recordName: payloadID.recordName, zoneName: payloadID.zoneID.zoneName
+      )
+    ]
+    let exact = try SecretSyncLiveCleanupPlan.authorizedRecordIDs(
+      manifest: manifest, artifactIDs: [artifactID], headID: headID,
+      values: values
+    )
+    #expect(Set(exact) == Set([artifactID, payloadID, headID]))
+    let database = SecretSyncLiveArtifactDatabaseFake()
+    await database.seed(recordIDs: exact)
+    try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+      exact, values: values, database: database
+    )
+    #expect(await database.deletedRecordIDs == Set(exact))
+
+    for zoneName in [CKRecordZone.default().zoneID.zoneName, "preseeded-foreign-zone"] {
+      let corrupted = [
+        SecretSyncLiveRecordReference(recordName: "hostile", zoneName: zoneName)
+      ]
+      #expect(throws: SecretSyncLiveCloudKitProofConfigurationError.unauthorizedArtifactZone) {
+        _ = try SecretSyncLiveCleanupPlan.authorizedRecordIDs(
+          manifest: corrupted, artifactIDs: [artifactID], headID: headID,
+          values: values
+        )
+      }
+    }
+    #expect(await database.deleteInvocationCount == 2)
+  }
+
+  @Test("production recovery staging reports exact break-glass and rotation outcomes")
+  func truthfulRecoveryStagingOutcomes() async throws {
+    let commitment = try SecretBootstrapFreshnessCommitment(
+      scopeID: U7GoldenVectors.scopeID, latestPolicyEpoch: 1,
+      headCommitDigest: U7GoldenVectors.digest(0xD1),
+      policyDigest: U7GoldenVectors.digest(0xD2)
+    )
+    let generationID = SecretGenerationID(U7UUID.byte(0xD3))
+    let breakGlass = try await SecretSyncLiveRecoveryExercise.stageBreakGlass(
+      commitment: commitment, generationID: generationID
+    )
+    let rotation = try await SecretSyncLiveRecoveryExercise.stageRotation(
+      commitment: commitment, currentGenerationID: generationID
+    )
+    #expect(breakGlass.seam == "SecretSyncRecoveryKeyCustody.stageBreakGlass")
+    #expect(rotation.seam == "SecretSyncRecoveryKeyCustody.stageRotation")
+    #expect(breakGlass.digest != rotation.digest)
+    #expect(
+      try SecretSyncLiveRecoveryExercise.validateStored(
+        breakGlass.evidenceBytes, operation: .breakGlass,
+        seam: breakGlass.seam
+      ) == breakGlass
+    )
+    #expect(
+      try SecretSyncLiveRecoveryExercise.validateStored(
+        rotation.evidenceBytes, operation: .rotation,
+        seam: rotation.seam
+      ) == rotation
+    )
+  }
+
+  @Test("production freshness transport returns only the exact protected floor offline")
+  func truthfulOfflineFallback() async throws {
+    let floor = try SecretBootstrapFreshnessCommitment(
+      scopeID: U7GoldenVectors.scopeID, latestPolicyEpoch: 7,
+      headCommitDigest: U7GoldenVectors.digest(0xE1),
+      policyDigest: U7GoldenVectors.digest(0xE2)
+    )
+    let database = SecretSyncLiveArtifactDatabaseFake()
+    await database.setNetworkFailure(true)
+    let returned = try await SecretSyncFreshnessTransport(database: database)
+      .normalPathCommitment(
+        for: floor.scopeID,
+        authority: .protectedLocal(SecretSyncLiveProtectedFloor(commitment: floor))
+      )
+    #expect(returned == floor)
+    #expect(await database.fetchInvocationCount == 1)
+  }
+
   @Test("canonical credential attestation rejects every proof mutation")
   func completeAttestationVerification() throws {
     let fixture = try SecretSyncLiveAttestationFixture.make()
     #expect(
       try SecretSyncLiveAttestation.verify(
         fixture.evidence, namespace: fixture.namespace, role: .a,
+        expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
         credentialRecordName: fixture.credentialRecordName,
         verifierRecordName: fixture.verifierRecordName,
         agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -442,6 +816,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       #expect(
         try !SecretSyncLiveAttestation.verify(
           fixture.mutated(mutation), namespace: fixture.namespace, role: .a,
+          expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
           credentialRecordName: fixture.credentialRecordName,
           verifierRecordName: fixture.verifierRecordName,
           agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -451,6 +826,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(
       try !SecretSyncLiveAttestation.verify(
         fixture.evidence, namespace: fixture.namespace, role: .a,
+        expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
         credentialRecordName: fixture.credentialRecordName + "-tampered",
         verifierRecordName: fixture.verifierRecordName,
         agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -459,6 +835,7 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(
       try !SecretSyncLiveAttestation.verify(
         fixture.evidence, namespace: fixture.namespace, role: .a,
+        expectedMatrixIdentityDigest: fixture.matrixIdentityDigest,
         credentialRecordName: fixture.credentialRecordName,
         verifierRecordName: fixture.verifierRecordName + "-tampered",
         agreementVerifierPrivateKey: fixture.verifier.rawRepresentation
@@ -476,6 +853,10 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
       SecretSyncLiveCloudKitProofConfiguration.phaseKey: phase,
       SecretSyncLiveCloudKitProofConfiguration.ledgerPathKey:
         "/tmp/u7-live-proof-ledger.json",
+      SecretSyncLiveCloudKitProofConfiguration.expectedDeviceIdentifierKey:
+        SecretSyncLivePhysicalMatrix.expectedIdentifier(
+          for: SecretSyncLiveCloudKitProofConfiguration.DeviceRole(rawValue: role) ?? .a
+        ),
     ]
   }
 }
@@ -605,6 +986,7 @@ struct SecretSyncLiveCloudKitProofTests {
     let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
     let body = try SecretSyncLiveAttestation.canonicalBody(
       namespace: values.runNamespace, role: values.deviceRole,
+      matrixIdentityDigest: values.matrixIdentityDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName, credential: credential,
       transcript: transcriptValue,
@@ -633,6 +1015,7 @@ struct SecretSyncLiveCloudKitProofTests {
       attestationProof.proofBytes, publicKey: generation.signingPublicKey
     ) else { throw SecretSyncCustodyError.invalidProof }
     return SecretSyncLiveCredentialEvidence(
+      matrixIdentityDigest: values.matrixIdentityDigest,
       credential: credential,
       signingHandleID: generation.signingHandle.rawValue,
       agreementHandleID: generation.agreementHandle.rawValue,
@@ -828,6 +1211,9 @@ struct SecretSyncLiveCloudKitProofTests {
     guard plaintext == Data("u7-production-encrypted-payload".utf8) else {
       throw SecretSyncCloudKitPolicyStoreError.referenceMismatch
     }
+    if values.deviceRole == .a {
+      try await ledger.storeProtectedCommitment(commitment(rebuilt.commit))
+    }
     try await complete(.authorize, values: values, ledger: ledger)
   }
 
@@ -838,14 +1224,26 @@ struct SecretSyncLiveCloudKitProofTests {
     _ = try await loadArtifact(
       SecretSyncLiveCASResult.self, kind: "cas", role: .a, values: values
     )
-    let context = try liveStore(values, ledger: ledger)
-    let head = try #require(try await context.store.policyHead(for: try scopeID(values)))
-    let entry = try await context.store.reconstructPolicy(commitDigest: head.commitDigest)
-    try SecretPolicyValidator.validateBootstrapFreshness(
-      localCommit: entry.commit,
-      against: commitment(entry.commit)
+    let floor = try await ledger.protectedCommitment()
+    let observation = SecretSyncLiveNetworkObservation()
+    let database = SecretSyncLiveRecordingDatabase(
+      database: CKContainer(identifier: values.containerIdentifier).privateCloudDatabase,
+      ledger: ledger, networkObservation: observation
     )
-    try await complete(.offlineFloor, values: values, ledger: ledger)
+    let returned = try await SecretSyncFreshnessTransport(database: database)
+      .normalPathCommitment(
+        for: floor.scopeID,
+        authority: .protectedLocal(SecretSyncLiveProtectedFloor(commitment: floor))
+      )
+    guard returned == floor, await observation.observedOfflineTransportFailure() else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    try await complete(
+      .offlineTransportFallback,
+      productionSeam: "SecretSyncFreshnessTransport.normalPathCommitment.protectedLocal",
+      outcomeDigest: Data(SHA256.hash(data: try returned.canonicalBytes())),
+      values: values, ledger: ledger
+    )
   }
 
   private func recordRevokedC(
@@ -870,20 +1268,16 @@ struct SecretSyncLiveCloudKitProofTests {
     let context = try liveStore(values, ledger: ledger)
     let head = try #require(try await context.store.policyHead(for: try scopeID(values)))
     let entry = try await context.store.reconstructPolicy(commitDigest: head.commitDigest)
-    let descriptor = try #require(entry.records.signedPolicy.policy.recoveryRecipient)
-    let evidence = try BlindRecoveryConfirmationEvidence(
-      recoveryRecipientID: descriptor.recoveryRecipientID,
-      challengeID: UUID(),
-      evidenceBytes: Data("operator-confirmed".utf8)
+    let outcome = try await SecretSyncLiveRecoveryExercise.stageBreakGlass(
+      commitment: commitment(entry.commit),
+      generationID: entry.commit.generationID
     )
-    _ = try BreakGlassRecoveryRequest(
-      requestID: UUID(), scopeID: entry.commit.scopeID,
-      recoveryRecipientID: descriptor.recoveryRecipientID,
-      sealedGenerationID: entry.commit.generationID,
-      expectedFreshnessCommitment: commitment(entry.commit),
-      blindConfirmation: evidence
+    try await ledger.storeTransitionOutcome(outcome.evidenceBytes, phase: .recovery)
+    try await complete(
+      .breakGlassCustodyStaged,
+      productionSeam: outcome.seam, outcomeDigest: outcome.digest,
+      values: values, ledger: ledger
     )
-    try await complete(.recovery, values: values, ledger: ledger)
   }
 
   private func verifyRestart(
@@ -905,39 +1299,15 @@ struct SecretSyncLiveCloudKitProofTests {
     let context = try liveStore(values, ledger: ledger)
     let head = try #require(try await context.store.policyHead(for: try scopeID(values)))
     let entry = try await context.store.reconstructPolicy(commitDigest: head.commitDigest)
-    let current = try #require(entry.records.signedPolicy.policy.recoveryRecipient)
-    let replacement = try liveRecoveryDescriptor()
-    let confirmation = try BlindRecoveryConfirmationEvidence(
-      recoveryRecipientID: replacement.recoveryRecipientID,
-      challengeID: UUID(), evidenceBytes: Data("operator-confirmed-rotation".utf8)
+    let outcome = try await SecretSyncLiveRecoveryExercise.stageRotation(
+      commitment: commitment(entry.commit),
+      currentGenerationID: entry.commit.generationID
     )
-    _ = try RecoveryRotationRequest(
-      requestID: UUID(), scopeID: entry.commit.scopeID,
-      currentRecoveryRecipientID: current.recoveryRecipientID,
-      replacementRecoveryRecipient: replacement,
-      currentGenerationID: entry.commit.generationID,
-      replacementGenerationID: SecretGenerationID(UUID()),
-      expectedFreshnessCommitment: commitment(entry.commit),
-      blindConfirmation: confirmation
-    )
-    try await complete(.recovery, values: values, ledger: ledger)
-  }
-
-  private func liveRecoveryDescriptor() throws -> RecoveryRecipientDescriptor {
-    let agreement = P256.KeyAgreement.PrivateKey()
-    let signing = P256.Signing.PrivateKey()
-    return try RecoveryRecipientDescriptor(
-      recoveryRecipientID: UUID(),
-      keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
-        algorithmIdentifier: RecoveryRecipientDescriptor.agreementAlgorithmIdentifier,
-        keyIdentifier: Data("u7-rotation-agreement".utf8),
-        publicKeyBytes: agreement.publicKey.x963Representation
-      ),
-      authorizationSigningPublicKey: SigningPublicKeyDescriptor(
-        algorithmIdentifier: RecoveryRecipientDescriptor.authorizationSigningAlgorithmIdentifier,
-        keyIdentifier: Data("u7-rotation-signing".utf8),
-        publicKeyBytes: signing.publicKey.x963Representation
-      )
+    try await ledger.storeTransitionOutcome(outcome.evidenceBytes, phase: .rotation)
+    try await complete(
+      .recoveryRotationCustodyStaged,
+      productionSeam: outcome.seam, outcomeDigest: outcome.digest,
+      values: values, ledger: ledger
     )
   }
 
@@ -967,48 +1337,28 @@ struct SecretSyncLiveCloudKitProofTests {
       [SecretSyncLiveRecordReference].self, kind: "manifest", role: .a,
       values: values
     )
-    var exactIDs = manifest.map {
-      CKRecord.ID(
-        recordName: $0.recordName,
-        zoneID: CKRecordZone.ID(
-          zoneName: $0.zoneName, ownerName: CKCurrentUserDefaultName
-        )
-      )
-    }
-    exactIDs.append(contentsOf: try proofArtifactIDs(values: values))
-    exactIDs = Array(Set(exactIDs))
+    let exactIDs = try SecretSyncLiveCleanupPlan.authorizedRecordIDs(
+      manifest: manifest,
+      artifactIDs: try proofArtifactIDs(values: values),
+      headID: SecretSyncHeadCAS.recordID(for: try scopeID(values)),
+      values: values
+    )
     let database = CKContainer(identifier: values.containerIdentifier).privateCloudDatabase
-    var unresolved: [CKRecord.ID] = []
-    for ids in Dictionary(grouping: exactIDs, by: \.zoneID).values {
-      let result: (
-        saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
-        deleteResults: [CKRecord.ID: Result<Void, any Error>]
+    do {
+      try await SecretSyncLiveCleanupPlan.deleteAndVerify(
+        exactIDs, values: values, database: database
       )
-      do {
-        result = try await database.modifyRecords(
-          saving: [], deleting: ids,
-          savePolicy: .ifServerRecordUnchanged, atomically: false
-        )
-      } catch {
-        unresolved.append(contentsOf: ids)
-        continue
-      }
-      for id in ids {
-        guard case .success? = result.deleteResults[id] else {
-          unresolved.append(id)
-          continue
-        }
-      }
+    } catch {
+      try await ledger.retainUnresolved(exactIDs)
+      throw error
     }
-    try await ledger.retainUnresolved(unresolved)
-    guard unresolved.isEmpty else {
-      throw SecretSyncLiveCloudKitProofConfigurationError.unresolvedCleanupRecords
-    }
+    try await ledger.retainUnresolved([])
     try await ledger.complete(
       phase: .cleanup, role: .a,
       evidence: SecretSyncLiveEvidence(
         timestamp: Date(), deviceRole: .a, operation: .cleanup,
-        resultCode: .passed, headRelation: .none
+        resultCode: .passed, headRelation: .none,
+        productionSeam: nil, outcomeDigest: nil
       )
     )
   }
@@ -1055,6 +1405,7 @@ struct SecretSyncLiveCloudKitProofTests {
         == cas.first(where: { $0.outcome == .advanced })?.serverHeadDigest
     else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
     var evidenceIDs = Set<String>()
+    var matrixDigests = Set<Data>()
     for role in SecretSyncLiveCloudKitProofConfiguration.DeviceRole.allCases {
       let credential = try await loadArtifact(
         SecretSyncLiveCredentialEvidence.self, kind: "credential", role: role,
@@ -1068,10 +1419,12 @@ struct SecretSyncLiveCloudKitProofTests {
         kind: "agreement-verifier", role: role, values: values
       )
       guard evidenceIDs.insert(credential.evidenceID).inserted,
+        matrixDigests.insert(credential.matrixIdentityDigest).inserted,
         try P256.KeyAgreement.PrivateKey(rawRepresentation: verifierPrivateKey)
           .publicKey.x963Representation == verifierPublic.publicKey,
         try SecretSyncLiveAttestation.verify(
           credential, namespace: values.runNamespace, role: role,
+          expectedMatrixIdentityDigest: SecretSyncLivePhysicalMatrix.digest(for: role),
           credentialRecordName: try artifactRecordID(
             kind: "credential", role: role, values: values
           ).recordName,
@@ -1090,6 +1443,46 @@ struct SecretSyncLiveCloudKitProofTests {
         throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
       }
     }
+    guard matrixDigests.count == 3 else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+    }
+    let floor = try await ledger.protectedCommitment()
+    let offline = try await loadArtifact(
+      SecretSyncLiveEvidence.self, kind: "phase-offline", role: .a,
+      values: values
+    )
+    guard offline.operation == .offlineTransportFallback,
+      offline.productionSeam
+        == "SecretSyncFreshnessTransport.normalPathCommitment.protectedLocal",
+      offline.outcomeDigest
+        == Data(SHA256.hash(data: try floor.canonicalBytes()))
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
+    let recoveryBytes = try await ledger.transitionOutcome(phase: .recovery)
+    let recovery = try SecretSyncLiveRecoveryExercise.validateStored(
+      recoveryBytes, operation: .breakGlass,
+      seam: "SecretSyncRecoveryKeyCustody.stageBreakGlass"
+    )
+    let recoveryProof = try await loadArtifact(
+      SecretSyncLiveEvidence.self, kind: "phase-recovery", role: .a,
+      values: values
+    )
+    guard recoveryProof.operation == .breakGlassCustodyStaged,
+      recoveryProof.productionSeam == recovery.seam,
+      recoveryProof.outcomeDigest == recovery.digest
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
+    let rotationBytes = try await ledger.transitionOutcome(phase: .rotation)
+    let rotation = try SecretSyncLiveRecoveryExercise.validateStored(
+      rotationBytes, operation: .rotation,
+      seam: "SecretSyncRecoveryKeyCustody.stageRotation"
+    )
+    let rotationProof = try await loadArtifact(
+      SecretSyncLiveEvidence.self, kind: "phase-rotation", role: .a,
+      values: values
+    )
+    guard rotationProof.operation == .recoveryRotationCustodyStaged,
+      rotationProof.productionSeam == rotation.seam,
+      rotationProof.outcomeDigest == rotation.digest
+    else { throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit }
     try await complete(.configuration, values: values, ledger: ledger)
   }
 
@@ -1156,12 +1549,15 @@ struct SecretSyncLiveCloudKitProofTests {
   private func complete(
     _ operation: SecretSyncLiveEvidence.Operation,
     relation: SecretSyncLiveEvidence.HeadRelation = .exact,
+    productionSeam: String? = nil,
+    outcomeDigest: Data? = nil,
     values: SecretSyncLiveCloudKitProofConfiguration.Values,
     ledger: SecretSyncLiveCleanupLedger
   ) async throws {
     let evidence = SecretSyncLiveEvidence(
       timestamp: Date(), deviceRole: values.deviceRole, operation: operation,
-      resultCode: .passed, headRelation: relation
+      resultCode: .passed, headRelation: relation,
+      productionSeam: productionSeam, outcomeDigest: outcomeDigest
     )
     try await saveArtifact(
       evidence, kind: "phase-\(values.phase.rawValue)", role: values.deviceRole,
@@ -1273,9 +1669,32 @@ struct SecretSyncLiveCloudKitProofTests {
   }
 }
 
+private actor SecretSyncLiveNetworkObservation {
+  private var offlineTransportFailure = false
+
+  func recordOfflineTransportFailure() {
+    offlineTransportFailure = true
+  }
+
+  func observedOfflineTransportFailure() -> Bool {
+    offlineTransportFailure
+  }
+}
+
 private struct SecretSyncLiveRecordingDatabase: CloudKitDatabaseProtocol {
   let database: CKDatabase
   let ledger: SecretSyncLiveCleanupLedger
+  let networkObservation: SecretSyncLiveNetworkObservation?
+
+  init(
+    database: CKDatabase,
+    ledger: SecretSyncLiveCleanupLedger,
+    networkObservation: SecretSyncLiveNetworkObservation? = nil
+  ) {
+    self.database = database
+    self.ledger = ledger
+    self.networkObservation = networkObservation
+  }
 
   func modifyRecords(
     saving records: [CKRecord],
@@ -1295,7 +1714,15 @@ private struct SecretSyncLiveRecordingDatabase: CloudKitDatabaseProtocol {
   func fetch(
     withRecordIDs ids: [CKRecord.ID]
   ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
-    try await database.fetch(withRecordIDs: ids)
+    do {
+      return try await database.fetch(withRecordIDs: ids)
+    } catch {
+      if let code = (error as? CKError)?.code,
+        code == .networkFailure || code == .networkUnavailable {
+        await networkObservation?.recordOfflineTransportFailure()
+      }
+      throw error
+    }
   }
 
   func fetchZoneChanges(
@@ -1337,10 +1764,11 @@ private extension Sequence {
 }
 
 private struct SecretSyncLiveAttestationFixture {
-  enum Mutation: CaseIterable { case signingChallenge, signingProof, agreementChallenge
+  enum Mutation: CaseIterable { case matrixIdentity, signingChallenge, signingProof, agreementChallenge
     case agreementProof, attestationChallenge, attestationProof }
 
   let namespace: String
+  let matrixIdentityDigest: Data
   let credentialRecordName: String
   let verifierRecordName: String
   let verifier: P256.KeyAgreement.PrivateKey
@@ -1348,6 +1776,7 @@ private struct SecretSyncLiveAttestationFixture {
 
   static func make() throws -> SecretSyncLiveAttestationFixture {
     let namespace = "u7-00112233-4455-6677-8899-aabbccddeeff"
+    let matrixIdentityDigest = SecretSyncLivePhysicalMatrix.digest(for: .a)
     let credentialRecordName = "\(namespace)-credential-A"
     let verifierRecordName = "\(namespace)-agreement-verifier-A"
     let signing = P256.Signing.PrivateKey()
@@ -1401,6 +1830,7 @@ private struct SecretSyncLiveAttestationFixture {
     let transcriptValue = SecretSyncLiveAttestation.transcriptValue(transcript)
     let body = try SecretSyncLiveAttestation.canonicalBody(
       namespace: namespace, role: .a,
+      matrixIdentityDigest: matrixIdentityDigest,
       credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName,
       credential: credential, transcript: transcriptValue,
@@ -1419,6 +1849,7 @@ private struct SecretSyncLiveAttestationFixture {
       canonicalBytes: attestationChallenge.canonicalBytes, using: signing
     )
     let evidence = SecretSyncLiveCredentialEvidence(
+      matrixIdentityDigest: matrixIdentityDigest,
       credential: credential, signingHandleID: U7UUID.byte(0xA8),
       agreementHandleID: U7UUID.byte(0xA9), possessionTranscript: transcriptValue,
       signingChallenge: signingChallenge.canonicalBytes, signingProof: signingProof,
@@ -1432,7 +1863,8 @@ private struct SecretSyncLiveAttestationFixture {
       )
     )
     return SecretSyncLiveAttestationFixture(
-      namespace: namespace, credentialRecordName: credentialRecordName,
+      namespace: namespace, matrixIdentityDigest: matrixIdentityDigest,
+      credentialRecordName: credentialRecordName,
       verifierRecordName: verifierRecordName,
       verifier: verifier, evidence: evidence
     )
@@ -1445,6 +1877,8 @@ private struct SecretSyncLiveAttestationFixture {
       return bytes
     }
     return SecretSyncLiveCredentialEvidence(
+      matrixIdentityDigest: mutation == .matrixIdentity
+        ? changed(evidence.matrixIdentityDigest) : evidence.matrixIdentityDigest,
       credential: evidence.credential,
       signingHandleID: evidence.signingHandleID,
       agreementHandleID: evidence.agreementHandleID,
@@ -1493,7 +1927,21 @@ private struct SecretSyncLiveAttestationFixture {
 private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
   private(set) var savePolicies: [CKModifyRecordsOperation.RecordSavePolicy] = []
   private(set) var zoneMutationCount = 0
+  private(set) var deleteInvocationCount = 0
+  private(set) var deletedRecordIDs = Set<CKRecord.ID>()
+  private(set) var fetchInvocationCount = 0
+  private var forceNetworkFailure = false
   private var records: [CKRecord.ID: CKRecord] = [:]
+
+  func setNetworkFailure(_ value: Bool) {
+    forceNetworkFailure = value
+  }
+
+  func seed(recordIDs: [CKRecord.ID]) {
+    for recordID in recordIDs {
+      records[recordID] = CKRecord(recordType: "U7SecretSyncProof", recordID: recordID)
+    }
+  }
 
   func modifyRecords(
     saving values: [CKRecord], deleting ids: [CKRecord.ID],
@@ -1512,14 +1960,31 @@ private actor SecretSyncLiveArtifactDatabaseFake: CloudKitDatabaseProtocol {
         saves[value.recordID] = .failure(SecretSyncLiveArtifactFakeError.exists)
       }
     }
-    return (saves, Dictionary(uniqueKeysWithValues: ids.map { ($0, .success(())) }))
+    if !ids.isEmpty { deleteInvocationCount += 1 }
+    var deletes: [CKRecord.ID: Result<Void, any Error>] = [:]
+    for id in ids {
+      if records.removeValue(forKey: id) != nil {
+        deletedRecordIDs.insert(id)
+        deletes[id] = .success(())
+      } else {
+        deletes[id] = .failure(CKError(.unknownItem))
+      }
+    }
+    return (saves, deletes)
   }
 
   func fetch(
     withRecordIDs ids: [CKRecord.ID]
   ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
-    Dictionary(uniqueKeysWithValues: ids.compactMap { id in
-      records[id].map { (id, .success($0)) }
+    fetchInvocationCount += 1
+    if forceNetworkFailure { throw CKError(.networkFailure) }
+    return Dictionary(uniqueKeysWithValues: ids.map { id -> (
+      CKRecord.ID, Result<CKRecord, any Error>
+    ) in
+      if let record = records[id] {
+        return (id, .success(record))
+      }
+      return (id, .failure(CKError(.unknownItem)))
     })
   }
 

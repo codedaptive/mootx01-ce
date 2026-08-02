@@ -64,7 +64,11 @@ struct SecretSyncCrossProviderGoldenVectorTests {
   }
 }
 
+/// Frozen cross-provider bytes inherited from SECRET-UPSTREAM-U2-R1. U7A
+/// consumes these verbatim as provenance-bearing compatibility fixtures; it
+/// never regenerates them from the Apple implementation under test.
 enum U7GoldenVectors {
+  static let provenance = "SECRET-UPSTREAM-U2-R1/frozen-cross-provider-v1"
   static let scopeID = SecretScopeID(
     UUID(uuidString: "00112233-4455-6677-8899-aabbccddeeff")!
   )

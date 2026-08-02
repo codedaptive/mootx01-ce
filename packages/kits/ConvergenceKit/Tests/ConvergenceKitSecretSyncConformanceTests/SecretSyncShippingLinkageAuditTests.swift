@@ -1,8 +1,12 @@
+import ConvergenceKit
+import ConvergenceKitAppleSecurity
+import ConvergenceKitCloudKit
 import Foundation
 import Testing
 
 @Suite("SecretSync shipping linkage audit")
 struct SecretSyncShippingLinkageAuditTests {
+#if os(macOS)
   @Test("built conformance product contains production SecretSync symbols only")
   func builtProductSymbolAudit() throws {
     let buildRoot = try buildRoot()
@@ -98,9 +102,22 @@ struct SecretSyncShippingLinkageAuditTests {
     }
     return try String(contentsOf: demangledURL, encoding: .utf8)
   }
+#else
+  @Test("non-macOS product compiles and links every production SecretSync owner")
+  func productionOwnersCompileAndLink() throws {
+    let suite = try U7GoldenVectors.suite()
+    _ = SecretSyncSecureEnclaveCustody.self
+    _ = try SecretSyncV1CryptoProvider(suite: suite)
+    _ = SecretPolicyValidator.self
+    _ = SecretSyncCloudKitPolicyStore.self
+    _ = SecretSyncHeadCAS.self
+  }
+#endif
 }
 
+#if os(macOS)
 private enum ShippingLinkageAuditError: Error {
   case toolFailed(String)
   case buildArtifactMissing(String)
 }
+#endif

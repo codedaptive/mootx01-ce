@@ -2,8 +2,12 @@ import CloudKit
 import ConvergenceKit
 import ConvergenceKitAppleSecurity
 import ConvergenceKitCloudKit
+import CryptoKit
 import Darwin
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
   case disabled
@@ -11,6 +15,8 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
   case configured(Values)
 
   struct Values: Sendable, Equatable {
+    // These identify the authorized Fulcrum proof fixture environment. They
+    // confer no shared SecretSync semantic authority.
     let containerIdentifier: String
     let databaseScope: CKDatabase.Scope
     let controlZoneID: CKRecordZone.ID
@@ -19,6 +25,7 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     let deviceRole: DeviceRole
     let phase: Phase
     let ledgerURL: URL
+    let matrixIdentityDigest: Data
   }
 
   enum DeviceRole: String, Codable, Sendable, CaseIterable {
@@ -48,10 +55,13 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
   static let phaseKey = "MOOT_SECRET_SYNC_PHASE"
   static let attestationKey = "MOOT_SECRET_SYNC_OPERATOR_ATTESTATION"
   static let ledgerPathKey = "MOOT_SECRET_SYNC_LEDGER_PATH"
+  static let expectedDeviceIdentifierKey =
+    "MOOT_SECRET_SYNC_EXPECTED_DEVICE_IDENTIFIER"
   static let canonicalContainerIdentifier = "iCloud.com.codedaptive.simplemachines"
 
   static func load(
-    environment: [String: String] = ProcessInfo.processInfo.environment
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    runtimePlatform: SecretSyncLiveRuntimePlatform = .current
   ) -> SecretSyncLiveCloudKitProofConfiguration {
     guard environment[optInKey] == "1" else { return .disabled }
     guard environment[attestationKey] == "AUTHORIZED_U7_FIXED_MATRIX" else {
@@ -69,6 +79,20 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
     guard let ledgerPath = environment[ledgerPathKey], ledgerPath.hasPrefix("/") else {
       return .invalid(.invalidLedgerPath)
     }
+    guard let suppliedIdentifier = environment[expectedDeviceIdentifierKey] else {
+      return .invalid(.expectedDeviceIdentifierMissing)
+    }
+    let matrixIdentityDigest: Data
+    do {
+      matrixIdentityDigest = try SecretSyncLivePhysicalMatrix.admit(
+        role: role, suppliedIdentifier: suppliedIdentifier,
+        runtimePlatform: runtimePlatform
+      )
+    } catch let error as SecretSyncLiveCloudKitProofConfigurationError {
+      return .invalid(error)
+    } catch {
+      return .invalid(.matrixIdentityMismatch)
+    }
     guard phase.isAdmitted(for: role) else { return .invalid(.rolePhaseMismatch) }
     return .configured(
       Values(
@@ -79,7 +103,8 @@ enum SecretSyncLiveCloudKitProofConfiguration: Sendable, Equatable {
         runNamespace: namespace,
         deviceRole: role,
         phase: phase,
-        ledgerURL: URL(fileURLWithPath: ledgerPath)
+        ledgerURL: URL(fileURLWithPath: ledgerPath),
+        matrixIdentityDigest: matrixIdentityDigest
       )
     )
   }
@@ -116,6 +141,9 @@ enum SecretSyncLiveCloudKitProofConfigurationError: Error, Sendable, Equatable {
   case invalidDeviceRole
   case invalidPhase
   case invalidLedgerPath
+  case expectedDeviceIdentifierMissing
+  case matrixPlatformMismatch
+  case matrixIdentityMismatch
   case rolePhaseMismatch
   case ledgerNamespaceMismatch
   case deviceEvidenceReused
@@ -130,6 +158,75 @@ enum SecretSyncLiveCloudKitProofConfigurationError: Error, Sendable, Equatable {
   case zoneMutationProhibited
 }
 
+enum SecretSyncLiveRuntimePlatform: String, Codable, Sendable {
+  case mac
+  case iPhone
+  case iPad
+  case unsupported
+
+  static var current: SecretSyncLiveRuntimePlatform {
+#if os(macOS)
+    .mac
+#elseif canImport(UIKit)
+    switch UIDevice.current.userInterfaceIdiom {
+    case .phone: .iPhone
+    case .pad: .iPad
+    default: .unsupported
+    }
+#else
+    .unsupported
+#endif
+  }
+}
+
+enum SecretSyncLivePhysicalMatrix {
+  private static let label = "u7-authorized-physical-matrix/v1"
+
+  static func expectedPlatform(
+    for role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) -> SecretSyncLiveRuntimePlatform {
+    switch role {
+    case .a: .mac
+    case .b: .iPhone
+    case .c: .iPad
+    }
+  }
+
+  static func expectedIdentifier(
+    for role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) -> String {
+    switch role {
+    case .a: "F58DA72F-02B8-5632-93D2-86B3CBAC9CB7"
+    case .b: "00008150-00161D3C0192401C"
+    case .c: "00008142-000A21981147801C"
+    }
+  }
+
+  static func digest(
+    for role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) -> Data {
+    let bytes = Data(
+      "\(label)|\(role.rawValue)|\(expectedPlatform(for: role).rawValue)|\(expectedIdentifier(for: role))"
+        .utf8
+    )
+    return Data(SHA256.hash(data: bytes))
+  }
+
+  static func admit(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
+    suppliedIdentifier: String,
+    runtimePlatform: SecretSyncLiveRuntimePlatform
+  ) throws -> Data {
+    guard runtimePlatform == expectedPlatform(for: role) else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.matrixPlatformMismatch
+    }
+    guard suppliedIdentifier == expectedIdentifier(for: role) else {
+      throw SecretSyncLiveCloudKitProofConfigurationError.matrixIdentityMismatch
+    }
+    return digest(for: role)
+  }
+}
+
 actor SecretSyncLiveCleanupLedger {
   struct State: Codable, Sendable {
     var namespace: String
@@ -138,6 +235,8 @@ actor SecretSyncLiveCleanupLedger {
     var recordNamesByZone: [String: [String]]
     var evidence: [SecretSyncLiveEvidence]
     var agreementVerifierPrivateKeysByRole: [String: Data]
+    var protectedCommitment: SecretBootstrapFreshnessCommitment?
+    var transitionOutcomeBytesByPhase: [String: Data]
   }
 
   private let url: URL
@@ -259,7 +358,8 @@ actor SecretSyncLiveCleanupLedger {
       state = State(
         namespace: namespace, deviceEvidenceByRole: [:],
         completedPhasesByRole: [:], recordNamesByZone: [:], evidence: [],
-        agreementVerifierPrivateKeysByRole: [:]
+        agreementVerifierPrivateKeysByRole: [:], protectedCommitment: nil,
+        transitionOutcomeBytesByPhase: [:]
       )
     }
     let result = try body(&state)
@@ -292,6 +392,50 @@ actor SecretSyncLiveCleanupLedger {
       return key
     }
   }
+
+  func storeProtectedCommitment(
+    _ commitment: SecretBootstrapFreshnessCommitment
+  ) throws {
+    try transaction { state in
+      guard state.protectedCommitment == nil
+        || state.protectedCommitment == commitment else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.deviceEvidenceReused
+      }
+      state.protectedCommitment = commitment
+    }
+  }
+
+  func protectedCommitment() throws -> SecretBootstrapFreshnessCommitment {
+    try transaction { state in
+      guard let commitment = state.protectedCommitment else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      }
+      return commitment
+    }
+  }
+
+  func storeTransitionOutcome(
+    _ bytes: Data,
+    phase: SecretSyncLiveCloudKitProofConfiguration.Phase
+  ) throws {
+    try transaction { state in
+      guard state.transitionOutcomeBytesByPhase[phase.rawValue] == nil else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.deviceEvidenceReused
+      }
+      state.transitionOutcomeBytesByPhase[phase.rawValue] = bytes
+    }
+  }
+
+  func transitionOutcome(
+    phase: SecretSyncLiveCloudKitProofConfiguration.Phase
+  ) throws -> Data {
+    try transaction { state in
+      guard let bytes = state.transitionOutcomeBytesByPhase[phase.rawValue] else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.missingPrerequisitePhase
+      }
+      return bytes
+    }
+  }
 }
 
 struct SecretSyncLiveEvidence: Codable, Sendable, Equatable {
@@ -305,8 +449,9 @@ struct SecretSyncLiveEvidence: Codable, Sendable, Equatable {
     case cleanup
     case hardwareCustody
     case proofOfPossession
-    case offlineFloor
-    case recovery
+    case offlineTransportFallback
+    case breakGlassCustodyStaged
+    case recoveryRotationCustodyStaged
     case restart
   }
 
@@ -329,9 +474,12 @@ struct SecretSyncLiveEvidence: Codable, Sendable, Equatable {
   let operation: Operation
   let resultCode: ResultCode
   let headRelation: HeadRelation
+  let productionSeam: String?
+  let outcomeDigest: Data?
 }
 
 struct SecretSyncLiveCredentialEvidence: Codable, Sendable, Equatable {
+  let matrixIdentityDigest: Data
   let credential: TrustedDeviceCredential
   let signingHandleID: UUID
   let agreementHandleID: UUID
