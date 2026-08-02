@@ -312,6 +312,9 @@ def reject_duplicate_object_keys(pairs):
         value[key] = item
     return value
 
+# This parser has one security responsibility: turn an untrusted Xcode export
+# into fresh private evidence only after descriptor identity, exact manifest
+# shape, attachment cardinality/name grammar, and directory inventory all bind.
 def admit_evidence(export_directory, custody_root, expected_identifier,
                    evidence_kind, output_directory):
     expected_labels = {
@@ -1250,15 +1253,18 @@ remove_pending_material() {
 
 recover_stage_material() {
   local result="$1"
-  local output="${transient}/recovered-stage"
-  mkdir -p "${output}"
+  local exported="${transient}/recovered-stage-export"
+  local admitted="${transient}/recovered-stage-admitted"
+  mkdir -p "${exported}"
   run_checked U7_RUNNER_PHASE_EXPORT_FAILED \
     "${U7_XCRESULTTOOL}" export attachments --path "${result}" \
-      --output-path "${output}"
+      --output-path "${exported}"
   local receipt inventory
-  admit_evidence "${output}" \
+  # Admission output is a sibling so the exact export inventory cannot observe
+  # and reject the parser's own freshly created private destination directory.
+  admit_evidence "${exported}" \
     'SecretSyncLiveCloudKitProofTests/externalPhase()' \
-    stage "${output}/admitted"
+    stage "${admitted}"
   receipt="${admitted_primary}"
   inventory="${admitted_secondary}"
   /bin/cp "${receipt}" "${U7_RUN_DIR}/stage-receipt.json"

@@ -1633,6 +1633,55 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
+  @Test("runner recovers accepted stage receipt and inventory without replay")
+  func runnerRecoversAcceptedStageEvidence() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-runner-resume-stage-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let host = try u7CompileStandaloneHost(root: root)
+    let fake = try u7WriteFakeRunnerTool(root: root)
+    let packageRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let runner = packageRoot.appendingPathComponent(
+      "U7LiveProofHost/run-u7-live-proof.sh"
+    )
+    let interrupted = try u7RunProcess(
+      executable: runner.path, arguments: ["--self-test"],
+      environment: u7RunnerEnvironment(
+        root: root, host: host, fake: fake,
+        additions: ["U7_SELF_TEST_INTERRUPT_AFTER_RECEIPT_INDEX": "4"]
+      )
+    )
+    #expect(interrupted.status != 0)
+    #expect(interrupted.stderr == "U7_RUNNER_SELF_TEST_INTERRUPT\n")
+
+    let runDirectory = root.appendingPathComponent("private")
+    let stageReceipt = runDirectory.appendingPathComponent("stage-receipt.json")
+    let stageInventory = runDirectory.appendingPathComponent("stage-inventory.json")
+    #expect(!FileManager.default.fileExists(atPath: stageReceipt.path))
+    #expect(!FileManager.default.fileExists(atPath: stageInventory.path))
+    #expect(FileManager.default.fileExists(
+      atPath: runDirectory.appendingPathComponent("pending-result-04.xcresult").path
+    ))
+
+    let resumed = try u7RunProcess(
+      executable: runner.path, arguments: ["--self-test"],
+      environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
+    )
+    #expect(resumed.status == 0)
+    #expect(resumed.stdout.hasSuffix("U7_RUNNER_OK\n"))
+    let phases = try String(
+      contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+    ).split(separator: "\n").filter { $0.hasPrefix("phase:") }
+    #expect(phases.count == 19)
+    #expect(Set(phases).count == 19)
+    // Every fake cleanup launch independently requires the exact stage receipt
+    // and inventory captured before the interrupt, proving recovery fed all roles.
+    #expect(phases.filter { $0.hasPrefix("phase:cleanup:") }.count == 3)
+  }
+
   @Test("runner fails closed for skip nonzero missing wrong stale and mismatch evidence")
   func runnerRejectsFakeFailureMatrix() throws {
     let modes = [
