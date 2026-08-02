@@ -573,6 +573,9 @@ actor SecretSyncLiveCleanupLedger {
     var locallyCompletedCleanupRoles: Set<String>?
     var credentialCheckpointsByRole: [String: CredentialCheckpoint]?
     var activeSignedCleanupRecords: [SecretSyncLiveRecordReference]?
+    var admittedLaunchGrantsByDigest: [String: SecretSyncLiveHostLaunchGrant]?
+    var trustedCredentialsByRole: [String: TrustedDeviceCredential]?
+    var pendingAuditEnvelope: SecretSyncLiveSignedArtifactEnvelope?
   }
 
   private let url: URL
@@ -720,6 +723,14 @@ actor SecretSyncLiveCleanupLedger {
       state.signedRunManifestDigest = values.runManifestDigest
       grants[nonce] = values.launchGrantDigest
       state.launchGrantDigestByNonce = grants
+      var admitted = state.admittedLaunchGrantsByDigest ?? [:]
+      let digestKey = values.launchGrantDigest.base64EncodedString()
+      guard admitted[digestKey] == nil || admitted[digestKey] == values.launchGrant else {
+        throw SecretSyncLiveCloudKitProofConfigurationError
+          .hostLaunchGrantBindingMismatch
+      }
+      admitted[digestKey] = values.launchGrant
+      state.admittedLaunchGrantsByDigest = admitted
       if values.phase == .cleanup {
         state.activeSignedCleanupRecords = values.signedRunManifest.manifest
           .cleanupRecords
@@ -734,6 +745,20 @@ actor SecretSyncLiveCleanupLedger {
           throw SecretSyncLiveCloudKitProofConfigurationError.launchGrantCredentialMismatch
         }
       }
+    }
+  }
+
+  func approvedLaunchGrant(
+    digest: Data
+  ) throws -> SecretSyncLiveHostLaunchGrant {
+    try transaction(writeBack: false) { state in
+      guard let grant = (state.admittedLaunchGrantsByDigest ?? [:])[
+        digest.base64EncodedString()
+      ] else {
+        throw SecretSyncLiveCloudKitProofConfigurationError
+          .missingPrerequisitePhase
+      }
+      return grant
     }
   }
 
@@ -813,6 +838,27 @@ actor SecretSyncLiveCleanupLedger {
       identifiers[role.rawValue] = credential.credentialID.rawValue
       state.credentialBindingDigestByRole = bindings
       state.credentialIDByRole = identifiers
+      var credentials = state.trustedCredentialsByRole ?? [:]
+      guard credentials[role.rawValue] == nil
+        || credentials[role.rawValue] == credential else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.deviceEvidenceReused
+      }
+      credentials[role.rawValue] = credential
+      state.trustedCredentialsByRole = credentials
+    }
+  }
+
+  func approvedCredential(
+    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  ) throws -> TrustedDeviceCredential {
+    try transaction(writeBack: false) { state in
+      guard let credential = (state.trustedCredentialsByRole ?? [:])[
+        role.rawValue
+      ] else {
+        throw SecretSyncLiveCloudKitProofConfigurationError
+          .missingPrerequisitePhase
+      }
+      return credential
     }
   }
 
@@ -1018,7 +1064,8 @@ actor SecretSyncLiveCleanupLedger {
       cleanupPrepared: nil, frozenCleanupRecordNamesByZone: nil,
       cleanupPrerequisitesCheckpointed: nil, cleanupMarkersByRole: nil,
       locallyCompletedCleanupRoles: nil, credentialCheckpointsByRole: nil,
-      activeSignedCleanupRecords: nil
+      activeSignedCleanupRecords: nil, admittedLaunchGrantsByDigest: nil,
+      trustedCredentialsByRole: nil, pendingAuditEnvelope: nil
     )
   }
 
@@ -1146,17 +1193,49 @@ actor SecretSyncLiveCleanupLedger {
     }
   }
 
-  func eraseAgreementVerifierPrivateKey(
-    role: SecretSyncLiveCloudKitProofConfiguration.DeviceRole
+  /// Persists the one immutable audit envelope before create-only publication.
+  func stageAuditEnvelope(
+    _ envelope: SecretSyncLiveSignedArtifactEnvelope
   ) throws {
-    _ = try transaction { state in
-      state.agreementVerifierPrivateKeysByRole.removeValue(forKey: role.rawValue)
+    try transaction { state in
+      if let existing = state.pendingAuditEnvelope {
+        guard existing == envelope else {
+          throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+        }
+      } else {
+        state.pendingAuditEnvelope = envelope
+      }
     }
   }
 
-  func eraseAllAgreementVerifierPrivateKeys() throws {
+  func stagedAuditEnvelope() throws -> SecretSyncLiveSignedArtifactEnvelope? {
+    try transaction(writeBack: false) { state in state.pendingAuditEnvelope }
+  }
+
+  /// Atomically records audit completion/evidence and destroys the complete
+  /// verifier-key set. Any durability failure leaves the prior ledger intact.
+  func completeAuditAndEraseVerifierKeys(
+    evidence: SecretSyncLiveEvidence
+  ) throws {
     try transaction { state in
-      state.agreementVerifierPrivateKeysByRole.removeAll(keepingCapacity: false)
+      guard state.pendingAuditEnvelope != nil else {
+        throw SecretSyncLiveCloudKitProofConfigurationError.incompleteAudit
+      }
+      var phases = state.completedPhasesByRole[
+        SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a.rawValue,
+        default: []
+      ]
+      let audit = SecretSyncLiveCloudKitProofConfiguration.Phase.audit.rawValue
+      if !phases.contains(audit) {
+        phases.append(audit)
+        state.completedPhasesByRole[
+          SecretSyncLiveCloudKitProofConfiguration.DeviceRole.a.rawValue
+        ] = phases
+        state.evidence.append(evidence)
+      }
+      state.agreementVerifierPrivateKeysByRole.removeAll(
+        keepingCapacity: false
+      )
     }
   }
 
@@ -1319,12 +1398,13 @@ enum SecretSyncLiveSignedArtifactVerifier {
     expectedPhase: SecretSyncLiveCloudKitProofConfiguration.Phase,
     expectedKind: String,
     expectedRecordName: String,
-    verifiedLaunchGrant: SecretSyncLiveHostLaunchGrant,
-    verifiedLaunchGrantDigest: Data,
-    verifiedRunManifestDigest: Data,
+    approvedLaunchGrant: SecretSyncLiveHostLaunchGrant,
+    approvedLaunchGrantDigest: Data,
+    approvedRunManifestDigest: Data,
+    approvedCredential: TrustedDeviceCredential,
     trustedHostAuthorityPublicKey: Data
   ) throws -> Bool {
-    let manifest = verifiedLaunchGrant.manifest
+    let manifest = approvedLaunchGrant.manifest
     let embeddedBody = try SecretSyncLiveHostLaunchGrantVerifier
       .canonicalManifestBytes(envelope.verifiedLaunchGrant.manifest)
     let embeddedSignature = try P256.Signing.ECDSASignature(
@@ -1338,26 +1418,51 @@ enum SecretSyncLiveSignedArtifactVerifier {
       manifestBytes: embeddedBody,
       signature: envelope.verifiedLaunchGrant.signature
     )
+    let approvedBody = try SecretSyncLiveHostLaunchGrantVerifier
+      .canonicalManifestBytes(approvedLaunchGrant.manifest)
+    let approvedDigest = SecretSyncLiveHostLaunchGrantVerifier.digest(
+      authorityPublicKey: trustedHostAuthorityPublicKey,
+      manifestBytes: approvedBody,
+      signature: approvedLaunchGrant.signature
+    )
+    let credentialBinding = SecretSyncLiveCredentialBinding.digest(
+      approvedCredential
+    )
     guard envelope.version == 1,
       authority.isValidSignature(embeddedSignature, for: embeddedBody),
+      envelope.verifiedLaunchGrant == approvedLaunchGrant,
+      approvedDigest == approvedLaunchGrantDigest,
       envelope.verifiedLaunchGrant.manifest.runManifestDigest
-        == verifiedRunManifestDigest,
+        == approvedRunManifestDigest,
       embeddedDigest == envelope.launchGrantDigest,
       envelope.namespace == expectedNamespace,
       envelope.role == expectedRole,
       envelope.phase == expectedPhase,
       envelope.kind == expectedKind,
       envelope.recordName == expectedRecordName,
+      manifest.runNamespace == expectedNamespace,
+      manifest.role == expectedRole,
+      manifest.phase == expectedPhase,
       envelope.launchNonce == manifest.nonce,
-      envelope.launchGrantDigest == verifiedLaunchGrantDigest,
-      envelope.runManifestDigest == verifiedRunManifestDigest,
+      envelope.launchGrantDigest == approvedLaunchGrantDigest,
+      envelope.runManifestDigest == approvedRunManifestDigest,
       envelope.prerequisiteArtifactDigests == manifest.prerequisiteArtifactDigests,
       (manifest.phase == .credential
         ? manifest.credentialBindingDigest == nil
-        : envelope.credentialBindingDigest == manifest.credentialBindingDigest),
+          && envelope.credentialBindingDigest == credentialBinding
+        : manifest.credentialBindingDigest == credentialBinding
+          && envelope.credentialBindingDigest == credentialBinding),
       envelope.payloadDigest == Data(SHA256.hash(data: envelope.payload)),
-      envelope.signingTranscript.signingPublicKey == envelope.signingPublicKey,
-      envelope.signingTranscript.agreementPublicKey == envelope.agreementPublicKey,
+      envelope.signingPublicKey == approvedCredential.signingPublicKey,
+      envelope.agreementPublicKey == approvedCredential.keyAgreementPublicKey,
+      envelope.signingTranscript.deviceID == approvedCredential.deviceID,
+      envelope.signingTranscript.credentialID == approvedCredential.credentialID,
+      envelope.signingTranscript.authorityCredentialID
+        == DeviceCredentialID(manifest.nonce),
+      envelope.signingTranscript.signingPublicKey
+        == approvedCredential.signingPublicKey,
+      envelope.signingTranscript.agreementPublicKey
+        == approvedCredential.keyAgreementPublicKey,
       envelope.signingTranscript.freshnessCommitment.headCommitDigest.bytes
         == Data(SHA256.hash(data: try envelope.canonicalBody())),
       envelope.signingTranscript.freshnessCommitment.policyDigest.bytes
@@ -1367,7 +1472,7 @@ enum SecretSyncLiveSignedArtifactVerifier {
       transcript: envelope.signingTranscript.productionValue()
     )
     let key = try P256.Signing.PublicKey(
-      x963Representation: envelope.signingPublicKey.publicKeyBytes
+      x963Representation: approvedCredential.signingPublicKey.publicKeyBytes
     )
     let signature = try P256.Signing.ECDSASignature(
       rawRepresentation: envelope.signature

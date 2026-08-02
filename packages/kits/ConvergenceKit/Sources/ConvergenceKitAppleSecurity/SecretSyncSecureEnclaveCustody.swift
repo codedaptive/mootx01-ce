@@ -43,8 +43,15 @@ public actor SecretSyncSecureEnclaveCustody:
   }
 
   /// Creates two independent Secure Enclave keys for a fresh credential ID.
+  ///
+  /// `checkpointBeforePersistence` receives only the public generation. Its
+  /// successful return must mean the caller crossed its own durable storage
+  /// barrier; custody does not persist either opaque key record before then.
   public func createCredential(
-    for deviceID: TrustedDeviceID
+    for deviceID: TrustedDeviceID,
+    checkpointBeforePersistence: @escaping @Sendable (
+      SecretSyncCustodyCredentialGeneration
+    ) async throws -> Void
   ) async throws -> SecretSyncCustodyCredentialGeneration {
     guard SecureEnclave.isAvailable else {
       throw SecretSyncCustodyError.hardwareUnavailable
@@ -90,30 +97,35 @@ public actor SecretSyncSecureEnclaveCustody:
         opaqueKeyRepresentation: agreement.dataRepresentation,
         publicKeyBytes: agreement.publicKey.x963Representation
       )
-      try await handleStore.insert(signingRecord)
-      do {
-        try await handleStore.insert(agreementRecord)
-      } catch {
-        await handleStore.remove(
-          credentialID: credentialID,
-          role: .signing
-        )
-        throw error
-      }
       let generation = try Self.generation(
         deviceID: deviceID,
         credentialID: credentialID,
         signingRecord: signingRecord,
         agreementRecord: agreementRecord
       )
+      let persisted = try await Self.persistCredentialGeneration(
+        generation,
+        signingRecord: signingRecord,
+        agreementRecord: agreementRecord,
+        checkpointBeforePersistence: checkpointBeforePersistence,
+        insert: { record in
+          try await self.handleStore.insert(record)
+        },
+        remove: { credentialID, role in
+          try await self.handleStore.removeStrict(
+            credentialID: credentialID,
+            role: role
+          )
+        }
+      )
       await authorization.invalidate(context)
-      return generation
+      return persisted
     } catch let error as SecretSyncCustodyError {
       await authorization.invalidate(context)
       throw error
     } catch {
       await authorization.invalidate(context)
-      throw SecretSyncCustodyError.cryptographicFailure
+      throw error
     }
   }
 
@@ -122,9 +134,15 @@ public actor SecretSyncSecureEnclaveCustody:
   /// The stable device ID is caller-owned and deliberately preserved. Existing
   /// credential material is not overwritten or silently repaired.
   public func replaceCredential(
-    for deviceID: TrustedDeviceID
+    for deviceID: TrustedDeviceID,
+    checkpointBeforePersistence: @escaping @Sendable (
+      SecretSyncCustodyCredentialGeneration
+    ) async throws -> Void
   ) async throws -> SecretSyncCustodyCredentialGeneration {
-    try await createCredential(for: deviceID)
+    try await createCredential(
+      for: deviceID,
+      checkpointBeforePersistence: checkpointBeforePersistence
+    )
   }
 
   /// Retrieves the signing descriptor after fresh authority authorization.
@@ -378,16 +396,64 @@ public actor SecretSyncSecureEnclaveCustody:
   public func removeCredentialForPhysicalProof(
     _ credentialID: DeviceCredentialID
   ) async throws {
+    try await Self.removeCredentialRecords(credentialID) { credentialID, role in
+      try await self.handleStore.removeStrict(
+        credentialID: credentialID,
+        role: role
+      )
+    }
+  }
+
+  /// Enforces the checkpoint-before-insert transaction used by production and
+  /// deterministic tests. Caller-owned provisional state is never cleared here.
+  static func persistCredentialGeneration(
+    _ generation: SecretSyncCustodyCredentialGeneration,
+    signingRecord: SecretSyncStoredKeyRecord,
+    agreementRecord: SecretSyncStoredKeyRecord,
+    checkpointBeforePersistence: @escaping @Sendable (
+      SecretSyncCustodyCredentialGeneration
+    ) async throws -> Void,
+    insert: @escaping @Sendable (SecretSyncStoredKeyRecord) async throws -> Void,
+    remove: @escaping @Sendable (
+      DeviceCredentialID, SecretSyncStoredKeyRole
+    ) async throws -> Void
+  ) async throws -> SecretSyncCustodyCredentialGeneration {
+    try await checkpointBeforePersistence(generation)
+    do {
+      try await insert(signingRecord)
+      try await insert(agreementRecord)
+      return generation
+    } catch {
+      let insertionFailure = error
+      do {
+        try await removeCredentialRecords(
+          generation.credentialID,
+          remove: remove
+        )
+      } catch {
+        // Cleanup failures take precedence because the durable checkpoint must
+        // remain actionable until both exact role records are known absent.
+        throw error
+      }
+      throw insertionFailure
+    }
+  }
+
+  /// Attempts both exact role removals. Missing records are already absent;
+  /// the first other failure is surfaced only after both attempts complete.
+  static func removeCredentialRecords(
+    _ credentialID: DeviceCredentialID,
+    remove: @escaping @Sendable (
+      DeviceCredentialID, SecretSyncStoredKeyRole
+    ) async throws -> Void
+  ) async throws {
     var firstFailure: SecretSyncCustodyError?
     for role in [SecretSyncStoredKeyRole.signing, .agreement] {
       do {
-        try await handleStore.removeStrict(
-          credentialID: credentialID,
-          role: role
-        )
+        try await remove(credentialID, role)
+      } catch SecretSyncCustodyError.missingHandle {
+        // An absent exact role is the desired idempotent cleanup result.
       } catch let error as SecretSyncCustodyError {
-        // Attempt both role deletions even when the first fails. A cleanup
-        // harness that leaves the second private handle behind is not strict.
         if firstFailure == nil {
           firstFailure = error
         }

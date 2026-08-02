@@ -1,4 +1,6 @@
 import ConvergenceKit
+import CryptoKit
+import Darwin
 import Foundation
 import Security
 import Testing
@@ -7,6 +9,158 @@ import Testing
 
 @Suite("SecretSync custody contracts")
 struct SecretSyncCustodyContractTests {
+  @Test("durable checkpoint precedes both handle inserts")
+  func durableCheckpointPrecedesHandlePersistence() async throws {
+    let fixture = try custodyPersistenceFixture()
+    let probe = SecretSyncCustodyPersistenceProbe()
+
+    let returned = try await SecretSyncSecureEnclaveCustody
+      .persistCredentialGeneration(
+        fixture.generation,
+        signingRecord: fixture.signingRecord,
+        agreementRecord: fixture.agreementRecord,
+        checkpointBeforePersistence: { generation in
+          #expect(generation == fixture.generation)
+          await probe.record(.checkpoint)
+        },
+        insert: { record in
+          await probe.record(record.role == .signing ? .insertSigning : .insertAgreement)
+        },
+        remove: { _, role in
+          await probe.record(role == .signing ? .removeSigning : .removeAgreement)
+        }
+      )
+
+    #expect(returned == fixture.generation)
+    #expect(
+      await probe.events == [.checkpoint, .insertSigning, .insertAgreement]
+    )
+  }
+
+  @Test("checkpoint failure performs zero inserts and zero cleanup writes")
+  func checkpointFailurePerformsNoPersistence() async throws {
+    let fixture = try custodyPersistenceFixture()
+    let probe = SecretSyncCustodyPersistenceProbe()
+
+    await #expect(throws: SecretSyncCustodyError.authorizationFailed) {
+      _ = try await SecretSyncSecureEnclaveCustody.persistCredentialGeneration(
+        fixture.generation,
+        signingRecord: fixture.signingRecord,
+        agreementRecord: fixture.agreementRecord,
+        checkpointBeforePersistence: { _ in
+          await probe.record(.checkpoint)
+          throw SecretSyncCustodyError.authorizationFailed
+        },
+        insert: { _ in await probe.record(.insertSigning) },
+        remove: { _, _ in await probe.record(.removeSigning) }
+      )
+    }
+    #expect(await probe.events == [.checkpoint])
+  }
+
+  @Test("insert failure attempts both removals and gives cleanup error precedence")
+  func insertFailureUsesStrictRollback() async throws {
+    let fixture = try custodyPersistenceFixture()
+    let probe = SecretSyncCustodyPersistenceProbe()
+
+    await #expect(throws: SecretSyncCustodyError.missingEntitlement) {
+      _ = try await SecretSyncSecureEnclaveCustody.persistCredentialGeneration(
+        fixture.generation,
+        signingRecord: fixture.signingRecord,
+        agreementRecord: fixture.agreementRecord,
+        checkpointBeforePersistence: { _ in await probe.record(.checkpoint) },
+        insert: { record in
+          if record.role == .agreement {
+            await probe.record(.insertAgreement)
+            throw SecretSyncCustodyError.duplicateHandle
+          }
+          await probe.record(.insertSigning)
+        },
+        remove: { _, role in
+          await probe.record(role == .signing ? .removeSigning : .removeAgreement)
+          if role == .signing {
+            throw SecretSyncCustodyError.missingHandle
+          }
+          throw SecretSyncCustodyError.missingEntitlement
+        }
+      )
+    }
+    #expect(
+      await probe.events == [
+        .checkpoint, .insertSigning, .insertAgreement,
+        .removeSigning, .removeAgreement,
+      ]
+    )
+  }
+
+  @Test("first insert failure still attempts both exact role removals")
+  func firstInsertFailureUsesStrictRollback() async throws {
+    let fixture = try custodyPersistenceFixture()
+    let probe = SecretSyncCustodyPersistenceProbe()
+
+    await #expect(throws: SecretSyncCustodyError.duplicateHandle) {
+      _ = try await SecretSyncSecureEnclaveCustody.persistCredentialGeneration(
+        fixture.generation,
+        signingRecord: fixture.signingRecord,
+        agreementRecord: fixture.agreementRecord,
+        checkpointBeforePersistence: { _ in await probe.record(.checkpoint) },
+        insert: { _ in
+          await probe.record(.insertSigning)
+          throw SecretSyncCustodyError.duplicateHandle
+        },
+        remove: { _, role in
+          await probe.record(role == .signing ? .removeSigning : .removeAgreement)
+          throw SecretSyncCustodyError.missingHandle
+        }
+      )
+    }
+    #expect(
+      await probe.events == [
+        .checkpoint, .insertSigning, .removeSigning, .removeAgreement,
+      ]
+    )
+  }
+
+  @Test("strict removal treats missing as absent and still attempts both roles")
+  func strictRemovalIsIdempotentAndComplete() async throws {
+    let credentialID = DeviceCredentialID(fixtureUUID(0x91))
+    let probe = SecretSyncCustodyPersistenceProbe()
+
+    try await SecretSyncSecureEnclaveCustody.removeCredentialRecords(
+      credentialID
+    ) { _, role in
+      await probe.record(role == .signing ? .removeSigning : .removeAgreement)
+      throw SecretSyncCustodyError.missingHandle
+    }
+
+    #expect(await probe.events == [.removeSigning, .removeAgreement])
+  }
+
+  @Test("public custody creation has no checkpoint-free compatibility overload")
+  func custodyCreationRequiresCheckpointContract() throws {
+    let source = try custodySource()
+    #expect(source.components(separatedBy: "public func createCredential(").count == 2)
+    #expect(source.components(separatedBy: "public func replaceCredential(").count == 2)
+    #expect(source.contains("checkpointBeforePersistence:"))
+    #expect(!source.contains("checkpointBeforePersistence: @Sendable") ||
+      !source.contains("= { _ in }"))
+  }
+
+  @Test("signed host uses a fixed strict fsync-backed custody checkpoint")
+  func signedHostDurableCheckpointContract() throws {
+    let source = try signedHostSource()
+    #expect(source.contains("O_NOFOLLOW"))
+    #expect(source.contains("fsync("))
+    #expect(source.contains("0o700"))
+    #expect(source.contains("0o600"))
+    #expect(source.contains("resumeInterruptedCustody"))
+    #expect(source.contains("checkpointBeforePersistence:"))
+    #expect(!source.contains("try?"))
+    let resume = try #require(source.range(of: "resumeInterruptedCustody"))
+    let create = try #require(source.range(of: "createCredential"))
+    #expect(resume.lowerBound < create.lowerBound)
+  }
+
   @Test("signing and agreement generations stay role-distinct")
   func roleDistinctHandlesAndDescriptors() async throws {
     let provider = SecretSyncTestOnlyCustodyProvider()
@@ -331,8 +485,16 @@ struct SecretSyncCustodyContractTests {
     }
 
     let provider = makeSecretSyncHardwareCustodyForCLITest()
+    let checkpointDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-custody-checkpoint-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: checkpointDirectory) }
     let generation = try await provider.createCredential(
-      for: TrustedDeviceID(UUID())
+      for: TrustedDeviceID(UUID()),
+      checkpointBeforePersistence: { generation in
+        try writeDurableHardwareCheckpoint(
+          generation, directory: checkpointDirectory
+        )
+      }
     )
     do {
       // A new provider owns new LA contexts and reloads the opaque handles
@@ -451,6 +613,97 @@ struct SecretSyncCustodyContractTests {
       throw SecretSyncCustodyError.cryptographicFailure
     }
   }
+}
+
+private struct SecretSyncCustodyPersistenceFixture {
+  let generation: SecretSyncCustodyCredentialGeneration
+  let signingRecord: SecretSyncStoredKeyRecord
+  let agreementRecord: SecretSyncStoredKeyRecord
+}
+
+private func custodyPersistenceFixture() throws
+  -> SecretSyncCustodyPersistenceFixture
+{
+  let deviceID = TrustedDeviceID(fixtureUUID(0x81))
+  let credentialID = DeviceCredentialID(fixtureUUID(0x82))
+  let signingHandle = SigningPrivateKeyHandle(fixtureUUID(0x83))
+  let agreementHandle = KeyAgreementPrivateKeyHandle(fixtureUUID(0x84))
+  let signing = P256.Signing.PrivateKey()
+  let agreement = P256.KeyAgreement.PrivateKey()
+  let signingRecord = SecretSyncStoredKeyRecord(
+    credentialID: credentialID,
+    handleID: signingHandle.rawValue,
+    role: .signing,
+    opaqueKeyRepresentation: Data([0x01]),
+    publicKeyBytes: signing.publicKey.x963Representation
+  )
+  let agreementRecord = SecretSyncStoredKeyRecord(
+    credentialID: credentialID,
+    handleID: agreementHandle.rawValue,
+    role: .agreement,
+    opaqueKeyRepresentation: Data([0x02]),
+    publicKeyBytes: agreement.publicKey.x963Representation
+  )
+  return try SecretSyncCustodyPersistenceFixture(
+    generation: SecretSyncCustodyCredentialGeneration(
+      deviceID: deviceID,
+      credentialID: credentialID,
+      signingHandle: signingHandle,
+      agreementHandle: agreementHandle,
+      signingPublicKey: SigningPublicKeyDescriptor(
+        algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+        keyIdentifier: Data(signingHandle.rawValue.uuidString.utf8),
+        publicKeyBytes: signingRecord.publicKeyBytes
+      ),
+      agreementPublicKey: KeyAgreementPublicKeyDescriptor(
+        algorithmIdentifier: SecretSyncAlgorithmRegistry.publicKeyEncoding,
+        keyIdentifier: Data(agreementHandle.rawValue.uuidString.utf8),
+        publicKeyBytes: agreementRecord.publicKeyBytes
+      )
+    ),
+    signingRecord: signingRecord,
+    agreementRecord: agreementRecord
+  )
+}
+
+private actor SecretSyncCustodyPersistenceProbe {
+  enum Event: Sendable, Equatable {
+    case checkpoint
+    case insertSigning
+    case insertAgreement
+    case removeSigning
+    case removeAgreement
+  }
+
+  private(set) var events: [Event] = []
+
+  func record(_ event: Event) {
+    events.append(event)
+  }
+}
+
+private func custodySource() throws -> String {
+  let packageRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+  return try String(
+    contentsOf: packageRoot.appendingPathComponent(
+      "Sources/ConvergenceKitAppleSecurity/SecretSyncSecureEnclaveCustody.swift"
+    ),
+    encoding: .utf8
+  )
+}
+
+private func signedHostSource() throws -> String {
+  let packageRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+  return try String(
+    contentsOf: packageRoot.appendingPathComponent("U3SignedHost/App/main.swift"),
+    encoding: .utf8
+  )
 }
 
 private func signedHostProfileValidationStatus(
@@ -684,6 +937,61 @@ private func hardwareAttributesAreLocked(
 
 private func hardwareDigest(_ byte: UInt8) throws -> SecretRecordDigest {
   try SecretRecordDigest(bytes: Data(repeating: byte, count: 32))
+}
+
+private struct HardwareCheckpoint: Codable {
+  let deviceID: UUID
+  let credentialID: UUID
+  let signingHandleID: UUID
+  let agreementHandleID: UUID
+}
+
+private func writeDurableHardwareCheckpoint(
+  _ generation: SecretSyncCustodyCredentialGeneration,
+  directory: URL
+) throws {
+  try FileManager.default.createDirectory(
+    at: directory,
+    withIntermediateDirectories: false,
+    attributes: [.posixPermissions: NSNumber(value: 0o700)]
+  )
+  let checkpoint = HardwareCheckpoint(
+    deviceID: generation.deviceID.rawValue,
+    credentialID: generation.credentialID.rawValue,
+    signingHandleID: generation.signingHandle.rawValue,
+    agreementHandleID: generation.agreementHandle.rawValue
+  )
+  let bytes = try JSONEncoder().encode(checkpoint)
+  let file = directory.appendingPathComponent("checkpoint.json")
+  let descriptor = open(
+    file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+    S_IRUSR | S_IWUSR
+  )
+  guard descriptor >= 0 else { throw SecretSyncCustodyError.cryptographicFailure }
+  defer { close(descriptor) }
+  try bytes.withUnsafeBytes { rawBuffer in
+    guard var pointer = rawBuffer.baseAddress else { return }
+    var remaining = rawBuffer.count
+    while remaining > 0 {
+      let count = write(descriptor, pointer, remaining)
+      guard count > 0 else { throw SecretSyncCustodyError.cryptographicFailure }
+      remaining -= count
+      pointer = pointer.advanced(by: count)
+    }
+  }
+  guard fsync(descriptor) == 0 else {
+    throw SecretSyncCustodyError.cryptographicFailure
+  }
+  let directoryDescriptor = open(
+    directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+  )
+  guard directoryDescriptor >= 0 else {
+    throw SecretSyncCustodyError.cryptographicFailure
+  }
+  defer { close(directoryDescriptor) }
+  guard fsync(directoryDescriptor) == 0 else {
+    throw SecretSyncCustodyError.cryptographicFailure
+  }
 }
 
 private func fixtureUUID(_ byte: UInt8) -> UUID {

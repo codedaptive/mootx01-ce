@@ -1,5 +1,6 @@
 import AppKit
 import ConvergenceKit
+import Darwin
 import Foundation
 import Security
 
@@ -11,6 +12,7 @@ private enum U3SignedHostFailure: Error {
   case invalidKeychainAttributes
   case invalidProof
   case incompleteCleanup
+  case invalidCheckpoint
 }
 
 private final class U3SignedHostDelegate: NSObject, NSApplicationDelegate {
@@ -53,16 +55,23 @@ private struct U3SignedPhysicalProof {
     "com.codedaptive.mootx01.secret-sync.agreement-handle"
 
   func run() async throws {
-    guard SecretSyncSecureEnclaveCustody.hardwareAvailable else {
-      throw SecretSyncCustodyError.hardwareUnavailable
-    }
     try verifyRuntimeEntitlements()
 
     let creator = SecretSyncSecureEnclaveCustody()
-    let generation = try await creator.createCredential(
-      for: TrustedDeviceID(UUID())
+    let checkpointStore = try U3CustodyCheckpointStore()
+    try await resumeInterruptedCustody(
+      with: creator,
+      checkpointStore: checkpointStore
     )
-    var cleanupRequired = true
+    guard SecretSyncSecureEnclaveCustody.hardwareAvailable else {
+      throw SecretSyncCustodyError.hardwareUnavailable
+    }
+    let generation = try await creator.createCredential(
+      for: TrustedDeviceID(UUID()),
+      checkpointBeforePersistence: { generation in
+        try checkpointStore.write(generation)
+      }
+    )
     do {
       try verifyStoredAttributes(for: generation.credentialID)
 
@@ -98,20 +107,44 @@ private struct U3SignedPhysicalProof {
       try await reloaded.removeCredentialForPhysicalProof(
         generation.credentialID
       )
-      cleanupRequired = false
       try await verifyProductionAbsence(
         with: reloaded,
         credentialID: generation.credentialID
       )
       try verifyKeychainAbsence(for: generation.credentialID)
+      try checkpointStore.clear()
     } catch {
-      if cleanupRequired {
-        try? await creator.removeCredentialForPhysicalProof(
+      let proofFailure = error
+      do {
+        try await creator.removeCredentialForPhysicalProof(
           generation.credentialID
         )
+        try await verifyProductionAbsence(
+          with: creator,
+          credentialID: generation.credentialID
+        )
+        try verifyKeychainAbsence(for: generation.credentialID)
+        try checkpointStore.clear()
+      } catch {
+        // Cleanup failure takes precedence and the durable checkpoint remains.
+        throw error
       }
-      throw error
+      throw proofFailure
     }
+  }
+
+  private func resumeInterruptedCustody(
+    with custody: SecretSyncSecureEnclaveCustody,
+    checkpointStore: U3CustodyCheckpointStore
+  ) async throws {
+    guard let checkpoint = try checkpointStore.read() else { return }
+    try await custody.removeCredentialForPhysicalProof(checkpoint.credentialID)
+    try await verifyProductionAbsence(
+      with: custody,
+      credentialID: checkpoint.credentialID
+    )
+    try verifyKeychainAbsence(for: checkpoint.credentialID)
+    try checkpointStore.clear()
   }
 
   private func proveBothRoles(
@@ -275,6 +308,172 @@ private struct U3SignedPhysicalProof {
 
   private func digest(_ byte: UInt8) throws -> SecretRecordDigest {
     try SecretRecordDigest(bytes: Data(repeating: byte, count: 32))
+  }
+}
+
+private struct U3CustodyCheckpoint: Codable {
+  let deviceID: UUID
+  let credentialIDValue: UUID
+  let signingHandleID: UUID
+  let agreementHandleID: UUID
+  let signingAlgorithm: String
+  let signingKeyIdentifier: Data
+  let signingPublicKey: Data
+  let agreementAlgorithm: String
+  let agreementKeyIdentifier: Data
+  let agreementPublicKey: Data
+
+  init(_ generation: SecretSyncCustodyCredentialGeneration) {
+    deviceID = generation.deviceID.rawValue
+    credentialIDValue = generation.credentialID.rawValue
+    signingHandleID = generation.signingHandle.rawValue
+    agreementHandleID = generation.agreementHandle.rawValue
+    signingAlgorithm = generation.signingPublicKey.algorithmIdentifier
+    signingKeyIdentifier = generation.signingPublicKey.keyIdentifier
+    signingPublicKey = generation.signingPublicKey.publicKeyBytes
+    agreementAlgorithm = generation.agreementPublicKey.algorithmIdentifier
+    agreementKeyIdentifier = generation.agreementPublicKey.keyIdentifier
+    agreementPublicKey = generation.agreementPublicKey.publicKeyBytes
+  }
+
+  var credentialID: DeviceCredentialID {
+    DeviceCredentialID(credentialIDValue)
+  }
+}
+
+private struct U3CustodyCheckpointStore: Sendable {
+  private static let directoryMode: mode_t = 0o700
+  private static let fileMode: mode_t = 0o600
+  private static let fileName = "provisional-custody.json"
+  private let directoryURL: URL
+
+  init() throws {
+    directoryURL = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support", isDirectory: true)
+      .appendingPathComponent("com.codedaptive.mootx01", isDirectory: true)
+      .appendingPathComponent("U3SignedHost", isDirectory: true)
+    try Self.requirePrivateDirectory(directoryURL)
+  }
+
+  func read() throws -> U3CustodyCheckpoint? {
+    let directory = try openDirectory()
+    defer { close(directory) }
+    let descriptor = openat(
+      directory, Self.fileName, O_RDONLY | O_NOFOLLOW
+    )
+    if descriptor < 0, errno == ENOENT { return nil }
+    guard descriptor >= 0, Self.isPrivateRegularFile(descriptor) else {
+      if descriptor >= 0 { close(descriptor) }
+      throw U3SignedHostFailure.invalidCheckpoint
+    }
+    defer { close(descriptor) }
+    return try JSONDecoder().decode(
+      U3CustodyCheckpoint.self,
+      from: Self.readAll(descriptor)
+    )
+  }
+
+  func write(_ generation: SecretSyncCustodyCredentialGeneration) throws {
+    let directory = try openDirectory()
+    defer { close(directory) }
+    let bytes = try JSONEncoder().encode(U3CustodyCheckpoint(generation))
+    let temporaryName = ".\(Self.fileName).\(UUID().uuidString.lowercased()).tmp"
+    let descriptor = openat(
+      directory,
+      temporaryName,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+      Self.fileMode
+    )
+    guard descriptor >= 0 else { throw U3SignedHostFailure.invalidCheckpoint }
+    var installed = false
+    defer {
+      close(descriptor)
+      if !installed { _ = unlinkat(directory, temporaryName, 0) }
+    }
+    try Self.writeAll(bytes, descriptor: descriptor)
+    guard fsync(descriptor) == 0,
+      renameat(directory, temporaryName, directory, Self.fileName) == 0,
+      fsync(directory) == 0
+    else {
+      throw U3SignedHostFailure.invalidCheckpoint
+    }
+    installed = true
+  }
+
+  func clear() throws {
+    let directory = try openDirectory()
+    defer { close(directory) }
+    if unlinkat(directory, Self.fileName, 0) != 0, errno != ENOENT {
+      throw U3SignedHostFailure.invalidCheckpoint
+    }
+    guard fsync(directory) == 0 else {
+      throw U3SignedHostFailure.invalidCheckpoint
+    }
+  }
+
+  private func openDirectory() throws -> Int32 {
+    try Self.requirePrivateDirectory(directoryURL)
+    let descriptor = open(
+      directoryURL.path,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+    )
+    guard descriptor >= 0 else { throw U3SignedHostFailure.invalidCheckpoint }
+    return descriptor
+  }
+
+  private static func requirePrivateDirectory(_ url: URL) throws {
+    do {
+      try FileManager.default.createDirectory(
+        at: url,
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: NSNumber(value: directoryMode)]
+      )
+    } catch {
+      throw U3SignedHostFailure.invalidCheckpoint
+    }
+    var status = stat()
+    guard lstat(url.path, &status) == 0,
+      (status.st_mode & S_IFMT) == S_IFDIR,
+      status.st_uid == geteuid(),
+      (status.st_mode & 0o777) == directoryMode
+    else {
+      throw U3SignedHostFailure.invalidCheckpoint
+    }
+  }
+
+  private static func isPrivateRegularFile(_ descriptor: Int32) -> Bool {
+    var status = stat()
+    return fstat(descriptor, &status) == 0
+      && (status.st_mode & S_IFMT) == S_IFREG
+      && status.st_uid == geteuid()
+      && (status.st_mode & 0o777) == fileMode
+  }
+
+  private static func readAll(_ descriptor: Int32) throws -> Data {
+    var result = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+      let count = Darwin.read(descriptor, &buffer, buffer.count)
+      if count == 0 { return result }
+      guard count > 0 else { throw U3SignedHostFailure.invalidCheckpoint }
+      result.append(contentsOf: buffer.prefix(Int(count)))
+    }
+  }
+
+  private static func writeAll(
+    _ data: Data,
+    descriptor: Int32
+  ) throws {
+    try data.withUnsafeBytes { rawBuffer in
+      guard var pointer = rawBuffer.baseAddress else { return }
+      var remaining = rawBuffer.count
+      while remaining > 0 {
+        let count = Darwin.write(descriptor, pointer, remaining)
+        guard count > 0 else { throw U3SignedHostFailure.invalidCheckpoint }
+        remaining -= count
+        pointer = pointer.advanced(by: count)
+      }
+    }
   }
 }
 
