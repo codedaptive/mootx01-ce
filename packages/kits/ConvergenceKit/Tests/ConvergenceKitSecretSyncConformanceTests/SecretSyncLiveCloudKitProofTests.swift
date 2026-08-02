@@ -1066,6 +1066,15 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     #expect(source.contains("-xctestrun"))
     #expect(source.contains("GENERATE_INFOPLIST_FILE=NO"))
     #expect(source.contains("INFOPLIST_FILE="))
+    #expect(source.contains(
+      "-only-testing:ConvergenceKitSecretSyncConformanceTests/"
+        + "SecretSyncLiveCloudKitProofTests/ledgerProbe()"
+    ))
+    #expect(source.contains(
+      "-only-testing:ConvergenceKitSecretSyncConformanceTests/"
+        + "SecretSyncLiveCloudKitProofTests/externalPhase()"
+    ))
+    #expect(source.contains("manifest.json"))
     #expect(!source.contains("INFOPLIST_KEY_MOOTSecretSyncHostAuthorityPublicKey="))
     #expect(!source.contains("-project"))
     #expect(!source.contains("-workspace"))
@@ -1223,6 +1232,48 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     )
     #expect(terminalResume.status == 0)
     #expect(terminalResume.stdout == "U7_RUNNER_OK\n")
+  }
+
+  @Test("runner rejects Xcode 27 selector and attachment-manifest attacks")
+  func runnerRejectsXcode27EvidenceAdmissionAttacks() throws {
+    let modes = [
+      "missing-manifest", "malformed-manifest", "nonarray-manifest",
+      "wrong-test-identifier",
+      "duplicate-test-group", "unsafe-exported-traversal",
+      "unsafe-exported-slash", "wrong-suggested-name", "failure-associated",
+      "malformed-attachment-type", "missing-attachment-field",
+      "duplicate-logical-attachment", "duplicate-exported-filename",
+      "symlink-export", "nonregular-export", "missing-referenced-file",
+      "manifest-file-mismatch", "unmanifested-file", "extra-stage-artifact",
+    ]
+    for mode in modes {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-xcode27-\(mode)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: ["--self-test"],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_FAKE_MODE": mode]
+        )
+      )
+      #expect(result.status != 0, "attack unexpectedly admitted: \(mode)")
+      #expect(
+        result.stderr == "U7_RUNNER_EVIDENCE_MISSING\n",
+        "unexpected rejection for \(mode): \(result.stderr)"
+      )
+      #expect(!result.stdout.contains("RAW-CANARY"))
+      #expect(!result.stderr.contains("RAW-CANARY"))
+    }
   }
 
   @Test("fake xcodebuild rejects missing or wrong-platform build matrices")
@@ -2973,10 +3024,14 @@ private func u7WriteFakeRunnerTool(root: URL) throws -> URL {
   let tool = root.appendingPathComponent("fake-runner-tool.py")
   let source = #"""
 #!/usr/bin/python3
-import base64, hashlib, json, os, pathlib, plistlib, shutil, stat, sys
+import base64, hashlib, json, os, pathlib, plistlib, shutil, stat, sys, uuid
 
 TARGET = "ConvergenceKitSecretSyncConformanceTests"
 PREFIX = "MOOT_SECRET_SYNC_"
+PROBE_TEST_IDENTIFIER = TARGET + "/SecretSyncLiveCloudKitProofTests/ledgerProbe()"
+PHASE_TEST_IDENTIFIER = TARGET + "/SecretSyncLiveCloudKitProofTests/externalPhase()"
+PROBE_SELECTOR = "-only-testing:" + PROBE_TEST_IDENTIFIER
+PHASE_SELECTOR = "-only-testing:" + PHASE_TEST_IDENTIFIER
 PROBE_KEYS = {
     PREFIX + "LIVE_PROOF", PREFIX + "RUN_NAMESPACE",
     PREFIX + "DEVICE_ROLE", PREFIX + "SIGNED_RUN_MANIFEST",
@@ -3133,8 +3188,106 @@ if sys.argv[1:3] == ["export", "attachments"]:
     source = arg("--path")
     output = arg("--output-path")
     output.mkdir(parents=True, exist_ok=True)
-    for candidate in source.rglob("*.json"):
-        shutil.copy2(candidate, output / candidate.name)
+    mode = os.environ.get("U7_FAKE_MODE", "success")
+    identifier_path = source / "test-identifier.txt"
+    if not identifier_path.exists():
+        (output / "manifest.json").write_bytes(canonical([]))
+        sys.exit(0)
+    test_identifier = identifier_path.read_text()
+    logical_sources = sorted((source / "Attachments").glob("*.json"))
+    attachments = []
+    for logical_source in logical_sources:
+        artifact_uuid = str(uuid.uuid4())
+        exported_name = artifact_uuid + ".json"
+        suggested_name = logical_source.stem + "_0_" + artifact_uuid + ".json"
+        exported_path = output / exported_name
+        shutil.copy2(logical_source, exported_path)
+        attachments.append({
+            "exportedFileName": exported_name,
+            "suggestedHumanReadableName": suggested_name,
+            "isAssociatedWithFailure": False,
+            "configurationName": "Test Scheme Action",
+            "deviceName": "U7 Fake Device",
+            "deviceId": "u7-fake-device",
+        })
+
+    is_stage = any(
+        item["suggestedHumanReadableName"].startswith("u7-stage-inventory-v1_0_")
+        for item in attachments
+    )
+    if mode == "missing-manifest":
+        sys.exit(0)
+    if mode == "malformed-manifest":
+        (output / "manifest.json").write_text("not-json")
+        sys.exit(0)
+    if mode == "nonarray-manifest":
+        (output / "manifest.json").write_bytes(canonical({}))
+        sys.exit(0)
+    if mode == "wrong-test-identifier":
+        test_identifier = TARGET + "/SecretSyncLiveCloudKitProofTests/wrong()"
+    if mode == "duplicate-test-group":
+        groups = [
+            {"testIdentifier": test_identifier, "attachments": attachments},
+            {"testIdentifier": test_identifier, "attachments": []},
+        ]
+        (output / "manifest.json").write_bytes(canonical(groups))
+        sys.exit(0)
+    if attachments and mode == "unsafe-exported-traversal":
+        attachments[0]["exportedFileName"] = "../" + attachments[0]["exportedFileName"]
+    if attachments and mode == "unsafe-exported-slash":
+        attachments[0]["exportedFileName"] = "nested/" + attachments[0]["exportedFileName"]
+    if attachments and mode == "wrong-suggested-name":
+        attachments[0]["suggestedHumanReadableName"] = "u7-ledger-probe-v1.json"
+    if attachments and mode == "failure-associated":
+        attachments[0]["isAssociatedWithFailure"] = True
+    if attachments and mode == "malformed-attachment-type":
+        attachments[0]["isAssociatedWithFailure"] = "false"
+    if attachments and mode == "missing-attachment-field":
+        del attachments[0]["deviceId"]
+    if attachments and mode == "duplicate-logical-attachment":
+        duplicate = dict(attachments[0])
+        duplicate_uuid = str(uuid.uuid4())
+        duplicate["exportedFileName"] = duplicate_uuid + ".json"
+        shutil.copy2(logical_sources[0], output / duplicate["exportedFileName"])
+        attachments.append(duplicate)
+    if attachments and mode == "duplicate-exported-filename":
+        duplicate = dict(attachments[0])
+        duplicate["suggestedHumanReadableName"] = (
+            "u7-phase-receipt-v1_0_" + str(uuid.uuid4()) + ".json"
+        )
+        attachments.append(duplicate)
+    if attachments and mode == "symlink-export":
+        exported_path = output / attachments[0]["exportedFileName"]
+        exported_path.unlink()
+        exported_path.symlink_to(logical_sources[0])
+    if attachments and mode == "nonregular-export":
+        exported_path = output / attachments[0]["exportedFileName"]
+        exported_path.unlink()
+        exported_path.mkdir()
+    if attachments and mode == "missing-referenced-file":
+        (output / attachments[0]["exportedFileName"]).unlink()
+    if attachments and mode == "manifest-file-mismatch":
+        attachments[0]["exportedFileName"] = str(uuid.uuid4()) + ".json"
+    if mode == "unmanifested-file":
+        (output / (str(uuid.uuid4()) + ".json")).write_text("{}")
+    if is_stage and mode == "extra-stage-artifact":
+        extra_uuid = str(uuid.uuid4())
+        extra_name = extra_uuid + ".json"
+        (output / extra_name).write_text("{}")
+        attachments.append({
+            "exportedFileName": extra_name,
+            "suggestedHumanReadableName": (
+                "u7-phase-receipt-v1_0_" + str(uuid.uuid4()) + ".json"
+            ),
+            "isAssociatedWithFailure": False,
+            "configurationName": "Test Scheme Action",
+            "deviceName": "U7 Fake Device",
+            "deviceId": "u7-fake-device",
+        })
+    (output / "manifest.json").write_bytes(canonical([{
+        "testIdentifier": test_identifier,
+        "attachments": attachments,
+    }]))
     sys.exit(0)
 
 log_path = pathlib.Path(os.environ["U7_FAKE_LOG"])
@@ -3204,7 +3357,15 @@ if environment.get("XCODE_GENERATED") != "preserved":
     sys.exit(50)
 moot_environment = {key: value for key, value in environment.items() if key.startswith(PREFIX)}
 test_filter = next(value for value in sys.argv if value.startswith("-only-testing:"))
-expected_keys = PROBE_KEYS if test_filter.endswith("/ledgerProbe") else (
+if test_filter in (
+        PROBE_SELECTOR.removesuffix("()"), PHASE_SELECTOR.removesuffix("()")):
+    result = arg("-resultBundlePath")
+    result.mkdir(parents=True, exist_ok=True)
+    append_log("zero-test:" + test_filter)
+    sys.exit(0)
+if test_filter not in (PROBE_SELECTOR, PHASE_SELECTOR):
+    sys.exit(55)
+expected_keys = PROBE_KEYS if test_filter == PROBE_SELECTOR else (
     CLEANUP_KEYS if moot_environment.get(PREFIX + "PHASE") == "cleanup" else ORDINARY_KEYS
 )
 if mode == "missing-environment":
@@ -3258,13 +3419,14 @@ if (role == "A") != (platform == "MacOSX") or (role != "A" and platform != "iPho
 result = arg("-resultBundlePath")
 attachments = result / "Attachments"
 attachments.mkdir(parents=True, exist_ok=True)
-if mode == "nonzero-probe" and test_filter.endswith("/ledgerProbe"):
+result.joinpath("test-identifier.txt").write_text(test_filter.removeprefix("-only-testing:"))
+if mode == "nonzero-probe" and test_filter == PROBE_SELECTOR:
     sys.exit(9)
-if mode == "nonzero-phase" and test_filter.endswith("/externalPhase"):
+if mode == "nonzero-phase" and test_filter == PHASE_SELECTOR:
     sys.exit(9)
 
 namespace = moot_environment[PREFIX + "RUN_NAMESPACE"]
-if test_filter.endswith("/ledgerProbe"):
+if test_filter == PROBE_SELECTOR:
     manifest = json.loads(base64.b64decode(
         moot_environment[PREFIX + "SIGNED_RUN_MANIFEST"]
     ))["manifest"]
