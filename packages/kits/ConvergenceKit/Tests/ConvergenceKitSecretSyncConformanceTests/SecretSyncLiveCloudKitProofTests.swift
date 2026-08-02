@@ -1406,6 +1406,36 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     }
   }
 
+  @Test("private copies use the descriptor-validated bytes across an in-place source race")
+  func runnerCopiesOnlyDescriptorValidatedBytes() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-runner-source-window-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let host = try u7CompileStandaloneHost(root: root)
+    let fake = try u7WriteFakeRunnerTool(root: root)
+    let packageRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let runner = packageRoot.appendingPathComponent(
+      "U7LiveProofHost/run-u7-live-proof.sh"
+    )
+    let result = try u7RunProcess(
+      executable: runner.path, arguments: ["--self-test"],
+      environment: u7RunnerEnvironment(
+        root: root, host: host, fake: fake,
+        additions: ["U7_SELF_TEST_XCTESTRUN_ATTACK": "source-window"]
+      )
+    )
+    #expect(result.status == 0)
+    #expect(result.stdout.hasSuffix("U7_RUNNER_OK\n"))
+    let trace = try String(
+      contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+    )
+    #expect(trace.split(separator: "\n").filter { $0.hasPrefix("probe:") }.count == 19)
+    #expect(trace.split(separator: "\n").filter { $0.hasPrefix("phase:") }.count == 19)
+  }
+
   @Test("fake launch boundary rejects non-exact phase environment dictionaries")
   func runnerRejectsInvalidXCTestrunEnvironment() throws {
     let modes = [

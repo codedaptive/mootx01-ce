@@ -274,6 +274,26 @@ def load_environment(path):
 def stable_identity(info):
     return "{}:{}:{:o}".format(info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
 
+def write_all(descriptor, data):
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            die()
+        remaining = remaining[written:]
+
+def overwrite_bound(path, data, expected_identity):
+    descriptor = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        opened = require_regular_owned(os.fstat(descriptor))
+        if stable_identity(opened) != expected_identity:
+            die()
+        os.ftruncate(descriptor, 0)
+        write_all(descriptor, data)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
 def validate(path, root, expected_platform, authority_path, mode=None, expected_environment=None):
     if not beneath(path, root) or not no_symlink_components(path, root):
         die()
@@ -317,7 +337,7 @@ def validate(path, root, expected_platform, authority_path, mode=None, expected_
         if actual != expected_environment:
             die()
     digest = hashlib.sha256(data).hexdigest()
-    return document, digest, stable_identity(path_info)
+    return document, digest, stable_identity(path_info), data
 
 action = sys.argv[1]
 if action == "discover":
@@ -329,41 +349,38 @@ if action == "discover":
         candidates.extend(os.path.join(directory, name) for name in files if name.endswith(".xctestrun"))
     if len(candidates) != 1:
         die()
-    _, digest, identity = validate(candidates[0], root, platform, authority_path)
+    _, digest, identity, _ = validate(candidates[0], root, platform, authority_path)
     print(digest + "\t" + identity + "\t" + os.path.realpath(candidates[0]))
 elif action == "inject":
-    source, copy, root, platform, authority_path, environment_path, source_digest, source_identity = sys.argv[2:10]
-    _, current_source_digest, current_source_identity = validate(source, root, platform, authority_path)
+    (source, copy, root, platform, authority_path, environment_path,
+     source_digest, source_identity, injection_attack) = sys.argv[2:11]
+    _, current_source_digest, current_source_identity, data = validate(
+        source, root, platform, authority_path
+    )
     if (current_source_digest != source_digest or current_source_identity != source_identity
             or os.path.dirname(source) != os.path.dirname(copy)):
         die()
     if os.path.lexists(copy) or not beneath(copy, root):
         die()
-    source_info = regular_owned(source)
-    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (source_info.st_dev, source_info.st_ino):
+    if injection_attack not in ("none", "source-window"):
+        die()
+    window_mutated = injection_attack == "source-window"
+    if window_mutated:
+        mutated = bytearray(data)
+        if not mutated:
             die()
-        data = b""
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        os.close(descriptor)
-    output = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        mutated[0] ^= 0xff
+        overwrite_bound(source, mutated, source_identity)
     try:
-        remaining = memoryview(data)
-        while remaining:
-            written = os.write(output, remaining)
-            if written <= 0:
-                die()
-            remaining = remaining[written:]
-        os.fsync(output)
+        output = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            write_all(output, data)
+            os.fsync(output)
+        finally:
+            os.close(output)
     finally:
-        os.close(output)
+        if window_mutated:
+            overwrite_bound(source, data, source_identity)
     document = read_plist(copy)
     configuration_index, target_index, target = target_entry(document)
     environment = dict(target.get("EnvironmentVariables", {}))
@@ -389,14 +406,14 @@ elif action == "inject":
         os.fsync(directory_descriptor)
     finally:
         os.close(directory_descriptor)
-    _, digest, identity = validate(copy, root, platform, authority_path, 0o600, expected_environment)
+    _, digest, identity, _ = validate(copy, root, platform, authority_path, 0o600, expected_environment)
     print(digest + "\t" + identity)
 elif action == "verify":
     (source, copy, root, platform, authority_path, environment_path,
      source_digest, source_identity, copy_digest, copy_identity) = sys.argv[2:12]
-    _, current_source_digest, current_source_identity = validate(source, root, platform, authority_path)
+    _, current_source_digest, current_source_identity, _ = validate(source, root, platform, authority_path)
     expected_environment = load_environment(environment_path)
-    _, current_copy_digest, current_copy_identity = validate(
+    _, current_copy_digest, current_copy_identity, _ = validate(
         copy, root, platform, authority_path, 0o600, expected_environment
     )
     if (current_source_digest != source_digest or current_source_identity != source_identity
@@ -456,11 +473,17 @@ prepare_invocation_copy() {
   local copy="$(/usr/bin/dirname "${source}")/.u7-${label}-$(/usr/bin/basename "${transient}").xctestrun"
   local environment_spec="${transient}/${label}-environment.json"
   local digest_file="${transient}/${label}-digest.txt"
+  local injection_attack=none
+  if [[ "${runner_self_test_mode}" == 1 \
+    && "${U7_SELF_TEST_XCTESTRUN_ATTACK:-}" == source-window ]]; then
+    injection_attack=source-window
+  fi
   write_environment_spec "${environment_spec}" "$@"
   capture_checked U7_RUNNER_XCTESTRUN_INVALID "${digest_file}" \
     /usr/bin/python3 "${plist_helper}" inject "${source}" "${copy}" \
       "${root}" "${platform}" "${transient}/authority.b64" \
-      "${environment_spec}" "${source_digest}" "${source_identity}"
+      "${environment_spec}" "${source_digest}" "${source_identity}" \
+      "${injection_attack}"
   invocation_copies+=("${copy}")
   local copy_digest copy_identity
   IFS=$'\t' read -r copy_digest copy_identity <"${digest_file}"
@@ -513,6 +536,10 @@ attack_invocation_copy_if_requested() {
     source-mode)
       /usr/bin/python3 -c 'import os, stat, sys; p=sys.argv[1]; os.chmod(p, stat.S_IMODE(os.lstat(p).st_mode) ^ stat.S_IXUSR)' \
         "${source_xctestrun}"
+      ;;
+    source-window)
+      # The embedded helper performs and restores this mutation between its
+      # descriptor-bound validation and private-copy construction.
       ;;
     *)
       fail U7_RUNNER_XCTESTRUN_INVALID
