@@ -138,14 +138,21 @@ private struct HostState: Codable {
   var credentialGrantDigestsByRole: [String: Data]
   var credentialBindingDigestsByRole: [String: Data]?
   var acceptedArtifactDigests: [Data]
-  var issuedNonces: Set<String>
-  var consumedResultIDs: Set<String>
+  var issuedNonces: [String]
+  var consumedResultIDs: [String]
   var pendingGrantDigest: Data?
   var pendingRole: Role?
   var pendingPhase: Phase?
   var pendingDestinationDigest: Data?
+  var pendingGrantName: String?
   var stageInventoryDigest: Data?
   var cleanupAuthorizationDigest: Data?
+  var terminal: Bool
+}
+
+private struct SignedHostState: Codable {
+  let state: HostState
+  let signature: Data
 }
 
 private struct Step {
@@ -218,6 +225,35 @@ private enum Host {
       ("phase-cleanup", .b), ("phase-cleanup", .c),
     ]
     return pairs.map { "\(namespace)-\($0.0)-\($0.1.rawValue)" }
+  }
+
+  static func ledgerIdentifier(namespace: String) -> String {
+    "u7-ledger-"
+      + SHA256.hash(data: Data(namespace.utf8))
+      .map { String(format: "%02x", $0) }.joined()
+  }
+
+  /// The dependency table mirrors the device's explicit `requirePhase`
+  /// calls. In particular terminal cleanup A binds audit A plus both remote
+  /// cleanup markers; a generic suffix cannot express that three-way gate.
+  static func prerequisiteDigests(
+    for step: Int, accepted: [Data]
+  ) throws -> [Data] {
+    let dependencyIndices: [Int]
+    switch step {
+    case 3: dependencyIndices = [0]
+    case 4: dependencyIndices = [3]
+    case 5, 6: dependencyIndices = [4]
+    case 12: dependencyIndices = [10]
+    case 14: dependencyIndices = [13]
+    case 15: dependencyIndices = [14]
+    case 18: dependencyIndices = [15, 16, 17]
+    default: dependencyIndices = []
+    }
+    guard dependencyIndices.allSatisfy({ $0 < accepted.count }) else {
+      throw HostError.wrongOrder
+    }
+    return dependencyIndices.map { accepted[$0] }
   }
 
   static func privateDirectory(_ path: String) throws -> URL {
@@ -338,14 +374,9 @@ private enum Host {
       let existingStateFD = openat(directoryFD, stateName, O_RDONLY | O_NOFOLLOW)
       if existingStateFD >= 0 {
         close(existingStateFD)
-        let state = try JSONDecoder().decode(
-          HostState.self, from: readPrivate(name: stateName, directoryFD: directoryFD)
-        )
+        let state = try loadState(directoryFD)
         guard state.namespace == namespace else { throw HostError.bindingMismatch }
-        _ = try P256.Signing.PrivateKey(
-          rawRepresentation: readPrivate(name: "authority-private.bin", directoryFD: directoryFD)
-        )
-        return "U7_HOST_RESUME_OK"
+        return state.terminal ? "U7_HOST_TERMINAL_OK" : "U7_HOST_RESUME_OK"
       }
       guard errno == ENOENT else { throw HostError.unsafePath }
       let key: P256.Signing.PrivateKey
@@ -356,10 +387,7 @@ private enum Host {
       } else {
         key = P256.Signing.PrivateKey()
       }
-      let ledgerIdentifier =
-        "u7-ledger-"
-        + SHA256.hash(data: Data(namespace.utf8))
-        .map { String(format: "%02x", $0) }.joined()
+      let ledgerIdentifier = ledgerIdentifier(namespace: namespace)
       let manifest = RunManifest(
         version: 2, runNamespace: namespace, ledgerIdentifier: ledgerIdentifier,
         artifactRecordNames: exactArtifacts(namespace: namespace)
@@ -372,7 +400,7 @@ private enum Host {
         domain: "mootx01.u7.signed-run-manifest.v2", fields: [body]
       )
       let state = HostState(
-        version: 1, namespace: namespace, ledgerIdentifier: ledgerIdentifier,
+        version: 2, namespace: namespace, ledgerIdentifier: ledgerIdentifier,
         runManifestDigest: manifestDigest,
         authorityPublicKey: key.publicKey.x963Representation,
         artifactRecordNames: manifest.artifactRecordNames, nextStep: 0,
@@ -380,8 +408,9 @@ private enum Host {
         credentialBindingDigestsByRole: [:],
         acceptedArtifactDigests: [], issuedNonces: [], consumedResultIDs: [],
         pendingGrantDigest: nil, pendingRole: nil, pendingPhase: nil,
-        pendingDestinationDigest: nil, stageInventoryDigest: nil,
-        cleanupAuthorizationDigest: nil
+        pendingDestinationDigest: nil, pendingGrantName: nil,
+        stageInventoryDigest: nil, cleanupAuthorizationDigest: nil,
+        terminal: false
       )
       try writePrivate(
         key.rawRepresentation, name: "authority-private.bin", directoryFD: directoryFD)
@@ -389,20 +418,90 @@ private enum Host {
         Data(key.publicKey.x963Representation.base64EncodedString().utf8),
         name: "authority-public.b64", directoryFD: directoryFD)
       try writePrivate(try canonical(signed), name: "run-manifest.json", directoryFD: directoryFD)
-      try writePrivate(try canonical(state), name: stateName, directoryFD: directoryFD)
+      try saveState(state, directoryFD)
       return "U7_HOST_INIT_OK"
     }
   }
 
   static func loadState(_ directoryFD: Int32) throws -> HostState {
-    try JSONDecoder().decode(
-      HostState.self,
-      from: readPrivate(name: "host-state.json", directoryFD: directoryFD)
+    let signed = try exactDecode(
+      SignedHostState.self,
+      data: readPrivate(name: "host-state.json", directoryFD: directoryFD),
+      keys: ["state", "signature"]
     )
+    let state = signed.state
+    let publicText = String(
+      decoding: try readPrivate(name: "authority-public.b64", directoryFD: directoryFD),
+      as: UTF8.self
+    )
+    guard let publicData = Data(base64Encoded: publicText),
+      let publicKey = try? P256.Signing.PublicKey(x963Representation: publicData),
+      let stateSignature = try? P256.Signing.ECDSASignature(
+        derRepresentation: signed.signature
+      ),
+      publicKey.isValidSignature(stateSignature, for: try canonical(state)),
+      state.version == 2, state.authorityPublicKey == publicData,
+      state.ledgerIdentifier == ledgerIdentifier(namespace: state.namespace),
+      state.artifactRecordNames == exactArtifacts(namespace: state.namespace),
+      state.nextStep >= 0, state.nextStep <= steps.count,
+      state.acceptedArtifactDigests.count == state.nextStep
+    else { throw HostError.bindingMismatch }
+
+    let signedManifest = try exactDecode(
+      SignedRunManifest.self,
+      data: readPrivate(name: "run-manifest.json", directoryFD: directoryFD),
+      keys: ["manifest", "signature"]
+    )
+    let manifestBody = try canonical(signedManifest.manifest)
+    guard
+      let manifestSignature = try? P256.Signing.ECDSASignature(
+        derRepresentation: signedManifest.signature
+      ),
+      publicKey.isValidSignature(manifestSignature, for: manifestBody),
+      signedManifest.manifest.version == 2,
+      signedManifest.manifest.runNamespace == state.namespace,
+      signedManifest.manifest.ledgerIdentifier == state.ledgerIdentifier,
+      signedManifest.manifest.artifactRecordNames == state.artifactRecordNames,
+      digest(domain: "mootx01.u7.signed-run-manifest.v2", fields: [manifestBody])
+        == state.runManifestDigest
+    else { throw HostError.bindingMismatch }
+
+    let pendingValues: [Any?] = [
+      state.pendingGrantDigest, state.pendingRole, state.pendingPhase,
+      state.pendingDestinationDigest, state.pendingGrantName,
+    ]
+    let pendingCount = pendingValues.compactMap { $0 }.count
+    guard pendingCount == 0 || pendingCount == pendingValues.count,
+      !state.terminal || state.nextStep == steps.count,
+      !state.terminal || pendingCount == 0
+    else { throw HostError.bindingMismatch }
+    if pendingCount == pendingValues.count {
+      guard state.nextStep < steps.count,
+        state.pendingRole == steps[state.nextStep].role,
+        state.pendingPhase == steps[state.nextStep].phase,
+        state.pendingGrantDigest?.count == SHA256.byteCount,
+        state.pendingDestinationDigest?.count == SHA256.byteCount,
+        state.pendingGrantName == "grant-\(String(format: "%02d", state.nextStep)).json"
+      else { throw HostError.bindingMismatch }
+    }
+    if !state.terminal {
+      let privateKey = try signingKey(directoryFD)
+      guard privateKey.publicKey.x963Representation == publicData else {
+        throw HostError.bindingMismatch
+      }
+    }
+    return state
   }
 
   static func saveState(_ state: HostState, _ directoryFD: Int32) throws {
-    try writePrivate(try canonical(state), name: "host-state.json", directoryFD: directoryFD)
+    let key = try signingKey(directoryFD)
+    let body = try canonical(state)
+    let signed = SignedHostState(
+      state: state, signature: try key.signature(for: body).derRepresentation
+    )
+    try writePrivate(
+      try canonical(signed), name: "host-state.json", directoryFD: directoryFD
+    )
   }
 
   static func signingKey(_ directoryFD: Int32) throws -> P256.Signing.PrivateKey {
@@ -451,9 +550,12 @@ private enum Host {
       else { throw HostError.bindingMismatch }
       state.ledgerDigestsByRole[role.rawValue] = probe.contentDigest
       let nonce = UUID()
-      guard state.issuedNonces.insert(nonce.uuidString.lowercased()).inserted else {
+      let nonceText = nonce.uuidString.lowercased()
+      guard !state.issuedNonces.contains(nonceText) else {
         throw HostError.replay
       }
+      state.issuedNonces.append(nonceText)
+      state.issuedNonces.sort()
       let manifest = GrantManifest(
         version: 2, runNamespace: state.namespace, role: role, phase: phase,
         platform: platform, nonce: nonce, issuedAtUnixSeconds: issuedAt,
@@ -461,7 +563,9 @@ private enum Host {
         runManifestDigest: state.runManifestDigest,
         destinationBindingDigest: destination,
         expectedLedgerContentDigest: probe.contentDigest,
-        prerequisiteArtifactDigests: state.acceptedArtifactDigests.suffix(2),
+        prerequisiteArtifactDigests: try prerequisiteDigests(
+          for: state.nextStep, accepted: state.acceptedArtifactDigests
+        ),
         trustedCredentialGrantDigestsByRole: state.credentialGrantDigestsByRole,
         credentialBindingDigest: phase == .credential
           ? nil
@@ -487,6 +591,7 @@ private enum Host {
       state.pendingRole = role
       state.pendingPhase = phase
       state.pendingDestinationDigest = destination
+      state.pendingGrantName = outputName
       try writePrivate(try canonical(grant), name: outputName, directoryFD: directoryFD)
       try saveState(state, directoryFD)
       return "U7_HOST_GRANT_OK"
@@ -501,11 +606,13 @@ private enum Host {
     // exact receipt check; there is no accepted-but-not-advanced state.
     return try withDirectory(directory) { directoryFD in
       var state = try loadState(directoryFD)
-      guard state.consumedResultIDs.insert(resultID).inserted,
+      guard !state.consumedResultIDs.contains(resultID),
         let grantDigest = state.pendingGrantDigest,
         let role = state.pendingRole, let phase = state.pendingPhase,
         let destination = state.pendingDestinationDigest
       else { throw HostError.replay }
+      state.consumedResultIDs.append(resultID)
+      state.consumedResultIDs.sort()
       let receipt = try exactDecode(
         PhaseReceipt.self, data: Data(contentsOf: receiptURL),
         keys: [
@@ -538,6 +645,7 @@ private enum Host {
       state.pendingRole = nil
       state.pendingPhase = nil
       state.pendingDestinationDigest = nil
+      state.pendingGrantName = nil
       state.nextStep += 1
       try saveState(state, directoryFD)
       return "U7_HOST_RECEIPT_OK"
@@ -632,10 +740,60 @@ private enum Host {
       ? lhs.recordName < rhs.recordName : lhs.zoneName < rhs.zoneName
   }
 
+  static func inspect(arguments: [String]) throws -> String {
+    let directory = try privateDirectory(try argument("--run-dir", in: arguments))
+    return try withDirectory(directory) { directoryFD in
+      let state = try loadState(directoryFD)
+      return [
+        "U7_HOST_INSPECT", String(state.nextStep),
+        state.pendingGrantDigest == nil ? "none" : "pending",
+        state.pendingRole?.rawValue ?? "-", state.pendingPhase?.rawValue ?? "-",
+        state.pendingGrantName ?? "-", state.terminal ? "terminal" : "active",
+      ].joined(separator: ":")
+    }
+  }
+
+  /// Terminal finalization signs one sanitized digest-only state before the
+  /// authority secret is erased. The retained public key, manifest, and signed
+  /// state remain independently verifiable; grants and cleanup capabilities do
+  /// not survive successful completion.
+  static func finalize(arguments: [String]) throws -> String {
+    let directory = try privateDirectory(try argument("--run-dir", in: arguments))
+    return try withDirectory(directory) { directoryFD in
+      var state = try loadState(directoryFD)
+      guard state.nextStep == steps.count, state.pendingGrantDigest == nil
+      else { throw HostError.wrongOrder }
+      if !state.terminal {
+        state.ledgerDigestsByRole.removeAll()
+        state.issuedNonces.removeAll()
+        state.consumedResultIDs.removeAll()
+        state.terminal = true
+        try saveState(state, directoryFD)
+      }
+      let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+      for name in names
+      where
+        name == "authority-private.bin"
+        || name == "stage-inventory.json"
+        || name == "stage-receipt.json"
+        || name == "cleanup-authorization.json"
+        || (name.hasPrefix("grant-") && name.hasSuffix(".json"))
+        || (name.hasPrefix("pending-receipt-") && name.hasSuffix(".json"))
+      {
+        guard unlinkat(directoryFD, name, 0) == 0 || errno == ENOENT else {
+          throw HostError.unsafePath
+        }
+      }
+      guard fsync(directoryFD) == 0 else { throw HostError.unsafePath }
+      return "U7_HOST_FINALIZED_OK"
+    }
+  }
+
   static func publicKey(arguments: [String]) throws -> String {
     let directory = try privateDirectory(try argument("--run-dir", in: arguments))
     return try withDirectory(directory) { directoryFD in
-      String(
+      _ = try loadState(directoryFD)
+      return String(
         decoding: try readPrivate(name: "authority-public.b64", directoryFD: directoryFD),
         as: UTF8.self)
     }
@@ -651,12 +809,18 @@ private enum Host {
     case "public-key":
       guard !deterministic else { throw HostError.invalidArguments }
       return try publicKey(arguments: arguments)
+    case "inspect":
+      guard !deterministic else { throw HostError.invalidArguments }
+      return try inspect(arguments: arguments)
     case "issue-grant": return try issueGrant(arguments: arguments, deterministic: deterministic)
     case "accept-receipt":
       guard !deterministic else { throw HostError.invalidArguments }
       return try acceptReceipt(arguments: arguments)
     case "authorize-cleanup":
       return try authorizeCleanup(arguments: arguments, deterministic: deterministic)
+    case "finalize":
+      guard !deterministic else { throw HostError.invalidArguments }
+      return try finalize(arguments: arguments)
     default: throw HostError.invalidArguments
     }
   }

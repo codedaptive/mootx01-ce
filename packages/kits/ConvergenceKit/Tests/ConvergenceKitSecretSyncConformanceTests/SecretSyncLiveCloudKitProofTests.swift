@@ -904,29 +904,38 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     let manifestDigest = try SecretSyncLiveSignedRunManifestVerifier.verify(
       signedManifest, trustedAuthorityPublicKey: authority, namespace: namespace
     )
+    #expect(!signedManifest.manifest.artifactRecordNames.contains(
+      "\(namespace)-phase-cleanup-A"
+    ))
     let destinationDigest = Data(repeating: 9, count: SHA256.byteCount)
-    let firstSteps: [(
+    let allSteps: [(
       SecretSyncLiveCloudKitProofConfiguration.DeviceRole,
       SecretSyncLiveCloudKitProofConfiguration.Phase,
       SecretSyncLiveRuntimePlatform
     )] = [
       (.a, .credential, .mac), (.b, .credential, .iPhone),
       (.c, .credential, .iPad), (.a, .backgroundDenied, .mac),
-      (.a, .stage, .mac),
+      (.a, .stage, .mac), (.a, .conditionalHead, .mac),
+      (.b, .conditionalHead, .iPhone), (.a, .verify, .mac),
+      (.b, .verify, .iPhone), (.c, .verify, .iPad), (.a, .offline, .mac),
+      (.c, .revoke, .iPad), (.a, .recovery, .mac), (.a, .rotation, .mac),
+      (.a, .restart, .mac), (.a, .audit, .mac), (.b, .cleanup, .iPhone),
+      (.c, .cleanup, .iPad), (.a, .cleanup, .mac),
     ]
     var stageInventory: SecretSyncLiveStageInventoryAttachment?
+    var acceptedArtifactDigests: [Data] = []
 
     // This intentionally executes the first complete authority transaction:
     // three credential bindings, background denial, stage inventory, then the
     // cleanup capability. Keeping it in one test proves durable ordering.
-    for (index, step) in firstSteps.enumerated() {
+    for (index, step) in allSteps.enumerated() {
       let probeURL = root.appendingPathComponent("probe-\(index).json")
       try SecretSyncLiveExactJSON.encode(SecretSyncLiveLedgerProbeAttachment(
         version: 1, namespace: namespace,
         ledgerIdentifier: signedManifest.manifest.ledgerIdentifier,
         role: step.0, contentDigest: Data(repeating: UInt8(index), count: 32)
       )).write(to: probeURL)
-      let grantName = "grant-\(index).json"
+      let grantName = "grant-\(String(format: "%02d", index)).json"
       let issue = try u7RunProcess(
         executable: executable.path,
         arguments: [
@@ -948,6 +957,15 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
         role: step.0, phase: step.1, runtimePlatform: step.2,
         now: Date(timeIntervalSince1970: 1_100)
       )
+      if index == 18 {
+        #expect(
+          grant.manifest.prerequisiteArtifactDigests
+            == [
+              acceptedArtifactDigests[15], acceptedArtifactDigests[16],
+              acceptedArtifactDigests[17],
+            ]
+        )
+      }
       if step.1 == .stage {
         stageInventory = SecretSyncLiveStageInventoryAttachment(
           version: 1, namespace: namespace, role: .a,
@@ -959,13 +977,15 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
           )]
         )
       }
+      let artifactDigest = Data(repeating: UInt8(index + 1), count: 32)
       let receiptURL = root.appendingPathComponent("receipt-\(index).json")
       try SecretSyncLiveExactJSON.encode(SecretSyncLivePhaseReceiptAttachment(
         version: 1, namespace: namespace, role: step.0, phase: step.1,
         runManifestDigest: manifestDigest, launchGrantDigest: grantDigest,
         destinationBindingDigest: destinationDigest,
-        artifactDigest: Data(repeating: UInt8(index + 1), count: 32),
-        inventoryDigest: try stageInventory?.canonicalDigest(),
+        artifactDigest: artifactDigest,
+        inventoryDigest: step.1 == .stage
+          ? try stageInventory?.canonicalDigest() : nil,
         credentialBindingDigest: step.1 == .credential
           ? Data(repeating: UInt8(index + 20), count: 32) : nil
       )).write(to: receiptURL)
@@ -976,23 +996,22 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
           "--receipt", receiptURL.path, "--result-id", "result-\(index)",
         ]
       ).status == 0)
+      acceptedArtifactDigests.append(artifactDigest)
+      if step.1 == .stage {
+        let inventoryURL = root.appendingPathComponent("inventory.json")
+        try SecretSyncLiveExactJSON.encode(try #require(stageInventory))
+          .write(to: inventoryURL)
+        let authorize = try u7RunProcess(
+          executable: executable.path,
+          arguments: [
+            "self-test", "authorize-cleanup", "--run-dir", runDirectory.path,
+            "--inventory", inventoryURL.path,
+            "--output", "cleanup-authorization.json", "--now", "1100",
+          ]
+        )
+        #expect(authorize.status == 0)
+      }
     }
-    let inventory = try #require(stageInventory)
-    let inventoryURL = root.appendingPathComponent("inventory.json")
-    try SecretSyncLiveExactJSON.encode(inventory).write(to: inventoryURL)
-    let authorize = try u7RunProcess(
-      executable: executable.path,
-      arguments: [
-        "self-test", "authorize-cleanup", "--run-dir", runDirectory.path,
-        "--inventory", inventoryURL.path,
-        "--output", "cleanup-authorization.json",
-        "--now", "1100",
-      ]
-    )
-    #expect(authorize.status == 0)
-    #expect(FileManager.default.fileExists(
-      atPath: runDirectory.appendingPathComponent("cleanup-authorization.json").path
-    ))
   }
 
   @Test("runner rejects zero-exit commands that produce no protocol evidence")
@@ -1032,6 +1051,208 @@ struct SecretSyncLiveCloudKitProofConfigurationTests {
     )
     #expect(!retained.contains(where: { $0.hasPrefix("transient.") }))
     #expect(!retained.contains("command.log"))
+  }
+
+  @Test("host inspect authenticates state manifest and retained authority bindings")
+  func hostInspectRejectsEveryDurableBindingMutation() throws {
+    let mutations = [
+      "version", "namespace", "manifestDigest", "publicKey",
+      "manifest", "privateKey",
+    ]
+    for mutation in mutations {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-host-inspect-\(mutation)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let runDirectory = root.appendingPathComponent("private")
+      let initialize = try u7RunProcess(
+        executable: host.path,
+        arguments: [
+          "self-test", "init", "--run-dir", runDirectory.path,
+          "--namespace", "u7-00112233-4455-6677-8899-aabbccddeeff",
+          "--now", "1100",
+        ]
+      )
+      #expect(initialize.status == 0)
+      let inspect = try u7RunProcess(
+        executable: host.path,
+        arguments: ["inspect", "--run-dir", runDirectory.path]
+      )
+      #expect(inspect.status == 0)
+      #expect(inspect.stdout.hasPrefix("U7_HOST_INSPECT:"))
+
+      if mutation == "privateKey" {
+        var replacement = Data(repeating: 0, count: 32)
+        replacement[31] = 8
+        try replacement.write(
+          to: runDirectory.appendingPathComponent("authority-private.bin")
+        )
+      } else if mutation == "manifest" {
+        let manifestURL = runDirectory.appendingPathComponent("run-manifest.json")
+        var outer = try #require(
+          JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL))
+            as? [String: Any]
+        )
+        var manifest = try #require(outer["manifest"] as? [String: Any])
+        manifest["ledgerIdentifier"] = "u7-ledger-mismatch"
+        outer["manifest"] = manifest
+        try JSONSerialization.data(withJSONObject: outer, options: [.sortedKeys])
+          .write(to: manifestURL)
+      } else {
+        let stateURL = runDirectory.appendingPathComponent("host-state.json")
+        var outer = try #require(
+          JSONSerialization.jsonObject(with: Data(contentsOf: stateURL))
+            as? [String: Any]
+        )
+        var state = try #require(outer["state"] as? [String: Any])
+        switch mutation {
+        case "version": state["version"] = 99
+        case "namespace":
+          state["namespace"] = "u7-ffffffff-ffff-ffff-ffff-ffffffffffff"
+        case "manifestDigest":
+          state["runManifestDigest"] = Data(repeating: 0, count: 32)
+            .base64EncodedString()
+        case "publicKey":
+          state["authorityPublicKey"] = Data(repeating: 0, count: 65)
+            .base64EncodedString()
+        default: Issue.record("unhandled mutation")
+        }
+        outer["state"] = state
+        try JSONSerialization.data(withJSONObject: outer, options: [.sortedKeys])
+          .write(to: stateURL)
+      }
+      let rejected = try u7RunProcess(
+        executable: host.path,
+        arguments: ["inspect", "--run-dir", runDirectory.path]
+      )
+      #expect(rejected.status != 0)
+      #expect(rejected.stderr == "U7_HOST_ERROR\n")
+    }
+  }
+
+  @Test("runner completes the exact 19-step fake proof and terminally sanitizes")
+  func runnerCompletesAndFinalizesFakeProof() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("u7-runner-success-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let host = try u7CompileStandaloneHost(root: root)
+    let fake = try u7WriteFakeRunnerTool(root: root)
+    let packageRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let runner = packageRoot.appendingPathComponent(
+      "U7LiveProofHost/run-u7-live-proof.sh"
+    )
+    let result = try u7RunProcess(
+      executable: runner.path, arguments: [],
+      environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
+    )
+    #expect(result.status == 0)
+    #expect(result.stdout.components(separatedBy: "U7_PHASE_OK:").count - 1 == 19)
+    #expect(result.stdout.hasSuffix("U7_RUNNER_OK\n"))
+    #expect(!result.stdout.contains("RAW-CANARY"))
+    #expect(!result.stderr.contains("RAW-CANARY"))
+    let retained = Set(try FileManager.default.contentsOfDirectory(
+      atPath: root.appendingPathComponent("private").path
+    ))
+    #expect(retained == Set([
+      ".host.lock", "authority-public.b64", "host-state.json", "run-manifest.json",
+    ]))
+    let phases = try String(
+      contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+    ).split(separator: "\n")
+    #expect(phases.count == 19)
+    #expect(Set(phases).count == 19)
+    let terminalResume = try u7RunProcess(
+      executable: runner.path, arguments: [],
+      environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
+    )
+    #expect(terminalResume.status == 0)
+    #expect(terminalResume.stdout == "U7_RUNNER_OK\n")
+  }
+
+  @Test("runner resumes pending grant and accepted receipt without replay")
+  func runnerResumesAuthorityBoundaries() throws {
+    let hooks = [
+      "U7_SELF_TEST_INTERRUPT_BEFORE_GRANT_INDEX",
+      "U7_SELF_TEST_INTERRUPT_AFTER_GRANT_INDEX",
+      "U7_SELF_TEST_INTERRUPT_AFTER_RESULT_INDEX",
+      "U7_SELF_TEST_INTERRUPT_AFTER_RECEIPT_INDEX",
+      "U7_SELF_TEST_INTERRUPT_AFTER_AUTHORIZATION_INDEX",
+    ]
+    for hook in hooks {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-resume-\(hook)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let interruptIndex = hook.contains("AUTHORIZATION") ? "4" : "7"
+      let interrupted = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: [hook: interruptIndex]
+        )
+      )
+      #expect(interrupted.status != 0)
+      #expect(interrupted.stderr == "U7_RUNNER_SELF_TEST_INTERRUPT\n")
+      let resumed = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(root: root, host: host, fake: fake)
+      )
+      #expect(resumed.status == 0)
+      let phases = try String(
+        contentsOf: root.appendingPathComponent("fake.log"), encoding: .utf8
+      ).split(separator: "\n")
+      #expect(phases.count == 19)
+      #expect(Set(phases).count == 19)
+    }
+  }
+
+  @Test("runner fails closed for skip nonzero missing wrong stale and mismatch evidence")
+  func runnerRejectsFakeFailureMatrix() throws {
+    let modes = [
+      "skip-phase", "nonzero-probe", "nonzero-phase", "missing-receipt",
+      "wrong-receipt", "stale-receipt", "mismatch-probe", "mismatch-receipt",
+    ]
+    for mode in modes {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("u7-runner-failure-\(mode)-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let host = try u7CompileStandaloneHost(root: root)
+      let fake = try u7WriteFakeRunnerTool(root: root)
+      let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+      let runner = packageRoot.appendingPathComponent(
+        "U7LiveProofHost/run-u7-live-proof.sh"
+      )
+      let result = try u7RunProcess(
+        executable: runner.path, arguments: [],
+        environment: u7RunnerEnvironment(
+          root: root, host: host, fake: fake,
+          additions: ["U7_FAKE_MODE": mode]
+        )
+      )
+      #expect(result.status != 0)
+      #expect(!result.stdout.contains("RAW-CANARY"))
+      #expect(!result.stderr.contains("RAW-CANARY"))
+      let retained = try FileManager.default.contentsOfDirectory(
+        atPath: root.appendingPathComponent("private").path
+      )
+      #expect(!retained.contains(where: { $0.hasPrefix("transient.") }))
+      #expect(retained.filter({ $0.hasPrefix("grant-") }).count <= 1)
+    }
   }
 
   @Test("manifest v2 derives distinct role-local ledgers from one logical identity")
@@ -2364,6 +2585,158 @@ private func u7RunProcess(
   )
 }
 
+private func u7CompileStandaloneHost(root: URL) throws -> URL {
+  let packageRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent()
+    .deletingLastPathComponent()
+  let executable = root.appendingPathComponent("u7-host")
+  let result = try u7RunProcess(
+    executable: "/usr/bin/xcrun",
+    arguments: [
+      "swiftc", packageRoot.appendingPathComponent("U7LiveProofHost/main.swift").path,
+      "-o", executable.path,
+    ]
+  )
+  guard result.status == 0 else {
+    throw SecretSyncLiveCloudKitProofConfigurationError.attachmentMalformed
+  }
+  return executable
+}
+
+private func u7WriteFakeRunnerTool(root: URL) throws -> URL {
+  let tool = root.appendingPathComponent("fake-runner-tool.py")
+  let source = #"""
+#!/usr/bin/python3
+import base64, hashlib, json, os, pathlib, shutil, sys
+
+def framed(domain, fields):
+    value = domain.encode()
+    for field in fields:
+        value += len(field).to_bytes(8, "big") + field
+    return hashlib.sha256(value).digest()
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+def arg(name):
+    return pathlib.Path(sys.argv[sys.argv.index(name) + 1])
+
+if sys.argv[1:3] == ["export", "attachments"]:
+    source = arg("--path")
+    output = arg("--output-path")
+    output.mkdir(parents=True, exist_ok=True)
+    for candidate in source.rglob("*.json"):
+        shutil.copy2(candidate, output / candidate.name)
+    sys.exit(0)
+
+if "build-for-testing" in sys.argv:
+    sys.exit(0)
+
+result = arg("-resultBundlePath")
+attachments = result / "Attachments"
+attachments.mkdir(parents=True, exist_ok=True)
+mode = os.environ.get("U7_FAKE_MODE", "success")
+test_filter = next(value for value in sys.argv if value.startswith("-only-testing:"))
+if mode == "nonzero-probe" and test_filter.endswith("/ledgerProbe"):
+    sys.exit(9)
+if mode == "nonzero-phase" and test_filter.endswith("/externalPhase"):
+    sys.exit(9)
+
+namespace = os.environ["MOOT_SECRET_SYNC_RUN_NAMESPACE"]
+role = os.environ["MOOT_SECRET_SYNC_DEVICE_ROLE"]
+if test_filter.endswith("/ledgerProbe"):
+    manifest = json.loads(base64.b64decode(
+        os.environ["MOOT_SECRET_SYNC_SIGNED_RUN_MANIFEST"]
+    ))["manifest"]
+    probe = {
+        "version": 1,
+        "namespace": "u7-ffffffff-ffff-ffff-ffff-ffffffffffff"
+            if mode == "mismatch-probe" else namespace,
+        "ledgerIdentifier": manifest["ledgerIdentifier"],
+        "role": role,
+        "contentDigest": base64.b64encode(bytes([ord(role)]) * 32).decode(),
+    }
+    (attachments / "u7-ledger-probe-v1.json").write_bytes(canonical(probe))
+    sys.exit(0)
+
+phase = os.environ["MOOT_SECRET_SYNC_PHASE"]
+grant = json.loads(base64.b64decode(os.environ["MOOT_SECRET_SYNC_HOST_LAUNCH_GRANT"]))
+manifest = grant["manifest"]
+authority = base64.b64decode(
+    (pathlib.Path(os.environ["U7_RUN_DIR"]) / "authority-public.b64").read_text()
+)
+grant_body = canonical(manifest)
+grant_digest = framed(
+    "mootx01.u7.host-launch-grant.v2",
+    [authority, grant_body, base64.b64decode(grant["signature"])],
+)
+inventory = None
+inventory_digest = None
+if phase == "stage":
+    inventory = {
+        "version": 1, "namespace": namespace, "role": "A",
+        "runManifestDigest": manifest["runManifestDigest"],
+        "launchGrantDigest": base64.b64encode(grant_digest).decode(),
+        "destinationBindingDigest": manifest["destinationBindingDigest"],
+        "records": [{
+            "recordName": "1" * 64,
+            "zoneName": "moot-secret-payload-v1",
+        }],
+    }
+    inventory_bytes = canonical(inventory)
+    inventory_digest = framed("mootx01.u7.stage-inventory.v1", [inventory_bytes])
+    (attachments / "u7-stage-inventory-v1.json").write_bytes(inventory_bytes)
+
+if mode in ("skip-phase", "missing-receipt"):
+    sys.exit(0)
+receipt = {
+    "version": 1, "namespace": namespace,
+    "role": "B" if mode == "wrong-receipt" and role != "B" else role,
+    "phase": phase,
+    "runManifestDigest": manifest["runManifestDigest"],
+    "launchGrantDigest": base64.b64encode(
+        bytes(32) if mode == "stale-receipt" else grant_digest
+    ).decode(),
+    "destinationBindingDigest": manifest["destinationBindingDigest"],
+    "artifactDigest": base64.b64encode(
+        hashlib.sha256((phase + role).encode()).digest()
+    ).decode(),
+    "inventoryDigest": base64.b64encode(
+        bytes(32) if mode == "mismatch-receipt" else inventory_digest
+    ).decode() if inventory_digest is not None else None,
+    "credentialBindingDigest": base64.b64encode(
+        hashlib.sha256(("credential-" + role).encode()).digest()
+    ).decode() if phase == "credential" else None,
+}
+(attachments / "u7-phase-receipt-v1.json").write_bytes(canonical(receipt))
+with open(os.environ["U7_FAKE_LOG"], "a") as log:
+    log.write("phase:" + phase + ":" + role + "\n")
+sys.exit(0)
+"""#
+  try Data(source.utf8).write(to: tool)
+  try FileManager.default.setAttributes(
+    [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: tool.path
+  )
+  return tool
+}
+
+private func u7RunnerEnvironment(
+  root: URL, host: URL, fake: URL,
+  additions: [String: String] = [:]
+) -> [String: String] {
+  let base = [
+    "U7_RUN_DIR": root.appendingPathComponent("private").path,
+    "U7_RUN_NAMESPACE": "u7-00112233-4455-6677-8899-aabbccddeeff",
+    "U7_HOST_TOOL": host.path, "U7_XCODEBUILD": fake.path,
+    "U7_XCRESULTTOOL": fake.path, "U7_PROJECT": "authorized.xcodeproj",
+    "U7_SCHEME": "Authorized", "U7_DEST_A": "A-RAW-CANARY",
+    "U7_DEST_B": "B-RAW-CANARY", "U7_DEST_C": "C-RAW-CANARY",
+    "U7_FAKE_LOG": root.appendingPathComponent("fake.log").path,
+    "U7_RUNNER_SELF_TEST_MODE": "1",
+  ]
+  return base.merging(additions, uniquingKeysWith: { _, replacement in replacement })
+}
+
 @Suite(
   "SecretSync authorized external-device private-CloudKit proof",
   .serialized,
@@ -2464,11 +2837,19 @@ struct SecretSyncLiveCloudKitProofTests {
     _ values: SecretSyncLiveCloudKitProofConfiguration.Values,
     ledger: SecretSyncLiveCleanupLedger
   ) async throws {
-    let kind = "phase-\(values.phase.rawValue)"
-    let envelope = try await loadArtifact(
-      SecretSyncLiveSignedArtifactEnvelope.self, kind: kind,
-      role: values.deviceRole, values: values
-    )
+    let artifactDigest: Data
+    if values.phase == .cleanup, values.deviceRole == .a {
+      // Cleanup A deletes the signed proof set, so its terminal receipt binds
+      // the authenticated local deletion checkpoint. A CloudKit cleanup-A
+      // marker is intentionally absent; only B and C publish markers.
+      artifactDigest = try await ledger.currentContentDigest()
+    } else {
+      let kind = "phase-\(values.phase.rawValue)"
+      artifactDigest = try await loadArtifact(
+        SecretSyncLiveSignedArtifactEnvelope.self, kind: kind,
+        role: values.deviceRole, values: values
+      ).artifactDigest()
+    }
     var inventory: SecretSyncLiveStageInventoryAttachment?
     if values.phase == .stage {
       let deterministicNames = Set(
@@ -2503,7 +2884,7 @@ struct SecretSyncLiveCloudKitProofTests {
       phase: values.phase, runManifestDigest: values.runManifestDigest,
       launchGrantDigest: values.launchGrantDigest,
       destinationBindingDigest: values.launchGrant.manifest.destinationBindingDigest,
-      artifactDigest: try envelope.artifactDigest(),
+      artifactDigest: artifactDigest,
       inventoryDigest: try inventory?.canonicalDigest(),
       credentialBindingDigest: values.phase == .credential
         ? SecretSyncLiveCredentialBinding.digest(

@@ -87,6 +87,22 @@ authority="$(/usr/bin/tr -d '\n' <"${transient}/authority.b64")"
   || fail U7_RUNNER_EVIDENCE_MISSING
 manifest="$(base64_file "${U7_RUN_DIR}/run-manifest.json")"
 
+capture_checked U7_RUNNER_INSPECT_FAILED "${transient}/inspect.out" \
+  "${U7_HOST_TOOL}" inspect --run-dir "${U7_RUN_DIR}"
+inspect_line="$(/usr/bin/tr -d '\n' <"${transient}/inspect.out")"
+IFS=: read -r inspect_tag start_index pending_state pending_role pending_phase \
+  pending_grant_name terminal_state <<<"${inspect_line}"
+[[ "${inspect_tag}" == U7_HOST_INSPECT && "${start_index}" =~ ^[0-9]+$ \
+  && ("${pending_state}" == none || "${pending_state}" == pending) \
+  && ("${terminal_state}" == active || "${terminal_state}" == terminal) ]] \
+  || fail U7_RUNNER_INSPECT_FAILED
+if [[ "${terminal_state}" == terminal ]]; then
+  run_checked U7_RUNNER_FINALIZE_FAILED \
+    "${U7_HOST_TOOL}" finalize --run-dir "${U7_RUN_DIR}"
+  printf '%s\n' 'U7_RUNNER_OK'
+  exit 0
+fi
+
 run_checked U7_RUNNER_BUILD_FAILED \
   "${U7_XCODEBUILD}" build-for-testing \
   -project "${U7_PROJECT}" -scheme "${U7_SCHEME}" \
@@ -106,12 +122,84 @@ phases=(
 cleanup_authorization=""
 stage_inventory=""
 stage_receipt=""
-index=0
+[[ ! -s "${U7_RUN_DIR}/cleanup-authorization.json" ]] \
+  || cleanup_authorization="$(base64_file "${U7_RUN_DIR}/cleanup-authorization.json")"
+[[ ! -s "${U7_RUN_DIR}/stage-inventory.json" ]] \
+  || stage_inventory="$(base64_file "${U7_RUN_DIR}/stage-inventory.json")"
+[[ ! -s "${U7_RUN_DIR}/stage-receipt.json" ]] \
+  || stage_receipt="$(base64_file "${U7_RUN_DIR}/stage-receipt.json")"
+
+interrupt_if_requested() {
+  local key="$1"
+  local candidate="$2"
+  if [[ "${U7_RUNNER_SELF_TEST_MODE:-0}" == 1 \
+    && "${!key:-}" == "${candidate}" ]]; then
+    fail U7_RUNNER_SELF_TEST_INTERRUPT 75
+  fi
+}
+
+remove_pending_material() {
+  local candidate="$1"
+  local number
+  number="$(printf '%02d' "${candidate}")"
+  /bin/rm -f -- "${U7_RUN_DIR}/grant-${number}.json" \
+    "${U7_RUN_DIR}/pending-receipt-${number}.json"
+  if [[ -d "${U7_RUN_DIR}/pending-result-${number}.xcresult" ]]; then
+    /bin/rm -rf -- "${U7_RUN_DIR}/pending-result-${number}.xcresult"
+  fi
+}
+
+recover_stage_material() {
+  local result="$1"
+  local output="${transient}/recovered-stage"
+  mkdir -p "${output}"
+  run_checked U7_RUNNER_PHASE_EXPORT_FAILED \
+    "${U7_XCRESULTTOOL}" export attachments --path "${result}" \
+      --output-path "${output}"
+  local receipt inventory
+  receipt="$(locate_attachment "${output}" 'u7-phase-receipt-v1.json')"
+  inventory="$(locate_attachment "${output}" 'u7-stage-inventory-v1.json')"
+  /bin/cp "${receipt}" "${U7_RUN_DIR}/stage-receipt.json"
+  /bin/cp "${inventory}" "${U7_RUN_DIR}/stage-inventory.json"
+  chmod 600 "${U7_RUN_DIR}/stage-receipt.json" \
+    "${U7_RUN_DIR}/stage-inventory.json"
+  stage_receipt="$(base64_file "${U7_RUN_DIR}/stage-receipt.json")"
+  stage_inventory="$(base64_file "${U7_RUN_DIR}/stage-inventory.json")"
+}
+
+# Accepted steps are authoritative in signed host state. Remove their stale
+# local launch material, recovering stage attachments first when a crash landed
+# after receipt acceptance but before the durable stage copy.
+for ((completed = 0; completed < start_index; completed++)); do
+  if [[ "${completed}" == 4 && -z "${stage_inventory}" \
+    && -d "${U7_RUN_DIR}/pending-result-04.xcresult" ]]; then
+    recover_stage_material "${U7_RUN_DIR}/pending-result-04.xcresult"
+  fi
+  remove_pending_material "${completed}"
+done
+
+authorize_cleanup_if_needed() {
+  [[ "${start_index}" -lt 5 || -n "${cleanup_authorization}" ]] && return 0
+  [[ -n "${stage_inventory}" && -n "${stage_receipt}" ]] \
+    || fail U7_RUNNER_EVIDENCE_MISSING
+  run_checked U7_RUNNER_CLEANUP_AUTH_FAILED \
+    "${U7_HOST_TOOL}" authorize-cleanup --run-dir "${U7_RUN_DIR}" \
+      --inventory "${U7_RUN_DIR}/stage-inventory.json" \
+      --output 'cleanup-authorization.json'
+  [[ -s "${U7_RUN_DIR}/cleanup-authorization.json" ]] \
+    || fail U7_RUNNER_EVIDENCE_MISSING
+  cleanup_authorization="$(base64_file "${U7_RUN_DIR}/cleanup-authorization.json")"
+  interrupt_if_requested U7_SELF_TEST_INTERRUPT_AFTER_AUTHORIZATION_INDEX 4
+}
+
+authorize_cleanup_if_needed
+index="${start_index}"
 # The sequence remains one visible loop because each accepted receipt mutates
 # the authority state consumed by the immediately following grant. Splitting or
 # parallelizing this loop would destroy the protocol's evidence-before-grant
 # ordering, including the stage-to-cleanup authorization checkpoint.
-for item in "${phases[@]}"; do
+while [[ "${index}" -lt "${#phases[@]}" ]]; do
+  item="${phases[${index}]}"
   phase="${item%%:*}"
   remainder="${item#*:}"
   role="${remainder%%:*}"
@@ -123,32 +211,39 @@ for item in "${phases[@]}"; do
     *) fail U7_RUNNER_MATRIX_INVALID 67 ;;
   esac
   binding="$(destination_digest "${destination}")"
-  phase_directory="${transient}/$(printf '%02d' "${index}")-${phase}-${role}"
+  number="$(printf '%02d' "${index}")"
+  phase_directory="${transient}/${number}-${phase}-${role}"
   mkdir -p "${phase_directory}/probe-attachments" "${phase_directory}/phase-attachments"
   probe_result="${phase_directory}/probe.xcresult"
-  phase_result="${phase_directory}/phase.xcresult"
-
-  run_checked U7_RUNNER_PROBE_FAILED \
-    /usr/bin/env \
-      MOOT_SECRET_SYNC_LIVE_PROOF=1 \
-      MOOT_SECRET_SYNC_RUN_NAMESPACE="${namespace}" \
-      MOOT_SECRET_SYNC_DEVICE_ROLE="${role}" \
-      MOOT_SECRET_SYNC_SIGNED_RUN_MANIFEST="${manifest}" \
-    "${U7_XCODEBUILD}" test-without-building \
-      -project "${U7_PROJECT}" -scheme "${U7_SCHEME}" \
-      -destination "${destination}" -resultBundlePath "${probe_result}" \
-      -only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/ledgerProbe
-  run_checked U7_RUNNER_PROBE_EXPORT_FAILED \
-    "${U7_XCRESULTTOOL}" export attachments --path "${probe_result}" \
-      --output-path "${phase_directory}/probe-attachments"
-  probe="$(locate_attachment "${phase_directory}/probe-attachments" 'u7-ledger-probe-v1.json')"
-
-  grant_name="grant-$(printf '%02d' "${index}").json"
+  phase_result="${U7_RUN_DIR}/pending-result-${number}.xcresult"
+  grant_name="grant-${number}.json"
   grant="${U7_RUN_DIR}/${grant_name}"
-  run_checked U7_RUNNER_GRANT_FAILED \
-    "${U7_HOST_TOOL}" issue-grant --run-dir "${U7_RUN_DIR}" \
-      --role "${role}" --phase "${phase}" --platform "${platform}" \
-      --destination-digest "${binding}" --probe "${probe}" --output "${grant_name}"
+  if [[ "${pending_state}" == pending ]]; then
+    [[ "${pending_role}" == "${role}" && "${pending_phase}" == "${phase}" \
+      && "${pending_grant_name}" == "${grant_name}" ]] \
+      || fail U7_RUNNER_INSPECT_FAILED
+  else
+    run_checked U7_RUNNER_PROBE_FAILED \
+      /usr/bin/env \
+        MOOT_SECRET_SYNC_LIVE_PROOF=1 \
+        MOOT_SECRET_SYNC_RUN_NAMESPACE="${namespace}" \
+        MOOT_SECRET_SYNC_DEVICE_ROLE="${role}" \
+        MOOT_SECRET_SYNC_SIGNED_RUN_MANIFEST="${manifest}" \
+      "${U7_XCODEBUILD}" test-without-building \
+        -project "${U7_PROJECT}" -scheme "${U7_SCHEME}" \
+        -destination "${destination}" -resultBundlePath "${probe_result}" \
+        -only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/ledgerProbe
+    run_checked U7_RUNNER_PROBE_EXPORT_FAILED \
+      "${U7_XCRESULTTOOL}" export attachments --path "${probe_result}" \
+        --output-path "${phase_directory}/probe-attachments"
+    probe="$(locate_attachment "${phase_directory}/probe-attachments" 'u7-ledger-probe-v1.json')"
+    interrupt_if_requested U7_SELF_TEST_INTERRUPT_BEFORE_GRANT_INDEX "${index}"
+    run_checked U7_RUNNER_GRANT_FAILED \
+      "${U7_HOST_TOOL}" issue-grant --run-dir "${U7_RUN_DIR}" \
+        --role "${role}" --phase "${phase}" --platform "${platform}" \
+        --destination-digest "${binding}" --probe "${probe}" --output "${grant_name}"
+    interrupt_if_requested U7_SELF_TEST_INTERRUPT_AFTER_GRANT_INDEX "${index}"
+  fi
   [[ -s "${grant}" ]] || fail U7_RUNNER_EVIDENCE_MISSING
 
   phase_environment=(
@@ -169,37 +264,67 @@ for item in "${phases[@]}"; do
       MOOT_SECRET_SYNC_STAGE_RECEIPT="${stage_receipt}"
     )
   fi
-  run_checked U7_RUNNER_PHASE_FAILED \
-    /usr/bin/env "${phase_environment[@]}" \
-    "${U7_XCODEBUILD}" test-without-building \
+  if [[ ! -d "${phase_result}" ]]; then
+    phase_log="${transient}/phase-${number}.log"
+    if ! /usr/bin/env "${phase_environment[@]}" \
+      "${U7_XCODEBUILD}" test-without-building \
       -project "${U7_PROJECT}" -scheme "${U7_SCHEME}" \
       -destination "${destination}" -resultBundlePath "${phase_result}" \
-      -only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase
+      -only-testing:ConvergenceKitSecretSyncConformanceTests/SecretSyncLiveCloudKitProofTests/externalPhase \
+      >"${phase_log}" 2>&1; then
+      /bin/rm -rf -- "${phase_result}"
+      fail U7_RUNNER_PHASE_FAILED
+    fi
+    interrupt_if_requested U7_SELF_TEST_INTERRUPT_AFTER_RESULT_INDEX "${index}"
+  fi
   run_checked U7_RUNNER_PHASE_EXPORT_FAILED \
     "${U7_XCRESULTTOOL}" export attachments --path "${phase_result}" \
       --output-path "${phase_directory}/phase-attachments"
-  receipt="$(locate_attachment "${phase_directory}/phase-attachments" 'u7-phase-receipt-v1.json')"
-  run_checked U7_RUNNER_RECEIPT_REJECTED \
-    "${U7_HOST_TOOL}" accept-receipt --run-dir "${U7_RUN_DIR}" \
-      --receipt "${receipt}" --result-id "$(basename "${phase_result}")-${index}"
+  receipt_matches="$(/usr/bin/find "${phase_directory}/phase-attachments" \
+    -type f -name 'u7-phase-receipt-v1.json' -print)"
+  if [[ -z "${receipt_matches}" || "${receipt_matches}" == *$'\n'* ]]; then
+    /bin/rm -rf -- "${phase_result}"
+    fail U7_RUNNER_EVIDENCE_MISSING
+  fi
+  receipt="${receipt_matches}"
+  inventory=""
+  if [[ "${phase}" == stage ]]; then
+    inventory_matches="$(/usr/bin/find "${phase_directory}/phase-attachments" \
+      -type f -name 'u7-stage-inventory-v1.json' -print)"
+    if [[ -z "${inventory_matches}" || "${inventory_matches}" == *$'\n'* ]]; then
+      /bin/rm -rf -- "${phase_result}"
+      fail U7_RUNNER_EVIDENCE_MISSING
+    fi
+    inventory="${inventory_matches}"
+  fi
+  /bin/cp "${receipt}" "${U7_RUN_DIR}/pending-receipt-${number}.json"
+  chmod 600 "${U7_RUN_DIR}/pending-receipt-${number}.json"
+  receipt_log="${transient}/receipt-${number}.log"
+  if ! "${U7_HOST_TOOL}" accept-receipt --run-dir "${U7_RUN_DIR}" \
+    --receipt "${U7_RUN_DIR}/pending-receipt-${number}.json" \
+    --result-id "pending-result-${number}.xcresult" \
+    >"${receipt_log}" 2>&1; then
+    /bin/rm -f -- "${U7_RUN_DIR}/pending-receipt-${number}.json"
+    /bin/rm -rf -- "${phase_result}"
+    fail U7_RUNNER_RECEIPT_REJECTED
+  fi
+  interrupt_if_requested U7_SELF_TEST_INTERRUPT_AFTER_RECEIPT_INDEX "${index}"
 
   if [[ "${phase}" == stage ]]; then
-    inventory="$(locate_attachment "${phase_directory}/phase-attachments" 'u7-stage-inventory-v1.json')"
-    inventory_name='stage-inventory.json'
-    /bin/cp "${inventory}" "${U7_RUN_DIR}/${inventory_name}"
-    chmod 600 "${U7_RUN_DIR}/${inventory_name}"
-    cleanup_name='cleanup-authorization.json'
-    run_checked U7_RUNNER_CLEANUP_AUTH_FAILED \
-      "${U7_HOST_TOOL}" authorize-cleanup --run-dir "${U7_RUN_DIR}" \
-        --inventory "${U7_RUN_DIR}/${inventory_name}" \
-        --output "${cleanup_name}"
-    [[ -s "${U7_RUN_DIR}/${cleanup_name}" ]] || fail U7_RUNNER_EVIDENCE_MISSING
-    cleanup_authorization="$(base64_file "${U7_RUN_DIR}/${cleanup_name}")"
-    stage_inventory="$(base64_file "${U7_RUN_DIR}/${inventory_name}")"
-    stage_receipt="$(base64_file "${receipt}")"
+    /bin/cp "${inventory}" "${U7_RUN_DIR}/stage-inventory.json"
+    /bin/cp "${receipt}" "${U7_RUN_DIR}/stage-receipt.json"
+    chmod 600 "${U7_RUN_DIR}/stage-inventory.json" "${U7_RUN_DIR}/stage-receipt.json"
+    stage_inventory="$(base64_file "${U7_RUN_DIR}/stage-inventory.json")"
+    stage_receipt="$(base64_file "${U7_RUN_DIR}/stage-receipt.json")"
   fi
+  remove_pending_material "${index}"
   printf 'U7_PHASE_OK:%s:%s\n' "${phase}" "${role}"
   index=$((index + 1))
+  start_index="${index}"
+  pending_state=none
+  authorize_cleanup_if_needed
 done
 
+run_checked U7_RUNNER_FINALIZE_FAILED \
+  "${U7_HOST_TOOL}" finalize --run-dir "${U7_RUN_DIR}"
 printf '%s\n' 'U7_RUNNER_OK'

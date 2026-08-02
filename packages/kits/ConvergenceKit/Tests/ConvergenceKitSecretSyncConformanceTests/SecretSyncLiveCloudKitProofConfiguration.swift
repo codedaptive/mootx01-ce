@@ -690,6 +690,10 @@ enum SecretSyncLiveCleanupAuthorizationVerifier {
     SecretSyncCloudKitZones.payloadZoneID.zoneName,
   ].sorted()
 
+  /// This verifier intentionally remains cohesive: signature, expiry, stage
+  /// inventory, deterministic union, zone allowlist, and record grammar are
+  /// one capability decision. Splitting it would permit callers to omit a
+  /// check and accidentally broaden destructive cleanup authority.
   static func verify(
     _ authorization: SecretSyncLiveSignedCleanupAuthorization,
     trustedAuthorityPublicKey: Data,
@@ -1138,6 +1142,9 @@ actor SecretSyncLiveCleanupLedger {
 
   /// Pins the host authority on first use, rejects nonce substitution, and
   /// requires every post-enrollment grant to bind the role's exact credential.
+  /// The full admission stays one lock-held mutation because ledger digest,
+  /// replay nonce, cleanup capability, and credential binding must either all
+  /// advance together or leave the role ledger byte-for-byte unchanged.
   func admitLaunchGrant(
     values: SecretSyncLiveCloudKitProofConfiguration.Values
   ) throws {
