@@ -1627,13 +1627,22 @@ mod tests {
         // Regression guard for the gap Perkins found in security review: the
         // KG connection was opened without the progress guard and its two row
         // loops charged nothing, so the KG store escaped the budget entirely
-        // on this port while Swift covered it structurally. A row cap that
-        // the fixture exceeds must now be enforced here as well.
+        // on this port while Swift covered it structurally.
+        //
+        // The cap value is load-bearing and must sit BETWEEN the two sections,
+        // or this test proves nothing. The fixture charges 38 rows in the
+        // chroma section first (36 `embedding_metadata` rows + 2 segment-id
+        // lookups), then 2 entities and 2 triples in the knowledge-graph
+        // section — 42 total. A cap of 39 therefore clears chroma and can only
+        // be tripped by a KG row, so this test FAILS the moment someone
+        // deletes the KG `charge_row` calls. A cap below 38 would trip in the
+        // chroma section, which was already charged before this fix, and would
+        // pass against the pre-fix code while claiming to guard it.
         let (mut coordinator, handle) = open_estate();
         let mut bridge = PalaceBridge::with_limits(
             &mut coordinator,
             MemPalaceImportLimits {
-                max_import_rows: 3,
+                max_import_rows: 39,
                 ..MemPalaceImportLimits::default()
             },
         );
@@ -1649,6 +1658,12 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("max_import_rows"), "{message}");
         assert!(message.contains("SQLite rows"), "{message}");
+        // Row 40 is the second KG entity — proof the breach happened INSIDE
+        // the knowledge-graph scan and not earlier in the chroma section.
+        assert!(
+            message.contains("40"),
+            "the breach must occur on a knowledge-graph row, not in chroma: {message}"
+        );
     }
 
     #[test]
