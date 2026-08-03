@@ -312,6 +312,12 @@ impl<'a> PalaceBridge<'a> {
         if kg_path.exists() {
             let conn = Connection::open_with_flags(&kg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| VaultKitError::AdapterError(format!("knowledge_graph.sqlite3: {e}")))?;
+            // Same untrusted-input guard as the chroma connection above: a
+            // degenerate KG file's query is abandoned rather than run to
+            // completion. The Swift twin gets this structurally because its
+            // budget lives on SQLiteReadOnly; Rust charges at call sites, so
+            // every open must install it explicitly.
+            budget.install_progress_guard(&conn);
 
             // KG entities: each entity becomes a drawer in knowledge_graph/entities.
             {
@@ -319,7 +325,7 @@ impl<'a> PalaceBridge<'a> {
                     .prepare(
                         "SELECT id, name, type, properties, created_at FROM entities ORDER BY id",
                     )
-                    .map_err(|e| VaultKitError::AdapterError(format!("entities: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("entities", e))?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok((
@@ -328,10 +334,15 @@ impl<'a> PalaceBridge<'a> {
                             row.get::<_, Option<String>>(4)?,
                         ))
                     })
-                    .map_err(|e| VaultKitError::AdapterError(format!("entities query: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("entities query", e))?;
                 for row in rows {
                     let (id, name, created_at) =
-                        row.map_err(|e| VaultKitError::AdapterError(format!("{e}")))?;
+                        row.map_err(|e| budget.map_sql_error("read entity row", e))?;
+                    budget.charge_row(
+                        id.len()
+                            + name.as_ref().map_or(0, String::len)
+                            + created_at.as_ref().map_or(0, String::len),
+                    )?;
                     self.import_kg_entity(
                         &id,
                         name.as_deref().unwrap_or(""),
@@ -382,7 +393,7 @@ impl<'a> PalaceBridge<'a> {
                          CAST(confidence AS TEXT), source_drawer_id \
                          FROM triples ORDER BY id",
                     )
-                    .map_err(|e| VaultKitError::AdapterError(format!("triples: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("triples", e))?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok((
@@ -396,10 +407,20 @@ impl<'a> PalaceBridge<'a> {
                             row.get::<_, Option<String>>(7)?,
                         ))
                     })
-                    .map_err(|e| VaultKitError::AdapterError(format!("triples query: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("triples query", e))?;
                 for row in rows {
                     let (id, subject, predicate, object, valid_from, valid_to, conf, src_drawer) =
-                        row.map_err(|e| VaultKitError::AdapterError(format!("{e}")))?;
+                        row.map_err(|e| budget.map_sql_error("read triple row", e))?;
+                    budget.charge_row(
+                        id.len()
+                            + subject.as_ref().map_or(0, String::len)
+                            + predicate.as_ref().map_or(0, String::len)
+                            + object.as_ref().map_or(0, String::len)
+                            + valid_from.as_ref().map_or(0, String::len)
+                            + valid_to.as_ref().map_or(0, String::len)
+                            + conf.as_ref().map_or(0, String::len)
+                            + src_drawer.as_ref().map_or(0, String::len),
+                    )?;
                     self.import_kg_triple(
                         &id,
                         subject.as_deref().unwrap_or(""),
@@ -1593,5 +1614,86 @@ mod tests {
         assert_eq!(second.drawers_updated, 0);
 
         std::fs::remove_dir_all(&temp).ok();
+    }
+
+    // MARK: - Import bounds on the live import path
+    //
+    // PalaceBridge is the path behind `moot_palace_import`, so the ceilings
+    // that protect the adapter must protect it too. The Swift twins live in
+    // `Tests/VaultKitTests/PalaceBridgeTests.swift`.
+
+    #[test]
+    fn bridge_row_cap_bounds_the_knowledge_graph_scan_too() {
+        // Regression guard for the gap Perkins found in security review: the
+        // KG connection was opened without the progress guard and its two row
+        // loops charged nothing, so the KG store escaped the budget entirely
+        // on this port while Swift covered it structurally. A row cap that
+        // the fixture exceeds must now be enforced here as well.
+        let (mut coordinator, handle) = open_estate();
+        let mut bridge = PalaceBridge::with_limits(
+            &mut coordinator,
+            MemPalaceImportLimits {
+                max_import_rows: 3,
+                ..MemPalaceImportLimits::default()
+            },
+        );
+        let err = bridge
+            .import_palace(
+                &fixture_palace_root(),
+                &handle,
+                NOW,
+                None,
+                EncodeSpeed::Foreground,
+            )
+            .expect_err("the row cap must reject this palace");
+        let message = err.to_string();
+        assert!(message.contains("max_import_rows"), "{message}");
+        assert!(message.contains("SQLite rows"), "{message}");
+    }
+
+    #[test]
+    fn bridge_rejects_oversized_tunnels_json_before_reading_it() {
+        let (mut coordinator, handle) = open_estate();
+        let root = std::env::temp_dir()
+            .join(format!("palacebridge-bounds-{}", uuid::Uuid::new_v4()));
+        let src = fixture_palace_root();
+        std::fs::create_dir_all(root.join("palace")).expect("create palace dir");
+        std::fs::copy(
+            src.join("palace/chroma.sqlite3"),
+            root.join("palace/chroma.sqlite3"),
+        )
+        .expect("copy chroma");
+        std::fs::copy(
+            src.join("knowledge_graph.sqlite3"),
+            root.join("knowledge_graph.sqlite3"),
+        )
+        .expect("copy kg");
+        // Oversized AND malformed: a "malformed" diagnostic would prove the
+        // file had been read and parsed before its size was checked.
+        std::fs::write(root.join("tunnels.json"), "x".repeat(4096)).expect("write tunnels");
+
+        let mut bridge = PalaceBridge::with_limits(
+            &mut coordinator,
+            MemPalaceImportLimits {
+                max_tunnels_json_bytes: 1024,
+                ..MemPalaceImportLimits::default()
+            },
+        );
+        let err = bridge
+            .import_palace(
+                &root,
+                &handle,
+                NOW,
+                None,
+                EncodeSpeed::Foreground,
+            )
+            .expect_err("the tunnels.json cap must reject this palace");
+        let message = err.to_string();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(message.contains("max_tunnels_json_bytes"), "{message}");
+        assert!(message.contains("4096"), "must name the OBSERVED value: {message}");
+        assert!(message.contains("1024"), "must name the LIMIT: {message}");
+        assert!(!message.contains("malformed"), "{message}");
     }
 }

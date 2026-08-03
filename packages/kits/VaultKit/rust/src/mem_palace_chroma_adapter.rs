@@ -33,7 +33,7 @@
 //!   `"tunnel"` / `"kg_entity"` / `"kg_triple"`.
 //! - Nothing dropped: every store field lands in a typed `NoteIR` home
 //!   or rides frontmatter verbatim.
-
+//!
 //! ## Trust posture: the palace root is UNTRUSTED input
 //!
 //! A palace root is a directory handed to the importer from outside the
@@ -47,15 +47,28 @@
 //! guard that abandons a query which burns virtual-machine steps without
 //! returning rows.
 //!
-//! Confidentiality and integrity are not at risk here — the palace is
-//! opened read-only and never written. Availability was: before these
-//! bounds existed the importer read an oversized `tunnels.json`, every
-//! SQLite row, and every `NoteIR` into memory with no ceiling of any
-//! kind. Every limit fails with an error naming the limit AND the
-//! observed value, because an import that dies on an unexplained cap is
-//! worse than one that is slow. The limit VALUES are identical to the
-//! Swift port's; divergent caps would mean an import that succeeds in one
-//! port and fails in the other.
+//! The palace is opened read-only and never written, so this adapter
+//! cannot mutate it and does not write outside the estate. Availability
+//! was the exposure these bounds close: before them the importer read an
+//! oversized `tunnels.json`, every SQLite row, and every `NoteIR` into
+//! memory with no ceiling of any kind.
+//!
+//! One residual is worth knowing rather than assuming away: the queries
+//! below run against an attacker-authored schema, so a palace that
+//! defines `embeddings` / `collections` / `entities` / `triples` as VIEWS
+//! executes its own SQL inside this connection. Read-only blocks writes
+//! and no filesystem-reach function is enabled, which leaves SQLite's own
+//! parser surface plus availability — and the step budget bounds the
+//! availability half. `PRAGMA trusted_schema=OFF` would close the rest;
+//! it is deliberately NOT set here because it changes how SQLite treats a
+//! foreign file and a real palace has never needed it. Do not upgrade
+//! this comment to "no confidentiality or integrity risk" without it.
+//!
+//! Every limit fails with an error naming the limit AND the observed
+//! value, because an import that dies on an unexplained cap is worse than
+//! one that is slow. The limit VALUES are identical to the Swift port's;
+//! divergent caps would mean an import that succeeds in one port and
+//! fails in the other.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
