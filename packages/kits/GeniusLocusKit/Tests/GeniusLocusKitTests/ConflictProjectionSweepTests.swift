@@ -158,6 +158,252 @@ struct ConflictProjectionSweepTests {
                 > AdjectiveSensitivity.elevated.rawValue)
     }
 
+    // MARK: - Per-fact sensitivity ceiling
+
+    /// A fact carrying `sensitivity` on its own adjective axis.
+    ///
+    /// Sensitivity lives at bits 6–11 of `adjectiveBitmap` (cookbook
+    /// §2.3, the same layout `Drawer` uses). LocusKit publishes the
+    /// decoder (`KGFact.adjectiveSensitivity`) but no encoder, so the
+    /// shift is written out here rather than hidden behind a local
+    /// helper that would silently rot if the field ever moved. Every
+    /// test below asserts the round-trip before relying on it.
+    static func fact(
+        _ id: String, _ subject: String, _ object: String, _ source: String,
+        sensitivity: AdjectiveSensitivity
+    ) -> KGFact {
+        KGFact(
+            id: id, subject: subject, predicate: "Employer", object: object,
+            sourceDrawerID: source,
+            adjectiveBitmap: Int64(sensitivity.rawValue) << 6,
+            filedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    /// Both source drawers at the Normal tier — the setup every test in
+    /// this section shares, so the only sensitivity in play is the
+    /// facts' own.
+    static let normalDrawers: [String: Int] = [
+        "d1": AdjectiveSensitivity.normal.rawValue,
+        "d2": AdjectiveSensitivity.normal.rawValue,
+    ]
+
+    /// The regression case. A RESTRICTED fact anchored to a NORMAL
+    /// drawer: before the ceiling counted each fact's own axis this
+    /// finding came back at raw 0 and the renderer emitted the whole
+    /// PROVEN block — result id, rule, coordinate, value digests,
+    /// temporal bases, reasons and dense source rows — for a claim the
+    /// legacy contradiction view in the same response had already
+    /// filtered out on the fact's own tier.
+    ///
+    /// The renderer's thresholds are asserted here as inequalities
+    /// rather than by calling it: AriaMcpKit sits above this kit and
+    /// cannot be imported from GLK's tests. The two predicates mirror
+    /// `RecipeTools.swift:985` (`>= secretRaw` → drop the finding) and
+    /// `:987` (`>= restrictedRaw` → coordinate digest only), and their
+    /// Rust twins at `recipe_tools.rs:186,190`.
+    @Test func restrictedFactOnNormalDrawerRaisesCeiling() {
+        let restricted = Self.fact(
+            "f1", "Sarah Chen C0", "Acme Robotics", "d1",
+            sensitivity: .restricted)
+        // Guard the bitmap encoding this fixture depends on.
+        #expect(restricted.adjectiveSensitivity == .restricted)
+
+        let report = ConflictSweepCore.run(
+            facts: [
+                restricted,
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+            ],
+            eventTimeSecondsBySourceDrawer: ["d1": 500, "d2": 500],
+            sensitivityRawBySourceDrawer: Self.normalDrawers,
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+
+        #expect(report.counts.provenContradiction == 1)
+        let finding = try! #require(report.proven.first)
+        #expect(finding.sensitivityCeilingRaw == AdjectiveSensitivity.restricted.rawValue)
+        // Renders as a coordinate digest, not the full PROVEN block…
+        #expect(finding.sensitivityCeilingRaw >= AdjectiveSensitivity.restricted.rawValue)
+        // …and is not suppressed outright — the restricted tier exists so
+        // a sensitive conflict can still be signalled without disclosure.
+        #expect(finding.sensitivityCeilingRaw < AdjectiveSensitivity.secret.rawValue)
+    }
+
+    /// A SECRET fact on a Normal drawer takes the finding past the
+    /// renderer's suppression threshold entirely (`RecipeTools.swift:985`,
+    /// `recipe_tools.rs:186`): no line is emitted at all, not even the
+    /// coordinate digest.
+    @Test func secretFactOnNormalDrawerSuppressesTheFinding() {
+        let secret = Self.fact(
+            "f1", "Sarah Chen C0", "Acme Robotics", "d1", sensitivity: .secret)
+        #expect(secret.adjectiveSensitivity == .secret)
+
+        let report = ConflictSweepCore.run(
+            facts: [
+                secret,
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+            ],
+            eventTimeSecondsBySourceDrawer: ["d1": 500, "d2": 500],
+            sensitivityRawBySourceDrawer: Self.normalDrawers,
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+
+        #expect(report.counts.provenContradiction == 1)
+        let finding = try! #require(report.proven.first)
+        #expect(finding.sensitivityCeilingRaw >= AdjectiveSensitivity.secret.rawValue)
+    }
+
+    /// The finding is carried, never dropped. A sensitive fact still
+    /// projects, still pairs, and still proves — only its disclosure is
+    /// reduced. Filtering sensitive facts out ahead of projection (the
+    /// legacy view's approach) would remove them from contradiction
+    /// detection altogether and leave the renderer's restricted tier with
+    /// nothing to render.
+    @Test func sensitiveFactStillProvesAndIsCounted() {
+        let report = ConflictSweepCore.run(
+            facts: [
+                Self.fact("f1", "Sarah Chen C0", "Acme Robotics", "d1",
+                          sensitivity: .secret),
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+            ],
+            eventTimeSecondsBySourceDrawer: ["d1": 500, "d2": 500],
+            sensitivityRawBySourceDrawer: Self.normalDrawers,
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+        #expect(report.diagnostics.projected == 2)
+        #expect(report.pairsEvaluated == 1)
+        #expect(report.proven.count == 1)
+        #expect(report.proven.first?.outcome.reasons.contains(.valuesExclusive) == true)
+    }
+
+    /// No over-redaction. `f1` and `f2` are Normal facts that prove
+    /// against each other; `f3` is a Restricted fact on an unrelated
+    /// coordinate that happens to share `f1`'s source drawer. The finding
+    /// must still render in full.
+    ///
+    /// This is the case that fails the rejected mechanism. Folding each
+    /// fact's tier into the DRAWER-keyed map with `max` would leave `d1`
+    /// holding Restricted — inherited from `f3` — and the unrelated
+    /// `f1`/`f2` finding would collapse to a coordinate digest. Nobody
+    /// would see that happen: over-redaction raises no error, it just
+    /// quietly empties the surface the typed lane exists to fill.
+    @Test func unrelatedNormalFactsSharingADrawerAreNotOverRedacted() {
+        let poisoner = Self.fact(
+            "f3", "Noor Haddad C1", "Vireo Systems", "d1",
+            sensitivity: .restricted)
+        #expect(poisoner.adjectiveSensitivity == .restricted)
+
+        let report = ConflictSweepCore.run(
+            facts: [
+                Self.fact("f1", "Sarah Chen C0", "Acme Robotics", "d1"),
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+                // Same source drawer as f1, different coordinate — so it
+                // never pairs, and its only possible influence is through
+                // a shared map key.
+                poisoner,
+            ],
+            eventTimeSecondsBySourceDrawer: ["d1": 500, "d2": 500],
+            sensitivityRawBySourceDrawer: Self.normalDrawers,
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+
+        #expect(report.counts.provenContradiction == 1)
+        let finding = try! #require(report.proven.first)
+        #expect(finding.sensitivityCeilingRaw == AdjectiveSensitivity.normal.rawValue)
+        // Below the digest threshold → the full PROVEN block renders.
+        #expect(finding.sensitivityCeilingRaw < AdjectiveSensitivity.restricted.rawValue)
+    }
+
+    /// Sourceless facts get their own ceiling slot and cannot contaminate
+    /// anything else.
+    ///
+    /// Facts filed with no source drawer id all share the drawer key
+    /// `""`. That shared key is the second reason the drawer-keyed fold
+    /// was rejected: folding fact tiers into a drawer-keyed map would
+    /// store one Secret sourceless fact's tier under `""` and hand it to
+    /// every other sourceless fact in the estate. Keying on the evidence
+    /// locator gives each fact a slot of its own regardless of source.
+    ///
+    /// Two facts about the terrain are asserted together here so a later
+    /// reader does not mistake the second for a bug and "fix" it:
+    ///
+    /// 1. A pair with an empty `sourceDrawerID` on either side is
+    ///    InvalidInput at the evaluator (SubstrateML
+    ///    `ConflictProjection.swift`, the `source_drawer_id.is_empty()`
+    ///    guard mirrored at `conflict_projection.rs:579-580`). It never
+    ///    becomes a finding, so it never reaches a ceiling — which means
+    ///    the `""` collision cannot surface through a finding as the code
+    ///    stands. The per-fact keying is what guarantees it still could
+    ///    not if that guard were ever relaxed.
+    /// 2. A sourceless Secret fact sharing a sweep with an unrelated
+    ///    sourced pair leaves that pair's ceiling at Normal.
+    ///
+    /// The discriminating test against the rejected fold is
+    /// `unrelatedNormalFactsSharingADrawerAreNotOverRedacted`; this one
+    /// pins the sourceless corner of the same contract.
+    @Test func sourcelessFactsGetTheirOwnCeilingSlot() {
+        let report = ConflictSweepCore.run(
+            facts: [
+                // An ordinary sourced pair, both Normal.
+                Self.fact("f1", "Sarah Chen C0", "Acme Robotics", "d1"),
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+                // A SECRET sourceless fact, and a sourced claim on the
+                // same coordinate so the two actually pair.
+                Self.fact("f3", "Noor Haddad C1", "Vireo Systems", "",
+                          sensitivity: .secret),
+                Self.fact("f4", "Noor Haddad C1", "Beta Corp", "d2"),
+            ],
+            eventTimeSecondsBySourceDrawer: ["": 500, "d1": 500, "d2": 500],
+            sensitivityRawBySourceDrawer: Self.normalDrawers,
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+
+        #expect(report.pairsEvaluated == 2)
+        // (1) The sourceless pair is judged InvalidInput, never a finding.
+        #expect(report.counts.unknownOrInvalid == 1)
+        // (2) The unrelated sourced pair keeps its Normal ceiling.
+        #expect(report.counts.provenContradiction == 1)
+        let finding = try! #require(report.proven.first)
+        #expect(finding.sensitivityCeilingRaw == AdjectiveSensitivity.normal.rawValue)
+    }
+
+    /// The two axes are symmetric and independent. A Restricted DRAWER
+    /// under a Normal fact still yields a Restricted ceiling — the
+    /// behaviour that existed before this change is intact — and a
+    /// Restricted FACT under a Normal drawer now yields the same ceiling.
+    /// Neither axis can be satisfied by the other.
+    @Test func drawerAxisAndFactAxisAreSymmetric() {
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        let times: [String: Int64] = ["d1": 500, "d2": 500]
+
+        // Restricted DRAWER, Normal facts.
+        let byDrawer = ConflictSweepCore.run(
+            facts: [
+                Self.fact("f1", "Sarah Chen C0", "Acme Robotics", "d1"),
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+            ],
+            eventTimeSecondsBySourceDrawer: times,
+            sensitivityRawBySourceDrawer: [
+                "d1": AdjectiveSensitivity.normal.rawValue,
+                "d2": restrictedRaw,
+            ],
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+        #expect(byDrawer.proven.first?.sensitivityCeilingRaw == restrictedRaw)
+
+        // Restricted FACT, Normal drawers.
+        let byFact = ConflictSweepCore.run(
+            facts: [
+                Self.fact("f1", "Sarah Chen C0", "Acme Robotics", "d1"),
+                Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2",
+                          sensitivity: .restricted),
+            ],
+            eventTimeSecondsBySourceDrawer: times,
+            sensitivityRawBySourceDrawer: Self.normalDrawers,
+            acceptedSupersessionPairs: [],
+            registry: .v01)
+        #expect(byFact.proven.first?.sensitivityCeilingRaw == restrictedRaw)
+    }
+
     // MARK: - Estate seam (end-to-end read path)
 
     private func openEstate(
