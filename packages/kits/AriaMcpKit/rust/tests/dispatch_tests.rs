@@ -1579,8 +1579,24 @@ fn memory_get_found_returns_full_content_verbatim() {
         text.contains(&id),
         "response must echo the memory id; got: {text}"
     );
+    // The sensitivity-gate advisory is appended after the content block
+    // whenever no grant is live, which is this dispatcher's state — it
+    // depends on grant state alone, never on estate contents, so it is
+    // present on every reply here. Strip that one trailing line before
+    // asserting the content is the final block; what is under test is that
+    // the content itself is not truncated. Mirrors Swift
+    // `MemoryGetTests.foundReturnsFullContentVerbatim`.
+    let advisory = text
+        .lines()
+        .next_back()
+        .expect("reply must not be empty");
     assert!(
-        text.ends_with("verbatim content for memory-get test"),
+        advisory.starts_with("sensitivity_advisory: "),
+        "with no grant live the reply must end with the sensitivity-gate advisory; got: {text}"
+    );
+    let body = text[..text.len() - advisory.len()].trim_end_matches('\n');
+    assert!(
+        body.ends_with("verbatim content for memory-get test"),
         "response must include the exact verbatim content as the final block; got: {text}"
     );
 }

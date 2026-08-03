@@ -852,11 +852,6 @@ fn run_memory_search(
     // "high — clear top result" is never reported on a lexical-only ranking.
     let dense_lane_dark = result.dense_lane_status.is_some();
 
-    // Release the coordinator lock before the sensitivity advisory check.
-    // has_sensitive_rows() acquires the same non-reentrant Mutex — holding
-    // it here would deadlock the server on every no-grant search call.
-    drop(coord);
-
     // Dense-row reply (PR-03): UUID · subject · fdc · qid · event_time per
     // hit — the address plus the assertion, no content hauling. Redaction
     // (provenance sensitivity restricted/secret) replaces the subject field
@@ -905,17 +900,20 @@ fn run_memory_search(
         };
         lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
     }
-    // redaction advisory stat.
-    // When no grant is active, check cheaply whether the estate holds any
-    // restricted or secret rows. If so, append an advisory so the AI client
-    // knows results may be incomplete and how to request access.
-    // Gated on `!sensitivity_ceiling_lifted` — when a grant IS live, the rows
-    // are already included and no advisory is appropriate.
-    // The stat uses a limit-1 LocusOnly scan with no query text (origin:
-    // Internal — no trace rows, B-10a). See `has_sensitive_rows`.
-    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+    // Sensitivity-gate advisory — conditioned on GRANT STATE ALONE.
+    // When no grant is live the gate is in effect, so the client is told
+    // the gate exists and which commands lift it. The message asserts
+    // NOTHING about what this estate holds: any condition that consulted
+    // estate contents would make advisory presence a disclosure channel
+    // for exactly the restricted/secret rows the gate protects, to a
+    // caller with no grant. Emitting on grant state alone discloses
+    // nothing — the caller is the party that did not unlock, so they
+    // already know it. Gated on `!sensitivity_ceiling_lifted`: under a live
+    // grant those rows are already included and no advisory applies.
+    // Mirrors Swift `runMemorySearch`.
+    if !sensitivity_ceiling_lifted {
         lines.push(
-            "sensitivity_advisory: results may be hidden by sensitivity tier — \
+            "sensitivity_advisory: a sensitivity tier gate is in effect — \
              run `mootx01 unlock private` to include restricted memories, \
              `mootx01 unlock secret` for secret memories.".to_string()
         );
@@ -952,7 +950,10 @@ fn run_memory_search(
 /// which strips the content blob this tool exists to return. Provenance
 /// `Sensitivity::Restricted` and `Sensitivity::Secret` remain access-controlled
 /// at the MCP boundary and are reported with the same not-found shape as other
-/// gate failures until an explicit grant mechanism exists.
+/// gate failures. A live sensitivity grant lifts the ADJECTIVE ceiling ONLY —
+/// the provenance gate is unconditional and does not consult the grant ledger,
+/// matching Swift `ToolDispatcher.runMemoryGet` (conformance parity: if that
+/// ruling is revisited, both verticals change together).
 fn run_memory_get(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -1129,19 +1130,17 @@ fn run_memory_get(
 
     let mut lines = memory_get_full_record_lines(&mut coord, &estate.handle, &drawer)?;
 
-    // Release the coordinator lock before the sensitivity advisory check.
-    // has_sensitive_rows() acquires the same non-reentrant Mutex — holding
-    // it here would deadlock the server on every no-grant get call.
-    drop(coord);
-
-    // redaction advisory stat  — same logic as
-    // run_memory_search. When no grant is active, surface an advisory if the
-    // estate contains any restricted/secret rows the default gate suppresses.
-    // Consistent with search so the AI client receives the same hint from
-    // both tools. Mirrors Swift ToolDispatcher.runMemoryGet.
-    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+    // Sensitivity-gate advisory — same rule as run_memory_search: grant
+    // state alone, never estate contents. It matters more here than in
+    // search, because this reply follows a SUCCESSFUL fetch of a visible
+    // row; a contents-dependent advisory would attach an estate-wide
+    // existence signal to that reply, which is precisely what this
+    // function's containment contract (see its doc comment: gated rows
+    // must be indistinguishable from absent ones) forbids.
+    // Mirrors Swift `ToolDispatcher.runMemoryGet`.
+    if !sensitivity_ceiling_lifted {
         lines.push(
-            "sensitivity_advisory: some memories may be hidden by sensitivity tier — \
+            "sensitivity_advisory: a sensitivity tier gate is in effect on this estate — \
              run `mootx01 unlock private` to include restricted memories, \
              `mootx01 unlock secret` for secret memories.".to_string()
         );
@@ -1217,49 +1216,6 @@ fn memory_get_full_record_lines(
     lines.push("content:".to_string());
     lines.push(drawer.content.clone());
     Ok(lines)
-}
-
-/// Returns `true` if the estate has at least one row tagged restricted or secret.
-///
-/// Used by `run_memory_search` and `run_memory_get` to decide whether to append a
-/// sensitivity advisory. The advisory tells the AI client
-/// that results may be incomplete and how to unlock the hidden tier.
-///
-/// Implementation: two limit-1 `GLKRecallRequest` probes with explicit
-/// `Filter::Sensitivity(tier)` — these filters suppress the default
-/// `sensitivityAtMost(Elevated)` gate (see `BitmapEvaluator::insert_defaults`),
-/// so restricted/secret rows become visible for counting. Mode `LocusOnly` +
-/// scoring `Raw` skips the BM25/vector pipeline — a pure bitmap filter probe.
-///
-/// Origin defaults to `RecallOrigin::Internal` (the builder default) — must NOT
-/// write recall-trace rows (B-10a: only the ARIA_MCP external boundary sets External).
-fn has_sensitive_rows(estate: &crate::estate_registry::OpenEstate, now: i64) -> bool {
-    use genius_locus_kit::recall::{
-        GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    };
-    use locus_kit::adjectives::AdjectiveSensitivity;
-    use locus_kit::filter::{Filter, RecallFrame};
-
-    let coord = estate.coord.lock().unwrap();
-    for tier in &[AdjectiveSensitivity::Restricted, AdjectiveSensitivity::Secret] {
-        // Limit 1: stop at first match — no need to count.
-        let mut frame = RecallFrame::new(vec![Filter::Sensitivity(*tier)]);
-        // Structured hydration (default): no content body needed — existence check only.
-        // Limit: 1 — stops at the first matching row.
-        frame.limit = Some(1);
-        let request = GLKRecallRequest::new(frame)
-            .with_mode(GLKRecallMode::LocusOnly) // Skip BM25/vector — pure bitmap probe.
-            .with_scoring(GLKRecallScoring::Raw) // No matrix scoring needed.
-            .with_limit(1);
-        // A failed call is treated as "no sensitive rows" — fail-safe:
-        // don't surface the advisory when we can't confirm sensitive rows exist.
-        if let Ok(result) = coord.recall_scored(&estate.handle, request, now) {
-            if !result.hits.is_empty() {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Note that a drawer id was "used" (acted upon) by a dereference verb.
