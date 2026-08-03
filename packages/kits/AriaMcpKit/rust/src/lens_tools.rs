@@ -157,11 +157,31 @@ pub fn dispatch(
             } else {
                 ranked.iter().collect()
             };
+            // Dense-row citations: each keystone carries its address and lattice
+            // metadata so the caller can memory_get it immediately
+            // (progressive-recall rule). Twin of Swift keystones dense-row path.
+            let dense_by_id: std::collections::HashMap<String, String> = filtered
+                .iter()
+                .filter_map(|k| {
+                    estate
+                        .store
+                        .get_drawer(&k.id)
+                        .ok()
+                        .flatten()
+                        .map(|d| (k.id.clone(), crate::dense_row::render(&d)))
+                })
+                .collect();
             Ok(list(
                 "keystones",
                 filtered
                     .iter()
-                    .map(|k| format!("{} centrality={}", k.id, k.centrality))
+                    .map(|k| {
+                        let row = dense_by_id
+                            .get(&k.id)
+                            .cloned()
+                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&k.id));
+                        format!("{} centrality={}", row, k.centrality)
+                    })
                     .collect(),
             ))
         }
@@ -206,10 +226,32 @@ pub fn dispatch(
                      moot_connection_map to see links pointing into this drawer.",
                 ));
             }
+            // Dense-row citations: each association hit carries its address
+            // so the caller can memory_get it (progressive-recall rule).
+            // Twin of Swift free_association dense-row path.
+            let fa_dense_by_id: std::collections::HashMap<String, String> = out
+                .iter()
+                .filter_map(|a| {
+                    estate
+                        .store
+                        .get_drawer(&a.drawer_id)
+                        .ok()
+                        .flatten()
+                        .map(|d| (a.drawer_id.clone(), crate::dense_row::render(&d)))
+                })
+                .collect();
             Ok(list(
                 "free_association",
                 out.iter()
-                    .map(|a| format!("{} activation={}", a.drawer_id, a.activation))
+                    .map(|a| {
+                        let row = fa_dense_by_id
+                            .get(&a.drawer_id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                crate::dense_row::render_unhydrated(&a.drawer_id)
+                            });
+                        format!("{} activation={}", row, a.activation)
+                    })
                     .collect(),
             ))
         }
@@ -463,9 +505,33 @@ pub fn dispatch(
             let threshold = opt_float(args, "threshold", 1.5)? as f32;
             let out = run_contradiction(&coord, &estate.handle, frame, threshold, now)
                 .map_err(lens_error)?;
+            // Dense-row citations: each outlier ID is a followable drawer address
+            // (progressive-recall rule). Twin of Swift cohesion dense-row path.
+            let coh_dense_by_id: std::collections::HashMap<String, String> = out
+                .outliers
+                .iter()
+                .filter_map(|id| {
+                    estate
+                        .store
+                        .get_drawer(id)
+                        .ok()
+                        .flatten()
+                        .map(|d| (id.clone(), crate::dense_row::render(&d)))
+                })
+                .collect();
+            let outlier_rows: Vec<String> = out
+                .outliers
+                .iter()
+                .map(|id| {
+                    coh_dense_by_id
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| crate::dense_row::render_unhydrated(id))
+                })
+                .collect();
             Ok(list(
                 &format!("cohesion_outliers (considered {})", out.considered),
-                out.outliers,
+                outlier_rows,
             ))
         }
 
@@ -513,14 +579,21 @@ pub fn dispatch(
             // The same get_drawer calls that build the hidden-endpoint set also
             // check the isKeystone flag. Feature-flag adoption §3.
             // Mirrors Swift LensTools contradiction dispatch.
-            let (hidden_tunnel_endpoint_ids, keystone_endpoint_ids): (
+            // Build hidden-endpoint set, keystone set, and dense-row map in one
+            // pass over the emitted endpoint IDs. Dense rows are stored only for
+            // visible (bulk-exportable) endpoints; hidden IDs are suppressed at
+            // render time before the dense-row lookup is reached.
+            // Twin of Swift contradiction dense-row path (PR-05 Part B).
+            let (hidden_tunnel_endpoint_ids, keystone_endpoint_ids, contradiction_dense_by_id): (
                 std::collections::HashSet<String>,
                 std::collections::HashSet<String>,
+                std::collections::HashMap<String, String>,
             ) = {
                 use locus_kit::drawer_operational::DrawerFeatureFlags;
                 let mut seen = std::collections::HashSet::new();
                 let mut hidden = std::collections::HashSet::new();
                 let mut keystones = std::collections::HashSet::new();
+                let mut dense = std::collections::HashMap::new();
                 for id in contradicts_tunnels
                     .iter()
                     .take(50)
@@ -531,13 +604,15 @@ pub fn dispatch(
                     if let Ok(Some(drawer)) = estate.store.get_drawer(id) {
                         if !drawer.adjective_sensitivity().is_bulk_exportable() {
                             hidden.insert(id.clone());
+                        } else {
+                            dense.insert(id.clone(), crate::dense_row::render(&drawer));
                         }
                         if drawer.has_feature_flag(DrawerFeatureFlags::IS_KEYSTONE) {
                             keystones.insert(id.clone());
                         }
                     }
                 }
-                (hidden, keystones)
+                (hidden, keystones, dense)
             };
             // Sort the emitted slice so keystone-involving contradictions surface
             // first. Stable: pairs within each group retain their original order.
@@ -559,18 +634,27 @@ pub fn dispatch(
                 lines.push("contradicts_tunnels: none".to_string());
             } else {
                 lines.push(format!("contradicts_tunnels: {}", contradicts_tunnels.len()));
+                // Dense-row citations: visible endpoints render as dense rows
+                // (progressive-recall rule); hidden endpoints suppress to "<hidden>";
+                // absent drawer IDs fall back to wing name.
                 // node-tree integrity bridge consumer: source_wing/target_wing used as
                 // display fallback when drawer IDs are absent on tunnel metadata.
                 for t in emitted.iter() {
                     let src = match t.source_drawer_id.as_deref() {
-                        Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>",
-                        Some(id) => id,
-                        None => t.source_wing.as_str(),
+                        Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>".to_string(),
+                        Some(id) => contradiction_dense_by_id
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+                        None => t.source_wing.clone(),
                     };
                     let tgt = match t.target_drawer_id.as_deref() {
-                        Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>",
-                        Some(id) => id,
-                        None => t.target_wing.as_str(),
+                        Some(id) if hidden_tunnel_endpoint_ids.contains(id) => "<hidden>".to_string(),
+                        Some(id) => contradiction_dense_by_id
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+                        None => t.target_wing.clone(),
                     };
                     let tier = if t.lifecycle() == TunnelLifecycle::Proposed {
                         " [proposed (agent-derived, unreviewed) — accept/reject via moot_review_tunnel]"
@@ -677,13 +761,31 @@ pub fn dispatch(
             let node_names = std::collections::HashMap::new();
             let out = run_trust_grounded_synthesis(&coord, &estate.handle, frame, None, now, &node_names)
                 .map_err(lens_error)?;
-            Ok(text_result(&format!(
-                "trust_grounded_synthesis: {} drawer(s), {} high-trust\nranked: {}\nsummary: {}",
+            // Dense-row citations per ranked drawer (progressive-recall rule).
+            // Each row is prefixed with two spaces (not "  - ") to match Swift
+            // trust_synthesis format. Twin of Swift LensTools trust_synthesis path.
+            let ts_dense_by_id: std::collections::HashMap<String, String> = out
+                .ranked_ids
+                .iter()
+                .filter_map(|id| {
+                    estate.store.get_drawer(id).ok().flatten()
+                        .map(|d| (id.clone(), crate::dense_row::render(&d)))
+                })
+                .collect();
+            let mut ts_lines = vec![format!(
+                "trust_grounded_synthesis: {} drawer(s), {} high-trust",
                 out.ranked_ids.len(),
                 out.high_trust_count,
-                out.ranked_ids.join(", "),
-                out.context.summary
-            )))
+            )];
+            for id in &out.ranked_ids {
+                let row = ts_dense_by_id
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| crate::dense_row::render_unhydrated(id));
+                ts_lines.push(format!("  {row}"));
+            }
+            ts_lines.push(format!("summary: {}", out.context.summary));
+            Ok(text_result(&ts_lines.join("\n")))
         }
 
         "moot_lens_partial_cue" => {
@@ -693,15 +795,31 @@ pub fn dispatch(
             let frame = recall_frame(args)?;
             match run_partial_cue_recall(&coord, &estate.handle, frame, anchor_id, mode, k, now) {
                 Ok(matches) => {
+                    // Dense-row citations: each match cites its address and lattice
+                    // metadata (progressive-recall rule). Twin of Swift partial_cue
+                    // dense-row path.
                     // Discrimination signal: fingerprint-based scores tend to be
-                    // near-flat on small corpora — surface this honestly.
+                    // near-flat on small corpora — surface this.
+                    let pc_dense_by_id: std::collections::HashMap<String, String> = matches
+                        .iter()
+                        .filter_map(|m| {
+                            estate.store.get_drawer(&m.id).ok().flatten()
+                                .map(|d| (m.id.clone(), crate::dense_row::render(&d)))
+                        })
+                        .collect();
                     let cue_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
                     let discrimination = crate::recall_discrimination::classify(&cue_scores);
                     let discrimination_line =
                         crate::recall_discrimination::result_line(discrimination);
                     let result_lines: Vec<String> = matches
                         .iter()
-                        .map(|m| format!("{} score={}", m.id, m.score))
+                        .map(|m| {
+                            let row = pc_dense_by_id
+                                .get(&m.id)
+                                .cloned()
+                                .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id));
+                            format!("{} score={}", row, m.score)
+                        })
                         .collect();
                     let mut body =
                         format!("partial_cue_recall: {} result(s)", result_lines.len());
@@ -779,10 +897,26 @@ pub fn dispatch(
             let k = opt_integer(args, "k", 5)?.max(0) as usize;
             let out = run_tunnel_successor(&coord, &estate.handle, wing, anchor_id, k)
                 .map_err(lens_error)?;
+            // Dense-row citations: each successor cites its address and lattice
+            // metadata so the caller can memory_get it immediately
+            // (progressive-recall rule). Twin of Swift successors dense-row path.
+            let suc_dense_by_id: std::collections::HashMap<String, String> = out
+                .iter()
+                .filter_map(|s| {
+                    estate.store.get_drawer(&s.id).ok().flatten()
+                        .map(|d| (s.id.clone(), crate::dense_row::render(&d)))
+                })
+                .collect();
             Ok(list(
                 "tunnel_successor",
                 out.iter()
-                    .map(|s| format!("{} weight={}", s.id, s.weight))
+                    .map(|s| {
+                        let row = suc_dense_by_id
+                            .get(&s.id)
+                            .cloned()
+                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&s.id));
+                        format!("{} weight={}", row, s.weight)
+                    })
                     .collect(),
             ))
         }
