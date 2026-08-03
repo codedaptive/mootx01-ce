@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.24.0
+version: 1.25.0
 status: accepted-1.1-target
-date: 2026-08-02
+date: 2026-08-03
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -870,22 +870,57 @@ mootx01 lock
 accepted. Both commands require the resident daemon (`mootx01 serve --http auto`)
 to be running.
 
-### Redaction advisory in moot_memory_search / moot_memory_get output
+### Sensitivity-gate advisory in moot_memory_search / moot_memory_get output
 
-When no sensitivity grant is active and the estate has at least one row tagged
-`restricted` or `secret`, both `moot_memory_search` and `moot_memory_get` append a
-trailing `sensitivity_advisory:` line to their output text:
+When no sensitivity grant is active, both `moot_memory_search` and
+`moot_memory_get` append a trailing `sensitivity_advisory:` line to their output
+text. Search and get carry distinct phrasings; each is byte-identical across the
+Swift and Rust ports.
+
+`moot_memory_search`:
 
 ```
-sensitivity_advisory: results may be hidden by sensitivity tier — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
+sensitivity_advisory: a sensitivity tier gate is in effect — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
 ```
 
-The advisory is absent when a grant IS active (rows are already visible and no
-guidance is needed). It is also absent when the estate has no sensitive rows at all.
-The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector cost,
-no recall-trace rows written — `origin: internal` per B-10a).
+`moot_memory_get`:
+
+```
+sensitivity_advisory: a sensitivity tier gate is in effect on this estate — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
+```
+
+The advisory is absent when a grant IS active — the ceiling is lifted, the rows
+are already visible, and no guidance applies. Presence depends on grant state and
+on nothing else.
+
+**Invariant — the advisory MUST NOT be conditioned on estate contents.** A
+condition such as "the estate holds at least one `restricted` or `secret` row"
+turns advisory presence into a disclosure channel for exactly the rows the
+sensitivity gate protects, readable by any caller holding no grant. Determining
+that condition also requires an explicit sensitivity filter, which per
+`BitmapEvaluator` suppresses the default `sensitivityAtMost(elevated)` ceiling —
+the gate defeats itself to answer the question. Emitting on grant state alone
+discloses nothing: the caller is the party that did not unlock, so the grant
+state is already theirs. Conformance for this invariant is two estates that
+differ only in whether sensitive rows exist, asserted to produce identical
+advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.25.0 -- 2026-08-03
+The sensitivity advisory on `moot_memory_search` and `moot_memory_get` is now
+emitted on grant state alone. Its previous second condition — an estate-contents
+check for `restricted`/`secret` rows — made advisory presence an estate-wide
+existence oracle for those rows, readable by a caller with no grant, and the
+check itself defeated the sensitivity ceiling to run (an explicit sensitivity
+filter suppresses `BitmapEvaluator`'s `sensitivityAtMost(elevated)` default).
+The probe is deleted in both ports rather than narrowed, which also removes its
+untraced `origin: internal` recall. Both advisory strings are reworded so they
+are true regardless of estate contents and no longer assert that results are
+being hidden; search and get keep distinct phrasings and each is byte-identical
+across ports. Advisory absence under a live grant is unchanged. Adds the
+contents-independence invariant above and its two-estate conformance test in
+both ports.
 
 ### 1.24.0 -- 2026-08-03
 

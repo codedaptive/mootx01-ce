@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.28.0
+version: 1.29.0
 status: accepted-1.1-target
-date: 2026-08-02
+date: 2026-08-03
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1165,6 +1165,18 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.29.0 -- 2026-08-03
+Observable output change on `moot_memory_search` and `moot_memory_get`: the
+trailing `sensitivity_advisory:` line is now emitted whenever no sensitivity
+grant is live, independent of what the estate contains. It previously also
+required the estate to hold at least one `restricted`/`secret` row, which made
+its presence an existence oracle for those rows. Both strings are reworded and
+are byte-identical across the Swift and Rust ports; search and get keep distinct
+phrasings. The `sensitivity_advisory: ` line prefix is unchanged, so consumers
+that strip or detect the line by prefix (e.g. `MootSpotlightRecord.parse`) need
+no change. Behavioural contract and the contents-independence invariant:
+`ARIA_MCP_SPEC.md` 1.25.0.
 
 ### 1.28.0 -- 2026-08-03
 
