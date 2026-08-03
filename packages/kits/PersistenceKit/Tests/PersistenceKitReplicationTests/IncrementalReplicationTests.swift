@@ -1578,9 +1578,14 @@ struct IncrementalReplicationTests {
     ///
     /// The two decoders DO agree for this pair and these column types — this test
     /// passes with the reconcile pass on either side of the upserts, which was
-    /// checked explicitly. So it is not a guard on the pass ordering; it is the
-    /// only cross-backend coverage in the suite, pinning that a value-less
-    /// update and delete both land correctly when the ends differ.
+    /// checked explicitly. So it is not a guard on the pass ordering.
+    ///
+    /// What it is: the only test that reaches the re-scan reconciliation's
+    /// SUCCESS path across a cross-backend pair and asserts that a row absent
+    /// from the source is deleted at the destination. Other tests do pair
+    /// SQLite with InMemory (§10.4, §10.9, §10.10, §10.B4, §10.B5), but they
+    /// either abort mid-sync or exercise the blob path, so none of them covers
+    /// this. That was the gap.
     @Test func rescanReconciliationIsSafeAcrossDifferentBackendTypes() async throws {
         let (source, sourceURL) = try await makeSQLite()
         defer { removeSQLite(at: sourceURL) }
