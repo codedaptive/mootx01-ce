@@ -107,6 +107,67 @@ pub fn render(drawer: &Drawer) -> String {
     .join(SEPARATOR)
 }
 
+/// Fetch dense rows for a set of hit ids in one structured-tier read,
+/// keyed by id. Twin of Swift `RecipeTools.denseRowsByID`.
+///
+/// THIS IS THE SENSITIVITY BOUNDARY for every by-id dense-row caller.
+/// Gate here, once; never at the call sites. A per-arm check is how the
+/// hole reappears: the next lens arm that hydrates an id inherits whatever
+/// this helper does. Callers pass ids and render whatever comes back.
+///
+/// THE EMPTY `RecallFrame` FILTER CHAIN IS LOAD-BEARING, NOT AN ABSENT
+/// ARGUMENT. `BitmapEvaluator::insert_defaults` inserts
+/// `SensitivityAtMost(Elevated)` into any chain carrying no sensitivity
+/// filter, and that predicate is evaluated against the ADJECTIVE bitmap —
+/// the same axis `AdjectiveSensitivity::is_bulk_exportable` tests. So a
+/// `Restricted` or `Secret` drawer never reaches `admissible`, and
+/// `render` is never called with one. No explicit sensitivity check
+/// appears below because it could never fire; the frame has already
+/// removed those rows.
+///
+/// Do NOT "simplify" this to a raw `store.get_drawer(id)` loop. That read
+/// applies no ceiling at all, and these ids arrive from tunnel graphs
+/// whose edges carry the sensitivity their endpoints had AT LINK TIME — a
+/// drawer restricted after its tunnels were created is still reachable
+/// through a stale edge, and the raw read would emit its subject. Reaching
+/// the ceiling through the frame is also what keeps this port's admission
+/// rule identical to Swift's rather than a second one that can drift.
+///
+/// Gated rows are simply ABSENT from the returned map rather than
+/// substituted, so each arm's existing `render_unhydrated` fallback
+/// produces the opaque row: the id and its ranking value still appear, the
+/// subject does not. Omitting the row entirely would change result counts
+/// and rankings and make the gate itself an oracle.
+///
+/// FAIL-CLOSED: an unresolvable estate or a failed read yields an empty
+/// map, so every row degrades to unhydrated rather than leaking on error.
+pub fn rows_by_id(
+    coord: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    ids: &[String],
+) -> std::collections::HashMap<String, String> {
+    if ids.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let Ok(locus_estate) = coord.estate_for(handle) else {
+        return std::collections::HashMap::new();
+    };
+    let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+    frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+    locus_estate
+        .get_drawers_matching_frame(ids, &frame)
+        .map(|f| {
+            f.admissible
+                .into_iter()
+                .map(|d| {
+                    let row = render(&d);
+                    (d.id.clone(), row)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Render a dense row for a hit returned without a hydrated drawer
 /// (defensive: structured-tier callers). The address is still useful;
 /// every other field shows its absence marker so row cost stays uniform.

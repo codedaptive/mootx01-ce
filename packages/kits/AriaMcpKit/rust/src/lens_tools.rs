@@ -160,17 +160,15 @@ pub fn dispatch(
             // Dense-row citations: each keystone carries its address and lattice
             // metadata so the caller can memory_get it immediately
             // (progressive-recall rule). Twin of Swift keystones dense-row path.
-            let dense_by_id: std::collections::HashMap<String, String> = filtered
-                .iter()
-                .filter_map(|k| {
-                    estate
-                        .store
-                        .get_drawer(&k.id)
-                        .ok()
-                        .flatten()
-                        .map(|d| (k.id.clone(), crate::dense_row::render(&d)))
-                })
-                .collect();
+            // Hydration goes through the shared gated boundary: these ids come
+            // from the TUNNEL graph, whose edges carry the sensitivity their
+            // endpoints had at link time, so a since-restricted endpoint is
+            // still reachable here and must not render its subject.
+            let dense_by_id = crate::dense_row::rows_by_id(
+                &coord,
+                &estate.handle,
+                &filtered.iter().map(|k| k.id.clone()).collect::<Vec<_>>(),
+            );
             Ok(list(
                 "keystones",
                 filtered
@@ -229,17 +227,14 @@ pub fn dispatch(
             // Dense-row citations: each association hit carries its address
             // so the caller can memory_get it (progressive-recall rule).
             // Twin of Swift free_association dense-row path.
-            let fa_dense_by_id: std::collections::HashMap<String, String> = out
-                .iter()
-                .filter_map(|a| {
-                    estate
-                        .store
-                        .get_drawer(&a.drawer_id)
-                        .ok()
-                        .flatten()
-                        .map(|d| (a.drawer_id.clone(), crate::dense_row::render(&d)))
-                })
-                .collect();
+            // Hydration goes through the shared gated boundary: this is a walk
+            // over the TUNNEL graph, so a since-restricted drawer is reachable
+            // through an edge that still carries its old classification.
+            let fa_dense_by_id = crate::dense_row::rows_by_id(
+                &coord,
+                &estate.handle,
+                &out.iter().map(|a| a.drawer_id.clone()).collect::<Vec<_>>(),
+            );
             Ok(list(
                 "free_association",
                 out.iter()
@@ -507,18 +502,13 @@ pub fn dispatch(
                 .map_err(lens_error)?;
             // Dense-row citations: each outlier ID is a followable drawer address
             // (progressive-recall rule). Twin of Swift cohesion dense-row path.
-            let coh_dense_by_id: std::collections::HashMap<String, String> = out
-                .outliers
-                .iter()
-                .filter_map(|id| {
-                    estate
-                        .store
-                        .get_drawer(id)
-                        .ok()
-                        .flatten()
-                        .map(|d| (id.clone(), crate::dense_row::render(&d)))
-                })
-                .collect();
+            // These ids are frame-fed — they come back from a recall that already
+            // applied the default ceiling — so nothing here is reachable that the
+            // gate would reject. Hydration still routes through the shared
+            // boundary so every lens arm reads the same way and a future arm
+            // copying this one inherits the gate rather than a raw store read.
+            let coh_dense_by_id =
+                crate::dense_row::rows_by_id(&coord, &estate.handle, &out.outliers);
             let outlier_rows: Vec<String> = out
                 .outliers
                 .iter()
@@ -774,14 +764,10 @@ pub fn dispatch(
             // Dense-row citations per ranked drawer (progressive-recall rule).
             // Each row is prefixed with two spaces (not "  - ") to match Swift
             // trust_synthesis format. Twin of Swift LensTools trust_synthesis path.
-            let ts_dense_by_id: std::collections::HashMap<String, String> = out
-                .ranked_ids
-                .iter()
-                .filter_map(|id| {
-                    estate.store.get_drawer(id).ok().flatten()
-                        .map(|d| (id.clone(), crate::dense_row::render(&d)))
-                })
-                .collect();
+            // Frame-fed ids (see the cohesion arm above) — routed through the
+            // shared gated boundary for uniformity, not because they leak.
+            let ts_dense_by_id =
+                crate::dense_row::rows_by_id(&coord, &estate.handle, &out.ranked_ids);
             let mut ts_lines = vec![format!(
                 "trust_grounded_synthesis: {} drawer(s), {} high-trust",
                 out.ranked_ids.len(),
@@ -810,13 +796,14 @@ pub fn dispatch(
                     // dense-row path.
                     // Discrimination signal: fingerprint-based scores tend to be
                     // near-flat on small corpora — surface this.
-                    let pc_dense_by_id: std::collections::HashMap<String, String> = matches
-                        .iter()
-                        .filter_map(|m| {
-                            estate.store.get_drawer(&m.id).ok().flatten()
-                                .map(|d| (m.id.clone(), crate::dense_row::render(&d)))
-                        })
-                        .collect();
+                    // Frame-fed ids (see the cohesion arm above) — routed through
+                    // the shared gated boundary for uniformity, not because they
+                    // leak.
+                    let pc_dense_by_id = crate::dense_row::rows_by_id(
+                        &coord,
+                        &estate.handle,
+                        &matches.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                    );
                     let cue_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
                     let discrimination = crate::recall_discrimination::classify(&cue_scores);
                     let discrimination_line =
@@ -910,13 +897,14 @@ pub fn dispatch(
             // Dense-row citations: each successor cites its address and lattice
             // metadata so the caller can memory_get it immediately
             // (progressive-recall rule). Twin of Swift successors dense-row path.
-            let suc_dense_by_id: std::collections::HashMap<String, String> = out
-                .iter()
-                .filter_map(|s| {
-                    estate.store.get_drawer(&s.id).ok().flatten()
-                        .map(|d| (s.id.clone(), crate::dense_row::render(&d)))
-                })
-                .collect();
+            // Hydration goes through the shared gated boundary: successors are
+            // read straight off the TUNNEL graph, so an endpoint restricted
+            // after the edge was created is still reachable here.
+            let suc_dense_by_id = crate::dense_row::rows_by_id(
+                &coord,
+                &estate.handle,
+                &out.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            );
             Ok(list(
                 "tunnel_successor",
                 out.iter()
