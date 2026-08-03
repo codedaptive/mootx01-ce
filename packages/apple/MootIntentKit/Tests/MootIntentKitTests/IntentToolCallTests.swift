@@ -232,6 +232,13 @@ struct URLRouterTests {
         // is the caller's assertion about their own content, and an x-callback
         // caller is an arbitrary other app. The substrate refuses, and the
         // refusal is what the caller gets back.
+        //
+        // HANDOFF TO TASK-MXE-2026-0235: this test asserts the *substrate*
+        // refuses, which presumes `capture` is still in the router's verb
+        // allowlist. If that task drops `capture` from the allowlist, the
+        // outcome becomes .notHandled and this test must be rewritten to assert
+        // the refusal happens at the allowlist instead — a stronger gate, since
+        // it never reaches the substrate at all.
         let url = URL(string: "mootx01://x-callback-url/capture?content=no-subject-here&location=urls&x-success=app://done")!
         let outcome = await router.route(url, using: bridge)
         guard case .routed(_, let text, let isError) = outcome else {
