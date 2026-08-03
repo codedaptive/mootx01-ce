@@ -415,6 +415,16 @@ fn attached_profile_contains_no_canonical_content_table() {
         "corpus_provider_configuration",
         "corpus_provider_counts",
         "corpus_provider_count_references",
+        // Term-keyed provider vocabulary added in CorpusKitCounts v3 (MXE-RT),
+        // replacing a single blob whose size scaled with vocabulary. Its
+        // `term TEXT` column is derived vocabulary, not canonical content:
+        // iix_termfreqs is already in this profile keyed by (term, item_id),
+        // mapping each term to the document containing it, which is strictly
+        // more revealing. The guard this profile actually enforces is the
+        // "no column named text" assertion below — no place a verbatim copy of
+        // canonical content could land — which a per-term vector column does
+        // not offer.
+        "corpus_provider_vocab",
     ]
     .into_iter()
     .collect();

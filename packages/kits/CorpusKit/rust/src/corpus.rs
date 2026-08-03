@@ -904,7 +904,15 @@ impl Corpus {
             if let Some(persisted) =
                 counts_store.load(trainable.model_id(), trainable.model_version())?
             {
-                accumulator.restore_counts(&persisted.counts)?;
+                // restore_counts_into prefers term rows and falls back to the
+                // blob, so an estate predating the term table rehydrates
+                // exactly as before and converts on its next persist. Nothing
+                // transforms data inside the open path.
+                counts_store.restore_counts_into(
+                    accumulator.as_mut(),
+                    trainable.model_id(),
+                    trainable.model_version(),
+                )?;
                 document_count = persisted.document_count;
                 vocab_anchor = persisted.vocab_size;
             }
@@ -1417,14 +1425,20 @@ impl Corpus {
             })?;
             let Some(state) = guard.as_ref() else { continue };
             let model_version = Self::slot_model_version(slot)?;
-            self.counts_store.upsert(&PersistedCounts {
-                model_id: slot.model_id.clone(),
-                model_version,
-                counts: state.accumulator.serialize_counts(),
-                document_count: state.document_count,
-                vocab_size: state.accumulator.counts_vocabulary_size(),
-                updated_at_secs: now_secs,
-            })?;
+            // Same layout decision as the other write paths — see
+            // CorpusProviderCountsStore::persist_counts_into. This is the path
+            // whose cost the batching exists to amortize: re-serializing the
+            // whole counts blob per chunk is O(N*vocab) over an import, which
+            // term rows remove.
+            self.counts_store.persist_counts_into(
+                state.accumulator.as_ref(),
+                &slot.model_id,
+                &model_version,
+                state.document_count,
+                state.accumulator.counts_vocabulary_size(),
+                now_secs,
+                &self.storage.row_store(),
+            )?;
         }
         Ok(())
     }

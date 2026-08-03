@@ -239,12 +239,22 @@ struct CorpusContentBoundaryTests {
         #expect(names.isDisjoint(with: CorpusSchemaProfile.attachedExcludedTables))
         // corpus_bitmap_generation is the global basis-generation singleton
         // added in CorpusIndexStateStore v2 (bitmap adoption).
+        // corpus_provider_vocab is the term-keyed provider vocabulary added in
+        // CorpusKitCounts v3 (MXE-RT), replacing a single blob whose size
+        // scaled with vocabulary. Its `term TEXT` column is derived vocabulary,
+        // not canonical content: iix_termfreqs already sits in this profile
+        // keyed by (term TEXT, item_id) and maps each term to the document
+        // containing it, which is strictly more revealing. The guard this
+        // profile actually enforces is the "no column named text" check below —
+        // no place a verbatim copy of canonical content could land — and a
+        // per-term vector column does not offer one.
         #expect(names == ["corpus_index_state", "corpus_bitmap_generation",
                           "corpus_provider_coverage",
                           "corpus_provider_configuration",
                           "iix_termfreqs", "iix_doclens",
                           "corpus_provider_basis", "corpus_provider_counts",
-                          "corpus_provider_count_references"])
+                          "corpus_provider_count_references",
+                          "corpus_provider_vocab"])
         // No column named "text" anywhere in the attached profile — there
         // is no place a verbatim copy could land.
         for table in CorpusSchemaProfile.attachedDeclaration.tables {
