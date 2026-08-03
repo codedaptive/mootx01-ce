@@ -220,7 +220,7 @@ struct IncrementalReplicationTests {
             from: source,
             to: destination,
             fromCursor: fullCursor
-        )
+        ).cursor
         #expect(incCursor.rowsWritten == 3, "Incremental sync must write only the 3 dirty rows")
 
         // Destination total must still be 100 rows (updates, not inserts).
@@ -289,7 +289,7 @@ struct IncrementalReplicationTests {
             from: source,
             to: destination,
             fromCursor: fullCursor
-        )
+        ).cursor
         // rowsWritten includes the delete operation.
         #expect(delCursor.rowsWritten == 1, "Delete sync should record 1 operation")
 
@@ -350,7 +350,7 @@ struct IncrementalReplicationTests {
 
         try await pollObserver { await session2.dirtySet.count() >= 1 }
 
-        let cursor2 = try await session2.sync(from: source, to: destination, fromCursor: fullCursor)
+        let cursor2 = try await session2.sync(from: source, to: destination, fromCursor: fullCursor).cursor
 
         // Only the new row and new audit event should be synced.
         #expect(cursor2.rowsWritten == 1, "Second session should sync only the new row")
@@ -519,7 +519,7 @@ struct IncrementalReplicationTests {
         let inputCursor = ReplicationCursor(hlcWatermark: hlc, rowsWritten: 17, auditEventsWritten: 5)
 
         // No writes → empty dirty-set.
-        let outputCursor = try await session.sync(from: source, to: destination, fromCursor: inputCursor)
+        let outputCursor = try await session.sync(from: source, to: destination, fromCursor: inputCursor).cursor
 
         #expect(outputCursor.hlcWatermark == hlc, "Empty sync must return the input watermark")
         #expect(outputCursor.rowsWritten == 17, "Empty sync must return the input rowsWritten")
@@ -563,7 +563,7 @@ struct IncrementalReplicationTests {
         #expect(dirtyCount == 2, "Session should have 2 dirty keys: 1 item + 1 event, got \(dirtyCount)")
 
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
-        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
+        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor).cursor
         #expect(cursor.rowsWritten == 2, "Sync should write one item row and one event row")
 
         let dstItemCount = try await destination.rowStore.count(table: "items", where: nil)
@@ -623,7 +623,7 @@ struct IncrementalReplicationTests {
         try await pollObserver { await session.dirtySet.count() >= 1 }
 
         // Incremental sync: only event3 should be sent (events 1 and 2 are before the watermark).
-        let cursor2 = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        let cursor2 = try await session.sync(from: source, to: destination, fromCursor: fullCursor).cursor
         #expect(cursor2.auditEventsWritten == 1,
                 "Incremental sync should deliver only the new audit event (after watermark)")
 
@@ -727,7 +727,7 @@ struct IncrementalReplicationTests {
         db2.close()
 
         // --- Retry sync must succeed and replicate corruptID. ---
-        let retryCursor = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        let retryCursor = try await session.sync(from: source, to: destination, fromCursor: fullCursor).cursor
         #expect(retryCursor.rowsWritten >= 1,
                 "Retry sync must replicate at least the previously-failed row, got \(retryCursor.rowsWritten)")
 
@@ -844,7 +844,7 @@ struct IncrementalReplicationTests {
         )
 
         // Retry must succeed and replicate both rowA and rowB.
-        let retryCursor = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        let retryCursor = try await session.sync(from: source, to: destination, fromCursor: fullCursor).cursor
         #expect(retryCursor.rowsWritten == 2,
                 "Retry must replicate both rowA and rowB, got \(retryCursor.rowsWritten)")
     }
@@ -884,7 +884,7 @@ struct IncrementalReplicationTests {
         }
 
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
-        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
+        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor).cursor
         #expect(cursor.blobsWritten >= 1, "Incremental sync must propagate the blob put")
 
         let result = try await destination.blobStore.get(key: blobKey)
@@ -926,7 +926,7 @@ struct IncrementalReplicationTests {
         }
 
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
-        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
+        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor).cursor
         #expect(cursor.blobsWritten >= 1, "Incremental sync must propagate the blob delete")
 
         let result = try await destination.blobStore.get(key: blobKey)
@@ -983,7 +983,7 @@ struct IncrementalReplicationTests {
 
         // Sync — blob must replicate to destination.
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
-        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
+        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor).cursor
         #expect(cursor.blobsWritten >= 1, "Incremental sync on SQLite must propagate the blob put")
 
         let got = try await destination.blobStore.get(key: blobKey)
@@ -1001,7 +1001,7 @@ struct IncrementalReplicationTests {
         )
         try await pollObserver { await session.dirtySet.count() >= 1 }
 
-        let cursor2 = try await session.sync(from: source, to: destination, fromCursor: cursor)
+        let cursor2 = try await session.sync(from: source, to: destination, fromCursor: cursor).cursor
         #expect(cursor2.blobsWritten >= 1, "Incremental sync on SQLite must propagate the blob delete")
 
         let gone = try await destination.blobStore.get(key: blobKey)
@@ -1115,7 +1115,7 @@ struct IncrementalReplicationTests {
         db2.close()
 
         // --- Retry sync must succeed and replicate BOTH the row and the blob. ---
-        let retryCursor = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        let retryCursor = try await session.sync(from: source, to: destination, fromCursor: fullCursor).cursor
         #expect(retryCursor.rowsWritten >= 1,
                 "Retry must replicate the previously-failed row (got \(retryCursor.rowsWritten))")
         #expect(retryCursor.blobsWritten >= 1,
@@ -1170,7 +1170,7 @@ struct IncrementalReplicationTests {
 
         // Clean sync — blob must propagate.
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
-        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
+        let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor).cursor
         #expect(cursor.blobsWritten >= 1, "Retry sync must replicate the blob")
 
         let afterRetry = try await destination.blobStore.get(key: blobKey)
