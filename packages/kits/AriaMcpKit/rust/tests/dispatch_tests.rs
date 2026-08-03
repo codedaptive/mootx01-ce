@@ -8646,3 +8646,73 @@ fn dm_elevated_endpoint_still_hydrates_fully() {
          subject; got: {body}"
     );
 }
+
+/// INDISTINGUISHABILITY (Perkins A3). A gated endpoint and an endpoint that
+/// does not exist at all must be rendered by the SAME code path, so the reply
+/// cannot be used as an existence oracle: an attacker who can link an id must
+/// not be able to tell "this drawer exists but is restricted" from "no such
+/// drawer". Both cases reach `render_unhydrated`, so the two rows must be
+/// byte-identical once the id itself is substituted.
+///
+/// MXE-NQ established this property for the near: anchor surface; this is the
+/// lens-arm equivalent, which that mission's test did not cover.
+#[test]
+fn dm_gated_endpoint_is_indistinguishable_from_absent_endpoint() {
+    use locus_kit::tunnel::Tunnel;
+    use locus_kit::tunnel_operational::TunnelKind;
+
+    // Arm A: a real drawer, restricted after the edge was created.
+    let reg_gated = EstateRegistry::new_inmemory();
+    let (src_g, tgt_g) = dm_stale_edge(
+        &reg_gated,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let gated_result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src_g.as_str()],
+        &reg_gated,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let gated_body = content_text(&gated_result);
+
+    // Arm B: an edge pointing at an id that was never a drawer.
+    let reg_absent = EstateRegistry::new_inmemory();
+    let src_a = file_one_memory(&reg_absent, "dm stale-edge source memory", "dm-src");
+    let absent_id = "00000000-0000-4000-8000-00000000dead".to_string();
+    let mut tunnel = Tunnel::new(
+        format!("dm-absent-tunnel-{src_a}"),
+        "Agentic Memory".to_string(),
+        "dm-src".to_string(),
+        "Agentic Memory".to_string(),
+        "dm-nowhere".to_string(),
+        "elaborates".to_string(),
+        "dm-tests".to_string(),
+        aria_mcp::dispatch::wall_now(),
+    );
+    tunnel.kind = TunnelKind::Elaborates;
+    tunnel.source_drawer_id = Some(src_a.clone());
+    tunnel.target_drawer_id = Some(absent_id.clone());
+    reg_absent
+        .default
+        .store
+        .add_tunnel(&tunnel)
+        .expect("add_tunnel must succeed");
+    let absent_result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src_a.as_str()],
+        &reg_absent,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let absent_body = content_text(&absent_result);
+
+    // Substitute each target id out; what remains must match exactly —
+    // same row shape, same absence markers, same weight, same result count.
+    assert_eq!(
+        gated_body.replace(&tgt_g, "<TARGET>"),
+        absent_body.replace(&absent_id, "<TARGET>"),
+        "a gated endpoint must be indistinguishable from an absent one — \
+         any difference is an existence oracle.\ngated:  {gated_body}\nabsent: {absent_body}"
+    );
+}

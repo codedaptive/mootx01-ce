@@ -187,4 +187,59 @@ struct DenseRowSensitivityGateTests {
         #expect(body.contains(DenseRow.renderUnhydrated(id: ids.tgt)),
                 "it must render the unhydrated row byte-for-byte; got: \(body)")
     }
+
+    /// INDISTINGUISHABILITY. A gated endpoint and an endpoint that does not
+    /// exist at all must render through the SAME path, so the reply cannot be
+    /// used as an existence oracle: someone who can link an id must not be
+    /// able to tell "this drawer exists but is restricted" from "no such
+    /// drawer". Both reach `renderUnhydrated`, so the two bodies must be
+    /// byte-identical once the id itself is substituted out.
+    ///
+    /// MXE-NQ established this property for the `near:` anchor surface; this
+    /// is the lens-arm equivalent, which that mission did not cover.
+    @Test func gatedEndpointIsIndistinguishableFromAbsentEndpoint() async throws {
+        // Arm A: a real drawer, restricted after the edge was created.
+        let kitG = GeniusLocusKit()
+        let handleG = try await openEstate(
+            in: kitG, owner: OwnerCredentials(ownerIdentifier: "dm-ind-g"))
+        let ids = try await staleEdge(kitG, handleG, sensitivity: .restricted)
+        let gatedBody = try text(try await ToolDispatcher(kit: kitG, handle: handleG)
+            .dispatch(name: "moot_lens_successors",
+                      arguments: .object([
+                        "wing": .string("study"),
+                        "anchorID": .string(ids.src)])))
+
+        // Arm B: an edge pointing at an id that was never a drawer.
+        let kitA = GeniusLocusKit()
+        let handleA = try await openEstate(
+            in: kitA, owner: OwnerCredentials(ownerIdentifier: "dm-ind-a"))
+        let estateA = try await kitA.estate(for: handleA)
+        let srcA = try await estateA.capture(CaptureFrame(
+            content: "dm stale-edge source memory", channel: .typed, room: "r",
+            latticeAnchor: .udc("004"), addedBy: "dm-tests",
+            embeddingModelID: "test-model-v1",
+            subject: "dm stale-edge source subject")).id
+        let absentID = "00000000-0000-4000-8000-00000000DEAD"
+        _ = try await estateA.capture(TunnelCaptureFrame(
+            sourceWing: "study", sourceRoom: "r",
+            targetWing: "study", targetRoom: "r",
+            label: "relates", addedBy: "dm-tests",
+            sourceDrawerId: srcA, targetDrawerId: absentID, kind: .references))
+        let absentBody = try text(try await ToolDispatcher(kit: kitA, handle: handleA)
+            .dispatch(name: "moot_lens_successors",
+                      arguments: .object([
+                        "wing": .string("study"),
+                        "anchorID": .string(srcA)])))
+
+        // Substitute each target id out; what remains must match exactly —
+        // same row shape, same absence markers, same weight, same count.
+        #expect(gatedBody.replacingOccurrences(of: ids.tgt, with: "<TARGET>")
+                == absentBody.replacingOccurrences(of: absentID, with: "<TARGET>"),
+                """
+                a gated endpoint must be indistinguishable from an absent one \
+                — any difference is an existence oracle.
+                gated:  \(gatedBody)
+                absent: \(absentBody)
+                """)
+    }
 }
