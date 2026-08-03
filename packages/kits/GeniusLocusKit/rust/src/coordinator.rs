@@ -715,6 +715,22 @@ pub struct ContradictionHuntReport {
     pub deduplicated: usize,
 }
 
+/// # Adding a per-estate registry
+///
+/// Every `HashMap<EstateHandle, …>` field below is a PER-ESTATE REGISTRY, and
+/// a handle is stable across reopens of the same estate (`handle.rs`). A
+/// registry that `close` does not remove therefore survives into the next open
+/// of that estate and resolves to state the caller never re-registered.
+///
+/// A new registry needs TWO things beyond its declaration:
+///   1. a removal in `close`, of the form `self.<field>.remove(handle);`
+///      (or `self.<field>.borrow_mut().remove(handle);` for a `RefCell` map),
+///      teardown-ordered if the value owns a worker, a lease, or a connection;
+///   2. nothing else — `tests/estate_close_completeness.rs` reads this file and
+///      fails if a declared registry has no matching removal in the `close`
+///      body. It will catch you, but it cannot fix you.
+///
+/// The Swift twin carries the same note on its own declaration block.
 pub struct EstateCoordinator {
     registry: HashMap<EstateHandle, Estate>,
     pub(crate) branches: HashMap<crate::branches::BranchId, crate::branches::EstateBranch>,
@@ -1458,9 +1474,13 @@ impl EstateCoordinator {
     }
 
     /// Remove an estate from the registry. The handle becomes stale;
-    /// subsequent `estate_for` lookups return `EstateNotOpen`. Also
-    /// drops the grant store, scope vault, and any registered corpus/vector
-    /// handles for that estate.
+    /// subsequent `estate_for` lookups return `EstateNotOpen`.
+    ///
+    /// Drops EVERY per-estate registry entry for the handle, not a subset:
+    /// handles are stable across reopens, so anything left behind resolves on
+    /// the next open of the same estate as state the caller never registered.
+    /// `tests/estate_close_completeness.rs` enforces that this stays complete
+    /// as registries are added.
     pub fn close(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
         if self.registry.remove(handle).is_none() {
             return Err(GeniusLocusKitError::EstateNotOpen {
@@ -1478,13 +1498,27 @@ impl EstateCoordinator {
         }
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
+        // Drop the subject-backfill rider (PR-09). A producer is registered
+        // against a handle, and handles are stable across reopens of the same
+        // estate (`handle.rs` — `estate_uuid` comes from the manifest, so
+        // reopening yields an EQUAL handle). Leaving the entry here would let a
+        // reopened estate resolve to a producer that was never re-registered:
+        // `drain_statuses` would render the `subject_backfill` lane as live and
+        // `subject_backfill_sweep` — which authorises on map presence alone —
+        // would hand full drawer content to it. Dropping the entry returns the
+        // lane to its dark default, which is what a freshly-opened estate must
+        // see.
+        self.subject_producers.remove(handle);
         // Drop the audit log and matrix tier with the estate — a closed handle
         // must not resolve to a live log or a stale recall tier (GLK-03 parity).
         self.audit_logs.remove(handle);
         self.matrix_tiers.remove(handle);
         // Drop the graph cache and preference store with the estate — a closed
-        // handle must not resolve to a stale recall accelerator. Parity of Swift
-        // `close` which drops `graphCaches[handle]` / `preferenceStores[handle]`.
+        // handle must not resolve to a stale recall accelerator. Both are pure
+        // score lookups registered by the caller (`register_graph_cache` /
+        // `register_preference_store`); nothing re-mints them lazily, so a
+        // reopened estate correctly scores their columns at 0.0 until the
+        // caller registers again.
         self.graph_caches.remove(handle);
         self.preference_stores.remove(handle);
         // Drop the node topology provider (w5-nodetree-native). A closed handle
