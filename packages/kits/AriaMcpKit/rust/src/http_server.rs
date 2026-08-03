@@ -1189,13 +1189,10 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
     // Grant the tier.
     match tier_raw.as_str() {
         "restricted" => {
-            // restricted grants expire at LOCAL midnight, not UTC.
-            // Derive the local UTC offset at grant time via POSIX localtime_r.
-            let now_secs = now_ms / 1000;
-            let tz_offset = local_utc_offset_seconds(now_secs);
-            dispatcher
-                .sensitivity_ledger
-                .grant_restricted(now_ms, i64::from(tz_offset));
+            // restricted grants expire at LOCAL midnight, not UTC. The ledger
+            // resolves that boundary against the host timezone's rules on the
+            // target local day; this route supplies only the instant of grant.
+            dispatcher.sensitivity_ledger.grant_restricted(now_ms);
         }
         "secret" => {
             dispatcher.sensitivity_ledger.grant_secret(now_ms);
@@ -1276,135 +1273,6 @@ fn wall_now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-/// Returns the local UTC offset in whole seconds for out-of-band sensitivity grants grant expiry.
-///
-/// out-of-band sensitivity grants requires restricted grants to expire at LOCAL midnight, not UTC
-/// midnight. This offset (seconds east of UTC, tm_gmtoff convention) is passed
-/// to `grant_restricted` so it can compute the correct local-midnight boundary.
-///
-/// Platform split — no new Cargo.toml dependency on either path:
-///
-/// - **Unix** (macOS, Linux): POSIX `localtime_r` via bare `extern "C"`.
-///   `tm_gmtoff` in the POSIX struct tm gives seconds east of UTC directly.
-///   `#[repr(C)]` inserts the correct 4-byte alignment padding before `tm_gmtoff`
-///   automatically; no explicit padding field is needed.
-///
-/// - **Windows**: `localtime_r` does NOT exist in the MSVC CRT (LNK2019 —
-///   gate run 28734286362). Uses `_localtime64_s` (MSVC CRT; note reversed arg
-///   order: result pointer FIRST, then time pointer; returns errno_t, 0=success)
-///   to determine whether DST is currently in effect, then `_get_timezone` and
-///   `_get_dstbias` for the effective UTC offset. Windows struct tm has no
-///   `tm_gmtoff` extension; offset is reconstructed from CRT bias functions.
-///
-/// Failure path on both platforms: return 0 (UTC). A wrong-timezone expiry
-/// grants access for slightly longer or shorter than intended; a daemon crash
-/// would be worse. UTC is the safe fallback.
-fn local_utc_offset_seconds(now_secs: i64) -> i32 {
-    #[cfg(unix)]
-    {
-        // POSIX struct tm layout on 64-bit Unix (macOS + Linux/glibc/musl).
-        // `#[repr(C)]` inserts 4 bytes of implicit padding after tm_isdst (i32,
-        // at offset 32) so that tm_gmtoff (i64) lands at offset 40, matching
-        // the C ABI on both platforms. No explicit padding field is needed.
-        #[repr(C)]
-        struct Tm {
-            tm_sec: i32,
-            tm_min: i32,
-            tm_hour: i32,
-            tm_mday: i32,
-            tm_mon: i32,
-            tm_year: i32,
-            tm_wday: i32,
-            tm_yday: i32,
-            tm_isdst: i32,
-            tm_gmtoff: i64,     // seconds east of UTC (POSIX extension)
-            tm_zone: *const i8, // timezone abbreviation pointer (unused)
-        }
-
-        extern "C" {
-            // time_t is i64 on all 64-bit POSIX targets (macOS, Linux aarch64/x86_64).
-            fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
-        }
-
-        let mut tm: Tm = unsafe { std::mem::zeroed() };
-        let ret = unsafe { localtime_r(&now_secs, &mut tm) };
-        if ret.is_null() {
-            return 0; // system call failed; UTC is a safe fallback
-        }
-        // tm_gmtoff is seconds east of UTC; cast to i32 is safe (max ±50400).
-        return tm.tm_gmtoff as i32;
-    }
-
-    #[cfg(windows)]
-    {
-        // Windows MSVC CRT equivalent. `localtime_r` does not exist (LNK2019 —
-        // gate run 28734286362). `_localtime64_s` is the MSVC replacement.
-        // Critical difference from POSIX: arg order is REVERSED (result pointer
-        // first, then time pointer) and it returns errno_t (0 = success).
-        // Windows struct tm has no `tm_gmtoff` extension; the UTC offset is
-        // reconstructed from `_get_timezone` (standard bias) + `_get_dstbias`
-        // (DST adjustment). `long` is 32-bit on Windows even on 64-bit targets.
-        #[repr(C)]
-        struct WinTm {
-            tm_sec: i32,
-            tm_min: i32,
-            tm_hour: i32,
-            tm_mday: i32,
-            tm_mon: i32,
-            tm_year: i32,
-            tm_wday: i32,
-            tm_yday: i32,
-            tm_isdst: i32, // positive = DST in effect; Windows tm ends here (no tm_gmtoff)
-        }
-
-        extern "C" {
-            // Note: arg order reversed vs POSIX; __time64_t = i64 on MSVC.
-            fn _localtime64_s(result: *mut WinTm, time: *const i64) -> i32;
-            // Stores seconds WEST of UTC for the local standard timezone.
-            // e.g. UTC-5 → 18000; UTC+5 → -18000. `long` = i32 on Windows.
-            fn _get_timezone(seconds: *mut i32) -> i32;
-            // Stores DST offset: typically -3600 ("spring forward" = 1 hr ahead).
-            fn _get_dstbias(bias: *mut i32) -> i32;
-        }
-
-        unsafe {
-            let mut tm: WinTm = std::mem::zeroed();
-            if _localtime64_s(&mut tm, &now_secs) != 0 {
-                return 0; // errno_t nonzero = failure; UTC is a safe fallback
-            }
-
-            // _get_timezone: seconds WEST of UTC for standard time.
-            let mut tz_west: i32 = 0;
-            if _get_timezone(&mut tz_west) != 0 {
-                return 0;
-            }
-
-            // Apply DST if currently in effect. _get_dstbias is negative for
-            // "spring forward" DST (e.g. -3600 → effective west offset shrinks
-            // by one hour). Effective west = tz_west + dst_bias.
-            if tm.tm_isdst > 0 {
-                let mut dst_bias: i32 = 0;
-                if _get_dstbias(&mut dst_bias) == 0 {
-                    // Convert seconds WEST → seconds EAST (tm_gmtoff convention).
-                    return -(tz_west + dst_bias);
-                }
-                // _get_dstbias failed; fall through to standard-time offset.
-            }
-
-            // Convert: seconds WEST → seconds EAST of UTC.
-            -tz_west
-        }
-    }
-
-    // Unreachable on our target matrix (macOS, Linux, Windows), but the
-    // function must compile on any target. UTC is correct for unknown platforms.
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = now_secs;
-        0
-    }
 }
 
 /// Serialize a JSON-RPC error object (null id) to bytes.
@@ -1693,24 +1561,4 @@ mod tests {
         assert_eq!(ms_to_iso8601_utc(500), "1970-01-01T00:00:00Z");
     }
 
-    #[test]
-    fn local_utc_offset_returns_i32_in_valid_range() {
-        // grant_restricted passes the local UTC offset so grants
-        // expire at LOCAL midnight, not UTC midnight. The offset must be a
-        // plausible value: within ±50400 seconds (±14 hours, the widest real
-        // IANA timezone offset). On CI/test boxes this is typically 0 (UTC),
-        // on developer machines it may vary — we only verify the range.
-        let now_secs = {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        };
-        let offset = super::local_utc_offset_seconds(now_secs);
-        assert!(
-            (-50_400..=50_400).contains(&offset),
-            "local_utc_offset_seconds returned {offset}, outside ±14h range"
-        );
-    }
 }

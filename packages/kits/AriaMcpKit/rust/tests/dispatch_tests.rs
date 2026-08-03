@@ -7182,7 +7182,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
         content_text(&before)
     );
 
-    sensitivity_ledger.grant_restricted(aria_mcp::dispatch::wall_now(), 0);
+    sensitivity_ledger.grant_restricted(aria_mcp::dispatch::wall_now());
     let after = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
@@ -7233,7 +7233,7 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
     );
     assert!(before.is_err(), "without a grant, moot_memory_get must report not-found for a restricted drawer");
 
-    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    sensitivity_ledger.grant_restricted(wall_now());
     let after = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id],
         &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
@@ -7262,7 +7262,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
     ).expect("file_memory must succeed");
 
     let sensitivity_ledger = SensitivityGrantLedger::new();
-    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    sensitivity_ledger.grant_restricted(wall_now());
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-search-marker"],
         &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
@@ -7293,7 +7293,7 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     ).expect("file_memory must succeed");
 
     let sensitivity_ledger = SensitivityGrantLedger::new();
-    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    sensitivity_ledger.grant_restricted(wall_now());
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-normal-marker"],
         &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
