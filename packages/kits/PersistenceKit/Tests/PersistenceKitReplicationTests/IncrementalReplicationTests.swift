@@ -74,6 +74,36 @@ private enum IncSyntheticSchema {
     }
 }
 
+/// A schema carrying one keyed table and one table with NO declared primary
+/// key, for the unresolvable-cycle tests (§10.C6, §10.C7).
+///
+/// An empty `primaryKey` is legal — both DDL emitters guard with
+/// `if !primaryKey.isEmpty` and simply omit the PRIMARY KEY clause
+/// (SQLiteSchema.swift:47, rust/src/sqlite.rs:452). Such a table cannot be
+/// reconciled: there is no column set on which to compare a source row against
+/// a destination row, so a change the session cannot key on it is unresolvable
+/// at every granularity.
+private enum PKLessSyntheticSchema {
+    static let kitID = "IncrementalReplicationTestKit"
+    static let version = 1
+
+    static var declaration: SchemaDeclaration {
+        SchemaDeclaration(
+            kitID: kitID,
+            version: version,
+            tables: [IncSyntheticSchema.itemsTable, keylessTable]
+        )
+    }
+
+    static var keylessTable: TableDeclaration {
+        TableDeclaration(
+            name: "keyless",
+            columns: [.text("label"), .int("counter")],
+            primaryKey: []
+        )
+    }
+}
+
 // MARK: - Storage factories
 
 private func makeInMemory(estateID: UUID = UUID()) async throws -> InMemoryStorage {
@@ -1175,6 +1205,402 @@ struct IncrementalReplicationTests {
 
         let afterRetry = try await destination.blobStore.get(key: blobKey)
         #expect(afterRetry == blobBytes, "Blob must be byte-identical at destination after retry sync")
+    }
+
+    // MARK: - §10.C Value-less changes on a durable backend (MXE-IR)
+    //
+    // The whole §10.C block exercises the durable path, which is the one that
+    // was dark. Every test above this point runs on InMemory, which populates
+    // `TableChange.values` on all five verbs — so they passed while SQLite,
+    // which emits `values: nil` for predicate updateRows and deleteRows, was
+    // dropping every update and delete on the floor.
+    //
+    // Codex finding 74e3b7f7e6288191ba31644e4fa4b43b.
+
+    /// §10.C1 — An update through `rowStore.update` on SQLite reaches the
+    /// destination.
+    ///
+    /// REGRESSION TEST: fails against pre-fix code. SQLiteStorage.updateRows
+    /// emits `values: nil`, the old `DirtySet.accumulate` returned without
+    /// recording anything, the dirty set came back empty, and `sync` took the
+    /// early return — reporting success having replicated nothing.
+    @Test func updateThroughRowStorePropagatesOnSQLite() async throws {
+        let (source, sourceURL) = try await makeSQLite()
+        let (destination, destinationURL) = try await makeSQLite()
+        defer { removeSQLite(at: sourceURL); removeSQLite(at: destinationURL) }
+
+        let rowID = UUID()
+        _ = try await source.rowStore.insert(table: "items", values: itemRow(id: rowID, adjectiveBitmap: 0b0001))
+        let fullCursor = try await StorageReplicator.flush(
+            from: source, into: destination, schema: IncSyntheticSchema.declaration
+        )
+        #expect(fullCursor.rowsWritten == 1)
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: IncSyntheticSchema.declaration
+        )
+
+        // Predicate update — the verb that emits no values on this backend.
+        let updated = try await source.rowStore.update(
+            table: "items",
+            values: ["adjective_bitmap": .bitmap(0b1111)],
+            where: .eq(Column(table: "items", name: "id"), .uuid(rowID))
+        )
+        #expect(updated == 1, "Source update must affect exactly one row")
+
+        // The change is unkeyable, so it lands as table dirt, not row dirt.
+        try await pollObserver { await session.dirtySet.pendingRescanTables().contains("items") }
+        #expect(
+            await session.dirtySet.pendingRescanTables() == ["items"],
+            "A value-less update must mark its table for re-scan"
+        )
+        #expect(
+            await session.dirtySet.count() == 0,
+            "No row can be named from a value-less change"
+        )
+
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        #expect(outcome.rescannedTables == ["items"], "The cycle must report the re-scan")
+        #expect(outcome.isComplete, "Nothing here is unresolvable")
+
+        let destRows = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(rowID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(destRows.count == 1, "Destination must still hold the row")
+        #expect(
+            destRows.first?.values["adjective_bitmap"] == .bitmap(0b1111),
+            "Destination must carry the UPDATED value, not the pre-update one"
+        )
+    }
+
+    /// §10.C2 — A delete through `rowStore.delete` on SQLite removes the
+    /// destination row.
+    ///
+    /// REGRESSION TEST: fails against pre-fix code for the same reason as
+    /// §10.C1. This is the confidentiality case in its simplest form — the
+    /// replica kept content the source had removed.
+    @Test func deleteThroughRowStorePropagatesOnSQLite() async throws {
+        let (source, sourceURL) = try await makeSQLite()
+        let (destination, destinationURL) = try await makeSQLite()
+        defer { removeSQLite(at: sourceURL); removeSQLite(at: destinationURL) }
+
+        let doomedID = UUID()
+        let survivorID = UUID()
+        _ = try await source.rowStore.insert(table: "items", values: itemRow(id: doomedID))
+        _ = try await source.rowStore.insert(table: "items", values: itemRow(id: survivorID))
+        let fullCursor = try await StorageReplicator.flush(
+            from: source, into: destination, schema: IncSyntheticSchema.declaration
+        )
+        #expect(try await destination.rowStore.count(table: "items", where: nil) == 2)
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: IncSyntheticSchema.declaration
+        )
+
+        _ = try await source.rowStore.delete(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(doomedID))
+        )
+
+        try await pollObserver { await session.dirtySet.pendingRescanTables().contains("items") }
+
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        #expect(outcome.isComplete)
+
+        let remaining = try await destination.rowStore.query(
+            table: "items", where: nil, orderBy: [], limit: nil, offset: nil
+        )
+        #expect(remaining.count == 1, "Destination must hold exactly the surviving row")
+        #expect(
+            remaining.first?.values["id"] == .uuid(survivorID),
+            "The row that survived at the source is the one that must survive at the destination"
+        )
+        // The reconciliation must not overreach: a row the source still has is
+        // not collateral damage.
+        let doomedAtDestination = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(doomedID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(doomedAtDestination.isEmpty, "The deleted row must be gone from the destination")
+    }
+
+    /// §10.C3 — TOMBSTONE-THEN-REPLICATE, the confidentiality case stated
+    /// directly rather than inferred from the generic update test.
+    ///
+    /// A withdrawal marks the row rather than removing it: `tombstoned_at` goes
+    /// from null to a timestamp through a predicate update, which is exactly the
+    /// value-less verb. If that update does not travel, the destination keeps
+    /// presenting a withdrawn row as live — and because a later insert would
+    /// advance the destination's audit watermark anyway, the system would record
+    /// that it had replicated a withdrawal it never sent.
+    ///
+    /// Both shapes are asserted: the withdrawn row carries its tombstone at the
+    /// destination, and an expunged (hard-deleted) row is absent entirely.
+    @Test func tombstonedAndExpungedRowsAreNotLiveAtDestinationAfterOneCycle() async throws {
+        let (source, sourceURL) = try await makeSQLite()
+        let (destination, destinationURL) = try await makeSQLite()
+        defer { removeSQLite(at: sourceURL); removeSQLite(at: destinationURL) }
+
+        let withdrawnID = UUID()
+        let expungedID = UUID()
+        let liveID = UUID()
+        for id in [withdrawnID, expungedID, liveID] {
+            _ = try await source.rowStore.insert(table: "items", values: itemRow(id: id))
+        }
+        let fullCursor = try await StorageReplicator.flush(
+            from: source, into: destination, schema: IncSyntheticSchema.declaration
+        )
+
+        // Baseline: the destination shows all three rows as live (no tombstone).
+        let baseline = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(withdrawnID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(
+            baseline.first?.values["tombstoned_at"] == .null,
+            "Before the withdrawal the destination copy must be live"
+        )
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: IncSyntheticSchema.declaration
+        )
+
+        // Withdrawal: tombstone the row at the source.
+        let tombstoneAt = Date(timeIntervalSince1970: 1_800_000_000)
+        _ = try await source.rowStore.update(
+            table: "items",
+            values: ["tombstoned_at": .timestamp(tombstoneAt)],
+            where: .eq(Column(table: "items", name: "id"), .uuid(withdrawnID))
+        )
+        // Expunge: remove the row at the source outright.
+        _ = try await source.rowStore.delete(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(expungedID))
+        )
+
+        try await pollObserver { await session.dirtySet.pendingRescanTables().contains("items") }
+
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        #expect(outcome.isComplete, "Both changes are resolvable by re-scan")
+
+        // The withdrawn row must carry its tombstone at the destination, so a
+        // tombstone-honouring read no longer returns it as live.
+        let withdrawnAtDestination = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(withdrawnID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(withdrawnAtDestination.count == 1)
+        #expect(
+            withdrawnAtDestination.first?.values["tombstoned_at"] != .null,
+            "The destination must not still present a withdrawn row as live"
+        )
+
+        // The expunged row must be absent outright.
+        let expungedAtDestination = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(expungedID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(expungedAtDestination.isEmpty, "An expunged row must not be readable at the destination")
+
+        // The untouched row is unaffected.
+        let liveAtDestination = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(liveID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(liveAtDestination.count == 1, "An untouched row must survive the reconciliation")
+        #expect(liveAtDestination.first?.values["tombstoned_at"] == .null)
+    }
+
+    /// §10.C4 — A cycle whose only activity was deletions does not report as a
+    /// no-op.
+    ///
+    /// The empty-dirty-set early return is what made this silent: a deletions-
+    /// only cycle returned `fromCursor` verbatim, indistinguishable from an idle
+    /// cycle. The cycle must now show its work.
+    @Test func deletionsOnlyCycleIsNotReportedAsANoOp() async throws {
+        let (source, sourceURL) = try await makeSQLite()
+        let (destination, destinationURL) = try await makeSQLite()
+        defer { removeSQLite(at: sourceURL); removeSQLite(at: destinationURL) }
+
+        for _ in 0..<3 {
+            _ = try await source.rowStore.insert(table: "items", values: itemRow())
+        }
+        let fullCursor = try await StorageReplicator.flush(
+            from: source, into: destination, schema: IncSyntheticSchema.declaration
+        )
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: IncSyntheticSchema.declaration
+        )
+
+        // Deletions and nothing else.
+        let deleted = try await source.rowStore.delete(table: "items", where: .isTrue)
+        #expect(deleted == 3)
+
+        try await pollObserver { await session.dirtySet.pendingRescanTables().contains("items") }
+
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+
+        #expect(
+            !outcome.rescannedTables.isEmpty,
+            "A deletions-only cycle must report the work it did, not look idle"
+        )
+        #expect(
+            outcome.cursor.rowsWritten == 3,
+            "All three deletions must be counted, got \(outcome.cursor.rowsWritten)"
+        )
+        #expect(
+            try await destination.rowStore.count(table: "items", where: nil) == 0,
+            "Destination must be emptied"
+        )
+    }
+
+    /// §10.C5 — A change shaped like the Rust PostgreSQL backend's predicate
+    /// update and delete — no values AND no rowKey — still resolves.
+    ///
+    /// The live-server legs of the PostgreSQL suite are gated on
+    /// POSTGRES_TEST_URL / PERSISTENCEKIT_PG_URL and skip when it is unset, so
+    /// they cannot establish that this shape resolves. This test feeds the exact
+    /// emission shape (`postgres.rs` predicate update `values: None`,
+    /// `row_key: None`) through the session on a backend that is always present,
+    /// so the code path PostgreSQL takes is covered on every run.
+    @Test func postgresShapedChangeWithoutValuesOrRowKeyResolves() async throws {
+        let source = try await makeInMemory()
+        let destination = try await makeInMemory()
+
+        let rowID = UUID()
+        _ = try await source.rowStore.upsert(
+            table: "items", values: itemRow(id: rowID, adjectiveBitmap: 0b0001), conflictColumns: ["id"]
+        )
+        let fullCursor = try await StorageReplicator.flush(
+            from: source, into: destination, schema: IncSyntheticSchema.declaration
+        )
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: IncSyntheticSchema.declaration
+        )
+
+        // Mutate the source, then hand the session the PostgreSQL-shaped change
+        // rather than the InMemory one (InMemory populates values, which would
+        // exercise the row-dirt path instead of the one under test).
+        _ = try await source.rowStore.update(
+            table: "items",
+            values: ["adjective_bitmap": .bitmap(0b1010)],
+            where: .eq(Column(table: "items", name: "id"), .uuid(rowID))
+        )
+        await session.dirtySet.accumulate(
+            TableChange(table: "items", event: .update, rowKey: nil, values: nil, hlc: nil)
+        )
+
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        #expect(outcome.rescannedTables == ["items"])
+
+        let destRows = try await destination.rowStore.query(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(rowID)),
+            orderBy: [], limit: nil, offset: nil
+        )
+        #expect(
+            destRows.first?.values["adjective_bitmap"] == .bitmap(0b1010),
+            "A change with neither values nor rowKey must still carry the update across"
+        )
+    }
+
+    /// §10.C6 — The audit watermark does not advance past an unresolved cycle.
+    ///
+    /// A table with no declared primary key can be neither named nor
+    /// reconciled. The cycle must refuse it out loud: report it, copy no audit
+    /// events, and leave the watermark where it was so the next cycle re-reads
+    /// the same range. Advancing it is what would make the miss permanent.
+    @Test func watermarkDoesNotAdvancePastAnUnresolvedCycle() async throws {
+        let source = try await makeInMemory()
+        let destination = try await makeInMemory()
+        let estateID = source.configuration.estateID
+
+        // An audit event that a resolved cycle WOULD carry the watermark to.
+        try await source.auditLog.append(
+            makeAuditEvent(estateID: estateID, rowID: UUID(), physicalTime: 9_000)
+        )
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: PKLessSyntheticSchema.declaration
+        )
+
+        let incomingHLC = HLC(physicalTime: 1_000, logicalCount: 0, nodeID: 1)
+        let fromCursor = ReplicationCursor(
+            hlcWatermark: incomingHLC, rowsWritten: 0, auditEventsWritten: 0
+        )
+
+        // A value-less change on the primary-key-less table: unresolvable at
+        // both granularities.
+        await session.dirtySet.accumulate(
+            TableChange(table: "keyless", event: .update, rowKey: nil, values: nil, hlc: nil)
+        )
+        #expect(
+            await session.dirtySet.pendingUnresolvableTables() == ["keyless"],
+            "A change on a PK-less table must be recorded as unresolvable, not dropped"
+        )
+
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fromCursor)
+
+        #expect(!outcome.isComplete, "The cycle must report itself incomplete")
+        #expect(outcome.unresolvedTables == ["keyless"], "The refusal must name the table")
+        #expect(
+            outcome.cursor.hlcWatermark == incomingHLC,
+            "The watermark must be unmoved, got \(String(describing: outcome.cursor.hlcWatermark))"
+        )
+        #expect(
+            outcome.cursor.auditEventsWritten == 0,
+            "An incomplete cycle must copy no audit events — they move with the watermark"
+        )
+        #expect(
+            try await destination.auditLog.iterate(after: nil, rowID: nil, limit: Int.max).isEmpty,
+            "No audit event may reach the destination on an incomplete cycle"
+        )
+    }
+
+    /// §10.C7 — An unresolvable change withholds the watermark without vetoing
+    /// the rest of the cycle: resolvable row work still propagates.
+    @Test func unresolvableChangeStillLetsResolvableWorkThrough() async throws {
+        let source = try await makeInMemory()
+        let destination = try await makeInMemory()
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: PKLessSyntheticSchema.declaration
+        )
+
+        // One resolvable insert on the keyed table…
+        let rowID = UUID()
+        _ = try await source.rowStore.upsert(
+            table: "items", values: itemRow(id: rowID), conflictColumns: ["id"]
+        )
+        try await pollObserver { await session.dirtySet.count() >= 1 }
+        // …alongside one unresolvable change on the keyless table.
+        await session.dirtySet.accumulate(
+            TableChange(table: "keyless", event: .delete, rowKey: nil, values: nil, hlc: nil)
+        )
+
+        let incomingHLC = HLC(physicalTime: 1_000, logicalCount: 0, nodeID: 1)
+        let outcome = try await session.sync(
+            from: source, to: destination,
+            fromCursor: ReplicationCursor(
+                hlcWatermark: incomingHLC, rowsWritten: 0, auditEventsWritten: 0
+            )
+        )
+
+        #expect(!outcome.isComplete)
+        #expect(outcome.cursor.hlcWatermark == incomingHLC, "Watermark withheld")
+        #expect(
+            try await destination.rowStore.count(table: "items", where: nil) == 1,
+            "Resolvable row work must still reach the destination"
+        )
     }
 }
 

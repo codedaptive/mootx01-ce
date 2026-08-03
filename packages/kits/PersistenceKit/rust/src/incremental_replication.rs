@@ -1971,6 +1971,481 @@ mod incremental_replication_tests {
         assert_eq!(actual, blob_bytes,
             "Blob must be byte-identical at destination after retry sync");
     }
+
+    // ── §10.C Value-less changes on a durable backend (MXE-IR) ────────────
+    //
+    // The whole §10.C block exercises the durable path, which is the one that
+    // was dark. Every test above this point runs on InMemoryStorage, which
+    // populates `TableChange.values` on all four verbs — so they passed while
+    // SQLite, which emits `values: None` for predicate update and delete, was
+    // dropping every update and delete on the floor.
+    //
+    // Codex finding 74e3b7f7e6288191ba31644e4fa4b43b.
+
+    /// A schema carrying one keyed table and one table with NO declared primary
+    /// key, for the unresolvable-cycle tests (§10.C6, §10.C7).
+    ///
+    /// An empty `primary_key` is legal — the DDL emitter guards with
+    /// `if !decl.primary_key.is_empty()` and simply omits the PRIMARY KEY clause
+    /// (rust/src/sqlite.rs:452). Such a table cannot be reconciled: there is no
+    /// column set on which to compare a source row against a destination row, so
+    /// a change the session cannot key on it is unresolvable at every
+    /// granularity.
+    fn pk_less_schema() -> SchemaDeclaration {
+        let mut schema = synthetic_schema();
+        schema.tables.push(TableDeclaration {
+            name: "keyless".into(),
+            columns: vec![
+                ColumnDeclaration { name: "label".into(), column_type: ColumnType::Text, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "counter".into(), column_type: ColumnType::Int, nullable: false, default_value: None, role: None },
+            ],
+            primary_key: vec![],
+            unique_constraints: vec![],
+            generated_columns: vec![],
+            append_only: false,
+            hashable: false,
+        });
+        schema
+    }
+
+    /// Open a durable SQLite estate in a fresh temp file.
+    ///
+    /// Uses the public `SqliteStorage` surface only — this mission does not
+    /// modify `sqlite.rs`, which is reserved by TASK-MXE-2026-0220 / 0225.
+    fn make_sqlite_storage(schema: &SchemaDeclaration) -> crate::sqlite::SqliteStorage {
+        let path = std::env::temp_dir().join(format!("pk_mxe_ir_{}.sqlite", Uuid::new_v4()));
+        let config = crate::storage::EstateConfiguration::new(
+            Uuid::new_v4(),
+            crate::storage::BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = crate::sqlite::SqliteStorage::new(config).expect("open sqlite storage");
+        storage.open(schema).expect("open schema");
+        storage
+    }
+
+    /// §10.C1 — An update through `row_store.update` on SQLite reaches the
+    /// destination.
+    ///
+    /// REGRESSION TEST: fails against pre-fix code. `sqlite.rs` update emits
+    /// `values: None`, the old `DirtySet::accumulate` returned without recording
+    /// anything, the dirty set came back empty, and `sync` took the early
+    /// return — reporting success having replicated nothing.
+    #[test]
+    fn update_through_row_store_propagates_on_sqlite() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        let row_id = Uuid::new_v4();
+        source.row_store()
+            .insert("items", item_row(row_id, 0b0001))
+            .expect("insert");
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+        assert_eq!(full_cursor.rows_written, 1);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Predicate update — the verb that emits no values on this backend.
+        let mut set_values = BTreeMap::new();
+        set_values.insert("adjective_bitmap".to_string(), TypedValue::Bitmap(0b1111));
+        let predicate =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(row_id));
+        let updated = source.row_store()
+            .update("items", set_values, &predicate)
+            .expect("update");
+        assert_eq!(updated, 1, "Source update must affect exactly one row");
+
+        session.drain_channels();
+        assert_eq!(
+            session.dirty_set.pending_rescan_tables(),
+            vec!["items".to_string()],
+            "A value-less update must mark its table for re-scan"
+        );
+        assert_eq!(
+            session.dirty_set.count(), 0,
+            "No row can be named from a value-less change"
+        );
+
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert_eq!(outcome.rescanned_tables, vec!["items".to_string()]);
+        assert!(outcome.is_complete(), "Nothing here is unresolvable");
+
+        let rows = destination.row_store()
+            .query("items", Some(&predicate), &[], None, None)
+            .expect("query");
+        assert_eq!(rows.len(), 1, "Destination must still hold the row");
+        assert_eq!(
+            rows[0].values.get("adjective_bitmap"),
+            Some(&TypedValue::Bitmap(0b1111)),
+            "Destination must carry the UPDATED value, not the pre-update one"
+        );
+    }
+
+    /// §10.C2 — A delete through `row_store.delete` on SQLite removes the
+    /// destination row.
+    ///
+    /// REGRESSION TEST: fails against pre-fix code for the same reason as
+    /// §10.C1. This is the confidentiality case in its simplest form — the
+    /// replica kept content the source had removed.
+    #[test]
+    fn delete_through_row_store_propagates_on_sqlite() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        let doomed_id = Uuid::new_v4();
+        let survivor_id = Uuid::new_v4();
+        for id in [doomed_id, survivor_id] {
+            source.row_store().insert("items", item_row(id, 0b0101)).expect("insert");
+        }
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+        assert_eq!(destination.row_store().count("items", None).expect("count"), 2);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        let doomed_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(doomed_id));
+        source.row_store().delete("items", &doomed_pred).expect("delete");
+
+        session.drain_channels();
+        assert_eq!(
+            session.dirty_set.pending_rescan_tables(),
+            vec!["items".to_string()],
+            "A value-less delete must mark its table for re-scan"
+        );
+
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert!(outcome.is_complete());
+
+        assert!(
+            destination.row_store().query("items", Some(&doomed_pred), &[], None, None)
+                .expect("query doomed").is_empty(),
+            "The deleted row must be gone from the destination"
+        );
+        // The reconciliation must not overreach: a row the source still has is
+        // not collateral damage.
+        let survivor_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(survivor_id));
+        assert_eq!(
+            destination.row_store().query("items", Some(&survivor_pred), &[], None, None)
+                .expect("query survivor").len(),
+            1,
+            "The row that survived at the source must survive at the destination"
+        );
+        assert_eq!(destination.row_store().count("items", None).expect("count"), 1);
+    }
+
+    /// §10.C3 — TOMBSTONE-THEN-REPLICATE, the confidentiality case stated
+    /// directly rather than inferred from the generic update test.
+    ///
+    /// A withdrawal marks the row rather than removing it: `tombstoned_at` goes
+    /// from null to a timestamp through a predicate update, which is exactly the
+    /// value-less verb. If that update does not travel, the destination keeps
+    /// presenting a withdrawn row as live — and because a later insert would
+    /// advance the destination's audit watermark anyway, the system would record
+    /// that it had replicated a withdrawal it never sent.
+    ///
+    /// Both shapes are asserted: the withdrawn row carries its tombstone at the
+    /// destination, and an expunged (hard-deleted) row is absent entirely.
+    #[test]
+    fn tombstoned_and_expunged_rows_are_not_live_at_destination_after_one_cycle() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        let withdrawn_id = Uuid::new_v4();
+        let expunged_id = Uuid::new_v4();
+        let live_id = Uuid::new_v4();
+        for id in [withdrawn_id, expunged_id, live_id] {
+            source.row_store().insert("items", item_row(id, 0b0101)).expect("insert");
+        }
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+
+        let withdrawn_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(withdrawn_id));
+
+        // Baseline: the destination shows the row as live (no tombstone).
+        let baseline = destination.row_store()
+            .query("items", Some(&withdrawn_pred), &[], None, None)
+            .expect("baseline query");
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(
+            baseline[0].values.get("tombstoned_at"),
+            Some(&TypedValue::Null),
+            "Before the withdrawal the destination copy must be live"
+        );
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Withdrawal: tombstone the row at the source.
+        let mut tombstone_values = BTreeMap::new();
+        tombstone_values.insert(
+            "tombstoned_at".to_string(),
+            TypedValue::Timestamp(1_800_000_000),
+        );
+        source.row_store()
+            .update("items", tombstone_values, &withdrawn_pred)
+            .expect("tombstone update");
+        // Expunge: remove the row at the source outright.
+        let expunged_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(expunged_id));
+        source.row_store().delete("items", &expunged_pred).expect("expunge delete");
+
+        session.drain_channels();
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert!(outcome.is_complete(), "Both changes are resolvable by re-scan");
+
+        // The withdrawn row must carry its tombstone at the destination, so a
+        // tombstone-honouring read no longer returns it as live.
+        let withdrawn_rows = destination.row_store()
+            .query("items", Some(&withdrawn_pred), &[], None, None)
+            .expect("query withdrawn");
+        assert_eq!(withdrawn_rows.len(), 1);
+        assert_ne!(
+            withdrawn_rows[0].values.get("tombstoned_at"),
+            Some(&TypedValue::Null),
+            "The destination must not still present a withdrawn row as live"
+        );
+
+        // The expunged row must be absent outright.
+        assert!(
+            destination.row_store().query("items", Some(&expunged_pred), &[], None, None)
+                .expect("query expunged").is_empty(),
+            "An expunged row must not be readable at the destination"
+        );
+
+        // The untouched row is unaffected.
+        let live_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(live_id));
+        let live_rows = destination.row_store()
+            .query("items", Some(&live_pred), &[], None, None)
+            .expect("query live");
+        assert_eq!(live_rows.len(), 1, "An untouched row must survive the reconciliation");
+        assert_eq!(live_rows[0].values.get("tombstoned_at"), Some(&TypedValue::Null));
+    }
+
+    /// §10.C4 — A cycle whose only activity was deletions does not report as a
+    /// no-op.
+    ///
+    /// The empty-dirty-set early return is what made this silent: a deletions-
+    /// only cycle returned `from_cursor` verbatim, indistinguishable from an idle
+    /// cycle. The cycle must now show its work.
+    #[test]
+    fn deletions_only_cycle_is_not_reported_as_a_no_op() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        for _ in 0..3 {
+            source.row_store()
+                .insert("items", item_row(Uuid::new_v4(), 0b0101))
+                .expect("insert");
+        }
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Deletions and nothing else.
+        let deleted = source.row_store()
+            .delete("items", &StoragePredicate::IsTrue)
+            .expect("delete all");
+        assert_eq!(deleted, 3);
+
+        session.drain_channels();
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+
+        assert!(
+            !outcome.rescanned_tables.is_empty(),
+            "A deletions-only cycle must report the work it did, not look idle"
+        );
+        assert_eq!(
+            outcome.cursor.rows_written, 3,
+            "All three deletions must be counted, got {}",
+            outcome.cursor.rows_written
+        );
+        assert_eq!(
+            destination.row_store().count("items", None).expect("count"), 0,
+            "Destination must be emptied"
+        );
+    }
+
+    /// §10.C5 — A change shaped like the PostgreSQL backend's predicate update
+    /// and delete — no values AND no row_key — still resolves.
+    ///
+    /// The live-server legs of the PostgreSQL suite are gated on
+    /// PERSISTENCEKIT_PG_URL and skip when it is unset, so they cannot establish
+    /// that this shape resolves. This test feeds the exact emission shape
+    /// (`postgres.rs` predicate update `values: None`, `row_key: None`) through
+    /// the session on a backend that is always present, so the code path
+    /// PostgreSQL takes is covered on every run.
+    #[test]
+    fn postgres_shaped_change_without_values_or_row_key_resolves() {
+        let schema = synthetic_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        let row_id = Uuid::new_v4();
+        source.row_store()
+            .upsert("items", item_row(row_id, 0b0001), &["id".to_string()])
+            .expect("upsert");
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Mutate the source, then hand the session the PostgreSQL-shaped change
+        // rather than the InMemory one (InMemory populates values, which would
+        // exercise the row-dirt path instead of the one under test).
+        let predicate =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(row_id));
+        let mut set_values = BTreeMap::new();
+        set_values.insert("adjective_bitmap".to_string(), TypedValue::Bitmap(0b1010));
+        source.row_store()
+            .update("items", set_values, &predicate)
+            .expect("update");
+
+        session.dirty_set.accumulate(&TableChange {
+            table: "items".into(),
+            event: StorageEvent::Update,
+            row_key: None,
+            values: None,
+            hlc: None,
+            origin: crate::observer::ChangeOrigin::Local,
+            changed_columns: None,
+        });
+
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert_eq!(outcome.rescanned_tables, vec!["items".to_string()]);
+
+        let rows = destination.row_store()
+            .query("items", Some(&predicate), &[], None, None)
+            .expect("query");
+        assert_eq!(
+            rows[0].values.get("adjective_bitmap"),
+            Some(&TypedValue::Bitmap(0b1010)),
+            "A change with neither values nor row_key must still carry the update across"
+        );
+    }
+
+    /// §10.C6 — The audit watermark does not advance past an unresolved cycle.
+    ///
+    /// A table with no declared primary key can be neither named nor
+    /// reconciled. The cycle must refuse it out loud: report it, copy no audit
+    /// events, and leave the watermark where it was so the next cycle re-reads
+    /// the same range. Advancing it is what would make the miss permanent.
+    #[test]
+    fn watermark_does_not_advance_past_an_unresolved_cycle() {
+        let schema = pk_less_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+        let estate_id = source.configuration().estate_id;
+
+        // An audit event that a resolved cycle WOULD carry the watermark to.
+        source.audit_log()
+            .append(tests_helpers::make_audit_event(estate_id, Uuid::new_v4(), 9_000))
+            .expect("append audit event");
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        let incoming = HLC::new(1_000, 0, 1);
+        let from_cursor = ReplicationCursor {
+            hlc_watermark: Some(incoming),
+            rows_written: 0,
+            audit_events_written: 0,
+            blobs_written: 0,
+        };
+
+        // A value-less change on the primary-key-less table: unresolvable at
+        // both granularities.
+        session.dirty_set.accumulate(&TableChange {
+            table: "keyless".into(),
+            event: StorageEvent::Update,
+            row_key: None,
+            values: None,
+            hlc: None,
+            origin: crate::observer::ChangeOrigin::Local,
+            changed_columns: None,
+        });
+        assert_eq!(
+            session.dirty_set.pending_unresolvable_tables(),
+            vec!["keyless".to_string()],
+            "A change on a PK-less table must be recorded as unresolvable, not dropped"
+        );
+
+        let outcome = session.sync(&source, &destination, from_cursor).expect("sync");
+
+        assert!(!outcome.is_complete(), "The cycle must report itself incomplete");
+        assert_eq!(
+            outcome.unresolved_tables,
+            vec!["keyless".to_string()],
+            "The refusal must name the table"
+        );
+        assert_eq!(
+            outcome.cursor.hlc_watermark,
+            Some(incoming),
+            "The watermark must be unmoved, got {:?}",
+            outcome.cursor.hlc_watermark
+        );
+        assert_eq!(
+            outcome.cursor.audit_events_written, 0,
+            "An incomplete cycle must copy no audit events — they move with the watermark"
+        );
+        assert!(
+            destination.audit_log().iterate(None, None, usize::MAX).expect("iterate").is_empty(),
+            "No audit event may reach the destination on an incomplete cycle"
+        );
+    }
+
+    /// §10.C7 — An unresolvable change withholds the watermark without vetoing
+    /// the rest of the cycle: resolvable row work still propagates.
+    #[test]
+    fn unresolvable_change_still_lets_resolvable_work_through() {
+        let schema = pk_less_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // One resolvable insert on the keyed table…
+        source.row_store()
+            .upsert("items", item_row(Uuid::new_v4(), 0b0101), &["id".to_string()])
+            .expect("upsert");
+        session.drain_channels();
+        assert_eq!(session.dirty_set.count(), 1);
+        // …alongside one unresolvable change on the keyless table.
+        session.dirty_set.accumulate(&TableChange {
+            table: "keyless".into(),
+            event: StorageEvent::Delete,
+            row_key: None,
+            values: None,
+            hlc: None,
+            origin: crate::observer::ChangeOrigin::Local,
+            changed_columns: None,
+        });
+
+        let incoming = HLC::new(1_000, 0, 1);
+        let outcome = session
+            .sync(
+                &source,
+                &destination,
+                ReplicationCursor {
+                    hlc_watermark: Some(incoming),
+                    rows_written: 0,
+                    audit_events_written: 0,
+                    blobs_written: 0,
+                },
+            )
+            .expect("sync");
+
+        assert!(!outcome.is_complete());
+        assert_eq!(outcome.cursor.hlc_watermark, Some(incoming), "Watermark withheld");
+        assert_eq!(
+            destination.row_store().count("items", None).expect("count"), 1,
+            "Resolvable row work must still reach the destination"
+        );
+    }
 }
 
 /// Test helpers for use in this module and replication module tests.
