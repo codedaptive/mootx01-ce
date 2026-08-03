@@ -89,7 +89,7 @@ struct MootMemoryToolsTests {
         exportability: public_
         content:
         Durable memory content.
-        sensitivity_advisory: some memories may be hidden by sensitivity tier
+        sensitivity_advisory: a sensitivity tier gate is in effect on this estate
         """))
         #expect(record.room == "Apple Intelligence")
         #expect(record.content == "Durable memory content.")
