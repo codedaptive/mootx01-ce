@@ -4956,6 +4956,61 @@ public actor DrawerStore {
     /// region is full; see PR01_SUBJECT_QUAD_BLAST_RADIUS.md), and this
     /// count runs at status cadence, not in recall.
     ///
+    /// Pipeline-version tag for subjects produced by the on-device
+    /// miniLLM rider (PR-10's producer; the Rust lane stays dark until a
+    /// model exists). The provenance tiers stored in
+    /// `subject_pipeline_version`:
+    ///   ai-v1            — the filing/backfill AI (capture + setSubject)
+    ///   minillm-v1       — the model rider
+    ///   consolidation-v1 — the deterministic vague-tier writer
+    ///   seed-v1          — structural charter-hint seeds
+    /// A version differing from a requested producer contract marks the
+    /// row a REGENERATION candidate (`countMissingSubject`) — the
+    /// migration lever. Twin: Rust `SUBJECT_PIPELINE_MINILLM_V1`.
+    public static let subjectPipelineMiniLLMV1 = "minillm-v1"
+
+    /// Presence debt, NULL-only (PR-09): live rows with non-empty content
+    /// and NO subject at all — the subject-backfill drain lane's
+    /// `pending` and the strict complement of what any producer has
+    /// settled. Distinct from `countMissingSubject(pipelineVersion:)`,
+    /// which adds producer-version mismatches (regeneration debt).
+    /// Projected to `id` only. Mirrors Rust `count_subject_debt`.
+    public func countSubjectDebt() async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .neq(Column(table: "drawers", name: "content"), .text("")),
+                .isNull(Column(table: "drawers", name: "subject")),
+            ]),
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        return rows.count
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09): up to `limit`
+    /// subject-debt rows (same predicate as `countSubjectDebt`) in
+    /// deterministic filedAt-then-id order, fully hydrated so the
+    /// producer can read `content`. Settled-work skip is structural —
+    /// a row whose subject was written no longer matches the predicate,
+    /// so reruns never revisit it. Mirrors Rust `subject_debt_batch`.
+    public func subjectDebtBatch(limit: Int) async throws -> [Drawer] {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .neq(Column(table: "drawers", name: "content"), .text("")),
+                .isNull(Column(table: "drawers", name: "subject")),
+            ]),
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
+            ],
+            limit: limit, offset: nil, columns: nil
+        )
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "subjectDebtBatch")
+    }
+
     /// Mirrors Rust `count_missing_subject`.
     public func countMissingSubject(pipelineVersion: String) async throws -> Int {
         let rows = try await storage.rowStore.query(

@@ -160,6 +160,7 @@ pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;
 pub mod source_catalog_entry;
+pub mod subject_register;
 pub mod summaries;
 pub mod telemetry;
 pub mod node;

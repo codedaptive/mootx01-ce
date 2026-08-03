@@ -126,6 +126,9 @@ pub fn run_dataset_associations(
                     lift: rule.lift,
                     conviction: rule.conviction,
                     leverage: rule.leverage,
+                    // Dataset rows are not drawers and carry no drawer
+                    // identity — exemplars are an estate-mode concept.
+                    exemplar_drawer_ids: vec![],
                 })
             } else {
                 None

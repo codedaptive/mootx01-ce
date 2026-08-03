@@ -76,6 +76,18 @@ public struct DrainStatus: Sendable, Equatable {
     /// and `encodeSettled` both key on it.
     public static let corpusEncodeName = "corpus_encode"
 
+    /// Canonical name of the subject-backfill drain lane (PR-09). The
+    /// lane renders ONLY while a subject producer is registered for the
+    /// estate (PR-10's Apple miniLLM rider; test stubs) — an
+    /// always-present eligibility-count lane would hold the
+    /// benchmarker's encode barrier open on healthy estates. When a
+    /// rider first ships enabled, the benchmarker's non-gating denylist
+    /// must gain this name in the same mission (the distillation-lane
+    /// precedent). Dispatcher-side mirrors:
+    /// AriaMcpKit `ToolDispatcher.subjectBackfillLaneName` /
+    /// `SUBJECT_BACKFILL_LANE_NAME`.
+    public static let subjectBackfillName = "subject_backfill"
+
     /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
     /// detached `mootx01 drain` finisher may exit and release the encode
     /// DrainLease, and a stdio serve need not spawn one.
@@ -148,6 +160,22 @@ extension GeniusLocusKit {
             inFlight: 0,
             detail: "pipeline: \(DistillationPipelineVersion.current)"
         ))
+
+        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // subject producer is registered (rider-gated — see
+        // `subjectBackfillName`). `pending` is the NULL-only presence
+        // debt (`countSubjectDebt`), a row-level eligibility count like
+        // the distillation lane's; `in_flight` is 0 — sweeps are
+        // synchronous bounded batches, never a queue.
+        if let producer = subjectProducers[handle] {
+            let debt = try await estate.countSubjectDebt()
+            statuses.append(DrainStatus(
+                name: DrainStatus.subjectBackfillName,
+                pending: debt,
+                inFlight: 0,
+                detail: "pipeline: \(producer.pipelineVersion)"
+            ))
+        }
 
         return statuses
     }

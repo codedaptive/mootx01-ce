@@ -343,6 +343,12 @@ impl DrawerStore for PostgresDrawerStore {
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_missing_subject(pipeline_version)
     }
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.0.count_subject_debt()
+    }
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.subject_debt_batch(limit)
+    }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_undistilled(pipeline_version)
     }

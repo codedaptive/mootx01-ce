@@ -523,6 +523,18 @@ public actor Estate {
         try await store.countMissingSubject(pipelineVersion: pipelineVersion)
     }
 
+    /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
+    /// lane's `pending`. See `DrawerStore.countSubjectDebt`.
+    public func countSubjectDebt() async throws -> Int {
+        try await store.countSubjectDebt()
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09). See
+    /// `DrawerStore.subjectDebtBatch(limit:)`.
+    public func subjectDebtBatch(limit: Int) async throws -> [Drawer] {
+        try await store.subjectDebtBatch(limit: limit)
+    }
+
     // MARK: - Drawer enumeration
 
     /// Enumerate every drawer in the estate. Used by cross-row

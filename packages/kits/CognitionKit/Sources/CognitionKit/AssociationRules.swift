@@ -76,11 +76,20 @@ public struct AssociationRuleResult: Sendable, Equatable {
     public let lift: Double
     public let conviction: Double
     public let leverage: Double
+    /// Drawer ids of up to `associationExemplarCap` memories that satisfy
+    /// BOTH sides of the rule, in the recall frame's deterministic order.
+    /// These are follow-up addresses (a consumer can hydrate the evidence
+    /// behind a rule), NOT the full support set — the full set's size is
+    /// `support × drawerCount` and belongs to analysis, not a reply.
+    /// Empty for dataset-mode rules, whose rows are not drawers and carry
+    /// no drawer identity.
+    public let exemplarDrawerIDs: [String]
 
     public init(
         antecedent: String, consequent: String,
         support: Double, confidence: Double,
-        lift: Double, conviction: Double, leverage: Double
+        lift: Double, conviction: Double, leverage: Double,
+        exemplarDrawerIDs: [String] = []
     ) {
         self.antecedent = antecedent
         self.consequent = consequent
@@ -89,8 +98,14 @@ public struct AssociationRuleResult: Sendable, Equatable {
         self.lift = lift
         self.conviction = conviction
         self.leverage = leverage
+        self.exemplarDrawerIDs = exemplarDrawerIDs
     }
 }
+
+/// How many exemplar drawer ids ride on each mined rule. Five is enough to
+/// hydrate representative evidence without inflating the reply; the cap is
+/// shared by both legs (Rust `ASSOCIATION_EXEMPLAR_CAP`).
+public let associationExemplarCap = 5
 
 // MARK: - Recipe
 
@@ -173,19 +188,34 @@ public struct AssociationRules: Recipe {
             activeRowCount: Int64(drawerCount),
             thresholds: input.thresholds)
 
-        // 5. Relabel the engine's Item indices back to label strings.
+        // 5. Relabel the engine's Item indices back to label strings, and
+        // attach exemplar drawer ids per rule. The engine aggregates rows
+        // into a matrix and cannot say WHICH drawers support a rule, but the
+        // recipe still holds the recalled set — one pass builds each
+        // drawer's label set, then each rule takes the first
+        // `associationExemplarCap` drawers (recall order, deterministic)
+        // whose labels contain both sides.
+        let drawerLabelSets: [(id: String, labels: Set<String>)] =
+            drawers.map { ($0.id, Set(drawerLabels($0))) }
         let results: [AssociationRuleResult] = rawRules.compactMap { rule in
             let ai = Int(rule.antecedent.field)
             let ci = Int(rule.consequent.field)
             guard ai < labels.count, ci < labels.count else { return nil }
+            let antLabel = labels[ai]
+            let conLabel = labels[ci]
+            let exemplars = drawerLabelSets.lazy
+                .filter { $0.labels.contains(antLabel) && $0.labels.contains(conLabel) }
+                .prefix(associationExemplarCap)
+                .map(\.id)
             return AssociationRuleResult(
-                antecedent: labels[ai],
-                consequent: labels[ci],
+                antecedent: antLabel,
+                consequent: conLabel,
                 support: rule.support,
                 confidence: rule.confidence,
                 lift: rule.lift,
                 conviction: rule.conviction,
-                leverage: rule.leverage)
+                leverage: rule.leverage,
+                exemplarDrawerIDs: Array(exemplars))
         }
 
         return Output(rules: results, drawerCount: drawerCount, labelOverflow: labelOverflow)

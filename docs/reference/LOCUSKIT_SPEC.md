@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.11.0
+version: 1.12.0
 status: active
 date: 2026-08-02
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -990,6 +990,20 @@ NULL-together lifecycle.
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.12.0 -- 2026-08-02
+
+Subject pipeline harness (progressive recall PR-09). § 14 additions:
+B-22 (presence debt vs regeneration debt: `countSubjectDebt` is the
+NULL-only lane observable; `countMissingSubject(pipelineVersion:)`
+remains the producer-contract regeneration count), B-23 (the sweep
+enumerator `subjectDebtBatch(limit:)` is deterministic — filedAt ASC,
+id ASC — and settled-work skip is structural), B-24 (the AI-facing
+register is ONE shared testable gate, `SubjectRegister`: 1–120 chars,
+single-line, trimmed, narrative-frame prefix lint; conformance pins
+verdicts on both legs and NEVER model output text). Provenance tiers
+documented at the pipeline-version constants (ai-v1, minillm-v1,
+consolidation-v1, seed-v1).
 
 ### 1.11.0 -- 2026-08-02
 

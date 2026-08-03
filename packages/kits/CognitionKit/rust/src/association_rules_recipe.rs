@@ -91,7 +91,17 @@ pub struct AssociationRuleResult {
     pub lift: f64,
     pub conviction: f64,
     pub leverage: f64,
+    /// Drawer ids of up to `ASSOCIATION_EXEMPLAR_CAP` memories satisfying
+    /// BOTH sides of the rule, in the recall frame's deterministic order.
+    /// Follow-up addresses, not the full support set. Empty for
+    /// dataset-mode rules (rows are not drawers). Twin of Swift
+    /// `AssociationRuleResult.exemplarDrawerIDs`.
+    pub exemplar_drawer_ids: Vec<String>,
 }
+
+/// How many exemplar drawer ids ride on each mined rule. Twin of Swift
+/// `associationExemplarCap`.
+pub const ASSOCIATION_EXEMPLAR_CAP: usize = 5;
 
 /// Output of the AssociationRules recipe.
 #[derive(Debug, Clone, PartialEq)]
@@ -156,21 +166,40 @@ pub fn run_association_rules(
     // 4. Mine association rules.
     let raw_rules = mine_association_rules(&matrix, drawer_count as i64, thresholds);
 
-    // 5. Relabel Item field indices back to label strings.
+    // 5. Relabel Item field indices back to label strings, and attach
+    // exemplar drawer ids per rule. The engine aggregates rows into a
+    // matrix and cannot say WHICH drawers support a rule, but the recipe
+    // still holds the recalled set — one pass builds each drawer's label
+    // set, then each rule takes the first ASSOCIATION_EXEMPLAR_CAP drawers
+    // (recall order, deterministic) whose labels contain both sides.
+    // Twin of the Swift exemplar computation.
+    let drawer_label_sets: Vec<(String, std::collections::BTreeSet<String>)> = drawers
+        .iter()
+        .map(|d| (d.id.clone(), drawer_labels(d).into_iter().collect()))
+        .collect();
     let rules: Vec<AssociationRuleResult> = raw_rules
         .into_iter()
         .filter_map(|rule| {
             let ai = rule.antecedent.field as usize;
             let ci = rule.consequent.field as usize;
             if ai < labels.len() && ci < labels.len() {
+                let ant_label = &labels[ai];
+                let con_label = &labels[ci];
+                let exemplar_drawer_ids: Vec<String> = drawer_label_sets
+                    .iter()
+                    .filter(|(_, set)| set.contains(ant_label) && set.contains(con_label))
+                    .take(ASSOCIATION_EXEMPLAR_CAP)
+                    .map(|(id, _)| id.clone())
+                    .collect();
                 Some(AssociationRuleResult {
-                    antecedent: labels[ai].clone(),
-                    consequent: labels[ci].clone(),
+                    antecedent: ant_label.clone(),
+                    consequent: con_label.clone(),
                     support: rule.support,
                     confidence: rule.confidence,
                     lift: rule.lift,
                     conviction: rule.conviction,
                     leverage: rule.leverage,
+                    exemplar_drawer_ids,
                 })
             } else {
                 None

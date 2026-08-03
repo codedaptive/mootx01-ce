@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.17.0
+version: 1.18.0
 status: accepted-1.1-target
 date: 2026-07-30
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
@@ -1894,6 +1894,21 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-08-02
+
+Subject-backfill rider seam (progressive recall PR-09; SIBLING lane to
+distillation — the lane-name reservation pre-decided the shape, flagged
+for review). The coordinator carries a per-estate `SubjectProducer`
+registry; `subjectBackfillSweep` runs bounded deterministic batches
+(produce → SubjectRegister-validate → setSubjectRepresentation),
+refuses while no producer is registered, and skips inadmissible output
+without storing it. The `subject_backfill` drain lane renders ONLY
+while a rider is registered (barrier safety; the benchmarker non-gating
+denylist gains the name in the mission that first enables a rider). The
+Rust lane is DARK: seam compiled, no producer ships, gate pinned by
+test. No producer ships in Swift either — the Apple miniLLM producer is
+the PR-10 rider.
 
 ### 1.17.0 -- 2026-07-30
 

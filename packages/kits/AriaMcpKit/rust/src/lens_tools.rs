@@ -99,6 +99,12 @@ pub fn is_lens_tool(name: &str) -> bool {
     LENS_TOOLS.contains(&name)
 }
 
+/// How many extent drawer ids a formal-concept row lists before truncating to
+/// "+N more". Twenty matches the default recall frame limit, so an untruncated
+/// extent is the common case; the cap exists so one giant concept cannot flood
+/// the reply. Twin of Swift `LensTools.lensExtentIDCap`.
+pub const LENS_EXTENT_ID_CAP: usize = 20;
+
 /// Dispatch a lens tool call. Same contract as `dispatch_tool`.
 pub fn dispatch(
     name: &str,
@@ -939,6 +945,16 @@ pub fn dispatch(
                     "  {} → {}: sup={:.3} conf={:.3} lift={:.3}",
                     rule.antecedent, rule.consequent, rule.support, rule.confidence, rule.lift
                 ));
+                // Exemplar addresses so the rule's evidence is hydratable
+                // (progressive-recall rule: findings carry cursors). Absent
+                // for dataset-mode rules, whose rows are not drawers.
+                // Parity: Swift moot_lens_associations render.
+                if !rule.exemplar_drawer_ids.is_empty() {
+                    lines.push(format!(
+                        "    exemplars: {}",
+                        rule.exemplar_drawer_ids.join(", ")
+                    ));
+                }
             }
             Ok(text_result(&lines.join("\n")))
         }
@@ -971,9 +987,26 @@ pub fn dispatch(
             for (i, concept) in out.concepts.iter().enumerate() {
                 lines.push(format!("  concept {}: support={}", i + 1, concept.support));
                 lines.push(format!("    intent: {}", concept.intent.join(", ")));
+                // Extent lists the drawer ADDRESSES, not just a count: every
+                // lens finding must be followable to its evidence
+                // (progressive-recall rule). Capped so one giant concept
+                // cannot flood the reply. Parity: Swift lensExtentIDCap.
+                let extent = &concept.extent_drawer_ids;
+                let shown: Vec<&str> = extent
+                    .iter()
+                    .take(LENS_EXTENT_ID_CAP)
+                    .map(String::as_str)
+                    .collect();
+                let more = if extent.len() > LENS_EXTENT_ID_CAP {
+                    format!(" +{} more", extent.len() - LENS_EXTENT_ID_CAP)
+                } else {
+                    String::new()
+                };
                 lines.push(format!(
-                    "    extent: {} drawer(s)",
-                    concept.extent_drawer_ids.len()
+                    "    extent ({}): {}{}",
+                    extent.len(),
+                    shown.join(", "),
+                    more
                 ));
             }
             Ok(text_result(&lines.join("\n")))

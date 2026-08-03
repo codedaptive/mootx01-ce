@@ -1452,6 +1452,18 @@ impl Estate {
         self.store.count_missing_subject(pipeline_version)
     }
 
+    /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
+    /// lane's `pending`. See `DrawerStore::count_subject_debt`.
+    pub fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.store.count_subject_debt()
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09). See
+    /// `DrawerStore::subject_debt_batch`.
+    pub fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.subject_debt_batch(limit)
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is

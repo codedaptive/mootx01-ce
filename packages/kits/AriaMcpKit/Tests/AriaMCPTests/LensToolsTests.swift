@@ -141,7 +141,12 @@ struct LensToolsTests {
 
         let body = try text(result)
         #expect(body.contains("tunnel_successor: 2 result(s)"))
-        #expect(body.contains("X weight=2"))
+        // Dense-row output (Part B): the tunnel endpoint "X" may not be a
+        // captured drawer, so denseRowsByID returns renderUnhydrated — the
+        // rendered row still starts with the id "X". The weight annotation
+        // is appended after the dense row. Both must be present.
+        #expect(body.contains("X"))
+        #expect(body.contains("weight=2"))
     }
 
     // MARK: - Recall lens

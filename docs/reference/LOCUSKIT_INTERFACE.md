@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.15.0
+version: 1.16.0
 status: active
 date: 2026-08-02
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -1408,6 +1408,18 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.16.0 -- 2026-08-02
+
+- PR-09: new DrawerStore/Estate surface — `countSubjectDebt()` (NULL-only
+  presence debt; the subject-backfill drain lane's pending) and
+  `subjectDebtBatch(limit:)` (deterministic sweep enumerator), with Rust
+  twins `count_subject_debt` / `subject_debt_batch` (trait defaults +
+  core + all forwarders). New `SubjectRegister` validator
+  (`subject_register.rs` twin) — the shared producer gate with paired
+  conformance vectors. New constant `subjectPipelineMiniLLMV1` ↔
+  `SUBJECT_PIPELINE_MINILLM_V1`; provenance-tier table documented at the
+  constants.
 
 ### 1.15.0 -- 2026-08-02
 

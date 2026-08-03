@@ -126,6 +126,17 @@ pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
 /// `DrawerStore.subjectPipelineAIV1`.
 pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
 
+/// Pipeline-version tag for subjects produced by the on-device miniLLM
+/// rider (PR-10's producer; the Rust lane stays DARK until a model
+/// exists — seam compiled, gated off). Provenance tiers stored in
+/// `subject_pipeline_version`: ai-v1 (filing/backfill AI), minillm-v1
+/// (model rider), consolidation-v1 (deterministic vague writer),
+/// seed-v1 (structural seeds). A version differing from a requested
+/// producer contract marks the row a REGENERATION candidate
+/// (`count_missing_subject`) — the migration lever. Twin of Swift
+/// `DrawerStore.subjectPipelineMiniLLMV1`.
+pub const SUBJECT_PIPELINE_MINILLM_V1: &str = "minillm-v1";
+
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------
@@ -699,6 +710,29 @@ pub trait DrawerStore: Send + Sync {
     fn count_missing_subject(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "count_missing_subject not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Presence debt, NULL-only (PR-09): live rows with non-empty content
+    /// and NO subject at all — the subject-backfill drain lane's
+    /// `pending`. Distinct from `count_missing_subject`, which adds
+    /// producer-version mismatches (regeneration debt). Mirrors Swift
+    /// `countSubjectDebt`.
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_subject_debt not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09): up to `limit`
+    /// subject-debt rows (same predicate as `count_subject_debt`) in
+    /// deterministic (filedAt ASC, id ASC) order, fully hydrated so the
+    /// producer can read `content`. Settled-work skip is structural — a
+    /// row whose subject was written no longer matches the predicate.
+    /// Mirrors Swift `subjectDebtBatch(limit:)`.
+    fn subject_debt_batch(&self, _limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "subject_debt_batch not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2135,6 +2169,12 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_missing_subject(pipeline_version)
+    }
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_subject_debt()
+    }
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().subject_debt_batch(limit)
     }
     fn seal_expunge_audit(
         &self,

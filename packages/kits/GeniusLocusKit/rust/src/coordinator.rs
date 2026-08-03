@@ -725,6 +725,12 @@ pub struct EstateCoordinator {
     /// Per-estate CorpusKit handles. Optional; activates BM25 lane in recall_scored.
     /// Mirrors Swift actor's `corpusKits: [EstateHandle: Corpus]`.
     pub(crate) corpus_kits: HashMap<EstateHandle, Arc<CorpusContentEngine>>,
+    /// Subject-backfill rider registry (PR-09, DARK LANE): the pluggable
+    /// producer that writes subjects for subject-debt rows. No producer
+    /// ships in Rust until a model exists (the SIMD/tagger dark-lane
+    /// precedent); tests inject stubs. While empty for a handle, the
+    /// subject_backfill drain lane does not render and the sweep refuses.
+    pub(crate) subject_producers: HashMap<EstateHandle, Arc<dyn SubjectProducer>>,
     /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
     /// `pub(crate)` so `intake.rs` can access it without routing through a public
@@ -907,6 +913,35 @@ impl Default for EstateCoordinator {
 /// report surfaces all of them with no wire reshape. The list is built from
 /// the drains that actually exist — no speculative drain machinery. Mirrors
 /// Swift `DrainStatus`.
+/// A subject producer (PR-09): turns drawer content into a one-sentence
+/// AI-facing subject. The Rust lane is DARK — no implementation ships
+/// until a model exists; tests inject stubs. The producer's pipeline
+/// version is stored as provenance on every subject it writes and is
+/// the regeneration lever. Mirrors Swift `SubjectProducer`.
+pub trait SubjectProducer: Send + Sync {
+    /// Provenance tier written to `subject_pipeline_version`
+    /// (e.g. `locus_kit::drawer_store::SUBJECT_PIPELINE_MINILLM_V1`).
+    fn pipeline_version(&self) -> &str;
+    /// Produce a subject for `content`. The sweep validates the result
+    /// against `locus_kit::subject_register` before writing;
+    /// inadmissible output is counted and skipped, never stored.
+    fn subject_for_content(&self, content: &str) -> Result<String, String>;
+}
+
+/// One subject-backfill sweep's outcome. Counts are per-call except
+/// `remaining_debt`, the estate-wide presence debt AFTER the sweep.
+/// Mirrors Swift `SubjectBackfillReport`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubjectBackfillReport {
+    /// Subjects written this sweep.
+    pub written: usize,
+    /// Producer outputs rejected by the register contract (skipped; the
+    /// rows remain debt and re-enumerate next sweep).
+    pub skipped_inadmissible: usize,
+    /// Estate-wide subject debt after the sweep.
+    pub remaining_debt: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrainStatus {
     /// Stable identifier for the drain (e.g. `"corpus_encode"`). Lets a status
@@ -927,6 +962,16 @@ impl DrainStatus {
     /// truth for the string — `drain_statuses` and `encode_settled` both key
     /// on it.
     pub const CORPUS_ENCODE_NAME: &'static str = "corpus_encode";
+
+    /// Canonical name of the subject-backfill drain lane (PR-09). The
+    /// lane renders ONLY while a subject producer is registered for the
+    /// estate — an always-present eligibility-count lane would hold the
+    /// benchmarker's encode barrier open on healthy estates. When a
+    /// rider first ships enabled, the benchmarker's non-gating denylist
+    /// must gain this name in the same mission. The Rust lane is DARK in
+    /// PR-09: no producer ships; tests inject stubs. Twin of Swift
+    /// `DrainStatus.subjectBackfillName`.
+    pub const SUBJECT_BACKFILL_NAME: &'static str = "subject_backfill";
 
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
@@ -964,6 +1009,7 @@ impl EstateCoordinator {
             grant_stores: HashMap::new(),
             scope_vaults: HashMap::new(),
             corpus_kits: HashMap::new(),
+            subject_producers: HashMap::new(),
             vector_stores: HashMap::new(),
             mount_states: HashMap::new(),
             audit_logs: HashMap::new(),
@@ -1789,7 +1835,117 @@ impl EstateCoordinator {
             )),
         });
 
+        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // subject producer is registered (rider-gated). `pending` is the
+        // NULL-only presence debt (`count_subject_debt`), a row-level
+        // eligibility count like the distillation lane's; `in_flight` is
+        // 0 — sweeps are synchronous bounded batches, never a queue.
+        // Mirrors the Swift drainStatuses entry.
+        if let Some(producer) = self.subject_producers.get(handle) {
+            let debt = estate.count_subject_debt().map_err(|e| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("count_subject_debt: {e:?}"),
+                }
+            })?;
+            statuses.push(DrainStatus {
+                name: DrainStatus::SUBJECT_BACKFILL_NAME.to_string(),
+                pending: debt,
+                in_flight: 0,
+                detail: Some(format!("pipeline: {}", producer.pipeline_version())),
+            });
+        }
+
         Ok(statuses)
+    }
+
+    /// Register (or replace) the subject producer for `handle` (PR-09).
+    /// The subject_backfill drain lane renders from the next
+    /// `drain_statuses` call on; `subject_backfill_sweep` becomes
+    /// runnable. DARK-LANE default: nothing calls this in production
+    /// Rust until a model exists; tests inject stubs. Mirrors Swift
+    /// `registerSubjectProducer`.
+    pub fn register_subject_producer(
+        &mut self,
+        handle: &EstateHandle,
+        producer: Arc<dyn SubjectProducer>,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        self.subject_producers.insert(handle.clone(), producer);
+        Ok(())
+    }
+
+    /// The registered producer's pipeline version, or None while the
+    /// lane is dark. Mirrors Swift `subjectProducerPipeline(for:)`.
+    pub fn subject_producer_pipeline(&self, handle: &EstateHandle) -> Option<String> {
+        self.subject_producers
+            .get(handle)
+            .map(|p| p.pipeline_version().to_string())
+    }
+
+    /// Run ONE bounded subject-backfill sweep (PR-09): enumerate up to
+    /// `batch_limit` subject-debt rows (deterministic filedAt-then-id
+    /// order), produce + validate + write each, and report. Settled-work
+    /// skip is structural — written rows leave the debt predicate, so
+    /// reruns never revisit them. Refuses while the lane is dark (no
+    /// producer): the interactive consent-gated backfill is the only
+    /// subject path until a rider exists. Mirrors Swift
+    /// `subjectBackfillSweep`.
+    pub fn subject_backfill_sweep(
+        &self,
+        handle: &EstateHandle,
+        batch_limit: usize,
+        now: i64,
+    ) -> Result<SubjectBackfillReport, GeniusLocusKitError> {
+        let Some(producer) = self.subject_producers.get(handle) else {
+            return Err(GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: "subject_backfill_sweep: no subject producer registered — \
+                         the rider lane is dark until a model registers; use the \
+                         interactive backfill (missing_subject → setSubject)"
+                    .to_string(),
+            });
+        };
+        let estate = self.estate_for(handle)?;
+        let batch = estate.subject_debt_batch(batch_limit).map_err(|e| {
+            GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("subject_debt_batch: {e:?}"),
+            }
+        })?;
+        let mut written = 0usize;
+        let mut skipped = 0usize;
+        for drawer in &batch {
+            let candidate = producer.subject_for_content(&drawer.content).map_err(|e| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("subject producer: {e}"),
+                }
+            })?;
+            if !locus_kit::subject_register::violations(&candidate).is_empty() {
+                // Inadmissible output is skipped, never stored — the row
+                // stays debt and re-enumerates next sweep.
+                skipped += 1;
+                continue;
+            }
+            estate
+                .set_subject_representation(
+                    &drawer.id,
+                    &candidate,
+                    producer.pipeline_version(),
+                    now,
+                )
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("set_subject_representation: {e:?}"),
+                })?;
+            written += 1;
+        }
+        let remaining = estate.count_subject_debt().map_err(|e| {
+            GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("count_subject_debt: {e:?}"),
+            }
+        })?;
+        Ok(SubjectBackfillReport {
+            written,
+            skipped_inadmissible: skipped,
+            remaining_debt: remaining,
+        })
     }
 
     /// Set the encode SPEED (drain QoS) for the estate's corpus drain, mapping

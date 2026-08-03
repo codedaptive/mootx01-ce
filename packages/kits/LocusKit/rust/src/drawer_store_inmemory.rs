@@ -2651,6 +2651,54 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
+    /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
+    /// lane's `pending`. Mirrors Swift `countSubjectDebt`.
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+        ]);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09). Deterministic
+    /// (filedAt ASC, id ASC) order; full rows so the producer can read
+    /// `content`; corrupt rows skip-and-log like every corpus scan.
+    /// Mirrors Swift `subjectDebtBatch(limit:)`.
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+        ]);
+        let (rows, _skipped) = self
+            .storage
+            .row_store()
+            .query_skip_corrupt(
+                T_DRAWERS,
+                Some(&predicate),
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
+                Some(limit),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        decode_rows_skip_corrupt(&rows, "subject_debt_batch")
+    }
+
     /// Zero the `content` column for every row in the `drawers` table.
     /// Used by `GLKCoordinator::destroy` to erase all drawer content blobs
     /// from LocusKit's SQLite storage as part of the estate destruction
@@ -5352,6 +5400,12 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<usize, LocusKitError> {
         self.inner
             .set_subject_representation(drawer_id, subject, pipeline_version, generated_at)
+    }
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_subject_debt()
+    }
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.subject_debt_batch(limit)
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_missing_subject(pipeline_version)

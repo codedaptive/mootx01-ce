@@ -101,6 +101,14 @@ public actor GeniusLocusKit {
     /// `hybrid` BM25/vector lanes. Dropped when the estate is closed.
     internal var corpusKits: [EstateHandle: CorpusContentEngine] = [:]
 
+    /// Subject-backfill rider registry (PR-09): the pluggable producer
+    /// that writes subjects for subject-debt rows. NO producer ships in
+    /// this mission — the Apple miniLLM producer is the PR-10 rider;
+    /// tests inject stubs. While empty for a handle, the
+    /// `subject_backfill` drain lane does not render (barrier-safety:
+    /// the benchmarker gates unknown lanes) and the sweep refuses.
+    internal var subjectProducers: [EstateHandle: any SubjectProducer] = [:]
+
     /// Opaque fault token used by optional migration targets' resume proofs.
     /// The core stores no historical migration type or state machine.
     internal var _migrationFaultTokenStorage: String? = nil
