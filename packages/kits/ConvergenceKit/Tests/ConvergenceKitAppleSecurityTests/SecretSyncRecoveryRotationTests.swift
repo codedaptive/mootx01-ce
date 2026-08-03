@@ -71,11 +71,15 @@ struct SecretSyncRecoveryRotationTests {
       sealedGenerationID: fixture.currentGenerationID,
       expectedFreshnessCommitment: fixture.freshness
     )
+    // The pre-confirmation transcript: what `beginBreakGlass` commits to,
+    // before any intent exists to bind. Its framing is unchanged, so the
+    // frozen length and digest still hold.
     let breakGlassBranch = SecretSyncRecoveryBranch.breakGlass(
       scopeID: fixture.scopeID,
       currentRecoveryRecipientID: current.recoveryRecipientID,
       sealedGenerationID: fixture.currentGenerationID,
-      freshness: fixture.freshness
+      freshness: fixture.freshness,
+      intentDigest: nil
     )
     let transcript = try SecretSyncRecoveryKeyCustody.transcript(
       handle: handle,
@@ -87,7 +91,36 @@ struct SecretSyncRecoveryRotationTests {
       Data(SHA256.hash(data: transcript))
         == u6Hex("eec3b1352c7d17d4b60da2858b86d863d7a84eb674e9cd48498513934c87019d")
     )
-    let confirmation = try await custody.confirm(handle, phrase: phrase)
+    let intent = try makeU6BIntent(
+      fixture: fixture,
+      handle: handle,
+      current: current
+    )
+    let intentDigest = Data(SHA256.hash(data: try intent.canonicalBytes()))
+    // The bound transcript adds tag 13: two bytes of tag, four of length, and
+    // the 32-byte digest. A bound confirmation and an unbound one are
+    // therefore different transcripts, which is what stops either standing in
+    // for the other.
+    let boundTranscript = try SecretSyncRecoveryKeyCustody.transcript(
+      handle: handle,
+      branch: SecretSyncRecoveryBranch.breakGlass(
+        scopeID: fixture.scopeID,
+        currentRecoveryRecipientID: current.recoveryRecipientID,
+        sealedGenerationID: fixture.currentGenerationID,
+        freshness: fixture.freshness,
+        intentDigest: intentDigest
+      ),
+      descriptor: current
+    )
+    #expect(boundTranscript.count == transcript.count + 38)
+    #expect(boundTranscript.count == 832)
+    #expect(boundTranscript != transcript)
+    #expect(boundTranscript.suffix(32) == intentDigest)
+    let confirmation = try await custody.confirmBreakGlass(
+      handle,
+      phrase: phrase,
+      intent: intent
+    )
     let request = try BreakGlassRecoveryRequest(
       requestID: handle.requestID,
       scopeID: fixture.scopeID,
@@ -120,7 +153,16 @@ struct SecretSyncRecoveryRotationTests {
       sealedGenerationID: fixture.currentGenerationID,
       expectedFreshnessCommitment: fixture.freshness
     )
-    let confirmation = try await custody.confirm(handle, phrase: phrase)
+    let intent = try makeU6BIntent(
+      fixture: fixture,
+      handle: handle,
+      current: current
+    )
+    let confirmation = try await custody.confirmBreakGlass(
+      handle,
+      phrase: phrase,
+      intent: intent
+    )
     let request = try BreakGlassRecoveryRequest(
       requestID: handle.requestID,
       scopeID: fixture.scopeID,
@@ -128,11 +170,6 @@ struct SecretSyncRecoveryRotationTests {
       sealedGenerationID: fixture.currentGenerationID,
       expectedFreshnessCommitment: fixture.freshness,
       blindConfirmation: confirmation
-    )
-    let intent = try makeU6BIntent(
-      fixture: fixture,
-      handle: handle,
-      current: current
     )
     let evidence = try await custody.stageBreakGlassAuthorization(
       request,
@@ -237,7 +274,17 @@ struct SecretSyncRecoveryRotationTests {
       let phrase = try SecretSyncRecoveryMnemonic(
         masterSeed: Data(0..<32)
       ).canonicalPhrase
-      let confirmation = try await custody.confirm(handle, phrase: phrase)
+      // The user confirms this exact intent, and nothing else may be signed.
+      let exactIntent = try makeU6BIntent(
+        fixture: fixture,
+        handle: handle,
+        current: current
+      )
+      let confirmation = try await custody.confirmBreakGlass(
+        handle,
+        phrase: phrase,
+        intent: exactIntent
+      )
       let request = try BreakGlassRecoveryRequest(
         requestID: handle.requestID,
         scopeID: fixture.scopeID,
@@ -300,7 +347,81 @@ struct SecretSyncRecoveryRotationTests {
           fixture: fixture, handle: handle, current: current,
           currentPolicyDigest: changedDigest
         )
+      case .appNamespace:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          appNamespace: "com.codedaptive.mootx01.attacker"
+        )
+      case .estateID:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          estateID: UUID()
+        )
+      case .replacementDeviceID:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          replacementDeviceID: TrustedDeviceID(UUID())
+        )
+      case .replacementCredentialID:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          replacementCredentialID: DeviceCredentialID(UUID())
+        )
+      case .replacementSigningPublicKey:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          replacementSigningPublicKey: SigningPublicKeyDescriptor(
+            algorithmIdentifier: "mootx01.test.replacement-signing.v1",
+            keyIdentifier: Data(repeating: 0x81, count: 32),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x82, count: 64)
+          )
+        )
+      case .replacementAgreementPublicKey:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          replacementAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+            algorithmIdentifier: "mootx01.test.replacement-agreement.v1",
+            keyIdentifier: Data(repeating: 0x91, count: 32),
+            publicKeyBytes: Data([0x04]) + Data(repeating: 0x92, count: 64)
+          )
+        )
+      case .signingPossessionProof:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          signingPossessionProof: Data([0x7A])
+        )
+      case .agreementPossessionProof:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          agreementPossessionProof: Data([0x7B])
+        )
+      case .candidateGenerationID:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          candidateGenerationID: SecretGenerationID(UUID())
+        )
+      case .replacementRecoveryRecipient:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          replacementRecoveryRecipient: alternateDescriptor
+        )
+      case .candidateSignedPolicyDigest:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          candidateSignedPolicyDigest: changedDigest
+        )
+      case .recoveryEnvelopeDigest:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          recoveryEnvelopeDigest: changedDigest
+        )
+      case .candidateSemantics:
+        changedIntent = try makeU6BIntent(
+          fixture: fixture, handle: handle, current: current,
+          candidateScopeSnapshotDigest: changedDigest
+        )
       }
+      #expect(changedIntent != exactIntent)
       await #expect(throws: SecretSyncRecoveryError.invalidConfirmation) {
         _ = try await custody.stageBreakGlassAuthorization(
           request,
@@ -308,16 +429,125 @@ struct SecretSyncRecoveryRotationTests {
           freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
         )
       }
-      _ = try await custody.stageBreakGlassAuthorization(
+      // Rejection is non-consuming: the intent the user actually confirmed
+      // still signs, and the signature verifies against the current recovery
+      // authorization key over exactly those bytes.
+      let evidence = try await custody.stageBreakGlassAuthorization(
         request,
+        intent: exactIntent,
+        freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
+      )
+      #expect(evidence.intent == exactIntent)
+      let publicKey = try P256.Signing.PublicKey(
+        x963Representation: current.authorizationSigningPublicKey.publicKeyBytes
+      )
+      #expect(
+        publicKey.isValidSignature(
+          try P256.Signing.ECDSASignature(
+            rawRepresentation: evidence.signature
+          ),
+          for: try exactIntent.canonicalBytes()
+        )
+      )
+      #expect(
+        !publicKey.isValidSignature(
+          try P256.Signing.ECDSASignature(
+            rawRepresentation: evidence.signature
+          ),
+          for: try changedIntent.canonicalBytes()
+        )
+      )
+    }
+  }
+
+  @Test("the warning acknowledgement is not a substitutable field")
+  func warningAcknowledgementIsNotSubstitutable() throws {
+    // `warning` is listed as substitution-sensitive, but all three of its
+    // components are pinned by the contract, so a substituted warning is not
+    // constructible in the first place — there is no mutated intent for the
+    // digest to reject. This records that fact where the other substitution
+    // cases live, so its absence from `U6BIntentMutation` reads as covered
+    // rather than missed.
+    #expect(throws: FullLossRecoveryContractError.invalidWarningAcknowledgement) {
+      _ = try FullLossRecoveryWarningAcknowledgement(
+        acknowledgement: "acknowledged-nothing-at-all"
+      )
+    }
+    #expect(throws: FullLossRecoveryContractError.invalidWarningAcknowledgement) {
+      _ = try FullLossRecoveryWarningAcknowledgement(
+        semanticIdentifier: "mootx01.attacker.warning",
+        acknowledgement: "acknowledged-no-erasure-and-rollback-risk"
+      )
+    }
+    #expect(throws: FullLossRecoveryContractError.invalidWarningAcknowledgement) {
+      _ = try FullLossRecoveryWarningAcknowledgement(
+        version: 0xFFFF,
+        acknowledgement: "acknowledged-no-erasure-and-rollback-risk"
+      )
+    }
+  }
+
+  @Test("break-glass cannot be confirmed without binding an intent")
+  func breakGlassRefusesUnboundConfirmation() async throws {
+    let fixture = U6BFixture()
+    let custody = fixture.custody()
+    let current = try await enroll(custody, fixture: fixture)
+    let handle = try await custody.beginBreakGlass(
+      requestID: UUID(uuidString: "69000000-0000-0000-0000-000000000006")!,
+      scopeID: fixture.scopeID,
+      currentRecoveryRecipient: current,
+      sealedGenerationID: fixture.currentGenerationID,
+      expectedFreshnessCommitment: fixture.freshness
+    )
+    let phrase = try SecretSyncRecoveryMnemonic(
+      masterSeed: Data(0..<32)
+    ).canonicalPhrase
+    // There is no intent-free way to confirm a break-glass ceremony, so an
+    // unbound confirmation cannot be produced and then laundered onto either
+    // stage path.
+    await #expect(throws: SecretSyncRecoveryError.invalidConfirmation) {
+      _ = try await custody.confirm(handle, phrase: phrase)
+    }
+    // Nor can the break-glass entry point admit a ceremony of another branch.
+    let enrollment = try await custody.beginEnrollment(requestID: UUID())
+    let enrollmentPhrase = try await custody.revealPhrase(for: enrollment)
+    await #expect(throws: SecretSyncRecoveryError.invalidConfirmation) {
+      _ = try await custody.confirmBreakGlass(
+        enrollment,
+        phrase: enrollmentPhrase,
         intent: makeU6BIntent(
           fixture: fixture,
           handle: handle,
           current: current
-        ),
-        freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
+        )
       )
     }
+    // The refused confirmation did not spend the ceremony: it still confirms
+    // and stages normally once an intent is bound to it.
+    let intent = try makeU6BIntent(
+      fixture: fixture,
+      handle: handle,
+      current: current
+    )
+    let confirmation = try await custody.confirmBreakGlass(
+      handle,
+      phrase: phrase,
+      intent: intent
+    )
+    let request = try BreakGlassRecoveryRequest(
+      requestID: handle.requestID,
+      scopeID: fixture.scopeID,
+      recoveryRecipientID: current.recoveryRecipientID,
+      sealedGenerationID: fixture.currentGenerationID,
+      expectedFreshnessCommitment: fixture.freshness,
+      blindConfirmation: confirmation
+    )
+    let evidence = try await custody.stageBreakGlassAuthorization(
+      request,
+      intent: intent,
+      freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
+    )
+    #expect(evidence.intent == intent)
   }
 
   @Test("unsigned and authorization break-glass paths share one terminal token")
@@ -335,14 +565,9 @@ struct SecretSyncRecoveryRotationTests {
       fixture: fixture,
       current: current
     )
-    let intent = try makeU6BIntent(
-      fixture: fixture,
-      handle: handle.handle,
-      current: current
-    )
     _ = try await custody.stageBreakGlassAuthorization(
       request,
-      intent: intent,
+      intent: handle.intent,
       freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
     )
     await #expect(throws: SecretSyncRecoveryError.alreadyConsumed) {
@@ -364,11 +589,6 @@ struct SecretSyncRecoveryRotationTests {
       fixture: fixture,
       current: secondCurrent
     )
-    let secondIntent = try makeU6BIntent(
-      fixture: fixture,
-      handle: secondHandle.handle,
-      current: secondCurrent
-    )
     _ = try await second.stageBreakGlass(
       secondRequest,
       freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
@@ -376,7 +596,7 @@ struct SecretSyncRecoveryRotationTests {
     await #expect(throws: SecretSyncRecoveryError.alreadyConsumed) {
       _ = try await second.stageBreakGlassAuthorization(
         secondRequest,
-        intent: secondIntent,
+        intent: secondHandle.intent,
         freshnessAnchor: U6BFreshnessAnchor(commitment: fixture.freshness)
       )
     }
@@ -398,11 +618,7 @@ struct SecretSyncRecoveryRotationTests {
         fixture: fixture,
         current: current
       )
-      let exactIntent = try makeU6BIntent(
-        fixture: fixture,
-        handle: confirmed.handle,
-        current: current
-      )
+      let exactIntent = confirmed.intent
 
       var changedRequestID = exactRequest.requestID
       var changedScope = exactRequest.scopeID
@@ -540,11 +756,7 @@ struct SecretSyncRecoveryRotationTests {
       fixture: fixture,
       current: current
     )
-    let intent = try makeU6BIntent(
-      fixture: fixture,
-      handle: confirmed.handle,
-      current: current
-    )
+    let intent = confirmed.intent
     let successes = await withTaskGroup(of: Bool.self) { group in
       group.addTask {
         do {
@@ -600,11 +812,7 @@ struct SecretSyncRecoveryRotationTests {
       fixture: fixture,
       current: current
     )
-    let intent = try makeU6BIntent(
-      fixture: fixture,
-      handle: confirmed.handle,
-      current: current
-    )
+    let intent = confirmed.intent
     await #expect(throws: SecretSyncRecoveryError.outputFailure) {
       _ = try await custody.stageBreakGlassAuthorization(
         request,
@@ -655,9 +863,23 @@ struct SecretSyncRecoveryRotationTests {
     let phrase = try SecretSyncRecoveryMnemonic(
       masterSeed: Data(0..<32)
     ).canonicalPhrase
+    // The confirmed intent travels with the confirmation so callers stage the
+    // intent that was actually bound rather than rebuilding an equal-looking
+    // one. Any caller that needs a different intent must confirm a different
+    // ceremony.
+    let intent = try makeU6BIntent(
+      fixture: fixture,
+      handle: handle,
+      current: current
+    )
     return U6BConfirmedBreakGlass(
       handle: handle,
-      evidence: try await custody.confirm(handle, phrase: phrase)
+      evidence: try await custody.confirmBreakGlass(
+        handle,
+        phrase: phrase,
+        intent: intent
+      ),
+      intent: intent
     )
   }
 
@@ -680,8 +902,26 @@ struct SecretSyncRecoveryRotationTests {
 private struct U6BConfirmedBreakGlass: Sendable {
   let handle: SecretSyncRecoveryConfirmationHandle
   let evidence: BlindRecoveryConfirmationEvidence
+  /// The exact intent this confirmation is bound to. Staging anything else
+  /// through the signing path is refused.
+  let intent: GlobalRecoveryTransitionIntent
 }
 
+/// Every field of `GlobalRecoveryTransitionIntent` an attacker could swap
+/// between the moment the user confirms and the moment the recovery key signs.
+///
+/// The first nine were already covered by the pre-signing current-state guard.
+/// The rest describe the replacement and candidate halves, which no guard
+/// touched — they are the substitution surface the intent digest closes.
+///
+/// Two fields of the intent are absent, both because they cannot vary:
+/// - `warning` — all three of its components are pinned by
+///   `FullLossRecoveryWarningAcknowledgement.init`
+///   (SecretSyncRecoveryAuthorityContracts.swift:109-116); any other value
+///   throws rather than producing a substituted intent. Covered instead by
+///   `warningAcknowledgementIsNotSubstitutable`.
+/// - `candidatePolicyEpoch` — pinned to `currentPolicyEpoch + 1`
+///   (:487-491), so it cannot move on its own. `epoch` moves the pair.
 private enum U6BIntentMutation: CaseIterable {
   case request
   case challenge
@@ -692,6 +932,19 @@ private enum U6BIntentMutation: CaseIterable {
   case epoch
   case commit
   case policy
+  case appNamespace
+  case estateID
+  case replacementDeviceID
+  case replacementCredentialID
+  case replacementSigningPublicKey
+  case replacementAgreementPublicKey
+  case signingPossessionProof
+  case agreementPossessionProof
+  case candidateGenerationID
+  case candidateSignedPolicyDigest
+  case replacementRecoveryRecipient
+  case recoveryEnvelopeDigest
+  case candidateSemantics
 }
 
 private enum U6BCoordinatedMutation: CaseIterable {
@@ -711,6 +964,7 @@ func makeU6BIntent(
   estateID: UUID = UUID(
     uuidString: "63000000-0000-0000-0000-000000000006"
   )!,
+  appNamespace: String = "com.codedaptive.mootx01.fulcrum",
   challengeRequestID: UUID? = nil,
   challengeID: UUID? = nil,
   sessionID: UUID? = nil,
@@ -719,15 +973,31 @@ func makeU6BIntent(
   currentRecoveryRecipient: RecoveryRecipientDescriptor? = nil,
   currentPolicyEpoch: UInt64? = nil,
   currentCommitDigest: SecretRecordDigest? = nil,
-  currentPolicyDigest: SecretRecordDigest? = nil
+  currentPolicyDigest: SecretRecordDigest? = nil,
+  replacementDeviceID: TrustedDeviceID? = nil,
+  replacementCredentialID: DeviceCredentialID? = nil,
+  replacementSigningPublicKey: SigningPublicKeyDescriptor? = nil,
+  replacementAgreementPublicKey: KeyAgreementPublicKeyDescriptor? = nil,
+  signingPossessionProof: Data? = nil,
+  agreementPossessionProof: Data? = nil,
+  candidateGenerationID: SecretGenerationID? = nil,
+  replacementRecoveryRecipient: RecoveryRecipientDescriptor? = nil,
+  // The contract ties `candidateSignedPolicyDigest` and
+  // `recoveryEnvelopeDigest` to the matching fields of `candidateSemantics`
+  // (SecretSyncRecoveryAuthorityContracts.swift:500-501), so each of these
+  // moves the semantics block with it. `scopeSnapshotDigest` is the semantics
+  // field no top-level field mirrors, so it varies the semantics alone.
+  candidateSignedPolicyDigest: SecretRecordDigest? = nil,
+  recoveryEnvelopeDigest: SecretRecordDigest? = nil,
+  candidateScopeSnapshotDigest: SecretRecordDigest? = nil
 ) throws -> GlobalRecoveryTransitionIntent {
   let digest: (UInt8) throws -> SecretRecordDigest = {
     try SecretRecordDigest(bytes: Data(repeating: $0, count: 32))
   }
-  let candidateSignedPolicy = try digest(0x31)
-  let recoveryEnvelope = try digest(0x32)
+  let candidateSignedPolicy = try candidateSignedPolicyDigest ?? digest(0x31)
+  let recoveryEnvelope = try recoveryEnvelopeDigest ?? digest(0x32)
   let semantics = try FullLossRecoveryCandidateSemantics(
-    scopeSnapshotDigest: digest(0x30),
+    scopeSnapshotDigest: candidateScopeSnapshotDigest ?? digest(0x30),
     signedPolicyDigest: candidateSignedPolicy,
     sealedPayloadDigest: digest(0x33),
     recipientEnvelopeDigests: [digest(0x34)],
@@ -743,18 +1013,20 @@ func makeU6BIntent(
       uuidString: "62000000-0000-0000-0000-000000000006"
     )!
   ).descriptor
-  let replacementSigning = try SigningPublicKeyDescriptor(
-    algorithmIdentifier: "mootx01.test.replacement-signing.v1",
-    keyIdentifier: Data(repeating: 0x41, count: 32),
-    publicKeyBytes: Data([0x04]) + Data(repeating: 0x42, count: 64)
-  )
-  let replacementAgreement = try KeyAgreementPublicKeyDescriptor(
-    algorithmIdentifier: "mootx01.test.replacement-agreement.v1",
-    keyIdentifier: Data(repeating: 0x51, count: 32),
-    publicKeyBytes: Data([0x04]) + Data(repeating: 0x52, count: 64)
-  )
+  let replacementSigning = try replacementSigningPublicKey
+    ?? SigningPublicKeyDescriptor(
+      algorithmIdentifier: "mootx01.test.replacement-signing.v1",
+      keyIdentifier: Data(repeating: 0x41, count: 32),
+      publicKeyBytes: Data([0x04]) + Data(repeating: 0x42, count: 64)
+    )
+  let replacementAgreement = try replacementAgreementPublicKey
+    ?? KeyAgreementPublicKeyDescriptor(
+      algorithmIdentifier: "mootx01.test.replacement-agreement.v1",
+      keyIdentifier: Data(repeating: 0x51, count: 32),
+      publicKeyBytes: Data([0x04]) + Data(repeating: 0x52, count: 64)
+    )
   return try GlobalRecoveryTransitionIntent(
-    appNamespace: "com.codedaptive.mootx01.fulcrum",
+    appNamespace: appNamespace,
     estateID: estateID,
     scopeID: scopeID ?? fixture.scopeID,
     challenge: FullLossRecoveryChallenge(
@@ -776,21 +1048,22 @@ func makeU6BIntent(
       currentPolicyEpoch ?? fixture.freshness.latestPolicyEpoch,
     currentGenerationID: currentGenerationID ?? fixture.currentGenerationID,
     currentRecoveryRecipient: currentRecoveryRecipient ?? current,
-    replacementDeviceID: TrustedDeviceID(
+    replacementDeviceID: replacementDeviceID ?? TrustedDeviceID(
       UUID(uuidString: "64000000-0000-0000-0000-000000000006")!
     ),
-    replacementCredentialID: DeviceCredentialID(
+    replacementCredentialID: replacementCredentialID ?? DeviceCredentialID(
       UUID(uuidString: "65000000-0000-0000-0000-000000000006")!
     ),
     replacementSigningPublicKey: replacementSigning,
     replacementAgreementPublicKey: replacementAgreement,
-    signingPossessionProof: Data([0x71]),
-    agreementPossessionProof: Data([0x72]),
+    signingPossessionProof: signingPossessionProof ?? Data([0x71]),
+    agreementPossessionProof: agreementPossessionProof ?? Data([0x72]),
     candidatePolicyEpoch:
       (currentPolicyEpoch ?? fixture.freshness.latestPolicyEpoch) + 1,
-    candidateGenerationID: fixture.replacementGenerationID,
+    candidateGenerationID:
+      candidateGenerationID ?? fixture.replacementGenerationID,
     candidateSignedPolicyDigest: candidateSignedPolicy,
-    replacementRecoveryRecipient: replacement,
+    replacementRecoveryRecipient: replacementRecoveryRecipient ?? replacement,
     recoveryEnvelopeDigest: recoveryEnvelope,
     candidateSemantics: semantics
   )

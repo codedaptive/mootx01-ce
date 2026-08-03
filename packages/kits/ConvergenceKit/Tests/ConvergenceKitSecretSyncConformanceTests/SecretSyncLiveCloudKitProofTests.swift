@@ -630,7 +630,19 @@ enum SecretSyncLiveRecoveryExercise {
       sealedGenerationID: generationID,
       expectedFreshnessCommitment: commitment
     )
-    let confirmation = try await custody.confirm(handle, phrase: enrolled.phrase)
+    // Break-glass confirmation commits to the exact intent it authorizes, so
+    // this exercise builds one even though it then drives only the unsigned
+    // stage path.
+    let confirmation = try await custody.confirmBreakGlass(
+      handle,
+      phrase: enrolled.phrase,
+      intent: liveBreakGlassIntent(
+        handle: handle,
+        current: enrolled.descriptor,
+        commitment: commitment,
+        generationID: generationID
+      )
+    )
     let request = try BreakGlassRecoveryRequest(
       requestID: handle.requestID, scopeID: commitment.scopeID,
       recoveryRecipientID: enrolled.descriptor.recoveryRecipientID,
@@ -705,6 +717,81 @@ enum SecretSyncLiveRecoveryExercise {
       requestID: try SecretSyncRecoveryFrame.uuid(from: fields[2].value),
       evidenceBytes: bytes,
       digest: Data(SHA256.hash(data: bytes))
+    )
+  }
+
+  /// The full-loss intent this exercise's break-glass confirmation binds.
+  ///
+  /// Its challenge fields come from `handle` because custody mints the
+  /// session and challenge identifiers inside `beginBreakGlass`; the current
+  /// half mirrors the live freshness commitment so the pre-signing guard
+  /// admits it. The replacement half is fixed test material — this exercise
+  /// proves the seam, not a real device handover.
+  private static func liveBreakGlassIntent(
+    handle: SecretSyncRecoveryConfirmationHandle,
+    current: RecoveryRecipientDescriptor,
+    commitment: SecretBootstrapFreshnessCommitment,
+    generationID: SecretGenerationID
+  ) throws -> GlobalRecoveryTransitionIntent {
+    let digest: (UInt8) throws -> SecretRecordDigest = {
+      try SecretRecordDigest(bytes: Data(repeating: $0, count: 32))
+    }
+    let signedPolicy = try digest(0xB1)
+    let recoveryEnvelope = try digest(0xB2)
+    let replacement = try SecretSyncRecoverySeedDerivation().derive(
+      masterSeed: Data((1...32).map(UInt8.init)),
+      recoveryRecipientID: UUID()
+    ).descriptor
+    return try GlobalRecoveryTransitionIntent(
+      appNamespace: "com.codedaptive.mootx01.conformance",
+      estateID: UUID(),
+      scopeID: commitment.scopeID,
+      challenge: FullLossRecoveryChallenge(
+        requestID: handle.requestID,
+        challengeID: handle.challengeID,
+        sessionID: handle.sessionID,
+        nonce: Data(repeating: 0xB0, count: 16),
+        issuedAtMilliseconds: 10_000,
+        expiresAtMilliseconds: 20_000
+      ),
+      warning: FullLossRecoveryWarningAcknowledgement(
+        acknowledgement: "acknowledged-no-erasure-and-rollback-risk"
+      ),
+      currentCommitDigest: commitment.headCommitDigest,
+      currentPolicyDigest: commitment.policyDigest,
+      currentPolicyEpoch: commitment.latestPolicyEpoch,
+      currentGenerationID: generationID,
+      currentRecoveryRecipient: current,
+      replacementDeviceID: TrustedDeviceID(UUID()),
+      replacementCredentialID: DeviceCredentialID(UUID()),
+      replacementSigningPublicKey: SigningPublicKeyDescriptor(
+        algorithmIdentifier: "mootx01.conformance.replacement-signing.v1",
+        keyIdentifier: Data(repeating: 0xB3, count: 32),
+        publicKeyBytes: Data([0x04]) + Data(repeating: 0xB4, count: 64)
+      ),
+      replacementAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+        algorithmIdentifier: "mootx01.conformance.replacement-agreement.v1",
+        keyIdentifier: Data(repeating: 0xB5, count: 32),
+        publicKeyBytes: Data([0x04]) + Data(repeating: 0xB6, count: 64)
+      ),
+      signingPossessionProof: Data([0xB7]),
+      agreementPossessionProof: Data([0xB8]),
+      candidatePolicyEpoch: commitment.latestPolicyEpoch + 1,
+      candidateGenerationID: SecretGenerationID(UUID()),
+      candidateSignedPolicyDigest: signedPolicy,
+      replacementRecoveryRecipient: replacement,
+      recoveryEnvelopeDigest: recoveryEnvelope,
+      candidateSemantics: FullLossRecoveryCandidateSemantics(
+        scopeSnapshotDigest: digest(0xB9),
+        signedPolicyDigest: signedPolicy,
+        sealedPayloadDigest: digest(0xBA),
+        recipientEnvelopeDigests: [digest(0xBB)],
+        recoveryEnvelopeDigest: recoveryEnvelope,
+        purgeRequirementDigests: [digest(0xBC)],
+        purgeReceiptDigests: [],
+        credentialDigests: [digest(0xBD)],
+        trustRecordDigests: [digest(0xBE)]
+      )
     )
   }
 

@@ -186,7 +186,11 @@ struct SecretSyncRecoveryAdversarialTests {
       expectedFreshnessCommitment: fixture.freshness
     )
     let phrase = try SecretSyncRecoveryMnemonic(masterSeed: Data(0..<32)).canonicalPhrase
-    let evidence = try await custody.confirm(handle, phrase: phrase)
+    let evidence = try await custody.confirmBreakGlass(
+      handle,
+      phrase: phrase,
+      intent: makeU6BIntent(fixture: fixture, handle: handle, current: current)
+    )
     let freshnessVariants = try [
       freshness(fixture.freshness, epoch: 10),
       freshness(
@@ -386,9 +390,14 @@ struct SecretSyncRecoveryAdversarialTests {
     let currentPhrase = try SecretSyncRecoveryMnemonic(
       masterSeed: Data(0..<32)
     ).canonicalPhrase
-    let breakGlassEvidence = try await custody.confirm(
+    let breakGlassEvidence = try await custody.confirmBreakGlass(
       breakGlass,
-      phrase: currentPhrase
+      phrase: currentPhrase,
+      intent: makeU6BIntent(
+        fixture: fixture,
+        handle: breakGlass,
+        current: current
+      )
     )
     let breakGlassAsRotation = try RecoveryRotationRequest(
       requestID: breakGlass.requestID,
