@@ -65,6 +65,90 @@ struct UtilityTierTests {
         // are exactly the fixture's.
         #expect(body.contains("subjects: 2/3 (1 missing)"),
                 "debt counter must reflect the mixed fixture; got: \(body)")
+        // Over-filtering control (MXE-XU): every row here is normal
+        // sensitivity, so the sensitivity ceiling removes nothing and the
+        // counts are identical to what they were before the ceiling was
+        // applied to them. An estate with no restricted rows must read the
+        // same after the fix as before it.
+        #expect(body.contains("memories: 3 active (3 total)"),
+                "ceiling must not drop rows on an estate with no restricted rows; got: \(body)")
+    }
+
+    /// MXE-XU — every drawer-derived aggregate on this surface reads the
+    /// sensitivity-filtered set, not the raw cluster-A set.
+    ///
+    /// The fixture holds one visible subject-bearing row plus two restricted
+    /// rows — one carrying a subject, one not — filed into a wing of their
+    /// own. Before the fix this reported `memories: 3 active (3 total)` and
+    /// `subjects: 2/3 (1 missing)`: an ungranted caller learned that live rows
+    /// were hidden from it, how many, and how many of those carried a subject.
+    /// `wings:` was already filtered; it is the control that proves the fix
+    /// closes the leak without over-reaching.
+    @Test func estateStatusAggregatesExcludeRestrictedRows() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "xu-ceiling"))
+        let handle = try await kit.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "xu-ceiling"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let hiddenWing = "Ceiling Hidden Wing"
+
+        // One normal-sensitivity, subject-bearing row in the default wing.
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("Visible row with a subject."),
+                "subject": .string("Visible row: carries a subject."),
+                "location": .string("ceiling-tests"),
+            ]))
+
+        // One restricted row WITH a subject, in a wing of its own.
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("Restricted row with a subject."),
+                "subject": .string("Restricted row: carries a subject."),
+                "location": .string("ceiling-hidden"),
+                "wing": .string(hiddenWing),
+                "sensitivity": .string("restricted"),
+            ]))
+
+        // …and one restricted row WITHOUT a subject. The ARIA boundary
+        // requires a subject, so subject debt is seeded through the direct
+        // capture seam, as the mixed-fixture test above does.
+        let frame = CaptureFrame(
+            content: "Restricted row without a subject.",
+            channel: .actuator,
+            room: "ceiling-hidden",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "utility-tier-tests",
+            embeddingModelID: "default",
+            sensitivity: .restricted,
+            wing: hiddenWing)
+        _ = try await kit.capture(handle, frame, mode: .regular)
+
+        let status = try await dispatcher.dispatch(
+            name: "moot_estate_status", arguments: .object([:]))
+        let body = text(of: status)
+
+        // The subject counter sees one eligible row, and it bears a subject.
+        #expect(body.contains("subjects: 1/1 (0 missing)"),
+                "subject counter must count only sensitivity-visible rows; got: \(body)")
+        // The memories counts move with the same set — a count that tracks
+        // the restricted population is the same leak in scalar form.
+        #expect(body.contains("memories: 1 active (1 total)"),
+                "memory counts must exclude restricted rows; got: \(body)")
+        // Already-correct neighbour: the restricted rows' wing must not be
+        // named, and the default wing must still be.
+        #expect(!body.contains(hiddenWing),
+                "wing listing must not name a wing known only from restricted rows; got: \(body)")
+        #expect(body.contains("wings: \(LocusKit.defaultWingName)"),
+                "the visible row's wing must still be listed; got: \(body)")
     }
 
     @Test func listLensesTerseDefaultAndVerbose() async throws {
