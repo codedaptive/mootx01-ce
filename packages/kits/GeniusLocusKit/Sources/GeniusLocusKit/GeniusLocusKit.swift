@@ -57,6 +57,26 @@ public actor GeniusLocusKit {
     /// Internal — only the verb surface and tests reference this constant.
     internal static let traceRetentionSeconds: TimeInterval = 30 * 24 * 60 * 60
 
+    // MARK: - Per-estate registries
+    //
+    // ADDING A PER-ESTATE REGISTRY
+    //
+    // Every `[EstateHandle: …]` stored property below is a PER-ESTATE
+    // REGISTRY, and a handle is equal across reopens of the same estate
+    // (`EstateHandle.estateUUID` comes from the manifest, so estate identity
+    // is a property of the substrate, not of the open). A registry that
+    // `close` does not clear therefore survives into the next open of that
+    // estate and resolves to state the caller never re-registered.
+    //
+    // A new registry needs a clearing line in BOTH of `close`'s paths in
+    // `EstateCoordinator.swift` — the error path and the success path —
+    // teardown-ordered if the value owns a worker, a lease, or a connection
+    // (see `corpusKits` and `schedulers` there for the two live examples).
+    //
+    // `EstateCloseCompletenessTests` reflects over these properties, so it
+    // will catch a missing clear without any edit to the test. It cannot
+    // catch a missing teardown call — that judgement is still yours.
+
     /// Registry of currently-open estates keyed by handle.
     ///
     /// Internal so that the coordinator and read-fan-out extensions in
