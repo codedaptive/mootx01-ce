@@ -76,7 +76,7 @@ struct SecretSyncCrashRestartConformanceTests {
     #expect(head.commitDigest == context.fixture.entry.commit.recordDigest)
   }
 
-  @Test("restart after accepted head reconstructs committed graph before receipt")
+  @Test("restart after accepted head reconstructs the graph before receipt")
   func crashAfterAcceptedHeadBeforeReceipt() async throws {
     let context = try await stagedContext()
     let outcome = try await context.store.compareAndAdvance(
@@ -87,12 +87,17 @@ struct SecretSyncCrashRestartConformanceTests {
       database: context.database, digester: context.digester
     )
 
-    let committed = try await restarted.committedPolicy(
+    // A restarted store must still be able to hydrate the graph the durable
+    // head references — that is what this accessor exists for. It hands the
+    // graph back in the `.staged` state because reconstruction proved structure
+    // and content-addressing, not authority; validating it is the caller's job.
+    let hydrated = try await restarted.unvalidatedHeadPolicy(
       for: U7GoldenVectors.scopeID, epoch: 1
     )
-    #expect(committed?.commit == context.fixture.entry.commit)
-    #expect(committed?.records.state == .committed)
-    #expect(committed?.credentials == context.fixture.entry.credentials)
+    #expect(hydrated?.commit == context.fixture.entry.commit)
+    #expect(hydrated?.records.state == .staged)
+    #expect(hydrated?.records.state != .committed)
+    #expect(hydrated?.credentials == context.fixture.entry.credentials)
   }
 
   @Test("partial cross-zone graphs reject while unreferenced orphans authorize nothing")

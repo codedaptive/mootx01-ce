@@ -21,6 +21,12 @@ public enum SecretSyncCloudKitPolicyStoreError: Error, Sendable, Equatable {
 /// non-authoritative. Only `compareAndAdvance` accepts the core module's
 /// `SecretPolicyAdvancePrecondition`, and only its database-bound
 /// `SecretSyncHeadCAS` can replace the per-scope mutable head.
+///
+/// The per-scope head is transport, not authority. Reading it and rebuilding
+/// the graph it references establishes content-addressing and structure only,
+/// so no member of this actor returns an entry in the `.committed` state. The
+/// caller that holds credentials, a verifier and a freshness commitment is the
+/// one entitled to decide that a graph is authoritative.
 public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
     private let database: any CloudKitDatabaseProtocol
     private let digester: any SecretSyncDigesting
@@ -56,12 +62,18 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry? {
-        let committedDigest = try await committedPolicy(
+        // Only the head-referenced commit digest is wanted here, to exclude it
+        // from the staged candidates — no authority is being claimed or needed.
+        // Reading `headCAS.currentHead` directly would not be equivalent: when
+        // the head sits at a later epoch, the chain walk is what locates the
+        // ancestor commit at the requested epoch, and it enforces the
+        // structural bindings along the way.
+        let headDigest = try await unvalidatedHeadPolicy(
             for: scopeID,
             epoch: epoch
         )?.commit.recordDigest
         let candidates = try await transitionCommits(in: scopeID, epoch: epoch)
-            .filter { $0.recordDigest != committedDigest }
+            .filter { $0.recordDigest != headDigest }
         guard candidates.count <= 1 else {
             throw SecretSyncCloudKitPolicyStoreError.competingStagedPolicies
         }
@@ -72,7 +84,28 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         )
     }
 
-    public func committedPolicy(
+    /// Reconstructs the graph the mutable scope head references at `epoch`,
+    /// making no claim about its authority.
+    ///
+    /// What the walk below proves: every fetched record is content-addressed by
+    /// its own canonical bytes, the commit chain descends epoch by epoch to the
+    /// requested epoch, genesis carries no predecessor or purge evidence, and
+    /// each epoch's purge requirements correspond exactly to the recipients its
+    /// predecessor dropped.
+    ///
+    /// What it does not prove: authority. Signature fields are round-tripped as
+    /// opaque bytes and no verifier runs, because this actor holds only a
+    /// database and a digester — it has no trusted credentials, no external
+    /// freshness commitment and no signature verifier, and acquiring them would
+    /// move credential material into a transport actor.
+    ///
+    /// The scope head is mutable. A party who can write SecretSync records can
+    /// stage a structurally valid graph carrying arbitrary signature bytes and
+    /// point the head at it, and every check here will pass. Entries are
+    /// therefore returned as `.staged`; the caller validates through
+    /// `SecretPolicyValidator` before trusting them. `compareAndAdvance`
+    /// remains the only path that acts on validated authority.
+    public func unvalidatedHeadPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry? {
@@ -83,7 +116,7 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         while true {
             let entry = try await reconstructPolicy(
                 commitDigest: head.commitDigest,
-                state: .committed
+                state: .staged
             )
             guard entry.commit.scopeID == head.scopeID,
                   entry.commit.policyEpoch == head.policyEpoch,
@@ -107,7 +140,7 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
             }
             let predecessorEntry = try await reconstructPolicy(
                 commitDigest: predecessor,
-                state: .committed
+                state: .staged
             )
             let priorRecipients = Set(
                 predecessorEntry.records.signedPolicy.policy
@@ -314,9 +347,11 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
         // logical head before retrying. This is structural revalidation only;
         // it deliberately makes no claim to rerun SecretPolicyValidator without
         // its credential, signature, competing-child, and freshness inputs.
+        // The entry is built as `.staged` to match that disclaimer: it is
+        // head-derived material whose authority nothing here established.
         let reconstructed = try await reconstructPolicy(
             commitDigest: current.commitDigest,
-            state: .committed
+            state: .staged
         )
         guard reconstructed.commit.scopeID == current.scopeID,
               reconstructed.commit.policyEpoch == current.policyEpoch,

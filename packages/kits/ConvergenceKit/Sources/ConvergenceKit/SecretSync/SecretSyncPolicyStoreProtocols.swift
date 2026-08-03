@@ -265,14 +265,40 @@ public struct SecretPolicyStoreEntry: Sendable, Hashable {
     }
 }
 
-/// Append-only storage seam for immutable staged and committed policy entries.
+/// Append-only storage seam for immutable policy entries.
+///
+/// The store is transport. It can prove that an exact content-addressed graph
+/// reached storage and that the graph's structural bindings hold; it cannot
+/// admit authority, because it holds none of the inputs authority requires.
+/// `compareAndAdvance` is the only member that acts on validated authority, and
+/// only because `SecretPolicyAdvancePrecondition` cannot be constructed without
+/// a `SecretControlSnapshot` that `SecretPolicyValidator` produced.
 public protocol SecretSyncPolicyStore: Sendable {
     func stagedPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry?
 
-    func committedPolicy(
+    /// Reconstructs the graph the mutable scope head references at `epoch`,
+    /// making no claim about its authority.
+    ///
+    /// Reconstruction proves content-addressing — every record's digest matches
+    /// its canonical bytes — together with the predecessor chain and the
+    /// recipient-to-purge correspondence. It proves nothing about authority:
+    /// signature fields are carried as opaque bytes and no verifier runs,
+    /// because a store holds neither trusted credentials, nor an external
+    /// freshness commitment, nor a signature verifier.
+    ///
+    /// The scope head is mutable transport. A party able to write records into
+    /// the backing database can stage a structurally valid graph carrying
+    /// arbitrary signature bytes and point the head at it. Entries returned
+    /// here therefore carry `.staged` and never `.committed`.
+    ///
+    /// The caller — which does hold credentials, a verifier and a freshness
+    /// commitment — must validate through `SecretPolicyValidator` before
+    /// treating the result as authoritative. This is the hydration path after a
+    /// restart, not a trust decision.
+    func unvalidatedHeadPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry?

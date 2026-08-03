@@ -77,15 +77,15 @@ struct SecretSyncProtocolContractTests {
             try await store.compareAndAdvance(precondition)
                 == .advanced(precondition.candidateHead)
         )
-        let committed = try #require(
-            try await store.committedPolicy(
+        let hydrated = try #require(
+            try await store.unvalidatedHeadPolicy(
                 for: entry.commit.scopeID,
                 epoch: entry.commit.policyEpoch
             )
         )
-        #expect(committed.commit == snapshot.commit)
-        #expect(committed.records == snapshot.records)
-        #expect(committed.trustRecords == snapshot.trustedDeviceRecords)
+        #expect(hydrated.commit == snapshot.commit)
+        #expect(hydrated.records == snapshot.records)
+        #expect(hydrated.trustRecords == snapshot.trustedDeviceRecords)
     }
 
     @Test("purge receipts are category-idempotent and admission defaults closed")
@@ -648,7 +648,12 @@ private actor PolicyStoreFake: SecretSyncPolicyStore {
         return stagedEntry
     }
 
-    func committedPolicy(
+    // This double keeps the entry `compareAndAdvance` accepted, so what it
+    // hands back is material the validator already admitted through the
+    // precondition. It still answers under the unvalidated name because the
+    // protocol promises the caller nothing about authority — a conformer that
+    // happens to hold validated material does not widen the contract.
+    func unvalidatedHeadPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry? {

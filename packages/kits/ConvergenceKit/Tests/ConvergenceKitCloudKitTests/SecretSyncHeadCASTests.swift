@@ -454,7 +454,7 @@ struct SecretSyncHeadCASTests {
         #expect(await database.savedHeadCount == 1)
     }
 
-    @Test("restart reconstructs committed policy from the authoritative head")
+    @Test("restart reconstructs the head-referenced policy from durable state")
     func restartUsesHeadNotCache() async throws {
         let fixture = try U5PolicyFixture.make()
         let database = U5ScriptedDatabase()
@@ -470,14 +470,19 @@ struct SecretSyncHeadCASTests {
             database: database,
             digester: U5PolicyFixture.digester
         )
-        let committed = try await restarted.committedPolicy(
+        let hydrated = try await restarted.unvalidatedHeadPolicy(
             for: fixture.entry.commit.scopeID,
             epoch: 1
         )
 
-        let reconstructed = try #require(committed)
+        // Hydration after restart still works — the graph comes back from the
+        // durable head, not from any in-process cache. What changed is the
+        // label: the store reports what it proved, and it did not prove
+        // authority.
+        let reconstructed = try #require(hydrated)
         #expect(reconstructed.commit == fixture.entry.commit)
-        #expect(reconstructed.records.state == .committed)
+        #expect(reconstructed.records.state == .staged)
+        #expect(reconstructed.records.state != .committed)
         #expect(reconstructed.records.signedPolicy == fixture.entry.records.signedPolicy)
         #expect(reconstructed.records.sealedPayload == fixture.entry.records.sealedPayload)
         #expect(reconstructed.records.recipientEnvelopes == fixture.entry.records.recipientEnvelopes)
@@ -523,7 +528,7 @@ struct SecretSyncHeadCASTests {
             await #expect(
                 throws: SecretSyncCloudKitPolicyStoreError.referenceMismatch
             ) {
-                _ = try await store.committedPolicy(
+                _ = try await store.unvalidatedHeadPolicy(
                     for: invalid.commit.scopeID,
                     epoch: invalid.commit.policyEpoch
                 )
@@ -558,7 +563,7 @@ struct SecretSyncHeadCASTests {
         await #expect(
             throws: SecretSyncCloudKitPolicyStoreError.referenceMismatch
         ) {
-            _ = try await store.committedPolicy(
+            _ = try await store.unvalidatedHeadPolicy(
                 for: chain.child.commit.scopeID,
                 epoch: chain.child.commit.policyEpoch
             )
@@ -590,7 +595,7 @@ struct SecretSyncHeadCASTests {
         await #expect(
             throws: SecretSyncCloudKitPolicyStoreError.referenceMismatch
         ) {
-            _ = try await store.committedPolicy(
+            _ = try await store.unvalidatedHeadPolicy(
                 for: invalid.commit.scopeID,
                 epoch: 1
             )
