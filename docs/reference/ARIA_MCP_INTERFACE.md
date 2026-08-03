@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.26.0
+version: 1.27.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -378,6 +378,17 @@ the 23 reasoning-lens tools below.
   `moot_lens_associations`, `moot_lens_concepts`,
   `moot_lens_apriori`, `moot_lens_moment`, `moot_lens_rhythm`,
   `moot_lens_precedence`, `moot_lens_complexity`
+
+**Lens evidence addresses.** Every lens finding that names memories cites
+them as dense rows (the PR-03 five-field form), so each finding is a
+hydratable address: seven memory-listing lens arms (`keystones`,
+`free_association`, `cohesion`, `contradiction`, `trust_synthesis`,
+`partial_cue`, `successors`) render their cited memories through the shared
+dense-row renderer byte-identically in both ports. `moot_lens_concepts`
+lists up to 20 member drawer ids per concept (extent cap, Swift
+`lensExtentIDCap` ↔ Rust `LENS_EXTENT_ID_CAP`), and
+`moot_lens_associations` carries `exemplarDrawerIDs` (cap 5) on each rule
+so a rule's evidence is directly fetchable via `moot_memory_get`.
 
 `moot_lens_contradiction` reports two lifecycle tiers on its contradicts-tunnel
 output: confirmed (active) edges, and PROPOSED edges flagged
@@ -1154,6 +1165,16 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.27.0 -- 2026-08-02
+
+- Lens evidence addresses (PR-05): memory-listing lens findings cite
+  memories as dense rows via the shared renderer (7 arms: keystones,
+  free_association, cohesion, contradiction, trust_synthesis,
+  partial_cue, successors); moot_lens_concepts lists member drawer ids
+  capped at 20 (`lensExtentIDCap` ↔ `LENS_EXTENT_ID_CAP`);
+  moot_lens_associations carries `exemplarDrawerIDs` (cap 5) per rule.
+  Byte-identical across ports, golden-tested against the renderer.
 
 ### 1.26.0 -- 2026-08-02
 

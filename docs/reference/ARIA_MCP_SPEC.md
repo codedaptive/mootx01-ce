@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.22.0
+version: 1.23.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -260,7 +260,15 @@ provenance respectively. Three tabular-dataset tools (`moot_file_dataset`,
 `moot_dataset_query`, `moot_dataset_stats`, MX-TAB-7) carry `.interface`
 provenance — always visible, never vault-gated. Total: 71 tools vault-on,
 65 vault-off (30 interface: 22 five-tier + 4 maintenance + 1 monitoring + 3
-dataset; 1 federation; 35 recipe/lens; 5 vault). For the full enumeration see
+dataset; 1 federation; 35 recipe/lens; 5 vault). Lens findings that name
+memories MUST cite them as dense rows through the shared renderer (evidence
+addresses, PR-05): the seven memory-listing arms (keystones,
+free_association, cohesion, contradiction, trust_synthesis, partial_cue,
+successors) are golden-tested byte-identical across ports;
+moot_lens_concepts lists member drawer ids capped at 20 and
+moot_lens_associations carries exemplar drawer ids capped at 5, so every
+lens claim is hydratable via moot_memory_get without a fresh search. For
+the full enumeration see
 ARIA_MCP_INTERFACE.md §2.
 
 ### Conformance contract
@@ -878,6 +886,14 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.23.0 -- 2026-08-02
+
+- Lens evidence addresses (PR-05): lens findings that name memories cite
+  them as dense rows via the shared renderer (7 memory-listing arms,
+  golden-tested byte-identical both ports); concepts extent ids capped
+  at 20, association exemplar ids capped at 5 — every lens claim is
+  hydratable via moot_memory_get.
 
 ### 1.22.0 -- 2026-08-02
 
