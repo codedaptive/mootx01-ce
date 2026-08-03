@@ -10,12 +10,13 @@
 // Every graph-lens arm that hydrates an id off that graph must refuse to
 // render its subject, while still emitting the id and its ranking value.
 //
-// ONE test per behaviour at the HELPER, not five near-duplicates per arm.
-// All six lens arms (LensTools 431, 473, 597, 776, 806, 900), both recall
-// arms in RecipeTools, and the tunnel-citation arms in ToolDispatch route
-// through `RecipeTools.denseRowsByID`, so proving the helper gates covers
-// every one of them by construction. `lensArmInheritsTheHelperGate` then
-// pins one real arm end-to-end so the routing itself cannot silently change.
+// ONE test per behaviour at the HELPER, not one near-duplicate per arm.
+// All six lens arms in `LensTools`, the four recall arms in `RecipeTools`,
+// and the two tunnel-citation arms in `ToolDispatch` — twelve call sites —
+// route through `RecipeTools.denseRowsByID`, so proving the helper gates
+// covers every one of them by construction.
+// `lensArmInheritsTheHelperGate` then pins one real arm end-to-end so the
+// routing itself cannot silently change.
 //
 // The gate here is the empty `filterChain` in `denseRowsByID`, which
 // `BitmapEvaluator.insertDefaults` turns into `.sensitivityAtMost(.elevated)`
@@ -86,7 +87,7 @@ struct DenseRowSensitivityGateTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
     }
 
-    // MARK: - The helper gate (covers all eleven callers by construction)
+    // MARK: - The helper gate (covers all twelve callers by construction)
 
     /// A drawer restricted AFTER its tunnels were created is absent from the
     /// helper's map — so every caller's `renderUnhydrated` fallback fires.
