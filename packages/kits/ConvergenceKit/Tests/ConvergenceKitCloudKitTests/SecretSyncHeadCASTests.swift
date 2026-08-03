@@ -490,7 +490,7 @@ struct SecretSyncHeadCASTests {
         #expect(reconstructed.trustRecords == fixture.entry.trustRecords)
     }
 
-    @Test("committed chain rejects invalid predecessor authority bindings")
+    @Test("predecessor chain rejects invalid structural authority bindings")
     func predecessorAuthorityBindingsReject() async throws {
         let first = try U5PolicyFixture.make(generationByte: 0x31)
         let second = try U5PolicyFixture.make(

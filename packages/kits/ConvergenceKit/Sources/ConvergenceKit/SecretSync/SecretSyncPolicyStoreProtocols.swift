@@ -291,8 +291,11 @@ public protocol SecretSyncPolicyStore: Sendable {
     ///
     /// The scope head is mutable transport. A party able to write records into
     /// the backing database can stage a structurally valid graph carrying
-    /// arbitrary signature bytes and point the head at it. Entries returned
-    /// here therefore carry `.staged` and never `.committed`.
+    /// arbitrary signature bytes and point the head at it. A conformer that
+    /// answers by reading such a head therefore returns `.staged`: it has no
+    /// basis for any stronger claim. A conformer that already holds
+    /// validator-admitted material may return it as it stands — what this
+    /// requirement forbids is inferring authority from the head.
     ///
     /// The caller — which does hold credentials, a verifier and a freshness
     /// commitment — must validate through `SecretPolicyValidator` before
