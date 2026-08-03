@@ -22,8 +22,9 @@
 //!      Returns false immediately on overflow; the connection is shed inline
 //!      with HTTP 503 + `Retry-After: 1`. The accept loop never stalls.
 //!   2. `wait_for_slot()` — blocking Condvar wait inside the spawned worker
-//!      thread. Enforces `max_concurrent`; the accept loop is already back
-//!      at `accept()` by the time this blocks.
+//!      thread. Enforces `max_concurrent` against the count of *actively
+//!      serving* connections, not against queue depth; the accept loop is
+//!      already back at `accept()` by the time this blocks.
 //!
 //! The `Dispatcher` is wrapped in `Arc<Mutex<>>` so it can be shared safely
 //! across the per-connection threads. The request bytes are read BEFORE
@@ -154,9 +155,24 @@ fn update_inflight_hwm(current: usize) {
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - ConcurrencyGate
 //
-// A Condvar-backed counting semaphore that bounds in-flight connections.
-// Rust's std does not ship a built-in semaphore, so we build one from
-// `Mutex<usize>` + `Condvar`, which is the canonical pattern.
+// A Condvar-backed gate that bounds in-flight connections. Rust's std does not
+// ship a built-in semaphore, so the gate is built from `Mutex` + `Condvar`,
+// which is the canonical pattern.
+//
+// TWO QUANTITIES, NOT ONE. The gate tracks queue depth and slot occupancy as
+// SEPARATE numbers (`admitted` and `running`) under a single Mutex. This
+// mirrors the Swift `ConcurrencyGate` in Sources/AriaMCP/HTTPServer.swift,
+// where `activeCount` is depth accounting only and slot admission is a
+// distinct `AsyncSemaphore(value: maxConcurrent)`.
+//
+// The separation is load-bearing, not stylistic. If one counter both records
+// queue depth AND gates admission, waiters are counted in the very number they
+// are waiting to fall below, and the gate cannot drain: with max_concurrent = 2
+// and three queued waiters the counter reads 5; both running requests finish
+// and it falls to 3; the admission test is still unsatisfied, so no waiter ever
+// wakes and every later connection is shed with 503 until the process
+// restarts. Gating on `running` alone — a number no waiter is part of — is what
+// makes the gate drainable.
 //
 // Sizing mirrors the Swift ConcurrencyGate defaults:
 //   max_concurrent = 64, max_queued = 256
@@ -167,10 +183,11 @@ fn update_inflight_hwm(current: usize) {
 // parks inside the gate:
 //
 //   1. try_enqueue() — NON-BLOCKING depth check called on the accept thread.
-//      Increments `active` and returns true if within bounds, or decrements
-//      and returns false (overflow → 503 shed inline, accept loop continues).
+//      Increments `admitted` and returns true if within bounds, or leaves the
+//      state untouched and returns false (overflow → 503 shed inline, accept
+//      loop continues).
 //   2. wait_for_slot() — BLOCKING Condvar wait, called INSIDE the spawned
-//      worker thread, not on the accept thread.
+//      worker thread, not on the accept thread. Takes a `running` permit.
 //
 // Why the split matters:
 //   Old (wrong): accept → try_acquire (depth check + Condvar wait combined) →
@@ -182,8 +199,31 @@ fn update_inflight_hwm(current: usize) {
 //     free to accept the next fd and shed overflow inline.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Counting-semaphore gate that bounds the number of simultaneous in-flight
-/// HTTP connections. Thread-safe via `Mutex<usize>` + `Condvar`.
+/// Internal gate state. Both quantities live under ONE `Mutex` so they are
+/// always mutated together and can never be read mid-update.
+///
+/// Invariants, which hold whenever the lock is not held and callers honour the
+/// protocol (every `wait_for_slot` follows a successful `try_enqueue`, and
+/// every admitted connection releases exactly once):
+///
+///   running <= max_concurrent                 — the concurrency cap
+///   running <= admitted                       — you cannot serve un-admitted work
+///   admitted <= max_concurrent + max_queued   — the depth cap
+struct GateState {
+    /// Connections admitted into the gate: waiting for a slot PLUS actively
+    /// serving. Incremented by `try_enqueue`, decremented by `release`. Does
+    /// NOT include connections that have been shed. This is the depth number
+    /// reported by `current_depth()`; nothing waits on it.
+    admitted: usize,
+    /// Connections actively serving — those that have returned from
+    /// `wait_for_slot` and not yet called `release`. This is the ONLY number
+    /// admission is gated on, which is precisely why a queued waiter never
+    /// blocks itself: a waiter is in `admitted` but not yet in `running`.
+    running: usize,
+}
+
+/// Gate that bounds the number of simultaneous in-flight HTTP connections.
+/// Thread-safe via `Mutex<GateState>` + `Condvar`.
 ///
 /// The accept thread calls `try_enqueue()` (non-blocking); the spawned worker
 /// thread calls `wait_for_slot()` (blocking Condvar wait). When the request
@@ -191,10 +231,9 @@ fn update_inflight_hwm(current: usize) {
 pub struct ConcurrencyGate {
     pub max_concurrent: usize,
     pub max_queued: usize,
-    /// Number of connections currently enqueued (waiting for a slot or
-    /// actively serving). Incremented by `try_enqueue`, decremented by
-    /// `release`. Does NOT include connections that have been shed.
-    active: Mutex<usize>,
+    /// Depth (`admitted`) and slot occupancy (`running`), kept separate. See
+    /// `GateState` for the invariants and why one counter cannot serve both.
+    state: Mutex<GateState>,
     /// Signalled whenever a slot is freed by `release()`.
     cvar: Condvar,
 }
@@ -205,7 +244,10 @@ impl ConcurrencyGate {
         Arc::new(Self {
             max_concurrent,
             max_queued,
-            active: Mutex::new(0),
+            state: Mutex::new(GateState {
+                admitted: 0,
+                running: 0,
+            }),
             cvar: Condvar::new(),
         })
     }
@@ -215,57 +257,78 @@ impl ConcurrencyGate {
     /// (connection enqueued; caller MUST eventually call `release()`); returns
     /// `false` if the queue is full (caller should send 503 and close).
     ///
-    /// This method never blocks. It only inspects and increments `active`
+    /// This method never blocks. It only inspects and increments `admitted`
     /// under the lock — no Condvar wait. The Condvar wait happens in
     /// `wait_for_slot()`, which the spawned worker thread calls after
     /// `try_enqueue()` returns true.
     pub fn try_enqueue(self: &Arc<Self>) -> bool {
-        let mut count = self.active.lock().unwrap();
-        // Reject immediately when the combined depth limit is reached.
-        if *count >= self.max_concurrent + self.max_queued {
+        let mut state = self.state.lock().unwrap();
+        // Reject immediately when the combined depth limit is reached. On
+        // rejection the state is left untouched, so a shed connection never
+        // owes a `release()`.
+        if state.admitted >= self.max_concurrent + self.max_queued {
             return false;
         }
-        *count += 1;
+        state.admitted += 1;
         true
         // Lock released here (drop). No Condvar wait on the accept thread.
     }
 
     /// Phase 2 (worker thread, BLOCKING): wait until a concurrency slot is
-    /// free. Must be called after a successful `try_enqueue()`, before
-    /// beginning request service. Blocks if `active > max_concurrent`; returns
-    /// as soon as `release()` decrements `active` below `max_concurrent` and
-    /// signals the condvar.
+    /// free, then take it. Must be called after a successful `try_enqueue()`,
+    /// before beginning request service.
+    ///
+    /// Blocks while `running >= max_concurrent` and returns as soon as a
+    /// `release()` drops `running` below the cap and signals the condvar; on
+    /// return `running` has been incremented on this caller's behalf, so the
+    /// caller now owns a slot and MUST `release()` it.
+    ///
+    /// The wait is on `running`, never on `admitted`. This caller is already
+    /// counted in `admitted` (by `try_enqueue`), so waiting on `admitted` would
+    /// make the caller part of the condition it is waiting to clear — the
+    /// permanent wedge described in the header comment above.
     pub fn wait_for_slot(&self) {
-        let mut count = self.active.lock().unwrap();
-        // active was already incremented by try_enqueue. Wait until our slot
-        // is within the max_concurrent window. Other threads may have changed
-        // count between try_enqueue and here; the loop re-checks on each wake.
-        while *count > self.max_concurrent {
-            count = self.cvar.wait(count).unwrap();
+        let mut state = self.state.lock().unwrap();
+        // Other threads may have changed `running` between try_enqueue and
+        // here, and `notify_all` wakes every waiter, so the predicate is
+        // re-checked on each wake (a plain `while`, never an `if`).
+        while state.running >= self.max_concurrent {
+            state = self.cvar.wait(state).unwrap();
         }
-        // Slot granted — hold the count at current level until release().
+        // Slot granted — take the permit while still holding the lock, so two
+        // waiters woken by the same notify cannot both pass the cap.
+        state.running += 1;
     }
 
-    /// Release a previously acquired slot. Decrements active and wakes ALL
-    /// waiting worker threads so each can re-check the `count > max_concurrent`
-    /// condition. `notify_one()` would only wake a single waiter per release —
-    /// when multiple slots become available simultaneously (e.g. a burst of
+    /// Release a previously acquired slot: drop this connection out of BOTH
+    /// numbers — it is no longer serving and no longer occupies queue depth —
+    /// then wake ALL waiting worker threads so each can re-check the
+    /// `running >= max_concurrent` condition.
+    ///
+    /// Both decrements saturate at zero. `try_enqueue` alone admits a
+    /// connection without granting it a slot, so a caller that enqueues and
+    /// then releases without ever completing `wait_for_slot` (the shed-after-
+    /// enqueue path) must not wrap `running` around to `usize::MAX` — which
+    /// would silently disable the concurrency cap for the life of the process.
+    ///
+    /// `notify_one()` would only wake a single waiter per release — when
+    /// multiple slots become available simultaneously (e.g. a burst of
     /// completions), one `notify_one` per completion would stall throughput
     /// because only one worker wakes per release event instead of all eligible
     /// workers. `notify_all()` is correct here: spurious wakes are harmless
-    /// (the `while count > max_concurrent` loop re-checks and re-waits) and the
-    /// lock scope is tiny.
+    /// (the `while running >= max_concurrent` loop re-checks and re-waits) and
+    /// the lock scope is tiny.
     pub fn release(&self) {
-        let mut count = self.active.lock().unwrap();
-        if *count > 0 {
-            *count -= 1;
-        }
+        let mut state = self.state.lock().unwrap();
+        state.running = state.running.saturating_sub(1);
+        state.admitted = state.admitted.saturating_sub(1);
         self.cvar.notify_all();
     }
 
-    /// Current gate depth (enqueued + actively serving). Informational.
+    /// Current gate depth (enqueued + actively serving) — i.e. `admitted`.
+    /// Informational.
     pub fn current_depth(&self) -> usize {
-        *self.active.lock().unwrap()
+        self.state.lock().unwrap().admitted
     }
 
     // ─── Legacy one-shot convenience (tests / serve_once path) ─────────────
