@@ -50,7 +50,9 @@ struct ConflictProjectionSweepTests {
         #expect(report.proven.count == 1)
         let finding = try! #require(report.proven.first)
         #expect(finding.outcome.kind == .provenContradiction)
-        // Ceiling is the MAX endpoint sensitivity — d2's restricted tier.
+        // Ceiling is the MAX over both axes of both endpoints. These
+        // facts carry no adjective bitmap, so both read Normal and the
+        // more sensitive DRAWER — d2's restricted tier — is what wins.
         #expect(finding.sensitivityCeilingRaw == AdjectiveSensitivity.restricted.rawValue)
         // And that is above the ceiling the proposal loop enforces, so
         // this finding is provable but not proposable.

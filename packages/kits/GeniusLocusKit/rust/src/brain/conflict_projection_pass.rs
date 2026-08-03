@@ -62,6 +62,21 @@ pub fn conflict_key(rule_id: &str, subject: &str) -> String {
     format!("{domain}:{}", normalize::enum_token(subject))
 }
 
+/// The evidence locator every projected signature carries for `fact_id`:
+/// `kgfact:<fact id>` — the signature's back-pointer to the KGFact it was
+/// projected from.
+///
+/// One source of truth on purpose. `run_sweep` joins signatures back to
+/// their facts through this exact string to read each fact's own adjective
+/// sensitivity. If the projection site and the sweep built the format
+/// independently and ever drifted, every join would miss — and because an
+/// unresolvable sensitivity fails closed, every finding in the estate
+/// would silently redact to Secret with no error anywhere. Sharing one
+/// function makes that divergence unrepresentable.
+pub fn evidence_locator_for_fact(fact_id: &str) -> String {
+    format!("kgfact:{fact_id}")
+}
+
 /// Project `facts` into signatures under `registry`.
 ///
 /// `event_time_seconds_by_source_drawer` carries source-drawer event
@@ -114,7 +129,7 @@ pub fn project(
             rule_id: rule.rule_id.to_string(),
             rule_version: rule.version,
             extractor_id: None,
-            evidence_locator: Some(format!("kgfact:{}", fact.id)),
+            evidence_locator: Some(evidence_locator_for_fact(&fact.id)),
         });
     }
     ConflictProjectionResult { signatures, diagnostics }

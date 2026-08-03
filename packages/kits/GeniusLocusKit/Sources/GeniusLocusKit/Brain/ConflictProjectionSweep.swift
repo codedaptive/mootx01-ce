@@ -18,14 +18,19 @@ import LocusKit
 import SubstrateML
 
 /// One proven-or-notable finding with the redaction input M4 needs: the
-/// MAX endpoint sensitivity of the pair's source drawers (M0 §8 — the
+/// MAX sensitivity across both endpoints, counting each endpoint's own
+/// KGFact as well as the drawer it was extracted from (M0 §8 — the
 /// report ceiling is the max of sources; rendering applies grants).
 public struct ConflictFinding: Sendable, Equatable {
     public let outcome: ConflictOutcome
-    /// Raw `AdjectiveSensitivity` value of the more sensitive source
-    /// drawer. An endpoint whose sensitivity could not be resolved counts
-    /// as the MAXIMUM tier (`.secret`), never as `.normal` — see
-    /// `ConflictSweepCore.ceiling` for why this direction is the safe one.
+    /// Raw `AdjectiveSensitivity` value of the most sensitive input to
+    /// the pair: either endpoint's KGFact or either endpoint's source
+    /// drawer. A fact carries its own sensitivity axis, independent of
+    /// the drawer it came from, so a Restricted fact filed against a
+    /// Normal drawer redacts the finding here. Any input whose
+    /// sensitivity could not be resolved counts as the MAXIMUM tier
+    /// (`.secret`), never as `.normal` — see `ConflictSweepCore.ceiling`
+    /// for why this direction is the safe one.
     public let sensitivityCeilingRaw: Int
 }
 
@@ -72,7 +77,10 @@ public enum ConflictSweepCore {
     ///   - eventTimeSecondsBySourceDrawer: Source-drawer event times in
     ///     EPOCH SECONDS (the caller owns the ms→s conversion, KI-003).
     ///   - sensitivityRawBySourceDrawer: Raw adjective-sensitivity per
-    ///     source drawer, for the per-finding redaction ceiling.
+    ///     source drawer — ONE of the two axes of the per-finding
+    ///     redaction ceiling. The other axis, each fact's own
+    ///     sensitivity, is read straight off `facts` and needs no
+    ///     parameter (see the locator map built below).
     ///   - acceptedSupersessionPairs: Canonical pair keys (GLK
     ///     `pairKey` form) of drawer pairs joined by an ACTIVE
     ///     `supersedes` tunnel — the accepted-supersession input to the
@@ -93,6 +101,36 @@ public enum ConflictSweepCore {
             registry: registry)
         var index = ConflictCoordinateIndex(bucketCap: bucketCap)
         index.insert(contentsOf: projection.signatures)
+
+        // Each fact's OWN adjective sensitivity, keyed by the evidence
+        // locator its signature carries. A KGFact has a sensitivity axis
+        // independent of the drawer it was extracted from, so a
+        // Restricted fact filed against a Normal drawer must still raise
+        // the finding's ceiling.
+        //
+        // Keyed PER FACT, never folded into the drawer map. Several facts
+        // routinely share one source drawer, and facts filed with no
+        // source share the key "" — a drawer-keyed fold would push one
+        // sensitive fact's tier onto every unrelated Normal fact behind
+        // the same key. That over-redaction is not the safe direction: it
+        // silently guts the contradiction surface this lane exists to
+        // provide, and nothing surfaces the loss.
+        //
+        // Derived from `facts` rather than taken as a parameter so the
+        // map is complete by construction — every signature in the index
+        // was projected from this same array. A caller cannot hand in a
+        // stale or partial map and blank the whole surface through the
+        // fail-closed default below.
+        var sensitivityRawByEvidenceLocator: [String: Int] = [:]
+        for fact in facts {
+            let locator = ConflictProjector.evidenceLocator(forFactID: fact.id)
+            let raw = fact.adjectiveSensitivity.rawValue
+            // Fold duplicates with MAX. Fact ids are unique in the
+            // kg_facts table, but `run` is public and takes an arbitrary
+            // array; on a repeated id the more sensitive reading wins.
+            sensitivityRawByEvidenceLocator[locator] =
+                max(sensitivityRawByEvidenceLocator[locator] ?? raw, raw)
+        }
 
         var counts = ConflictSweepCounts()
         var proven: [ConflictFinding] = []
@@ -115,13 +153,15 @@ public enum ConflictSweepCore {
                 historical.append(ConflictFinding(
                     outcome: outcome,
                     sensitivityCeilingRaw: ceiling(
-                        pair, sensitivityRawBySourceDrawer)))
+                        pair, sensitivityRawBySourceDrawer,
+                        sensitivityRawByEvidenceLocator)))
             case .provenContradiction:
                 counts.provenContradiction += 1
                 proven.append(ConflictFinding(
                     outcome: outcome,
                     sensitivityCeilingRaw: ceiling(
-                        pair, sensitivityRawBySourceDrawer)))
+                        pair, sensitivityRawBySourceDrawer,
+                        sensitivityRawByEvidenceLocator)))
             case .candidateReview:
                 counts.candidateReview += 1
             case .invalidInput, .irrelevant:
@@ -137,16 +177,21 @@ public enum ConflictSweepCore {
             historical: historical)
     }
 
+    /// The finding's redaction ceiling: the MAX over four inputs — each
+    /// endpoint's own KGFact sensitivity and each endpoint's source
+    /// drawer sensitivity. The two axes are independent; a pair
+    /// discloses through whichever of them is the more sensitive.
     private static func ceiling(
         _ pair: (a: ConflictSignature, b: ConflictSignature),
-        _ sensitivityRawBySourceDrawer: [String: Int]
+        _ sensitivityRawBySourceDrawer: [String: Int],
+        _ sensitivityRawByEvidenceLocator: [String: Int]
     ) -> Int {
-        // Fail closed. An endpoint whose sensitivity could not be
-        // resolved counts as the MAXIMUM tier, never as `.normal`: a
-        // hydration gap is not evidence of low sensitivity, and the
-        // Elevated ceiling the proposal loop enforces
-        // (`proposeConflictTunnels`) must not be passable by a failed
-        // lookup.
+        // Fail closed. ANY of the four inputs that cannot be resolved
+        // counts as the MAXIMUM tier, never as `.normal`: a hydration
+        // gap — or a signature carrying no evidence locator — is not
+        // evidence of low sensitivity, and the Elevated ceiling the
+        // proposal loop enforces (`proposeConflictTunnels`) must not be
+        // passable by a failed lookup.
         //
         // `.secret` — a real tier — rather than a sentinel like
         // `Int.max`, because this field is documented as a raw
@@ -155,8 +200,14 @@ public enum ConflictSweepCore {
         // would re-open the fail-open hole for any future caller that
         // decodes before comparing.
         let unresolved = AdjectiveSensitivity.secret.rawValue
-        return max(sensitivityRawBySourceDrawer[pair.a.sourceDrawerID] ?? unresolved,
-                   sensitivityRawBySourceDrawer[pair.b.sourceDrawerID] ?? unresolved)
+        func factRaw(_ signature: ConflictSignature) -> Int {
+            guard let locator = signature.evidenceLocator else { return unresolved }
+            return sensitivityRawByEvidenceLocator[locator] ?? unresolved
+        }
+        return max(
+            max(factRaw(pair.a), factRaw(pair.b)),
+            max(sensitivityRawBySourceDrawer[pair.a.sourceDrawerID] ?? unresolved,
+                sensitivityRawBySourceDrawer[pair.b.sourceDrawerID] ?? unresolved))
     }
 }
 

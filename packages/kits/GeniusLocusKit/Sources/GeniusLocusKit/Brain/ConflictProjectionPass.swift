@@ -65,6 +65,22 @@ public enum ConflictProjector {
         return "\(domain):\(ConflictNormalize.enumToken(subject))"
     }
 
+    /// The evidence locator every projected signature carries for
+    /// `factID`: `kgfact:<fact id>` — the signature's back-pointer to the
+    /// KGFact it was projected from.
+    ///
+    /// One source of truth on purpose. `ConflictSweepCore.run` joins
+    /// signatures back to their facts through this exact string to read
+    /// each fact's own adjective sensitivity. If the projection site and
+    /// the sweep built the format independently and ever drifted, every
+    /// join would miss — and because an unresolvable sensitivity fails
+    /// closed, every finding in the estate would silently redact to
+    /// `.secret` with no error anywhere. Sharing one function makes that
+    /// divergence unrepresentable.
+    public static func evidenceLocator(forFactID factID: String) -> String {
+        "kgfact:\(factID)"
+    }
+
     /// Project `facts` into signatures under `registry`.
     ///
     /// - Parameters:
@@ -123,7 +139,7 @@ public enum ConflictProjector {
                 ruleID: rule.ruleID,
                 ruleVersion: rule.version,
                 extractorID: nil,
-                evidenceLocator: "kgfact:\(fact.id)"))
+                evidenceLocator: Self.evidenceLocator(forFactID: fact.id)))
         }
         return ConflictProjectionResult(signatures: signatures, diagnostics: diagnostics)
     }

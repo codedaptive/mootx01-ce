@@ -15,23 +15,29 @@ use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::kg_fact::KGFact;
 use std::collections::{HashMap, HashSet};
 use substrate_ml::conflict_projection::{
-    evaluate, ConflictOutcome, ConflictOutcomeKind, ConflictRuleRegistry,
+    evaluate, ConflictOutcome, ConflictOutcomeKind, ConflictRuleRegistry, ConflictSignature,
 };
 
 use super::conflict_projection_pass::{
-    project, ConflictCoordinateIndex, ConflictProjectionDiagnostics, DEFAULT_BUCKET_CAP,
+    evidence_locator_for_fact, project, ConflictCoordinateIndex, ConflictProjectionDiagnostics,
+    DEFAULT_BUCKET_CAP,
 };
 
 /// One proven-or-notable finding with the redaction input M4 needs: the
-/// MAX endpoint sensitivity of the pair's source drawers (M0 §8 — the
-/// report ceiling is the max of sources; rendering applies grants).
+/// MAX sensitivity across both endpoints, counting each endpoint's own
+/// KGFact as well as the drawer it was extracted from (M0 §8 — the report
+/// ceiling is the max of sources; rendering applies grants).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictFinding {
     pub outcome: ConflictOutcome,
-    /// Raw adjective-sensitivity of the more sensitive source drawer.
-    /// An endpoint whose sensitivity could not be resolved counts as the
-    /// MAXIMUM tier (`Secret`), never as normal — see `run_sweep`'s
-    /// `ceiling` closure for why this direction is the safe one.
+    /// Raw adjective-sensitivity of the most sensitive input to the pair:
+    /// either endpoint's KGFact or either endpoint's source drawer. A
+    /// fact carries its own sensitivity axis, independent of the drawer
+    /// it came from, so a Restricted fact filed against a Normal drawer
+    /// redacts the finding here. Any input whose sensitivity could not be
+    /// resolved counts as the MAXIMUM tier (`Secret`), never as normal —
+    /// see `run_sweep`'s `ceiling` closure for why this direction is the
+    /// safe one.
     pub sensitivity_ceiling_raw: i64,
 }
 
@@ -78,6 +84,11 @@ pub fn pair_key(a: &str, b: &str) -> String {
 /// Run projection + index + evaluation. Pure on its inputs; the caller
 /// supplies event times in EPOCH SECONDS and the accepted-supersession
 /// pair-key set (ACTIVE `supersedes` tunnels between source drawers).
+///
+/// `sensitivity_raw_by_source_drawer` is ONE of the two axes of the
+/// per-finding redaction ceiling. The other axis, each fact's own
+/// sensitivity, is read straight off `facts` and needs no parameter (see
+/// the locator map built below).
 pub fn run_sweep(
     facts: &[KGFact],
     event_time_seconds_by_source_drawer: &HashMap<String, i64>,
@@ -90,6 +101,37 @@ pub fn run_sweep(
     let mut index = ConflictCoordinateIndex::new(bucket_cap);
     index.insert_all(projection.signatures);
 
+    // Each fact's OWN adjective sensitivity, keyed by the evidence locator
+    // its signature carries. A KGFact has a sensitivity axis independent
+    // of the drawer it was extracted from, so a Restricted fact filed
+    // against a Normal drawer must still raise the finding's ceiling.
+    //
+    // Keyed PER FACT, never folded into the drawer map. Several facts
+    // routinely share one source drawer, and facts filed with no source
+    // share the key "" — a drawer-keyed fold would push one sensitive
+    // fact's tier onto every unrelated Normal fact behind the same key.
+    // That over-redaction is not the safe direction: it silently guts the
+    // contradiction surface this lane exists to provide, and nothing
+    // surfaces the loss.
+    //
+    // Derived from `facts` rather than taken as a parameter so the map is
+    // complete by construction — every signature in the index was
+    // projected from this same slice. A caller cannot hand in a stale or
+    // partial map and blank the whole surface through the fail-closed
+    // default below.
+    let mut sensitivity_raw_by_evidence_locator: HashMap<String, i64> = HashMap::new();
+    for fact in facts {
+        let locator = evidence_locator_for_fact(&fact.id);
+        let raw = fact.adjective_sensitivity().raw_value();
+        // Fold duplicates with MAX. Fact ids are unique in the kg_facts
+        // table, but `run_sweep` is public and takes an arbitrary slice;
+        // on a repeated id the more sensitive reading wins.
+        sensitivity_raw_by_evidence_locator
+            .entry(locator)
+            .and_modify(|existing| *existing = (*existing).max(raw))
+            .or_insert(raw);
+    }
+
     let mut counts = ConflictSweepCounts::default();
     let mut proven: Vec<ConflictFinding> = Vec::new();
     let mut historical: Vec<ConflictFinding> = Vec::new();
@@ -99,11 +141,16 @@ pub fn run_sweep(
         let accepted = accepted_supersession_pairs
             .contains(&pair_key(&a.source_drawer_id, &b.source_drawer_id));
         let outcome = evaluate(a, b, registry, accepted);
+        // The finding's redaction ceiling: the MAX over four inputs —
+        // each endpoint's own KGFact sensitivity and each endpoint's
+        // source drawer sensitivity. The two axes are independent; a pair
+        // discloses through whichever of them is the more sensitive.
         let ceiling = || -> i64 {
-            // Fail closed. An endpoint whose sensitivity could not be
-            // resolved counts as the MAXIMUM tier, never as Normal: a
-            // hydration gap is not evidence of low sensitivity, and the
-            // Elevated ceiling the proposal loop enforces
+            // Fail closed. ANY of the four inputs that cannot be resolved
+            // counts as the MAXIMUM tier, never as Normal: a hydration
+            // gap — or a signature carrying no evidence locator — is not
+            // evidence of low sensitivity, and the Elevated ceiling the
+            // proposal loop enforces
             // (coordinator::propose_conflict_tunnels) must not be
             // passable by a failed lookup.
             //
@@ -114,6 +161,14 @@ pub fn run_sweep(
             // value here would re-open the fail-open hole for any future
             // caller that decodes before comparing.
             let unresolved = AdjectiveSensitivity::Secret.raw_value();
+            let fact_raw = |s: &ConflictSignature| -> i64 {
+                s.evidence_locator
+                    .as_deref()
+                    .and_then(|locator| {
+                        sensitivity_raw_by_evidence_locator.get(locator).copied()
+                    })
+                    .unwrap_or(unresolved)
+            };
             let ra = sensitivity_raw_by_source_drawer
                 .get(&a.source_drawer_id)
                 .copied()
@@ -122,7 +177,7 @@ pub fn run_sweep(
                 .get(&b.source_drawer_id)
                 .copied()
                 .unwrap_or(unresolved);
-            ra.max(rb)
+            fact_raw(a).max(fact_raw(b)).max(ra).max(rb)
         };
         match outcome.kind {
             ConflictOutcomeKind::Agreement => counts.agreement += 1,
@@ -229,7 +284,9 @@ mod tests {
         assert_eq!(report.proven.len(), 1);
         let finding = &report.proven[0];
         assert_eq!(finding.outcome.kind, ConflictOutcomeKind::ProvenContradiction);
-        // Ceiling is the MAX endpoint sensitivity — d2's restricted tier.
+        // Ceiling is the MAX over both axes of both endpoints. These
+        // facts carry no adjective bitmap, so both read Normal and the
+        // more sensitive DRAWER — d2's restricted tier — is what wins.
         assert_eq!(
             finding.sensitivity_ceiling_raw,
             AdjectiveSensitivity::Restricted.raw_value()
