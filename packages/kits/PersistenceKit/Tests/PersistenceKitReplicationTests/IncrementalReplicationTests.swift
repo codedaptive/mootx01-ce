@@ -1566,6 +1566,73 @@ struct IncrementalReplicationTests {
         )
     }
 
+    /// §10.C8 — The re-scan reconciliation is safe across DIFFERENT backend
+    /// types: a durable SQLite source replicating into an InMemory destination.
+    ///
+    /// Every other test in this block runs SQLite→SQLite or InMemory→InMemory, so
+    /// both ends decode through the same reader and their primary-key encodings
+    /// necessarily agree. A cross-backend pair does not have that guarantee: the
+    /// source is read through `source.rowStore` and the destination through
+    /// `txn.rowStore`, and a value can round-trip into a different `TypedValue`
+    /// case between the two.
+    ///
+    /// The two decoders DO agree for this pair and these column types — this test
+    /// passes with the reconcile pass on either side of the upserts, which was
+    /// checked explicitly. So it is not a guard on the pass ordering; it is the
+    /// only cross-backend coverage in the suite, pinning that a value-less
+    /// update and delete both land correctly when the ends differ.
+    @Test func rescanReconciliationIsSafeAcrossDifferentBackendTypes() async throws {
+        let (source, sourceURL) = try await makeSQLite()
+        defer { removeSQLite(at: sourceURL) }
+        let destination = try await makeInMemory()
+
+        let keptID = UUID()
+        let doomedID = UUID()
+        _ = try await source.rowStore.insert(table: "items", values: itemRow(id: keptID, adjectiveBitmap: 0b0001))
+        _ = try await source.rowStore.insert(table: "items", values: itemRow(id: doomedID))
+        let fullCursor = try await StorageReplicator.flush(
+            from: source, into: destination, schema: IncSyntheticSchema.declaration
+        )
+        #expect(try await destination.rowStore.count(table: "items", where: nil) == 2)
+
+        let session = IncrementalReplicationSession.start(
+            source: source, schema: IncSyntheticSchema.declaration
+        )
+
+        // One value-less update and one value-less delete, both on the durable
+        // source — so the table is re-scanned and reconciled against a
+        // destination of a different backend type.
+        _ = try await source.rowStore.update(
+            table: "items",
+            values: ["adjective_bitmap": .bitmap(0b1111)],
+            where: .eq(Column(table: "items", name: "id"), .uuid(keptID))
+        )
+        _ = try await source.rowStore.delete(
+            table: "items",
+            where: .eq(Column(table: "items", name: "id"), .uuid(doomedID))
+        )
+
+        try await pollObserver { await session.dirtySet.pendingRescanTables().contains("items") }
+        let outcome = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
+        #expect(outcome.isComplete)
+
+        // The destination must end up matching the source EXACTLY: the surviving
+        // row present and updated, the deleted row gone, and — the property that
+        // catches a reordering — the table not emptied.
+        let all = try await destination.rowStore.query(
+            table: "items", where: nil, orderBy: [], limit: nil, offset: nil
+        )
+        #expect(
+            all.count == 1,
+            "Destination must hold exactly the surviving row, got \(all.count)"
+        )
+        #expect(all.first?.values["id"] == .uuid(keptID))
+        #expect(
+            all.first?.values["adjective_bitmap"] == .bitmap(0b1111),
+            "The surviving row must carry the updated value"
+        )
+    }
+
     /// §10.C7 — An unresolvable change withholds the watermark without vetoing
     /// the rest of the cycle: resolvable row work still propagates.
     @Test func unresolvableChangeStillLetsResolvableWorkThrough() async throws {

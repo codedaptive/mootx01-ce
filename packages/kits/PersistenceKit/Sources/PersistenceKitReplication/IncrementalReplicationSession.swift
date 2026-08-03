@@ -656,46 +656,35 @@ public final class IncrementalReplicationSession: Sendable {
             var deletesWritten = 0
             var maxHLC: HLC? = fromCursor.hlcWatermark
 
-            // 1. Row upserts and deletes.
-            for op in payload.rowOps {
-                switch op {
-                case .upsert(let tableName, let primaryKey, let values):
-                    // Track HLC values from row columns for watermark.
-                    for value in values.values {
-                        if case .hlc(let h) = value {
-                            if let current = maxHLC {
-                                if h > current { maxHLC = h }
-                            } else {
-                                maxHLC = h
-                            }
-                        }
-                    }
-                    _ = try await txn.rowStore.upsert(
-                        table: tableName,
-                        values: values,
-                        conflictColumns: primaryKey
-                    )
-                    rowsWritten += 1
-
-                case .delete(let tableName, let predicate):
-                    _ = try await txn.rowStore.delete(table: tableName, where: predicate)
-                    deletesWritten += 1
-                }
-            }
-
-            // 1b. Reconcile every wholly-dirty table: delete destination rows
-            // whose primary key is absent from the source. The upserts for
-            // these tables are already in rowOps above, so what remains is the
-            // half a value-less change cannot express — which rows went away.
-            // Without this pass an expunge, tombstone, or erasure would leave
-            // the removed content live at the destination.
+            // 1. Reconcile every wholly-dirty table: delete destination rows
+            // whose primary key is absent from the source. This is the half a
+            // value-less change cannot express — which rows went away. Without
+            // it an expunge, tombstone, or erasure would leave the removed
+            // content live at the destination.
             //
             // Same rule the full-snapshot path applies to blobs
             // (StorageReplicator §3d, SECFIX-WS2-PK F5): keys the destination
             // holds and the source does not are divergence.
             //
-            // Both sides are encoded through DirtyKey so the comparison cannot
-            // drift from the encoding the dirty-set itself uses.
+            // ORDER IS DELIBERATE: this pass runs BEFORE the upserts in step 2.
+            //
+            // Both sides are encoded through DirtyKey, but they are READ through
+            // different decoders — the source via `source.rowStore`, the
+            // destination via `txn.rowStore` — and those coincide only when both
+            // ends are the same backend type. The decoders in this repo do agree
+            // for the primary-key column types the tests cover (verified
+            // SQLite→InMemory, §10.C8), so this ordering is not fixing an
+            // observed bug. It removes the DEPENDENCE on that agreement, which
+            // nothing enforces.
+            //
+            // Why the order decides the blast radius: if a future backend pair
+            // ever decoded a PK value into a different TypedValue case, every
+            // destination row would look absent from the source. Deleting first
+            // makes that delete-then-reinsert churn and the destination still
+            // ends up matching the source exactly. Deleting AFTER the upserts
+            // would instead delete the rows just written and leave the table
+            // empty. Correct under both agreement and divergence is worth more
+            // than correct under agreement alone.
             for rescan in payload.tableRescans {
                 let destinationRows = try await txn.rowStore.query(
                     table: rescan.table,
@@ -733,7 +722,34 @@ public final class IncrementalReplicationSession: Sendable {
                 }
             }
 
-            // 2. Audit events newer than the previous watermark.
+            // 2. Row upserts and per-key deletes.
+            for op in payload.rowOps {
+                switch op {
+                case .upsert(let tableName, let primaryKey, let values):
+                    // Track HLC values from row columns for watermark.
+                    for value in values.values {
+                        if case .hlc(let h) = value {
+                            if let current = maxHLC {
+                                if h > current { maxHLC = h }
+                            } else {
+                                maxHLC = h
+                            }
+                        }
+                    }
+                    _ = try await txn.rowStore.upsert(
+                        table: tableName,
+                        values: values,
+                        conflictColumns: primaryKey
+                    )
+                    rowsWritten += 1
+
+                case .delete(let tableName, let predicate):
+                    _ = try await txn.rowStore.delete(table: tableName, where: predicate)
+                    deletesWritten += 1
+                }
+            }
+
+            // 3. Audit events newer than the previous watermark.
             let newEvents = payload.auditEvents
             if !newEvents.isEmpty {
                 try await txn.auditLog.appendBatch(newEvents)
@@ -746,7 +762,7 @@ public final class IncrementalReplicationSession: Sendable {
                 }
             }
 
-            // 3. Blob puts and deletes from the dirty blob set.
+            // 4. Blob puts and deletes from the dirty blob set.
             // put() is idempotent on key; delete() is a no-op if the key is absent.
             var blobPutsWritten = 0
             var blobDeletesWritten = 0

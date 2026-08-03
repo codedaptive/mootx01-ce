@@ -774,45 +774,38 @@ impl IncrementalReplicationSession {
                 let audit_log = txn.audit_log();
                 let blob_store = txn.blob_store();
 
-                // 1. Row upserts and deletes.
-                for op in &payload_ref.row_ops {
-                    match op {
-                        RowOp::Upsert { table, primary_key, values } => {
-                            // Track HLC values from row columns for watermark.
-                            for value in values.values() {
-                                if let TypedValue::Hlc(h) = value {
-                                    match *max_hlc_ref {
-                                        None => *max_hlc_ref = Some(*h),
-                                        Some(ref current) if h > current => {
-                                            *max_hlc_ref = Some(*h)
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            row_store.upsert(table, values.clone(), primary_key)?;
-                            *rows_written_ref += 1;
-                        }
-                        RowOp::Delete { table, predicate } => {
-                            row_store.delete(table, predicate)?;
-                            *deletes_written_ref += 1;
-                        }
-                    }
-                }
-
-                // 1b. Reconcile every wholly-dirty table: delete destination
-                // rows whose primary key is absent from the source. The upserts
-                // for these tables are already in row_ops above, so what remains
-                // is the half a value-less change cannot express — which rows
-                // went away. Without this pass an expunge, tombstone, or erasure
-                // would leave the removed content live at the destination.
+                // 1. Reconcile every wholly-dirty table: delete destination
+                // rows whose primary key is absent from the source. This is the
+                // half a value-less change cannot express — which rows went
+                // away. Without it an expunge, tombstone, or erasure would leave
+                // the removed content live at the destination.
                 //
                 // Same rule the full-snapshot path applies to blobs
                 // (SECFIX-WS2-PK F5): keys the destination holds and the source
                 // does not are divergence.
                 //
-                // Both sides are encoded through DirtyKey so the comparison
-                // cannot drift from the encoding the dirty-set itself uses.
+                // ORDER IS DELIBERATE: this pass runs BEFORE the upserts in
+                // step 2.
+                //
+                // Both sides are encoded through DirtyKey, but they are READ
+                // through different decoders — the source via
+                // `source.row_store()`, the destination via `txn.row_store()` —
+                // and those coincide only when both ends are the same backend
+                // type. The decoders in this repo do agree for the primary-key
+                // column types the tests cover (verified SQLite→InMemory,
+                // §10.C8), so this ordering is not fixing an observed bug. It
+                // removes the DEPENDENCE on that agreement, which nothing
+                // enforces.
+                //
+                // Why the order decides the blast radius: if a future backend
+                // pair ever decoded a PK value into a different TypedValue
+                // variant, every destination row would look absent from the
+                // source. Deleting first makes that delete-then-reinsert churn
+                // and the destination still ends up matching the source exactly.
+                // Deleting AFTER the upserts would instead delete the rows just
+                // written and leave the table empty. Correct under both
+                // agreement and divergence is worth more than correct under
+                // agreement alone.
                 for rescan in &payload_ref.table_rescans {
                     let destination_rows =
                         row_store.query(&rescan.table, None, &[], None, None)?;
@@ -850,7 +843,33 @@ impl IncrementalReplicationSession {
                     }
                 }
 
-                // 2. Audit events after the previous watermark.
+                // 2. Row upserts and per-key deletes.
+                for op in &payload_ref.row_ops {
+                    match op {
+                        RowOp::Upsert { table, primary_key, values } => {
+                            // Track HLC values from row columns for watermark.
+                            for value in values.values() {
+                                if let TypedValue::Hlc(h) = value {
+                                    match *max_hlc_ref {
+                                        None => *max_hlc_ref = Some(*h),
+                                        Some(ref current) if h > current => {
+                                            *max_hlc_ref = Some(*h)
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            row_store.upsert(table, values.clone(), primary_key)?;
+                            *rows_written_ref += 1;
+                        }
+                        RowOp::Delete { table, predicate } => {
+                            row_store.delete(table, predicate)?;
+                            *deletes_written_ref += 1;
+                        }
+                    }
+                }
+
+                // 3. Audit events after the previous watermark.
                 if !payload_ref.audit_events.is_empty() {
                     audit_log.append_batch(payload_ref.audit_events.clone())?;
                     *audit_events_written_ref = payload_ref.audit_events.len();
@@ -865,7 +884,7 @@ impl IncrementalReplicationSession {
                     }
                 }
 
-                // 3. Blob ops from the BlobDirtyAccumulator.
+                // 4. Blob ops from the BlobDirtyAccumulator.
                 // Put: write the captured bytes to the destination (fail-loud if bytes
                 // are None — that would be a programmer error, not a runtime condition,
                 // since accumulate always stores bytes for Put events).
@@ -2395,6 +2414,71 @@ mod incremental_replication_tests {
         assert!(
             destination.audit_log().iterate(None, None, usize::MAX).expect("iterate").is_empty(),
             "No audit event may reach the destination on an incomplete cycle"
+        );
+    }
+
+    /// §10.C8 — The re-scan reconciliation is safe across DIFFERENT backend
+    /// types: a durable SQLite source replicating into an InMemory destination.
+    ///
+    /// Every other test in this block runs SQLite→SQLite or InMemory→InMemory, so
+    /// both ends decode through the same reader and their primary-key encodings
+    /// necessarily agree. A cross-backend pair does not have that guarantee: the
+    /// source is read through `source.row_store()` and the destination through
+    /// `txn.row_store()`, and a value can round-trip into a different
+    /// `TypedValue` variant between the two.
+    ///
+    /// The two decoders DO agree for this pair and these column types — this test
+    /// passes with the reconcile pass on either side of the upserts, which was
+    /// checked explicitly. So it is not a guard on the pass ordering; it is the
+    /// only cross-backend coverage in the suite, pinning that a value-less
+    /// update and delete both land correctly when the ends differ.
+    #[test]
+    fn rescan_reconciliation_is_safe_across_different_backend_types() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_storage(&schema); // InMemory — a DIFFERENT backend type
+
+        let kept_id = Uuid::new_v4();
+        let doomed_id = Uuid::new_v4();
+        source.row_store().insert("items", item_row(kept_id, 0b0001)).expect("insert kept");
+        source.row_store().insert("items", item_row(doomed_id, 0b0101)).expect("insert doomed");
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+        assert_eq!(destination.row_store().count("items", None).expect("count"), 2);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // One value-less update and one value-less delete, both on the durable
+        // source — so the table is re-scanned and reconciled against a
+        // destination of a different backend type.
+        let kept_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(kept_id));
+        let mut set_values = BTreeMap::new();
+        set_values.insert("adjective_bitmap".to_string(), TypedValue::Bitmap(0b1111));
+        source.row_store().update("items", set_values, &kept_pred).expect("update");
+        let doomed_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(doomed_id));
+        source.row_store().delete("items", &doomed_pred).expect("delete");
+
+        session.drain_channels();
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert!(outcome.is_complete());
+
+        // The destination must end up matching the source EXACTLY: the surviving
+        // row present and updated, the deleted row gone, and — the property that
+        // catches a reordering — the table not emptied.
+        let all = destination.row_store()
+            .query("items", None, &[], None, None)
+            .expect("query all");
+        assert_eq!(
+            all.len(), 1,
+            "Destination must hold exactly the surviving row, got {}",
+            all.len()
+        );
+        assert_eq!(all[0].values.get("id"), Some(&TypedValue::Uuid(kept_id)));
+        assert_eq!(
+            all[0].values.get("adjective_bitmap"),
+            Some(&TypedValue::Bitmap(0b1111)),
+            "The surviving row must carry the updated value"
         );
     }
 
