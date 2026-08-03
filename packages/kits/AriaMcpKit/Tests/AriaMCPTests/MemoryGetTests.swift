@@ -125,7 +125,20 @@ struct MemoryGetTests {
         #expect(body.contains("content:"))
         // The verbatim block appears whole and untruncated — not a preview.
         #expect(body.contains(verbatim), "response must contain the exact captured text")
-        #expect(body.hasSuffix(verbatim), "content must be the trailing verbatim block, not truncated")
+        // The sensitivity-gate advisory is appended after the content block
+        // whenever no grant is live, which is this dispatcher's state — it
+        // depends on grant state alone, never on estate contents, so it is
+        // present on every reply here. Strip that one trailing line before
+        // asserting the content is the final block; what is under test is
+        // that the content itself is not truncated.
+        let advisoryPrefix = "sensitivity_advisory: "
+        var lines = body.components(separatedBy: "\n")
+        let advisory = try #require(lines.last, "reply must not be empty")
+        #expect(advisory.hasPrefix(advisoryPrefix),
+                "with no grant live the reply must end with the sensitivity-gate advisory")
+        lines.removeLast()
+        #expect(lines.joined(separator: "\n").hasSuffix(verbatim),
+                "content must be the trailing verbatim block, not truncated")
     }
 
     @Test func foundIncludesMetadataAndLinkedTunnelSummary() async throws {

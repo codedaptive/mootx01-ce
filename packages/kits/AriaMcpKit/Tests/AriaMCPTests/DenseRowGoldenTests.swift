@@ -266,7 +266,24 @@ struct DenseRowGoldenTests {
         let lines = body.components(separatedBy: "\n")
         let rowChars = lines.filter { $0.contains(DenseRow.separator) }
             .map(\.count).reduce(0, +)
-        let totalChars = body.count
+        // The sensitivity-gate advisory is NOT narration and is excluded from
+        // the envelope budget deliberately. It is an access-control notice
+        // emitted on grant state alone (no grant live here, which is the
+        // default posture), so its cost is a fixed constant per reply rather
+        // than something that scales with narration. Folding a constant into
+        // a ratio measured against a 10-row fixture would make this guardrail
+        // report on result-set size instead of on narration discipline, which
+        // is what it exists to protect. The constant is bounded by its own
+        // assertion below so it cannot grow unnoticed.
+        let advisoryPrefix = "sensitivity_advisory: "
+        let advisoryLines = lines.filter { $0.hasPrefix(advisoryPrefix) }
+        #expect(advisoryLines.count == 1,
+                "a locked estate's reply carries exactly one sensitivity-gate advisory")
+        let advisoryChars = advisoryLines.map(\.count).reduce(0, +)
+        #expect(advisoryChars <= 200,
+                "the advisory is a bounded constant, not a growth surface; got \(advisoryChars) chars")
+
+        let totalChars = body.count - advisoryChars
         let envelopeShare = Double(totalChars - rowChars) / Double(totalChars)
         #expect(envelopeShare < 0.12,
                 "envelope share must be <12%; got \(envelopeShare) for body: \(body)")

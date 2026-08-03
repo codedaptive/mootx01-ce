@@ -1593,18 +1593,19 @@ extension ToolDispatcher {
                 : "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
             lines.append("recall_provenance: \(densePart) \(degradedPart)")
         }
-        // redaction advisory stat.
-        // When no grant is active, check cheaply whether the estate holds any
-        // restricted or secret rows. If so, append an advisory so the AI client
-        // knows results may be incomplete and how to request access.
-        // Gated on `!sensitivityCeilingLifted` — when a grant IS live, the rows
-        // are already included and no advisory is appropriate.
-        // The stat uses a private `.internal` limit-1 scan (no trace rows, no
-        // BM25/vector cost) — a pure bitmap filter probe. See
-        // `estateHasSensitiveRows(handle:)`.
-        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+        // Sensitivity-gate advisory — conditioned on GRANT STATE ALONE.
+        // When no grant is live the gate is in effect, so the client is told
+        // the gate exists and which commands lift it. The message asserts
+        // NOTHING about what this estate holds: any condition that consulted
+        // estate contents would make advisory presence a disclosure channel
+        // for exactly the restricted/secret rows the gate protects, to a
+        // caller with no grant. Emitting on grant state alone discloses
+        // nothing — the caller is the party that did not unlock, so they
+        // already know it. Gated on `!sensitivityCeilingLifted`: under a live
+        // grant those rows are already included and no advisory applies.
+        if !sensitivityCeilingLifted {
             lines.append(
-                "sensitivity_advisory: results may be hidden by sensitivity tier — " +
+                "sensitivity_advisory: a sensitivity tier gate is in effect — " +
                 "run `mootx01 unlock private` to include restricted memories, " +
                 "`mootx01 unlock secret` for secret memories."
             )
@@ -1812,14 +1813,16 @@ extension ToolDispatcher {
         }
 
         var lines = try await fullRecordLines(for: drawer, estate: estate)
-        // redaction advisory stat  — same logic as
-        // runMemorySearch. When no grant is active, surface an advisory if the
-        // estate contains any restricted/secret rows not visible through the
-        // default gate. Consistent with search so the AI client receives the
-        // same hint from both tools.
-        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+        // Sensitivity-gate advisory — same rule as runMemorySearch: grant
+        // state alone, never estate contents. It matters more here than in
+        // search, because this reply follows a SUCCESSFUL fetch of a visible
+        // row; a contents-dependent advisory would attach an estate-wide
+        // existence signal to that reply, which is precisely what this
+        // function's containment contract (see its doc comment: gated rows
+        // must be indistinguishable from absent ones) forbids.
+        if !sensitivityCeilingLifted {
             lines.append(
-                "sensitivity_advisory: some memories may be hidden by sensitivity tier — " +
+                "sensitivity_advisory: a sensitivity tier gate is in effect on this estate — " +
                 "run `mootx01 unlock private` to include restricted memories, " +
                 "`mootx01 unlock secret` for secret memories."
             )
@@ -1884,48 +1887,6 @@ extension ToolDispatcher {
         lines.append("content:")
         lines.append(drawer.content)
         return lines
-    }
-
-    /// Returns `true` if the estate has at least one row tagged restricted or secret.
-    ///
-    /// Used by `runMemorySearch` and `runMemoryGet` to decide whether to append a
-    /// sensitivity advisory. The advisory tells the AI client that results may be
-    /// incomplete and how to unlock the hidden tier.
-    ///
-    /// Implementation: two limit-1 `GLKRecallRequest` scans with explicit
-    /// `Filter.sensitivity(tier)` — these filters suppress the default
-    /// `sensitivityAtMost(.elevated)` gate (see `BitmapEvaluator.insertDefaults`),
-    /// so restricted/secret rows become visible for counting. Mode `.locusOnly` +
-    /// scoring `.raw` skips the BM25/vector pipeline; the scan is a pure bitmap
-    /// filter probe — cheap even for large estates.
-    ///
-    /// `origin: .internal` — must NOT write recall-trace rows (B-10a: only the
-    /// ARIA_MCP boundary sets `.external`). This is an internal diagnostic query.
-    private func estateHasSensitiveRows(handle: EstateHandle) async -> Bool {
-        for tier: AdjectiveSensitivity in [.restricted, .secret] {
-            // Limit 1: stop at first match — no need to count.
-            let frame = RecallFrame(
-                filterChain: [.sensitivity(tier)],
-                hydrationLevel: .structured, // No content body needed — existence check only.
-                limit: 1,
-                ordering: .byCaptureTimeDesc
-            )
-            let request = GLKRecallRequest(
-                frame: frame,
-                mode: .locusOnly,     // Skip BM25/vector — pure bitmap probe.
-                scoring: .raw,        // No matrix scoring needed.
-                limit: 1,
-                fallback: .allowDegraded,
-                queryText: nil,       // No text query — filter only.
-                origin: .internal     // Internal diagnostic — must not write trace rows (B-10a).
-            )
-            // A nil result (thrown error) is treated as no sensitive rows — fail-safe:
-            // don't surface the advisory when we can't confirm sensitive rows exist.
-            if let result = try? await kit.recall(handle, request), !result.hits.isEmpty {
-                return true
-            }
-        }
-        return false
     }
 
     /// Note that a drawer id was "used" (acted upon) by a dereference verb.
