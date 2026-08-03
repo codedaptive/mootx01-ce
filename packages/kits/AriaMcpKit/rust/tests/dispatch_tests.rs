@@ -5106,6 +5106,96 @@ fn lens_keystones_over_estate_succeeds() {
     );
 }
 
+// PR-05 Part B golden: trust_synthesis dense-row output byte-matches dense_row::render.
+// Mirrors Swift `trustSynthesisDenseRowsMatchRenderer` in LensToolsTests.swift.
+#[test]
+fn trust_synthesis_dense_row_matches_renderer() {
+    let registry = EstateRegistry::new_inmemory();
+    let id = file_one_memory(&registry, "golden trust memory — PR-05 rust golden", "study");
+    // Fetch the drawer from the store to compute the expected dense row.
+    let drawer = stored_drawer(&registry, &id);
+    let expected_row = aria_mcp::dense_row::render(&drawer);
+    let result = dispatch_tool(
+        "moot_lens_trust_synthesis",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_lens_trust_synthesis must succeed");
+    assert!(is_success(&result), "trust_synthesis must succeed; got: {result:?}");
+    let body = content_text(&result);
+    // The dense row is emitted with a two-space prefix per Swift format parity.
+    assert!(
+        body.contains(&format!("  {expected_row}")),
+        "trust_synthesis body must contain the dense row byte-for-byte; got: {body}"
+    );
+}
+
+// PR-05 Part B golden: moot_lens_successors dense-row output byte-matches dense_row::render.
+// Uses a direct tunnel between two captured drawers so the successor is guaranteed
+// to be a real DrawerStore entry — get_drawer finds it and renders it hydrated.
+// Mirrors Swift successors dense-row contract (progressive-recall rule).
+#[test]
+fn successors_dense_row_matches_renderer() {
+    use locus_kit::tunnel::Tunnel;
+    use locus_kit::tunnel_operational::TunnelKind;
+    let registry = EstateRegistry::new_inmemory();
+    // File source and target drawers into the default wing ("Agentic Memory").
+    let src_id = file_one_memory(
+        &registry,
+        "successor golden source — PR-05",
+        "succ-golden-src",
+    );
+    let tgt_id = file_one_memory(
+        &registry,
+        "successor golden target — PR-05",
+        "succ-golden-tgt",
+    );
+    // Add a tunnel src → tgt directly via the store (same pattern as
+    // the contradiction gateway test at lens_contradiction_hidden_endpoint_is_redacted).
+    let mut tunnel = Tunnel::new(
+        format!("succ-golden-tunnel-{src_id}"),
+        "Agentic Memory".to_string(),
+        "succ-golden-src".to_string(),
+        "Agentic Memory".to_string(),
+        "succ-golden-tgt".to_string(),
+        "successor-golden-test".to_string(),
+        "pr05-golden".to_string(),
+        aria_mcp::dispatch::wall_now(),
+    );
+    tunnel.kind = TunnelKind::References;
+    tunnel.source_drawer_id = Some(src_id.clone());
+    tunnel.target_drawer_id = Some(tgt_id.clone());
+    registry
+        .default
+        .store
+        .add_tunnel(&tunnel)
+        .expect("add_tunnel must succeed");
+    // Fetch target drawer from the DrawerStore for expected dense row computation.
+    let tgt_drawer = stored_drawer(&registry, &tgt_id);
+    let expected_row = aria_mcp::dense_row::render(&tgt_drawer);
+    // Call successors — target must appear as the successor of source.
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_lens_successors must succeed");
+    assert!(is_success(&result), "successors must succeed; got: {result:?}");
+    let body = content_text(&result);
+    // The target drawer ID must appear as part of a dense row (progressive-recall rule).
+    assert!(
+        body.contains(&tgt_id),
+        "successors body must contain target drawer id; got: {body}"
+    );
+    // The full dense row must appear byte-for-byte.
+    assert!(
+        body.contains(&expected_row),
+        "successors body must contain the target's dense row byte-for-byte; got: {body}"
+    );
+}
+
 #[test]
 fn lens_associations_over_captured_drawers_succeeds() {
     // moot_lens_associations — AR_FCA_CAPABILITY_001.
