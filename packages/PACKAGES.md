@@ -584,14 +584,27 @@ recipe-descriptor conformance anchor)
 
 ### VaultKit
 
-**Role:** Encrypted vault export/import — projects an estate to a portable,
-file-based snapshot and back. Backs the ARIA `moot_vault_*` tool family
-(export, import, reconcile, status).
+**Role:** Portable vault export/import — projects an estate to a plaintext,
+file-based Markdown snapshot and back. Backs the ARIA `moot_vault_*` tool
+family (export, import, reconcile, status).
 
 **Provides:**
-- export an estate's drawers to a vault directory, and import a vault back
-  into an estate (path/key projection between human paths and estate keys)
+- export an estate's drawers to a vault directory as UTF-8 Markdown (one note
+  per drawer, an `index.md` per folder, `log.md` for diary entries), and
+  import a vault back into an estate (path/key projection between human paths
+  and estate keys)
 - vault reconcile + status surfaces consumed by the `moot_vault_*` tools
+- sensitivity-tier exclusions on export: the `.secret` tier never rides bulk
+  export, and `.restricted` is excluded unless the caller explicitly scopes it
+  in. These are tier filters applied before anything is written — they are not
+  a confidentiality control over what does get written.
+
+**Vault contents are written in plaintext.** VaultKit encrypts nothing on
+export or import; a drawer's text lands on disk verbatim and readable. The
+confidentiality boundary is the destination directory — its filesystem
+permissions, whatever whole-disk encryption sits under it, and whether it is
+synced or backed up anywhere are the operator's responsibility to set before
+exporting.
 
 **Dependencies:** GeniusLocusKit, LocusKit, EideticLib, PersistenceKit.
 **Languages:** Swift + Rust (conformance-gated).
@@ -650,7 +663,7 @@ the precise sub-package(s) it uses.
 | GeniusLocusKit | ✅ | ✅ | Built |
 | NeuronKit | ✅ | ✅ | Built |
 | CognitionKit | ✅ | ✅ | Built (18 recipes; descriptor conformance-gated) |
-| VaultKit | ✅ | ✅ | Built (encrypted vault export/import; moot_vault_* bridge) |
+| VaultKit | ✅ | ✅ | Built (plaintext Markdown vault export/import; moot_vault_* bridge) |
 | IntellectusLib | ✅ | ✅ | Built (17 tests each port; zero-dependency leaf) |
 | ObserverSink | ✅ | ✅ | Built (12 conformance tests each port; PersistenceKit-backed stats store) |
 
