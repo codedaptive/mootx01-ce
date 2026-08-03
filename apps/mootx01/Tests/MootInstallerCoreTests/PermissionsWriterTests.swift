@@ -2,7 +2,8 @@
 //
 // Tests for PermissionsWriter: tier classification (exhaustive over the real
 // tool inventory), tiered merge (both namespace prefixes), allow-all merge,
-// idempotency, user-placement precedence, migration of stale-tiered entries
+// idempotency, user-placement precedence, cross-namespace tier inheritance
+// (a tier placed under either prefix binds the absent twin), migration of stale-tiered entries
 // (deny sacred, foreign entries untouched), and prefix-based removal (both
 // namespaces). Tool names are injected (the real caller derives them from
 // the linked AriaMCP ToolProjection at runtime); most tests use a fixed
@@ -211,10 +212,11 @@ struct PermissionsWriterTests {
 
         // The user already allowed a tool we default to ask, and already
         // allowed one we default to deny — but ONLY under the direct
-        // namespace. Their placement must survive for that exact entry;
-        // the plugin-namespace twin is genuinely absent, so it gets
-        // backfilled at the tool's CURRENT default (documented behavior —
-        // see mergeTiered's doc comment on cross-namespace independence).
+        // namespace. Their placement must survive for that exact entry, and
+        // the absent plugin-namespace twin now INHERITS that placement
+        // rather than taking the classifier default: the two prefixes are
+        // two addresses for one capability, so a tier set under either binds
+        // the other (see mergeTiered's doc comment).
         let existing: [String: Any] = [
             "permissions": ["allow": [
                 "mcp__mootx01__moot_withdraw_memory",
@@ -234,9 +236,188 @@ struct PermissionsWriterTests {
         #expect(allow.contains("mcp__mootx01__moot_erase_memory"), "user's direct-namespace allow must survive even for deny-default tools")
         #expect(!ask.contains("mcp__mootx01__moot_withdraw_memory"), "must not duplicate the direct entry into ask")
         #expect(!deny.contains("mcp__mootx01__moot_erase_memory"), "must not duplicate the direct entry into deny")
-        // The plugin-namespace twin was absent — backfilled at the default.
-        #expect(ask.contains("mcp__plugin_mootx01_mootx01__moot_withdraw_memory"), "missing plugin-namespace twin must be backfilled at the default tier")
-        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_erase_memory"), "missing plugin-namespace twin must be backfilled at the default tier")
+        // The plugin-namespace twin was absent — it inherits the sibling's
+        // tier (allow), NOT classify's default (ask / deny respectively).
+        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_withdraw_memory"), "absent plugin twin must inherit the sibling's allow, not classify's ask")
+        #expect(!ask.contains("mcp__plugin_mootx01_mootx01__moot_withdraw_memory"), "absent plugin twin must not take the classifier default")
+        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_erase_memory"), "absent plugin twin must inherit the sibling's allow, not classify's deny")
+        #expect(!deny.contains("mcp__plugin_mootx01_mootx01__moot_erase_memory"), "absent plugin twin must not take the classifier default")
+    }
+
+    // MARK: - mergeTiered — a placement under either namespace binds its twin
+    //
+    // Codex finding 2d36552ac03c8191867d26bb6ae32376: matching entries by
+    // exact string and backfilling each prefix independently would let a
+    // user who denies a tool under the namespace they can see get the other
+    // namespace's twin added to `allow` on the next install or upgrade.
+    // These pin the inheritance rule that prevents it, in both directions.
+
+    @Test("a deny under the direct namespace binds the absent plugin twin")
+    func mergeTieredDenyBindsAbsentPluginTwin() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // moot_memory_search classifies `allow` (it is a read). The user has
+        // denied it under the only namespace they have ever seen. Backfilling
+        // the plugin twin at the classifier default would put the SAME
+        // capability in `allow` — the bypass this test exists to prevent.
+        let existing: [String: Any] = [
+            "permissions": ["deny": ["mcp__mootx01__moot_memory_search"]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let deny = perms["deny"] as? [String] ?? []
+        #expect(deny.contains("mcp__mootx01__moot_memory_search"), "the user's deny must survive untouched")
+        #expect(
+            deny.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"),
+            "the absent plugin twin must inherit deny — a user cannot place an entry for a namespace they have never seen"
+        )
+        #expect(
+            !allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"),
+            "the denied capability must not reappear in allow under the sibling namespace"
+        )
+    }
+
+    @Test("an ask under the direct namespace binds the absent plugin twin")
+    func mergeTieredAskBindsAbsentPluginTwin() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // Same shape as the deny case, one tier looser: an `ask` the user set
+        // is still a decision about the capability, not about a string.
+        let existing: [String: Any] = [
+            "permissions": ["ask": ["mcp__mootx01__moot_memory_search"]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let ask = perms["ask"] as? [String] ?? []
+        #expect(ask.contains("mcp__mootx01__moot_memory_search"), "the user's ask must survive untouched")
+        #expect(ask.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the absent plugin twin must inherit ask")
+        #expect(!allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "must not take classify's allow default")
+    }
+
+    @Test("inheritance is symmetric: a plugin-namespace deny binds the absent direct twin")
+    func mergeTieredPluginDenyBindsAbsentDirectTwin() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // The mirror image. Neither prefix is privileged — whichever one
+        // carries the user's decision is the one the other inherits from.
+        let existing: [String: Any] = [
+            "permissions": ["deny": ["mcp__plugin_mootx01_mootx01__moot_memory_search"]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let deny = perms["deny"] as? [String] ?? []
+        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the user's deny must survive untouched")
+        #expect(deny.contains("mcp__mootx01__moot_memory_search"), "the absent direct twin must inherit deny")
+        #expect(!allow.contains("mcp__mootx01__moot_memory_search"), "must not take classify's allow default")
+    }
+
+    @Test("siblings that disagree are both left exactly where the user put them")
+    func mergeTieredDisagreeingSiblingsAreNeverMoved() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // One namespace allowed, the other denied. With both entries present
+        // there is nothing left to add for this tool, so the observable
+        // guarantee is that mergeTiered MOVES NEITHER — inheritance decides
+        // the tier of new entries only and is never a licence to re-tier an
+        // existing one (that is migrateTiers' job, and deny is sacred there).
+        // The most-restrictive tie-break itself is unreachable while there
+        // are exactly two namespaces: a disagreement implies both entries
+        // exist, so no entry is added to apply it to. It is defensive, and
+        // becomes observable only if a third prefix is ever added.
+        let existing: [String: Any] = [
+            "permissions": [
+                "allow": ["mcp__mootx01__moot_memory_search"],
+                "deny": ["mcp__plugin_mootx01_mootx01__moot_memory_search"],
+            ]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let ask = perms["ask"] as? [String] ?? []
+        let deny = perms["deny"] as? [String] ?? []
+        #expect(allow.contains("mcp__mootx01__moot_memory_search"), "the user's allow must stay put")
+        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the user's deny must stay put")
+        #expect(!deny.contains("mcp__mootx01__moot_memory_search"), "the allowed entry must not be duplicated into deny")
+        #expect(!allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the denied entry must not be duplicated into allow")
+        #expect(!ask.contains("mcp__mootx01__moot_memory_search") && !ask.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"))
+    }
+
+    @Test("with neither namespace present the classifier default still decides")
+    func mergeTieredFallsBackToClassifyWhenNoSiblingExists() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // The unchanged path: inheritance only fires when a sibling exists.
+        // A settings file carrying an unrelated tool must not perturb how
+        // moot_erase_memory (deny) or moot_withdraw_memory (ask) are tiered.
+        let existing: [String: Any] = [
+            "permissions": ["deny": ["mcp__mootx01__moot_estate_ping"]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let ask = perms["ask"] as? [String] ?? []
+        let deny = perms["deny"] as? [String] ?? []
+        for prefix in ["mcp__mootx01__", "mcp__plugin_mootx01_mootx01__"] {
+            #expect(deny.contains("\(prefix)moot_erase_memory"), "destructive default unchanged under \(prefix)")
+            #expect(ask.contains("\(prefix)moot_withdraw_memory"), "mutation default unchanged under \(prefix)")
+            #expect(allow.contains("\(prefix)moot_memory_search"), "read default unchanged under \(prefix)")
+        }
+        // The unrelated tool's own inheritance still applies to ITS twin.
+        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_estate_ping"))
+    }
+
+    @Test("inheritance stays idempotent: a second run adds nothing")
+    func mergeTieredInheritanceIsIdempotent() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        let existing: [String: Any] = [
+            "permissions": ["deny": ["mcp__mootx01__moot_memory_search"]]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+        let before = try readPermissions(settingsURL)
+
+        let second = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+        #expect(second.allow == 0 && second.ask == 0 && second.deny == 0, "a second run must add nothing")
+
+        let after = try readPermissions(settingsURL)
+        for key in ["allow", "ask", "deny"] {
+            #expect(
+                (before[key] as? [String] ?? []) == (after[key] as? [String] ?? []),
+                "\(key) must be byte-identical across runs"
+            )
+        }
     }
 
     // MARK: - migrateTiers (existing installs converging on a new default)
