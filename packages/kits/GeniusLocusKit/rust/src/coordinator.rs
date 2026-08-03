@@ -3997,6 +3997,62 @@ impl EstateCoordinator {
         })
     }
 
+    /// Run one typed conflict-projection sweep over `handle` (DCP M3 —
+    /// the proving lane; the lexical hunter above proposes). Pure read:
+    /// no tunnel proposals, no writes. Mirrors Swift
+    /// `GeniusLocusKit.conflictProjectionSweep(in:)`.
+    pub fn conflict_projection_sweep(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<crate::brain::conflict_projection_sweep::ConflictProjectionSweepReport, VerbDispatchError>
+    {
+        use crate::brain::conflict_projection_sweep::{pair_key, run_sweep, SWEEP_DEFAULT_BUCKET_CAP};
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
+        use substrate_ml::conflict_projection::ConflictRuleRegistry;
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("conflict_projection_sweep", "", e))
+        };
+        let facts = estate.all_kg_facts().map_err(remap_err)?;
+
+        // One drawer walk for both per-drawer inputs: validity instants
+        // and sensitivity ceilings. LocusKit's Rust clock is
+        // epoch-millisecond; the sweep core's identity domain is whole
+        // seconds (KI-003) — the division happens HERE, at the seam.
+        let mut event_time_seconds = std::collections::HashMap::new();
+        let mut sensitivity_raw = std::collections::HashMap::new();
+        for drawer in estate.all_drawers().map_err(remap_err)? {
+            event_time_seconds.insert(drawer.id.clone(), drawer.event_time.div_euclid(1000));
+            sensitivity_raw
+                .insert(drawer.id.clone(), drawer.adjective_sensitivity().raw_value());
+        }
+
+        // Accepted supersession: an ACTIVE supersedes tunnel between the
+        // two source drawers (review-accept sets lifecycle Active).
+        let mut accepted_pairs = std::collections::HashSet::new();
+        for tunnel in estate.all_tunnels().map_err(remap_err)? {
+            if tunnel.kind == TunnelKind::Supersedes
+                && tunnel.lifecycle() == TunnelLifecycle::Active
+            {
+                if let (Some(s), Some(t)) =
+                    (tunnel.source_drawer_id.as_ref(), tunnel.target_drawer_id.as_ref())
+                {
+                    accepted_pairs.insert(pair_key(s, t));
+                }
+            }
+        }
+
+        Ok(run_sweep(
+            &facts,
+            &event_time_seconds,
+            &sensitivity_raw,
+            &accepted_pairs,
+            &ConflictRuleRegistry::v01(),
+            SWEEP_DEFAULT_BUCKET_CAP,
+        ))
+    }
+
     // MARK: - mutate
 
     /// Apply a named mutation to a drawer. Delegates to `Estate::mutate`,
@@ -9376,6 +9432,59 @@ mod tests {
 
         let tunnels = coord.recall_tunnels(&h, "attic").expect("recall_tunnels");
         assert!(tunnels.is_empty());
+    }
+
+    // DCP M3 estate seam — mirrors Swift `estateSweepProvesThenSupersedes`:
+    // two captured drawers, two active facts on one coordinate with
+    // exclusive values → proven: 1; then an ACTIVE supersedes tunnel
+    // between the source drawers converts the pair to
+    // HistoricalSuccession (F06 end-to-end).
+    #[test]
+    fn conflict_sweep_proves_then_supersedes() {
+        use locus_kit::kg_fact::KGFact;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
+
+        let (coord, h) = open_one();
+        let estate = coord.estate_for(&h).expect("estate");
+        let a = coord.capture(&h, cap_frame("Employer claim one."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("Employer claim two."), NOW).unwrap();
+        estate
+            .add_kg_fact(&KGFact::new(
+                "fact-a".into(),
+                "Sarah Chen C0".into(),
+                "Employer".into(),
+                "Acme Robotics".into(),
+                a.id.clone(),
+                NOW,
+            ))
+            .unwrap();
+        estate
+            .add_kg_fact(&KGFact::new(
+                "fact-b".into(),
+                "Sarah Chen C0".into(),
+                "Employer".into(),
+                "Beta Corp".into(),
+                b.id.clone(),
+                NOW,
+            ))
+            .unwrap();
+
+        let first = coord.conflict_projection_sweep(&h).expect("sweep");
+        assert_eq!(first.diagnostics.scanned, 2);
+        assert_eq!(first.diagnostics.projected, 2);
+        assert_eq!(first.pairs_evaluated, 1);
+        assert_eq!(first.counts.proven_contradiction, 1);
+
+        let mut frame = tunnel_frame("study", "study", "supersession accepted in review");
+        frame.source_drawer_id = Some(a.id.clone());
+        frame.target_drawer_id = Some(b.id.clone());
+        frame.kind = TunnelKind::Supersedes;
+        frame.lifecycle = TunnelLifecycle::Active;
+        estate.capture_tunnel(frame, NOW).unwrap();
+
+        let second = coord.conflict_projection_sweep(&h).expect("sweep");
+        assert_eq!(second.counts.proven_contradiction, 0);
+        assert_eq!(second.counts.historical_succession, 1);
     }
 
     // CO-9: a verb on a closed handle surfaces EstateNotOpen, not an empty
