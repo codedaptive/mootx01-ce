@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-07-20
-version: 1.11.0
+date: 2026-08-03
+version: 1.12.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -950,8 +950,10 @@ struct inside `IncrementalReplicationSession.swift`.
 |---|---|---|
 | `ReplicationCursor` | `ReplicationCursor` | Watermark after flush/hydrate: `hlcWatermark`/`hlc_watermark` (HLC?/Option<HLC>), `rowsWritten`/`rows_written` (Int/usize), `auditEventsWritten`/`audit_events_written` (Int/usize), `blobsWritten`/`blobs_written` (Int/usize). |
 | `ReplicationError` | `ReplicationError` | Closed error enum: `schemaMismatch`/`SchemaMismatch`, `storageFailure`/`StorageFailure`. |
-| `DirtySet` | `DirtySet` | Observer-fed dirty-row accumulator. Swift: `public actor DirtySet` (actor serializes access). Rust: `pub struct DirtySet` with `Mutex<BTreeSet<DirtyKey>>` (owned-state struct, no async runtime). Observable behaviour is identical: accumulate on change notification, drain before each sync run. |
-| `IncrementalReplicationSession` | `IncrementalReplicationSession` | Session-oriented incremental replication: wires `StorageObserver` subscriptions to dirty-set accumulators and runs sync passes. Swift: `public final class IncrementalReplicationSession: Sendable`. Rust: `pub struct IncrementalReplicationSession`. |
+| `DirtySet` | `DirtySet` | Observer-fed dirty accumulator. Swift: `public actor DirtySet` (actor serializes access). Rust: `pub struct DirtySet` with `Mutex`-guarded sets (owned-state struct, no async runtime). Observable behaviour is identical: accumulate on change notification, drain before each sync run. **Tracks dirt at three resolutions**, because the durable backends do not always emit primary-key values: rows it can name; tables it cannot name but can re-scan (a `TableChange` with absent or PK-incomplete `values` marks its whole table); and tables that declare no primary key, which can be neither named nor reconciled. A value-less change is NEVER discarded. Inspection: `count()` (named rows only), `pendingRescanTables()` / `pending_rescan_tables`, `pendingUnresolvableTables()` / `pending_unresolvable_tables`. |
+| `DirtyDrain` | `DirtyDrain` | One atomic drain of all three resolutions — `keys`, `rescanTables`/`rescan_tables`, `unresolvableTables`/`unresolvable_tables`, plus `isEmpty`/`is_empty`. Returned by `DirtySet.drain()` and accepted by `DirtySet.restore(_:)`; draining or restoring a subset is not expressible, so table-granularity dirt cannot be lost on a retry. Swift: internal `struct DirtyDrain: Sendable`. Rust: `pub struct DirtyDrain`. |
+| `IncrementalReplicationSession` | `IncrementalReplicationSession` | Session-oriented incremental replication: wires `StorageObserver` subscriptions to dirty-set accumulators and runs sync passes. Swift: `public final class IncrementalReplicationSession: Sendable`. Rust: `pub struct IncrementalReplicationSession`. `sync` returns `IncrementalSyncOutcome`, not a bare `ReplicationCursor`. A table marked for re-scan is read in full: every source row is upserted and every destination row whose primary key is absent from the source is deleted — the row-level form of the blob reconciliation in the full-snapshot path (§3d, SECFIX-WS2-PK F5). The early return fires only when nothing at all was observed, never for changes that could not be keyed. |
+| `IncrementalSyncOutcome` | `IncrementalSyncOutcome` | Result of one incremental cycle: `cursor` (the `ReplicationCursor` to persist), `rescannedTables`/`rescanned_tables` (tables read in full this cycle), `unresolvedTables`/`unresolved_tables` (tables carrying a change resolvable at no granularity), and `isComplete`/`is_complete()`. A non-empty unresolved list means the cycle was INCOMPLETE: no audit events were copied and `cursor.hlcWatermark` carries the INCOMING watermark unchanged, so the next cycle re-reads the same range. Resolvable row work still propagates. Declared in the session's own source file on both ports, not alongside `ReplicationCursor`: the cursor is the durable watermark, cycle resolution is a per-run report. Swift: `public struct IncrementalSyncOutcome: Sendable, Equatable`. Rust: `pub struct IncrementalSyncOutcome`. |
 | `BlobDirtySet` (Swift) | `BlobDirtyAccumulator` (Rust) | Blob-change dirty accumulator. The name differs by port convention; the contract is identical: accumulate `BlobChange` notifications, drain to get the (key, bytes) set to sync. |
 | `EstateCacheConfig` | `EstateCacheConfig` | Cache layer config: `enabled`, byte ceiling, sensitivity threshold (clamped ≤ 2). |
 | `CachingRowStore` | `CachingRowStore` | Decorating `RowStore` with InMemory hot tier and LRU eviction (SPEC I-11/I-12). Present and as-of reads key separately (SPEC B-16). Accepts an optional `ParentChainProvider` callback for Merkle-aggregate chain invalidation (SPEC B-17). Swift: `init(backing:config:parentChainProvider:)` with `parentChainProvider` defaulting to `nil`. Rust: `new(backing, config)` (no callback) or `with_parent_chain(backing, config, provider)`. |
@@ -1499,6 +1501,20 @@ fn perform_maintenance(
 ```
 
 ## Changelog
+
+### 1.12.0 -- 2026-08-03
+MXE-IR (Codex finding `74e3b7f7e6288191ba31644e4fa4b43b`): incremental
+replication no longer discards observed changes it cannot attribute to a row.
+`DirtySet` now tracks dirt at three resolutions and `DirtySet.drain` returns
+`DirtyDrain` rather than `[DirtyKey]` / `Vec<DirtyKey>`;
+`DirtySet.restore` takes the same type. `IncrementalReplicationSession.sync`
+returns the new `IncrementalSyncOutcome` instead of a bare `ReplicationCursor`,
+carrying the cycle's re-scanned and unresolved tables alongside it. The audit
+watermark advances only for a cycle that resolved every observed change.
+`ReplicationCursor` and `ReplicationError` are unchanged. Breaking for callers
+of `sync`, `DirtySet.drain`, and `DirtySet.restore` (MINOR under this
+document's numbering, which tracks surface additions; the session had no
+in-repo production consumers at the time of the change).
 
 ### 1.11.0 -- 2026-07-20
 Shared-content 1.1 P5: added the storage maintenance surface (§ 12) —
