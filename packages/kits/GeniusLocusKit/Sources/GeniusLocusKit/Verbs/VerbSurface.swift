@@ -1657,7 +1657,10 @@ public extension GeniusLocusKit {
     /// `storages[handle]` since `open`; the store is built lazily and cached
     /// in `kgStores[handle]`. Caching is required — `DrawerStore.init` applies
     /// schema migrations and reads the manifest on every instantiation.
-    private func ensureKGStore(for handle: EstateHandle) async throws -> DrawerStore {
+    // Internal (not private): the Brain layer's meeting-decision filing
+    // seam (MeetingDecisionCapture.swift) writes KGFacts through the same
+    // per-estate store this verb surface uses.
+    internal func ensureKGStore(for handle: EstateHandle) async throws -> DrawerStore {
         if let store = kgStores[handle] { return store }
         guard let storage = storages[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)

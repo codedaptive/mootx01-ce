@@ -3997,6 +3997,103 @@ impl EstateCoordinator {
         })
     }
 
+    /// Deterministic KGFact id for an extracted decision (replay-safe).
+    /// Mirrors Swift `GeniusLocusKit.meetingDecisionFactID`.
+    pub fn meeting_decision_fact_id(
+        source_drawer_id: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> String {
+        use substrate_ml::meeting_decision_extractor::MEETING_DECISION_EXTRACTOR_ID;
+        let input = format!(
+            "{MEETING_DECISION_EXTRACTOR_ID}|{source_drawer_id}|{subject}|{predicate}|{object}"
+        );
+        substrate_kernel::sha256::hash(input.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// Parse `transcript` under the v0.1 registry and file each accepted
+    /// decision as an ACTIVE KGFact anchored to `source_drawer_id` (DCP
+    /// M6 filing seam — mirrors Swift `captureMeetingDecisions(in:)`).
+    ///
+    /// Filing posture: extracted facts file ACTIVE — the controlled
+    /// register is strict enough that an accepted line IS an assertion,
+    /// and the M0 §2 proof floor requires both facts active; what stays
+    /// PROPOSED downstream is the contradicts tunnel (M5), not the fact.
+    /// Replay safety: deterministic ids + a pre-insert existence check,
+    /// so re-extracting the same transcript skips already-filed ids.
+    /// `now` is the filing instant in epoch milliseconds (the LocusKit
+    /// Rust clock).
+    pub fn capture_meeting_decisions(
+        &self,
+        handle: &EstateHandle,
+        transcript: &str,
+        source_drawer_id: &str,
+        now: i64,
+    ) -> Result<crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport, VerbDispatchError>
+    {
+        use crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport;
+        use locus_kit::kg_fact::KGFact;
+        use substrate_ml::conflict_projection::ConflictRuleRegistry;
+        use substrate_ml::meeting_decision_extractor::extract;
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("capture_meeting_decisions", "", e))
+        };
+        let extraction = extract(transcript, &ConflictRuleRegistry::v01());
+
+        // Existing-id set for replay dedup (retired included — a
+        // withdrawn decision must not silently refile).
+        let existing: std::collections::HashSet<String> = estate
+            .all_kg_facts_including_retired()
+            .map_err(remap_err)?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+
+        let mut filed = Vec::new();
+        let mut skipped = Vec::new();
+        let mut replaces = std::collections::HashMap::new();
+        for decision in &extraction.decisions {
+            let id = Self::meeting_decision_fact_id(
+                source_drawer_id,
+                &decision.entity,
+                &decision.dimension,
+                &decision.raw_value,
+            );
+            if let Some(replaced) = &decision.replaces_id {
+                replaces.insert(id.clone(), replaced.clone());
+            }
+            if existing.contains(&id) {
+                skipped.push(id);
+                continue;
+            }
+            estate
+                .add_kg_fact(&KGFact::new(
+                    id.clone(),
+                    decision.entity.clone(),
+                    // The rule's canonical dimension spelling, so
+                    // projection's dimension_key(predicate) round-trips.
+                    decision.dimension.clone(),
+                    decision.raw_value.clone(),
+                    source_drawer_id.to_string(),
+                    now,
+                ))
+                .map_err(remap_err)?;
+            filed.push(id);
+        }
+        Ok(MeetingDecisionCaptureReport {
+            extraction,
+            filed_fact_ids: filed,
+            skipped_existing_ids: skipped,
+            replaces_by_fact_id: replaces,
+        })
+    }
+
     /// Run one typed conflict-projection sweep over `handle` (DCP M3 —
     /// the proving lane; the lexical hunter above proposes). Pure read:
     /// no tunnel proposals, no writes. Mirrors Swift
@@ -9485,6 +9582,72 @@ mod tests {
         let second = coord.conflict_projection_sweep(&h).expect("sweep");
         assert_eq!(second.counts.proven_contradiction, 0);
         assert_eq!(second.counts.historical_succession, 1);
+    }
+
+    // DCP M6 filing seam — mirrors Swift MeetingDecisionCaptureTests:
+    // golden deterministic fact id, active filing + replay skip, the
+    // replaces-reference carry, and the F21 precursor (two conflicting
+    // controlled transcripts prove through the typed sweep).
+    #[test]
+    fn meeting_decisions_file_and_prove() {
+        let (coord, h) = open_one();
+
+        // Golden deterministic fact id (pinned in both ports).
+        assert_eq!(
+            EstateCoordinator::meeting_decision_fact_id(
+                "drawer-t1",
+                "project-phoenix",
+                "decision:launch_date",
+                "2026-09-15"
+            ),
+            "a4adaa374550adaeb5fdd72c6648f983567217fc1f6ad2b1b39dc30a8b6d89ac"
+        );
+
+        let a = coord.capture(&h, cap_frame("Monday planning meeting."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("Thursday follow-up meeting."), NOW).unwrap();
+
+        let transcript_a = "Attendees: the platform group.\n\
+                            Decision: project-phoenix.launch_date = 2026-09-15\n\
+                            Decision: they.launch_date = 2026-10-01";
+        let first = coord
+            .capture_meeting_decisions(&h, transcript_a, &a.id, NOW)
+            .expect("capture decisions");
+        assert_eq!(first.filed_fact_ids.len(), 1);
+        assert!(first.skipped_existing_ids.is_empty());
+        assert_eq!(first.extraction.rejected.len(), 1);
+
+        // Replay skips instead of erroring or duplicating.
+        let replay = coord
+            .capture_meeting_decisions(&h, transcript_a, &a.id, NOW)
+            .expect("replay");
+        assert!(replay.filed_fact_ids.is_empty());
+        assert_eq!(replay.skipped_existing_ids, first.filed_fact_ids);
+
+        // Replaces reference carried, keyed by the filed fact id.
+        let rep = coord
+            .capture_meeting_decisions(
+                &h,
+                "Replaces decision abc-123: project-altair.launch_date = 2026-11-01",
+                &a.id,
+                NOW,
+            )
+            .expect("replaces");
+        let rep_id = rep.filed_fact_ids[0].clone();
+        assert_eq!(rep.replaces_by_fact_id.get(&rep_id).map(String::as_str), Some("abc-123"));
+
+        // F21 precursor: the conflicting second transcript proves
+        // through the typed sweep.
+        coord
+            .capture_meeting_decisions(
+                &h,
+                "Decision: project-phoenix.launch_date = 2026-10-01",
+                &b.id,
+                NOW,
+            )
+            .expect("conflicting transcript");
+        let report = coord.conflict_projection_sweep(&h).expect("sweep");
+        assert_eq!(report.counts.proven_contradiction, 1);
+        assert_eq!(report.proven[0].outcome.key, "decision:project-phoenix");
     }
 
     // CO-9: a verb on a closed handle surfaces EstateNotOpen, not an empty
