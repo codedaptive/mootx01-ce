@@ -4722,8 +4722,41 @@ impl DrawerStore for DrawerStoreCore {
         // mirroring Swift `Estate.open`/`create`'s
         // `containerFP.rebuildAll(activeDrawers:)`. Tombstoned drawers are
         // excluded — they are not part of the active set the OR must cover.
+        //
+        // ## Why the projected (no-blob) scan, and why it is still a FULL scan
+        //
+        // The scan is deliberately unbounded and unfiltered at the storage
+        // tier: the aggregate is only sound to prune against if it covers
+        // EVERY active row (§ 11.5). A limit, a sample, or a deferred
+        // background rebuild would open a window where pruning runs against an
+        // incomplete OR — a correctness regression, not a speed-up. Do not
+        // "optimise" this into a bounded read.
+        //
+        // What narrows is the COLUMN set, not the row set. The fold below
+        // reads exactly five fields — `tombstoned_at` (this filter),
+        // `parent_node_id` (container grouping), and the three bitmaps
+        // (`adjective_bitmap`, `operational_bitmap`, `provenance`) — so the
+        // `content` blob is pure waste here. `all_drawers_bounded_projected`
+        // issues a genuine projected SELECT over `DRAWER_STRUCTURED_COLUMNS`
+        // (every drawer column except the `content` and `distilled` text
+        // payloads), so the blob is never read off disk; `drawer_from_row`
+        // decodes the absent column to `""`. With `limit = None` the row set
+        // and the `(filedAt ASC, id ASC)` order are exactly those of
+        // `all_drawers()`, so the fingerprints are byte-identical to a
+        // full-row read while open-time cost stays proportional to the row
+        // COUNT rather than to total content — the property Codex finding
+        // 8cde7730c1fc8191b4d0b45fc571f930 is about. A content-bearing read
+        // here makes every subsequent open of a large, imported, or synced
+        // estate more expensive, silently, as the estate grows.
+        //
+        // The structured projection rather than a bespoke five-column one:
+        // `drawer_from_row` mints a fresh random `Uuid::new_v4()` when
+        // `lineageID` is absent, which would burn entropy per row and break the
+        // deterministic-engine rule for no gain — the rebuild never reads
+        // `lineage_id`. Every other structured column is a small integer or
+        // short text field; the blob was the whole cost.
         let active: Vec<Drawer> = self
-            .all_drawers()?
+            .all_drawers_bounded_projected(None)?
             .into_iter()
             .filter(|d| d.tombstoned_at.is_none())
             .collect();
