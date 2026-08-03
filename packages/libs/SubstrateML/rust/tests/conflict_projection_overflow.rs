@@ -40,8 +40,9 @@ fn duration_reported_overflow_returns_none() {
 /// bit falls off and the product wraps to a small NEGATIVE duration. A
 /// wrapped value is worse than a panic: it becomes a fact value that flows
 /// into contradiction evaluation and is compared against real durations.
-/// Asserting `is_none` alone would be satisfied by a panic, so this test
-/// also names the specific wrapped value that must never be produced.
+/// In debug the pre-fix code panicked here and the test aborted; the
+/// `assert_ne!` below targets the release half specifically, naming the
+/// exact wrapped value that must never be produced.
 #[test]
 fn duration_overflow_never_wraps() {
     let wrapped = i64::MAX.wrapping_mul(3600);
