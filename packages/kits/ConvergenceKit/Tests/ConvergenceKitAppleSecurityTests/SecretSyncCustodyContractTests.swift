@@ -161,6 +161,52 @@ struct SecretSyncCustodyContractTests {
     #expect(resume.lowerBound < create.lowerBound)
   }
 
+  // U3SignedHost is an app target with no SwiftPM coverage, and its checkpoint
+  // types are private inside main.swift, so the match gate cannot be exercised
+  // behaviourally without restructuring U3SignedHost.xcodeproj. This asserts
+  // the structural contract instead, in the same source-text idiom as the
+  // durable-checkpoint test above: the gate consults every checkpoint field,
+  // never deletes or clears anything itself, and always runs before removal.
+  @Test("signed host proves the checkpoint against stored records before deleting")
+  func signedHostCheckpointMatchGateContract() throws {
+    let source = try signedHostSource()
+    let resumeStart = try #require(
+      source.range(of: "private func resumeInterruptedCustody(")
+    )
+    let gateStart = try #require(
+      source.range(of: "private func requireCheckpointMatchesStoredRecords(")
+    )
+    let gateEnd = try #require(
+      source.range(of: "private func proveBothRoles(")
+    )
+    #expect(resumeStart.lowerBound < gateStart.lowerBound)
+    #expect(gateStart.lowerBound < gateEnd.lowerBound)
+
+    let resume = String(source[resumeStart.lowerBound..<gateStart.lowerBound])
+    let match = try #require(
+      resume.range(of: "requireCheckpointMatchesStoredRecords(")
+    )
+    let removal = try #require(
+      resume.range(of: "removeCredentialForPhysicalProof(")
+    )
+    #expect(match.lowerBound < removal.lowerBound)
+
+    let gate = String(source[gateStart.lowerBound..<gateEnd.lowerBound])
+    for field in [
+      "signingHandleID", "signingAlgorithm", "signingKeyIdentifier",
+      "signingPublicKey", "agreementHandleID", "agreementAlgorithm",
+      "agreementKeyIdentifier", "agreementPublicKey",
+    ] {
+      #expect(gate.contains("checkpoint." + field))
+    }
+    // The gate reads and compares; it must never remove a record or clear the
+    // checkpoint, so a refusal leaves both the handles and the evidence intact.
+    #expect(!gate.contains("removeCredentialForPhysicalProof"))
+    #expect(!gate.contains("checkpointStore"))
+    #expect(gate.contains("U3SignedHostFailure.checkpointRecordsAbsent"))
+    #expect(gate.contains("U3SignedHostFailure.checkpointFieldMismatch"))
+  }
+
   @Test("opt-in hardware proof preserves its checkpoint until strict absence")
   func hardwareProofStrictCleanupContract() throws {
     let source = try String(
