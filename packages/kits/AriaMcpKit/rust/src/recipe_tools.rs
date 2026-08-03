@@ -1112,6 +1112,33 @@ fn run_dream_tool(
             "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel.",
         );
     }
+    // Step 4 — subject backfill dispatch (rider-default ruling,
+    // 2026-08-02): dreaming pays subject debt when a producer is
+    // registered. The Rust lane is DARK (no producer ships), so this is
+    // a guarded no-op in production Rust today — the wiring exists so
+    // the two ports dispatch identically the day a model lands.
+    // Mirrors Swift runDream step 4. Reuses the coordinator guard taken
+    // at the top of this function — re-locking here would self-deadlock.
+    {
+        if coord.subject_producer_pipeline(&estate.handle).is_some() {
+            let debt = coord
+                .estate_for(&estate.handle)
+                .ok()
+                .and_then(|e| e.count_subject_debt().ok())
+                .unwrap_or(0);
+            if debt > 0 {
+                match coord.subject_backfill_sweep(&estate.handle, 32, now_epoch_ms) {
+                    Ok(sweep) => body.push_str(&format!(
+                        "\nsubjectsBackfilled: {} (skipped: {}, remaining: {})",
+                        sweep.written, sweep.skipped_inadmissible, sweep.remaining_debt
+                    )),
+                    Err(e) => body.push_str(&format!(
+                        "\n(subject backfill error: {e:?} — continuing)"
+                    )),
+                }
+            }
+        }
+    }
     Ok(text_result(&body))
 }
 

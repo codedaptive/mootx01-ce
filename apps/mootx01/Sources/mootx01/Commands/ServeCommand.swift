@@ -236,6 +236,24 @@ struct ServeCommand: AsyncParsableCommand {
             // is safe for both fresh estates (wings missing) and previously-served
             // estates (wings present). `Date()` is acceptable here — this is an app
             // entry point, not a deterministic engine.
+            // Subject rider — ON BY DEFAULT (rider-default ruling,
+            // 2026-08-02): register the Apple miniLLM subject producer
+            // unless the operator disabled it at install
+            // (MOOTX01_SUBJECT_RIDER=0 → --subject-rider-off). Model
+            // unavailability (no Apple Intelligence, model not
+            // downloaded, pre-26 OS) logs and continues — a served
+            // estate must never fail to start over an optional rider.
+            // Dreaming dispatches the actual backfill sweeps.
+            if ToolProjection.subjectRiderEnabled {
+                do {
+                    try await kit.enableAppleSubjectRider(for: handle)
+                    FileHandle.standardError.write(Data(
+                        "mootx01 serve: subject rider enabled (minillm-v1)\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data(
+                        "mootx01 serve: subject rider unavailable — continuing without it (\(error))\n".utf8))
+                }
+            }
             do {
                 try await kit.seedDefaultWings(for: handle, now: Date())
             } catch {

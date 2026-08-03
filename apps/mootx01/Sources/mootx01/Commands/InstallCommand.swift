@@ -50,6 +50,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Create the default estate WITHOUT at-rest encryption. The estate database is stored unencrypted. Default is encrypted (SQLCipher whole-database, key held in the Keychain). Run `mootx01 upgrade` at any time to encrypt an unencrypted estate.")
     var noEncrypt: Bool = false
 
+    @Flag(name: .long, help: "Disable the on-device subject rider (Apple Intelligence miniLLM writing one-line subjects for imported/legacy memories during dreaming). Default is ON where the on-device model is available; this flag turns it off for the resident daemon.")
+    var subjectRiderOff: Bool = false
+
     @Flag(name: .long, help: "When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).")
     var reuseDb: Bool = false
 
@@ -512,12 +515,17 @@ struct InstallCommand: AsyncParsableCommand {
             // hand-run `mootx01 serve` carries no launchd environment at all and
             // the two must never disagree about the same estate.
             let encryptValue = noEncrypt ? "0" : "1"
+            // MOOTX01_SUBJECT_RIDER: "0" = --subject-rider-off; "1" = on
+            // (the rider-default ruling, 2026-08-02). Availability is still
+            // checked at serve; this only records the operator's choice.
+            let subjectRiderValue = subjectRiderOff ? "0" : "1"
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
                 "MOOTX01_DATA_DIR": dataDir.path,
                 "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 "MOOTX01_VAULT": vaultValue,
                 "MOOTX01_ENCRYPT": encryptValue,
+                "MOOTX01_SUBJECT_RIDER": subjectRiderValue,
             ]
             switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
             case let .installed(plistPath, endpointURL):

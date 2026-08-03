@@ -1112,6 +1112,25 @@ enum RecipeTools {
         let hunt = try await kit.huntContradictions(
             in: handle, probeLimit: 500, now: now)
 
+        // Step 4 — subject backfill dispatch (rider-default ruling,
+        // 2026-08-02): dreaming pays subject debt when a producer is
+        // registered (on Apple the serve layer registers the miniLLM
+        // rider by default). One bounded batch per dream call — the
+        // sweep's settled-skip makes repeated dreams converge; estates
+        // with no rider (disabled, non-Apple, kit-level tests) skip
+        // silently and the interactive consent path remains the only
+        // subject writer.
+        var backfillLine = ""
+        if await kit.subjectProducerPipeline(for: handle) != nil {
+            let debt = try await kit.estate(for: handle).countSubjectDebt()
+            if debt > 0 {
+                let sweep = try await kit.subjectBackfillSweep(
+                    handle, batchLimit: 32, now: now)
+                backfillLine = "\nsubjectsBackfilled: \(sweep.written) "
+                    + "(skipped: \(sweep.skippedInadmissible), remaining: \(sweep.remainingDebt))"
+            }
+        }
+
         var body = """
         moot_dream: matrix rebuilt, dreaming cycle complete
         consideredCandidates: \(report.candidatesConsidered)
@@ -1121,6 +1140,7 @@ enum RecipeTools {
         contradictionsProposed: \(hunt.proposed.count)
         contradictionCandidatesBorderline: \(hunt.borderline.count)
         """
+        body += backfillLine
         if !hunt.vectorStoreAvailable {
             body += "\n(contradiction hunt skipped: no vector index for this estate — run moot_reindex first)"
         }

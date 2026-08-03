@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-07-30
-version: 1.24.0
+version: 1.25.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.22.0: MXE-BB — circuit-breaker API (migrationParked, isParked, clearParked) on both ports.
 package: GeniusLocusKit
@@ -2084,6 +2084,14 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.25.0 -- 2026-08-02
+
+- Rider-default ruling: host-layer auto-enable documented
+  (`ToolProjection.subjectRiderEnabled(environment:)`, env
+  `MOOTX01_SUBJECT_RIDER`, install flag `--subject-rider-off`);
+  dreaming triggers append a `subjectsBackfilled:` line when a sweep
+  ran.
 
 ### 1.24.0 -- 2026-08-02
 

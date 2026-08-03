@@ -96,6 +96,21 @@ public enum ToolProjection {
         memoryToolEnabled(environment: ProcessInfo.processInfo.environment)
     }
 
+    /// True when the Apple subject rider should auto-enable at serve
+    /// (rider-default ruling, 2026-08-02: ON by default). Any value of
+    /// `MOOTX01_SUBJECT_RIDER` other than the literal "0" — including
+    /// absent — means on; `mootx01 install --subject-rider-off` writes
+    /// the "0" into the daemon's launchd env (the MOOTX01_VAULT
+    /// pattern). The rider still requires the on-device model: the
+    /// serve layer tolerates unavailability and continues.
+    public static func subjectRiderEnabled(environment: [String: String]) -> Bool {
+        environment["MOOTX01_SUBJECT_RIDER"] != "0"
+    }
+
+    public static var subjectRiderEnabled: Bool {
+        subjectRiderEnabled(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// The complete advertised tool list.
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.

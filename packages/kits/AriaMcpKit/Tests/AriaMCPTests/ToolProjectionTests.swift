@@ -196,6 +196,15 @@ struct ToolProjectionTests {
         #expect(properties["near"] != nil, "near property must be advertised")
     }
 
+    /// Rider-default policy fn (2026-08-02 ruling): on unless the env
+    /// carries the literal "0".
+    @Test func testSubjectRiderEnabledDefaultsOn() {
+        #expect(ToolProjection.subjectRiderEnabled(environment: [:]))
+        #expect(ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": "1"]))
+        #expect(!ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": "0"]))
+        #expect(ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": ""]))
+    }
+
     /// `estateID` must be optional (in properties, not in required) on every
     /// interface tool.
     @Test func testEstateIDIsOptionalOnInterfaceTools() {

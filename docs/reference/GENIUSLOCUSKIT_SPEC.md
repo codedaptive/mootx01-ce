@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.19.0
+version: 1.20.0
 status: accepted-1.1-target
 date: 2026-07-30
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
@@ -1894,6 +1894,18 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.20.0 -- 2026-08-02
+
+Rider-default ruling: the Apple subject rider is ON BY DEFAULT at the
+HOST layer — `mootx01 serve` auto-registers the miniLLM producer unless
+`MOOTX01_SUBJECT_RIDER=0` (`mootx01 install --subject-rider-off`);
+model unavailability logs and continues. Kit semantics are unchanged
+(GLK never auto-registers at open). Dreaming DISPATCHES the backfill:
+every dreaming trigger (moot_dream verb both ports; the mootx01 dream
+command) runs one bounded subject sweep after its cycle when a producer
+is registered and debt is non-zero. The benchmarker's encode-barrier
+denylist gains `subject_backfill` accordingly.
 
 ### 1.19.0 -- 2026-08-02
 
