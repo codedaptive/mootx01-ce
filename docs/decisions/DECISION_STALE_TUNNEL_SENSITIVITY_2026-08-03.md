@@ -1,7 +1,7 @@
 ---
 status: proposed
 question: Should CorrectSensitivity reclassify a drawer's incident tunnels, or does gating at each disclosure boundary suffice?
-authors: Bilby, Perkins
+authors: MOOTx01 maintainers
 date: 2026-08-03
 relates_to:
   - docs/reference/ARIA_MCP_INTERFACE.md
@@ -9,8 +9,8 @@ relates_to:
 supersedes: none
 context:
   - Raised while closing Codex finding 9352f983dea081919f83885bdbf77d40 (MXE-DM)
-  - That finding is closed at the render boundary; this record covers the underlying data condition, which is not
-  - Perkins found three surfaces emitting stale-edge metadata today — this is live, not hypothetical
+  - That finding is closed at the render boundary; this record covers the underlying data condition, which is not closed
+  - The post-flight security review found three surfaces emitting stale-edge metadata today — this is live, not hypothetical
 ---
 
 # Stale tunnel sensitivity — reclassify at correction, or gate at every boundary?
@@ -32,14 +32,15 @@ gates at one hydration boundary per port. The **data condition itself is
 unchanged and out of that mission's scope by explicit instruction.**
 
 This record exists because the condition is load-bearing on boundary gating
-alone, and because Perkins's post-flight review found the exposure is wider
-than the closed finding.
+alone, and because the post-flight security review found the exposure is
+wider than the closed finding.
 
 ## What is actually exposed today
 
-Perkins enumerated three **live** surfaces that emit metadata of a stale-Normal
-edge pointing into a since-restricted drawer. This is the material fact; an
-earlier draft of this question framed the risk as future-only, which was wrong.
+The post-flight security review enumerated three **live** surfaces that emit
+metadata of a stale-Normal edge pointing into a since-restricted drawer. This
+is the material fact; an earlier draft of this question framed the risk as
+future-only, which was wrong.
 
 | Surface | What it emits | Assessment |
 |---|---|---|
@@ -124,8 +125,9 @@ training corpus, so it should not sit indefinitely.
 
 ## Disposition
 
-**Proposed — awaiting Bob.** Nothing here blocks the MXE-DM merge; Perkins
-returned no blocking findings and the Codex finding is closed.
+**Proposed — awaiting maintainer ruling.** Nothing here blocks the MXE-DM
+merge: the post-flight security review returned no blocking findings and the
+Codex finding is closed.
 
 Three things want a ruling:
 
