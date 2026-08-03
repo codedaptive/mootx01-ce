@@ -23,8 +23,9 @@ import SubstrateML
 public struct ConflictFinding: Sendable, Equatable {
     public let outcome: ConflictOutcome
     /// Raw `AdjectiveSensitivity` value of the more sensitive source
-    /// drawer. Drawers that could not be hydrated count as `.normal` —
-    /// the finding still surfaces, and rendering has no content to leak.
+    /// drawer. An endpoint whose sensitivity could not be resolved counts
+    /// as the MAXIMUM tier (`.secret`), never as `.normal` — see
+    /// `ConflictSweepCore.ceiling` for why this direction is the safe one.
     public let sensitivityCeilingRaw: Int
 }
 
@@ -140,8 +141,22 @@ public enum ConflictSweepCore {
         _ pair: (a: ConflictSignature, b: ConflictSignature),
         _ sensitivityRawBySourceDrawer: [String: Int]
     ) -> Int {
-        max(sensitivityRawBySourceDrawer[pair.a.sourceDrawerID] ?? 0,
-            sensitivityRawBySourceDrawer[pair.b.sourceDrawerID] ?? 0)
+        // Fail closed. An endpoint whose sensitivity could not be
+        // resolved counts as the MAXIMUM tier, never as `.normal`: a
+        // hydration gap is not evidence of low sensitivity, and the
+        // Elevated ceiling the proposal loop enforces
+        // (`proposeConflictTunnels`) must not be passable by a failed
+        // lookup.
+        //
+        // `.secret` — a real tier — rather than a sentinel like
+        // `Int.max`, because this field is documented as a raw
+        // `AdjectiveSensitivity` value and decoding coerces beyond-spec
+        // raws back to `.normal`. Parking an out-of-range value here
+        // would re-open the fail-open hole for any future caller that
+        // decodes before comparing.
+        let unresolved = AdjectiveSensitivity.secret.rawValue
+        return max(sensitivityRawBySourceDrawer[pair.a.sourceDrawerID] ?? unresolved,
+                   sensitivityRawBySourceDrawer[pair.b.sourceDrawerID] ?? unresolved)
     }
 }
 

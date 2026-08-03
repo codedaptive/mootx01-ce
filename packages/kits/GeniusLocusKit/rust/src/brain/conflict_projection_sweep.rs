@@ -11,6 +11,7 @@
 // conversion (KI-003). No clock, no writes, no tunnel proposals here —
 // report rendering is M4, tunnel lifecycle wiring is M5.
 
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::kg_fact::KGFact;
 use std::collections::{HashMap, HashSet};
 use substrate_ml::conflict_projection::{
@@ -28,8 +29,9 @@ use super::conflict_projection_pass::{
 pub struct ConflictFinding {
     pub outcome: ConflictOutcome,
     /// Raw adjective-sensitivity of the more sensitive source drawer.
-    /// Drawers that could not be hydrated count as normal (0) — the
-    /// finding still surfaces, and rendering has no content to leak.
+    /// An endpoint whose sensitivity could not be resolved counts as the
+    /// MAXIMUM tier (`Secret`), never as normal — see `run_sweep`'s
+    /// `ceiling` closure for why this direction is the safe one.
     pub sensitivity_ceiling_raw: i64,
 }
 
@@ -98,14 +100,28 @@ pub fn run_sweep(
             .contains(&pair_key(&a.source_drawer_id, &b.source_drawer_id));
         let outcome = evaluate(a, b, registry, accepted);
         let ceiling = || -> i64 {
+            // Fail closed. An endpoint whose sensitivity could not be
+            // resolved counts as the MAXIMUM tier, never as Normal: a
+            // hydration gap is not evidence of low sensitivity, and the
+            // Elevated ceiling the proposal loop enforces
+            // (coordinator::propose_conflict_tunnels) must not be
+            // passable by a failed lookup.
+            //
+            // Secret — a real tier — rather than a sentinel like
+            // i64::MAX, because this field is documented as a raw
+            // AdjectiveSensitivity value and `from_raw` coerces
+            // beyond-spec raws back to Normal. Parking an out-of-range
+            // value here would re-open the fail-open hole for any future
+            // caller that decodes before comparing.
+            let unresolved = AdjectiveSensitivity::Secret.raw_value();
             let ra = sensitivity_raw_by_source_drawer
                 .get(&a.source_drawer_id)
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or(unresolved);
             let rb = sensitivity_raw_by_source_drawer
                 .get(&b.source_drawer_id)
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or(unresolved);
             ra.max(rb)
         };
         match outcome.kind {
