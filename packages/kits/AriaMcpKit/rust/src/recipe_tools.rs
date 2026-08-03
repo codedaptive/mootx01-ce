@@ -812,9 +812,11 @@ fn run_shaped_recall_tool(
                 .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
             drop(coord);
             // The provenance reject runs BEFORE the empty-content check, so a
-            // gated row and an empty row are indistinguishable in both
-            // directions — reversing the order would let a caller separate
-            // "gated" from "blank" by seeding a blank row and comparing.
+            // gated row and an empty row collapse into the one not-found
+            // shape. Ordering discipline and defence in depth: this fetch
+            // requests a single id, so `admissible` holds at most one drawer
+            // and either order yields the same error today. Should this ever
+            // resolve a set, provenance-first is the order that cannot leak.
             let anchor_drawer = fetched
                 .admissible
                 .into_iter()

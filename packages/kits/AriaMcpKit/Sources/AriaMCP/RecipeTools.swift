@@ -858,11 +858,13 @@ enum RecipeTools {
                 matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full),
                 hydrationLevel: .full)
             // The provenance reject is evaluated BEFORE the empty-content
-            // check, so a gated row and an empty row are indistinguishable
-            // in both directions — reversing the order would let a caller
-            // separate "gated" from "blank" by seeding a blank row and
-            // comparing. Both fall into the one not-found shape below,
-            // byte-identical to the message an absent id produces.
+            // check, so a gated row and an empty row collapse into the one
+            // not-found shape below, byte-identical to the message an absent
+            // id produces. Ordering discipline and defence in depth: this
+            // fetch requests a single id, so `admissible` holds at most one
+            // drawer and either order yields the same error today. Should
+            // this ever resolve a set, provenance-first is the order that
+            // cannot leak.
             let admissibleAnchor = fetched.admissible.first { d in
                 switch d.sensitivity {
                 case .restricted, .secret: return false
