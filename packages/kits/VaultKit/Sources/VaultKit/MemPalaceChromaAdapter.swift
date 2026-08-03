@@ -145,9 +145,11 @@ import SQLite3
 // availability half. `PRAGMA trusted_schema=OFF` would close the rest;
 // it is deliberately NOT set here because it changes how SQLite treats a
 // foreign file and a real palace has never needed it. Do not upgrade
-// this comment to "no confidentiality or integrity risk" without it. Every limit below fails with an error naming the limit AND
-// the observed value, because an import that dies on an unexplained cap
-// is worse than one that is slow.
+// this comment to "no confidentiality or integrity risk" without it.
+//
+// Every limit below fails with an error naming the limit AND the observed
+// value, because an import that dies on an unexplained cap is worse than
+// one that is slow.
 //
 // ## Why direct SQLite here (and not PersistenceKit)
 //
