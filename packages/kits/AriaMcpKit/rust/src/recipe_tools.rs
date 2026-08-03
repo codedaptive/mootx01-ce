@@ -778,8 +778,10 @@ fn run_shaped_recall_tool(
     // contract as moot_memory_search — the anchor's content runs through
     // the SAME shaped pipeline (preset/filter/limit inherited); the anchor
     // row is excluded from the reply; a gated anchor reads as not-found
-    // (default containment gate, no grant lift — oracle-free). Mirrors
-    // Swift runShapedRecall.
+    // (default containment gate for adjective sensitivity bits 6–11, plus an
+    // explicit `Drawer::sensitivity()` check for provenance sensitivity bits
+    // 30–35, which the frame does not cover; no grant lift — oracle-free,
+    // byte-identical to an absent id). Mirrors Swift runShapedRecall.
     let query_arg = optional_string(args, "query")?.map(|s| s.to_string());
     let near_arg = optional_string(args, "near")?.map(|s| s.to_string());
     let (query, anchor_id): (String, Option<String>) = match (query_arg, near_arg) {
@@ -809,10 +811,19 @@ fn run_shaped_recall_tool(
                 .get_drawers_matching_frame(&[anchor.clone()], &frame)
                 .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
             drop(coord);
+            // The provenance reject runs BEFORE the empty-content check, so a
+            // gated row and an empty row are indistinguishable in both
+            // directions — reversing the order would let a caller separate
+            // "gated" from "blank" by seeding a blank row and comparing.
             let anchor_drawer = fetched
                 .admissible
                 .into_iter()
-                .find(|d| !d.content.is_empty())
+                .find(|d| !matches!(
+                    d.sensitivity(),
+                    locus_kit::provenance::Sensitivity::Restricted
+                        | locus_kit::provenance::Sensitivity::Secret
+                ))
+                .filter(|d| !d.content.is_empty())
                 .ok_or_else(|| JSONRPCError::new(
                     JSONRPCErrorCode::INVALID_PARAMS,
                     format!("near: anchor memory not found: {anchor}"),

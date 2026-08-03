@@ -1386,7 +1386,12 @@ extension ToolDispatcher {
             query = q
         case (nil, .some(let anchor)):
             // Anchor fetch under the DEFAULT containment gate (no grant
-            // lift, deliberately): pivoting through a restricted/secret
+            // lift, deliberately) AND an explicit provenance check: the
+            // RecallFrame gate covers adjective sensitivity (bits 6-11)
+            // only, while `Drawer.sensitivity` decodes provenance
+            // sensitivity (bits 30-35). Both are needed — a
+            // provenance-Secret row with the default adjective-Normal
+            // passes the frame. Pivoting through a restricted/secret
             // anchor's content would leak content-derived neighbors past
             // the redaction boundary, so a gated anchor reads as
             // not-found — the same oracle-free shape memory_get uses.
@@ -1395,7 +1400,19 @@ extension ToolDispatcher {
                 ids: [anchor],
                 matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full),
                 hydrationLevel: .full)
-            guard let anchorDrawer = fetched.admissible.first,
+            // The provenance reject is evaluated BEFORE the empty-content
+            // check, so a gated row and an empty row are indistinguishable
+            // in both directions — reversing the order would let a caller
+            // separate "gated" from "blank" by seeding a blank row and
+            // comparing. Both fall into the one not-found shape below,
+            // byte-identical to the message an absent id produces.
+            let admissibleAnchor = fetched.admissible.first { d in
+                switch d.sensitivity {
+                case .restricted, .secret: return false
+                case .normal, .elevated: return true
+                }
+            }
+            guard let anchorDrawer = admissibleAnchor,
                   !anchorDrawer.content.isEmpty else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,

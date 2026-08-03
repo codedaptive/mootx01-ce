@@ -829,7 +829,10 @@ enum RecipeTools {
         // identical contract to moot_memory_search — the anchor's content
         // runs through the SAME shaped pipeline (preset/filter/limit
         // inherited); the anchor row is excluded from the reply; a gated
-        // anchor reads as not-found (no grant lift, oracle-free).
+        // anchor reads as not-found (default containment gate for adjective
+        // sensitivity bits 6-11, plus an explicit `Drawer.sensitivity` check
+        // for provenance sensitivity bits 30-35, which the frame does not
+        // cover; no grant lift — oracle-free, byte-identical to an absent id).
         let queryArg = try optionalString(args["query"], argument: "query")
         let nearArg = try optionalString(args["near"], argument: "near")
         let query: String
@@ -854,7 +857,19 @@ enum RecipeTools {
                 ids: [anchor],
                 matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full),
                 hydrationLevel: .full)
-            guard let anchorDrawer = fetched.admissible.first,
+            // The provenance reject is evaluated BEFORE the empty-content
+            // check, so a gated row and an empty row are indistinguishable
+            // in both directions — reversing the order would let a caller
+            // separate "gated" from "blank" by seeding a blank row and
+            // comparing. Both fall into the one not-found shape below,
+            // byte-identical to the message an absent id produces.
+            let admissibleAnchor = fetched.admissible.first { d in
+                switch d.sensitivity {
+                case .restricted, .secret: return false
+                case .normal, .elevated: return true
+                }
+            }
+            guard let anchorDrawer = admissibleAnchor,
                   !anchorDrawer.content.isEmpty else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,

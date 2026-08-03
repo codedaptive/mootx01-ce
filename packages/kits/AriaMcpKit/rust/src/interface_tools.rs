@@ -622,11 +622,15 @@ fn run_memory_search(
     // through the SAME scored pipeline (full fusion stack), so the fan-out
     // inherits every shape/filter/limit unchanged; the anchor row itself is
     // excluded from the reply. The anchor is fetched under the DEFAULT
-    // containment gate (no grant lift, deliberately): pivoting through a
-    // restricted/secret anchor's content would leak content-derived
-    // neighbors past the redaction boundary, so a gated anchor reads as
-    // not-found — the same oracle-free shape memory_get uses. Mirrors Swift
-    // runMemorySearch.
+    // containment gate (no grant lift, deliberately) AND is then checked
+    // against the provenance sensitivity axis: the frame gate covers
+    // adjective sensitivity (bits 6–11) only, while `Drawer::sensitivity()`
+    // decodes provenance sensitivity (bits 30–35). Both checks are needed —
+    // a provenance-Secret row with the default adjective-Normal passes the
+    // frame. Pivoting through a restricted/secret anchor's content would leak
+    // content-derived neighbors past the redaction boundary, so a gated
+    // anchor reads as not-found, byte-identical to an absent id — the same
+    // oracle-free shape memory_get uses. Mirrors Swift runMemorySearch.
     let query_arg = optional_string(args, "query")?.map(|s| s.to_string());
     let near_arg = optional_string(args, "near")?.map(|s| s.to_string());
     let (query, anchor_id): (String, Option<String>) = match (query_arg, near_arg) {
@@ -646,7 +650,7 @@ fn run_memory_search(
         }
         (Some(q), None) => (q, None),
         (None, Some(anchor)) => {
-            let mut coord = estate.coord.lock().unwrap();
+            let coord = estate.coord.lock().unwrap();
             let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -662,10 +666,19 @@ fn run_memory_search(
                     format!("{e}"),
                 ))?;
             drop(coord);
+            // The provenance reject runs BEFORE the empty-content check, so a
+            // gated row and an empty row are indistinguishable in both
+            // directions — reversing the order would let a caller separate
+            // "gated" from "blank" by seeding a blank row and comparing.
             let anchor_drawer = fetched
                 .admissible
                 .into_iter()
-                .find(|d| !d.content.is_empty())
+                .find(|d| !matches!(
+                    d.sensitivity(),
+                    locus_kit::provenance::Sensitivity::Restricted
+                        | locus_kit::provenance::Sensitivity::Secret
+                ))
+                .filter(|d| !d.content.is_empty())
                 .ok_or_else(|| JSONRPCError::new(
                     JSONRPCErrorCode::INVALID_PARAMS,
                     format!("near: anchor memory not found: {anchor}"),
