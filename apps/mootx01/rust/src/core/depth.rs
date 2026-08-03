@@ -963,4 +963,149 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&home);
     }
+
+    // ---- generation-boundary shape contract -------------------------------
+    //
+    // The plugin entry's shape asserted directly against the embedded bundle,
+    // before any install machinery runs. Rust twin of Swift's
+    // `PluginPackageShapeTests`.
+    //
+    // Why here and not only at the install boundary: when the packager renamed
+    // the plugin MCP server key (7f64973aa), three install-boundary tests went
+    // red with "type is not http" — a symptom three layers downstream of the
+    // actual change, describing the wrong defect (the entry was HTTP-shaped
+    // all along; the key it was filed under had moved). Nothing asserted the
+    // contract where the contract is produced.
+
+    /// The map key a package's MCP manifest files the server entry under.
+    /// Most hosts use `mcpServers`; VS Code / GitHub Copilot uses `servers`.
+    const SERVER_MAP_KEYS: [&str; 2] = ["mcpServers", "servers"];
+
+    /// A generated plugin entry carries its endpoint under one of these. Most
+    /// hosts use `url`; Antigravity's schema names it `serverUrl`.
+    const URL_KEYS: [&str; 2] = ["url", "serverUrl"];
+
+    /// Every JSON file in `host_id`'s package that declares a server map, as
+    /// (relative path, map key, the server map).
+    fn server_maps(host_id: &str) -> Vec<(String, &'static str, serde_json::Map<String, serde_json::Value>)> {
+        let mut found = Vec::new();
+        for (rel, contents) in InstallBundle::embedded().package_files(host_id) {
+            if !rel.ends_with(".json") {
+                continue;
+            }
+            let Ok(root) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                continue;
+            };
+            for key in SERVER_MAP_KEYS {
+                if let Some(servers) = root.get(key).and_then(|v| v.as_object()) {
+                    found.push((rel.clone(), key, servers.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    /// The contract, stated once at the boundary that produces it: every
+    /// plugin-capable host's generated MCP manifest files exactly one server,
+    /// under `clients::PLUGIN_SERVER_NAME`, and that entry is HTTP-shaped — it
+    /// points at the resident daemon over HTTP and carries neither a `command`
+    /// (the stdio proxy-bridge shape, which the transport ruling moved away
+    /// from so concurrent clients share one daemon) nor an `env` (client-side
+    /// env on an HTTP entry is inert — nothing reads it).
+    #[test]
+    fn plugin_package_entries_are_http_shaped() {
+        let bundle = InstallBundle::embedded();
+        let mut hosts: Vec<&str> = bundle.plugin_capable_hosts().map(|h| h.id.as_str()).collect();
+        hosts.sort_unstable();
+
+        // Guard the guard: this test is worthless if the iteration silently
+        // covers nothing — the exact failure mode it exists to catch.
+        assert!(!hosts.is_empty(), "the embedded bundle must declare plugin-capable hosts");
+
+        let mut checked = 0usize;
+        for host_id in &hosts {
+            let maps = server_maps(host_id);
+            assert!(
+                !maps.is_empty(),
+                "{host_id} is plugin-capable but its package declares no MCP server map"
+            );
+
+            for (rel, map_key, servers) in maps {
+                let at = format!("{host_id}/{rel} [{map_key}]");
+                let keys: Vec<&str> = servers.keys().map(|k| k.as_str()).collect();
+                assert_eq!(
+                    keys,
+                    vec![clients::PLUGIN_SERVER_NAME],
+                    "{at}: must declare exactly the plugin server key '{}'",
+                    clients::PLUGIN_SERVER_NAME
+                );
+
+                let entry = servers
+                    .get(clients::PLUGIN_SERVER_NAME)
+                    .and_then(|v| v.as_object())
+                    .unwrap_or_else(|| panic!("{at}: no object entry under the plugin server key"));
+
+                assert!(
+                    URL_KEYS.iter().any(|k| entry.contains_key(*k)),
+                    "{at}: an HTTP-shaped entry must carry a url; got {:?}",
+                    entry.keys().collect::<Vec<_>>()
+                );
+                assert!(
+                    !entry.contains_key("command"),
+                    "{at}: HTTP-shaped entries must never carry a command — that is the stdio proxy-bridge shape"
+                );
+                assert!(
+                    !entry.contains_key("env"),
+                    "{at}: HTTP-shaped entries must never carry an env block — it is inert"
+                );
+
+                // Hosts whose schema takes a transport discriminator must say
+                // `http`; hosts whose schema has no `type` field omit it. Any
+                // other value means the entry is not HTTP-shaped at all.
+                if let Some(ty) = entry.get("type") {
+                    assert_eq!(ty, "http", "{at}: transport must be http");
+                }
+
+                checked += 1;
+            }
+        }
+
+        assert_eq!(
+            checked,
+            hosts.len(),
+            "expected exactly one MCP manifest per plugin-capable host"
+        );
+    }
+
+    /// The constant the installer reads must be the key the packager writes.
+    /// `PLUGIN_SERVER_NAME` mirrors generated data; this keeps the mirror
+    /// honest. Direct tripwire for a repeat of 7f64973aa, where the generated
+    /// key moved and the installer's copy did not.
+    #[test]
+    fn plugin_server_name_matches_generated_packages() {
+        let mut emitted: Vec<String> = InstallBundle::embedded()
+            .plugin_capable_hosts()
+            .flat_map(|h| server_maps(&h.id))
+            .flat_map(|(_, _, servers)| servers.keys().cloned().collect::<Vec<_>>())
+            .collect();
+        emitted.sort_unstable();
+        emitted.dedup();
+        assert_eq!(
+            emitted,
+            vec![clients::PLUGIN_SERVER_NAME.to_string()],
+            "the generated packages are the authority for the plugin server key; \
+             PLUGIN_SERVER_NAME is '{}' but the packages emit {emitted:?}",
+            clients::PLUGIN_SERVER_NAME
+        );
+    }
+
+    /// The two keys are deliberately different (7f64973aa): a plugin entry is
+    /// namespaced under the plugin id by the host, so it reads as
+    /// `plugin:mootx01:memory`; a direct entry has no such namespace and keeps
+    /// `mootx01`. Collapsing them would break the plugin-ownership hook's
+    /// ability to spot a competing direct entry.
+    #[test]
+    fn plugin_and_direct_server_keys_are_distinct() {
+        assert_ne!(clients::PLUGIN_SERVER_NAME, clients::SERVER_NAME);
+    }
 }

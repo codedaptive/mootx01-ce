@@ -247,7 +247,8 @@ public enum MCPClients {
     ///
     /// The generated packages are the authority for this value; it is
     /// mirrored here so the installer has one place to read it instead
-    /// of a literal at each call site.
+    /// of a literal at each call site. `PluginPackageShapeTests` asserts
+    /// the mirror still matches what the packager emits.
     public static let pluginServerName: String = "memory"
 
     /// Clients the installer wires up on macOS. Order matches the

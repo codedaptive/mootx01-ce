@@ -72,7 +72,8 @@ pub const SERVER_NAME: &str = "mootx01";
 ///
 /// The generated packages are the authority for this value; it is mirrored
 /// here so the installer has one place to read it instead of a literal at
-/// each call site.
+/// each call site. `core::depth`'s `plugin_server_name_matches_generated_packages`
+/// asserts the mirror still matches what the packager emits.
 pub const PLUGIN_SERVER_NAME: &str = "memory";
 
 impl McpClient {
