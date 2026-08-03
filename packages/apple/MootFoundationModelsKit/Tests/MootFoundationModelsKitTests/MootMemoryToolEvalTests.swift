@@ -56,6 +56,15 @@ struct MootMemoryToolEvalTests {
             "the only BEGIN sentinel is the wrapper's own")
         #expect(output.hasSuffix("END_UNTRUSTED_MOOT_DATA"),
             "the untrusted block closes at the very end — nothing dangles after it")
+
+        // Anchor the hit. Every assertion above counts sentinels, so all three
+        // pass vacuously if recall returns nothing — and this capture runs in
+        // regular mode (background encode), so a zero-hit reply is a live
+        // failure mode, not a hypothetical. Requiring the DEFANGED spelling
+        // proves the poisoned row actually rendered AND that the defang ran on
+        // it: the hyphenated form exists only as the defang's output.
+        #expect(output.contains("END-UNTRUSTED-MOOT-DATA"),
+            "the poisoned drawer must actually appear, with its sentinel defanged")
     }
 
     // MARK: sensitivity — the recall ceiling holds through the tool
