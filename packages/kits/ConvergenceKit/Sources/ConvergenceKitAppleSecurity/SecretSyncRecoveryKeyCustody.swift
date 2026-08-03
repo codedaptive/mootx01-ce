@@ -181,11 +181,22 @@ enum SecretSyncRecoveryBranch: Sendable, Hashable {
     replacementGenerationID: SecretGenerationID,
     freshness: SecretBootstrapFreshnessCommitment
   )
+  /// Full-loss break-glass, bound to the intent the recovery key will sign.
+  ///
+  /// `intentDigest` is the SHA-256 of the canonical
+  /// `GlobalRecoveryTransitionIntent` this ceremony authorizes. It is `nil`
+  /// only in the window between `beginBreakGlass` and `confirmBreakGlass`:
+  /// the intent embeds the challenge and session identifiers that `begin`
+  /// itself mints, so no caller can construct it any earlier. From
+  /// confirmation onward the digest is fixed, and every transcript that
+  /// `consume` recomputes carries it — which is what makes the signature
+  /// cover the intent the user actually confirmed.
   case breakGlass(
     scopeID: SecretScopeID,
     currentRecoveryRecipientID: UUID,
     sealedGenerationID: SecretGenerationID,
-    freshness: SecretBootstrapFreshnessCommitment
+    freshness: SecretBootstrapFreshnessCommitment,
+    intentDigest: Data?
   )
 
   var operation: SecretSyncRecoveryConfirmationOperation {
@@ -194,6 +205,42 @@ enum SecretSyncRecoveryBranch: Sendable, Hashable {
     case .rotation: .rotation
     case .breakGlass: .breakGlass
     }
+  }
+
+  /// The canonical intent digest this break-glass ceremony is bound to.
+  ///
+  /// `nil` for enrollment and rotation, which authorize no intent, and for a
+  /// break-glass ceremony that has not yet been confirmed.
+  var breakGlassIntentDigest: Data? {
+    guard case let .breakGlass(_, _, _, _, intentDigest) = self else {
+      return nil
+    }
+    return intentDigest
+  }
+
+  /// Returns the same break-glass branch bound to `intentDigest`.
+  ///
+  /// Returns `nil` for any other branch: enrollment and rotation authorize no
+  /// intent and must never acquire one.
+  func boundToBreakGlassIntent(
+    _ intentDigest: Data
+  ) -> SecretSyncRecoveryBranch? {
+    guard case let .breakGlass(
+      scopeID,
+      currentRecoveryRecipientID,
+      sealedGenerationID,
+      freshness,
+      _
+    ) = self else {
+      return nil
+    }
+    return .breakGlass(
+      scopeID: scopeID,
+      currentRecoveryRecipientID: currentRecoveryRecipientID,
+      sealedGenerationID: sealedGenerationID,
+      freshness: freshness,
+      intentDigest: intentDigest
+    )
   }
 }
 
@@ -206,8 +253,15 @@ enum SecretSyncRecoveryPendingState: Sendable {
 
 struct SecretSyncRecoveryPending: Sendable {
   let handle: SecretSyncRecoveryConfirmationHandle
-  let branch: SecretSyncRecoveryBranch
-  let transcriptCommitment: Data
+  /// Mutable for exactly one transition: `confirmBreakGlass` rebinds the
+  /// break-glass branch to the confirmed intent digest. Enrollment and
+  /// rotation branches are written once at `begin` and never change.
+  var branch: SecretSyncRecoveryBranch
+  /// The commitment `consume` admits against. `begin` writes the transcript
+  /// hash for the branch as recorded there; `confirmBreakGlass` replaces it
+  /// with the hash of the intent-bearing transcript, so from confirmation
+  /// onward the only admissible transcript is the bound one.
+  var transcriptCommitment: Data
   var phraseForReveal: String?
   var material: SecretSyncRecoveryDerivedMaterial?
   var state: SecretSyncRecoveryPendingState
@@ -308,9 +362,62 @@ public actor SecretSyncRecoveryKeyCustody:
   }
 
   /// Confirms one complete 24-word phrase against the exact pending operation.
+  ///
+  /// Break-glass ceremonies are refused here. They authorize a signature over
+  /// a specific `GlobalRecoveryTransitionIntent`, so they must commit to that
+  /// intent as part of being confirmed; use
+  /// `confirmBreakGlass(_:phrase:intent:)`. Admitting one through this method
+  /// would produce a confirmation bound to no intent, which is exactly the
+  /// substitution the ceremony exists to prevent.
   public func confirm(
     _ handle: SecretSyncRecoveryConfirmationHandle,
     phrase: String
+  ) throws -> BlindRecoveryConfirmationEvidence {
+    guard handle.operation != .breakGlass else {
+      throw SecretSyncRecoveryError.invalidConfirmation
+    }
+    return try admit(handle, phrase: phrase, intentDigest: nil)
+  }
+
+  /// Confirms a break-glass phrase against the exact intent it authorizes.
+  ///
+  /// The canonical digest of `intent` is committed into the confirmation
+  /// transcript before any evidence is returned, and `consume` admits only a
+  /// transcript carrying that same digest. The signature the recovery key
+  /// later produces therefore covers the intent the user confirmed and no
+  /// other: substituting any field of `intent` between here and
+  /// `stageBreakGlassAuthorization(_:intent:freshnessAnchor:)` changes the
+  /// digest, and the confirmation is refused without being spent.
+  ///
+  /// `intent` has no default. An unbound break-glass confirmation is not
+  /// representable, so no caller can omit the binding by accident.
+  public func confirmBreakGlass(
+    _ handle: SecretSyncRecoveryConfirmationHandle,
+    phrase: String,
+    intent: GlobalRecoveryTransitionIntent
+  ) throws -> BlindRecoveryConfirmationEvidence {
+    guard handle.operation == .breakGlass else {
+      throw SecretSyncRecoveryError.invalidConfirmation
+    }
+    let canonicalIntent: Data
+    do {
+      canonicalIntent = try intent.canonicalBytes()
+    } catch {
+      throw SecretSyncRecoveryError.invalidConfirmation
+    }
+    return try admit(
+      handle,
+      phrase: phrase,
+      intentDigest: Data(SHA256.hash(data: canonicalIntent))
+    )
+  }
+
+  /// Shared confirmation path. `intentDigest` is non-nil exactly for
+  /// break-glass, whose callers are the only ones that reach it.
+  private func admit(
+    _ handle: SecretSyncRecoveryConfirmationHandle,
+    phrase: String,
+    intentDigest: Data?
   ) throws -> BlindRecoveryConfirmationEvidence {
     guard var pending = pendingByToken[handle.tokenID] else {
       throw SecretSyncRecoveryError.missingCeremony
@@ -339,17 +446,37 @@ public actor SecretSyncRecoveryKeyCustody:
     guard material.descriptor == pending.handle.recoveryRecipient else {
       throw SecretSyncRecoveryError.invalidConfirmation
     }
+    // The phrase is admitted against the branch exactly as `begin` recorded
+    // it, proving the ceremony was not altered between begin and confirmation.
     let transcript = try Self.transcript(
       handle: pending.handle,
       branch: pending.branch,
       descriptor: material.descriptor
     )
-    let commitment = Data(SHA256.hash(data: transcript))
     guard Self.constantTimeCommitment(
-      commitment,
+      Data(SHA256.hash(data: transcript)),
       pending.transcriptCommitment
     ) else {
       throw SecretSyncRecoveryError.invalidConfirmation
+    }
+    if let intentDigest {
+      // Break-glass binds here. The branch acquires the intent digest and the
+      // stored commitment is replaced by the transcript that carries it, so
+      // the intent-free transcript is no longer admissible for this token.
+      // Both the evidence returned below and the commitment `consume` checks
+      // are therefore the bound ones — the digest gates, it is not merely
+      // recorded.
+      guard let bound = pending.branch.boundToBreakGlassIntent(intentDigest)
+      else {
+        throw SecretSyncRecoveryError.invalidConfirmation
+      }
+      let boundTranscript = try Self.transcript(
+        handle: pending.handle,
+        branch: bound,
+        descriptor: material.descriptor
+      )
+      pending.branch = bound
+      pending.transcriptCommitment = Data(SHA256.hash(data: boundTranscript))
     }
     pending.state = .confirmed
     pending.material = material
@@ -459,6 +586,21 @@ public actor SecretSyncRecoveryKeyCustody:
     case .confirmed:
       break
     }
+    // A break-glass token is admissible only for the exact intent its
+    // confirmation committed to. The structural equality below would already
+    // catch a mismatch; this compares the digests in constant time first, and
+    // states the invariant where it is enforced. An expected branch carrying
+    // no digest — an unbound break-glass, or a rotation or enrollment record
+    // replayed as one — is refused here.
+    if expectedBranch.operation == .breakGlass {
+      guard
+        let expected = expectedBranch.breakGlassIntentDigest,
+        let confirmed = pending.branch.breakGlassIntentDigest,
+        SecretSyncRecoveryFrame.constantTimeEqual32(expected, confirmed)
+      else {
+        throw SecretSyncRecoveryError.invalidConfirmation
+      }
+    }
     guard
       pending.branch == expectedBranch,
       pending.handle.operation == expectedBranch.operation,
@@ -544,7 +686,8 @@ public actor SecretSyncRecoveryKeyCustody:
       scopeID,
       currentRecoveryRecipientID,
       sealedGenerationID,
-      freshness
+      freshness,
+      intentDigest
     ):
       fields += [
         .init(tag: 9, value: SecretSyncRecoveryFrame.uuid(scopeID.rawValue)),
@@ -552,6 +695,14 @@ public actor SecretSyncRecoveryKeyCustody:
         .init(tag: 11, value: SecretSyncRecoveryFrame.uuid(sealedGenerationID.rawValue)),
         .init(tag: 12, value: try freshnessFrame(freshness)),
       ]
+      // Tag 13 is the SHA-256 of the canonical intent the recovery key will
+      // sign. It is absent from the pre-confirmation transcript `begin`
+      // commits to and present from `confirmBreakGlass` onward, so a bound
+      // confirmation and an unbound one are different transcripts by
+      // construction and neither can stand in for the other.
+      if let intentDigest {
+        fields.append(.init(tag: 13, value: intentDigest))
+      }
     }
     return try SecretSyncRecoveryFrame.encode(fields)
   }

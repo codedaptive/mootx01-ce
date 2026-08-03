@@ -74,7 +74,13 @@ extension SecretSyncRecoveryKeyCustody {
   /// Begins explicit full-loss staging against the current public descriptor.
   ///
   /// The current phrase is not retained or revealed by this operation. The
-  /// complete phrase must be supplied later to `confirm(_:phrase:)`.
+  /// complete phrase and the exact intent this recovery authorizes must both
+  /// be supplied later to `confirmBreakGlass(_:phrase:intent:)`.
+  ///
+  /// The intent cannot be supplied here: it embeds the challenge and session
+  /// identifiers minted inside this call, so the caller first learns them from
+  /// the returned handle. Confirmation is therefore the earliest point at
+  /// which the ceremony can commit to the intent, and it is where it does.
   public func beginBreakGlass(
     requestID: UUID,
     scopeID: SecretScopeID,
@@ -95,7 +101,8 @@ extension SecretSyncRecoveryKeyCustody {
         currentRecoveryRecipientID:
           currentRecoveryRecipient.recoveryRecipientID,
         sealedGenerationID: sealedGenerationID,
-        freshness: expectedFreshnessCommitment
+        freshness: expectedFreshnessCommitment,
+        intentDigest: nil
       ),
       phrase: nil,
       material: nil
@@ -160,11 +167,20 @@ extension SecretSyncRecoveryKeyCustody {
       throw SecretSyncRecoveryError.missingCeremony
     }
     let descriptor = pending.handle.recoveryRecipient
+    // This path signs nothing, so it carries no intent of its own to bind. It
+    // reproduces the digest the confirmation already committed to, taken from
+    // live custody state and never from caller input, which is the only value
+    // `consume` will admit. The token therefore stays single-use across both
+    // stage paths. Nothing can be laundered in here either: a break-glass
+    // ceremony reaches `.confirmed` only through
+    // `confirmBreakGlass(_:phrase:intent:)`, which always binds, so an
+    // unbound confirmation does not exist to be spent.
     let branch = SecretSyncRecoveryBranch.breakGlass(
       scopeID: request.scopeID,
       currentRecoveryRecipientID: request.recoveryRecipientID,
       sealedGenerationID: request.sealedGenerationID,
-      freshness: request.expectedFreshnessCommitment
+      freshness: request.expectedFreshnessCommitment,
+      intentDigest: pending.branch.breakGlassIntentDigest
     )
     let admitted = try consume(
       evidence: request.blindConfirmation,
@@ -223,11 +239,16 @@ extension SecretSyncRecoveryKeyCustody {
     } catch {
       throw SecretSyncRecoveryError.invalidConfirmation
     }
+    // The digest of the exact bytes about to be signed. If it differs from the
+    // one the confirmation committed to — that is, if any field of `intent`
+    // was substituted after the user entered the phrase — `consume` refuses
+    // before the token is spent, and nothing is signed.
     let branch = SecretSyncRecoveryBranch.breakGlass(
       scopeID: request.scopeID,
       currentRecoveryRecipientID: request.recoveryRecipientID,
       sealedGenerationID: request.sealedGenerationID,
-      freshness: freshness
+      freshness: freshness,
+      intentDigest: Data(SHA256.hash(data: canonicalIntent))
     )
     let admitted = try consume(
       evidence: request.blindConfirmation,
