@@ -942,8 +942,38 @@ enum RecipeTools {
     /// Fetch dense rows for a set of hit ids in one structured-tier read.
     /// The structured tier carries every dense-row field (subject trio,
     /// lattice anchor, event time, provenance bitmap for redaction) without
-    /// hauling content blobs. Rows the default gate rejects fall back to
-    /// the unhydrated marker row at the call site.
+    /// hauling content blobs.
+    ///
+    /// THIS IS THE SENSITIVITY BOUNDARY for every by-id dense-row caller —
+    /// all six graph-lens arms in `LensTools`, the recall arms here, and the
+    /// tunnel-citation arms in `ToolDispatch`. Gate here, once; never at the
+    /// call sites. A per-arm check is how the hole reappears: the next arm
+    /// that hydrates an id inherits whatever this helper does.
+    ///
+    /// THE EMPTY `filterChain` IS LOAD-BEARING, NOT AN ABSENT ARGUMENT.
+    /// `BitmapEvaluator.insertDefaults` inserts `.sensitivityAtMost(.elevated)`
+    /// into any chain carrying no sensitivity filter, and that predicate is
+    /// evaluated against the ADJECTIVE bitmap (bits 4–7) — the same axis
+    /// `AdjectiveSensitivity.isBulkExportable` tests. So a `.restricted` or
+    /// `.secret` drawer never reaches `fetched.admissible`, and
+    /// `DenseRow.render` is never called with one. No explicit sensitivity
+    /// check appears below because it could never fire; the frame has already
+    /// removed those rows.
+    ///
+    /// Do NOT "simplify" this to the frameless `estate.getDrawers(ids:
+    /// hydrationLevel:)`. That read applies no ceiling at all, and these ids
+    /// arrive from tunnel graphs whose edges carry the sensitivity their
+    /// endpoints had AT LINK TIME — a drawer restricted after its tunnels
+    /// were created is still reachable through a stale edge. Dropping the
+    /// frame would emit that drawer's subject. (The Rust port carried exactly
+    /// that defect at its raw-store lens sites; `dense_row::rows_by_id` is its
+    /// twin of this method and reaches the ceiling through the same frame.)
+    ///
+    /// Gated rows are simply ABSENT from the returned map rather than
+    /// substituted, so each arm's existing `DenseRow.renderUnhydrated`
+    /// fallback produces the opaque row: the id and its ranking value still
+    /// appear, the subject does not. Omitting the row entirely would change
+    /// result counts and rankings and make the gate itself an oracle.
     static func denseRowsByID(ids: [String], estate: Estate) async throws -> [String: String] {
         guard !ids.isEmpty else { return [:] }
         let fetched = try await estate.getDrawers(
