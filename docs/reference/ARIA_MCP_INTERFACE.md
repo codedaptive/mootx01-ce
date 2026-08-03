@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.27.0
+version: 1.28.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1165,6 +1165,14 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.28.0 -- 2026-08-03
+
+- Typed conflict projection section (DCP M4): the three contradiction
+  surfaces render the evaluator-backed section via one shared renderer
+  (Swift `RecipeTools.conflictProjectionSection` ↔ Rust
+  `conflict_projection_section`); GLK sweep verbs
+  `conflictProjectionSweep` ↔ `conflict_projection_sweep`.
 
 ### 1.27.0 -- 2026-08-02
 

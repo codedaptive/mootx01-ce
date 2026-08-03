@@ -8114,3 +8114,123 @@ fn recall_distilled_description_contains_ack_token() {
     assert!(desc.contains("recall_distilled/v2"),
         "description must document the current ack token; got: {desc:?}");
 }
+
+// ---------------------------------------------------------------------------
+// DCP M4 — typed conflict-projection section (mirrors Swift
+// ConflictProjectionSectionTests): moot_lens_contradiction appends the
+// evaluator-backed section; F13 restricted redaction; secret ceiling
+// counted but silent.
+// ---------------------------------------------------------------------------
+
+/// Capture a drawer at `sensitivity` and file one employer claim from it.
+fn plant_typed_claim(
+    registry: &EstateRegistry,
+    content: &str,
+    employer: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    use locus_kit::kg_fact::KGFact;
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "conflict-section-tests",
+        LatticeAnchor::udc("000"),
+        "conflict-section-tests",
+        "test-model-v1",
+    );
+    frame.subject = Some(content.chars().take(120).collect());
+    frame.sensitivity = sensitivity;
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, 1_690_000_000_000)
+        .expect("capture must succeed");
+    let estate = coord.estate_for(&registry.default.handle).expect("estate");
+    estate
+        .add_kg_fact(&KGFact::new(
+            format!("fact-{employer}"),
+            "Sarah Chen C0".to_string(),
+            "employer".to_string(),
+            employer.to_string(),
+            drawer.id,
+            1_700_000_000_000,
+        ))
+        .expect("add_kg_fact must succeed");
+}
+
+/// Normal+normal pair: the lens appends the full typed section.
+#[test]
+fn lens_appends_full_typed_section() {
+    let registry = EstateRegistry::new_inmemory();
+    plant_typed_claim(&registry, "Claim one.", "Acme Robotics",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    plant_typed_claim(&registry, "Claim two.", "Beta Corp",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    let result = dispatch_tool(
+        "moot_lens_contradiction", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("lens must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    // Legacy view intact (additive contract).
+    assert!(text.contains("conflicting_facts: 1 subject+predicate pair(s)"), "got: {text}");
+    // Typed section.
+    assert!(text.contains("proven: 1"), "got: {text}");
+    assert!(text.contains("historical: 0"), "got: {text}");
+    assert!(text.contains("compatible: 0"), "got: {text}");
+    assert!(text.contains("unknown_or_invalid: 0"), "got: {text}");
+    assert!(text.contains("coverage: 2/2"), "got: {text}");
+    // The lens has no lexical lane — no candidates line.
+    assert!(!text.contains("candidates:"), "got: {text}");
+    assert!(text.contains("  PROVEN "), "got: {text}");
+    assert!(text.contains("    rule: dim.person.employer@1"), "got: {text}");
+    assert!(text.contains("    coordinate: person:sarah chen c0|employer"), "got: {text}");
+    assert!(text.contains(" vs "), "got: {text}");
+    assert!(
+        text.contains("    time: t:pt:1690000000 | t:pt:1690000000"),
+        "temporal bases must be epoch SECONDS (KI-003); got: {text}"
+    );
+    assert!(
+        text.contains("    reasons: same_coordinate, validity_overlap, values_exclusive"),
+        "got: {text}"
+    );
+}
+
+/// F13 — restricted+normal pair: counted, but the block collapses to the
+/// coordinate-digest line. No source ids, no value digests, no dense rows.
+#[test]
+fn f13_restricted_pair_is_redacted() {
+    let registry = EstateRegistry::new_inmemory();
+    plant_typed_claim(&registry, "Public claim.", "Acme Robotics",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    plant_typed_claim(&registry, "Restricted claim.", "Beta Corp",
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted);
+    let result = dispatch_tool(
+        "moot_lens_contradiction", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("lens must succeed");
+    let text = content_text(&result);
+    assert!(text.contains("proven: 1"), "got: {text}");
+    assert!(text.contains("a conflicting claim exists at "), "got: {text}");
+    assert!(text.contains("[restricted]"), "got: {text}");
+    assert!(!text.contains("  PROVEN "), "got: {text}");
+    assert!(!text.contains("    rule: "), "got: {text}");
+    assert!(!text.contains("    values: "), "got: {text}");
+}
+
+/// Secret ceiling: counted in `proven: N`, no block at all.
+#[test]
+fn secret_ceiling_is_counted_but_silent() {
+    let registry = EstateRegistry::new_inmemory();
+    plant_typed_claim(&registry, "Public claim.", "Acme Robotics",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    plant_typed_claim(&registry, "Secret claim.", "Beta Corp",
+        locus_kit::adjectives::AdjectiveSensitivity::Secret);
+    let result = dispatch_tool(
+        "moot_lens_contradiction", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("lens must succeed");
+    let text = content_text(&result);
+    assert!(text.contains("proven: 1"), "got: {text}");
+    assert!(!text.contains("  PROVEN "), "got: {text}");
+    assert!(!text.contains("[restricted]"), "got: {text}");
+}

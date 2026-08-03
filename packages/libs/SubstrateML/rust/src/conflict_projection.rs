@@ -506,7 +506,20 @@ pub struct ConflictOutcome {
     pub dimension: String,
     pub source_drawer_ids: Vec<String>,
     pub value_digests: Vec<String>,
+    /// Canonical temporal-basis bytes of the two claims, sorted (the
+    /// M0 §7 per-proven block's "temporal basis" field).
+    pub temporal_bases: Vec<String>,
     pub reasons: Vec<ConflictReason>,
+}
+
+impl ConflictOutcome {
+    /// Coordinate digest for redacted rendering (M0 §8): the restricted
+    /// line names the coordinate only through this digest — never the
+    /// key, dimension, or value digests (enum domains are small, so
+    /// value digests are guessable).
+    pub fn coordinate_digest(&self) -> String {
+        sha256_hex(&format!("dcp1|coord|{}|{}", self.key, self.dimension))
+    }
 }
 
 /// Pairwise pure evaluation (spec §5 predicates, M0 §6 precedence).
@@ -536,6 +549,14 @@ pub fn evaluate(
             dimension: a.dimension.clone(),
             source_drawer_ids: source_ids,
             value_digests: digests,
+            temporal_bases: {
+                let mut bases = vec![
+                    a.validity.canonical_bytes(),
+                    b.validity.canonical_bytes(),
+                ];
+                bases.sort();
+                bases
+            },
             reasons,
         }
     };

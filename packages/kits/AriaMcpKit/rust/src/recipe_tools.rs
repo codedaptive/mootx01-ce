@@ -92,6 +92,153 @@ use crate::dispatch::{
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
+/// Render the typed conflict-projection sweep as the ADDITIVE report
+/// section every contradiction surface appends (DCP M4, M0 §7):
+/// moot_hunt_contradictions, moot_dream, and moot_lens_contradiction
+/// all route through this one renderer so the lines never drift.
+///
+/// Redaction (M0 §8, ceiling = MAX endpoint sensitivity, no grant
+/// plumbing in v0.1 — same fixed posture as the lexical hunter):
+/// ceiling ≤ elevated (raw 16) → full block incl. dense rows;
+/// restricted (raw 32) → one line naming only the coordinate DIGEST;
+/// secret (raw 48) → counted in `proven: N`, no block at all.
+///
+/// `lexical_candidates` is the borderline count from the lexical hunter
+/// (the `candidates:` relabel); None on surfaces with no lexical lane
+/// (the lens). Mirrors Swift `RecipeTools.renderConflictProjection`.
+pub(crate) fn conflict_projection_section(
+    coord: &genius_locus_kit::coordinator::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    lexical_candidates: Option<usize>,
+) -> Vec<String> {
+    let sweep = match coord.conflict_projection_sweep(handle) {
+        Ok(sweep) => sweep,
+        Err(e) => {
+            return vec![format!(
+                "(typed conflict projection unavailable: {})",
+                crate::interface_tools::describe_verb_dispatch_error(&e)
+            )]
+        }
+    };
+    let restricted_raw = locus_kit::adjectives::AdjectiveSensitivity::Restricted.raw_value();
+    let secret_raw = locus_kit::adjectives::AdjectiveSensitivity::Secret.raw_value();
+
+    // Dense rows only for fully visible findings (structured-tier by-id
+    // fetch, same tier as memory_get).
+    let visible_ids: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        sweep
+            .proven
+            .iter()
+            .filter(|f| f.sensitivity_ceiling_raw < restricted_raw)
+            .flat_map(|f| f.outcome.source_drawer_ids.iter())
+            .filter(|id| seen.insert((*id).clone()))
+            .cloned()
+            .collect()
+    };
+    let dense_by_id: BTreeMap<String, String> = if visible_ids.is_empty() {
+        BTreeMap::new()
+    } else {
+        match coord.estate_for(handle) {
+            Ok(locus_estate) => {
+                let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+                frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+                locus_estate
+                    .get_drawers_matching_frame(&visible_ids, &frame)
+                    .map(|f| {
+                        f.admissible
+                            .into_iter()
+                            .map(|d| {
+                                let row = crate::dense_row::render(&d);
+                                (d.id.clone(), row)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            Err(_) => BTreeMap::new(),
+        }
+    };
+
+    let mut lines: Vec<String> = vec![
+        format!("proven: {}", sweep.counts.proven_contradiction),
+        format!("historical: {}", sweep.counts.historical_succession),
+        format!("compatible: {}", sweep.counts.compatible_plurality),
+    ];
+    if let Some(candidates) = lexical_candidates {
+        lines.push(format!("candidates: {candidates}"));
+    }
+    // Unparsed facts and unjudgeable pairs share the line: both are
+    // "the typed lane saw it and refused to guess".
+    lines.push(format!(
+        "unknown_or_invalid: {}",
+        sweep.counts.unknown_or_invalid + sweep.diagnostics.unparsed
+    ));
+    lines.push(format!(
+        "coverage: {}/{}",
+        sweep.diagnostics.projected, sweep.diagnostics.scanned
+    ));
+    if sweep.truncated_buckets > 0 {
+        // Deviation-only line (M0 §7): silence means no bucket hit its cap.
+        lines.push(format!("truncated_buckets: {}", sweep.truncated_buckets));
+    }
+    for finding in &sweep.proven {
+        if finding.sensitivity_ceiling_raw >= secret_raw {
+            continue;
+        }
+        let outcome = &finding.outcome;
+        if finding.sensitivity_ceiling_raw >= restricted_raw {
+            lines.push(format!(
+                "  a conflicting claim exists at {} [restricted]",
+                outcome.coordinate_digest()
+            ));
+            continue;
+        }
+        lines.push(format!("  PROVEN {}", outcome.result_id));
+        lines.push(format!("    rule: {}@{}", outcome.rule_id, outcome.rule_version));
+        lines.push(format!("    coordinate: {}|{}", outcome.key, outcome.dimension));
+        lines.push(format!("    values: {}", outcome.value_digests.join(" vs ")));
+        lines.push(format!("    time: {}", outcome.temporal_bases.join(" | ")));
+        lines.push(format!(
+            "    reasons: {}",
+            outcome
+                .reasons
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        for id in &outcome.source_drawer_ids {
+            lines.push(format!(
+                "    {}",
+                dense_by_id
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{id} · - · - · - · -"))
+            ));
+        }
+    }
+    for finding in &sweep.historical {
+        if finding.sensitivity_ceiling_raw >= restricted_raw {
+            continue;
+        }
+        let outcome = &finding.outcome;
+        lines.push(format!(
+            "  HISTORICAL {} {}|{} ({})",
+            outcome.result_id,
+            outcome.key,
+            outcome.dimension,
+            outcome
+                .reasons
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines
+}
+
 /// Recipe tool names — mirrors Swift `RecipeTools` static constants.
 const LIST_LENSES: &str = "moot_list_lenses";
 /// Full recipe catalog browse tool — mirrors Swift `RecipeTools.listRecipesCatalogToolName`.
@@ -1139,6 +1286,12 @@ fn run_dream_tool(
             }
         }
     }
+    // DCP M4 — the typed proving lane's additive section (M0 §7).
+    body.push('\n');
+    body.push_str(
+        &conflict_projection_section(&coord, &estate.handle, Some(hunt.borderline.len()))
+            .join("\n"),
+    );
     Ok(text_result(&body))
 }
 
@@ -1226,6 +1379,12 @@ fn run_hunt_contradictions_tool(
                 .to_string(),
         );
     }
+    // DCP M4 — the typed proving lane's additive section (M0 §7).
+    lines.extend(conflict_projection_section(
+        &coord,
+        &estate.handle,
+        Some(report.borderline.len()),
+    ));
     Ok(text_result(&lines.join("\n")))
 }
 

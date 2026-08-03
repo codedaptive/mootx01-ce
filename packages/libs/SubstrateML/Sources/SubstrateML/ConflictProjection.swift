@@ -431,7 +431,18 @@ public struct ConflictOutcome: Equatable, Sendable {
     public let dimension: String
     public let sourceDrawerIDs: [String]
     public let valueDigests: [String]
+    /// Canonical temporal-basis bytes of the two claims, sorted (the
+    /// M0 §7 per-proven block's "temporal basis" field).
+    public let temporalBases: [String]
     public let reasons: [ConflictReason]
+
+    /// Coordinate digest for redacted rendering (M0 §8): the restricted
+    /// line names the coordinate only through this digest — never the
+    /// key, dimension, or value digests (enum domains are small, so
+    /// value digests are guessable).
+    public var coordinateDigest: String {
+        ConflictIdentity.sha256Hex("dcp1|coord|\(key)|\(dimension)")
+    }
 }
 
 // MARK: - Evaluator
@@ -459,6 +470,9 @@ public enum ConflictEvaluator {
                 valueDigests: [
                     ConflictIdentity.sha256Hex("dcp1|value|" + a.value.canonicalBytes),
                     ConflictIdentity.sha256Hex("dcp1|value|" + b.value.canonicalBytes),
+                ].sorted(),
+                temporalBases: [
+                    a.validity.canonicalBytes, b.validity.canonicalBytes,
                 ].sorted(),
                 reasons: reasons)
         }

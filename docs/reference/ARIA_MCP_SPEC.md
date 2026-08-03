@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.23.0
+version: 1.24.0
 status: accepted-1.1-target
 date: 2026-08-02
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -886,6 +886,20 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.24.0 -- 2026-08-03
+
+- Typed conflict projection (DCP M4). moot_hunt_contradictions,
+  moot_dream, and moot_lens_contradiction APPEND one shared additive
+  section: `proven:`, `historical:`, `compatible:`, `candidates:`
+  (lexical lane, hunt/dream only), `unknown_or_invalid:`,
+  `coverage: projected/scanned`, `truncated_buckets:` (deviation-only).
+  Per-proven block: result id, rule@version, coordinate, value digests,
+  temporal bases, reason codes, and the two source ids as dense rows.
+  Redaction ceiling = MAX endpoint sensitivity: restricted collapses to
+  a coordinate-digest line, secret is counted with no block. Every
+  existing line is unchanged; the lens's legacy grouped-objects view
+  remains decodable. Retrieval proposes; typed constraints prove.
 
 ### 1.23.0 -- 2026-08-02
 

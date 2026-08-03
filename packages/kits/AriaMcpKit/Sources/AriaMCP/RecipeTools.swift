@@ -938,6 +938,96 @@ enum RecipeTools {
         })
     }
 
+    // MARK: - typed conflict projection section (DCP M4)
+
+    /// Render the typed conflict-projection sweep as the ADDITIVE report
+    /// section every contradiction surface appends (M0 §7):
+    /// moot_hunt_contradictions, moot_dream, and moot_lens_contradiction
+    /// all route through this one renderer so the lines never drift.
+    ///
+    /// Redaction (M0 §8, ceiling = MAX endpoint sensitivity, no grant
+    /// plumbing in v0.1 — same fixed posture as the lexical hunter):
+    /// - ceiling ≤ elevated (raw 16): full block incl. dense rows.
+    /// - restricted (raw 32): one line naming only the coordinate
+    ///   DIGEST — no source ids, no value digests (enum domains are
+    ///   small, digests would be guessable), no dense rows.
+    /// - secret (raw 48): counted in `proven: N`, no block at all.
+    ///
+    /// `lexicalCandidates` is the borderline count from the lexical
+    /// hunter (the `candidates:` relabel); pass nil on surfaces with no
+    /// lexical lane (the lens).
+    static func conflictProjectionSection(
+        _ sweep: ConflictProjectionSweepReport,
+        denseRows: [String: String],
+        lexicalCandidates: Int?
+    ) -> [String] {
+        var lines: [String] = [
+            "proven: \(sweep.counts.provenContradiction)",
+            "historical: \(sweep.counts.historicalSuccession)",
+            "compatible: \(sweep.counts.compatiblePlurality)",
+        ]
+        if let candidates = lexicalCandidates {
+            lines.append("candidates: \(candidates)")
+        }
+        // Unparsed facts and unjudgeable pairs share the line: both are
+        // "the typed lane saw it and refused to guess".
+        lines.append("unknown_or_invalid: "
+            + "\(sweep.counts.unknownOrInvalid + sweep.diagnostics.unparsed)")
+        lines.append("coverage: \(sweep.diagnostics.projected)/\(sweep.diagnostics.scanned)")
+        if sweep.truncatedBuckets > 0 {
+            // Deviation-only line (M0 §7): silence means no bucket hit
+            // its cap.
+            lines.append("truncated_buckets: \(sweep.truncatedBuckets)")
+        }
+        let secretRaw = AdjectiveSensitivity.secret.rawValue
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        for finding in sweep.proven {
+            if finding.sensitivityCeilingRaw >= secretRaw { continue }
+            let outcome = finding.outcome
+            if finding.sensitivityCeilingRaw >= restrictedRaw {
+                lines.append("  a conflicting claim exists at "
+                    + "\(outcome.coordinateDigest) [restricted]")
+                continue
+            }
+            lines.append("  PROVEN \(outcome.resultID)")
+            lines.append("    rule: \(outcome.ruleID)@\(outcome.ruleVersion)")
+            lines.append("    coordinate: \(outcome.key)|\(outcome.dimension)")
+            lines.append("    values: \(outcome.valueDigests.joined(separator: " vs "))")
+            lines.append("    time: \(outcome.temporalBases.joined(separator: " | "))")
+            lines.append("    reasons: "
+                + outcome.reasons.map(\.rawValue).joined(separator: ", "))
+            for id in outcome.sourceDrawerIDs {
+                lines.append("    \(denseRows[id] ?? "\(id) · - · - · - · -")")
+            }
+        }
+        for finding in sweep.historical where finding.sensitivityCeilingRaw < restrictedRaw {
+            let outcome = finding.outcome
+            lines.append("  HISTORICAL \(outcome.resultID) "
+                + "\(outcome.key)|\(outcome.dimension) ("
+                + outcome.reasons.map(\.rawValue).joined(separator: ", ") + ")")
+        }
+        return lines
+    }
+
+    /// Run the typed sweep for a report surface and render its section,
+    /// hydrating dense rows only for fully visible findings.
+    static func renderConflictProjection(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        estate: Estate,
+        lexicalCandidates: Int?
+    ) async throws -> [String] {
+        let sweep = try await kit.conflictProjectionSweep(in: handle)
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        let visibleIDs = sweep.proven
+            .filter { $0.sensitivityCeilingRaw < restrictedRaw }
+            .flatMap(\.outcome.sourceDrawerIDs)
+        let denseRows = try await denseRowsByID(
+            ids: Array(Set(visibleIDs)), estate: estate)
+        return conflictProjectionSection(
+            sweep, denseRows: denseRows, lexicalCandidates: lexicalCandidates)
+    }
+
     // MARK: - run_migration_benchmark
 
     private static func runMigrationBenchmark(
@@ -1147,6 +1237,12 @@ enum RecipeTools {
         if !hunt.proposed.isEmpty {
             body += "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel."
         }
+        // DCP M4 — the typed proving lane's additive section (M0 §7).
+        let typedSection = try await renderConflictProjection(
+            kit: kit, handle: handle,
+            estate: kit.estate(for: handle),
+            lexicalCandidates: hunt.borderline.count)
+        body += "\n" + typedSection.joined(separator: "\n")
         return ToolDispatcher.textResult(body)
     }
 
@@ -1217,6 +1313,11 @@ enum RecipeTools {
             lines.append("Judge each CANDIDATE pair: if the two memories genuinely conflict, "
                 + "record it with moot_link_memories kind=contradicts proposed=true; otherwise ignore it.")
         }
+        // DCP M4 — the typed proving lane's additive section (M0 §7).
+        lines += try await renderConflictProjection(
+            kit: kit, handle: handle,
+            estate: kit.estate(for: handle),
+            lexicalCandidates: report.borderline.count)
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 

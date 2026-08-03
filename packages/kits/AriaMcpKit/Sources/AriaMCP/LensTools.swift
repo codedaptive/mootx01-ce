@@ -755,6 +755,14 @@ enum LensTools {
                     }
                 }
             }
+            // DCP M4 — route through the typed evaluator: the same
+            // additive section (M0 §7) every contradiction surface
+            // appends. The legacy grouped-objects view above remains
+            // decodable and unchanged; the lens has no lexical lane, so
+            // no candidates line.
+            lines += try await RecipeTools.renderConflictProjection(
+                kit: kit, handle: handle, estate: estate,
+                lexicalCandidates: nil)
             return ToolDispatcher.textResult(lines.joined(separator: "\n"))
 
         case "moot_lens_trust_synthesis":
