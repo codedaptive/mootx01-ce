@@ -179,25 +179,90 @@ package enum RowCrypto {
 //
 // Per-row content-column crypto wires in at the column-aware backend layer
 // where rows are `[String: TypedValue]` and the protected columns are
-// reachable by name. Interception is by column name — "content" and
-// "distilled" — which in the LocusKit schema belong to drawers alone, the
-// sole content-bearing table, so stamping the keyID column on write is
-// always valid. `distilled` is protected because it is content-DERIVED text
+// reachable by name.
+//
+// Interception is by (table, column) PAIR, never by column name alone. The
+// protected names are not unique across the schema: `kg_facts` declares its
+// own `subject` column (LocusKitSchema.swift), the subject term of an S-P-O
+// knowledge-graph triple. Sealing that by name would break two things at
+// once — `kg_facts` has no `keyID` column, so stamping one produces an
+// INSERT naming a column that does not exist, and `subject` there is an
+// indexed lookup key, so encrypting it under a fresh nonce per write would
+// make `idx_kg_facts_subject` index ciphertext that never matches an
+// equality probe. The table filter is what keeps protection targeted at the
+// rows that need it.
+//
+// `distilled` is protected because it is content-DERIVED text
 // (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
-// row-level protection class as the content it renders). Both the SQLite
-// and PostgreSQL backends call these functions, which is what keeps their
-// stored envelopes byte-compatible.
+// row-level protection class as the content it renders).
+//
+// Both the SQLite and PostgreSQL backends call these functions, which is
+// what keeps their stored envelopes byte-compatible.
 
-/// The text columns the per-row seam protects. Order is meaningful only
-/// for determinism of iteration; each present column is sealed
-/// independently under the same row key.
-private let rowCryptoProtectedColumns: [String] = ["content", "distilled"]
+/// The column carrying a row's key identifier. Present on every table that
+/// declares protected columns; absent elsewhere, which is precisely why the
+/// seam must not stamp it onto an unprotected table.
+package let rowCryptoKeyIDColumn = "keyID"
 
-/// Encrypt the protected text columns ("content", "distilled") and stamp
-/// the key identifier when the estate uses per-row encryption (Mode 2 /
-/// RowEncryption). Returns `values` unchanged for plaintext, for
-/// FullDatabase (the whole file is encrypted by SQLCipher, so the per-row
-/// seam is a no-op), and for rows carrying no protected text.
+/// The protected text columns, keyed by table.
+///
+/// A table absent from this map is not intercepted in either direction —
+/// its values pass through untouched and it never receives a keyID stamp.
+/// That absence is load-bearing: it is what keeps `kg_facts.subject`
+/// byte-identical to a pre-seam write.
+///
+/// Order within a table's list is meaningful only for determinism of
+/// iteration; each present column is sealed independently under the same
+/// row key.
+private let rowCryptoProtectedColumnsByTable: [String: [String]] = [
+    "drawers": ["content", "distilled"]
+]
+
+/// The protected columns for `table`, or an empty list when the table has
+/// none. The match is exact — no prefix rule, no wildcard, no default — so
+/// a new content-bearing table joins the protected set only by being added
+/// to the map deliberately.
+package func rowCryptoProtectedColumns(for table: String) -> [String] {
+    rowCryptoProtectedColumnsByTable[table] ?? []
+}
+
+/// True when an explicit column projection of `table` reads a protected
+/// column but omits `keyID`.
+///
+/// `decryptedForRead` cannot open a sealed value without the row's key
+/// identifier, so such a projection would hand back ciphertext bytes where
+/// the caller expects text — and silently, because `.blob` is a legal
+/// `TypedValue` that a decoder reads as an absent string. A backend that
+/// supports projection adds `keyID` to the SELECT when this returns true,
+/// then removes it from the row it returns, leaving the caller's projection
+/// contract unchanged.
+///
+/// False for a nil or empty projection (both select every column, so
+/// `keyID` already rides along) and false on non-encrypting estates, where
+/// nothing is sealed in the first place.
+package func rowCryptoProjectionNeedsKeyID(
+    table: String,
+    columns: [String]?,
+    config: EstateEncryptionConfig
+) -> Bool {
+    guard config.usesRowCrypto,
+          let columns, !columns.isEmpty,
+          !columns.contains(rowCryptoKeyIDColumn) else { return false }
+    let protected = Set(rowCryptoProtectedColumns(for: table))
+    return columns.contains { protected.contains($0) }
+}
+
+/// Encrypt `table`'s protected text columns and stamp the key identifier
+/// when the estate uses per-row encryption (Mode 2 / RowEncryption).
+/// Returns `values` unchanged for plaintext, for FullDatabase (the whole
+/// file is encrypted by SQLCipher, so the per-row seam is a no-op), for a
+/// table that declares no protected columns, and for rows carrying no
+/// protected text.
+///
+/// `table` is required and has no default. A defaulted table name would
+/// re-create the untargeted by-name interception this seam exists to
+/// remove; making the compiler enumerate the call sites is the control that
+/// keeps a new backend from silently sealing the wrong table.
 ///
 /// Empty-string text is passed through unsealed: the only empty-text write
 /// in the schema is the expunge/zeroization scrub (`content = ""`), which
@@ -208,6 +273,7 @@ private let rowCryptoProtectedColumns: [String] = ["content", "distilled"]
 /// path never persists plaintext derived text on an encrypting estate.
 package func encryptedForWrite(
     _ values: [String: TypedValue],
+    table: String,
     config: EstateEncryptionConfig,
     provider: any AeadProvider = CryptoKitAeadProvider()
 ) throws -> [String: TypedValue] {
@@ -218,21 +284,31 @@ package func encryptedForWrite(
     }
     var out = values
     var sealedAny = false
-    for column in rowCryptoProtectedColumns {
+    for column in rowCryptoProtectedColumns(for: table) {
         guard case .text(let plaintext)? = values[column], !plaintext.isEmpty else { continue }
         out[column] = .blob(try RowCrypto.encrypt(Data(plaintext.utf8), key: key, provider: provider))
         sealedAny = true
     }
     if sealedAny {
-        out["keyID"] = .text(keyID)
+        out[rowCryptoKeyIDColumn] = .text(keyID)
     }
     return out
 }
 
-/// Decrypt the protected text columns ("content", "distilled") when the row
-/// carries a non-null keyID (an encrypted row) and the estate holds the
-/// key. Returns `values` unchanged for Mode 1, for plaintext rows (null
-/// keyID), or when a column is not stored as ciphertext bytes.
+/// Decrypt `table`'s protected text columns when the row carries a non-null
+/// keyID (an encrypted row) and the estate holds the key. Returns `values`
+/// unchanged for Mode 1, for a table that declares no protected columns,
+/// for plaintext rows (null keyID), or when a column is not stored as
+/// ciphertext bytes.
+///
+/// `table` is required and has no default, for the same reason it is on
+/// `encryptedForWrite`: read and write must agree on which columns are
+/// sealed, and only an explicit table name can guarantee that.
+///
+/// A plaintext value in a protected column passes through untouched — the
+/// `.blob` guard below skips it. That is what lets an estate written before
+/// a column joined the protected set keep reading correctly alongside newly
+/// sealed rows.
 ///
 /// The row's keyID must match this estate's key identifier. In the
 /// single-key model of Mode 2 that is the only key the estate holds,
@@ -243,17 +319,18 @@ package func encryptedForWrite(
 /// keeps the seam ready for a future multi-key registry lookup.
 package func decryptedForRead(
     _ values: [String: TypedValue],
+    table: String,
     config: EstateEncryptionConfig,
     provider: any AeadProvider = CryptoKitAeadProvider()
 ) throws -> [String: TypedValue] {
     guard config.usesRowCrypto,
           let key = config.key,
-          case .text(let keyID)? = values["keyID"], !keyID.isEmpty,
+          case .text(let keyID)? = values[rowCryptoKeyIDColumn], !keyID.isEmpty,
           keyID == config.keyIdentifier else {
         return values
     }
     var out = values
-    for column in rowCryptoProtectedColumns {
+    for column in rowCryptoProtectedColumns(for: table) {
         guard case .blob(let cipher)? = values[column] else { continue }
         out[column] = .text(String(decoding: try RowCrypto.decrypt(cipher, key: key, provider: provider), as: UTF8.self))
     }
@@ -272,25 +349,30 @@ package func decryptedForRead(
 /// cannot resolve. Refuse the write rather than let convention be the only
 /// safeguard. Mode 1 (plaintext) and Mode 3 (FullDatabase) return immediately,
 /// so the path is byte-identical to before this guard existed.
+///
+/// `table` selects which columns the guard covers. It is not decoration on
+/// the error message: a table with no protected columns cannot violate the
+/// invariant, and firing on one would reject legitimate writes to tables
+/// that merely reuse a protected column's name — `kg_facts.subject` being
+/// the case that forced the filter.
 package func assertContentKeyIDInvariant(
     _ values: [String: TypedValue],
     table: String,
     config: EstateEncryptionConfig
 ) throws {
     guard config.usesRowCrypto else { return }
-    // The guard covers every protected text column ("content" and the
-    // content-derived "distilled" — SPEC_DISTILLATION_STORAGE §2).
+    // The guard covers exactly the columns protected for THIS table.
     // Exempt empty-string text (#76): expunge/zeroization writes
     // content = "" to erase the blob — there is nothing to encrypt.
     // Only non-empty plaintext without a keyID is the invariant violation.
-    let plaintextColumn = rowCryptoProtectedColumns.first { column in
+    let plaintextColumn = rowCryptoProtectedColumns(for: table).first { column in
         if case .text(let text)? = values[column], !text.isEmpty { return true }
         return false
     }
     guard let violating = plaintextColumn else { return }
     // A keyID is present only when the protected text is ciphertext; .text
     // with no keyID is the unsafe, unencrypted write.
-    if case .text(let keyID)? = values["keyID"], !keyID.isEmpty { return }
+    if case .text(let keyID)? = values[rowCryptoKeyIDColumn], !keyID.isEmpty { return }
     throw StorageError.constraintViolation(detail:
         "content/keyID invariant: table '\(table)' on an encrypting estate received plaintext '\(violating)' with no keyID; the encryption seam did not run, so this row would be unreadable")
 }

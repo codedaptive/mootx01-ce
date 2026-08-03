@@ -78,7 +78,7 @@ struct DistilledColumnCryptoTests {
             "content": .text("original body"),
             "distilled": .text("dense body"),
         ]
-        let sealed = try encryptedForWrite(values, config: config)
+        let sealed = try encryptedForWrite(values, table: "drawers", config: config)
         guard case .blob = sealed["content"] else {
             Issue.record("content was not sealed"); return
         }
@@ -94,7 +94,7 @@ struct DistilledColumnCryptoTests {
         // A distillation write is an UPDATE carrying only representation
         // columns — the seam must still run for it.
         let values: [String: TypedValue] = ["distilled": .text("dense body")]
-        let sealed = try encryptedForWrite(values, config: config)
+        let sealed = try encryptedForWrite(values, table: "drawers", config: config)
         guard case .blob = sealed["distilled"] else {
             Issue.record("representation-only distilled was not sealed"); return
         }
@@ -106,8 +106,8 @@ struct DistilledColumnCryptoTests {
         let config = EstateEncryptionConfig(.rowEncryption)
         let sealed = try encryptedForWrite(
             ["content": .text("body"), "distilled": .text("dense body")],
-            config: config)
-        let opened = try decryptedForRead(sealed, config: config)
+            table: "drawers", config: config)
+        let opened = try decryptedForRead(sealed, table: "drawers", config: config)
         #expect(opened["content"] == .text("body"))
         #expect(opened["distilled"] == .text("dense body"))
     }
@@ -117,7 +117,7 @@ struct DistilledColumnCryptoTests {
         let values: [String: TypedValue] = [
             "content": .text("body"), "distilled": .text("dense body"),
         ]
-        let out = try encryptedForWrite(values, config: .plaintext)
+        let out = try encryptedForWrite(values, table: "drawers", config: .plaintext)
         #expect(out["content"] == .text("body"))
         #expect(out["distilled"] == .text("dense body"))
         #expect(out["keyID"] == nil)

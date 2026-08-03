@@ -285,7 +285,7 @@ mod distilled_seam {
         values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
         values.insert("content".to_string(), TypedValue::Text("original body".to_string()));
         values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
-        let sealed = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert!(matches!(sealed.get("content"), Some(TypedValue::Blob(_))));
         assert!(matches!(sealed.get("distilled"), Some(TypedValue::Blob(_))));
         assert_eq!(
@@ -301,7 +301,7 @@ mod distilled_seam {
         let config = EstateEncryptionConfig::row_encryption();
         let mut values = BTreeMap::new();
         values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
-        let sealed = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert!(matches!(sealed.get("distilled"), Some(TypedValue::Blob(_))));
         assert_eq!(
             sealed.get("keyID"),
@@ -315,8 +315,8 @@ mod distilled_seam {
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text("body".to_string()));
         values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
-        let sealed = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
-        let opened = decrypted_for_read(sealed, &config, &AesGcmAeadProvider).unwrap();
+        let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        let opened = decrypted_for_read(sealed, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert_eq!(opened.get("content"), Some(&TypedValue::Text("body".to_string())));
         assert_eq!(
             opened.get("distilled"),
@@ -329,7 +329,7 @@ mod distilled_seam {
         let config = EstateEncryptionConfig::plaintext();
         let mut values = BTreeMap::new();
         values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
-        let out = encrypted_for_write(values, &config, &AesGcmAeadProvider).unwrap();
+        let out = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert_eq!(
             out.get("distilled"),
             Some(&TypedValue::Text("dense body".to_string()))
