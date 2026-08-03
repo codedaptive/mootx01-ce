@@ -1548,14 +1548,20 @@ pub(crate) const KEY_ID_COL: &str = "keyID";
 /// for every other table is load-bearing: it is what keeps
 /// `kg_facts.subject` byte-identical to a pre-seam write.
 ///
-/// `distilled` is protected because it is content-DERIVED text
-/// (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
-/// row-level protection class as the content it renders). Mirrors the
-/// Swift `rowCryptoProtectedColumns(for:)` map verbatim — the two ports
-/// must agree or stored envelopes stop being byte-compatible.
+/// `distilled` and `subject` are protected because both are content-DERIVED
+/// text (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
+/// row-level protection class as the content it renders). A subject is a
+/// summary of the body it was generated from, so leaving it plaintext on an
+/// encrypting estate discloses the substance of a sealed row. The subject's
+/// provenance columns — `subject_pipeline_version` and `subject_at` — are
+/// deliberately NOT protected: they record how a subject was produced and
+/// when, not what it says.
+///
+/// Mirrors the Swift `rowCryptoProtectedColumns(for:)` map verbatim — the
+/// two ports must agree or stored envelopes stop being byte-compatible.
 pub(crate) fn protected_cols_for_table(table: &str) -> &'static [&'static str] {
     match table {
-        "drawers" => &["content", "distilled"],
+        "drawers" => &["content", "distilled", "subject"],
         _ => &[],
     }
 }

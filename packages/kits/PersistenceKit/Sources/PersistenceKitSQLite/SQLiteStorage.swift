@@ -659,9 +659,10 @@ actor SQLiteBackend {
         for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2): UPDATE is a protected-text write
         // path since the distilled-representation columns landed (a
-        // distillation write is an UPDATE carrying "distilled" text —
+        // distillation write is an UPDATE carrying "distilled" text, and a
+        // subjecting write one carrying "subject" —
         // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals any non-empty
-        // protected text ("content"/"distilled") and stamps keyID; it is a
+        // text in a column protected for this table and stamps keyID; it is a
         // no-op for the bitmap/timestamp updates that were this path's only
         // traffic before, and for the expunge scrub (empty text is exempt so
         // erasure stays a plaintext-empty marker).

@@ -192,9 +192,14 @@ package enum RowCrypto {
 // equality probe. The table filter is what keeps protection targeted at the
 // rows that need it.
 //
-// `distilled` is protected because it is content-DERIVED text
-// (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
-// row-level protection class as the content it renders).
+// `distilled` and `subject` are protected because both are content-DERIVED
+// text (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
+// row-level protection class as the content it renders). A subject is a
+// summary of the body it was generated from, so leaving it plaintext on an
+// encrypting estate discloses the substance of a sealed row. The subject's
+// provenance columns — `subject_pipeline_version` and `subject_at` — are
+// deliberately NOT protected: they record how a subject was produced and
+// when, not what it says.
 //
 // Both the SQLite and PostgreSQL backends call these functions, which is
 // what keeps their stored envelopes byte-compatible.
@@ -215,7 +220,7 @@ package let rowCryptoKeyIDColumn = "keyID"
 /// iteration; each present column is sealed independently under the same
 /// row key.
 private let rowCryptoProtectedColumnsByTable: [String: [String]] = [
-    "drawers": ["content", "distilled"]
+    "drawers": ["content", "distilled", "subject"]
 ]
 
 /// The protected columns for `table`, or an empty list when the table has
