@@ -545,4 +545,249 @@ mod tests {
         assert!(ledger.grant_state_snapshot(now).is_none());
     }
 
+    // ---------------------------------------------------------------------
+    // DST boundary resolution.
+    //
+    // These cases use SYNTHETIC zone rules — a closure over one transition
+    // instant — so they assert the resolution algorithm itself with no
+    // process-global state and no dependence on the host's tzdata. The
+    // real-zone end-to-end proof (which does touch `TZ`) is the single
+    // serialized test at the bottom of this module.
+    //
+    // Every expected instant below is what Foundation's
+    // `Calendar.startOfDay(for:)` + one day resolves for the same zone and
+    // the same grant instant, measured directly rather than derived by hand.
+    // Cross-port agreement at these edges is the requirement: a sensitivity
+    // boundary that differs between the Swift and Rust ports would be worse
+    // than the DST defect this fixes.
+    // ---------------------------------------------------------------------
+
+    /// `America/New_York` across the 2026 spring-forward: UTC-5 until
+    /// 2026-03-08T07:00:00Z (02:00 EST, when clocks jump to 03:00 EDT),
+    /// UTC-4 from then on.
+    fn ny_spring_forward_2026(epoch_secs: i64) -> i64 {
+        if epoch_secs < 1_772_953_200 {
+            -5 * 3600
+        } else {
+            -4 * 3600
+        }
+    }
+
+    /// `America/New_York` across the 2026 fall-back: UTC-4 until
+    /// 2026-11-01T06:00:00Z (02:00 EDT, when clocks rewind to 01:00 EST),
+    /// UTC-5 from then on. Local midnight is NOT ambiguous in this zone —
+    /// the rewind lands at 01:00, an hour after the boundary.
+    fn ny_fall_back_2026(epoch_secs: i64) -> i64 {
+        if epoch_secs < 1_793_512_800 {
+            -4 * 3600
+        } else {
+            -5 * 3600
+        }
+    }
+
+    /// `America/Havana` across the 2026 spring-forward: UTC-5 until
+    /// 2026-03-08T05:00:00Z, UTC-4 from then on. Cuba springs forward AT
+    /// midnight (00:00 → 01:00), so local midnight on 2026-03-08 never
+    /// occurs — the nonexistent-midnight case.
+    fn havana_skipped_midnight_2026(epoch_secs: i64) -> i64 {
+        if epoch_secs < 1_772_946_000 {
+            -5 * 3600
+        } else {
+            -4 * 3600
+        }
+    }
+
+    /// `America/Havana` across the 2026 fall-back: UTC-4 until
+    /// 2026-11-01T05:00:00Z, UTC-5 from then on. Cuba rewinds 01:00 → 00:00,
+    /// so local midnight on 2026-11-01 occurs TWICE — at 04:00Z (CDT) and
+    /// again at 05:00Z (CST). The ambiguous-midnight case.
+    fn havana_ambiguous_midnight_2026(epoch_secs: i64) -> i64 {
+        if epoch_secs < 1_793_509_200 {
+            -4 * 3600
+        } else {
+            -5 * 3600
+        }
+    }
+
+    /// `Asia/Kolkata` — a no-DST zone at a half-hour offset (UTC+5:30).
+    fn kolkata(_epoch_secs: i64) -> i64 {
+        5 * 3600 + 1800
+    }
+
+    #[test]
+    fn spring_forward_expiry_is_real_midnight_not_an_hour_late() {
+        // THE REPORTED DEFECT (Codex 2359da9d324c81918983a3dab4fe313f).
+        // Grant at 2026-03-08 00:30 EST (UTC-5). The next local midnight
+        // falls after the transition, so it occurs at UTC-4.
+        // Fixed-offset arithmetic reused the grant-time -5 and produced
+        // 2026-03-09T05:00:00Z — a full hour of restricted recall past policy.
+        let granted_at = 1_772_947_800_000; // 2026-03-08T05:30:00Z = 00:30 EST
+        let expiry = next_local_midnight_ms(granted_at, ny_spring_forward_2026);
+        assert_eq!(
+            expiry, 1_773_028_800_000,
+            "expected 2026-03-09T04:00:00Z (00:00 EDT); \
+             1773032400000 would be the pre-fix fixed-offset answer, an hour late"
+        );
+
+        // And the ledger must actually be locked at the real boundary.
+        let ledger = SensitivityGrantLedger::new();
+        ledger.grant_restricted_in(granted_at, ny_spring_forward_2026);
+        assert!(ledger.is_restricted_granted(1_773_028_799_000));
+        assert!(!ledger.is_restricted_granted(1_773_028_800_000));
+    }
+
+    #[test]
+    fn fall_back_day_expiry_uses_the_offset_at_the_boundary() {
+        // Grant at 2026-10-31 12:00 EDT (UTC-4); the boundary is the next
+        // midnight, still EDT, at 2026-11-01T04:00:00Z.
+        assert_eq!(
+            next_local_midnight_ms(1_793_462_400_000, ny_fall_back_2026),
+            1_793_505_600_000
+        );
+
+        // Grant at 2026-11-01 00:30 EDT — same local day as the rewind. The
+        // boundary is the following midnight, by then EST, at
+        // 2026-11-02T05:00:00Z. Reusing the grant-time -4 would land an hour
+        // early here, which is the same defect in the other direction.
+        assert_eq!(
+            next_local_midnight_ms(1_793_507_400_000, ny_fall_back_2026),
+            1_793_595_600_000
+        );
+    }
+
+    #[test]
+    fn ambiguous_midnight_expires_at_the_earlier_occurrence() {
+        // Havana, 2026-11-01: local midnight happens at 04:00Z (CDT) and
+        // again at 05:00Z (CST). FAIL CLOSED — take the earlier. An extra
+        // hour of restricted recall is exactly what this mission removes.
+        let expiry = next_local_midnight_ms(1_793_462_400_000, havana_ambiguous_midnight_2026);
+        assert_eq!(
+            expiry, 1_793_505_600_000,
+            "expected the EARLIER occurrence 2026-11-01T04:00:00Z, not 05:00:00Z"
+        );
+    }
+
+    #[test]
+    fn skipped_midnight_expires_at_first_existing_instant_of_the_new_day() {
+        // Havana, 2026-03-08: clocks jump 00:00 → 01:00, so local midnight
+        // never happens. FAIL CLOSED — expire at the first instant that does
+        // exist on the new local day, which is the transition itself.
+        let expiry = next_local_midnight_ms(1_772_902_800_000, havana_skipped_midnight_2026);
+        assert_eq!(
+            expiry, 1_772_946_000_000,
+            "expected 2026-03-08T05:00:00Z, the first instant of the new local day"
+        );
+        // The chosen instant must be strictly after the grant, or the grant
+        // would be dead on arrival rather than merely short.
+        assert!(expiry > 1_772_902_800_000);
+    }
+
+    #[test]
+    fn no_dst_zone_and_utc_are_unchanged() {
+        // Half-hour offset, no transitions: pure day arithmetic still holds.
+        // Grant 2026-03-08 00:30 IST → 2026-03-09 00:00 IST = 18:30Z on 03-08.
+        assert_eq!(
+            next_local_midnight_ms(1_772_910_000_000, kolkata),
+            1_772_994_600_000
+        );
+        // UTC control, same instants the lifecycle tests above assert.
+        assert_eq!(
+            next_local_midnight_ms(1_751_641_200_000, utc),
+            1_751_673_600_000
+        );
+        // Exactly at local midnight still advances a full day.
+        assert_eq!(
+            next_local_midnight_ms(1_751_587_200_000, utc),
+            1_751_673_600_000
+        );
+    }
+
+    #[test]
+    fn host_offset_is_a_plausible_utc_offset() {
+        // The host primitive is the one part that cannot be asserted against
+        // a fixed expectation — it reports whatever zone the machine is in.
+        // ±14h is the widest real IANA offset, so anything outside it means
+        // the struct layout or the CRT call is wrong, not that the box is in
+        // an unusual timezone.
+        let now_secs = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        };
+        let offset = host_utc_offset_seconds_at(now_secs);
+        assert!(
+            (-50_400..=50_400).contains(&offset),
+            "host_utc_offset_seconds_at returned {offset}, outside the ±14h range"
+        );
+    }
+
+    /// `TZ` is process-global and cargo runs tests on parallel threads, so a
+    /// test that changes it can corrupt a sibling mid-assertion. Serialization
+    /// here is structural: this is the ONLY test in the module that touches
+    /// `TZ`, every real-zone case lives inside it, and the mutex below makes
+    /// that guarantee enforced rather than merely observed if a second such
+    /// test is ever added.
+    #[cfg(unix)]
+    #[test]
+    fn real_host_zones_resolve_the_same_boundaries_as_swift() {
+        static TZ_LOCK: Mutex<()> = Mutex::new(());
+        // A poisoned lock means a prior TZ test panicked; the zone is restored
+        // below regardless, so recovering the guard is safe and keeps one
+        // failure from cascading into a second, misleading one.
+        let _guard = TZ_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        extern "C" {
+            /// Re-reads `TZ` into libc's cached zone state. `setenv` alone does
+            /// not do this — without it `localtime_r` keeps answering for the
+            /// previous zone.
+            fn tzset();
+        }
+
+        // (zone, grant instant ms, expected expiry ms). Expected values are
+        // Foundation's, measured for the same inputs.
+        let cases: [(&str, i64, i64); 8] = [
+            // Spring forward — the reported defect.
+            ("America/New_York", 1_772_947_800_000, 1_773_028_800_000),
+            // Fall-back day, and a grant inside it.
+            ("America/New_York", 1_793_462_400_000, 1_793_505_600_000),
+            ("America/New_York", 1_793_507_400_000, 1_793_595_600_000),
+            // Skipped local midnight (spring forward AT 00:00).
+            ("America/Havana", 1_772_902_800_000, 1_772_946_000_000),
+            // Ambiguous local midnight (rewind 01:00 → 00:00): earlier wins.
+            ("America/Havana", 1_793_462_400_000, 1_793_505_600_000),
+            // No-DST zone at a half-hour offset, and UTC.
+            ("Asia/Kolkata", 1_772_910_000_000, 1_772_994_600_000),
+            ("UTC", 1_751_641_200_000, 1_751_673_600_000),
+            // A zone whose DST shift is 30 minutes, not an hour.
+            ("Australia/Lord_Howe", 1_775_352_600_000, 1_775_395_800_000),
+        ];
+
+        let original = std::env::var("TZ").ok();
+        let mut failures: Vec<String> = Vec::new();
+        for (zone, granted_at, expected) in cases {
+            std::env::set_var("TZ", zone);
+            unsafe { tzset() };
+            let actual = next_local_midnight_ms(granted_at, host_utc_offset_seconds_at);
+            if actual != expected {
+                failures.push(format!(
+                    "{zone}: grant {granted_at} -> expiry {actual}, expected {expected}"
+                ));
+            }
+        }
+        // Restore before asserting, so a failure cannot leave the process in a
+        // foreign timezone for whatever runs next.
+        match original {
+            Some(tz) => std::env::set_var("TZ", tz),
+            None => std::env::remove_var("TZ"),
+        }
+        unsafe { tzset() };
+
+        assert!(
+            failures.is_empty(),
+            "host-timezone resolution disagrees with the Swift port:\n{}",
+            failures.join("\n")
+        );
+    }
 }
