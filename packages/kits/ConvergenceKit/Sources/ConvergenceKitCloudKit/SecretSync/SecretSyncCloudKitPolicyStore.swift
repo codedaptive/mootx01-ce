@@ -105,6 +105,11 @@ public actor SecretSyncCloudKitPolicyStore: SecretSyncPolicyStore {
     /// therefore returned as `.staged`; the caller validates through
     /// `SecretPolicyValidator` before trusting them. `compareAndAdvance`
     /// remains the only path that acts on validated authority.
+    ///
+    /// The returned entry's `credentials` and `trustRecords` come out of the
+    /// same untrusted graph and must never be fed back as the validator's
+    /// trusted set — that would check a forgery against credentials the forger
+    /// supplied. The trusted set belongs to the caller's own custody.
     public func unvalidatedHeadPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64

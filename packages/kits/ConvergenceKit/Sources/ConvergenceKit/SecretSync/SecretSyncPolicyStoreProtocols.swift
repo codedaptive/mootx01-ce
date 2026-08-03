@@ -301,6 +301,12 @@ public protocol SecretSyncPolicyStore: Sendable {
     /// commitment — must validate through `SecretPolicyValidator` before
     /// treating the result as authoritative. This is the hydration path after a
     /// restart, not a trust decision.
+    ///
+    /// The returned entry's own `credentials` and `trustRecords` are part of
+    /// that untrusted graph and must never be used as the validator's trusted
+    /// set. Doing so would validate a forgery against itself: an attacker who
+    /// staged the graph chose those records too. The trusted set comes from the
+    /// caller's own custody, never from the material being checked.
     func unvalidatedHeadPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
