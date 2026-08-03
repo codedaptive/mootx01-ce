@@ -700,6 +700,87 @@ struct VaultBridgeTests {
                 "superseded drawer must carry the edited body")
     }
 
+    /// Pins the BOUNDARY of the moot_id lineage-hijack guard for Codex finding
+    /// `de1284c737788191805d8063a94587a4` (path-based moot_id guard allows
+    /// same-path hijack).
+    ///
+    /// **This test documents a known limitation. It is NOT a defence, and a
+    /// passing run is NOT evidence that same-path spoofing is blocked.** It
+    /// asserts the behaviour that actually ships: a note at the lineage's own
+    /// expected export path, carrying that lineage's `moot_id` with a changed
+    /// body, keeps the claimed lineage and supersedes the drawer.
+    ///
+    /// That is deliberate, and it cannot be fixed by a better discriminator.
+    /// Such a file is byte-for-byte indistinguishable from a legitimate
+    /// round-trip edit — the user exports, edits in Obsidian, re-imports — which
+    /// is the whole point of the round-trip feature `samepathRoundTripEditSupersedes`
+    /// exists to protect. Any check that rejected this note would break that
+    /// feature or give false assurance.
+    ///
+    /// The three sibling tests above (`mootIDHijackGuardBlocksBodyReplacement`
+    /// and its confirmed/restricted variants) pin the other side of the same
+    /// boundary: a hostile note at a FOREIGN path is refiled under its own FNV
+    /// lineage and the victim is untouched. Read the four together — they are
+    /// the guard's actual perimeter.
+    @Test("same-path note claiming a lineage with changed content keeps that lineage — the hijack guard's known limit, not a defence")
+    func samepathHostileContentIsIndistinguishableFromLegitimateEdit() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // 1. Capture the victim drawer normally, so its lineageID is random
+        //    (not FNV-derived) — the same shape a real user's drawer has.
+        let victimContent = "Victim body: the content a hostile same-path note will replace."
+        let victim = try await kit.capture(handle, CaptureFrame(
+            content: victimContent,
+            channel: .typed,
+            room: "samepath-hijack",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "owner",
+            embeddingModelID: "test-v1"))
+
+        // 2. Export. This is what makes the attack possible at all: it writes the
+        //    drawer to a deterministic vault path and stamps moot_id =
+        //    victim.lineageID into the frontmatter, so both the path and the UUID
+        //    become predictable to anyone who can read the vault.
+        let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
+        try await bridge.export(estate: handle, to: vault, scope: .believed, now: Date())
+        let exportedFile = try #require(firstMDFile(in: vault),
+                                        "export must have produced at least one .md file")
+
+        // 3. Replace the BODY in place, leaving the exported frontmatter — and
+        //    therefore the victim's moot_id — untouched. This is the hostile
+        //    note: planted at the victim's own export path, claiming the
+        //    victim's lineage, carrying attacker content.
+        let raw = try String(contentsOf: exportedFile, encoding: .utf8)
+        let victimRange = try #require(raw.range(of: victimContent),
+                                       "exported note must carry the victim body verbatim")
+        let hostileBody = "Attacker-controlled replacement planted at the victim's export path."
+        try raw.replacingCharacters(in: victimRange, with: hostileBody)
+            .write(to: exportedFile, atomically: true, encoding: .utf8)
+
+        // 4. Re-import.
+        let report = try await bridge.importVault(at: vault, into: handle, now: Date())
+
+        // 5. CURRENT, SHIPPING BEHAVIOUR — the guard does not fire. The note's
+        //    stableSourceKey equals the key recomputed for the claimed lineage,
+        //    so isPathForeign is false, the FNV rewrite is skipped, and the
+        //    import is processed as an ordinary update.
+        #expect(report.drawersUpdated == 1,
+                "same-path note with a changed body is accepted as an update (drawersUpdated=1)")
+        #expect(report.drawersWritten == 0,
+                "same-path note is not isolated into a new drawer (drawersWritten=0)")
+
+        let after = try await currentDrawers(kit, handle)
+        #expect(after.count == 1,
+                "estate holds one drawer — the victim lineage was superseded, not duplicated")
+        let survivor = try #require(after.first)
+        #expect(survivor.lineageID == victim.lineageID,
+                "the CLAIMED lineage is retained: the moot_id claim was not rejected")
+        #expect(survivor.content.contains(hostileBody),
+                "the victim's active body is now the attacker's content — this is the limitation")
+    }
+
     // MARK: - Export cap regression: >50 drawers must all be exported
 
     /// Regression test for the VK-EXPORT-FIX defect: DrawerMapping.export was
