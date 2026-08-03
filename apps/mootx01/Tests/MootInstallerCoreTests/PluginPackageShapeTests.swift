@@ -55,6 +55,13 @@ struct PluginPackageShapeTests {
     /// `env` (client-side env on an HTTP entry is inert — nothing reads it).
     @Test("every plugin-capable host's generated MCP entry is HTTP-shaped under the plugin server key")
     func pluginPackageEntriesAreHTTPShaped() throws {
+        // Length note: this runs long on purpose and does not split. The
+        // contract is "every plugin-capable host, every MCP manifest it
+        // ships" — so the host loop, the per-file assertions, and the
+        // closing coverage count are one indivisible statement. Extracting
+        // the loop body into a per-file helper would let the count-guard
+        // drift away from the assertions it certifies, which is the precise
+        // failure this suite exists to prevent.
         let pluginHosts = InstallBundle.embedded.hosts.values
             .filter(\.supportsPlugin)
             .sorted { $0.id < $1.id }

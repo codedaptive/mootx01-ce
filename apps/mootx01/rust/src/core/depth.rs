@@ -1014,6 +1014,13 @@ mod tests {
     /// env on an HTTP entry is inert — nothing reads it).
     #[test]
     fn plugin_package_entries_are_http_shaped() {
+        // Length note: this runs long on purpose and does not split. The
+        // contract is "every plugin-capable host, every MCP manifest it
+        // ships" — so the host loop, the per-file assertions, and the
+        // closing coverage count are one indivisible statement. Extracting
+        // the loop body into a per-file helper would let the count-guard
+        // drift away from the assertions it certifies, which is the precise
+        // failure this suite exists to prevent.
         let bundle = InstallBundle::embedded();
         let mut hosts: Vec<&str> = bundle.plugin_capable_hosts().map(|h| h.id.as_str()).collect();
         hosts.sort_unstable();
