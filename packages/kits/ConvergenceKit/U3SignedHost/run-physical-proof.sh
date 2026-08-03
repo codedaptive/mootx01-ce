@@ -328,8 +328,15 @@ signed_host_output="$work_dir/signed-host.stdout"
 signed_host_error="$work_dir/signed-host.stderr"
 run_signed_host "$app_path" "$signed_host_output" "$signed_host_error" \
   || fail "signed-host-launch-failed"
-signed_host_result_is_pass "$signed_host_output" \
-  || fail "signed-host-proof-failed"
+if ! signed_host_result_is_pass "$signed_host_output"; then
+  # The host's diagnostics live under work_dir, which the EXIT trap deletes.
+  # Relay them before that happens, or a refusal reaches the operator as a
+  # bare token with no field name, no checkpoint path, and no remedy.
+  if [[ -s "$signed_host_error" ]]; then
+    cat "$signed_host_error" >&2
+  fi
+  fail "signed-host-proof-failed"
+fi
 printf '%s\n' 'U3_SIGNED_HOST_RESULT=pass'
 }
 

@@ -32,7 +32,8 @@ private final class U3SignedHostDelegate: NSObject, NSApplicationDelegate {
         writeFixedResult(classification(for: error))
         exit(EXIT_FAILURE)
       } catch let error as U3SignedHostFailure {
-        writeCheckpointRefusalDetail(error)
+        // The refusal detail is written where the checkpoint path is known,
+        // inside resumeInterruptedCustody. Here only the fixed token is due.
         writeFixedResult(classification(for: error))
         exit(EXIT_FAILURE)
       } catch {
@@ -159,10 +160,21 @@ private struct U3SignedPhysicalProof {
     checkpointStore: U3CustodyCheckpointStore
   ) async throws {
     guard let checkpoint = try checkpointStore.read() else { return }
-    try await requireCheckpointMatchesStoredRecords(
-      checkpoint,
-      custody: custody
-    )
+    do {
+      try await requireCheckpointMatchesStoredRecords(
+        checkpoint,
+        custody: custody
+      )
+    } catch let refusal as U3SignedHostFailure {
+      // Reported here rather than at the top-level catch because this is the
+      // only scope that knows where the retained checkpoint lives, and a
+      // refusal is useless to a developer who cannot find the file to clear.
+      writeCheckpointRefusalDetail(
+        refusal,
+        checkpointPath: checkpointStore.checkpointPath
+      )
+      throw refusal
+    }
     try await custody.removeCredentialForPhysicalProof(checkpoint.credentialID)
     try await verifyProductionAbsence(
       with: custody,
@@ -456,6 +468,12 @@ private struct U3CustodyCheckpointStore: Sendable {
   private static let fileName = "provisional-custody.json"
   private let directoryURL: URL
 
+  /// The checkpoint's on-disk location, so a refusal can name the file a
+  /// developer has to delete rather than leaving them to find it.
+  var checkpointPath: String {
+    directoryURL.appendingPathComponent(Self.fileName).path
+  }
+
   init() throws {
     directoryURL = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -617,26 +635,44 @@ private func classification(for failure: U3SignedHostFailure) -> String {
   }
 }
 
-/// Reports on standard error why a resume declined to delete.
+/// Reports on standard error why a resume declined to delete, and how to clear
+/// the block it leaves behind.
 ///
 /// Standard output carries exactly one fixed line because
-/// `run-physical-proof.sh` compares it byte for byte; the disagreeing field
-/// therefore goes to standard error, where a developer can read it without
-/// that comparison being loosened.
-private func writeCheckpointRefusalDetail(_ failure: U3SignedHostFailure) {
-  let detail: String
+/// `run-physical-proof.sh` compares it byte for byte, so the detail goes to
+/// standard error instead of loosening that comparison. The message names the
+/// checkpoint's full path and says what to do with it: a refusal deliberately
+/// keeps the checkpoint, which means every later run refuses too until the file
+/// is removed. A developer who is told only which field disagreed still has no
+/// idea how to get the harness running again, so the remedy travels with the
+/// diagnosis rather than living in a document they will not be reading.
+private func writeCheckpointRefusalDetail(
+  _ failure: U3SignedHostFailure,
+  checkpointPath: String
+) {
+  let disagreement: String
   switch failure {
   case .checkpointFieldMismatch(let field):
-    detail = field
+    disagreement = field
   case .checkpointRecordsAbsent:
-    detail = "records-absent"
+    disagreement = "records-absent"
   case .inactiveApplication, .invalidEntitlementShape,
     .invalidKeychainAttributes, .invalidProof, .incompleteCleanup,
     .invalidCheckpoint:
     return
   }
-  let line = "U3_SIGNED_HOST_CHECKPOINT_DISAGREEMENT=" + detail + "\n"
-  FileHandle.standardError.write(Data(line.utf8))
+  let message = """
+    U3_SIGNED_HOST_CHECKPOINT_DISAGREEMENT=\(disagreement)
+    U3_SIGNED_HOST_CHECKPOINT_PATH=\(checkpointPath)
+    U3_SIGNED_HOST_CHECKPOINT_REMEDY: The checkpoint on disk does not describe \
+    the custody records it names, so nothing was deleted and both Keychain \
+    records are intact. The checkpoint was kept on purpose, as evidence. Every \
+    later run will refuse the same way until it is removed. Inspect it, then \
+    delete it to let the harness start a fresh run:
+        rm '\(checkpointPath)'
+
+    """
+  FileHandle.standardError.write(Data(message.utf8))
 }
 
 private func writeFixedResult(_ result: String) {
