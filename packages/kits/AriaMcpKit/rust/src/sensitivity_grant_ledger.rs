@@ -257,12 +257,16 @@ fn next_local_midnight_ms(now_ms: i64, zone: ZoneOffsetRule) -> i64 {
         .copied()
         .filter(|&t| reads_as(t) > target_naive)
         .min();
-    // Unreachable on any real zone: a skipped midnight requires two offsets,
-    // which puts one candidate on each side. A single-candidate resolution is
-    // always an exact occurrence and returned above. The day-wide bracket is a
-    // structural fallback so the bisection below cannot run on garbage.
-    let mut lo = below.unwrap_or_else(|| target_naive - offset_at_now - SECS_PER_DAY);
-    let mut hi = above.unwrap_or(lo + SECS_PER_DAY);
+    // Both sides are always present on a real zone: a skipped midnight needs
+    // two offsets, which puts one candidate on each side, and a single-candidate
+    // resolution is always an exact occurrence already returned above. If that
+    // ever fails to hold, do NOT bisect over an invented bracket — a bracket
+    // that does not contain the transition can only be resolved LATE, which is
+    // the one direction this function must never fail in. Fall closed on the
+    // earliest candidate instead.
+    let (Some(mut lo), Some(mut hi)) = (below, above) else {
+        return candidates.iter().copied().min().unwrap_or(now_secs) * 1_000;
+    };
     while hi - lo > 1 {
         let mid = lo + (hi - lo) / 2;
         if reads_as(mid) >= target_naive {
