@@ -8451,3 +8451,198 @@ fn secret_ceiling_is_counted_but_silent() {
     assert!(!text.contains("  PROVEN "), "got: {text}");
     assert!(!text.contains("[restricted]"), "got: {text}");
 }
+
+// ---------------------------------------------------------------------------
+// 12b. MXE-DM — stale-tunnel endpoints render unhydrated (Codex 9352f983)
+//
+// A tunnel inherits its endpoints' adjective sensitivity ONCE, at capture
+// (estate_verbs.rs:767-785). CorrectSensitivity later rewrites only the
+// drawer's adjective bitmap and never reclassifies existing tunnels
+// (estate_verbs.rs:2670-2692). So a Normal tunnel can outlive its endpoint's
+// Normal status and keep pointing at a now-Restricted drawer. Every graph
+// lens arm that hydrates an id off that graph must refuse to render the
+// subject — while still emitting the id and its ranking value, so result
+// counts and rankings are unchanged and the gate is not itself an oracle.
+// ---------------------------------------------------------------------------
+
+/// The canary lives in the SUBJECT, not the content: `dense_row::render`
+/// renders `subject`, so a canary in the body would prove nothing.
+const DM_CANARY: &str = "dm stale-edge target SUBJECTCANARY";
+
+/// Build the stale-edge state: two Normal drawers linked while BOTH are
+/// Normal (so the tunnel inherits Normal), then the target corrected to
+/// `sens` — which leaves the tunnel's own classification stale.
+/// Returns (source id, target id).
+fn dm_stale_edge(
+    registry: &EstateRegistry,
+    sens: locus_kit::adjectives::AdjectiveSensitivity,
+) -> (String, String) {
+    let src = file_one_memory(registry, "dm stale-edge source memory", "dm-src");
+    let tgt = file_one_memory(registry, DM_CANARY, "dm-tgt");
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => src.as_str(), "to_id" => tgt.as_str(), "kind" => "elaborates"],
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("link_memories must not throw");
+    assert!(is_success(&link), "link_memories must succeed; got: {link:?}");
+    {
+        let coord = registry.coord.lock().unwrap();
+        coord
+            .mutate(
+                &registry.default.handle,
+                &tgt,
+                locus_kit::frames::MutationKind::CorrectSensitivity(sens),
+                None,
+            )
+            .expect("CorrectSensitivity must succeed");
+    }
+    (src, tgt)
+}
+
+/// Every assertion the gated behaviour owes us, in one place: the id is
+/// still present (so counts and rankings are untouched), the ranking
+/// annotation survives, and the subject is gone.
+fn assert_gated_but_present(body: &str, tgt: &str, ranking_marker: &str) {
+    assert!(
+        body.contains(tgt),
+        "gated endpoint must STILL APPEAR by id — dropping it would change \
+         result counts and make the gate an oracle; got: {body}"
+    );
+    assert!(
+        body.contains(ranking_marker),
+        "gated endpoint must keep its ranking value ({ranking_marker}); got: {body}"
+    );
+    assert!(
+        !body.contains("SUBJECTCANARY"),
+        "gated endpoint must NOT render its subject; got: {body}"
+    );
+    assert!(
+        body.contains(&aria_mcp::dense_row::render_unhydrated(tgt)),
+        "gated endpoint must render the unhydrated row byte-for-byte; got: {body}"
+    );
+}
+
+#[test]
+fn dm_successors_stale_restricted_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "weight=");
+}
+
+#[test]
+fn dm_successors_stale_secret_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Secret,
+    );
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "weight=");
+}
+
+#[test]
+fn dm_free_association_stale_restricted_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let result = dispatch_tool(
+        "moot_lens_free_association",
+        &args!["wing" => "Agentic Memory", "seedDrawerID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("free_association must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "activation=");
+}
+
+#[test]
+fn dm_keystones_stale_restricted_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    // topK 50: the seeded charter graph outranks a fresh two-node edge, and
+    // the default topK of 5 would truncate the target away — the assertion
+    // would then pass without ever exercising the gate.
+    let (_src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let result = dispatch_tool(
+        "moot_lens_keystones",
+        &args!["wing" => "Agentic Memory", "topK" => 50],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("keystones must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "centrality=");
+}
+
+/// The gate must not become a wall: a Normal endpoint reached over the same
+/// stale-edge fixture still hydrates completely, subject and all.
+#[test]
+fn dm_normal_endpoint_still_hydrates_fully() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Normal,
+    );
+    let expected = aria_mcp::dense_row::render(&stored_drawer(&registry, &tgt));
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let body = content_text(&result);
+    assert!(
+        body.contains("SUBJECTCANARY"),
+        "a Normal endpoint must still render its subject; got: {body}"
+    );
+    assert!(
+        body.contains(&expected),
+        "a Normal endpoint must render the full dense row byte-for-byte; got: {body}"
+    );
+}
+
+/// Elevated is inside the ceiling (Normal tier) and must hydrate too — the
+/// gate is `> elevated`, not `!= normal`.
+#[test]
+fn dm_elevated_endpoint_still_hydrates_fully() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, _tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Elevated,
+    );
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let body = content_text(&result);
+    assert!(
+        body.contains("SUBJECTCANARY"),
+        "an Elevated endpoint is within the ceiling and must still render its \
+         subject; got: {body}"
+    );
+}
