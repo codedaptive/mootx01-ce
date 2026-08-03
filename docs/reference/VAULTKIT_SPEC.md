@@ -1,8 +1,8 @@
 ---
 title: VaultKit Specification
-version: v0.1
+version: v0.3
 status: active
-date: 2026-07-16
+date: 2026-08-03
 description: "Behavioral specification for VaultKit: invariants, behavioral contracts, and the guarantees the bridge makes to callers and the substrate."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -463,6 +463,37 @@ fixture and the golden OKF round-trip fixture are asserted byte-identically
 in both ports.
 
 ## Changelog
+
+### v0.3 — 2026-08-03
+
+Bounded the MemPalace importer's reads and stated the adapter's trust
+posture as a behavioural contract: the palace root is UNTRUSTED input, so
+its size is an attacker-influenced value rather than a fact the importer
+may assume. Four ceilings now hold for every MemPalace import, on both the
+`MemPalaceChromaAdapter` path and the `PalaceBridge` direct-import path:
+a `tunnels.json` maximum size checked BEFORE the file is opened, a maximum
+SQLite row count, a maximum total of materialized column bytes, and a
+SQLite progress-handler step budget that abandons a query whose plan
+degenerates. Rows and bytes are accounted against ONE budget per import,
+so both are real totals rather than a per-store allowance.
+
+Two guarantees are load-bearing for callers. First, **a breach names both
+the limit and the observed value** — an import that dies on an
+unexplained cap is worse than one that is slow. Second, **a normal palace
+imports exactly as before**: the defaults are sized against a measured
+real palace with the headroom factors recorded in
+`VAULTKIT_INTERFACE.md`, and the limit VALUES are identical in both ports
+and asserted literally in both suites, because divergent caps would mean
+an import that succeeds in one port and fails in the other.
+
+Streaming was ruled out rather than overlooked: `VaultAdapter.toIR`
+returns a fully-materialized array whose contract is deterministic order
+by `stableSourceKey` bytes, and that sort requires every note resident.
+Bounding the reads is the fix; the one materialization that could be
+removed inside the adapter (the Swift chroma scan's second copy) was.
+
+Front-matter version corrected from a stale v0.1 — a v0.2 entry already
+existed below.
 
 ### v0.2 — 2026-07-23
 

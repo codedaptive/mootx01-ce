@@ -1,10 +1,10 @@
 ---
 title: VaultKit Interface
-version: 1.13.0
+version: 1.15.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-28
+date: 2026-08-03
 description: Public interface contract for VaultKit — bidirectional bridge between a MOOTx01 estate and human-readable Markdown vaults, programmatic exchange formats, and MemPalace.
 relates_to:
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#62-note-identity-and-import-semantics
@@ -324,8 +324,10 @@ a native `NoteIR` home rides `frontmatter` verbatim (keys un-prefixed).
 public struct MemPalaceChromaAdapter: VaultAdapter {
     public var drawersCollection: String   // default "mempalace_drawers"
     public var closetsCollection: String   // default "mempalace_closets"
+    public var limits: MemPalaceImportLimits   // default .default
     public init(drawersCollection: String = "mempalace_drawers",
-                closetsCollection: String = "mempalace_closets")
+                closetsCollection: String = "mempalace_closets",
+                limits: MemPalaceImportLimits = .default)
     /// vaultURL = the PALACE ROOT directory (e.g. ~/.mempalace)
     public func toIR(vaultURL: URL) throws -> [NoteIR]
     /// Always throws VaultKitError.adapterError — MemPalace is a source,
@@ -333,6 +335,49 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
     public func fromIR(_ notes: [NoteIR], to vaultURL: URL) throws
 }
 ```
+
+**Import bounds — the palace root is UNTRUSTED input.** A palace root is
+a directory handed to the importer from outside the estate; "the user
+chose it" covers a palace they were given, not only one they built. Its
+size is therefore an attacker-influenced input. Every read is bounded and
+accounted against ONE `MemPalaceImportBudget` per import, so the row and
+byte ceilings are totals for the import rather than a fresh allowance per
+store. `PalaceBridge` carries the same `limits` property and enforces the
+same ceilings on the direct-import path.
+
+```swift
+public struct MemPalaceImportLimits: Sendable, Equatable {
+    public var maxTunnelsJSONBytes: Int   // default 67_108_864 (64 MiB)
+    public var maxImportRows: Int         // default 20_000_000
+    public var maxMaterializedBytes: Int  // default 1_073_741_824 (1 GiB)
+    public var maxSQLiteVMSteps: Int      // default 1_000_000_000
+    public var sqliteProgressGrain: Int32 // default 1_000_000
+    public static let `default`: MemPalaceImportLimits
+}
+```
+
+| Limit | Swift | Rust | Default | Measured on a real palace | Headroom |
+|---|---|---|---|---|---|
+| `tunnels.json` max bytes, checked BEFORE the file is opened | `maxTunnelsJSONBytes` | `MAX_TUNNELS_JSON_BYTES` | 64 MiB | 3,149 B | 21,311x |
+| Max SQLite rows across the whole import | `maxImportRows` | `MAX_IMPORT_ROWS` | 20,000,000 | 506,204 | 39.5x |
+| Max column-text bytes materialized | `maxMaterializedBytes` | `MAX_MATERIALIZED_BYTES` | 1 GiB | 40,700,592 B | 26.4x |
+| SQLite virtual-machine step budget | `maxSQLiteVMSteps` | `MAX_SQLITE_VM_STEPS` | 1,000,000,000 | ~8,850,000 | 113x |
+| Steps between progress callbacks | `sqliteProgressGrain` | `SQLITE_PROGRESS_GRAIN` | 1,000,000 | — | — |
+
+The step budget is enforced by a SQLite progress handler
+(`sqlite3_progress_handler` in Swift, `Connection::progress_handler` in
+Rust) so a query whose plan degenerates — burning instructions WITHOUT
+returning rows, where neither the row nor the byte counter advances — is
+abandoned rather than run to completion.
+
+Every breach surfaces as `VaultKitError.adapterError` /
+`VaultKitError::AdapterError` naming **both the limit and the observed
+value**; an import that dies on an unexplained cap is worse than one that
+is slow. The `tunnels.json` size is taken from the filesystem before the
+file is opened, so an oversized file is never read into memory. The
+default VALUES are identical in both ports and asserted literally in both
+test suites: divergent caps would mean an import that succeeds in one port
+and fails in the other.
 
 Palace layout read: `palace/chroma.sqlite3` (required — ChromaDB;
 collections → METADATA segment → `embeddings` ⨝ `embedding_metadata`),
@@ -784,6 +829,7 @@ requirements.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.15.0 | 2026-08-03 | Bounded the MemPalace importer's reads (Codex finding `7398704cea488191a2ce153ad1d5b016`, availability). New public `MemPalaceImportLimits` (Swift) / `MemPalaceImportLimits` + `MAX_*` constants (Rust) and `MemPalaceImportBudget`; new `limits` property on `MemPalaceChromaAdapter` and `PalaceBridge` (both defaulted, so every existing call site stays source-compatible). Four ceilings — `tunnels.json` max bytes checked before the file is opened, max SQLite rows, max materialized bytes, and a SQLite progress-handler step budget — accounted against one budget per import so rows and bytes are real totals. Every breach names the limit AND the observed value via `adapterError`. Defaults sized against the measured real palace with the headroom factors documented in the table above; identical values in both ports, asserted literally in both suites. Swift `metadataRows` no longer materializes the largest scan twice (new internal `forEachRow`), matching the Rust cursor. rusqlite gains the `hooks` feature for `progress_handler`. Front-matter version corrected from a stale 1.13.0 (a 1.14.0 entry already existed below). |
 | 1.14.0 | 2026-07-23 | Clarified that the watched-source scheduler is a planned 1.1 resident control-layer mission, not a `VaultBridge` responsibility; linked the lifecycle and automated sensitivity requirements in `VAULTKIT_SPEC.md`. |
 | 1.13.0 | 2026-07-16 | Concordance table: added two missing public Rust types re-exported at the `vault_kit` crate root. (1) `PalaceItemJobPayload` — the four-noun checkpoint-job payload struct (fields: `noun`, `source_id`, `body`, `call`); Swift-internal counterpart also documented. (2) `CheckpointQueue` — Rust-only dependency-free maildir-style filesystem queue that stands in for QueueKit on the Rust leg; public methods `mount`/`send`/`send_item`/`pending_jobs`/`read_job`/`read_item_job`/`complete` documented. Both types live in `vault_kit::palace_pump` and were re-exported via `lib.rs` but had no concordance rows. |
 | 1.12.0 | 2026-07-16 | Audit corrections: (1) `VaultExportScope` default corrected from `.believed` to `.exportable` (CAND-032 shipped before the doc was updated) — fixed in prose, enum annotation, MCP tool table, and both concordance rows (`VaultExportScope` Rust Default, `moot_vault_export` scope). (2) `VaultProgress` typealias added (Swift + Rust). (3) `VaultAdapter` protocol extended with `fromIR(_:to:progress:)` / `from_ir_with_progress` overload. (4) `VaultBridge.export` scope default and all bridge method signatures updated to include `progress: VaultProgress?` parameter (present in source since T7; missing from doc). (5) `VaultBridge.importVault(includingPaths:)` and `importMemPalace` updated with `mode` and `progress` params. (6) `PalaceBridge.importPalace` updated with `progress` param. (7) `ImportReport` four missing fields added: `drawersSkippedUnchanged`, `drawersSkippedTombstoned`, `drawersSkippedPartialWrite`, `enqueuedForEncode` (FINDING-1a, FINDING-1b). (8) Import receipt JSON updated to include `drawersSkippedPartialWrite`. (9) Concordance table rows corrected for `VaultAdapter`, `ImportReport`, `VaultBridge`, and `PalaceBridge`. |
