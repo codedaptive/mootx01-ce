@@ -590,9 +590,9 @@ family (export, import, reconcile, status).
 
 **Provides:**
 - export an estate's drawers to a vault directory as UTF-8 Markdown (one note
-  per drawer, an `index.md` per folder, `log.md` for diary entries), and
-  import a vault back into an estate (path/key projection between human paths
-  and estate keys)
+  per drawer, plus an `index.md` per folder for OKF navigation), and import a
+  vault back into an estate (path/key projection between human paths and
+  estate keys)
 - vault reconcile + status surfaces consumed by the `moot_vault_*` tools
 - sensitivity-tier exclusions on export: the `.secret` tier never rides bulk
   export, and `.restricted` is excluded unless the caller explicitly scopes it
