@@ -32,7 +32,55 @@ struct ShareInboxSpoolTests {
         let recalled = await bridge.callTool("moot_memory_search", arguments: [
             "query": .string("spooled from the share sheet"),
         ])
-        #expect(recalled.text.contains("spooled from the share sheet"))
+        // The dense recall row carries the drawer's SUBJECT. This item was
+        // spooled without one, so what must appear is the subject CaptureSink
+        // derived from the body — proving the drain path supplies a real subject
+        // rather than the substrate having accepted a blank one.
+        #expect(recalled.text.contains("spooled from the share sheet"),
+            "the derived subject must reach the estate and render in the recall row")
+        #expect(!recalled.text.contains("(no subject)"),
+            "a drained item must never land with the subject-debt marker")
+    }
+
+    @Test("a subject the sharing surface supplied survives the spool round-trip")
+    func suppliedSubjectSurvivesSpooling() async throws {
+        let spool = try makeTempSpool()
+        let bridge = try await TestBridge.makeInMemory()
+
+        // The Share Extension is a separate process: the subject has to survive
+        // JSON encoding into the spool and decoding on the host side, or the
+        // host would silently re-derive one and the title the user saw is lost.
+        let supplied = "Ferry to Bruny is cancelled Thursday; book the Friday sailing."
+        try await spool.enqueue(.init(
+            text: "Notice from the ferry operator about Thursday's cancellation.",
+            location: "shared",
+            subject: supplied))
+        let outcome = await spool.drain(using: bridge)
+        #expect(outcome.captured == 1)
+
+        let recalled = await bridge.callTool("moot_memory_search", arguments: [
+            "query": .string("ferry cancellation notice"),
+        ])
+        #expect(recalled.text.contains(supplied),
+            "the supplied subject must survive spooling and reach the estate verbatim")
+    }
+
+    @Test("an item spooled by an older build, carrying no subject field, still drains")
+    func legacyPayloadWithoutSubjectDrains() async throws {
+        let spool = try makeTempSpool()
+        let bridge = try await TestBridge.makeInMemory()
+
+        // Payloads written before SharedItem gained `subject` are sitting in the
+        // live app-group container right now. Decoding must treat the missing
+        // key as nil rather than failing, or the share inbox would retire every
+        // one of them as undecodable on the next drain.
+        let legacy = Data(#"{"text":"Sent before subject existed.","location":"shared"}"#.utf8)
+        let decoded = try JSONDecoder().decode(CaptureSink.SharedItem.self, from: legacy)
+        #expect(decoded.subject == nil, "a missing subject key decodes as absent, not as a failure")
+
+        let text = try await CaptureSink().capture(decoded, using: bridge)
+        #expect(text.contains("filed memory"),
+            "a legacy payload captures through the derived-subject path")
     }
 
     @Test("drain is idempotent: a drained spool captures nothing on the second pass")
