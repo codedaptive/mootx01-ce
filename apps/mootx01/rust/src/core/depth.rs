@@ -485,8 +485,13 @@ fn refresh_stranded_plugin_cache(
 }
 
 /// Inject
-/// `"env": {"MOOTX01_VAULT": "0"}` on the `mcpServers.mootx01` entry of an
-/// MCP config JSON file — but ONLY when that entry is command/stdio-shaped
+/// `"env": {"MOOTX01_VAULT": "0"}` on the `mcpServers.<PLUGIN_SERVER_NAME>`
+/// entry of a plugin package's MCP manifest — this runs only over the files
+/// `install_plugin` materialises, so the key is the plugin-package key
+/// (`clients::PLUGIN_SERVER_NAME`), never the direct-entry
+/// `clients::SERVER_NAME`. The two differ deliberately; see `core::clients`.
+///
+/// The patch applies ONLY when that entry is command/stdio-shaped
 /// (carries a `command` key: the proxy-bridge fallback for a host whose
 /// schema cannot express HTTP). An HTTP-shaped entry (`type`/`url`, no
 /// `command`) is left untouched: the resident daemon is the actual MCP
@@ -515,7 +520,7 @@ fn inject_vault_env(rel: &str, contents: &str) -> String {
     };
     if let Some(server) = root
         .get_mut("mcpServers")
-        .and_then(|m| m.get_mut("mootx01"))
+        .and_then(|m| m.get_mut(crate::core::clients::PLUGIN_SERVER_NAME))
         .and_then(|v| v.as_object_mut())
     {
         // HTTP-shaped entry (no `command` key) — client-side env is inert;
@@ -610,6 +615,7 @@ fn backup_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::clients;
 
     #[test]
     fn mode_flag_parses() {
@@ -744,7 +750,7 @@ mod tests {
         let mcp_text = std::fs::read_to_string(&mcp_path).unwrap();
         let mcp: serde_json::Value =
             serde_json::from_str(&mcp_text).expect(".mcp.json must be valid JSON");
-        let server = &mcp["mcpServers"]["mootx01"];
+        let server = &mcp["mcpServers"][clients::PLUGIN_SERVER_NAME];
         assert!(server.get("command").is_none(), "claude-code's plugin entry must remain HTTP-shaped");
         assert_eq!(server["env"], serde_json::Value::Null, "HTTP-shaped entries must never get a client-side env block");
         assert_eq!(server["type"], "http");
@@ -768,19 +774,19 @@ mod tests {
     /// gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
     #[test]
     fn inject_vault_env_shape_check() {
-        let command_entry = r#"{"mcpServers":{"mootx01":{"command":"mootx01","args":["proxy"]}}}"#;
+        let command_entry = r#"{"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}"#;
         let patched = inject_vault_env(".mcp.json", command_entry);
         let patched_json: serde_json::Value = serde_json::from_str(&patched).unwrap();
         assert_eq!(
-            patched_json["mcpServers"]["mootx01"]["env"]["MOOTX01_VAULT"], "0",
+            patched_json["mcpServers"][clients::PLUGIN_SERVER_NAME]["env"]["MOOTX01_VAULT"], "0",
             "a command-shaped entry must still get MOOTX01_VAULT=0 injected"
         );
 
-        let http_entry = r#"{"mcpServers":{"mootx01":{"type":"http","url":"http://127.0.0.1:4242"}}}"#;
+        let http_entry = r#"{"mcpServers":{"memory":{"type":"http","url":"http://127.0.0.1:4242"}}}"#;
         let unchanged = inject_vault_env(".mcp.json", http_entry);
         let unchanged_json: serde_json::Value = serde_json::from_str(&unchanged).unwrap();
         assert!(
-            unchanged_json["mcpServers"]["mootx01"].get("env").is_none(),
+            unchanged_json["mcpServers"][clients::PLUGIN_SERVER_NAME].get("env").is_none(),
             "an HTTP-shaped entry must never gain an env block"
         );
     }
@@ -795,7 +801,7 @@ mod tests {
         let mcp_text = std::fs::read_to_string(root.join(".mcp.json")).unwrap();
         let mcp: serde_json::Value = serde_json::from_str(&mcp_text).unwrap();
         assert_eq!(
-            mcp["mcpServers"]["mootx01"]["env"],
+            mcp["mcpServers"][clients::PLUGIN_SERVER_NAME]["env"],
             serde_json::Value::Null,
             "vault-on must leave env absent (absent = vault-on)"
         );
@@ -945,7 +951,7 @@ mod tests {
         let mcp_text = std::fs::read_to_string(plugin_dir.join(".mcp.json")).unwrap();
         let mcp_json: serde_json::Value = serde_json::from_str(&mcp_text).unwrap();
         assert_eq!(
-            mcp_json["mcpServers"]["mootx01"]["type"], "http",
+            mcp_json["mcpServers"][clients::PLUGIN_SERVER_NAME]["type"], "http",
             "converged package must be HTTP-shaped"
         );
         assert!(!mcp_text.contains("\"serve\""), "stdio-era serve entry must not survive rematerialization");

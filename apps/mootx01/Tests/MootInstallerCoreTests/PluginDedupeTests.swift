@@ -247,7 +247,7 @@ struct PluginDedupeTests {
 
         let rewrittenData = try Data(contentsOf: pluginDir.appendingPathComponent(".mcp.json"))
         let rewritten = try JSONSerialization.jsonObject(with: rewrittenData) as? [String: Any]
-        let server = (rewritten?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
+        let server = (rewritten?["mcpServers"] as? [String: Any])?[MCPClients.pluginServerName] as? [String: Any]
         #expect(server?["type"] as? String == "http",
                 "the stale stdio manifest must have converged to the current HTTP-shaped entry; got: \(String(describing: rewritten))")
         #expect(server?["command"] == nil,
