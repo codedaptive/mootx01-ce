@@ -935,6 +935,12 @@ final class SQLiteReadOnly {
     ) throws {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            // The progress handler runs during prepare as well as step —
+            // SQLite may interrupt while it is still planning the query, and
+            // a degenerate plan is exactly the case the step budget exists
+            // to catch. Name the limit here too, or the guard reports itself
+            // as a bare "interrupted".
+            if budget.interruptedByStepLimit { throw budget.stepLimitError() }
             throw VaultKitError.adapterError(
                 "prepare failed: \(String(cString: sqlite3_errmsg(handle)))")
         }
@@ -946,6 +952,7 @@ final class SQLiteReadOnly {
         for (index, value) in bindings.enumerated() {
             guard sqlite3_bind_text(stmt, Int32(index + 1), value, -1, transient) == SQLITE_OK
             else {
+                if budget.interruptedByStepLimit { throw budget.stepLimitError() }
                 throw VaultKitError.adapterError(
                     "bind failed: \(String(cString: sqlite3_errmsg(handle)))")
             }

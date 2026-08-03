@@ -439,4 +439,70 @@ struct PalaceBridgeTests {
         )
         #expect(entries.contains { $0.topic == "vault-receipt" })
     }
+
+    // MARK: - Import bounds on the LIVE import path
+
+    // PalaceBridge is the import path behind `moot_palace_import`, so the
+    // bounds that protect the adapter must protect it too — capping only
+    // the adapter would close the finding on paper. Same constants, same
+    // error text, asserted here through the bridge entry point.
+
+    @Test("bridge: an oversized tunnels.json is rejected before the file is read")
+    func bridgeRejectsOversizedTunnelsBeforeRead() async throws {
+        let (kit, handle) = try await openEstate()
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("palacebridge-bounds-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: Self.fixturePalaceURL, to: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Oversized AND malformed: a "malformed" diagnostic would prove the
+        // file had been read and parsed before the size was checked.
+        try String(repeating: "x", count: 4096).write(
+            to: root.appendingPathComponent("tunnels.json"),
+            atomically: true, encoding: .utf8)
+
+        let bridge = PalaceBridge(
+            kit: kit, limits: MemPalaceImportLimits(maxTunnelsJSONBytes: 1024))
+        do {
+            _ = try await bridge.importPalace(at: root, into: handle, now: Date())
+            Issue.record("expected the tunnels.json limit to reject this palace")
+        } catch {
+            let message = "\(error)"
+            #expect(message.contains("maxTunnelsJSONBytes"))
+            #expect(message.contains("4096"), "the error must name the OBSERVED value")
+            #expect(message.contains("1024"), "the error must name the LIMIT")
+            #expect(!message.contains("malformed"))
+        }
+    }
+
+    @Test("bridge: a row count over the cap is rejected, naming the limit")
+    func bridgeRejectsRowCap() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = PalaceBridge(
+            kit: kit, limits: MemPalaceImportLimits(maxImportRows: 3))
+        do {
+            _ = try await bridge.importPalace(
+                at: Self.fixturePalaceURL, into: handle, now: Date())
+            Issue.record("expected the row cap to reject this palace")
+        } catch {
+            let message = "\(error)"
+            #expect(message.contains("maxImportRows"))
+            #expect(message.contains("SQLite rows"))
+        }
+    }
+
+    @Test("bridge: the fixture palace still imports unchanged under the defaults")
+    func bridgeDefaultsDoNotAlterNormalImport() async throws {
+        let (kit, handle) = try await openEstate()
+        // Explicitly at the shipping limits: the caps must be invisible to
+        // real input, so this asserts exactly what `fixtureImportBasic`
+        // asserts — same counts, reached through the bounded path.
+        let bridge = PalaceBridge(kit: kit, limits: .default)
+        let report = try await bridge.importPalace(
+            at: Self.fixturePalaceURL, into: handle, now: Date())
+        #expect(report.drawersWritten >= 3, "chroma rows must still land as drawers")
+        // Non-zero proves tunnels.json was read rather than size-rejected.
+        #expect(report.tunnelsCreated > 0)
+        #expect(report.drawersUpdated == 0)
+    }
 }
