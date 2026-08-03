@@ -2300,26 +2300,37 @@ fn run_estate_status(
         })
         .collect();
 
-    // "total" = all non-erased rows (tombstone = permanently erased).
-    let total: Vec<_> = all_drawers
-        .iter()
-        .filter(|d| d.tombstoned_at.is_none())
-        .collect();
-
     let kg_facts = coord
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    // Sensitivity ceiling (#50): exclude restricted/secret drawers from
-    // the wing listing, matching the estate-map ceiling. Wing names derived
-    // from restricted/secret drawers can leak topic metadata.
-    let visible: Vec<_> = active.iter().filter(|d| {
-        let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
-        sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
-    }).collect();
+    // Sensitivity ceiling (#50): restricted/secret drawers contribute nothing
+    // to this surface — not the wing listing, and not any count. Wing names
+    // derived from restricted/secret drawers leak topic metadata; a count that
+    // moves with the restricted set is the same leak in scalar form, since
+    // this tool has no sensitivity-grant plumbing and every caller is an
+    // ungranted one. Matches the estate-map ceiling. `is_bulk_exportable` is
+    // true for Normal and Elevated, false for Restricted and Secret — the
+    // parity of Swift `AdjectiveSensitivity.isBulkExportable`.
+    //
+    // EVERY drawer-derived aggregate below reads from `visible` or
+    // `visible_total`. An aggregate added here inherits that rule: derive it
+    // from a filtered set, or the next reader learns the size of a population
+    // they cannot see. Mirrors Swift runEstateStatus.
+    let visible: Vec<_> = active
+        .iter()
+        .filter(|d| d.adjective_sensitivity().is_bulk_exportable())
+        .collect();
+    // "total" = all non-erased rows (tombstone = permanently erased), under
+    // the same ceiling — hence the wider cluster scope but the identical
+    // sensitivity predicate.
+    let visible_total: Vec<_> = all_drawers
+        .iter()
+        .filter(|d| d.tombstoned_at.is_none() && d.adjective_sensitivity().is_bulk_exportable())
+        .collect();
     let visible_node_ids: Vec<String> = visible.iter().map(|d| d.parent_node_id.clone()).collect();
-    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &visible_node_ids);
-    let wings: std::collections::BTreeSet<String> = active_node_names
+    let visible_node_names = coord.resolve_drawer_node_names(&estate.handle, &visible_node_ids);
+    let wings: std::collections::BTreeSet<String> = visible_node_names
         .values()
         .map(|(w, _)| w.clone())
         .collect();
@@ -2365,15 +2376,19 @@ fn run_estate_status(
         "stale"
     };
 
-    // Subject-debt counter (PR-04): presence debt over the live cluster-A
-    // set — N subject-bearing / M eligible (non-empty content), K missing.
-    // The every-load reminder driving the consent-gated interactive
-    // backfill (walk moot_memory_list filter:missing_subject → setSubject
+    // Subject-debt counter (PR-04): presence debt over the live
+    // sensitivity-visible set — N subject-bearing / M eligible (non-empty
+    // content), K missing. It counts `visible`, not `active`, under the
+    // ceiling declared above: the debt an ungranted caller is being asked to
+    // pay is exactly the debt it is allowed to see, so this counter and the
+    // `moot_memory_list filter:missing_subject` enumerator it points the AI at
+    // describe one population. The every-load reminder driving the
+    // consent-gated interactive backfill (walk the enumerator → setSubject
     // only after the user grants time and permission). Presence debt only —
     // pipeline-version regeneration debt stays count_missing_subject's
     // concern. Mirrors Swift runEstateStatus.
-    let subject_eligible = active.iter().filter(|d| !d.content.is_empty()).count();
-    let subject_bearing = active
+    let subject_eligible = visible.iter().filter(|d| !d.content.is_empty()).count();
+    let subject_bearing = visible
         .iter()
         .filter(|d| !d.content.is_empty() && d.subject.is_some())
         .count();
@@ -2383,8 +2398,8 @@ fn run_estate_status(
     //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
     let mut body = format!(
         "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
-        active.len(),
-        total.len(),
+        visible.len(),
+        visible_total.len(),
         subject_bearing,
         subject_eligible,
         subject_eligible - subject_bearing,

@@ -2648,17 +2648,31 @@ extension ToolDispatcher {
             let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
             return RowState.cluster(ofRawState: stateRaw) == .some(.a)
         }
-        // Sensitivity ceiling (#50): exclude restricted/secret drawers from
-        // the wing listing and counts, matching the estate-map ceiling. Wing
-        // names derived from restricted/secret drawers can leak topic metadata.
+        // Sensitivity ceiling (#50): restricted/secret drawers contribute
+        // nothing to this surface — not the wing listing, and not any count.
+        // Wing names derived from restricted/secret drawers leak topic
+        // metadata; a count that moves with the restricted set is the same
+        // leak in scalar form, since this tool has no sensitivity-grant
+        // plumbing and every caller is an ungranted one. Matches the
+        // estate-map ceiling. `isBulkExportable` is true for .normal and
+        // .elevated, false for .restricted and .secret.
+        //
+        // EVERY drawer-derived aggregate below reads from `visible` or
+        // `visibleTotal`. An aggregate added here inherits that rule: derive
+        // it from a filtered set, or the next reader learns the size of a
+        // population they cannot see.
         let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
-        // "total" counts all non-erased rows (tombstone = erased permanently).
-        let total = drawers.filter { $0.tombstonedAt == nil }
+        // "total" counts all non-erased rows (tombstone = erased permanently),
+        // under the same ceiling — hence the wider cluster scope but the same
+        // sensitivity predicate as `visible`.
+        let visibleTotal = drawers.filter {
+            $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable
+        }
         // Resolve parentNodeIds to display names for wing listing. Drawer
         // no longer carries stored wing/room after node-tree migration.
-        let activeNodeNames = try await estate.resolveNodeNames(
+        let visibleNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: visible.map(\.parentNodeId))
-        let wings = Set(visible.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
+        let wings = Set(visible.compactMap { visibleNodeNames[$0.parentNodeId]?.wing }).sorted()
         let facts = try await kit.recallKGFacts(handle)
         // Trace row count — the reward pipeline's read log size. A read failure
         // must not break the whole status response, but it must NOT be reported
@@ -2688,19 +2702,22 @@ extension ToolDispatcher {
             fdcRecalculationState = "stale"
         }
         // Subject-debt counter (PR-04): presence debt over the live
-        // cluster-A set — N subject-bearing / M eligible (non-empty
-        // content), K missing. This is the every-load reminder that
-        // drives the consent-gated interactive backfill (the AI asks the
-        // user for time and permission before walking
-        // moot_memory_list filter:missing_subject → setSubject; standing
-        // behavior documented in the estate-status teachme). Presence
-        // debt only — pipeline-version regeneration debt stays the store
-        // verb countMissingSubject's concern.
-        let subjectEligible = active.filter { !$0.content.isEmpty }
+        // sensitivity-visible set — N subject-bearing / M eligible (non-empty
+        // content), K missing. It counts `visible`, not `active`, under the
+        // ceiling declared above: the debt an ungranted caller is being asked
+        // to pay is exactly the debt it is allowed to see, so this counter and
+        // the `moot_memory_list filter:missing_subject` enumerator it points
+        // the AI at describe one population. This is the every-load reminder
+        // that drives the consent-gated interactive backfill (the AI asks the
+        // user for time and permission before walking the enumerator →
+        // setSubject; standing behavior documented in the estate-status
+        // teachme). Presence debt only — pipeline-version regeneration debt
+        // stays the store verb countMissingSubject's concern.
+        let subjectEligible = visible.filter { !$0.content.isEmpty }
         let subjectBearing = subjectEligible.filter { $0.subject != nil }
         var stats = [
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
-            "memories: \(active.count) active (\(total.count) total)",
+            "memories: \(visible.count) active (\(visibleTotal.count) total)",
             "subjects: \(subjectBearing.count)/\(subjectEligible.count) "
                 + "(\(subjectEligible.count - subjectBearing.count) missing)",
             "wings: \(wings.joined(separator: ", "))",
