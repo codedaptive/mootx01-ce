@@ -298,6 +298,11 @@ impl ConcurrencyGate {
         // Slot granted — take the permit while still holding the lock, so two
         // waiters woken by the same notify cannot both pass the cap.
         state.running += 1;
+        // Invariant check, debug/test builds only: the cap must hold at the
+        // exact moment a permit is granted. Cheap here (the lock is already
+        // held) and it fails loudly in the test suite if the predicate above is
+        // ever weakened to `>` or split across the lock boundary.
+        debug_assert!(state.running <= self.max_concurrent);
     }
 
     /// Release a previously acquired slot: drop this connection out of BOTH
@@ -322,6 +327,14 @@ impl ConcurrencyGate {
         let mut state = self.state.lock().unwrap();
         state.running = state.running.saturating_sub(1);
         state.admitted = state.admitted.saturating_sub(1);
+        // Invariant check, debug/test builds only. This is the assertion that
+        // catches a release NOT paired 1:1 with a completed `wait_for_slot()`
+        // on the same admitted connection — the failure mode that would
+        // under-report `running` and silently raise the effective concurrency
+        // cap. It deliberately does NOT assert `running > 0` before the
+        // decrement: the enqueue-then-release path (admitted without ever
+        // taking a permit) is a legitimate caller and leaves `running` at 0.
+        debug_assert!(state.running <= state.admitted);
         self.cvar.notify_all();
     }
 
@@ -466,7 +479,7 @@ pub fn run_http_loop(
         };
 
         // Phase 1 (accept thread, NON-BLOCKING): depth check only. try_enqueue
-        // increments `active` and returns false immediately when the gate is
+        // increments `admitted` and returns false immediately when the gate is
         // at capacity — it never blocks on the Condvar. This means the accept
         // loop always processes connections promptly and can shed overflow
         // inline with a 503, rather than parking inside the Mutex and pushing

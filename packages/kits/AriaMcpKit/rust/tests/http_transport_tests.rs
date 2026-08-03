@@ -470,12 +470,13 @@ fn saturation_try_enqueue_is_non_blocking() {
     // max_concurrent=1, max_queued=1 → total capacity 2.
     let gate = ConcurrencyGate::new(1, 1);
 
-    // Enqueue slot 1 and slot 2 — both non-blocking (just increment active).
+    // Enqueue slot 1 and slot 2 — both non-blocking (just increment `admitted`;
+    // neither takes a running permit, because wait_for_slot is never called).
     assert!(gate.try_enqueue(), "first enqueue must succeed");
     assert!(gate.try_enqueue(), "second enqueue must succeed (fills queue)");
     assert_eq!(gate.current_depth(), 2);
 
-    // Third enqueue: active=2 >= max_concurrent+max_queued=2, must return false
+    // Third enqueue: admitted=2 >= max_concurrent+max_queued=2, must return false
     // WITHOUT blocking. The fact that this returns at all proves no Condvar wait.
     let overflow = gate.try_enqueue();
     assert!(!overflow, "overflow enqueue must return false immediately");
