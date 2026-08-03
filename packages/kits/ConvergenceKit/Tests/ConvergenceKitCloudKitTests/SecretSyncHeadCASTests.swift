@@ -601,6 +601,124 @@ struct SecretSyncHeadCASTests {
             )
         }
     }
+
+    @Test("a forged head graph is never returned as committed authority")
+    func forgedHeadIsNotCommittedAuthority() async throws {
+        let fixture = try U5PolicyFixture.make()
+        let forged = try Self.entryWithForgedCommitSignature(fixture)
+
+        // The validator is the only thing entitled to admit authority, and it
+        // refuses this graph: its commit signature is not one the verifier
+        // accepts. Anything the store subsequently says about the same graph is
+        // therefore a statement about transport, not about authority.
+        #expect(throws: (any Error).self) {
+            _ = try SecretPolicyValidator.validateTransition(
+                currentSnapshot: nil,
+                stagedRecords: forged.records,
+                commit: forged.commit,
+                trustedCredentials: forged.credentials,
+                trustedDeviceRecords: forged.trustRecords,
+                knownCompetingChildDigests: [],
+                externalFreshness: try SecretBootstrapFreshnessCommitment(
+                    scopeID: forged.commit.scopeID,
+                    latestPolicyEpoch: forged.commit.policyEpoch,
+                    headCommitDigest: forged.commit.recordDigest,
+                    policyDigest: forged.commit.policyDigest
+                ),
+                digester: U5PolicyFixture.digester,
+                signatureVerifier: U5ExactSignatureVerifier()
+            )
+        }
+
+        // Stage the forged graph and move the mutable scope head onto it —
+        // exactly what a party with write access to the SecretSync private
+        // database can do without ever holding a signing key.
+        let database = U5ScriptedDatabase()
+        let store = SecretSyncCloudKitPolicyStore(
+            database: database,
+            digester: U5PolicyFixture.digester
+        )
+        try await store.appendStagedPolicy(forged)
+        try await database.replaceHead(
+            SecretSyncCloudKitScopeHead(
+                scopeID: forged.commit.scopeID,
+                policyEpoch: forged.commit.policyEpoch,
+                headCommitDigest: forged.commit.recordDigest,
+                policyDigest: forged.commit.policyDigest
+            )
+        )
+
+        let reconstructed = try #require(
+            try await store.unvalidatedHeadPolicy(
+                for: forged.commit.scopeID,
+                epoch: 1
+            )
+        )
+
+        // Reconstruction still succeeds: content-addressing and every
+        // structural binding hold, because forging the signature bytes leaves
+        // both intact. That is the whole point — structure is not authority.
+        #expect(reconstructed.commit == forged.commit)
+        #expect(reconstructed.records.signedPolicy == forged.records.signedPolicy)
+
+        // The regression: head-derived material must never carry the
+        // validator-admitted label.
+        #expect(reconstructed.records.state != .committed)
+        #expect(reconstructed.records.state == .staged)
+    }
+
+    /// Rebuild the genesis transition commit with signature bytes no verifier
+    /// admits, recomputing its content address so the graph remains exactly
+    /// content-addressed and every structural binding the store checks still
+    /// holds. `U5ExactSignatureVerifier` admits only `Data([0xA1])`, so `0xEE`
+    /// bytes cannot verify against any credential in the fixture.
+    private static func entryWithForgedCommitSignature(
+        _ fixture: U5PolicyFixture
+    ) throws -> SecretPolicyStoreEntry {
+        let original = fixture.entry.commit
+        let commit = try contentAddressedCommit { digest in
+            try SecretTransitionCommit(
+                recordDigest: digest,
+                scopeID: original.scopeID,
+                policyEpoch: original.policyEpoch,
+                predecessorCommitDigest: original.predecessorCommitDigest,
+                policyDigest: original.policyDigest,
+                scopeSnapshotDigest: original.scopeSnapshotDigest,
+                generationID: original.generationID,
+                sealedPayloadDigest: original.sealedPayloadDigest,
+                recipientEnvelopeDigests: original.recipientEnvelopeDigests,
+                recoveryEnvelopeDigest: original.recoveryEnvelopeDigest,
+                purgeRequirementDigests: original.purgeRequirementDigests,
+                purgeReceiptDigests: original.purgeReceiptDigests,
+                recoveryAuthorizationDigest: original.recoveryAuthorizationDigest,
+                signerCredentialID: original.signerCredentialID,
+                signature: Data([0xEE, 0xEE])
+            )
+        }
+        return try SecretPolicyStoreEntry(
+            commit: commit,
+            records: fixture.entry.records,
+            credentials: fixture.entry.credentials,
+            trustRecords: fixture.entry.trustRecords,
+            digester: U5PolicyFixture.digester
+        )
+    }
+
+    /// Two-pass content addressing: `canonicalBytes()` excludes `recordDigest`,
+    /// so building once with a placeholder yields the bytes whose digest is the
+    /// record's true address.
+    private static func contentAddressedCommit(
+        _ build: (SecretRecordDigest) throws -> SecretTransitionCommit
+    ) throws -> SecretTransitionCommit {
+        let placeholder = try SecretRecordDigest(
+            bytes: Data(repeating: 0, count: SecretRecordDigest.byteCount)
+        )
+        let provisional = try build(placeholder)
+        let address = try U5PolicyFixture.digester.digest(
+            canonicalBytes: provisional.canonicalBytes()
+        )
+        return try build(address)
+    }
 }
 
 private struct U6RecoveryCASHarness {
