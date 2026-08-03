@@ -4041,6 +4041,13 @@ impl EstateCoordinator {
     /// durable, F14) — a registry version bump files a NEW instance
     /// (F15); a withdrawn LEXICAL (hunter) tunnel does not suppress a
     /// typed proof. `now` is epoch milliseconds.
+    ///
+    /// Sensitivity ceiling: a proven finding whose endpoint sensitivity
+    /// ceiling exceeds Elevated is never proposed — the same policy, the
+    /// same raw-value comparison, and the same position ahead of the dedup
+    /// check that the lexical hunter applies before it screens a pair.
+    /// Ceiling skips are counted apart from dedup suppressions so the
+    /// gate's activity is visible in the report.
     pub fn propose_conflict_tunnels(
         &self,
         handle: &EstateHandle,
@@ -4093,9 +4100,28 @@ impl EstateCoordinator {
 
         let mut proposed = Vec::new();
         let mut suppressed = 0usize;
+        let mut ceiling_skipped = 0usize;
         for finding in &sweep.proven {
             let outcome = &finding.outcome;
             if outcome.source_drawer_ids.len() != 2 {
+                continue;
+            }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            //
+            // Compare the RAW ceiling, never a decoded tier: `from_raw`
+            // coerces every unrecognised raw — scale-gapped intermediates
+            // and beyond-spec values alike — to Normal, so a decode-based
+            // check would wave through exactly the rows this gate exists to
+            // stop. The sweep already computed this ceiling as the MAX
+            // endpoint sensitivity, and it fails closed on an unresolvable
+            // endpoint.
+            if finding.sensitivity_ceiling_raw
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                ceiling_skipped += 1;
                 continue;
             }
             let (a, b) = (&outcome.source_drawer_ids[0], &outcome.source_drawer_ids[1]);
@@ -4150,6 +4176,7 @@ impl EstateCoordinator {
             sweep,
             proposed_tunnel_ids: proposed,
             suppressed,
+            ceiling_skipped,
         })
     }
 

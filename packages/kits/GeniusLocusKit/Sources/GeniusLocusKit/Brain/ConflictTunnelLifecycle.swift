@@ -7,6 +7,13 @@
 // tunnels so the next sweep reads the pair as HistoricalSuccession
 // (F22 end-to-end).
 //
+// Sensitivity ceiling: a proven finding whose endpoint sensitivity
+// ceiling exceeds Elevated is never proposed — the same policy, the same
+// raw-value comparison, and the same position ahead of the dedup check
+// that the lexical hunter applies before it screens a pair
+// (ContradictionHunt.swift). Ceiling skips are counted apart from dedup
+// suppressions so the gate's activity is visible in the report.
+//
 // Dedup contract (F14/F15):
 // - ANY live (active or proposed) `contradicts` tunnel between the
 //   pair suppresses a new proposal — the claim is already on the books.
@@ -31,6 +38,13 @@ public struct ConflictTunnelProposalReport: Sendable {
     public let proposedTunnelIDs: [String]
     /// Proven findings suppressed by the dedup contract.
     public let suppressed: Int
+    /// Proven findings skipped because their sensitivity ceiling exceeds
+    /// Elevated. Counted apart from `suppressed`: "already on the books"
+    /// and "above the ceiling" are different facts, and folding the
+    /// second into the first would hide the gate's activity from anyone
+    /// reading the report — including from whoever has to notice it has
+    /// regressed.
+    public let ceilingSkipped: Int
 }
 
 public extension GeniusLocusKit {
@@ -69,9 +83,27 @@ public extension GeniusLocusKit {
 
         var proposed: [String] = []
         var suppressed = 0
+        var ceilingSkipped = 0
         for finding in sweep.proven {
             let outcome = finding.outcome
             guard outcome.sourceDrawerIDs.count == 2 else { continue }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the
+            // Normal tier (normal + elevated). Restricted/secret rows
+            // must not be screened, proposed, or echoed as borderline
+            // snippets.
+            //
+            // Compare the RAW ceiling, never a decoded tier: decoding
+            // coerces every unrecognised raw — scale-gapped intermediates
+            // and beyond-spec values alike — to `.normal`, so a
+            // decode-based check would wave through exactly the rows this
+            // gate exists to stop. The sweep already computed this
+            // ceiling as the MAX endpoint sensitivity, and it fails
+            // closed on an unresolvable endpoint.
+            if finding.sensitivityCeilingRaw > AdjectiveSensitivity.elevated.rawValue {
+                ceilingSkipped += 1
+                continue
+            }
             let a = outcome.sourceDrawerIDs[0], b = outcome.sourceDrawerIDs[1]
             let pair = Self.pairKey(a, b)
             let label = "\(Self.conflictProposalLabelPrefix)\(outcome.ruleID)@\(outcome.ruleVersion) "
@@ -116,7 +148,8 @@ public extension GeniusLocusKit {
             proposed.append(tunnel.id)
         }
         return ConflictTunnelProposalReport(
-            sweep: sweep, proposedTunnelIDs: proposed, suppressed: suppressed)
+            sweep: sweep, proposedTunnelIDs: proposed, suppressed: suppressed,
+            ceilingSkipped: ceilingSkipped)
     }
 
     /// File the ACTIVE `supersedes` tunnels for a meeting-capture

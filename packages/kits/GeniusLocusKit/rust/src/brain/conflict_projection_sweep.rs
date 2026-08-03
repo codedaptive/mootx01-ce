@@ -167,6 +167,13 @@ pub struct ConflictTunnelProposalReport {
     pub proposed_tunnel_ids: Vec<String>,
     /// Proven findings suppressed by the dedup contract.
     pub suppressed: usize,
+    /// Proven findings skipped because their sensitivity ceiling exceeds
+    /// Elevated. Counted apart from `suppressed`: "already on the books"
+    /// and "above the ceiling" are different facts, and folding the
+    /// second into the first would hide the gate's activity from anyone
+    /// reading the report — including from whoever has to notice it has
+    /// regressed.
+    pub ceiling_skipped: usize,
 }
 
 /// Default bucket cap re-export for the coordinator seam.
