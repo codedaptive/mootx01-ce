@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-07-30
-version: 1.23.0
+version: 1.24.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.22.0: MXE-BB — circuit-breaker API (migrationParked, isParked, clearParked) on both ports.
 package: GeniusLocusKit
@@ -2084,6 +2084,13 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.24.0 -- 2026-08-02
+
+- PR-10: `MiniLLMSubjectProducer` (Apple-only, availability-gated),
+  `enableAppleSubjectRider(for:)`,
+  `SubjectProducer.regeneratesPipelines` ↔ `regenerates_pipelines`
+  (default empty); sweep and drain-lane pending are tier-aware.
 
 ### 1.23.0 -- 2026-08-02
 

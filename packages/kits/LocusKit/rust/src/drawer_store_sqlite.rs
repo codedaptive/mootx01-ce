@@ -403,6 +403,16 @@ impl DrawerStore for SqliteDrawerStore {
     fn subject_debt_batch(&self, limit: usize) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.0.subject_debt_batch(limit)
     }
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.0.count_subject_debt_including(pipelines)
+    }
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.subject_debt_batch_including(limit, pipelines)
+    }
     fn seal_expunge_audit(
         &self,
         event: &substrate_lib::verbs::AuditEvent,

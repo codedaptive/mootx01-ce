@@ -143,3 +143,83 @@ fn inadmissible_producer_output_is_skipped_never_stored() {
         "inadmissible output must never be stored"
     );
 }
+
+/// Producer with regeneration tiers (PR-10 shape) — regenerates the
+/// deterministic tiers, never ai-v1. Twin of Swift TieredStubProducer.
+struct TieredStubProducer;
+impl SubjectProducer for TieredStubProducer {
+    fn pipeline_version(&self) -> &str { "tiered-stub-v1" }
+    fn subject_for_content(&self, content: &str) -> Result<String, String> {
+        Ok(content.lines().next().unwrap_or("").chars().take(120).collect())
+    }
+    fn regenerates_pipelines(&self) -> Vec<String> {
+        vec!["consolidation-v1".to_string(), "seed-v1".to_string()]
+    }
+}
+
+#[test]
+fn tiered_sweep_regenerates_below_tiers_and_never_ai_v1() {
+    let (mut coord, handle) = open_estate();
+    // One NULL row.
+    seed_debt(&coord, &handle, 1);
+    // One ai-v1 row (subject at capture) and one consolidation-v1 row.
+    let ai_id = {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        let mut frame = CaptureFrame::new(
+            "Filing-AI authored row.",
+            CaptureChannel::Typed,
+            "backfill-tests",
+            LatticeAnchor::udc("000"),
+            "subject-backfill-tests",
+            "test-model-v1",
+        );
+        frame.subject = Some("Filing-AI subject stays untouched.".to_string());
+        coord.capture(&handle, frame, NOW).unwrap().id
+    };
+    let cons_id = {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        let frame = CaptureFrame::new(
+            "Deterministic writer row.",
+            CaptureChannel::Typed,
+            "backfill-tests",
+            LatticeAnchor::udc("000"),
+            "subject-backfill-tests",
+            "test-model-v1",
+        );
+        let id = coord.capture(&handle, frame, NOW).unwrap().id;
+        let estate = coord.estate_for(&handle).unwrap();
+        estate
+            .set_subject_representation(&id, "Deterministic vague subject.", "consolidation-v1", NOW + 1)
+            .unwrap();
+        id
+    };
+
+    coord
+        .register_subject_producer(&handle, Arc::new(TieredStubProducer))
+        .unwrap();
+    let report = coord.subject_backfill_sweep(&handle, 10, NOW + 10).unwrap();
+    assert_eq!(report.written, 2, "NULL + consolidation-v1 regenerate: {report:?}");
+    assert_eq!(report.remaining_debt, 0);
+
+    let estate = coord.estate_for(&handle).unwrap();
+    let after = estate.all_drawers().unwrap();
+    let by_id: std::collections::BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        after.iter().map(|d| (d.id.as_str(), d)).collect();
+    assert_eq!(
+        by_id[ai_id.as_str()].subject_pipeline_version.as_deref(),
+        Some("ai-v1"),
+        "ai-v1 outranks the model — never overwritten"
+    );
+    assert_eq!(
+        by_id[ai_id.as_str()].subject.as_deref(),
+        Some("Filing-AI subject stays untouched.")
+    );
+    assert_eq!(
+        by_id[cons_id.as_str()].subject_pipeline_version.as_deref(),
+        Some("tiered-stub-v1")
+    );
+}

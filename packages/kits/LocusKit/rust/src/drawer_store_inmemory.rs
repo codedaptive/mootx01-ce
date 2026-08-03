@@ -2654,15 +2654,14 @@ impl DrawerStore for DrawerStoreCore {
     /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
     /// lane's `pending`. Mirrors Swift `countSubjectDebt`.
     fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.count_subject_debt_including(&[])
+    }
+
+    /// Tier-aware debt count (PR-10). Mirrors Swift
+    /// `countSubjectDebt(includingPipelines:)`.
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
         let row_store = self.storage.row_store();
-        let predicate = StoragePredicate::And(vec![
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-            StoragePredicate::Neq(
-                Column::new(T_DRAWERS, "content"),
-                TypedValue::Text(String::new()),
-            ),
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
-        ]);
+        let predicate = subject_debt_predicate(pipelines);
         let rows = row_store
             .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
             .map_err(map_storage_err)?;
@@ -2674,14 +2673,17 @@ impl DrawerStore for DrawerStoreCore {
     /// `content`; corrupt rows skip-and-log like every corpus scan.
     /// Mirrors Swift `subjectDebtBatch(limit:)`.
     fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
-        let predicate = StoragePredicate::And(vec![
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-            StoragePredicate::Neq(
-                Column::new(T_DRAWERS, "content"),
-                TypedValue::Text(String::new()),
-            ),
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
-        ]);
+        self.subject_debt_batch_including(limit, &[])
+    }
+
+    /// Tier-aware sweep enumerator (PR-10). Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:)`.
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let predicate = subject_debt_predicate(pipelines);
         let (rows, _skipped) = self
             .storage
             .row_store()
@@ -5407,6 +5409,16 @@ impl DrawerStore for InMemoryDrawerStore {
     fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
         self.inner.subject_debt_batch(limit)
     }
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.inner.count_subject_debt_including(pipelines)
+    }
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.subject_debt_batch_including(limit, pipelines)
+    }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_missing_subject(pipeline_version)
     }
@@ -6456,6 +6468,31 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
 ///
 /// The log line is written to stderr so it appears in the process log without
 /// requiring a tracing/logging dependency in PersistenceKit's crate.
+/// The subject-debt predicate, optionally widened by regeneration tiers
+/// (PR-10): subject NULL, or produced under one of `pipelines` (the tiers
+/// BELOW the requesting producer on the trust ladder — the Apple rider
+/// lists the deterministic tiers and never ai-v1, so the filing AI
+/// outranks the fallback model STRUCTURALLY). Twin of Swift
+/// `DrawerStore.subjectDebtPredicate(includingPipelines:)`.
+fn subject_debt_predicate(pipelines: &[String]) -> StoragePredicate {
+    let mut subject_clauses: Vec<StoragePredicate> =
+        vec![StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject"))];
+    for pipeline in pipelines {
+        subject_clauses.push(StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "subject_pipeline_version"),
+            TypedValue::Text(pipeline.clone()),
+        ));
+    }
+    StoragePredicate::And(vec![
+        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "content"),
+            TypedValue::Text(String::new()),
+        ),
+        StoragePredicate::Or(subject_clauses),
+    ])
+}
+
 fn decode_rows_skip_corrupt(rows: &[StorageRow], scan: &str) -> Result<Vec<Drawer>, LocusKitError> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {

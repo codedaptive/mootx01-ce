@@ -226,3 +226,43 @@ fn count_missing_subject_semantics() {
         .expect("count missing");
     assert_eq!(missing, 2); // i1 (NULL) + i3 (version mismatch)
 }
+
+// ---------------------------------------------------------------------------
+// Tier-aware debt enumeration (PR-10) — twin of Swift
+// tierAwareDebtEnumeration: NULL rows and listed tiers enumerate; ai-v1
+// (above the requester) and the requester's own tier never do.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tier_aware_debt_enumeration() {
+    let store = new_store();
+    let (null_id, ai_id, cons_id, model_id) = (make_id(), make_id(), make_id(), make_id());
+    for id in [&null_id, &ai_id, &cons_id, &model_id] {
+        store.add_drawer(&sample_drawer(id), NOW).expect("add");
+    }
+    store
+        .set_subject_representation(&ai_id, "Filing-AI subject.", "ai-v1", NOW + 1)
+        .expect("set ai");
+    store
+        .set_subject_representation(&cons_id, "Deterministic vague subject.", "consolidation-v1", NOW + 1)
+        .expect("set cons");
+    store
+        .set_subject_representation(&model_id, "Model subject.", "minillm-v1", NOW + 1)
+        .expect("set model");
+
+    // NULL-only (the PR-09 default): just the NULL row.
+    assert_eq!(store.count_subject_debt().unwrap(), 1);
+    let null_only = store.subject_debt_batch(10).unwrap();
+    assert_eq!(null_only.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec![null_id.as_str()]);
+
+    // The Apple rider's view: NULL + the deterministic tiers; ai-v1 and
+    // minillm-v1 NEVER enumerate.
+    let tiers = vec!["consolidation-v1".to_string(), "seed-v1".to_string()];
+    let rider_view = store.subject_debt_batch_including(10, &tiers).unwrap();
+    let mut got: Vec<&str> = rider_view.iter().map(|d| d.id.as_str()).collect();
+    got.sort();
+    let mut want = vec![null_id.as_str(), cons_id.as_str()];
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!(store.count_subject_debt_including(&tiers).unwrap(), 2);
+}

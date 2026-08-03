@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.16.0
+version: 1.17.0
 status: active
 date: 2026-08-02
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -1408,6 +1408,13 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.17.0 -- 2026-08-02
+
+- PR-10: tier-aware debt surface — `countSubjectDebt(includingPipelines:)`
+  and `subjectDebtBatch(limit:includingPipelines:)` across the store
+  stack, Rust twins `count_subject_debt_including` /
+  `subject_debt_batch_including`.
 
 ### 1.16.0 -- 2026-08-02
 

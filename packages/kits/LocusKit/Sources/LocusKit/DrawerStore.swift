@@ -4969,6 +4969,29 @@ public actor DrawerStore {
     /// migration lever. Twin: Rust `SUBJECT_PIPELINE_MINILLM_V1`.
     public static let subjectPipelineMiniLLMV1 = "minillm-v1"
 
+    /// The subject-debt predicate, optionally widened by regeneration
+    /// tiers (PR-10): subject NULL, or produced under one of
+    /// `includingPipelines` (the tiers BELOW the requesting producer on
+    /// the trust ladder — the Apple rider lists the deterministic tiers
+    /// consolidation-v1/seed-v1 and never ai-v1, so the filing AI
+    /// outranks the fallback model STRUCTURALLY: its rows are simply
+    /// never enumerated for regeneration).
+    private static func subjectDebtPredicate(includingPipelines pipelines: [String]) -> StoragePredicate {
+        var subjectClauses: [StoragePredicate] = [
+            .isNull(Column(table: "drawers", name: "subject"))
+        ]
+        for pipeline in pipelines {
+            subjectClauses.append(
+                .eq(Column(table: "drawers", name: "subject_pipeline_version"),
+                    .text(pipeline)))
+        }
+        return .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(Column(table: "drawers", name: "content"), .text("")),
+            .or(subjectClauses),
+        ])
+    }
+
     /// Presence debt, NULL-only (PR-09): live rows with non-empty content
     /// and NO subject at all — the subject-backfill drain lane's
     /// `pending` and the strict complement of what any producer has
@@ -4976,32 +4999,42 @@ public actor DrawerStore {
     /// which adds producer-version mismatches (regeneration debt).
     /// Projected to `id` only. Mirrors Rust `count_subject_debt`.
     public func countSubjectDebt() async throws -> Int {
+        try await countSubjectDebt(includingPipelines: [])
+    }
+
+    /// Tier-aware debt count (PR-10): NULL rows plus rows produced under
+    /// any of `includingPipelines`. Mirrors Rust
+    /// `count_subject_debt_including`.
+    public func countSubjectDebt(includingPipelines pipelines: [String]) async throws -> Int {
         let rows = try await storage.rowStore.query(
             table: "drawers",
-            where: .and([
-                .isNull(Column(table: "drawers", name: "tombstonedAt")),
-                .neq(Column(table: "drawers", name: "content"), .text("")),
-                .isNull(Column(table: "drawers", name: "subject")),
-            ]),
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
             orderBy: [], limit: nil, offset: nil, columns: ["id"]
         )
         return rows.count
     }
 
     /// The subject-backfill sweep enumerator (PR-09): up to `limit`
-    /// subject-debt rows (same predicate as `countSubjectDebt`) in
-    /// deterministic filedAt-then-id order, fully hydrated so the
-    /// producer can read `content`. Settled-work skip is structural —
-    /// a row whose subject was written no longer matches the predicate,
-    /// so reruns never revisit it. Mirrors Rust `subject_debt_batch`.
+    /// subject-debt rows in deterministic filedAt-then-id order, fully
+    /// hydrated so the producer can read `content`. Settled-work skip is
+    /// structural — a row whose subject was written no longer matches
+    /// the predicate, so reruns never revisit it. Mirrors Rust
+    /// `subject_debt_batch`.
     public func subjectDebtBatch(limit: Int) async throws -> [Drawer] {
+        try await subjectDebtBatch(limit: limit, includingPipelines: [])
+    }
+
+    /// Tier-aware sweep enumerator (PR-10). NULL rows plus rows produced
+    /// under any of `includingPipelines` — a written minillm-v1 subject
+    /// leaves the predicate (the producer's own tier is never in its
+    /// list), so settled-skip still holds. Mirrors Rust
+    /// `subject_debt_batch_including`.
+    public func subjectDebtBatch(
+        limit: Int, includingPipelines pipelines: [String]
+    ) async throws -> [Drawer] {
         let rows = try await storage.rowStore.query(
             table: "drawers",
-            where: .and([
-                .isNull(Column(table: "drawers", name: "tombstonedAt")),
-                .neq(Column(table: "drawers", name: "content"), .text("")),
-                .isNull(Column(table: "drawers", name: "subject")),
-            ]),
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
             orderBy: [
                 OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
                 OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),

@@ -598,3 +598,123 @@ struct LensToolsSecurityTests {
             arguments: .object(["limit": .integer(999_999)]))
     }
 }
+
+// MARK: - PR-05 Part A: concepts extent addresses (address-follow test)
+
+extension LensToolsTests {
+
+    /// Verifies the progressive-recall invariant for `moot_lens_concepts`:
+    /// every drawer id listed in an extent row is a real captured drawer that
+    /// `moot_memory_get` can hydrate. This proves the output is addressable,
+    /// not just a count.
+    @Test func conceptsExtentIDsAreHydratable() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "fc-hydr"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture four drawers sharing room, kind, and channel so they
+        // form a formal concept with a multi-drawer extent.
+        var capturedIDs: [String] = []
+        for i in 1...4 {
+            capturedIDs.append(
+                try await capture(kit, handle,
+                    content: "concept evidence \(i)", room: "study"))
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_concepts",
+            arguments: .object([:]))
+
+        let body = try text(result)
+
+        // At least one captured drawer ID must appear in an extent line
+        // (progressive-recall rule: every listed ID is a follow-up address).
+        guard let knownID = capturedIDs.first(where: { body.contains($0) }) else {
+            Issue.record(
+                "moot_lens_concepts output contains no captured drawer ID;\n\(body)")
+            return
+        }
+
+        // The ID must be hydratable via the memory_get boundary.
+        let getResult = try await dispatcher.runMemoryGet(["id": .string(knownID)])
+        let getObj = try #require(getResult.objectValue)
+        #expect(getObj["isError"]?.boolValue != true,
+            "concepts extent drawer id \(knownID) must be hydratable via moot_memory_get")
+    }
+}
+
+// MARK: - PR-05 Part B: dense-row golden tests (byte-identical renderer)
+
+extension LensToolsTests {
+
+    /// Golden test: `moot_lens_trust_synthesis` row strings match
+    /// `DenseRow.render` byte-for-byte. Both paths (the lens and the
+    /// test) call `estate.getDrawers(ids:hydrationLevel:.structured)` then
+    /// `DenseRow.render` — identical inputs must produce identical strings.
+    @Test func trustSynthesisDenseRowsMatchRenderer() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ts-golden"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture a drawer that surfaces in trust_synthesis.
+        let id = try await capture(kit, handle,
+            content: "golden trust memory", room: "study")
+
+        // Hydrate at structured level — the same level RecipeTools.denseRowsByID
+        // uses — then render. This is the reference string.
+        let estate = try await kit.estate(for: handle)
+        let drawers = try await estate.getDrawers(ids: [id], hydrationLevel: .structured)
+        let drawer = try #require(drawers.first,
+            "captured drawer must be fetchable at structured hydration level")
+        let expectedRow = DenseRow.render(drawer)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_trust_synthesis",
+            arguments: .object(["filter": .string("unconfirmed")]))
+
+        let body = try text(result)
+        // Each ranked drawer appears as two-space-indented row in the output.
+        #expect(body.contains("  " + expectedRow),
+            "trust_synthesis output must contain the dense row byte-for-byte")
+    }
+
+    /// Golden test: `moot_lens_keystones` row strings match `DenseRow.render`
+    /// byte-for-byte for a hub drawer whose UUID is a real captured drawer.
+    /// Using a real drawer ensures `denseRowsByID` hydrates it fully rather
+    /// than falling back to `renderUnhydrated`.
+    @Test func keystonesDenseRowsMatchRenderer() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ks-golden"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture the hub and spoke drawers.
+        let hubID = try await capture(kit, handle, content: "hub memory", room: "study")
+        let s1ID = try await capture(kit, handle, content: "spoke one", room: "study")
+        let s2ID = try await capture(kit, handle, content: "spoke two", room: "study")
+        let s3ID = try await capture(kit, handle, content: "spoke three", room: "study")
+
+        // Three outbound tunnels from hubID make it the top-ranked keystone.
+        for spokeID in [s1ID, s2ID, s3ID] {
+            try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
+        }
+
+        // Compute the expected dense row via the same path the lens uses:
+        // structured hydration + DenseRow.render.
+        let estate = try await kit.estate(for: handle)
+        let drawers = try await estate.getDrawers(ids: [hubID], hydrationLevel: .structured)
+        let hubDrawer = try #require(drawers.first,
+            "hub drawer must be fetchable at structured hydration level")
+        let expectedRow = DenseRow.render(hubDrawer)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_keystones",
+            arguments: .object(["wing": .string("study")]))
+
+        let body = try text(result)
+        #expect(body.contains(expectedRow),
+            "keystones output must contain the hub's dense row byte-for-byte")
+    }
+}

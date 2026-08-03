@@ -31,6 +31,20 @@ public protocol SubjectProducer: Sendable {
     /// against `SubjectRegister` before writing; inadmissible output is
     /// counted and skipped, never stored.
     func subject(forContent content: String) async throws -> String
+
+    /// The pipeline tiers this producer is allowed to REGENERATE, in
+    /// addition to NULL rows (PR-10). The trust ladder is enforced by
+    /// construction: a producer lists only tiers BELOW itself — the
+    /// Apple miniLLM rider lists the deterministic tiers
+    /// (consolidation-v1, seed-v1) and never ai-v1, so filing-AI
+    /// subjects are simply never enumerated for it. Default: empty
+    /// (NULL-only, the PR-09 behavior).
+    var regeneratesPipelines: [String] { get }
+}
+
+extension SubjectProducer {
+    /// NULL-only by default — regeneration is an explicit opt-in.
+    public var regeneratesPipelines: [String] { [] }
 }
 
 /// One sweep's outcome. All counts are per-call (bounded by the batch
@@ -87,7 +101,8 @@ extension GeniusLocusKit {
                     + "use the interactive backfill (missing_subject → setSubject)")
         }
         let estate = try estate(for: handle)
-        let batch = try await estate.subjectDebtBatch(limit: batchLimit)
+        let batch = try await estate.subjectDebtBatch(
+            limit: batchLimit, includingPipelines: producer.regeneratesPipelines)
         var written = 0
         var skipped = 0
         for drawer in batch {
@@ -106,7 +121,8 @@ extension GeniusLocusKit {
                 at: now)
             written += 1
         }
-        let remaining = try await estate.countSubjectDebt()
+        let remaining = try await estate.countSubjectDebt(
+            includingPipelines: producer.regeneratesPipelines)
         return SubjectBackfillReport(
             written: written,
             skippedInadmissible: skipped,

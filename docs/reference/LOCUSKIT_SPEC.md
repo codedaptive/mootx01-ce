@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.12.0
+version: 1.13.0
 status: active
 date: 2026-08-02
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -990,6 +990,18 @@ NULL-together lifecycle.
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.13.0 -- 2026-08-02
+
+Regeneration tiers (progressive recall PR-10). § 14 addition B-25: the
+tier-aware debt predicate (subject NULL OR pipeline ∈ a producer's
+regeneration list) enforces the trust ladder BY CONSTRUCTION — a
+producer lists only tiers below itself, so ai-v1 rows are never
+enumerated for the model rider and a producer's own tier is its settled
+work. `countSubjectDebt(includingPipelines:)` /
+`subjectDebtBatch(limit:includingPipelines:)` with Rust twins
+`count_subject_debt_including` / `subject_debt_batch_including`;
+zero-arg forms unchanged (NULL-only).
 
 ### 1.12.0 -- 2026-08-02
 

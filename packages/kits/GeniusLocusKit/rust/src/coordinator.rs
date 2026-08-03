@@ -926,6 +926,14 @@ pub trait SubjectProducer: Send + Sync {
     /// against `locus_kit::subject_register` before writing;
     /// inadmissible output is counted and skipped, never stored.
     fn subject_for_content(&self, content: &str) -> Result<String, String>;
+
+    /// The pipeline tiers this producer is allowed to REGENERATE, in
+    /// addition to NULL rows (PR-10). Trust ladder by construction: a
+    /// producer lists only tiers BELOW itself — never ai-v1, never its
+    /// own tier. Default: empty (NULL-only, the PR-09 behavior).
+    fn regenerates_pipelines(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One subject-backfill sweep's outcome. Counts are per-call except
@@ -1842,11 +1850,11 @@ impl EstateCoordinator {
         // 0 — sweeps are synchronous bounded batches, never a queue.
         // Mirrors the Swift drainStatuses entry.
         if let Some(producer) = self.subject_producers.get(handle) {
-            let debt = estate.count_subject_debt().map_err(|e| {
-                GeniusLocusKitError::UnderlyingEstateFailure {
+            let debt = estate
+                .count_subject_debt_including(&producer.regenerates_pipelines())
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!("count_subject_debt: {e:?}"),
-                }
-            })?;
+                })?;
             statuses.push(DrainStatus {
                 name: DrainStatus::SUBJECT_BACKFILL_NAME.to_string(),
                 pending: debt,
@@ -1905,11 +1913,11 @@ impl EstateCoordinator {
             });
         };
         let estate = self.estate_for(handle)?;
-        let batch = estate.subject_debt_batch(batch_limit).map_err(|e| {
-            GeniusLocusKitError::UnderlyingEstateFailure {
+        let batch = estate
+            .subject_debt_batch_including(batch_limit, &producer.regenerates_pipelines())
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("subject_debt_batch: {e:?}"),
-            }
-        })?;
+            })?;
         let mut written = 0usize;
         let mut skipped = 0usize;
         for drawer in &batch {
@@ -1936,11 +1944,11 @@ impl EstateCoordinator {
                 })?;
             written += 1;
         }
-        let remaining = estate.count_subject_debt().map_err(|e| {
-            GeniusLocusKitError::UnderlyingEstateFailure {
+        let remaining = estate
+            .count_subject_debt_including(&producer.regenerates_pipelines())
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("count_subject_debt: {e:?}"),
-            }
-        })?;
+            })?;
         Ok(SubjectBackfillReport {
             written,
             skipped_inadmissible: skipped,

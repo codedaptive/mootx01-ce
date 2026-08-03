@@ -168,7 +168,8 @@ extension GeniusLocusKit {
         // the distillation lane's; `in_flight` is 0 — sweeps are
         // synchronous bounded batches, never a queue.
         if let producer = subjectProducers[handle] {
-            let debt = try await estate.countSubjectDebt()
+            let debt = try await estate.countSubjectDebt(
+                includingPipelines: producer.regeneratesPipelines)
             statuses.append(DrainStatus(
                 name: DrainStatus.subjectBackfillName,
                 pending: debt,

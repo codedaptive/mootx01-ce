@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.18.0
+version: 1.19.0
 status: accepted-1.1-target
 date: 2026-07-30
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
@@ -1894,6 +1894,23 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.19.0 -- 2026-08-02
+
+Apple miniLLM subject rider (progressive recall PR-10) — the sanctioned
+miniLLM feature's first landing, single-function by doctrine (subjects
+only). `MiniLLMSubjectProducer` runs on the first-party on-device
+Foundation Models surface (Apple-first, migrate-when-able), gated by
+`canImport` + availability; output post-passed and admitted ONLY
+through the SubjectRegister gate (a misbehaving model degrades to
+no-op). Enablement is user-settable via `enableAppleSubjectRider(for:)`
+(the tagger precedent — never silently mandatory; nothing
+auto-registers, pinned by the dark-default tests). Trust ladder:
+`SubjectProducer.regeneratesPipelines` (default empty) — the Apple
+rider regenerates only consolidation-v1/seed-v1; ai-v1 rows are never
+overwritten. Rust: `regenerates_pipelines` trait default; lane still
+dark. Verified live on-device where the model is present (conditional
+test).
 
 ### 1.18.0 -- 2026-08-02
 

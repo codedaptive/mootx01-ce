@@ -1464,6 +1464,19 @@ impl Estate {
         self.store.subject_debt_batch(limit)
     }
 
+    /// Tier-aware variants (PR-10). See the DrawerStore twins.
+    pub fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.store.count_subject_debt_including(pipelines)
+    }
+
+    pub fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.subject_debt_batch_including(limit, pipelines)
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is

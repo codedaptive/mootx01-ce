@@ -121,3 +121,58 @@ struct SubjectBackfillCycleTests {
                 "inadmissible output must never be stored")
     }
 }
+
+/// Producer with regeneration tiers (PR-10 shape) — regenerates the
+/// deterministic tiers, never ai-v1.
+private struct TieredStubProducer: SubjectProducer {
+    let pipelineVersion = "tiered-stub-v1"
+    let regeneratesPipelines = ["consolidation-v1", "seed-v1"]
+    func subject(forContent content: String) async throws -> String {
+        String(content.split(separator: "\n").first.map(String.init)!.prefix(120))
+    }
+}
+
+extension SubjectBackfillCycleTests {
+
+    /// PR-10 trust ladder through the sweep: NULL + deterministic-tier
+    /// rows regenerate; ai-v1 rows are untouched; the producer's writes
+    /// carry its own tier.
+    @Test func tieredSweepRegeneratesBelowTiersAndNeverAIV1() async throws {
+        let (kit, handle, estate) = try await openEstate(owner: "tiered-sweep")
+        defer { Task { try? await kit.close(handle) } }
+        // One NULL row.
+        try await seedDebt(kit, handle, count: 1)
+        // One ai-v1 row and one consolidation-v1 row.
+        let all = try await estate.allDrawers()
+        let nullID = all[0].id
+        let frame = CaptureFrame(
+            content: "Filing-AI authored row.", channel: .typed,
+            room: "backfill-tests", latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "subject-backfill-tests", embeddingModelID: "test-model-v1",
+            subject: "Filing-AI subject stays untouched.")
+        let aiDrawer = try await kit.capture(handle, frame)
+        let consFrame = CaptureFrame(
+            content: "Deterministic writer row.", channel: .typed,
+            room: "backfill-tests", latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "subject-backfill-tests", embeddingModelID: "test-model-v1")
+        let consDrawer = try await kit.capture(handle, consFrame)
+        _ = try await estate.setSubjectRepresentation(
+            drawerId: consDrawer.id,
+            subject: "Deterministic vague subject.",
+            pipelineVersion: "consolidation-v1",
+            at: Date())
+
+        try await kit.registerSubjectProducer(TieredStubProducer(), for: handle)
+        let report = try await kit.subjectBackfillSweep(handle, batchLimit: 10, now: Date())
+        #expect(report.written == 2, "NULL + consolidation-v1 regenerate: \(report)")
+        #expect(report.remainingDebt == 0)
+
+        let after = Dictionary(uniqueKeysWithValues:
+            try await estate.allDrawers().map { ($0.id, $0) })
+        #expect(after[aiDrawer.id]?.subjectPipelineVersion == "ai-v1",
+                "ai-v1 outranks the model — never overwritten")
+        #expect(after[aiDrawer.id]?.subject == "Filing-AI subject stays untouched.")
+        #expect(after[consDrawer.id]?.subjectPipelineVersion == "tiered-stub-v1")
+        #expect(after[nullID]?.subjectPipelineVersion == "tiered-stub-v1")
+    }
+}

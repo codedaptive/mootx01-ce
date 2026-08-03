@@ -736,6 +736,29 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Tier-aware debt count (PR-10): NULL rows plus rows produced under
+    /// any of `pipelines` (the tiers BELOW the requesting producer on
+    /// the trust ladder). Mirrors Swift
+    /// `countSubjectDebt(includingPipelines:)`.
+    fn count_subject_debt_including(&self, _pipelines: &[String]) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_subject_debt_including not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Tier-aware sweep enumerator (PR-10). A producer's own tier is
+    /// never in its list, so settled-skip still holds. Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:)`.
+    fn subject_debt_batch_including(
+        &self,
+        _limit: usize,
+        _pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "subject_debt_batch_including not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // ── Wave-2 vague tier methods (SPEC_CONSOLIDATION_VAGUE_RECALL §3.2, §4.4, §5.1) ──
 
     /// Atomically consolidate N constituents into a pre-built vague drawer.
@@ -2175,6 +2198,16 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().subject_debt_batch(limit)
+    }
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.as_ref().count_subject_debt_including(pipelines)
+    }
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().subject_debt_batch_including(limit, pipelines)
     }
     fn seal_expunge_audit(
         &self,

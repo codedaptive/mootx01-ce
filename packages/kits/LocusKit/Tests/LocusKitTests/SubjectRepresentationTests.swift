@@ -292,3 +292,60 @@ struct SubjectRepresentationTests {
         #expect(missing == 2)  // d1 (NULL) + d3 (version mismatch)
     }
 }
+
+// MARK: - Tier-aware debt enumeration (PR-10)
+
+extension SubjectRepresentationTests {
+
+    /// The regeneration ladder by construction: NULL rows and listed
+    /// tiers enumerate; ai-v1 (above the requester) and the requester's
+    /// own tier never do. Twin: Rust `tier_aware_debt_enumeration`.
+    @Test func tierAwareDebtEnumeration() async throws {
+        let store = try await freshStore()
+        // Four rows: NULL, ai-v1, consolidation-v1, minillm-v1.
+        let nullID = try await addSample(store, content: "row without subject")
+        let aiID = try await addSample(store, content: "row by the filing AI")
+        _ = try await store.setSubjectRepresentation(
+            drawerId: aiID, subject: "Filing-AI subject.",
+            pipelineVersion: "ai-v1", at: Date())
+        let consID = try await addSample(store, content: "row by consolidation")
+        _ = try await store.setSubjectRepresentation(
+            drawerId: consID, subject: "Deterministic vague subject.",
+            pipelineVersion: "consolidation-v1", at: Date())
+        let modelID = try await addSample(store, content: "row by the model")
+        _ = try await store.setSubjectRepresentation(
+            drawerId: modelID, subject: "Model subject.",
+            pipelineVersion: "minillm-v1", at: Date())
+
+        // NULL-only (the PR-09 default): just the NULL row.
+        #expect(try await store.countSubjectDebt() == 1)
+        let nullOnly = try await store.subjectDebtBatch(limit: 10)
+        #expect(nullOnly.map(\.id) == [nullID])
+
+        // The Apple rider's view: NULL + the deterministic tiers;
+        // ai-v1 and minillm-v1 NEVER enumerate.
+        let riderView = try await store.subjectDebtBatch(
+            limit: 10, includingPipelines: ["consolidation-v1", "seed-v1"])
+        #expect(Set(riderView.map(\.id)) == Set([nullID, consID]))
+        #expect(try await store.countSubjectDebt(
+            includingPipelines: ["consolidation-v1", "seed-v1"]) == 2)
+    }
+
+    private func freshStore() async throws -> DrawerStore {
+        // Same SQLite temp-file harness the rest of this suite uses.
+        let (store, _) = try await makeStore()
+        return store
+    }
+
+    private func addSample(_ store: DrawerStore, content: String) async throws -> String {
+        let d = Drawer(
+            content: content,
+            parentNodeId: UUID().uuidString,
+            addedBy: "tier-tests",
+            filedAt: Date(),
+            embeddingModelID: "test-v1",
+            udcCode: "001")
+        try await store.addDrawer(d, now: Date())
+        return d.id
+    }
+}

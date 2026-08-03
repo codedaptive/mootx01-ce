@@ -535,6 +535,17 @@ public actor Estate {
         try await store.subjectDebtBatch(limit: limit)
     }
 
+    /// Tier-aware variants (PR-10). See the DrawerStore twins.
+    public func countSubjectDebt(includingPipelines pipelines: [String]) async throws -> Int {
+        try await store.countSubjectDebt(includingPipelines: pipelines)
+    }
+
+    public func subjectDebtBatch(
+        limit: Int, includingPipelines pipelines: [String]
+    ) async throws -> [Drawer] {
+        try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines)
+    }
+
     // MARK: - Drawer enumeration
 
     /// Enumerate every drawer in the estate. Used by cross-row
