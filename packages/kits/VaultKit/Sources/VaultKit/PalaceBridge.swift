@@ -53,8 +53,15 @@ public struct PalaceBridge: Sendable {
     private static let drawersCollection = "mempalace_drawers"
     private static let closetsCollection = "mempalace_closets"
 
-    public init(kit: GeniusLocusKit) {
+    /// The ceilings this bridge enforces on an untrusted palace root.
+    /// Identical defaults to `MemPalaceChromaAdapter.limits` — the two
+    /// entry points read the same palaces and must not disagree about
+    /// what is too large.
+    public var limits: MemPalaceImportLimits
+
+    public init(kit: GeniusLocusKit, limits: MemPalaceImportLimits = .default) {
         self.kit = kit
+        self.limits = limits
     }
 
     // MARK: - Public API
@@ -89,10 +96,22 @@ public struct PalaceBridge: Sendable {
         // existingTunnelSignatures snapshot. Without this, a re-import would not
         // find tunnels created by a prior import (their sourceWing comes from
         // the JSON, not from the drawer wing set).
+        //
+        // The palace root is UNTRUSTED input (see the trust-posture note
+        // at the top of MemPalaceChromaAdapter). One budget covers this
+        // whole import — the tunnels.json size check below and every
+        // SQLite read further down — so the row and byte ceilings are
+        // totals for the import rather than a fresh allowance per store.
+        let budget = MemPalaceImportBudget(limits: limits)
         let tunnelsURL = palaceRoot
             .appendingPathComponent(MemPalaceChromaAdapter.tunnelsRelativePath)
         var preloadedTunnelRecords: [MemPalaceChromaAdapter.TunnelRecord] = []
         if FileManager.default.fileExists(atPath: tunnelsURL.path) {
+            // Charged from the filesystem size BEFORE the file is opened,
+            // so an oversized tunnels.json is never read into memory.
+            try budget.chargeTunnelsFile(
+                byteCount: MemPalaceChromaAdapter.fileByteCount(at: tunnelsURL),
+                path: tunnelsURL.path)
             let data = try Data(contentsOf: tunnelsURL)
             do {
                 preloadedTunnelRecords = try JSONDecoder().decode(
@@ -145,7 +164,7 @@ public struct PalaceBridge: Sendable {
         let chromaPath = palaceRoot
             .appendingPathComponent(MemPalaceChromaAdapter.chromaRelativePath).path
         if FileManager.default.fileExists(atPath: chromaPath) {
-            let db = try SQLiteReadOnly(path: chromaPath)
+            let db = try SQLiteReadOnly(path: chromaPath, budget: budget)
             // Gather all chroma rows across both collections up front so the
             // progress callback can report a real total instead of 0. The
             // rows are materialized once (no double read).
@@ -247,7 +266,7 @@ public struct PalaceBridge: Sendable {
         let kgPath = palaceRoot
             .appendingPathComponent(MemPalaceChromaAdapter.knowledgeGraphRelativePath).path
         if FileManager.default.fileExists(atPath: kgPath) {
-            let db = try SQLiteReadOnly(path: kgPath)
+            let db = try SQLiteReadOnly(path: kgPath, budget: budget)
 
             // KG entities: each entity becomes a drawer in knowledge_graph/entities.
             for row in try db.query(

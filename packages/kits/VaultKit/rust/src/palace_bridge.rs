@@ -40,7 +40,8 @@ use uuid::Uuid;
 use crate::drawer_mapping::{iso8601_to_ms, ms_to_iso8601, DrawerMapping};
 use crate::error::VaultKitError;
 use crate::mem_palace_chroma_adapter::{
-    canonical_iso8601_from_mem_palace, metadata_rows, metadata_segment_id,
+    canonical_iso8601_from_mem_palace, file_byte_count, metadata_rows, metadata_segment_id,
+    MemPalaceImportBudget, MemPalaceImportLimits,
     CHROMA_RELATIVE_PATH, KNOWLEDGE_GRAPH_RELATIVE_PATH, TUNNELS_RELATIVE_PATH,
 };
 use crate::vault_bridge::ImportReport;
@@ -104,12 +105,30 @@ struct TunnelEndpoint {
 
 pub struct PalaceBridge<'a> {
     coordinator: &'a mut EstateCoordinator,
+    /// The ceilings this bridge enforces on an untrusted palace root.
+    /// Identical defaults to `MemPalaceChromaAdapter::limits` — the two
+    /// entry points read the same palaces and must not disagree about what
+    /// is too large. Mirrors Swift `PalaceBridge.limits`.
+    limits: MemPalaceImportLimits,
 }
 
 impl<'a> PalaceBridge<'a> {
-    /// Create a new `PalaceBridge` wrapping the given coordinator.
+    /// Create a new `PalaceBridge` wrapping the given coordinator, at the
+    /// shipping import limits.
     pub fn new(coordinator: &'a mut EstateCoordinator) -> Self {
-        Self { coordinator }
+        Self {
+            coordinator,
+            limits: MemPalaceImportLimits::default(),
+        }
+    }
+
+    /// Create a new `PalaceBridge` with explicit import limits, for a caller
+    /// that has a known-good oversized palace.
+    pub fn with_limits(
+        coordinator: &'a mut EstateCoordinator,
+        limits: MemPalaceImportLimits,
+    ) -> Self {
+        Self { coordinator, limits }
     }
 
     /// Import all three MemPalace stores at `palace_root` into `handle`.
@@ -141,7 +160,12 @@ impl<'a> PalaceBridge<'a> {
         // are included in existingTunnelSignatures. Without this a re-import
         // would not find tunnels created by a prior import because their
         // sourceWing comes from the JSON, not from the drawer wing set.
-        let tunnel_records = self.read_tunnel_records(palace_root)?;
+        //
+        // ONE budget covers this whole import — the tunnels.json size check
+        // and every SQLite read below — so the row and byte ceilings are
+        // totals for the import rather than a fresh allowance per store.
+        let mut budget = MemPalaceImportBudget::new(self.limits);
+        let tunnel_records = self.read_tunnel_records(palace_root, &mut budget)?;
         let tunnel_source_wings: HashSet<String> =
             tunnel_records.iter().map(|r| r.source.wing.clone()).collect();
 
@@ -179,6 +203,9 @@ impl<'a> PalaceBridge<'a> {
         if chroma_path.exists() {
             let conn = Connection::open_with_flags(&chroma_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| VaultKitError::AdapterError(format!("chroma.sqlite3: {e}")))?;
+            // The palace root is untrusted: abandon a query that burns VM
+            // steps without returning rows.
+            budget.install_progress_guard(&conn);
             // Gather all chroma rows across both collections up front so the
             // progress callback can report a real total instead of 0. The
             // rows are materialized once (no double read).
@@ -186,13 +213,13 @@ impl<'a> PalaceBridge<'a> {
             for (collection, is_closet) in
                 &[(DRAWERS_COLLECTION, false), (CLOSETS_COLLECTION, true)]
             {
-                let seg_id = match metadata_segment_id(&conn, collection).map_err(|e| {
+                let seg_id = match metadata_segment_id(&conn, collection, &mut budget).map_err(|e| {
                     VaultKitError::AdapterError(format!("segment_id: {e}"))
                 })? {
                     Some(id) => id,
                     None => continue,
                 };
-                let rows = metadata_rows(&conn, &seg_id)
+                let rows = metadata_rows(&conn, &seg_id, &mut budget)
                     .map_err(|e| VaultKitError::AdapterError(format!("metadata_rows: {e}")))?;
                 for (embedding_id, metadata) in rows {
                     all_rows.push((embedding_id, metadata, *is_closet));
@@ -867,11 +894,20 @@ impl<'a> PalaceBridge<'a> {
 
     // MARK: - Pre-read tunnels.json
 
-    fn read_tunnel_records(&self, palace_root: &Path) -> Result<Vec<TunnelRecord>, VaultKitError> {
+    fn read_tunnel_records(
+        &self,
+        palace_root: &Path,
+        budget: &mut MemPalaceImportBudget,
+    ) -> Result<Vec<TunnelRecord>, VaultKitError> {
         let tunnels_path = palace_root.join(TUNNELS_RELATIVE_PATH);
         if !tunnels_path.exists() {
             return Ok(vec![]);
         }
+        // Charged from the filesystem size BEFORE the file is opened, so an
+        // oversized tunnels.json is never read into memory. Same constant and
+        // same message as the adapter path — this is the LIVE import path, so
+        // leaving it unbounded would close the finding on paper only.
+        budget.charge_tunnels_file(file_byte_count(&tunnels_path), &tunnels_path)?;
         let data = std::fs::read(&tunnels_path)
             .map_err(|e| VaultKitError::AdapterError(format!("tunnels.json read: {e}")))?;
         serde_json::from_slice(&data).map_err(|e| {

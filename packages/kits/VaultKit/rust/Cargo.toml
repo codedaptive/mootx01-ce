@@ -37,9 +37,16 @@ path = "src/lib.rs"
 #     territory and belongs to the adapter (same boundary as
 #     ExchangeAdapter's JSON parsing). Recorded in the lane's field-mapping
 #     contract (docs/reference/VAULTKIT_INTERFACE.md, MemPalace adapter).
+#     The "hooks" feature enables rusqlite's Connection::progress_handler,
+#     which the adapter installs so a query against an UNTRUSTED palace can
+#     be abandoned instead of running to completion (see the trust-posture
+#     note in mem_palace_chroma_adapter.rs). The Swift port calls the same
+#     SQLite C entry point, sqlite3_progress_handler, directly. This is a
+#     feature flag on a dependency already declared here, not a new external
+#     dependency — the same pattern as persistence-kit enabling "limits".
 [dependencies]
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
 locus-kit = { path = "../../LocusKit/rust" }
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
