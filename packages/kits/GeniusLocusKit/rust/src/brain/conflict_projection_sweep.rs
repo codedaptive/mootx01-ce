@@ -214,7 +214,12 @@ mod tests {
         let report = run_sweep(
             &facts,
             &seconds(&[("d1", 500), ("d2", 500)]),
-            &seconds(&[("d1", 0), ("d2", 6)]),
+            // Real tiers, not arbitrary integers: only a defined tier
+            // exercises the ceiling the proposal loop compares against.
+            &seconds(&[
+                ("d1", AdjectiveSensitivity::Normal.raw_value()),
+                ("d2", AdjectiveSensitivity::Restricted.raw_value()),
+            ]),
             &HashSet::new(),
             &ConflictRuleRegistry::v01(),
             SWEEP_DEFAULT_BUCKET_CAP,
@@ -224,8 +229,14 @@ mod tests {
         assert_eq!(report.proven.len(), 1);
         let finding = &report.proven[0];
         assert_eq!(finding.outcome.kind, ConflictOutcomeKind::ProvenContradiction);
-        // Ceiling is the MAX endpoint sensitivity (d2's 6).
-        assert_eq!(finding.sensitivity_ceiling_raw, 6);
+        // Ceiling is the MAX endpoint sensitivity — d2's restricted tier.
+        assert_eq!(
+            finding.sensitivity_ceiling_raw,
+            AdjectiveSensitivity::Restricted.raw_value()
+        );
+        // And that is above the ceiling the proposal loop enforces, so
+        // this finding is provable but not proposable.
+        assert!(finding.sensitivity_ceiling_raw > AdjectiveSensitivity::Elevated.raw_value());
         assert_eq!(
             finding.outcome.source_drawer_ids,
             vec!["d1".to_string(), "d2".to_string()]
@@ -286,6 +297,52 @@ mod tests {
         assert_eq!(fwd.proven.len(), 1);
         assert_eq!(rev.proven.len(), 1);
         assert_eq!(fwd.proven[0].outcome.result_id, rev.proven[0].outcome.result_id);
+    }
+
+    /// Trap 2 — an endpoint whose sensitivity could not be resolved yields
+    /// the MAXIMUM ceiling, not Normal. That is the value the proposal gate
+    /// reads, so a hydration gap can no longer produce a proposal for a row
+    /// of unknown sensitivity.
+    ///
+    /// Asserted at the pure core rather than end-to-end on purpose: in the
+    /// coordinator seam a drawer that fails to hydrate also fails the
+    /// proposal loop's endpoint-resolution guard, so an end-to-end test
+    /// would pass for the wrong reason and could not distinguish a
+    /// fail-closed ceiling from a fail-open one.
+    #[test]
+    fn unresolved_endpoint_sensitivity_fails_closed() {
+        let facts = vec![
+            fact("f1", "Sarah Chen C0", "Acme Robotics", "d1"),
+            fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+        ];
+        let times = seconds(&[("d1", 500), ("d2", 500)]);
+        let reg = ConflictRuleRegistry::v01();
+        let secret_raw = AdjectiveSensitivity::Secret.raw_value();
+
+        // Neither endpoint resolvable.
+        let both = run_sweep(
+            &facts,
+            &times,
+            &HashMap::new(),
+            &HashSet::new(),
+            &reg,
+            SWEEP_DEFAULT_BUCKET_CAP,
+        );
+        assert_eq!(both.proven.len(), 1);
+        assert_eq!(both.proven[0].sensitivity_ceiling_raw, secret_raw);
+
+        // One resolvable NORMAL endpoint must not pull the ceiling down —
+        // the unresolved side still dominates the MAX.
+        let one = run_sweep(
+            &facts,
+            &times,
+            &seconds(&[("d1", AdjectiveSensitivity::Normal.raw_value())]),
+            &HashSet::new(),
+            &reg,
+            SWEEP_DEFAULT_BUCKET_CAP,
+        );
+        assert_eq!(one.proven[0].sensitivity_ceiling_raw, secret_raw);
+        assert!(one.proven[0].sensitivity_ceiling_raw > AdjectiveSensitivity::Elevated.raw_value());
     }
 
     /// Mixed outcomes tally into the additive count lines; agreement and

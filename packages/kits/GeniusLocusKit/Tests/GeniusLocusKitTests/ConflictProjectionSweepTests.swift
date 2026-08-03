@@ -37,7 +37,12 @@ struct ConflictProjectionSweepTests {
                 Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
             ],
             eventTimeSecondsBySourceDrawer: ["d1": 500, "d2": 500],
-            sensitivityRawBySourceDrawer: ["d1": 0, "d2": 6],
+            // Real tiers, not arbitrary integers: only a defined tier
+            // exercises the ceiling the proposal loop compares against.
+            sensitivityRawBySourceDrawer: [
+                "d1": AdjectiveSensitivity.normal.rawValue,
+                "d2": AdjectiveSensitivity.restricted.rawValue,
+            ],
             acceptedSupersessionPairs: [],
             registry: .v01)
         #expect(report.pairsEvaluated == 1)
@@ -45,8 +50,11 @@ struct ConflictProjectionSweepTests {
         #expect(report.proven.count == 1)
         let finding = try! #require(report.proven.first)
         #expect(finding.outcome.kind == .provenContradiction)
-        // Ceiling is the MAX endpoint sensitivity (d2's 6).
-        #expect(finding.sensitivityCeilingRaw == 6)
+        // Ceiling is the MAX endpoint sensitivity — d2's restricted tier.
+        #expect(finding.sensitivityCeilingRaw == AdjectiveSensitivity.restricted.rawValue)
+        // And that is above the ceiling the proposal loop enforces, so
+        // this finding is provable but not proposable.
+        #expect(finding.sensitivityCeilingRaw > AdjectiveSensitivity.elevated.rawValue)
         #expect(finding.outcome.sourceDrawerIDs == ["d1", "d2"])
     }
 
@@ -109,6 +117,43 @@ struct ConflictProjectionSweepTests {
         #expect(report.counts.candidateReview == 1)
         #expect(report.counts.provenContradiction == 0)
         #expect(report.proven.isEmpty)
+    }
+
+    /// Trap 2 — an endpoint whose sensitivity could not be resolved
+    /// yields the MAXIMUM ceiling, not `.normal`. That is the value the
+    /// proposal gate reads, so a hydration gap can no longer produce a
+    /// proposal for a row of unknown sensitivity.
+    ///
+    /// Asserted at the pure core rather than end-to-end on purpose: in the
+    /// estate seam a drawer that fails to hydrate also fails the proposal
+    /// loop's endpoint-resolution guard, so an end-to-end test would pass
+    /// for the wrong reason and could not distinguish a fail-closed
+    /// ceiling from a fail-open one.
+    @Test func unresolvedEndpointSensitivityFailsClosed() {
+        let facts = [
+            Self.fact("f1", "Sarah Chen C0", "Acme Robotics", "d1"),
+            Self.fact("f2", "Sarah Chen C0", "Beta Corp", "d2"),
+        ]
+        let times: [String: Int64] = ["d1": 500, "d2": 500]
+        let secretRaw = AdjectiveSensitivity.secret.rawValue
+
+        // Neither endpoint resolvable.
+        let both = ConflictSweepCore.run(
+            facts: facts, eventTimeSecondsBySourceDrawer: times,
+            sensitivityRawBySourceDrawer: [:],
+            acceptedSupersessionPairs: [], registry: .v01)
+        #expect(both.proven.count == 1)
+        #expect(both.proven.first?.sensitivityCeilingRaw == secretRaw)
+
+        // One resolvable NORMAL endpoint must not pull the ceiling down —
+        // the unresolved side still dominates the MAX.
+        let one = ConflictSweepCore.run(
+            facts: facts, eventTimeSecondsBySourceDrawer: times,
+            sensitivityRawBySourceDrawer: ["d1": AdjectiveSensitivity.normal.rawValue],
+            acceptedSupersessionPairs: [], registry: .v01)
+        #expect(one.proven.first?.sensitivityCeilingRaw == secretRaw)
+        #expect((one.proven.first?.sensitivityCeilingRaw ?? 0)
+                > AdjectiveSensitivity.elevated.rawValue)
     }
 
     // MARK: - Estate seam (end-to-end read path)

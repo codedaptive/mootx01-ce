@@ -55,6 +55,47 @@ struct ConflictTunnelLifecycleTests {
         return (drawer, report)
     }
 
+    /// Capture a drawer at `sensitivity` and file one employer claim from
+    /// it. Both claims in a ceiling test share one event time, so the
+    /// typed pair is concurrent (validity_overlap) and proves as a
+    /// contradiction — which is the point: the gate must act on a finding
+    /// the sweep genuinely proved, not on one it declined to prove.
+    private func plantEmployerClaim(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle,
+        content: String, employer: String,
+        sensitivity: AdjectiveSensitivity
+    ) async throws {
+        let drawer = try await kit.capture(handle, CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "tunnel-lifecycle-tests",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "tunnel-lifecycle-tests",
+            embeddingModelID: "test-model-v1",
+            sensitivity: sensitivity,
+            eventTime: Date(timeIntervalSince1970: 1_690_000_000)))
+        _ = try await kit.captureKGFact(
+            handle, subject: "Sarah Chen C0", predicate: "Employer",
+            object: employer, sourceDrawerID: drawer.id, now: Self.now)
+    }
+
+    /// Run one proposal pass over a proven employer contradiction whose
+    /// two source drawers carry `a` and `b`, returning the report and the
+    /// number of `contradicts` tunnels that actually reached the estate.
+    private func proposeForPair(
+        owner: String, _ a: AdjectiveSensitivity, _ b: AdjectiveSensitivity
+    ) async throws -> (ConflictTunnelProposalReport, Int) {
+        let (kit, handle, estate) = try await openEstate(owner: owner)
+        try await plantEmployerClaim(kit, handle, content: "Employer claim one.",
+                                     employer: "Acme Robotics", sensitivity: a)
+        try await plantEmployerClaim(kit, handle, content: "Employer claim two.",
+                                     employer: "Beta Corp", sensitivity: b)
+        let report = try await kit.proposeConflictTunnels(in: handle, now: Self.now)
+        let persisted = try await estate.allTunnels()
+            .filter { $0.kind == .contradicts }.count
+        return (report, persisted)
+    }
+
     /// F21 — two conflicting controlled transcripts produce EXACTLY ONE
     /// proposed contradicts tunnel; a second pass proposes nothing (the
     /// live tunnel suppresses).
@@ -168,6 +209,59 @@ struct ConflictTunnelLifecycleTests {
             lifecycle: .withdrawn))
         let pass = try await kit.proposeConflictTunnels(in: handle, now: Self.now)
         #expect(pass.proposedTunnelIDs.count == 1)
+    }
+
+    // MARK: - Sensitivity ceiling (Codex a21d636037ac81918d5c1b791b6fe210)
+
+    /// A proven contradiction between two RESTRICTED drawers produces no
+    /// proposal and no returned id, and persists no tunnel. The sweep
+    /// still PROVES the pair — the ceiling gates the write, not the
+    /// proving — and the skip is counted as a ceiling skip, never folded
+    /// into the dedup `suppressed` tally.
+    @Test func restrictedPairIsNeverProposed() async throws {
+        let (report, persisted) = try await proposeForPair(
+            owner: "tunnel-ceiling-restricted", .restricted, .restricted)
+        #expect(report.sweep.counts.provenContradiction == 1)
+        #expect(report.proposedTunnelIDs.isEmpty)
+        #expect(report.ceilingSkipped == 1)
+        #expect(report.suppressed == 0)
+        #expect(persisted == 0)
+    }
+
+    /// Same for SECRET — the tier above restricted is not a special case,
+    /// it is the same raw comparison.
+    @Test func secretPairIsNeverProposed() async throws {
+        let (report, persisted) = try await proposeForPair(
+            owner: "tunnel-ceiling-secret", .secret, .secret)
+        #expect(report.sweep.counts.provenContradiction == 1)
+        #expect(report.proposedTunnelIDs.isEmpty)
+        #expect(report.ceilingSkipped == 1)
+        #expect(report.suppressed == 0)
+        #expect(persisted == 0)
+    }
+
+    /// The MAX rule: the ceiling is the MORE sensitive endpoint, so one
+    /// normal endpoint does not rescue a restricted counterpart.
+    @Test func mixedNormalRestrictedPairIsNeverProposed() async throws {
+        let (report, persisted) = try await proposeForPair(
+            owner: "tunnel-ceiling-mixed", .normal, .restricted)
+        #expect(report.sweep.counts.provenContradiction == 1)
+        #expect(report.proposedTunnelIDs.isEmpty)
+        #expect(report.ceilingSkipped == 1)
+        #expect(persisted == 0)
+    }
+
+    /// The gate must not over-filter. Elevated is INSIDE the mineable
+    /// Normal tier (normal + elevated), so a normal/elevated pair still
+    /// proposes exactly one tunnel.
+    @Test func normalElevatedPairStillProposes() async throws {
+        let (report, persisted) = try await proposeForPair(
+            owner: "tunnel-ceiling-elevated", .normal, .elevated)
+        #expect(report.sweep.counts.provenContradiction == 1)
+        #expect(report.proposedTunnelIDs.count == 1)
+        #expect(report.ceilingSkipped == 0)
+        #expect(report.suppressed == 0)
+        #expect(persisted == 1)
     }
 
     /// F22 — a later `Replaces decision` transcript files an ACTIVE

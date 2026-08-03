@@ -9913,6 +9913,108 @@ mod tests {
         assert_eq!(report.proven[0].outcome.key, "decision:project-phoenix");
     }
 
+    // The Elevated sensitivity ceiling on typed proposals (Codex
+    // a21d636037ac81918d5c1b791b6fe210). Mirrors the Swift
+    // ConflictTunnelLifecycleTests ceiling cases: restricted, secret and
+    // mixed pairs are PROVEN by the sweep but never proposed and never
+    // persisted; a normal+elevated pair still proposes, so the gate does
+    // not over-filter the tier it is supposed to admit.
+    #[test]
+    fn conflict_proposal_respects_sensitivity_ceiling() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::kg_fact::KGFact;
+        use locus_kit::tunnel_operational::TunnelKind;
+
+        // Plant two conflicting employer claims whose source drawers carry
+        // the given sensitivities, run one proposal pass, and report both
+        // the pass result and how many contradicts tunnels actually reached
+        // the estate. Same event time on both drawers → validity overlap →
+        // the pair genuinely proves, which is what makes the gate the only
+        // thing that can stop the write.
+        let propose_for_pair = |sa: AdjectiveSensitivity, sb: AdjectiveSensitivity| {
+            let (coord, h) = open_one();
+            let estate = coord.estate_for(&h).expect("estate");
+            let mut frame_a = cap_frame("Employer claim one.");
+            frame_a.sensitivity = sa;
+            let mut frame_b = cap_frame("Employer claim two.");
+            frame_b.sensitivity = sb;
+            let a = coord.capture(&h, frame_a, NOW).unwrap();
+            let b = coord.capture(&h, frame_b, NOW).unwrap();
+            estate
+                .add_kg_fact(&KGFact::new(
+                    "fact-a".into(),
+                    "Sarah Chen C0".into(),
+                    "Employer".into(),
+                    "Acme Robotics".into(),
+                    a.id.clone(),
+                    NOW,
+                ))
+                .unwrap();
+            estate
+                .add_kg_fact(&KGFact::new(
+                    "fact-b".into(),
+                    "Sarah Chen C0".into(),
+                    "Employer".into(),
+                    "Beta Corp".into(),
+                    b.id.clone(),
+                    NOW,
+                ))
+                .unwrap();
+            let report = coord.propose_conflict_tunnels(&h, NOW).expect("propose");
+            let persisted = estate
+                .all_tunnels()
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.kind == TunnelKind::Contradicts)
+                .count();
+            (report, persisted)
+        };
+
+        // Restricted + restricted: proven, never proposed, and counted as a
+        // ceiling skip rather than folded into the dedup tally.
+        let (restricted, restricted_persisted) = propose_for_pair(
+            AdjectiveSensitivity::Restricted,
+            AdjectiveSensitivity::Restricted,
+        );
+        assert_eq!(restricted.sweep.counts.proven_contradiction, 1);
+        assert!(restricted.proposed_tunnel_ids.is_empty());
+        assert_eq!(restricted.ceiling_skipped, 1);
+        assert_eq!(restricted.suppressed, 0);
+        assert_eq!(
+            restricted_persisted, 0,
+            "no tunnel may be written for a finding above the ceiling"
+        );
+
+        // Secret is not a special case — it is the same raw comparison.
+        let (secret, secret_persisted) =
+            propose_for_pair(AdjectiveSensitivity::Secret, AdjectiveSensitivity::Secret);
+        assert_eq!(secret.sweep.counts.proven_contradiction, 1);
+        assert!(secret.proposed_tunnel_ids.is_empty());
+        assert_eq!(secret.ceiling_skipped, 1);
+        assert_eq!(secret.suppressed, 0);
+        assert_eq!(secret_persisted, 0);
+
+        // MAX rule: one normal endpoint does not rescue a restricted one.
+        let (mixed, mixed_persisted) = propose_for_pair(
+            AdjectiveSensitivity::Normal,
+            AdjectiveSensitivity::Restricted,
+        );
+        assert_eq!(mixed.sweep.counts.proven_contradiction, 1);
+        assert!(mixed.proposed_tunnel_ids.is_empty());
+        assert_eq!(mixed.ceiling_skipped, 1);
+        assert_eq!(mixed_persisted, 0);
+
+        // Elevated is INSIDE the mineable Normal tier (normal + elevated),
+        // so this pair must still propose exactly one tunnel.
+        let (elevated, elevated_persisted) =
+            propose_for_pair(AdjectiveSensitivity::Normal, AdjectiveSensitivity::Elevated);
+        assert_eq!(elevated.sweep.counts.proven_contradiction, 1);
+        assert_eq!(elevated.proposed_tunnel_ids.len(), 1);
+        assert_eq!(elevated.ceiling_skipped, 0);
+        assert_eq!(elevated.suppressed, 0);
+        assert_eq!(elevated_persisted, 1);
+    }
+
     // DCP M5 — tunnel lifecycle. Mirrors Swift
     // ConflictTunnelLifecycleTests: F21 (one proposed tunnel from two
     // conflicting controlled transcripts, live-pair suppression on the
