@@ -2385,18 +2385,23 @@ impl Estate {
         }
     }
 
-    /// Current time as epoch **seconds**. Used anywhere a store method takes
-    /// `now: i64`. The DrawerStore layer (both InMemory and SQLite) multiplies
-    /// the caller-supplied value by 1_000 before handing it to the HLC
-    /// generator (`hlc.rs`), so callers must supply seconds — not milliseconds.
-    /// Passing milliseconds here produces HLC physical_time values ~1_000×
-    /// too large (microsecond magnitudes instead of millisecond magnitudes),
-    /// causing mutate/reanchor audit rows to sort incorrectly against capture
-    /// and expunge rows on the same replica. (secfix/punt-g2 — HLC double-multiply)
-    fn now_secs() -> i64 {
+    /// Current time as epoch **milliseconds**. Used anywhere a store method
+    /// takes `now: i64`.
+    ///
+    /// Milliseconds is the unit the whole boundary consumes: `HLCGenerator::send`
+    /// (`hlc.rs`) stores the value directly as `last_physical`, and
+    /// `TypedValue::Timestamp` (`persistence_kit::sqlite`) serializes it with
+    /// `from_timestamp_millis`. Nothing multiplies on the way in — the store
+    /// passes the caller's value straight through.
+    ///
+    /// Passing seconds here backdates the event to 1970. That is not merely a
+    /// wrong date: audit consumers order by packed HLC, so once a restart clears
+    /// the in-memory generator, a seconds-valued mutation sorts *before* the
+    /// capture it modified.
+    fn now_ms() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0)
     }
 
@@ -2442,7 +2447,7 @@ impl Estate {
 
                 let changed_by = self.changed_by_or_estate();
                 // Store `now` is epoch-milliseconds (HLC physical_time).
-                let now = Self::now_secs();
+                let now = Self::now_ms();
 
                 self.store.mutate_provenance(
                     row_id,
@@ -2465,7 +2470,7 @@ impl Estate {
                 // anything else (e.g. Active, Accepted), so no extra guard is
                 // needed here.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Rejected,
@@ -2482,7 +2487,7 @@ impl Estate {
                 })?;
                 // active/pending → contest → contested per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Contested,
@@ -2509,7 +2514,7 @@ impl Estate {
                     )));
                 }
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Active,
@@ -2537,7 +2542,7 @@ impl Estate {
                 }
                 // active → promote → accepted per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Accepted,
@@ -2554,7 +2559,7 @@ impl Estate {
                 })?;
                 // active/accepted → supersede → superseded per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Superseded,
@@ -2656,7 +2661,7 @@ impl Estate {
                 // revives); the lineage contradiction for superseded was caught
                 // above, so by here the transition is unconditionally legal.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Active,
@@ -2682,7 +2687,7 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
@@ -2707,7 +2712,7 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
@@ -2738,7 +2743,7 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
@@ -2760,7 +2765,7 @@ impl Estate {
                 // contract (B-18). The producer at this boundary is the
                 // calling AI, so the pipeline version is ai-v1. Mirrors
                 // Swift MutationKind.setSubject in EstateVerbs.swift.
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store
                     .set_subject_representation(row_id, &subject, SUBJECT_PIPELINE_AI_V1, now)
                     .map(|_| ())
@@ -2839,7 +2844,7 @@ impl Estate {
             changed_by
         };
         // Store expects epoch seconds (it multiplies by 1_000 before HLC).
-        let now = Self::now_secs();
+        let now = Self::now_ms();
         self.store.reanchor_gated(
             row_id,
             to_room,
@@ -2859,7 +2864,7 @@ impl Estate {
     /// identity and reason into the audit trail instead of inheriting
     /// `reanchor`'s generic "estate owner / reanchored via Estate.reanchor"
     /// attribution). Unlike the Swift port, `now` is generated internally
-    /// via `Self::now_secs()` rather than threaded in as a parameter — this
+    /// via `Self::now_ms()` rather than threaded in as a parameter — this
     /// mirrors `reanchor`'s own `now` handling exactly (same layer, same
     /// convention) rather than introducing a second `now`-unit contract for
     /// `reanchor_gated` in this file.
@@ -2875,9 +2880,9 @@ impl Estate {
                 id: row_id.to_string(),
             });
         }
-        // Store expects epoch seconds (it multiplies by 1_000 before HLC) —
-        // same contract `reanchor` relies on via `Self::now_secs()`.
-        let now = Self::now_secs();
+        // Store expects epoch milliseconds and passes the value straight to the
+        // HLC — same contract `reanchor` relies on via `Self::now_ms()`.
+        let now = Self::now_ms();
         self.store.reanchor_gated(
             row_id,
             None,
@@ -3267,7 +3272,7 @@ mod tests {
     fn make_estate() -> Estate {
         // InMemoryDrawerStore::new allocates InMemoryStorage internally —
         // backend identity is visible at the type, not the argument.
-        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000_000, None).unwrap());
         Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 
@@ -3525,7 +3530,7 @@ mod tests {
         // active row. Capture builds the aggregate incrementally; reopening the
         // estate over the same storage rebuilds it from the active drawer set.
         // Either way the room aggregate covers the captured drawer's bits.
-        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000_000, None).unwrap());
         let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
         let d = basic_capture(&estate, "alpha", "study");
 
@@ -5761,36 +5766,53 @@ mod tests {
         );
     }
 
-    // --- secfix/punt-g2: HLC double-multiply regression guard ---
+    // --- Timestamp-unit guards (Codex 0e9d4e43e8cc8191ac913a3fddcad48c) ---
     //
-    // DrawerStore convention: callers pass epoch SECONDS; the store
-    // multiplies by 1_000 before feeding HLC (so HLC physical_time is
-    // always in epoch-millisecond magnitude). The pre-fix `now_millis()`
-    // helper returned epoch milliseconds, causing the store to multiply
-    // again → HLC physical_time was ~1_000× too large (microsecond magnitude).
-    //
-    // now_secs() must return epoch seconds so the store produces the correct
-    // millisecond-magnitude physical_time in audit rows.
+    // The whole boundary is epoch MILLISECONDS: `HLCGenerator::send` stores
+    // `now` directly as `last_physical`, and `TypedValue::Timestamp` is a
+    // millisecond codec. Nothing multiplies on the way in. A verb that supplies
+    // seconds backdates its event to 1970 and breaks HLC audit ordering.
 
     #[test]
-    fn now_secs_returns_epoch_seconds_magnitude() {
-        // Epoch-seconds floor: 2023-01-01 UTC ≈ 1_672_531_200
-        // Epoch-seconds ceil:  2035-01-01 UTC ≈ 2_051_222_400
-        let now = Estate::now_secs();
+    fn now_ms_returns_epoch_millisecond_magnitude() {
+        // Epoch-milliseconds floor: 2023-01-01 UTC ≈ 1_672_531_200_000
+        // Epoch-milliseconds ceil:  2035-01-01 UTC ≈ 2_051_222_400_000
+        let now = Estate::now_ms();
         assert!(
-            now >= 1_672_531_200 && now < 2_051_222_400,
-            "now_secs() must return epoch seconds (magnitude ~1.7e9, got {now}); \
-             if this is ~1_000x too large the double-multiply is not fixed"
+            now >= 1_672_531_200_000 && now < 2_051_222_400_000,
+            "now_ms() must return epoch milliseconds (magnitude ~1.7e12, got {now}); \
+             a ~1_000x smaller value means the helper is still returning seconds"
         );
     }
 
     #[test]
     fn mutate_confirm_hlc_physical_time_is_millisecond_magnitude() {
-        // After mutate(Confirm), the audit event's HLC physical_time must be
-        // in epoch-millisecond range (~1.7e12). Pre-fix it was in microsecond
-        // range (~1.7e15) because now_millis() * 1000 was double-multiplied.
+        // RESTART-HONEST. `HLCGenerator::send` only adopts `now` when
+        // `now > last_physical`; otherwise it bumps the logical counter and
+        // *inherits* the previous physical time. So if a capture in this same
+        // process has already pushed `last_physical` to ~1.7e12, a
+        // seconds-valued mutation silently inherits the correct magnitude and
+        // the defect is invisible — which is exactly why the previous version
+        // of this test passed against the bug.
+        //
+        // Capturing at an early-1970 instant reproduces the condition a daemon
+        // restart creates: a generator whose `last_physical` is NOT already at
+        // millisecond magnitude. A seconds-valued mutation (~1.7e9) then
+        // exceeds it, is adopted as the physical time, and fails this assert.
         let estate = make_estate();
-        let drawer = basic_capture(&estate, "hlc-magnitude check", "study");
+        let frame = CaptureFrame::new(
+            "hlc-magnitude check",
+            CaptureChannel::Typed,
+            "study",
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        // 1970-01-12 in epoch ms — a valid instant well below both the
+        // seconds-magnitude (~1.7e9) and millisecond-magnitude (~1.7e12) values.
+        const EARLY_MS: i64 = 1_000_000;
+        let drawer = estate.capture(frame, EARLY_MS).unwrap();
+
         estate
             .mutate(&drawer.id, MutationKind::Confirm, None)
             .unwrap();
@@ -5803,13 +5825,20 @@ mod tests {
         assert_eq!(events.len(), 2, "expected capture + confirm audit events");
 
         let hlc = events[1].hlc;
-        // Epoch-milliseconds floor: 2023-01-01 UTC ≈ 1_672_531_200_000 ms
-        // Epoch-milliseconds ceil:  2035-01-01 UTC ≈ 2_051_222_400_000 ms
         assert!(
             hlc.physical_time >= 1_672_531_200_000 && hlc.physical_time < 2_051_222_400_000,
             "confirm audit HLC physical_time must be epoch milliseconds (~1.7e12, got {}); \
-             if ~1_000x too large the double-multiply is not fixed",
+             a ~1.7e9 value means the verb is still supplying seconds",
             hlc.physical_time
+        );
+
+        // Ordering: the mutation must sort AFTER the capture it modified.
+        // This is the consequence the unit bug actually produces in the audit log.
+        assert!(
+            events[1].hlc.physical_time > events[0].hlc.physical_time,
+            "mutation (physical {}) must sort after the capture it modified (physical {})",
+            events[1].hlc.physical_time,
+            events[0].hlc.physical_time
         );
     }
 }

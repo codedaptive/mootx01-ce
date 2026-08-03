@@ -7595,11 +7595,13 @@ impl EstateCoordinator {
         // the Corpus encode stream so the drain-stage distillation fires for hints
         // exactly as for user content (DISTILL_SEED_STALL). Seeding failure closes
         // the estate (no half-provisioned zombie). Provision-time wall clock (epoch
-        // seconds) at the app boundary — the engine interior never reads the clock.
+        // MILLISECONDS) at the app boundary — the engine interior never reads the
+        // clock. Milliseconds is what the store and HLC boundary consume; seconds
+        // here would stamp every default-wing hint drawer in every estate as 1970.
         {
             let seed_now: i64 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
+                .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             if let Err(e) = self.seed_default_wings(&handle, seed_now) {
                 let _ = self.close(&handle);

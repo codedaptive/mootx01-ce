@@ -392,7 +392,7 @@ impl<'a> VaultBridge<'a> {
             if !qualified.is_empty() {
                 let frames: Vec<CaptureFrame> = qualified.iter().map(|(_, f, _, _)| f.clone()).collect();
                 let drawers = self.coordinator
-                    .capture_batch(handle, frames, now / 1000)
+                    .capture_batch(handle, frames, now)
                     .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
                 for ((note, frame, is_update, classified), drawer) in qualified.iter().zip(drawers.iter()) {
                     let tunnels = self.mapping.apply_note_post_capture(
@@ -491,7 +491,7 @@ impl<'a> VaultBridge<'a> {
                     .enqueue_change_batch(&jobs)
                     .map_err(|e| VaultKitError::VerbError(format!("enqueue_change_batch failed: {e:?}")))?;
                 self.coordinator
-                    .rollup_after_reindex(handle, now / 1000)
+                    .rollup_after_reindex(handle, now)
                     .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;
             }
         }
@@ -542,7 +542,7 @@ impl<'a> VaultBridge<'a> {
             "vault-receipt".to_string(),
             "wing_vaultkit".to_string(),
             "receipts".to_string(),
-            now / 1000,
+            now,
             // Receipts carry no embedding; the storage layer requires a
             // non-empty model id (same convention as the dreaming daemon).
             "no-embedding".to_string(),

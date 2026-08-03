@@ -252,9 +252,11 @@ impl BundleStore {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
 
-        let now_secs = SystemTime::now()
+        // Epoch MILLISECONDS — `TypedValue::Timestamp` is a millisecond codec
+        // (`persistence_kit::sqlite`). Seconds here files every chunk as 1970.
+        let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         let root_uuid = corpus_root_uuid();
         for chunk in chunks {
@@ -274,7 +276,7 @@ impl BundleStore {
             values.insert("text".into(), TypedValue::Text(chunk.text.clone()));
             values.insert("hlc".into(), TypedValue::Hlc(chunk.hlc));
             values.insert("metadata".into(), TypedValue::Json(metadata_json));
-            values.insert("created_at".into(), TypedValue::Timestamp(now_secs));
+            values.insert("created_at".into(), TypedValue::Timestamp(now_ms));
             // Pre-populate parent chain cache so the synchronous
             // HashParentChainProvider callback can map this chunk
             // to its corpus-level parent in the Merkle tree.

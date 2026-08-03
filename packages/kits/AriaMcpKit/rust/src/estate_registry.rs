@@ -76,7 +76,7 @@ const DEFAULT_OWNER: &str = "aria-mcp-default";
 // Arbitrary wall-clock anchor for the in-memory estate. In-memory estates
 // are ephemeral and discarded when the server exits; using a fixed value
 // keeps test behavior deterministic.
-const INIT_NOW: i64 = 1_700_000_000;
+const INIT_NOW: i64 = 1_700_000_000_000;
 
 // Default busy-timeout for SQLite estates: 5.0 seconds. Single-process
 // server model means concurrent writers are unlikely, but the timeout
@@ -646,10 +646,12 @@ fn seed_wings_non_fatal(
     handle: &EstateHandle,
     estate_label: &str,
 ) {
-    // wall_now as epoch seconds — same precision as the Swift Date().
+    // Epoch MILLISECONDS — the unit the store and HLC boundary consume
+    // (`hlc.rs::send`, `sqlite.rs` timestamp codec). Supplying seconds here
+    // backdates every seeded hint drawer to 1970 and corrupts audit ordering.
     let seed_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(INIT_NOW);
     if let Err(e) = coord.lock().unwrap().seed_default_wings(handle, seed_now) {
         eprintln!(

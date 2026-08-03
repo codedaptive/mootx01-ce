@@ -270,12 +270,14 @@ impl Estate {
             .get(&existing.parent_node_id)
             .map(|(w, r)| (w.as_str(), r.as_str()))
             .unwrap_or(("", ""));
-        let now_secs = std::time::SystemTime::now()
+        // Epoch MILLISECONDS — this lands in the container fingerprint's
+        // `updatedAt`, a `TypedValue::Timestamp` (millisecond codec).
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as i64;
+            .as_millis() as i64;
         self.store
-            .and_in_container_fingerprint(wing, room, cleared_op, now_secs)?;
+            .and_in_container_fingerprint(wing, room, cleared_op, now_ms)?;
 
         // Read back the drawer so the caller has the current storage state.
         self.store

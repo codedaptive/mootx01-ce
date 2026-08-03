@@ -403,8 +403,10 @@ fn export_writes_exactly_one_receipt_with_counts_and_now() {
         .expect("read receipts");
     assert_eq!(receipts.len(), 1);
     let receipt = &receipts[0];
-    // The diary's filed_at is epoch seconds; the bridge's now is ms.
-    assert_eq!(receipt.filed_at, NOW / 1000);
+    // `filed_at` is epoch MILLISECONDS, the same unit the bridge is handed —
+    // the receipt is stamped with `now` verbatim, no conversion. Dividing here
+    // would file every receipt as a 1970 record.
+    assert_eq!(receipt.filed_at, NOW);
     assert_eq!(receipt.topic, "vault-receipt");
     assert!(receipt.entry.contains("\"operation\":\"vault-export\""));
     assert!(receipt.entry.contains("\"scope\":\"believed\""));
@@ -438,7 +440,15 @@ fn import_writes_exactly_one_receipt_with_counts() {
         .expect("read receipts");
     assert_eq!(receipts.len(), 1);
     let receipt = &receipts[0];
-    assert_eq!(receipt.filed_at, NOW / 1000);
+    // Epoch MILLISECONDS — see the export receipt test above.
+    assert_eq!(receipt.filed_at, NOW);
+    // Receipt era guard: a millisecond-magnitude stamp lands in the current
+    // era. A seconds-valued one (~1.7e9 ms) would read as January 1970.
+    assert!(
+        receipt.filed_at > 1_672_531_200_000,
+        "receipt filed_at {} predates 2023 — it is being filed as a 1970 record",
+        receipt.filed_at
+    );
     assert!(receipt.entry.contains("\"operation\":\"vault-import\""));
     assert!(receipt.entry.contains("\"drawersWritten\":1"));
     assert!(receipt.entry.contains("\"drawersUpdated\":0"));

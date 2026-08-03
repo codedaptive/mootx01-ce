@@ -135,8 +135,10 @@ fn iso8601(ms: i64) -> String {
 /// milliseconds, matching the sub-second precision the Swift port carries in its
 /// `Date`, so the two ports store byte-identical ISO-8601 for the same instant.
 /// (This reverses the earlier seconds-granularity port convention — formerly
-/// deferred to v1.1 as KI-003 — per the Swift/Rust bit-identity mandate; the
-/// unit was migrated everywhere at once, never partially.)
+/// deferred to v1.1 as KI-003 — per the Swift/Rust bit-identity mandate.)
+///
+/// Every caller must supply milliseconds. There is no conversion anywhere on
+/// the way in: this codec and `HLCGenerator::send` both take the value as given.
 fn parse_iso8601(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
