@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.29.0
+version: 1.30.0
 status: accepted-1.1-target
 date: 2026-08-03
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -564,6 +564,28 @@ fabricated `0`, which would be indistinguishable from a genuinely empty trace
 table and would lie about reward-pipeline depth. The read failure does not
 break the rest of the status response (the other fields are still returned).
 Both ports identical (`runEstateStatus`, `run_estate_status`).
+
+**Drawer-derived aggregates — the sensitivity ceiling:** every value in the
+`moot_estate_status` body that is computed from a drawer set is computed from
+the *sensitivity-filtered* set — restricted and secret rows contribute to none
+of them. That is `memories: N active (M total)`, `subjects: N/M (K missing)`,
+and `wings:`. The predicate is `AdjectiveSensitivity.isBulkExportable` (Swift)
+/ `AdjectiveSensitivity::is_bulk_exportable` (Rust): true for `normal` and
+`elevated`, false for `restricted` and `secret`. It matches the ceiling
+`moot_estate_map` applies to its per-location counts and the one
+`moot_memory_list` applies before enumerating, so the subject-debt counter and
+the `filter:missing_subject` enumerator it directs the AI at report one
+population. `moot_estate_status` carries no sensitivity-grant plumbing, so
+every caller is an ungranted one and these counts never rise with a grant.
+
+The remaining fields count no drawer set and are therefore unfiltered:
+`kg facts:` (KGFact rows, whose sensitivity axis is their own), `trace_rows:`
+(recall-trace rows), `sync:`, `fdc_recalculation*`,
+`shared_content_migration:`, `version_skew:`, `update_available:`.
+
+An aggregate added to this response inherits the ceiling: derive it from the
+filtered set, or its magnitude discloses the size of a population the caller
+cannot see. Both ports identical.
 
 ### Version-skew advisory (the connection-ownership contract §5)
 
@@ -1165,6 +1187,17 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.30.0 -- 2026-08-03
+Observable output change on `moot_estate_status`: the `memories: N active
+(M total)` and `subjects: N/M (K missing)` numbers now exclude restricted and
+secret rows, as `wings:` already did. On an estate holding such rows both lines
+report smaller numbers than before; on an estate without them nothing changes.
+Field keys, field order, line count, and response shape are unchanged, so
+consumers that read the body by prefix need no change — no in-repo consumer
+parses these integers. Documents the drawer-aggregate ceiling and the
+unfiltered non-drawer fields in the `moot_estate_status` section above.
+Behavioural contract: `ARIA_MCP_SPEC.md` 1.26.0.
 
 ### 1.29.0 -- 2026-08-03
 Observable output change on `moot_memory_search` and `moot_memory_get`: the

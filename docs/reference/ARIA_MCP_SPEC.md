@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.25.0
+version: 1.26.0
 status: accepted-1.1-target
 date: 2026-08-03
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -906,6 +906,23 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.26.0 -- 2026-08-03
+Every drawer-derived aggregate in the `moot_estate_status` response now reads
+the sensitivity-filtered set. `subjects: N/M (K missing)` and
+`memories: N active (M total)` previously counted the raw cluster-A and
+non-tombstoned sets, so an ungranted caller learned how many live rows were
+hidden from it and how many of those carried content and a subject — on a
+surface whose neighbouring `wings:` line was already filtered for exactly that
+reason, and whose sibling `moot_memory_list filter:missing_subject` enumerator
+already filtered before listing. The counter and that enumerator now describe
+one population. On an estate holding restricted/secret rows these numbers drop;
+that is the correction, not a regression. No sensitivity-grant plumbing is
+added — `moot_estate_status` has none, and a grant-lifted true count remains a
+feature request. Non-drawer aggregates on the same surface (`kg facts:`,
+`trace_rows:`, `sync:`, `fdc_recalculation*`, `shared_content_migration:`) are
+unchanged: they count no drawer set. Both ports, with the ceiling rule stated
+in-code so aggregates added later inherit it.
 
 ### 1.25.0 -- 2026-08-03
 The sensitivity advisory on `moot_memory_search` and `moot_memory_get` is now
