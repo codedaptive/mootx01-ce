@@ -588,10 +588,11 @@ public actor SecretSyncRecoveryKeyCustody:
     }
     // A break-glass token is admissible only for the exact intent its
     // confirmation committed to. The structural equality below would already
-    // catch a mismatch; this compares the digests in constant time first, and
-    // states the invariant where it is enforced. An expected branch carrying
-    // no digest — an unbound break-glass, or a rotation or enrollment record
-    // replayed as one — is refused here.
+    // catch a mismatch; this checks the digests first so the invariant is
+    // stated where it is enforced, using the same XOR-accumulate compare the
+    // commitment checks use rather than a short-circuiting one. An expected
+    // branch carrying no digest — an unbound break-glass, or a rotation or
+    // enrollment record replayed as one — is refused here.
     if expectedBranch.operation == .breakGlass {
       guard
         let expected = expectedBranch.breakGlassIntentDigest,
@@ -665,6 +666,14 @@ public actor SecretSyncRecoveryKeyCustody:
       SecretSyncRecoveryFrameField(tag: 7, value: SecretSyncRecoveryFrame.uuid(descriptor.recoveryRecipientID)),
       SecretSyncRecoveryFrameField(tag: 8, value: try descriptorFrame(descriptor)),
     ]
+    // Tags 1-8 above are common to every branch. Tag numbering below is
+    // branch-local and deliberately not shared: tags 11 and 12 mean different
+    // things in rotation than in break-glass, and tag 13 is the rotation
+    // freshness frame but the break-glass intent digest. That is safe because
+    // tag 2 carries the operation and the guard above pins
+    // `handle.operation == branch.operation`, so two branches can never be
+    // read against each other. Do not "fix" the overlap by renumbering — the
+    // break-glass frozen transcript vectors depend on these exact tags.
     switch branch {
     case .enrollment:
       break
