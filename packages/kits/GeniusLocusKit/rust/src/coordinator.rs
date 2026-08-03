@@ -3997,6 +3997,208 @@ impl EstateCoordinator {
         })
     }
 
+    /// Run one typed sweep and file a PROPOSED `contradicts` tunnel for
+    /// every proven finding that survives the dedup contract (DCP M5 —
+    /// mirrors Swift `proposeConflictTunnels(in:)`).
+    ///
+    /// Dedup contract (F14/F15): any live (active or proposed)
+    /// contradicts tunnel between the pair suppresses; a WITHDRAWN
+    /// typed proposal suppresses only the SAME rule@version (rejection
+    /// durable, F14) — a registry version bump files a NEW instance
+    /// (F15); a withdrawn LEXICAL (hunter) tunnel does not suppress a
+    /// typed proof. `now` is epoch milliseconds.
+    pub fn propose_conflict_tunnels(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<crate::brain::conflict_projection_sweep::ConflictTunnelProposalReport, VerbDispatchError>
+    {
+        use crate::brain::conflict_projection_sweep::{pair_key, ConflictTunnelProposalReport};
+        use locus_kit::frames::TunnelCaptureFrame;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+
+        const LABEL_PREFIX: &str = "dcp: ";
+
+        let sweep = self.conflict_projection_sweep(handle)?;
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("propose_conflict_tunnels", "", e))
+        };
+
+        let mut live_pairs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut withdrawn_typed_labels: std::collections::HashMap<
+            String,
+            Vec<String>,
+        > = std::collections::HashMap::new();
+        for tunnel in estate.all_tunnels().map_err(remap_err)? {
+            if tunnel.kind != TunnelKind::Contradicts {
+                continue;
+            }
+            let (Some(s), Some(t)) =
+                (tunnel.source_drawer_id.as_ref(), tunnel.target_drawer_id.as_ref())
+            else {
+                continue;
+            };
+            let pair = pair_key(s, t);
+            match tunnel.lifecycle() {
+                TunnelLifecycle::Active | TunnelLifecycle::Proposed => {
+                    live_pairs.insert(pair);
+                }
+                TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => {
+                    if tunnel.label.starts_with(LABEL_PREFIX) {
+                        withdrawn_typed_labels.entry(pair).or_default().push(tunnel.label.clone());
+                    }
+                }
+            }
+        }
+
+        let all_drawers = estate.all_drawers().map_err(remap_err)?;
+        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
+        let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        let mut proposed = Vec::new();
+        let mut suppressed = 0usize;
+        for finding in &sweep.proven {
+            let outcome = &finding.outcome;
+            if outcome.source_drawer_ids.len() != 2 {
+                continue;
+            }
+            let (a, b) = (&outcome.source_drawer_ids[0], &outcome.source_drawer_ids[1]);
+            let pair = pair_key(a, b);
+            let renewal_key =
+                format!("{LABEL_PREFIX}{}@{}", outcome.rule_id, outcome.rule_version);
+            let label = format!("{renewal_key} result={}", outcome.result_id);
+            if live_pairs.contains(&pair) {
+                suppressed += 1;
+                continue;
+            }
+            if withdrawn_typed_labels
+                .get(&pair)
+                .is_some_and(|labels| labels.iter().any(|l| l.starts_with(&renewal_key)))
+            {
+                // F14: exact repeat of a rejected proof stays rejected;
+                // a different rule VERSION misses this prefix (F15).
+                suppressed += 1;
+                continue;
+            }
+            // Endpoint coordinates from the node tree — skip rather than
+            // file fabricated coordinates (hunter posture).
+            let (Some(da), Some(db)) =
+                (drawers_by_id.get(a.as_str()), drawers_by_id.get(b.as_str()))
+            else {
+                continue;
+            };
+            let (Some((a_wing, a_room)), Some((b_wing, b_room))) = (
+                node_names.get(&da.parent_node_id),
+                node_names.get(&db.parent_node_id),
+            ) else {
+                continue;
+            };
+            let mut frame = TunnelCaptureFrame::new(
+                a_wing.clone(),
+                a_room.clone(),
+                b_wing.clone(),
+                b_room.clone(),
+                label,
+                "conflict-projection",
+            );
+            frame.source_drawer_id = Some(a.clone());
+            frame.target_drawer_id = Some(b.clone());
+            frame.kind = TunnelKind::Contradicts;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = TunnelLifecycle::Proposed;
+            let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+            live_pairs.insert(pair);
+            proposed.push(tunnel.id);
+        }
+        Ok(ConflictTunnelProposalReport {
+            sweep,
+            proposed_tunnel_ids: proposed,
+            suppressed,
+        })
+    }
+
+    /// File the ACTIVE `supersedes` tunnels for a meeting-capture
+    /// report's `Replaces decision` references (F22 — mirrors Swift
+    /// `fileSupersessions(in:report:now:)`): the replaced fact's source
+    /// drawer is superseded by the replacing fact's source drawer.
+    /// Returns (filed tunnel ids, unresolved replaced-fact ids).
+    pub fn file_supersessions(
+        &self,
+        handle: &EstateHandle,
+        report: &crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport,
+        now: i64,
+    ) -> Result<(Vec<String>, Vec<String>), VerbDispatchError> {
+        use locus_kit::frames::TunnelCaptureFrame;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+        use substrate_ml::meeting_decision_extractor::MEETING_DECISION_EXTRACTOR_ID;
+
+        if report.replaces_by_fact_id.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("file_supersessions", "", e))
+        };
+        let facts_by_id: std::collections::HashMap<String, locus_kit::kg_fact::KGFact> = estate
+            .all_kg_facts_including_retired()
+            .map_err(remap_err)?
+            .into_iter()
+            .map(|f| (f.id.clone(), f))
+            .collect();
+        let all_drawers = estate.all_drawers().map_err(remap_err)?;
+        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
+        let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        let mut filed = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut refs: Vec<(&String, &String)> = report.replaces_by_fact_id.iter().collect();
+        refs.sort();
+        for (fact_id, replaced_fact_id) in refs {
+            let (Some(new_fact), Some(old_fact)) =
+                (facts_by_id.get(fact_id), facts_by_id.get(replaced_fact_id))
+            else {
+                unresolved.push(replaced_fact_id.clone());
+                continue;
+            };
+            let (Some(nd), Some(od)) = (
+                drawers_by_id.get(new_fact.source_drawer_id.as_str()),
+                drawers_by_id.get(old_fact.source_drawer_id.as_str()),
+            ) else {
+                unresolved.push(replaced_fact_id.clone());
+                continue;
+            };
+            let (Some((n_wing, n_room)), Some((o_wing, o_room))) = (
+                node_names.get(&nd.parent_node_id),
+                node_names.get(&od.parent_node_id),
+            ) else {
+                unresolved.push(replaced_fact_id.clone());
+                continue;
+            };
+            // Source = the SUPERSEDING drawer, target = the superseded
+            // one. ACTIVE because the controlled grammar's Replaces line
+            // IS the acceptance.
+            let mut frame = TunnelCaptureFrame::new(
+                n_wing.clone(),
+                n_room.clone(),
+                o_wing.clone(),
+                o_room.clone(),
+                format!("{MEETING_DECISION_EXTRACTOR_ID}: replaces {replaced_fact_id}"),
+                "conflict-projection",
+            );
+            frame.source_drawer_id = Some(new_fact.source_drawer_id.clone());
+            frame.target_drawer_id = Some(old_fact.source_drawer_id.clone());
+            frame.kind = TunnelKind::Supersedes;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = TunnelLifecycle::Active;
+            let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+            filed.push(tunnel.id);
+        }
+        Ok((filed, unresolved))
+    }
+
     /// Deterministic KGFact id for an extracted decision (replay-safe).
     /// Mirrors Swift `GeniusLocusKit.meetingDecisionFactID`.
     pub fn meeting_decision_fact_id(
@@ -9648,6 +9850,157 @@ mod tests {
         let report = coord.conflict_projection_sweep(&h).expect("sweep");
         assert_eq!(report.counts.proven_contradiction, 1);
         assert_eq!(report.proven[0].outcome.key, "decision:project-phoenix");
+    }
+
+    // DCP M5 — tunnel lifecycle. Mirrors Swift
+    // ConflictTunnelLifecycleTests: F21 (one proposed tunnel from two
+    // conflicting controlled transcripts, live-pair suppression on the
+    // second pass), F14 (withdrawn typed rejection at the same
+    // rule@version stays rejected), F15 (older-version rejection files
+    // a new instance), lexical-rejection independence, and F22
+    // (explicit replacement → supersedes tunnel → HistoricalSuccession,
+    // proposals stop; unknown replaced ids report unresolved).
+    #[test]
+    fn conflict_tunnel_lifecycle_f21_f14_f15_f22() {
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+
+        // --- F21 + live suppression ---
+        let (coord, h) = open_one();
+        let a = coord.capture(&h, cap_frame("Monday meeting."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("Thursday meeting."), NOW).unwrap();
+        coord
+            .capture_meeting_decisions(
+                &h, "Decision: project-phoenix.launch_date = 2026-09-15", &a.id, NOW)
+            .unwrap();
+        coord
+            .capture_meeting_decisions(
+                &h, "Decision: project-phoenix.launch_date = 2026-10-01", &b.id, NOW)
+            .unwrap();
+        let first = coord.propose_conflict_tunnels(&h, NOW).expect("propose");
+        assert_eq!(first.sweep.counts.proven_contradiction, 1);
+        assert_eq!(first.proposed_tunnel_ids.len(), 1, "F21: one proposed tunnel");
+        assert_eq!(first.suppressed, 0);
+        let estate = coord.estate_for(&h).unwrap();
+        let tunnels: Vec<_> = estate
+            .all_tunnels()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == TunnelKind::Contradicts)
+            .collect();
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].lifecycle(), TunnelLifecycle::Proposed);
+        assert!(tunnels[0].label.starts_with("dcp: dim.decision.launch_date@1"));
+        let second = coord.propose_conflict_tunnels(&h, NOW).expect("propose again");
+        assert!(second.proposed_tunnel_ids.is_empty());
+        assert_eq!(second.suppressed, 1);
+
+        // --- F14: same-version withdrawn rejection suppresses ---
+        let (coord2, h2) = open_one();
+        let a2 = coord2.capture(&h2, cap_frame("Meeting A."), NOW).unwrap();
+        let b2 = coord2.capture(&h2, cap_frame("Meeting B."), NOW).unwrap();
+        coord2
+            .capture_meeting_decisions(
+                &h2, "Decision: project-phoenix.launch_date = 2026-09-15", &a2.id, NOW)
+            .unwrap();
+        coord2
+            .capture_meeting_decisions(
+                &h2, "Decision: project-phoenix.launch_date = 2026-10-01", &b2.id, NOW)
+            .unwrap();
+        let plant = |label: &str, lifecycle: TunnelLifecycle| {
+            let estate2 = coord2.estate_for(&h2).unwrap();
+            let mut frame =
+                tunnel_frame("study", "study", label);
+            frame.source_drawer_id = Some(a2.id.clone());
+            frame.target_drawer_id = Some(b2.id.clone());
+            frame.kind = TunnelKind::Contradicts;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = lifecycle;
+            estate2.capture_tunnel(frame, NOW).unwrap();
+        };
+        plant("dcp: dim.decision.launch_date@1 result=old", TunnelLifecycle::Withdrawn);
+        let f14 = coord2.propose_conflict_tunnels(&h2, NOW).expect("propose");
+        assert!(f14.proposed_tunnel_ids.is_empty(), "F14: exact repeat stays rejected");
+        assert_eq!(f14.suppressed, 1);
+
+        // --- F15: older-version rejection renews / lexical independence ---
+        let (coord3, h3) = open_one();
+        let a3 = coord3.capture(&h3, cap_frame("Meeting A."), NOW).unwrap();
+        let b3 = coord3.capture(&h3, cap_frame("Meeting B."), NOW).unwrap();
+        coord3
+            .capture_meeting_decisions(
+                &h3, "Decision: project-phoenix.launch_date = 2026-09-15", &a3.id, NOW)
+            .unwrap();
+        coord3
+            .capture_meeting_decisions(
+                &h3, "Decision: project-phoenix.launch_date = 2026-10-01", &b3.id, NOW)
+            .unwrap();
+        {
+            let estate3 = coord3.estate_for(&h3).unwrap();
+            let mut frame =
+                tunnel_frame("study", "study", "dcp: dim.decision.launch_date@0 result=ancient");
+            frame.source_drawer_id = Some(a3.id.clone());
+            frame.target_drawer_id = Some(b3.id.clone());
+            frame.kind = TunnelKind::Contradicts;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = TunnelLifecycle::Withdrawn;
+            estate3.capture_tunnel(frame, NOW).unwrap();
+            let mut lexical =
+                tunnel_frame("study", "study", "hunter: numeric_divergence score=0.9");
+            lexical.source_drawer_id = Some(a3.id.clone());
+            lexical.target_drawer_id = Some(b3.id.clone());
+            lexical.kind = TunnelKind::Contradicts;
+            lexical.origin_class = TunnelOriginClass::Derived;
+            lexical.lifecycle = TunnelLifecycle::Withdrawn;
+            estate3.capture_tunnel(lexical, NOW).unwrap();
+        }
+        let f15 = coord3.propose_conflict_tunnels(&h3, NOW).expect("propose");
+        assert_eq!(
+            f15.proposed_tunnel_ids.len(),
+            1,
+            "F15: version bump + rejected lexical guess must not suppress a typed proof"
+        );
+
+        // --- F22: explicit replacement → historical, proposals stop ---
+        let (coord4, h4) = open_one();
+        let a4 = coord4.capture(&h4, cap_frame("Monday meeting."), NOW).unwrap();
+        let b4 = coord4.capture(&h4, cap_frame("Thursday meeting."), NOW).unwrap();
+        let first4 = coord4
+            .capture_meeting_decisions(
+                &h4, "Decision: project-phoenix.launch_date = 2026-09-15", &a4.id, NOW)
+            .unwrap();
+        let original_fact_id = first4.filed_fact_ids[0].clone();
+        let second4 = coord4
+            .capture_meeting_decisions(
+                &h4,
+                &format!(
+                    "Replaces decision {original_fact_id}: project-phoenix.launch_date = 2026-10-01"
+                ),
+                &b4.id,
+                NOW,
+            )
+            .unwrap();
+        let (filed, unresolved) =
+            coord4.file_supersessions(&h4, &second4, NOW).expect("supersessions");
+        assert_eq!(filed.len(), 1, "F22: one supersedes tunnel filed");
+        assert!(unresolved.is_empty());
+        let sweep = coord4.conflict_projection_sweep(&h4).expect("sweep");
+        assert_eq!(sweep.counts.proven_contradiction, 0);
+        assert_eq!(sweep.counts.historical_succession, 1);
+        let proposals = coord4.propose_conflict_tunnels(&h4, NOW).expect("propose");
+        assert!(proposals.proposed_tunnel_ids.is_empty());
+        // Unknown replaced-fact id reports unresolved, files nothing.
+        let ghost = coord4
+            .capture_meeting_decisions(
+                &h4,
+                "Replaces decision no-such-fact: project-altair.launch_date = 2026-12-01",
+                &b4.id,
+                NOW,
+            )
+            .unwrap();
+        let (ghost_filed, ghost_unresolved) =
+            coord4.file_supersessions(&h4, &ghost, NOW).expect("ghost");
+        assert!(ghost_filed.is_empty());
+        assert_eq!(ghost_unresolved, vec!["no-such-fact".to_string()]);
     }
 
     // CO-9: a verb on a closed handle surfaces EstateNotOpen, not an empty

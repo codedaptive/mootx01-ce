@@ -141,6 +141,18 @@ pub fn run_sweep(
     }
 }
 
+/// One M5 pass's outcome (typed proposals). Mirrors Swift
+/// `ConflictTunnelProposalReport`.
+#[derive(Debug, Clone)]
+pub struct ConflictTunnelProposalReport {
+    /// The sweep the proposals were derived from.
+    pub sweep: ConflictProjectionSweepReport,
+    /// Tunnel ids proposed THIS pass, in sweep order.
+    pub proposed_tunnel_ids: Vec<String>,
+    /// Proven findings suppressed by the dedup contract.
+    pub suppressed: usize,
+}
+
 /// Default bucket cap re-export for the coordinator seam.
 pub const SWEEP_DEFAULT_BUCKET_CAP: usize = DEFAULT_BUCKET_CAP;
 

@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.20.0
+version: 1.21.0
 status: accepted-1.1-target
 date: 2026-07-30
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
@@ -1894,6 +1894,24 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.21.0 -- 2026-08-03
+
+Deterministic Contradiction Projection (DCP M2-M6). The Brain layer
+gains the typed proving lane over KGFacts: projection (active facts on
+registered dimensions become ConflictSignatures; exclusions counted,
+never dropped), the in-memory (key, dimension) coordinate index with a
+per-bucket cap and truncation diagnostics, the pure sweep
+(project → index → evaluate; accepted ACTIVE supersedes tunnels convert
+overlap to HistoricalSuccession), typed tunnel proposals (proven
+findings file PROPOSED contradicts tunnels labeled
+`dcp: <rule>@<version>`; live pairs suppress; a withdrawn typed
+rejection is durable per rule@version — a version bump files a new
+instance; withdrawn lexical guesses never suppress typed proofs), the
+controlled meeting-decision filing seam (dcp-meeting-v1 grammar,
+replay-safe deterministic fact ids, ACTIVE filing posture), and
+Replaces-reference supersession filing. Everything is a pure
+read except the explicitly write-labeled proposal/filing verbs.
 
 ### 1.20.0 -- 2026-08-02
 
