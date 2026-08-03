@@ -449,17 +449,27 @@ pub mod normalize {
         }
         mantissa = mantissa.checked_mul(multiplier)?;
         if negative {
+            // Unchecked negation is safe here: `mantissa` is built only from
+            // digit-string parses (sign already stripped) and the checked ops
+            // above, so it is in `0..=i64::MAX` and can never be `i64::MIN`,
+            // the one value whose negation overflows.
             mantissa = -mantissa;
         }
         Some(TypedConflictValue::Decimal { mantissa, scale })
     }
 
     /// Exact duration: `<n>h`/`<n>min`/`<n>s` → seconds.
+    ///
+    /// Fails closed on overflow, matching `budget_ceiling`: the unit multiply
+    /// is checked, so a value that does not fit in `i64` seconds returns
+    /// `None` exactly as an unparseable one does. This is an overflow guard,
+    /// not a range policy — `i64::MAX` seconds is still accepted through the
+    /// `s` suffix, where the multiplier is 1 and nothing overflows.
     pub fn duration(raw: &str) -> Option<TypedConflictValue> {
         let s = collapse(raw).to_lowercase().replace(' ', "");
         let value = |suffix: &str, mult: i64| -> Option<TypedConflictValue> {
             let n: i64 = s.strip_suffix(suffix)?.parse().ok()?;
-            Some(TypedConflictValue::Duration { seconds: n * mult })
+            Some(TypedConflictValue::Duration { seconds: n.checked_mul(mult)? })
         };
         value("min", 60).or_else(|| value("h", 3600)).or_else(|| value("s", 1))
     }

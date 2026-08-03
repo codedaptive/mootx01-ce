@@ -357,6 +357,14 @@ public enum ConflictNormalize {
     /// USD decimal with exact `k`/`m` suffix scaling (×1e3 / ×1e6) and
     /// an optional `USD`/`$` marker. `1.5m USD` → d:1500000. Exact
     /// integer arithmetic only.
+    ///
+    /// Fails closed on overflow: every multiply and add below reports
+    /// overflow and returns nil, so a value too large for `Int64`
+    /// mantissa is refused exactly as an unparseable one is. This is an
+    /// overflow guard, not a range policy — `Int64.max` with no scaling
+    /// suffix is still accepted. The Rust twin `normalize::budget_ceiling`
+    /// guards the same three sites with `checked_mul`/`checked_add`; the
+    /// two ports must refuse the same inputs.
     public static func usdDecimal(_ raw: String) -> TypedConflictValue? {
         var s = collapse(raw).lowercased()
         s = s.replacingOccurrences(of: "usd", with: "")
@@ -381,25 +389,47 @@ public enum ConflictNormalize {
             guard frac.count <= 6, let fracVal = Int64(frac) else { return nil }
             scale = frac.count
             var scaled = mantissa
-            for _ in 0..<scale { scaled = scaled * 10 }
-            mantissa = scaled + fracVal
+            for _ in 0..<scale {
+                let (shifted, shiftOverflow) = scaled.multipliedReportingOverflow(by: 10)
+                guard !shiftOverflow else { return nil }
+                scaled = shifted
+            }
+            let (combined, addOverflow) = scaled.addingReportingOverflow(fracVal)
+            guard !addOverflow else { return nil }
+            mantissa = combined
         }
-        mantissa *= multiplier
         // Fold the multiplier into the mantissa (scale unchanged), then
         // reduce: canonicalBytes strips trailing zeros anyway; keep the
         // exact pair.
+        let (folded, foldOverflow) = mantissa.multipliedReportingOverflow(by: multiplier)
+        guard !foldOverflow else { return nil }
+        mantissa = folded
+        // Unchecked negation is safe here: `mantissa` is built only from
+        // digit-string parses (the sign was stripped above) and the
+        // overflow-checked steps, so it is in `0...Int64.max` and can never
+        // be `Int64.min`, the one value whose negation traps.
         if negative { mantissa = -mantissa }
         return .decimal(mantissa: mantissa, scale: UInt8(scale))
     }
 
     /// Exact duration: `<n>h`/`<n> h`/`<n>min`/`<n>s` → seconds; whole
     /// units only.
+    ///
+    /// Fails closed on overflow: the unit multiply reports overflow and
+    /// returns nil, so a value that does not fit in `Int64` seconds is
+    /// refused exactly as an unparseable one is. This is an overflow
+    /// guard, not a range policy — `Int64.max` seconds is still accepted
+    /// through the `s` suffix, whose multiplier is 1. The Rust twin
+    /// `normalize::duration` uses `checked_mul` for the same reason; the
+    /// two ports must refuse the same inputs.
     public static func duration(_ raw: String) -> TypedConflictValue? {
         let s = collapse(raw).lowercased().replacingOccurrences(of: " ", with: "")
         func value(_ suffix: String, _ mult: Int64) -> TypedConflictValue? {
             guard s.hasSuffix(suffix), let n = Int64(s.dropLast(suffix.count))
             else { return nil }
-            return .duration(seconds: n * mult)
+            let (seconds, overflow) = n.multipliedReportingOverflow(by: mult)
+            guard !overflow else { return nil }
+            return .duration(seconds: seconds)
         }
         return value("min", 60) ?? value("h", 3600) ?? value("s", 1)
     }
