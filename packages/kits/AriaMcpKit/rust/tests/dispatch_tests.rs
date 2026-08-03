@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use aria_mcp::{
     dispatch::{dispatch_tool, dispatch_tool_with_vault_flag},
     estate_registry::EstateRegistry,
-    jsonrpc::{JSONRPCErrorCode, JsonValue},
+    jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
     tool_list::{build_tool_list, build_tool_list_with_flags, build_tool_list_with_vault_flag, vault_enabled},
 };
@@ -1733,6 +1733,207 @@ fn memory_get_provenance_secret_drawer_is_reported_not_found() {
         "secret drawer must use the standard not-found shape without leaking content; got: {}",
         err.message
     );
+}
+
+// ── near: anchor pivot — provenance-sensitivity redaction boundary ──────────
+//
+// The by-id door (memory_get, above) and the pivot door (near:) must agree.
+// `moot_memory_search` deliberately surfaces a gated row's ID with a redacted
+// body, so the UUID needed to pivot is obtainable in ordinary use; if the
+// pivot did not gate, the caller could hand that UUID back as `near:` and
+// receive the protected body's content-derived neighbors. These cases cover
+// both tools that accept `near:` — moot_memory_search and moot_recall_shaped.
+//
+// Every case asserts the SAME not-found message an absent id produces. A
+// distinct message or error code would turn the fix into an existence oracle
+// for redacted rows, which is the same class of defect the gate closes.
+
+/// Dispatch `near:` against both tools that accept it and return the error
+/// each produced. Keeping this in one helper is what makes "both doors agree"
+/// checkable in a single assertion per property.
+fn near_pivot_errors(registry: &EstateRegistry, anchor: &str) -> Vec<(&'static str, JSONRPCError)> {
+    let search = dispatch_tool(
+        "moot_memory_search",
+        &args!["near" => anchor],
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("near: on a gated or absent anchor must be reported not-found");
+    let shaped = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["near" => anchor, "preset" => "balanced"],
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("near: on a gated or absent anchor must be reported not-found");
+    vec![("moot_memory_search", search), ("moot_recall_shaped", shaped)]
+}
+
+#[test]
+fn near_anchor_provenance_secret_is_reported_not_found() {
+    // The regression case for Codex finding 3a1cf92490a481918c3a2837effe341f:
+    // before the gate, the Secret body became the recall query verbatim.
+    let registry = EstateRegistry::new_inmemory_bare();
+    let secret = "provenance-secret body must not become a near: recall query";
+    let id = file_one_memory_with_provenance_sensitivity(
+        &registry,
+        secret,
+        "vault",
+        locus_kit::provenance::Sensitivity::Secret,
+    );
+
+    for (tool, err) in near_pivot_errors(&registry, &id) {
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("near: anchor memory not found: {id}"),
+            "{tool} must use the standard near: not-found shape"
+        );
+        assert!(
+            !err.message.contains(secret),
+            "{tool} must not leak the withheld body; got: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn near_anchor_provenance_restricted_is_reported_not_found() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let restricted = "provenance-restricted body must not become a near: recall query";
+    let id = file_one_memory_with_provenance_sensitivity(
+        &registry,
+        restricted,
+        "vault",
+        locus_kit::provenance::Sensitivity::Restricted,
+    );
+
+    for (tool, err) in near_pivot_errors(&registry, &id) {
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("near: anchor memory not found: {id}"),
+            "{tool} must use the standard near: not-found shape"
+        );
+        assert!(
+            !err.message.contains(restricted),
+            "{tool} must not leak the withheld body; got: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn near_anchor_gated_message_is_byte_identical_to_absent_id_message() {
+    // Indistinguishability — the property the gate exists to protect. If a
+    // gated anchor produced any different message or code than an absent id,
+    // `near:` would become an existence oracle for redacted rows, which is the
+    // same defect class as the leak it replaces.
+    let registry = EstateRegistry::new_inmemory_bare();
+
+    for tier in [
+        locus_kit::provenance::Sensitivity::Restricted,
+        locus_kit::provenance::Sensitivity::Secret,
+    ] {
+        let id = file_one_memory_with_provenance_sensitivity(
+            &registry,
+            "gated body for the oracle check",
+            "vault",
+            tier,
+        );
+        // A UUID that was never filed. Comparing against the gated id
+        // substituted in leaves the SHAPE as the only possible difference.
+        let absent = "00000000-0000-4000-8000-00000000dead";
+
+        let gated = near_pivot_errors(&registry, &id);
+        let missing = near_pivot_errors(&registry, absent);
+        for ((tool, g), (_, m)) in gated.into_iter().zip(missing.into_iter()) {
+            assert_eq!(g.code, m.code, "{tool}/{tier:?}: error code must match");
+            assert_eq!(
+                g.message,
+                m.message.replace(absent, &id),
+                "{tool}/{tier:?}: gated message must be byte-identical to the absent-id message"
+            );
+        }
+    }
+}
+
+#[test]
+fn near_anchor_provenance_normal_and_elevated_still_pivot() {
+    // The other half: a gate, not a wall. Provenance Normal and Elevated are
+    // BELOW the redaction boundary and must still pivot, or the fix would have
+    // closed the near: door on ordinary rows. Mirrors the intent of
+    // memory_get's provenance_normal_and_elevated tests.
+    for tier in [
+        locus_kit::provenance::Sensitivity::Normal,
+        locus_kit::provenance::Sensitivity::Elevated,
+    ] {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let id = file_one_memory_with_provenance_sensitivity(
+            &registry,
+            "open provenance anchor body pivots normally",
+            "lab",
+            tier,
+        );
+
+        let search = dispatch_tool(
+            "moot_memory_search",
+            &args!["near" => id.as_str()],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .unwrap_or_else(|e| panic!("provenance {tier:?} must still pivot via search; got: {e:?}"));
+        assert!(is_success(&search), "provenance {tier:?} search pivot: {search:?}");
+
+        let shaped = dispatch_tool(
+            "moot_recall_shaped",
+            &args!["near" => id.as_str(), "preset" => "balanced"],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .unwrap_or_else(|e| panic!("provenance {tier:?} must still pivot via shaped; got: {e:?}"));
+        assert!(is_success(&shaped), "provenance {tier:?} shaped pivot: {shaped:?}");
+    }
+}
+
+#[test]
+fn near_anchor_adjective_gated_behaviour_is_unchanged() {
+    // The adjective axis (bits 6-11) was already gated by the default
+    // RecallFrame before this mission, and stays gated the same way after it.
+    // Pinning it here proves the provenance check was added ALONGSIDE the
+    // frame gate rather than replacing it.
+    let registry = EstateRegistry::new_inmemory_bare();
+    let body = "adjective-secret anchor body";
+    let id = {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        let mut frame = CaptureFrame::new(
+            body,
+            CaptureChannel::Typed,
+            "vault",
+            LatticeAnchor::udc("004"),
+            "aria-mcp-tests",
+            "default",
+        );
+        frame.sensitivity = locus_kit::adjectives::AdjectiveSensitivity::Secret;
+        let now = aria_mcp::dispatch::wall_now();
+        let coord = registry.coord.lock().unwrap();
+        coord
+            .capture(&registry.default.handle, frame, now)
+            .expect("adjective-secret capture must succeed")
+            .id
+            .clone()
+    };
+
+    for (tool, err) in near_pivot_errors(&registry, &id) {
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("near: anchor memory not found: {id}"),
+            "{tool}: adjective-gated anchors keep the same not-found shape"
+        );
+    }
 }
 
 #[test]

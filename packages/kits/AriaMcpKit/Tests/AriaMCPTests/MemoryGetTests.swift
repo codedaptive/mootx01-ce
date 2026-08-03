@@ -351,6 +351,172 @@ struct MemoryGetTests {
         }
     }
 
+    // MARK: - near: anchor pivot — the same provenance boundary
+
+    // The by-id door (above) and the pivot door (`near:<uuid>`) must agree.
+    // `moot_memory_search` deliberately surfaces a gated row's id with a
+    // redacted body, so the UUID needed to pivot is obtainable in ordinary
+    // use; without a gate the caller could hand that UUID back as `near:` and
+    // receive the protected body's content-derived neighbors — the redaction
+    // boundary crossed by a different door. These cases cover both tools that
+    // accept `near:`: moot_memory_search and moot_recall_shaped.
+    //
+    // Every case asserts the SAME message an absent id produces. A distinct
+    // message or error code would turn the gate into an existence oracle for
+    // redacted rows, which is the same defect class it closes.
+
+    /// Dispatch `near:` against both tools that accept it, returning each
+    /// tool's error message (or `nil` if it did not throw). One helper is what
+    /// makes "both doors agree" checkable in a single assertion per property.
+    private func nearPivotMessages(
+        anchorID: String,
+        dispatcher: ToolDispatcher
+    ) async -> [(tool: String, message: String?)] {
+        var out: [(tool: String, message: String?)] = []
+        for (tool, args) in [
+            ("moot_memory_search", JSONValue.object(["near": .string(anchorID)])),
+            ("moot_recall_shaped", JSONValue.object([
+                "near": .string(anchorID), "preset": .string("balanced")
+            ]))
+        ] {
+            do {
+                _ = try await dispatcher.dispatch(name: tool, arguments: args)
+                out.append((tool, nil))
+            } catch let error as JSONRPCError {
+                #expect(error.code == JSONRPCErrorCode.invalidParams,
+                    "\(tool) must use the tool-family's standard invalidParams code")
+                out.append((tool, error.message))
+            } catch {
+                out.append((tool, nil))
+            }
+        }
+        return out
+    }
+
+    /// Regression for Codex finding `3a1cf92490a481918c3a2837effe341f`: before
+    /// the gate, a provenance-Secret anchor's body became the recall query
+    /// verbatim through both `near:` doors.
+    @Test func nearAnchorProvenanceSecretIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "near-prov-secret")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let body = "provenance-secret body must not become a near: recall query"
+        let drawer = try await seedProvenance(
+            body, provenanceSensitivity: .secret, in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        for (tool, message) in await nearPivotMessages(
+            anchorID: drawer.id, dispatcher: dispatcher
+        ) {
+            guard let message else {
+                Issue.record("\(tool): provenance-secret anchor must be reported not-found")
+                continue
+            }
+            #expect(message == "near: anchor memory not found: \(drawer.id)",
+                "\(tool) must use the standard near: not-found shape")
+            #expect(!message.contains(body),
+                "\(tool) must not leak the withheld body")
+        }
+    }
+
+    @Test func nearAnchorProvenanceRestrictedIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "near-prov-restricted")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let body = "provenance-restricted body must not become a near: recall query"
+        let drawer = try await seedProvenance(
+            body, provenanceSensitivity: .restricted, in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        for (tool, message) in await nearPivotMessages(
+            anchorID: drawer.id, dispatcher: dispatcher
+        ) {
+            guard let message else {
+                Issue.record("\(tool): provenance-restricted anchor must be reported not-found")
+                continue
+            }
+            #expect(message == "near: anchor memory not found: \(drawer.id)",
+                "\(tool) must use the standard near: not-found shape")
+            #expect(!message.contains(body),
+                "\(tool) must not leak the withheld body")
+        }
+    }
+
+    /// Indistinguishability — the property the gate exists to protect. If a
+    /// gated anchor produced any different message than a wholly absent UUID,
+    /// `near:` would become an existence oracle for redacted rows.
+    @Test func nearAnchorGatedMessageIsByteIdenticalToAbsentIDMessage() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "near-prov-oracle")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        for tier: LocusKit.Sensitivity in [.restricted, .secret] {
+            let drawer = try await seedProvenance(
+                "gated body for \(tier)", provenanceSensitivity: tier, in: handle, kit: kit)
+            // A UUID that was never filed. Substituting the gated id into the
+            // absent-id message leaves the SHAPE as the only difference that
+            // could survive the comparison.
+            let absentID = UUID().uuidString
+
+            let gated = await nearPivotMessages(anchorID: drawer.id, dispatcher: dispatcher)
+            let absent = await nearPivotMessages(anchorID: absentID, dispatcher: dispatcher)
+            for (g, a) in zip(gated, absent) {
+                guard let gatedMessage = g.message, let absentMessage = a.message else {
+                    Issue.record("\(g.tool)/\(tier): both a gated and an absent anchor must be reported not-found")
+                    continue
+                }
+                #expect(
+                    gatedMessage == absentMessage.replacingOccurrences(
+                        of: absentID, with: drawer.id),
+                    "\(g.tool)/\(tier) message must be byte-identical to the absent-id message")
+            }
+        }
+    }
+
+    /// The other half: a gate, not a wall. Provenance `.normal` and
+    /// `.elevated` are BELOW the redaction boundary and must still pivot, or
+    /// the fix would have closed `near:` on ordinary rows. Mirrors the intent
+    /// of `provenanceNormalAndElevatedDrawersAreReturnedInFull`.
+    @Test func nearAnchorProvenanceNormalAndElevatedStillPivot() async throws {
+        for tier: LocusKit.Sensitivity in [.normal, .elevated] {
+            let kit = GeniusLocusKit()
+            let owner = OwnerCredentials(ownerIdentifier: "near-prov-open-\(tier)")
+            let handle = try await openEstate(in: kit, owner: owner)
+            let drawer = try await seedProvenance(
+                "open provenance anchor body pivots normally",
+                provenanceSensitivity: tier, in: handle, kit: kit)
+
+            let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+            for (tool, message) in await nearPivotMessages(
+                anchorID: drawer.id, dispatcher: dispatcher
+            ) {
+                #expect(message == nil,
+                    "provenance \(tier) is below the redaction boundary and must still pivot through \(tool); got: \(message ?? "")")
+            }
+        }
+    }
+
+    /// The adjective axis (bits 6-11) was already gated by the default
+    /// RecallFrame before this mission and stays gated the same way after it.
+    /// Pinning it here proves the provenance check was added ALONGSIDE the
+    /// frame gate rather than replacing it.
+    @Test func nearAnchorAdjectiveGatedBehaviourIsUnchanged() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "near-adjective-secret")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let drawer = try await seed(
+            "adjective-secret anchor body", sensitivity: .secret, in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        for (tool, message) in await nearPivotMessages(
+            anchorID: drawer.id, dispatcher: dispatcher
+        ) {
+            #expect(message == "near: anchor memory not found: \(drawer.id)",
+                "\(tool): adjective-gated anchors keep the same not-found shape")
+        }
+    }
+
     @Test func withdrawnDrawerIsReportedNotFound() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mg-withdrawn")
