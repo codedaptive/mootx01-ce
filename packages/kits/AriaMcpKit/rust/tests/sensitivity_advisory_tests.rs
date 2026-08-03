@@ -64,6 +64,16 @@ fn advisories(body: &str) -> Vec<&str> {
         .collect()
 }
 
+/// A fixed UTC `ZoneOffsetRule` for the grant helpers. These tests assert only
+/// that a LIVE grant suppresses the advisory — never anything about when the
+/// grant expires — so they pass under any zone. Pinning the zone anyway keeps
+/// the expiry boundary from being a function of the runner's machine, which is
+/// the difference between a test and a future flake. The ledger's own `utc`
+/// helper lives in its `#[cfg(test)]` module and is invisible from here.
+fn utc_zone(_epoch_secs: i64) -> i64 {
+    0
+}
+
 fn seed(registry: &EstateRegistry, content: &str, sensitivity: &str) -> String {
     let subject: String = content.chars().take(120).collect();
     let a = args![
@@ -257,8 +267,8 @@ fn search_advisory_absent_under_live_grant_in_both_estates() {
     let pair = make_estate_pair();
     let clean_ledger = SensitivityGrantLedger::new();
     let sensitive_ledger = SensitivityGrantLedger::new();
-    clean_ledger.grant_restricted(wall_now(), 0);
-    sensitive_ledger.grant_restricted(wall_now(), 0);
+    clean_ledger.grant_restricted_in(wall_now(), utc_zone);
+    sensitive_ledger.grant_restricted_in(wall_now(), utc_zone);
 
     assert!(
         advisories(&search(&pair.clean, &clean_ledger)).is_empty(),
@@ -272,8 +282,8 @@ fn get_advisory_absent_under_live_grant_in_both_estates() {
     let pair = make_estate_pair();
     let clean_ledger = SensitivityGrantLedger::new();
     let sensitive_ledger = SensitivityGrantLedger::new();
-    clean_ledger.grant_restricted(wall_now(), 0);
-    sensitive_ledger.grant_restricted(wall_now(), 0);
+    clean_ledger.grant_restricted_in(wall_now(), utc_zone);
+    sensitive_ledger.grant_restricted_in(wall_now(), utc_zone);
 
     assert!(advisories(&get(&pair.clean, &pair.clean_visible_id, &clean_ledger)).is_empty());
     assert!(advisories(&get(
