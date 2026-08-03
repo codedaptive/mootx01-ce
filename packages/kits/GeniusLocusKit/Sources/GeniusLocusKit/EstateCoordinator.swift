@@ -160,6 +160,14 @@ public extension GeniusLocusKit {
     /// backing SQLite connection to release the file lock, and drops all
     /// registry entries for the handle.
     ///
+    /// "All" is literal and load-bearing: EVERY per-estate registry is
+    /// cleared, on both the error path and the success path, because handles
+    /// are equal across reopens and anything left behind resolves on the next
+    /// open of the same estate as state the caller never registered.
+    /// `EstateCloseCompletenessTests` enforces this as registries are added.
+    /// Values that own a worker, a lease, or a connection are torn down BEFORE
+    /// their entry is dropped — see `corpusKits` and `schedulers` below.
+    ///
     /// Storage close contract: GLK retains the caller's `Storage` in
     /// `storages[handle]` so grant stores and sub-stores share the same
     /// SQLite file. On close, GLK calls `storage.close()` to release
@@ -197,6 +205,28 @@ public extension GeniusLocusKit {
             calibrationRegistries[handle] = nil
             matrixPersistenceBackends[handle] = nil
             nodeTopologyProviders[handle] = nil
+            // Drop the recall accelerators. Both are caller-registered pure
+            // score lookups with no lazy re-mint, so a reopened estate scores
+            // their columns at 0.0 until the caller registers again.
+            graphCaches[handle] = nil
+            preferenceStores[handle] = nil
+            // Drop the subject-backfill rider. Handles are equal across
+            // reopens, so leaving this entry lets a reopened estate resolve to
+            // a producer that was never re-registered — drainStatuses renders
+            // the subject_backfill lane as live and subjectBackfillSweep, which
+            // authorises on map presence alone, hands drawer content to it.
+            subjectProducers[handle] = nil
+            // Release the standing-signal scheduler's signals drain lease
+            // BEFORE dropping the registry entry, the same ordering discipline
+            // the corpusKits drop below follows. `DrainLease.release()` is
+            // ownership-guarded — it removes the lease file only when this
+            // process holds it — so it can never clobber another drainer's
+            // record. The scheduler owns no background task or timer of its
+            // own (`tick(now:)` is caller-driven), so once the lease is
+            // released the reference itself is safe to drop; that also
+            // releases the scheduler's queue.sqlite connection.
+            schedulers[handle]?.drainLease?.release()
+            schedulers[handle] = nil
             // Drop dreaming queue + HLC. No drain worker to
             // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
             dreamingQueues[handle] = nil
@@ -226,6 +256,28 @@ public extension GeniusLocusKit {
         calibrationRegistries[handle] = nil
         matrixPersistenceBackends[handle] = nil
         nodeTopologyProviders[handle] = nil
+        // Drop the recall accelerators. Both are caller-registered pure
+        // score lookups with no lazy re-mint, so a reopened estate scores
+        // their columns at 0.0 until the caller registers again.
+        graphCaches[handle] = nil
+        preferenceStores[handle] = nil
+        // Drop the subject-backfill rider. Handles are equal across reopens,
+        // so leaving this entry lets a reopened estate resolve to a producer
+        // that was never re-registered — drainStatuses renders the
+        // subject_backfill lane as live and subjectBackfillSweep, which
+        // authorises on map presence alone, hands drawer content to it.
+        subjectProducers[handle] = nil
+        // Release the standing-signal scheduler's signals drain lease BEFORE
+        // dropping the registry entry, the same ordering discipline the
+        // corpusKits drop below follows. `DrainLease.release()` is
+        // ownership-guarded — it removes the lease file only when this process
+        // holds it — so it can never clobber another drainer's record. The
+        // scheduler owns no background task or timer of its own (`tick(now:)`
+        // is caller-driven), so once the lease is released the reference itself
+        // is safe to drop; that also releases the scheduler's queue.sqlite
+        // connection.
+        schedulers[handle]?.drainLease?.release()
+        schedulers[handle] = nil
         // Drop dreaming queue + HLC. No drain worker to
         // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
         dreamingQueues[handle] = nil
@@ -278,5 +330,71 @@ public extension GeniusLocusKit {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
         return estate
+    }
+}
+
+// MARK: - Close-path completeness audit
+
+/// Reporting seam for the close-path completeness audit: any dictionary keyed
+/// by `EstateHandle` can say whether it still holds an entry for a handle,
+/// whatever its value type is.
+///
+/// The conditional conformance below is what makes `residentRegistries(for:)`
+/// STRUCTURAL rather than a hand-maintained list. Every per-estate registry on
+/// the actor is a `[EstateHandle: …]`, so each one conforms automatically and
+/// is enumerated by reflection — a registry added in a later mission is
+/// audited with no edit to this file and no edit to the test.
+internal protocol EstateKeyedRegistry {
+    /// Whether this registry still holds an entry for `handle`.
+    func holdsEntry(for handle: EstateHandle) -> Bool
+}
+
+extension Dictionary: EstateKeyedRegistry where Key == EstateHandle {
+    internal func holdsEntry(for handle: EstateHandle) -> Bool {
+        self[handle] != nil
+    }
+}
+
+internal extension GeniusLocusKit {
+
+    /// The names of every per-estate registry that still holds an entry for
+    /// `handle`, sorted for a stable diff.
+    ///
+    /// `close` must leave this empty. Handles are equal across reopens
+    /// (`EstateHandle.estateUUID` comes from the manifest, so it is a property
+    /// of the substrate rather than of the open), which means any registry
+    /// entry left behind is resolvable by the NEXT open of the same estate as
+    /// state the caller never registered. That is the whole shape of Codex
+    /// finding `6ed2ab30948481919f147fae496f55b1`.
+    ///
+    /// Implemented by reflecting over the actor's stored properties and
+    /// selecting those that are `EstateHandle`-keyed dictionaries, so the audit
+    /// covers registries that did not exist when it was written. Reflection is
+    /// acceptable here because this is a diagnostic read on a cold path — the
+    /// close-completeness test — never a hot recall path.
+    func residentRegistries(for handle: EstateHandle) -> [String] {
+        Mirror(reflecting: self).children.compactMap { child in
+            guard let label = child.label,
+                  let registry = child.value as? any EstateKeyedRegistry,
+                  registry.holdsEntry(for: handle)
+            else { return nil }
+            return label
+        }
+        .sorted()
+    }
+
+    /// The names of every per-estate registry declared on the actor, sorted.
+    ///
+    /// The completeness test asserts this is non-empty and that the registries
+    /// it managed to populate are a meaningful share of it, so the test cannot
+    /// quietly degrade into asserting emptiness over an empty set.
+    func declaredRegistryNames() -> [String] {
+        Mirror(reflecting: self).children.compactMap { child in
+            guard let label = child.label,
+                  child.value is any EstateKeyedRegistry
+            else { return nil }
+            return label
+        }
+        .sorted()
     }
 }
