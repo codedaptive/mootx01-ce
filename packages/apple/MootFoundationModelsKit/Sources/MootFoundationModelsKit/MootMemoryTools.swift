@@ -25,13 +25,25 @@ public struct MootCaptureArguments: Sendable {
     @Guide(description: "A short subject-matter location.")
     public var location: String
 
+    // The model is the ideal author of this field, not a fallback for it: the
+    // schema's register ("written for the NEXT AI that will scan it") describes
+    // precisely what a model reading the content can produce and a string
+    // function cannot. The @Guide text is the register, compressed to what fits
+    // an on-device model's instruction budget.
+    @Guide(description: "One sentence, at most 120 characters, stating what this memory asserts. Telegraphic — entities and claims first, no narrative framing. Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\"")
+    public var subject: String?
+
     @Guide(description: "Privacy sensitivity.", .anyOf(["normal", "elevated", "restricted", "secret"]))
     public var sensitivity: String
 
-    public init(content: String, location: String, sensitivity: String = "normal") {
+    // `subject` is optional and trails the required fields so existing
+    // construction sites keep compiling; when a model omits it the capture tool
+    // derives one from `content` rather than failing the capture.
+    public init(content: String, location: String, sensitivity: String = "normal", subject: String? = nil) {
         self.content = content
         self.location = location
         self.sensitivity = sensitivity
+        self.subject = subject
     }
 }
 
@@ -122,8 +134,16 @@ public struct MootCaptureTool: Tool {
         guard await authorize(arguments) else {
             throw MootMemoryToolError.captureNotAuthorized
         }
+        // `subject` is required by the tool. When the model wrote one it is used
+        // as-is (normalized to a single line); when it omitted the field the
+        // subject is derived from the content so an authorized capture is never
+        // lost to a missing summary. Both paths share MootIntentKit's
+        // CaptureSubject seam with the App Intents and Share-Sheet surfaces.
+        let subject = CaptureSubject.resolve(
+            supplied: arguments.subject, body: arguments.content)
         let result = await caller.callTool("moot_file_memory", arguments: [
             "content": .string(arguments.content),
+            "subject": .string(subject),
             "location": .string(arguments.location),
             "sensitivity": .string(arguments.sensitivity),
             "impatient": .bool(true),
