@@ -40,6 +40,12 @@
 // generic pattern the way "ends in _status" can — see `classify`'s doc
 // comment for why this one is intentionally exhaustive-by-name.
 //
+// The two prefixes address ONE capability, so a tier placed under either
+// binds the other: `mergeTiered` gives an absent entry its twin's tier
+// (most restrictive wins on disagreement) rather than the classifier
+// default. Backfilling at the default instead would let a `deny` under one
+// namespace be bypassed by an `allow` under the other. See its doc comment.
+//
 // All merges are additive and idempotent: entries the user already has (in
 // ANY tier) are preserved and never duplicated or moved — EXCEPT for the
 // migration pass (`migrateTiers`, run at upgrade time), which re-tiers an
@@ -82,6 +88,20 @@ public enum PermissionsWriter {
     /// Default permission tier for a tool, by capability pattern.
     public enum Tier: String {
         case allow, ask, deny
+
+        /// Rank for the most-restrictive-wins rule used when a tool's two
+        /// namespace entries disagree: `deny` > `ask` > `allow`. Ordering a
+        /// permission tier only ever means "how much does this restrict",
+        /// so the rank lives on the tier rather than at each comparison
+        /// site. Not part of the public surface — `mergeTiered` is the only
+        /// caller.
+        fileprivate var restrictiveness: Int {
+            switch self {
+            case .allow: return 0
+            case .ask: return 1
+            case .deny: return 2
+            }
+        }
     }
 
     /// Reads: no estate content is created, changed, or removed. Includes
@@ -186,19 +206,39 @@ public enum PermissionsWriter {
     /// Merge tool entries into `permissions.allow` / `.ask` / `.deny` by tier.
     ///
     /// A tool the user already placed in ANY of the three lists is left
-    /// exactly where it is — the user's decision outranks our default.
+    /// exactly where it is — the user's decision outranks our default. This
+    /// function only ever ADDS; it never moves an entry that already exists.
+    ///
     /// Writes an entry under BOTH `mcpPrefix` and `pluginMcpPrefix` for each
     /// tool (see the file header) — a rule under only one namespace matches
-    /// zero calls made through the other Claude Code connection. The two
-    /// namespaces are tracked and preserved INDEPENDENTLY against
-    /// `existing`: an install that only ever wrote `mcpPrefix` (pre-plugin,
-    /// or pre this fix) gets its missing `pluginMcpPrefix` twin backfilled
-    /// here at `classify`'s CURRENT default tier — NOT copied from whatever
-    /// tier the `mcpPrefix` sibling happens to sit in (which may itself be
-    /// a user customization, or a stale pre-migration tier). If a user
-    /// wants matching customizations in both namespaces, they place both
-    /// entries themselves; this function only ever fills in what is
-    /// genuinely absent.
+    /// zero calls made through the other Claude Code connection.
+    ///
+    /// **A placement under either namespace binds its twin.** The two
+    /// prefixes are two addresses for one capability, not two capabilities.
+    /// So when a tool is absent under one prefix but present under the
+    /// other, the entry added here INHERITS the sibling's tier rather than
+    /// falling back to `classify`. Where the namespaces disagree (the user
+    /// edited one, an older install wrote the other), the MOST RESTRICTIVE
+    /// tier found wins for the newly added entry only: `deny` > `ask` >
+    /// `allow`. Only when neither namespace carries the tool at all does
+    /// `classify` decide.
+    ///
+    /// Backfilling at the classifier default instead would bypass a user's
+    /// `deny`: someone who denies `mcp__mootx01__moot_memory_get` would get
+    /// `mcp__plugin_mootx01_mootx01__moot_memory_get` added to `allow` on
+    /// the next install or upgrade, because that exact string is "genuinely
+    /// absent". A deny is a decision about a capability, not about a string
+    /// prefix the user has never seen and cannot be expected to know exists.
+    ///
+    /// The sibling's tier is read from the settings file as it stands on
+    /// entry, which at every production call site is AFTER `migrateTiers`
+    /// has run (`InstallCommand`, `UpgradeCommand`, and both Rust twins run
+    /// the two passes in that order). Inheritance therefore reads a tier
+    /// that has already converged on the current default, never a stale
+    /// pre-migration one. The lookup is also computed once per tool, before
+    /// either namespace entry is appended, so the order in which this run
+    /// writes the two prefixes cannot change the result.
+    ///
     /// Returns the number of entries added per tier (both namespaces
     /// combined — a fresh install adds 2 entries per tool).
     ///
@@ -216,14 +256,34 @@ public enum PermissionsWriter {
         var ask = permissions["ask"] as? [String] ?? []
         var deny = permissions["deny"] as? [String] ?? []
 
-        // The user's existing placement (any tier) wins over our default.
-        let existing = Set(allow).union(ask).union(deny)
+        // The user's existing placement (any tier) wins over our default —
+        // and WHERE each existing entry sits is now load-bearing, not just
+        // whether it exists, because an absent entry inherits its twin's
+        // tier. An entry cannot legitimately appear in more than one tier
+        // (this function never duplicates); if it somehow does, the first
+        // tier found wins, matching `migrateTiers`' reverse index.
+        var existingTier: [String: Tier] = [:]
+        for (tier, list) in [(Tier.allow, allow), (Tier.ask, ask), (Tier.deny, deny)] {
+            for entry in list where existingTier[entry] == nil {
+                existingTier[entry] = tier
+            }
+        }
+
         var added = (allow: 0, ask: 0, deny: 0)
         for tool in toolNames {
-            let tier = classify(tool)
+            // Computed from the pre-existing state, once per tool and before
+            // either entry is appended. Scanning every prefix rather than
+            // only "the other one" is equivalent here and stays correct if a
+            // third namespace is ever added: a prefix whose entry is absent
+            // contributes nothing, and one whose entry is present is exactly
+            // a sibling to inherit from.
+            let inherited = allPrefixes
+                .compactMap { existingTier["\($0)\(tool)"] }
+                .max { $0.restrictiveness < $1.restrictiveness }
+            let tier = inherited ?? classify(tool)
             for prefix in allPrefixes {
                 let entry = "\(prefix)\(tool)"
-                guard !existing.contains(entry) else { continue }
+                guard existingTier[entry] == nil else { continue }
                 switch tier {
                 case .allow: allow.append(entry); added.allow += 1
                 case .ask:   ask.append(entry);   added.ask += 1
