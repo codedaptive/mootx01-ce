@@ -220,11 +220,13 @@ struct ConflictProjectionSweepTests {
 
         #expect(report.counts.provenContradiction == 1)
         let finding = try! #require(report.proven.first)
+        // Restricted exactly — which puts it AT the renderer's digest
+        // threshold (`>= restrictedRaw`, RecipeTools.swift:987) and BELOW
+        // its suppression threshold (`>= secretRaw`, :985): a coordinate
+        // digest is emitted in place of the PROVEN block, and the finding
+        // is not dropped. The restricted tier exists so a sensitive
+        // conflict can still be signalled without disclosure.
         #expect(finding.sensitivityCeilingRaw == AdjectiveSensitivity.restricted.rawValue)
-        // Renders as a coordinate digest, not the full PROVEN block…
-        #expect(finding.sensitivityCeilingRaw >= AdjectiveSensitivity.restricted.rawValue)
-        // …and is not suppressed outright — the restricted tier exists so
-        // a sensitive conflict can still be signalled without disclosure.
         #expect(finding.sensitivityCeilingRaw < AdjectiveSensitivity.secret.rawValue)
     }
 

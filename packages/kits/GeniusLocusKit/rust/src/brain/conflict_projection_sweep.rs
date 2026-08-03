@@ -161,6 +161,17 @@ pub fn run_sweep(
             // value here would re-open the fail-open hole for any future
             // caller that decodes before comparing.
             let unresolved = AdjectiveSensitivity::Secret.raw_value();
+            // Both fallbacks inside `fact_raw` are defensive and
+            // unreachable through `run_sweep`: every signature in the
+            // index came from `project`, which always sets a locator, and
+            // the map was built from the same `facts` those signatures
+            // were projected from, so the lookup cannot miss. They are
+            // kept rather than pruned as dead code because
+            // `ConflictSignature` publishes `evidence_locator` as
+            // optional for future extractor-sourced signatures — the day
+            // one of those arrives this must redact, not resolve to
+            // Normal. Reaching them from a test would mean widening this
+            // API for the test's benefit alone.
             let fact_raw = |s: &ConflictSignature| -> i64 {
                 s.evidence_locator
                     .as_deref()
@@ -476,16 +487,16 @@ mod tests {
 
         assert_eq!(report.counts.proven_contradiction, 1);
         let finding = &report.proven[0];
+        // Restricted exactly — which puts it AT the renderer's digest
+        // threshold (`>= restricted_raw`, recipe_tools.rs:190) and BELOW
+        // its suppression threshold (`>= secret_raw`, :186): a coordinate
+        // digest is emitted in place of the PROVEN block, and the finding
+        // is not dropped. The restricted tier exists so a sensitive
+        // conflict can still be signalled without disclosure.
         assert_eq!(
             finding.sensitivity_ceiling_raw,
             AdjectiveSensitivity::Restricted.raw_value()
         );
-        // Renders as a coordinate digest, not the full PROVEN block…
-        assert!(
-            finding.sensitivity_ceiling_raw >= AdjectiveSensitivity::Restricted.raw_value()
-        );
-        // …and is not suppressed outright — the restricted tier exists so
-        // a sensitive conflict can still be signalled without disclosure.
         assert!(finding.sensitivity_ceiling_raw < AdjectiveSensitivity::Secret.raw_value());
     }
 
@@ -548,6 +559,10 @@ mod tests {
         assert_eq!(report.diagnostics.projected, 2);
         assert_eq!(report.pairs_evaluated, 1);
         assert_eq!(report.proven.len(), 1);
+        assert!(report.proven[0]
+            .outcome
+            .reasons
+            .contains(&substrate_ml::conflict_projection::ConflictReason::ValuesExclusive));
     }
 
     /// No over-redaction. `f1` and `f2` are Normal facts that prove

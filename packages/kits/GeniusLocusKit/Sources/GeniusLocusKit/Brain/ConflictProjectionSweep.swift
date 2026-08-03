@@ -200,6 +200,16 @@ public enum ConflictSweepCore {
         // would re-open the fail-open hole for any future caller that
         // decodes before comparing.
         let unresolved = AdjectiveSensitivity.secret.rawValue
+        // Both fallbacks inside `factRaw` are defensive and unreachable
+        // through `run`: every signature in the index came from
+        // `ConflictProjector.project`, which always sets a locator, and
+        // the map was built from the same `facts` those signatures were
+        // projected from, so the lookup cannot miss. They are kept rather
+        // than pruned as dead code because `ConflictSignature` publishes
+        // `evidenceLocator` as optional for future extractor-sourced
+        // signatures — the day one of those arrives this must redact, not
+        // resolve to `.normal`. Reaching them from a test would mean
+        // widening this API for the test's benefit alone.
         func factRaw(_ signature: ConflictSignature) -> Int {
             guard let locator = signature.evidenceLocator else { return unresolved }
             return sensitivityRawByEvidenceLocator[locator] ?? unresolved
