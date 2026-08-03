@@ -13,6 +13,10 @@ private enum U3SignedHostFailure: Error {
   case invalidProof
   case incompleteCleanup
   case invalidCheckpoint
+  case checkpointRecordsAbsent
+  // Carries the first checkpoint field that disagreed with the stored record,
+  // so a refused resume names what was wrong instead of only that it refused.
+  case checkpointFieldMismatch(String)
 }
 
 private final class U3SignedHostDelegate: NSObject, NSApplicationDelegate {
@@ -25,6 +29,10 @@ private final class U3SignedHostDelegate: NSObject, NSApplicationDelegate {
         writeFixedResult("pass")
         exit(EXIT_SUCCESS)
       } catch let error as SecretSyncCustodyError {
+        writeFixedResult(classification(for: error))
+        exit(EXIT_FAILURE)
+      } catch let error as U3SignedHostFailure {
+        writeCheckpointRefusalDetail(error)
         writeFixedResult(classification(for: error))
         exit(EXIT_FAILURE)
       } catch {
@@ -133,11 +141,28 @@ private struct U3SignedPhysicalProof {
     }
   }
 
+  /// Finishes the cleanup a previous run was interrupted before completing.
+  ///
+  /// The checkpoint is never authority on its own. It is same-user file data
+  /// with no MAC, no signature, and no Keychain binding, so its credential ID
+  /// alone is not evidence that the records it names are the records this run
+  /// wrote — a stale checkpoint from an earlier run, or a partially written
+  /// one, would otherwise be enough to delete an unrelated credential's
+  /// handles. The stored signing and agreement records are the ground truth
+  /// the checkpoint must agree with, field for field, before anything is
+  /// removed. Codex finding 98abbd7925148191ac433b614b7ba5c8.
+  ///
+  /// A refusal deliberately leaves the checkpoint on disk. Clearing it would
+  /// destroy the evidence a developer needs to see what disagreed.
   private func resumeInterruptedCustody(
     with custody: SecretSyncSecureEnclaveCustody,
     checkpointStore: U3CustodyCheckpointStore
   ) async throws {
     guard let checkpoint = try checkpointStore.read() else { return }
+    try await requireCheckpointMatchesStoredRecords(
+      checkpoint,
+      custody: custody
+    )
     try await custody.removeCredentialForPhysicalProof(checkpoint.credentialID)
     try await verifyProductionAbsence(
       with: custody,
@@ -145,6 +170,90 @@ private struct U3SignedPhysicalProof {
     )
     try verifyKeychainAbsence(for: checkpoint.credentialID)
     try checkpointStore.clear()
+  }
+
+  /// Proves the checkpoint describes the records it is about to authorize the
+  /// deletion of, and throws without deleting anything when it does not.
+  ///
+  /// Every field the checkpoint carries about the two role records is compared,
+  /// not just the credential ID that selects them. The reads are the ordinary
+  /// production retrieval methods: non-destructive, no Secure Enclave key is
+  /// reconstructed, and each one takes a fresh authority authorization — so a
+  /// resume can no longer delete custody records without the device owner
+  /// present.
+  ///
+  /// `deviceID` is the one checkpoint field left uncompared: a stored record
+  /// carries no device identity, so there is no ground truth to match it
+  /// against.
+  private func requireCheckpointMatchesStoredRecords(
+    _ checkpoint: U3CustodyCheckpoint,
+    custody: SecretSyncSecureEnclaveCustody
+  ) async throws {
+    let credentialID = checkpoint.credentialID
+    let signingHandle: SigningPrivateKeyHandle
+    let agreementHandle: KeyAgreementPrivateKeyHandle
+    let signingDescriptor: SigningPublicKeyDescriptor
+    let agreementDescriptor: KeyAgreementPublicKeyDescriptor
+    do {
+      signingHandle = try await custody.signingPrivateKeyHandle(
+        for: credentialID
+      )
+      agreementHandle = try await custody.keyAgreementPrivateKeyHandle(
+        for: credentialID
+      )
+      signingDescriptor = try await custody.signingPublicCredential(
+        for: credentialID
+      )
+      agreementDescriptor = try await custody.keyAgreementPublicCredential(
+        for: credentialID
+      )
+    } catch SecretSyncCustodyError.missingHandle {
+      // Absent records mean the checkpoint does not describe this machine's
+      // current state. Every other custody error — missing entitlement, failed
+      // authorization — propagates unchanged so it keeps its own diagnosis.
+      throw U3SignedHostFailure.checkpointRecordsAbsent
+    }
+
+    // Ordered so the strongest identity evidence for each role is stated first
+    // and the reported field is the most specific disagreement available.
+    let comparisons: [(field: String, agrees: Bool)] = [
+      (
+        "signingHandleID",
+        signingHandle.rawValue == checkpoint.signingHandleID
+      ),
+      (
+        "signingAlgorithm",
+        signingDescriptor.algorithmIdentifier == checkpoint.signingAlgorithm
+      ),
+      (
+        "signingKeyIdentifier",
+        signingDescriptor.keyIdentifier == checkpoint.signingKeyIdentifier
+      ),
+      (
+        "signingPublicKey",
+        signingDescriptor.publicKeyBytes == checkpoint.signingPublicKey
+      ),
+      (
+        "agreementHandleID",
+        agreementHandle.rawValue == checkpoint.agreementHandleID
+      ),
+      (
+        "agreementAlgorithm",
+        agreementDescriptor.algorithmIdentifier == checkpoint.agreementAlgorithm
+      ),
+      (
+        "agreementKeyIdentifier",
+        agreementDescriptor.keyIdentifier == checkpoint.agreementKeyIdentifier
+      ),
+      (
+        "agreementPublicKey",
+        agreementDescriptor.publicKeyBytes == checkpoint.agreementPublicKey
+      ),
+    ]
+    guard let disagreement = comparisons.first(where: { !$0.agrees }) else {
+      return
+    }
+    throw U3SignedHostFailure.checkpointFieldMismatch(disagreement.field)
   }
 
   private func proveBothRoles(
@@ -492,6 +601,42 @@ private func classification(for error: SecretSyncCustodyError) -> String {
     .corruptProtectedHead, .rollbackDetected:
     "proof-failed"
   }
+}
+
+private func classification(for failure: U3SignedHostFailure) -> String {
+  switch failure {
+  case .checkpointRecordsAbsent, .checkpointFieldMismatch:
+    // A refused resume is not a failed proof: nothing was deleted and the
+    // checkpoint is still on disk. It gets its own token so a developer can
+    // tell the two outcomes apart at a glance.
+    "checkpoint-unmatched"
+  case .inactiveApplication, .invalidEntitlementShape,
+    .invalidKeychainAttributes, .invalidProof, .incompleteCleanup,
+    .invalidCheckpoint:
+    "proof-failed"
+  }
+}
+
+/// Reports on standard error why a resume declined to delete.
+///
+/// Standard output carries exactly one fixed line because
+/// `run-physical-proof.sh` compares it byte for byte; the disagreeing field
+/// therefore goes to standard error, where a developer can read it without
+/// that comparison being loosened.
+private func writeCheckpointRefusalDetail(_ failure: U3SignedHostFailure) {
+  let detail: String
+  switch failure {
+  case .checkpointFieldMismatch(let field):
+    detail = field
+  case .checkpointRecordsAbsent:
+    detail = "records-absent"
+  case .inactiveApplication, .invalidEntitlementShape,
+    .invalidKeychainAttributes, .invalidProof, .incompleteCleanup,
+    .invalidCheckpoint:
+    return
+  }
+  let line = "U3_SIGNED_HOST_CHECKPOINT_DISAGREEMENT=" + detail + "\n"
+  FileHandle.standardError.write(Data(line.utf8))
 }
 
 private func writeFixedResult(_ result: String) {
