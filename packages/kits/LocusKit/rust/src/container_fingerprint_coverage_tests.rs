@@ -288,7 +288,8 @@ fn fingerprint_snapshot(
     rows
 }
 
-/// A bit no real flag occupies, used to dirty the aggregate before a rebuild.
+/// A bit no real flag occupies; ORed into the aggregate to dirty it ahead of
+/// a rebuild.
 ///
 /// `add_drawer` already folds each capture into the room and wing aggregates
 /// incrementally, so straight after the fixture is built the table ALREADY
