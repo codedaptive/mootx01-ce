@@ -579,8 +579,8 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
     let lineage = Uuid::new_v4();
 
     // D1: Trust=Canonical (bits 18-23) so S-1 allows promote to Accepted.
-    // Representation columns populated so the gate-reject scrub can be
-    // verified to NULL them.
+    // Representation columns populated so their survival through the
+    // gate refusal can be verified byte-identical below.
     let mut d1 = sample_drawer("d1-gate-reject-accepted", "w", "r", "accepted-sibling-content");
     d1.lineage_id = lineage;
     d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
