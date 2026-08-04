@@ -52,7 +52,14 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v12 adds the subject trio to `drawers`
+/// Current schema version. v13 adds the kg_facts identity trio
+/// (`addedBy`, `foreignSourceKey`, `foreignRecordID`, all TEXT NOT NULL
+/// DEFAULT '') — the columns MXE-KH declared on the table but shipped
+/// without a ladder entry, so populated v12 estates never gained them on
+/// open. The `mootx01 upgrade` backfill (kg_fact_identity_backfill)
+/// moves misfiled pre-existing `source_drawer_id` values into them after
+/// this migration runs.
+/// v12 adds the subject trio to `drawers`
 /// (`subject`, `subject_pipeline_version`, `subject_at`, all nullable) —
 /// the one-sentence AI-facing summary progressive recall returns in the
 /// dense row. Nullable with no backfill: NULL `subject` IS the
@@ -80,7 +87,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
 /// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -113,6 +120,39 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
+            // v12 → v13: add the kg_facts identity trio (MXE-KH declared
+            // these on `kg_facts_table()` but shipped no ladder entry, so a
+            // populated v12 estate never gained them and every write to
+            // them — including the `mootx01 upgrade` backfill — would fail
+            // with "no such column"). NOT NULL DEFAULT '' matches the
+            // declaration contract: a locally-filed, unanchored fact writes
+            // the same shape it always did. The DATA move (pre-KH
+            // source_drawer_id values into their correct columns) is
+            // deliberately NOT a schema operation — it needs the
+            // drawers/lineage evidence and per-class counting that live in
+            // kg_fact_identity_backfill, run only by `mootx01 upgrade`.
+            // Matches the Swift v12 → v13 migration exactly.
+            Migration {
+                from_version: 12,
+                to_version: 13,
+                operations: vec![
+                    SchemaOperation::AddColumn {
+                        table: "kg_facts".to_string(),
+                        column: ColumnDeclaration::text("addedBy")
+                            .with_default(TypedValue::Text(String::new())),
+                    },
+                    SchemaOperation::AddColumn {
+                        table: "kg_facts".to_string(),
+                        column: ColumnDeclaration::text("foreignSourceKey")
+                            .with_default(TypedValue::Text(String::new())),
+                    },
+                    SchemaOperation::AddColumn {
+                        table: "kg_facts".to_string(),
+                        column: ColumnDeclaration::text("foreignRecordID")
+                            .with_default(TypedValue::Text(String::new())),
+                    },
+                ],
+            },
             // v11 → v12: add the subject trio to drawers (progressive
             // recall dense row). All three nullable, no backfill — NULL
             // `subject` is the backfill-eligibility predicate, so pre-v12
@@ -1205,6 +1245,9 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
+    /// v13 adds the kg_facts identity trio (addedBy, foreignSourceKey,
+    /// foreignRecordID) as a ladder entry so populated v12 estates gain
+    /// the columns MXE-KH declared on the table.
     /// v12 adds the subject trio (subject, subject_pipeline_version,
     /// subject_at) to drawers for the progressive-recall dense row.
     /// v11 adds operationalAND (AND-reduction aggregate) to container_fingerprints
@@ -1216,25 +1259,30 @@ mod tests {
     /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_twelve() {
-        assert_eq!(SCHEMA_VERSION, 12);
-        // Three migrations: v9 → v10 (FINDING-3 dedup + unique index),
-        //                   v10 → v11 (operationalAND on container_fingerprints),
-        //                   v11 → v12 (subject trio on drawers).
+    fn schema_version_is_thirteen() {
+        assert_eq!(SCHEMA_VERSION, 13);
+        // Four migrations: v9 → v10 (FINDING-3 dedup + unique index),
+        //                  v10 → v11 (operationalAND on container_fingerprints),
+        //                  v11 → v12 (subject trio on drawers),
+        //                  v12 → v13 (kg_facts identity trio).
         let m = schema();
-        assert_eq!(m.migrations.len(), 3);
-        // v11 → v12 is listed first (newest-first order).
-        assert_eq!(m.migrations[0].from_version, 11);
-        assert_eq!(m.migrations[0].to_version, 12);
+        assert_eq!(m.migrations.len(), 4);
+        // v12 → v13 is listed first (newest-first order).
+        assert_eq!(m.migrations[0].from_version, 12);
+        assert_eq!(m.migrations[0].to_version, 13);
         assert_eq!(m.migrations[0].operations.len(), 3);
-        // v10 → v11 is listed second.
-        assert_eq!(m.migrations[1].from_version, 10);
-        assert_eq!(m.migrations[1].to_version, 11);
-        assert_eq!(m.migrations[1].operations.len(), 1);
-        // v9 → v10 is listed third.
-        assert_eq!(m.migrations[2].from_version, 9);
-        assert_eq!(m.migrations[2].to_version, 10);
-        assert_eq!(m.migrations[2].operations.len(), 2);
+        // v11 → v12 is listed second.
+        assert_eq!(m.migrations[1].from_version, 11);
+        assert_eq!(m.migrations[1].to_version, 12);
+        assert_eq!(m.migrations[1].operations.len(), 3);
+        // v10 → v11 is listed third.
+        assert_eq!(m.migrations[2].from_version, 10);
+        assert_eq!(m.migrations[2].to_version, 11);
+        assert_eq!(m.migrations[2].operations.len(), 1);
+        // v9 → v10 is listed fourth.
+        assert_eq!(m.migrations[3].from_version, 9);
+        assert_eq!(m.migrations[3].to_version, 10);
+        assert_eq!(m.migrations[3].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.

@@ -43,6 +43,11 @@ let package = Package(
             traits: ["MigrationFloor1_0"]
         ),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
+        // VaultKit: UpgradeCommand injects DrawerMapping.lineageID into the
+        // LocusKit kg_facts identity backfill (MXE-MI). The resolver is
+        // injected at the app layer because LocusKit sits below VaultKit
+        // and must not import it.
+        .package(name: "VaultKit", path: "../../packages/kits/VaultKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
         // NeuronKit: DreamCommand constructs DreamingDaemon + seam adapters
@@ -96,6 +101,9 @@ let package = Package(
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
+                // VaultKit: DrawerMapping resolver for the kg_facts identity
+                // backfill run by `mootx01 upgrade` (MXE-MI).
+                .product(name: "VaultKit", package: "VaultKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 // DreamCommand: NeuronKit provides DreamingDaemon + seam adapters;

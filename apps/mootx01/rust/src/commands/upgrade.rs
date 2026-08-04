@@ -33,6 +33,7 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         }
         let code = place_and_report(&src, &home, no_restart);
         if code == ExitCode::from(exit::OK) {
+            run_kg_fact_identity_backfill();
             offer_estate_encryption_if_needed();
         }
         return code;
@@ -60,8 +61,9 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         Some(false) => {
             println!("Already up to date (v{CURRENT_VERSION}).");
             // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
-            // and it offers whether or not a new version is available — so
-            // the up-to-date early return still offers.
+            // and it converges whether or not a new version is available — so
+            // the up-to-date early return still backfills and offers.
+            run_kg_fact_identity_backfill();
             offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
         }
@@ -98,9 +100,109 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         println!("Upgraded to v{latest}. Run `mootx01 status` to confirm.");
         // After the services are back up, so a decline leaves a fully
         // converged install and an accept owns its own stop/start sequence.
+        // The backfill runs first: unattended correctness migration before
+        // the TTY-gated opt-in offer.
+        run_kg_fact_identity_backfill();
         offer_estate_encryption_if_needed();
     }
     code
+}
+
+/// MXE-MI: move pre-MXE-KH `kg_facts.sourceDrawerID` identity values into
+/// the columns MXE-KH created for them (`addedBy`, `foreignSourceKey`,
+/// `foreignRecordID`), via locus-kit's `kg_fact_identity_backfill`.
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling) — this is
+/// that vehicle; no detection or prompting lives anywhere else. Unattended
+/// and non-interactive, unlike the TTY-gated encryption offer: a
+/// correctness migration must also converge scripted/service upgrades.
+///
+/// Failure posture inherits the estate-encryption invariant — every failure
+/// path leaves a working estate at the canonical path. The backfill's moves
+/// are per-row atomic UPDATEs, so a partial run leaves every row in one of
+/// two readable shapes (the palace dedup anchor's fallback ladder serves
+/// both) and the next upgrade completes it. The estate opens through the
+/// SUBSTRATE path on purpose: the schema ladder's v12 → v13 migration is
+/// what adds the identity columns to estates that predate them, and
+/// `SqliteStorage::new` adopts the sibling `db.key` on its own, so keyed
+/// and plaintext estates both open correctly.
+fn run_kg_fact_identity_backfill() {
+    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+    use persistence_kit::sqlite::SqliteStorage;
+    use uuid::Uuid;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    // Absent estate means first run — serve creates new estates post-KH;
+    // there is nothing to backfill.
+    if !estate.exists() {
+        return;
+    }
+
+    // Quiesce first (single-writer discipline, same direction as the
+    // encryption migration): if the daemon will not stop, skip — nothing is
+    // half-done, and the next `mootx01 upgrade` retries.
+    let was_running = daemon_is_running();
+    if was_running && !daemon_stop() {
+        println!(
+            "  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
+        );
+        return;
+    }
+
+    let result = (|| -> Result<locus_kit::kg_fact_identity_backfill::KGFactIdentityBackfillReport, String> {
+        // The estate_id here is transient — the manifest holds the canonical
+        // estate uuid; this value only satisfies the config constructor
+        // (same convention as SqliteDrawerStore::from_path).
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: estate.display().to_string(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
+        // The class-B resolver is vault-kit's stable-source-key hash,
+        // injected here because locus-kit sits below vault-kit and must not
+        // depend on it.
+        let report = locus_kit::kg_fact_identity_backfill::run(
+            &storage,
+            &|key| vault_kit::drawer_mapping::DrawerMapping::lineage_id(key),
+        )
+        .map_err(|e| e.to_string())?;
+        storage.close();
+        Ok(report)
+    })();
+
+    // Put the daemon back over the (possibly migrated) estate before
+    // reporting, mirroring the encryption leg's ordering.
+    if was_running {
+        let _ = daemon_start();
+    }
+
+    match result {
+        Ok(report) => {
+            if report.scanned == 0 {
+                println!("  ✓ kg_facts identity columns: nothing to backfill");
+            } else {
+                println!(
+                    "  ✓ kg_facts identity backfill: {} scanned — addedBy {}, foreignSourceKey {}, foreignRecordID {}, local anchors kept {} (sensitivity inherited {}), unclassified {}",
+                    report.scanned,
+                    report.host_identities,
+                    report.foreign_palace_keys,
+                    report.triple_ids,
+                    report.local_drawer_ids,
+                    report.inheritance_applied,
+                    report.unclassified
+                );
+            }
+        }
+        Err(e) => {
+            println!(
+                "  ✗ kg_facts identity backfill failed: {e}\n    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry."
+            );
+        }
+    }
 }
 
 /// CE-1.0.35-08 (Rust leg): offer to encrypt an unencrypted active estate.

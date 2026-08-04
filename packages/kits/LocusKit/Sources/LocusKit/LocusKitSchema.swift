@@ -83,7 +83,14 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v12 adds the subject trio to `drawers`
+    /// Current schema version. v13 adds the kg_facts identity trio
+    /// (`addedBy`, `foreignSourceKey`, `foreignRecordID`, all TEXT NOT
+    /// NULL DEFAULT '') — the columns MXE-KH declared on the table but
+    /// shipped without a ladder entry, so populated v12 estates never
+    /// gained them on open. The `mootx01 upgrade` backfill
+    /// (KGFactIdentityBackfill) moves misfiled pre-existing
+    /// `sourceDrawerID` values into them after this migration runs.
+    /// v12 adds the subject trio to `drawers`
     /// (`subject`, `subject_pipeline_version`, `subject_at`, all
     /// nullable) — the one-sentence AI-facing summary that progressive
     /// recall returns in the dense row. Nullable columns with no
@@ -107,8 +114,9 @@ public enum LocusKitSchema {
     /// content_hash BLOB nullable to drawers (NT-L3). v6 added order_key
     /// REAL nullable to tunnels (NT-L5). v5 added erasure_ledger (NT-L4).
     /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
-    /// (NT-L1). v2 added keys.ext. No estate data has shipped.
-    public static let version = 12
+    /// (NT-L1). v2 added keys.ext. Populated estates exist; every
+    /// schema change from v13 on ships a ladder entry.
+    public static let version = 13
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -182,8 +190,7 @@ public enum LocusKitSchema {
                 // falsely satisfy any AND-check before the first rebuildAll. The
                 // table is derived and always recomputed at estate open, so the
                 // default value is corrected on the next open without a backfill
-                // migration. No estate data has shipped, but the migration is
-                // correct and harmless for in-development estates.
+                // migration.
                 Migration(fromVersion: 10, toVersion: 11, operations: [
                     .addColumn(table: "container_fingerprints",
                                column: .bitmap("operationalAND", default: Int64(-1)))
@@ -201,6 +208,25 @@ public enum LocusKitSchema {
                     .addColumn(table: "drawers", column: .text("subject", nullable: true)),
                     .addColumn(table: "drawers", column: .text("subject_pipeline_version", nullable: true)),
                     .addColumn(table: "drawers", column: .timestamp("subject_at", nullable: true)),
+                ]),
+                // v12 → v13: add the kg_facts identity trio (MXE-KH declared
+                // these on `kgFactsTable` but shipped no ladder entry, so a
+                // populated v12 estate never gained them and every write to
+                // them — including the `mootx01 upgrade` backfill — would
+                // fail with "no such column"). NOT NULL DEFAULT '' matches
+                // the declaration contract: a locally-filed, unanchored fact
+                // writes the same shape it always did. The DATA move (pre-KH
+                // sourceDrawerID values into their correct columns) is
+                // deliberately NOT a schema operation — it needs the
+                // drawers/lineage evidence and per-class counting that live
+                // in KGFactIdentityBackfill, run only by `mootx01 upgrade`.
+                Migration(fromVersion: 12, toVersion: 13, operations: [
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "addedBy", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "foreignSourceKey", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "foreignRecordID", type: .text, nullable: false, defaultValue: .text(""))),
                 ]),
             ]
         )
@@ -233,9 +259,9 @@ public enum LocusKitSchema {
             // world. Declared nullable so a row written before this
             // column existed (or a raw insert that omits it) does not
             // violate a NOT NULL constraint; drawerFromRow backfills a
-            // NULL/absent eventTime to that row's filedAt. New columns
-            // land in the v1 declaration with no migration ladder, per
-            // this file's design note — no estate data has shipped.
+            // NULL/absent eventTime to that row's filedAt. This column
+            // predates the migration-ladder discipline; columns added
+            // from v13 on ship a ladder entry (populated estates exist).
             .timestamp("eventTime", nullable: true),
             .text("embeddingModelID"),
             .timestamp("tombstonedAt", nullable: true),

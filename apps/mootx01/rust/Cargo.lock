@@ -968,6 +968,7 @@ dependencies = [
  "tempfile",
  "trash",
  "uuid",
+ "vault-kit",
 ]
 
 [[package]]

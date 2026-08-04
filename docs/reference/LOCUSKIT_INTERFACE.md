@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.18.0
+version: 1.19.0
 status: active
-date: 2026-08-03
+date: 2026-08-04
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1414,6 +1414,49 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.19.0 -- 2026-08-04
+
+- **`KGFactIdentityBackfill` / `kg_fact_identity_backfill` (MXE-MI).** New
+  public backfill entry, run only by `mootx01 upgrade`:
+
+  ```swift
+  public struct KGFactIdentityBackfillReport: Sendable, Equatable {
+      public var scanned, localDrawerIDs, inheritanceApplied,
+                 hostIdentities, foreignPalaceKeys, tripleIDs,
+                 unclassified: Int
+  }
+  public enum KGFactIdentityBackfill {
+      public static let knownHostIdentities: Set<String>
+      public static func run(
+          storage: any Storage,
+          resolveForeignKey: @Sendable (String) -> UUID
+      ) async throws -> KGFactIdentityBackfillReport
+  }
+  ```
+
+  ```rust
+  // locus_kit::kg_fact_identity_backfill
+  pub struct KGFactIdentityBackfillReport { /* same seven counts */ }
+  pub const KNOWN_HOST_IDENTITIES: [&str; 4];
+  pub fn run(
+      storage: &dyn Storage,
+      resolve_foreign_key: &dyn Fn(&str) -> Uuid,
+  ) -> Result<KGFactIdentityBackfillReport, LocusKitError>;
+  ```
+
+  Moves pre-MXE-KH `sourceDrawerID` values into `addedBy` /
+  `foreignSourceKey` / `foreignRecordID` under a four-rule
+  exactly-one-match classification; anything ambiguous stays put and is
+  counted. Idempotent and re-runnable; opens through the substrate path so
+  the v12 → v13 ladder adds the columns first. The foreign-key resolver is
+  injected (VaultKit's `DrawerMapping.lineageID(forStableSourceKey:)` /
+  `DrawerMapping::lineage_id`) because LocusKit does not depend on
+  VaultKit.
+- **Schema version 12 → 13** with a `Migration(fromVersion: 12,
+  toVersion: 13)` adding the three identity columns (TEXT NOT NULL
+  DEFAULT `''`) — the ladder entry MXE-KH's declaration-only change was
+  missing.
 
 ### 1.18.0 -- 2026-08-03
 

@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.14.0
+version: 1.15.0
 status: active
-date: 2026-08-03
+date: 2026-08-04
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -990,6 +990,27 @@ NULL-together lifecycle.
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.15.0 -- 2026-08-04
+
+- **Schema v13: the kg_facts identity trio gains a migration ladder entry
+  (MXE-MI).** MXE-KH declared `addedBy` / `foreignSourceKey` /
+  `foreignRecordID` on the `kg_facts` table but shipped no ladder entry, so
+  populated v12 estates never gained the columns on open. v13 adds the
+  three `.addColumn` operations (TEXT NOT NULL DEFAULT `''`) in both ports.
+- **`KGFactIdentityBackfill` (Swift) / `kg_fact_identity_backfill` (Rust).**
+  A deterministic, idempotent, re-runnable backfill that moves pre-KH
+  `sourceDrawerID` values into the column each belongs in. Four evidence
+  rules — local drawer id (`drawers.id` resolution; row kept, MXE-KH
+  sensitivity inheritance retro-applied to all-zero-bitmap rows), host
+  identity (closed compiled-in set → `addedBy`), foreign palace key
+  (injected lineage resolver against `drawers.lineageID` →
+  `foreignSourceKey`), triple id (`temporal:*` subject co-import evidence →
+  `foreignRecordID`). A value moves only when EXACTLY ONE rule matches;
+  anything else is left in place and counted in the returned per-class
+  report. Run only by `mootx01 upgrade` (the sole migration vehicle); the
+  foreign-key resolver is injected by the app layer because LocusKit does
+  not depend on VaultKit.
 
 ### 1.14.0 -- 2026-08-03
 

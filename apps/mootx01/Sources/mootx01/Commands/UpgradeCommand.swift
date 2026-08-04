@@ -17,7 +17,11 @@
 import AriaMCP
 import ArgumentParser
 import Foundation
+import LocusKit
 import MootInstallerCore
+import PersistenceKit
+import PersistenceKitSQLite
+import VaultKit
 
 struct UpgradeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -270,6 +274,15 @@ struct UpgradeCommand: AsyncParsableCommand {
         // side effect at all from `mootx01 upgrade`.
         migratePermissionTiers(home: home)
 
+        // MXE-MI: converge pre-MXE-KH kg_facts rows whose sourceDrawerID
+        // holds a host identity, foreign palace key, or triple id into the
+        // identity columns those values belong in. Unattended, like the
+        // permission-tier migration above — a correctness migration with no
+        // user choice in it. Runs BEFORE restartAgents so the restarted
+        // daemon hydrates the migrated rows instead of serving the pre-
+        // migration shape from RAM until its next restart.
+        await runKGFactIdentityBackfill(home: home)
+
         restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
 
@@ -277,6 +290,87 @@ struct UpgradeCommand: AsyncParsableCommand {
         // decline leaves a fully converged install, and an accept owns the
         // whole stop → migrate → restart sequence itself.
         offerEstateEncryptionIfNeeded(home: home)
+    }
+
+    /// MXE-MI: move pre-MXE-KH `kg_facts.sourceDrawerID` identity values
+    /// into the columns MXE-KH created for them (`addedBy`,
+    /// `foreignSourceKey`, `foreignRecordID`), via LocusKit's
+    /// `KGFactIdentityBackfill`. `mootx01 upgrade` is the ONLY migration
+    /// vehicle (Bob's ruling) — this is that vehicle; no detection or
+    /// prompting lives anywhere else. Unattended and non-interactive:
+    /// unlike the encryption offer (an opt-in posture change), a
+    /// correctness migration must also converge launchd/scripted upgrades.
+    ///
+    /// Failure posture inherits the EstateEncryptionMigrator invariant —
+    /// every failure path leaves a working estate at the canonical path.
+    /// The backfill's moves are per-row atomic UPDATEs, so a partial run
+    /// leaves every row in one of two readable shapes (the palace dedup
+    /// anchor serves both) and the next upgrade completes it. The estate
+    /// opens through the SUBSTRATE path on purpose: the schema ladder's
+    /// v12 → v13 migration is what adds the identity columns to estates
+    /// that predate them.
+    private func runKGFactIdentityBackfill(home: URL) async {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+        // Absent estate means first run — serve creates new estates
+        // post-KH; there is nothing to backfill.
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+
+        // Same key custody as serve's open path: existing key for an
+        // encrypted estate, plaintext posture preserved for a plaintext
+        // one. Never prompts, never migrates encryption — that is the
+        // TTY-gated offer's job, below.
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            print("  ✗ kg_facts identity backfill skipped — estate key unavailable: \(error)")
+            return
+        }
+
+        // Quiesce first (single-writer discipline, same direction as the
+        // encryption migration): if the daemon will not stop, skip —
+        // nothing is half-done, and the next `mootx01 upgrade` retries.
+        // restartAgents (the very next step in run()) starts the daemon
+        // again over the migrated estate, so there is no start here.
+        if LaunchAgent.isDaemonRunning() && !LaunchAgent.stopDaemon() {
+            print("  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
+            return
+        }
+
+        do {
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: encryption
+            )
+            let storage = try SQLiteStorage(configuration: configuration)
+            // The class-B resolver is VaultKit's stable-source-key hash,
+            // injected here because LocusKit sits below VaultKit and must
+            // not import it.
+            let report = try await KGFactIdentityBackfill.run(
+                storage: storage,
+                resolveForeignKey: DrawerMapping.lineageID(forStableSourceKey:))
+            await storage.close()
+            if report.scanned == 0 {
+                print("  ✓ kg_facts identity columns: nothing to backfill")
+            } else {
+                print("""
+                      ✓ kg_facts identity backfill: \(report.scanned) scanned — \
+                    addedBy \(report.hostIdentities), foreignSourceKey \(report.foreignPalaceKeys), \
+                    foreignRecordID \(report.tripleIDs), local anchors kept \(report.localDrawerIDs) \
+                    (sensitivity inherited \(report.inheritanceApplied)), unclassified \(report.unclassified)
+                    """)
+            }
+        } catch {
+            print("""
+                  ✗ kg_facts identity backfill failed: \(error)
+                    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
+                """)
+        }
+        #endif
     }
 
     /// CE-1.0.35-08: offer to encrypt an unencrypted default estate.
