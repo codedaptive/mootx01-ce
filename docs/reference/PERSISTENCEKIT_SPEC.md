@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.10.0
+version: 1.11.0
 status: active
-date: 2026-07-20
+date: 2026-08-03
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -516,7 +516,8 @@ concept. The Mode 2 content seam is wired in the SQLite and PostgreSQL backends
   AEAD) before the value reaches Postgres, so the bytes are ciphertext at rest in
   the database regardless of the server. Wired on both ports: the per-row AEAD
   seam lives in PersistenceKit core and `PostgreSQLRowStore` applies it on
-  insert (and asserts the content/keyID invariant on upsert/update). Deployment
+  every write verb — insert, upsert and update — with the content/keyID
+  invariant asserted beneath it on each. Deployment
   TDE / TLS / RBAC are defense-in-depth, not the primary answer; the
   schema/structure is the server's, the data is ours to encrypt.
 - **InMemory** — the in-memory store holds content **encrypted** (the same Mode 2
@@ -537,8 +538,12 @@ decrypted by the Rust port, and vice versa. The nonce is
 cryptographically random per encryption (via `OsRng` in Rust, via
 `AES.GCM.Nonce()` in Swift); nonce reuse is never permitted. The
 `assertContentKeyIDInvariant` / `assert_content_key_id_invariant` guard
-on both ports ensures upsert and update paths on Mode 2 estates cannot
-store plaintext content without a keyID.
+on both ports ensures no write verb on a Mode 2 estate can store plaintext
+in a protected column. The guard tests the VALUE'S TYPE, not the presence
+of a sibling `keyID`: ciphertext is a blob, so non-empty text in a
+protected column means the seam did not run — whether or not the row also
+carries a keyID. Acceptable states are blob, null/absent, and empty text
+(the erasure-scrub exemption).
 
 Mode 3 (FullDatabase) is deliberately NOT cross-port byte-compatible: both
 ports use SQLCipher whole-file encryption but on different crypto backends
@@ -847,6 +852,19 @@ Authority for the Package.swift / Cargo.toml addition:
 `the package-dependency rule`.
 
 ## Changelog
+
+### 1.11.0 -- 2026-08-03
+Corrected the at-rest write-boundary contract (MXE-PW). The per-row AEAD
+seam now runs on EVERY write verb -- insert, upsert and update -- on both
+SQLite and PostgreSQL, in both ports; previously upsert relied on the
+invariant guard alone. The content/keyID invariant is restated as a check
+on the VALUE'S TYPE rather than on the presence of a sibling keyID: a
+non-empty TEXT value in a protected column on a RowEncryption estate is a
+violation regardless of keyID, because ciphertext is stored as a blob.
+The prior wording ("cannot store plaintext content without a keyID")
+described a guard that returned OK for plaintext accompanied by any
+non-empty keyID -- the state snapshot replication produced, which stored
+memory content in cleartext at rest.
 
 ### 1.10.0 -- 2026-07-20
 Cross-port parity fix (GLK shared-content 1.1 P4): the Rust SQLite

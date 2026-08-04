@@ -3,7 +3,7 @@ title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-08-03
-version: 1.12.0
+version: 1.13.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -1042,10 +1042,9 @@ encryption seam at the storage layer:
 
 | Path | Swift | Rust | Notes |
 |---|---|---|---|
-| Write (insert) | `encryptedForWrite` → encrypt `content` → stamp `keyID` | `encrypted_for_write` → encrypt `content` → stamp `keyID` | Only for `mode != .plaintext` and rows with a `content` column |
-| Read (query / query_projected) | `decryptedForRead` → decrypt `content` | `decrypted_for_read` → decrypt `content` | Only when `keyID` matches estate key identifier |
-| Upsert guard | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Rejects plaintext `content` on encrypting estate; encryption seam is not wired to upsert |
-| Update guard | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Same guard; all current callers update non-content columns |
+| Write (insert / upsert / update) | `encryptedForWrite` → encrypt protected columns → stamp `keyID` | `encrypted_for_write` → encrypt protected columns → stamp `keyID` | Every write verb seals. Only for `mode != .plaintext` and tables declaring protected columns |
+| Read (query / query_projected) | `decryptedForRead` → decrypt protected columns | `decrypted_for_read` → decrypt protected columns | Only when `keyID` matches estate key identifier |
+| Write-boundary guard (all verbs) | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Runs beneath the seam on insert, upsert and update. Rejects non-empty TEXT in a protected column on an encrypting estate regardless of `keyID` — ciphertext is a blob, so text means the seam did not run. Blob, null/absent and empty text (erasure scrub) are accepted |
 
 Column names intercepted: `"content"` and `"keyID"`. Plaintext mode is a
 no-op on every path. Cross-port compatibility applies to Mode 2
@@ -1501,6 +1500,14 @@ fn perform_maintenance(
 ```
 
 ## Changelog
+
+### 1.13.0 -- 2026-08-03
+At-rest encryption wiring table corrected (MXE-PW): the seam runs on
+insert, upsert AND update in both ports and both backends, and the
+write-boundary guard rejects non-empty text in a protected column
+regardless of keyID. The previous table stated the seam was "not wired to
+upsert" and that update callers only touched non-content columns; both
+were false.
 
 ### 1.12.0 -- 2026-08-03
 MXE-IR (Codex finding `74e3b7f7e6288191ba31644e4fa4b43b`): incremental
