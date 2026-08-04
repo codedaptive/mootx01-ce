@@ -34,10 +34,17 @@ import MootGateway
 /// formatter in `ToolDispatch.runFactSearch`, which is how G1 labels them too.
 actor FixtureReader: ReviewSurfaceReading {
     private let responses: [ReviewSurface: String]
+    private let structured: [ReviewSurface: JSONValue]
     private(set) var callCount = 0
 
-    init(responses: [ReviewSurface: String]) {
+    /// `structured` mirrors the recall family's structuredContent block —
+    /// the rows review items derive from; text-only surfaces omit it.
+    init(
+        responses: [ReviewSurface: String],
+        structured: [ReviewSurface: JSONValue] = [:]
+    ) {
         self.responses = responses
+        self.structured = structured
     }
 
     func call(
@@ -48,7 +55,7 @@ actor FixtureReader: ReviewSurfaceReading {
             return ReviewToolResponse(
                 text: "no fixture for \(surface.rawValue)", isError: true)
         }
-        return ReviewToolResponse(text: text, isError: false)
+        return ReviewToolResponse(text: text, structured: structured[surface], isError: false)
     }
 }
 
@@ -79,12 +86,41 @@ enum ReviewUIFixtures {
             843C301F-23A0-4F23-BC1D-A5090842CBD3  object=[ACCEPTED 2026-07-05 single tree develop]  source=599ED465-7C48-4567-8382-0D8E2396081D  filed=2026-07-09T20:53:30Z
         """
 
+    /// Dense-row text (transcribed from DenseRow.render after the PR-03
+    /// migration) — feeds only notices. Items derive from
+    /// `memorySearchStructured` below, mirroring
+    /// `Tests/MootGatewayTests/Review/ReviewFixtures.swift`.
     static let memorySearch = """
         found 2 memory(s)
-        DFA470F5-4D6C-48E6-AF8C-56E535F1DD43  [fab5-w2]  W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary
-        591F3E67-878E-4373-A6FC-3406B26E38D8  [fab5-w2]  W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note.
+        DFA470F5-4D6C-48E6-AF8C-56E535F1DD43 · W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary · fdc:D2 · qid:Q00 · 2026-07-23T18:04:11Z
+        591F3E67-878E-4373-A6FC-3406B26E38D8 · W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note. · fdc:D2 · qid:Q00 · 2026-07-23T18:05:02Z
         discrimination: medium — partial separation.
         """
+
+    /// The structured twin of `memorySearch` — the structuredContent block
+    /// the recall family carries beside the text; review items derive from
+    /// these rows.
+    static let memorySearchStructured: JSONValue = .object([
+        "results": .array([
+            .object([
+                "id": .string("DFA470F5-4D6C-48E6-AF8C-56E535F1DD43"),
+                "room": .string("fab5-w2"),
+                "content": .string("W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary"),
+                "subject": .string("W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary"),
+            ]),
+            .object([
+                "id": .string("591F3E67-878E-4373-A6FC-3406B26E38D8"),
+                "room": .string("fab5-w2"),
+                "content": .string("W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note."),
+                "subject": .string("W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note."),
+            ]),
+        ])
+    ])
+
+    /// Structured blocks per surface for the populated map (recall family only).
+    static let populatedStructured: [ReviewSurface: JSONValue] = [
+        .memorySearch: memorySearchStructured
+    ]
 
     /// Journal stamps are inside the morning window used below (`referenceNow`
     /// is 2026-07-25T12:00:00Z; morning's window opens at the start of the 24th).
@@ -154,8 +190,13 @@ enum ReviewUIFixtures {
         responses: [ReviewSurface: String] = populated
     ) async -> ReviewReport {
         let builder = ReviewBuilderFactory.builder(for: kind, schedule: utcSchedule)
+        // The structured twin rides along whenever the populated memorySearch
+        // text is in play — custom maps that drop the surface get no rows.
+        let structured = responses[.memorySearch] == memorySearch
+            ? populatedStructured : [:]
         return await builder.build(
-            now: referenceNow, reader: FixtureReader(responses: responses))
+            now: referenceNow,
+            reader: FixtureReader(responses: responses, structured: structured))
     }
 }
 
@@ -478,7 +519,7 @@ struct ReviewCenterModelTests {
     func disconnectedRetries() async {
         // The bridge attaches asynchronously after launch, so a review that was
         // asked too early must be able to succeed later.
-        let reader = FixtureReader(responses: ReviewUIFixtures.populated)
+        let reader = FixtureReader(responses: ReviewUIFixtures.populated, structured: ReviewUIFixtures.populatedStructured)
         var attached = false
         let model = ReviewCenterModel(
             schedule: ReviewUIFixtures.utcSchedule,
@@ -496,7 +537,7 @@ struct ReviewCenterModelTests {
 
     @Test("a loaded review is cached — reselecting it makes no further tool calls")
     func loadedReportIsCached() async {
-        let reader = FixtureReader(responses: ReviewUIFixtures.populated)
+        let reader = FixtureReader(responses: ReviewUIFixtures.populated, structured: ReviewUIFixtures.populatedStructured)
         let model = Self.fixtureModel(reader)
         await model.loadIfNeeded(.dashboard)
         let afterFirst = await reader.callCount
@@ -507,7 +548,7 @@ struct ReviewCenterModelTests {
 
     @Test("refresh rebuilds, and the rebuilt report is equal for a fixed now")
     func refreshRebuilds() async {
-        let reader = FixtureReader(responses: ReviewUIFixtures.populated)
+        let reader = FixtureReader(responses: ReviewUIFixtures.populated, structured: ReviewUIFixtures.populatedStructured)
         let model = Self.fixtureModel(reader)
         await model.loadIfNeeded(.dashboard)
         guard case .loaded(let first) = model.state(for: .dashboard) else {
@@ -528,7 +569,7 @@ struct ReviewCenterModelTests {
 
     @Test("selecting one review does not build another")
     func buildsOnlyTheSelectedReview() async {
-        let reader = FixtureReader(responses: ReviewUIFixtures.populated)
+        let reader = FixtureReader(responses: ReviewUIFixtures.populated, structured: ReviewUIFixtures.populatedStructured)
         let model = ReviewCenterModel(
             kinds: ReviewKind.allCases,
             schedule: ReviewUIFixtures.utcSchedule,
@@ -545,7 +586,7 @@ struct ReviewCenterModelTests {
         // A sub-second instant must be floored: the G1 wire coders drop the
         // fraction, so a fractional generatedAt would not round-trip.
         let fractional = ReviewUIFixtures.referenceNow.addingTimeInterval(0.75)
-        let reader = FixtureReader(responses: ReviewUIFixtures.populated)
+        let reader = FixtureReader(responses: ReviewUIFixtures.populated, structured: ReviewUIFixtures.populatedStructured)
         let model = ReviewCenterModel(
             schedule: ReviewUIFixtures.utcSchedule,
             clock: { fractional },

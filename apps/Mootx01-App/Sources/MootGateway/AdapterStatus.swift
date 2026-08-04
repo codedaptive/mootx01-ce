@@ -66,8 +66,8 @@ public enum GatewayEdges {
             detail: "The bitmap evaluator filters on state, sensitivity, sensitivityAtMost, room, contentMatches, createdAfter/Before, lineage, exportable, contained. The moot_memory_search tool exposes only four named filters (unconfirmed, userConfirmed, exportable, contained). Rich recall is reachable in-process but not projected to callers."
         ),
         EdgeFinding(
-            title: "DrawerEntity recall wired via gateway-layer text parse",
-            detail: "moot_memory_search response lines carry the format \"<uuid>  [<room>]  <content preview>\". DrawerLineParser extracts typed DrawerEntity values from these lines at the gateway layer — no new ARIA tool needed. DrawerEntityQuery.entities(for:) and suggestedEntities() are wired, and RecallDrawerIntent returns a typed [DrawerEntity] value (plus dialog) that Shortcuts can chain. Content is a preview (up to 120 chars from the tool); full content is not yet returned in the search path."
+            title: "DrawerEntity recall wired via structured recall results",
+            detail: "moot_memory_search replies carry a structuredContent block ({id, room, content, subject} per row, declared by the tool's outputSchema). StructuredRecallResults decodes typed DrawerEntity values from that block at the gateway layer — entity data never comes from the display text, whose interpolated drawer content is caller-controlled. DrawerEntityQuery.entities(for:) and suggestedEntities() are wired, and RecallDrawerIntent returns a typed [DrawerEntity] value (plus dialog) that Shortcuts can chain. Entity content carries the drawer body; restricted/secret rows carry the server's redaction marker instead."
         ),
         EdgeFinding(
             title: "propose / associate have no caller path by design",

@@ -22,11 +22,20 @@ import AriaMCP   // JSONValue
 public struct IntentCallResult: Sendable {
     /// Concatenated text from every content[].text block in the tool response.
     public let text: String
+    /// The tools/call result's `structuredContent` block, verbatim, when the
+    /// tool emitted one. The recall family does (an object carrying a
+    /// `results` array of `{id, room, content, subject}` rows); most tools do
+    /// not, and transport failures produce no result at all — both leave this
+    /// nil. Entity construction reads THIS field, never `text`.
+    public let structured: JSONValue?
     /// True when the substrate (or the ARIA surface) refused the operation.
     public let isError: Bool
 
-    public init(text: String, isError: Bool) {
+    /// `structured` defaults to nil because most tools answer in text only;
+    /// conformances thread the block through whenever the response carries one.
+    public init(text: String, structured: JSONValue? = nil, isError: Bool) {
         self.text = text
+        self.structured = structured
         self.isError = isError
     }
 }
@@ -45,12 +54,9 @@ public protocol MootToolCalling: Actor, Sendable {
 // MARK: - Structured recall extension
 
 extension MootToolCalling {
-    /// Recall drawers as typed entities by parsing the `moot_memory_search`
-    /// text response. The tool response lines have the format:
-    ///   `<uuid>  [<room>]  <content preview up to 120 chars>`
-    /// This gateway-layer parse gives id, room, and content-preview without
-    /// requiring a new ARIA surface. Lines that don't match the UUID-bracket
-    /// format (the header and provenance lines) are silently skipped.
+    /// Recall drawers as typed entities from `moot_memory_search`'s
+    /// `structuredContent` block — typed `{id, room, content, subject}` rows
+    /// built server-side from the drawer rows themselves.
     ///
     /// - Parameters:
     ///   - query: The free-text query sent to moot_memory_search.
@@ -70,46 +76,43 @@ extension MootToolCalling {
         }
         let result = await callTool("moot_memory_search", arguments: arguments)
         guard !result.isError else { return [] }
-        return Self.parseDrawerLines(result.text)
-    }
-
-    /// Parse `moot_memory_search` text response lines into DrawerEntity values.
-    /// Forwards to DrawerLineParser — kept on the protocol so conformances
-    /// (and their tests) keep the `Bridge.parseDrawerLines` call shape.
-    public static func parseDrawerLines(_ text: String) -> [DrawerEntity] {
-        DrawerLineParser.parse(text)
+        return StructuredRecallResults.entities(from: result.structured)
     }
 }
 
-// MARK: - DrawerLineParser
+// MARK: - StructuredRecallResults
 //
-// The moot_memory_search response-line parser as a standalone namespace, so
-// non-conforming callers (RecallDrawerIntent's typed-result composition) can
-// parse without routing through a MootToolCalling conformance.
+// Builds DrawerEntity values from the `structuredContent` block of a
+// recall-family tools/call result.
+//
+// Display text is NEVER a source of entity data. Drawer content is user- and
+// import-controlled, and the text block interpolates it verbatim — content
+// can embed anything, including lines shaped exactly like the display format,
+// so any parse of the text block lets a drawer's CONTENT mint an extra entity
+// with an attacker-chosen id and room (Codex finding
+// fdce2bc01c4881919babde660cd3ad16). It is also why the display format's
+// future is irrelevant here: a display change breaks a text parser silently,
+// while the structured block is a declared contract (the tool's
+// outputSchema). The structured rows are built server-side from the drawer
+// row itself, and JSON field boundaries mean content can never escape its
+// slot.
 
-public enum DrawerLineParser {
-    /// Parse `moot_memory_search` text response lines into DrawerEntity values.
-    /// Each result line is `<uuid>  [<room>]  <content>`. The first line
-    /// ("found N memory(s)") and the recall_provenance line are skipped.
-    public static func parse(_ text: String) -> [DrawerEntity] {
-        // UUID pattern: 8-4-4-4-12 hex groups.
-        let uuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-        // Full line pattern: <uuid>  [<room>]  <content>
-        // Two spaces separate each field segment per the ToolDispatch format.
-        let linePattern = "^(\(uuidPattern))  \\[([^\\]]+)\\]  (.+)$"
-        guard let regex = try? NSRegularExpression(pattern: linePattern) else { return [] }
-
-        return text.components(separatedBy: "\n").compactMap { line -> DrawerEntity? in
-            let range = NSRange(line.startIndex..., in: line)
-            guard let match = regex.firstMatch(in: line, range: range) else { return nil }
-
-            func capture(_ idx: Int) -> String? {
-                guard let r = Range(match.range(at: idx), in: line) else { return nil }
-                return String(line[r])
-            }
-            guard let id = capture(1), let room = capture(2), let content = capture(3) else {
-                return nil
-            }
+public enum StructuredRecallResults {
+    /// Decode `structuredContent.results` rows into DrawerEntity values.
+    ///
+    /// Only rows carrying `id`, `room`, AND `content` become entities — the
+    /// same admissible set the text block renders as full rows. Gated rows
+    /// (which the server emits as opaque `{id, subject}` stubs) and anything
+    /// malformed are skipped, never guessed at. Restricted/secret rows arrive
+    /// with the server's redaction markers already in the content/subject
+    /// slots, so no body needs re-gating here.
+    public static func entities(from structured: JSONValue?) -> [DrawerEntity] {
+        guard let results = structured?.objectValue?["results"]?.arrayValue else { return [] }
+        return results.compactMap { row -> DrawerEntity? in
+            guard let object = row.objectValue,
+                  let id = object["id"]?.stringValue,
+                  let room = object["room"]?.stringValue,
+                  let content = object["content"]?.stringValue else { return nil }
             return DrawerEntity(id: id, content: content, room: room)
         }
     }

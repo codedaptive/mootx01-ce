@@ -71,14 +71,19 @@ actor TestBridge: MootToolCalling {
                 return IntentCallResult(text: prettyPrint(value), isError: false)
             }
             let isError = object["isError"]?.boolValue ?? false
+            // Thread structuredContent through, exactly as MootBridge.flatten
+            // does — the entity path reads it, never the text.
+            let structured = object["structuredContent"]
             guard let content = object["content"]?.arrayValue else {
-                return IntentCallResult(text: prettyPrint(value), isError: isError)
+                return IntentCallResult(
+                    text: prettyPrint(value), structured: structured, isError: isError)
             }
             let text = content.compactMap { block -> String? in
                 block.objectValue?["text"]?.stringValue
             }.joined(separator: "\n")
             return IntentCallResult(
                 text: text.isEmpty ? prettyPrint(value) : text,
+                structured: structured,
                 isError: isError
             )
         }

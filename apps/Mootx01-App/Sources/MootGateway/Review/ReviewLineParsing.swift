@@ -1,5 +1,6 @@
 import Foundation
-import MootIntentKit   // DrawerLineParser
+import AriaMCP        // JSONValue (structured recall rows)
+import MootIntentKit   // StructuredRecallResults
 
 // MARK: - ReviewLineParsing  (FAB5-G1 — ARIA text responses → ReviewItem)
 //
@@ -21,9 +22,11 @@ import MootIntentKit   // DrawerLineParser
 //                                   and "    <fact id>  object=[<o>]  source=<s>  filed=<iso>"
 //   moot_fact_search                "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<s>"
 //   moot_read_journal               "journal for <agent>: N entry(s)" then "[<iso>]  <entry>"
-//   moot_memory_search              "<uuid>  [<room>]  <content>" — parsed by
-//                                   DrawerLineParser (MootIntentKit), reused rather
-//                                   than reimplemented.
+//   moot_memory_search              NOT text-parsed: the reply's structuredContent
+//                                   rows ({id, room, content, subject}) are decoded
+//                                   by StructuredRecallResults (MootIntentKit) —
+//                                   drawer content is caller-controlled, so the
+//                                   display text is never a source of drawer data.
 //
 // Parsing rules that hold everywhere here:
 //  - Unrecognized lines are SKIPPED, never guessed at. Headers, `hint:` lines
@@ -332,21 +335,26 @@ enum ReviewLineParsing {
 
     // MARK: memory_search
 
-    /// Recalled drawers. Delegates to `DrawerLineParser` (MootIntentKit), which
-    /// already owns this format for the intent layer — one parser, one place to
-    /// fix if the response shape ever changes.
-    static func drawers(_ text: String, _ context: ReviewProvenanceContext) -> [ReviewItem] {
-        DrawerLineParser.parse(text).enumerated().map { ordinal, drawer in
+    /// Recalled drawers. Decoded from the response's `structuredContent` rows
+    /// by `StructuredRecallResults` (MootIntentKit) — the one place drawer
+    /// rows become typed values. This parse alone receives the whole
+    /// `ReviewToolResponse`: drawer content is caller-controlled, so the
+    /// display text is never a source of drawer data (see the
+    /// StructuredRecallResults header for the forgery argument).
+    static func drawers(_ response: ReviewToolResponse, _ context: ReviewProvenanceContext) -> [ReviewItem] {
+        StructuredRecallResults.entities(from: response.structured).enumerated().map { ordinal, drawer in
             ReviewItem(
                 id: ReviewItem.makeID(
                     surface: context.surface, subjectID: drawer.id, ordinal: ordinal),
                 title: drawer.room,
                 detail: drawer.content,
                 subjectID: drawer.id,
-                // moot_memory_search's text response carries no filed instant.
+                // The structured recall row carries no filed instant.
                 occurredAt: nil,
+                // The audit record names the structured row the item came
+                // from — there is no response "line" for this surface.
                 provenance: context.provenance(
-                    line: "\(drawer.id)  [\(drawer.room)]  \(drawer.content)"))
+                    line: "structured row: id=\(drawer.id) room=\(drawer.room) content=\(drawer.content)"))
         }
     }
 }

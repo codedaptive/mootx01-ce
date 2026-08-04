@@ -153,7 +153,7 @@ struct AdapterShellTests {
             "wing": .string("Personal Life"),
         ])
         #expect(search.isError == false)
-        let hits = MootBridge.parseDrawerLines(search.text)
+        let hits = StructuredRecallResults.entities(from: search.structured)
         try #require(hits.count == 1)
 
         let get = await bridge.callToolFull("moot_memory_get", arguments: [
@@ -176,7 +176,7 @@ struct AdapterShellTests {
         let search = await bridge.callToolFull("moot_memory_search", arguments: [
             "query": .string("m-ing-1 default probe"),
         ])
-        let hits = MootBridge.parseDrawerLines(search.text)
+        let hits = StructuredRecallResults.entities(from: search.structured)
         try #require(hits.count == 1)
         let get = await bridge.callToolFull("moot_memory_get", arguments: [
             "id": .string(hits[0].id),

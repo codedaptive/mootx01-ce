@@ -39,6 +39,10 @@ public struct GatewayCall: Sendable {
     /// The concatenated text of every `content[].text` block in a
     /// successful `tools/call` result. Empty for non-tool methods.
     public let text: String
+    /// The `structuredContent` block of a `tools/call` result, verbatim, when
+    /// the tool emitted one (the recall family does; most tools do not).
+    /// Typed consumers (DrawerEntity construction) read THIS, never `text`.
+    public let structured: JSONValue?
     /// The `isError` flag from a `tools/call` result, or a transport-level
     /// JSON-RPC error. True means the substrate (or the surface) said no.
     public let isError: Bool
@@ -247,16 +251,18 @@ public actor MootBridge {
                 requestJSON: requestJSON,
                 responseJSON: "(no response — dispatcher treated request as a notification)",
                 text: "",
+                structured: nil,
                 isError: true
             )
         }
 
         let responseJSON = Self.pretty(response.asJSONValue)
-        let (text, isError) = Self.flatten(response)
+        let (text, structured, isError) = Self.flatten(response)
         return GatewayCall(
             requestJSON: requestJSON,
             responseJSON: responseJSON,
             text: text,
+            structured: structured,
             isError: isError
         )
     }
@@ -297,25 +303,29 @@ public actor MootBridge {
 
     // MARK: Result flattening
 
-    /// Pull `(text, isError)` out of a JSON-RPC response. For a `tools/call`
-    /// result this reads the MCP `{ content: [{type:"text",text:…}], isError }`
+    /// Pull `(text, structuredContent, isError)` out of a JSON-RPC response.
+    /// For a `tools/call` result this reads the MCP
+    /// `{ content: [{type:"text",text:…}], structuredContent?, isError }`
     /// shape; for a transport-level JSON-RPC error it reports the message.
-    private static func flatten(_ response: JSONRPCResponse) -> (String, Bool) {
+    private static func flatten(_ response: JSONRPCResponse) -> (String, JSONValue?, Bool) {
         switch response.payload {
         case .error(let error):
-            return ("JSON-RPC error \(error.code): \(error.message)", true)
+            return ("JSON-RPC error \(error.code): \(error.message)", nil, true)
         case .result(let value):
             guard let object = value.objectValue else {
-                return (pretty(value), false)
+                return (pretty(value), nil, false)
             }
             let isError = object["isError"]?.boolValue ?? false
+            // structuredContent rides beside the text block on tools that
+            // declare an outputSchema (the recall family). Absent elsewhere.
+            let structured = object["structuredContent"]
             guard let content = object["content"]?.arrayValue else {
-                return (pretty(value), isError)
+                return (pretty(value), structured, isError)
             }
             let text = content.compactMap { block -> String? in
                 block.objectValue?["text"]?.stringValue
             }.joined(separator: "\n")
-            return (text.isEmpty ? pretty(value) : text, isError)
+            return (text.isEmpty ? pretty(value) : text, structured, isError)
         }
     }
 
@@ -375,6 +385,10 @@ extension MootBridge: MootToolCalling {
             "arguments": .object(arguments),
         ])
         let gatewayCall = await call(method: "tools/call", params: params)
-        return IntentCallResult(text: gatewayCall.text, isError: gatewayCall.isError)
+        return IntentCallResult(
+            text: gatewayCall.text,
+            structured: gatewayCall.structured,
+            isError: gatewayCall.isError
+        )
     }
 }

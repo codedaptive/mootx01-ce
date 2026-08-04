@@ -117,6 +117,27 @@ extension ReviewBuilder {
             response: response, keep: keep, keepDescription: keepDescription, parse: parse)
     }
 
+    /// Fetch-and-parse variant for surfaces whose items come from the
+    /// response's structured block rather than its text (the recall family).
+    /// The parse receives the whole `ReviewToolResponse` so it can read
+    /// `structured`; the notice logic is shared with the text variants.
+    func section(
+        id: String,
+        title: String,
+        surface: ReviewSurface,
+        arguments: [String: JSONValue],
+        reader: any ReviewSurfaceReading,
+        keep: (ReviewItem) -> Bool = { _ in true },
+        keepDescription: String? = nil,
+        parseResponse: (ReviewToolResponse, ReviewProvenanceContext) -> [ReviewItem]
+    ) async -> ReviewSection {
+        let response = await reader.call(surface, arguments: arguments)
+        return self.section(
+            id: id, title: title, surface: surface, arguments: arguments,
+            response: response, keep: keep, keepDescription: keepDescription,
+            parseResponse: parseResponse)
+    }
+
     /// Build a section from a response that has ALREADY been fetched.
     ///
     /// Exists so one response can feed more than one section: the weekly review
@@ -133,6 +154,26 @@ extension ReviewBuilder {
         keepDescription: String? = nil,
         parse: (String, ReviewProvenanceContext) -> [ReviewItem]
     ) -> ReviewSection {
+        // Text-parsed surfaces route through the response-based core so the
+        // section/notice logic exists exactly once.
+        section(
+            id: id, title: title, surface: surface, arguments: arguments,
+            response: response, keep: keep, keepDescription: keepDescription,
+            parseResponse: { fetched, context in parse(fetched.text, context) })
+    }
+
+    /// The core: build a section from an already-fetched response with a
+    /// parse that sees the whole `ReviewToolResponse` (text and structured).
+    func section(
+        id: String,
+        title: String,
+        surface: ReviewSurface,
+        arguments: [String: JSONValue],
+        response: ReviewToolResponse,
+        keep: (ReviewItem) -> Bool = { _ in true },
+        keepDescription: String? = nil,
+        parseResponse: (ReviewToolResponse, ReviewProvenanceContext) -> [ReviewItem]
+    ) -> ReviewSection {
         let context = ReviewProvenanceContext(
             surface: surface,
             arguments: ReviewProvenance.renderArguments(arguments))
@@ -141,7 +182,7 @@ extension ReviewBuilder {
                 id: id, title: title, items: [],
                 notice: Self.refusalNotice(surface: surface, text: response.text))
         }
-        let parsed = parse(response.text, context)
+        let parsed = parseResponse(response, context)
         guard !parsed.isEmpty else {
             return ReviewSection(
                 id: id, title: title, items: [],
@@ -323,7 +364,7 @@ public struct MorningReviewBuilder: ReviewBuilder {
         let context = await section(
             id: "context", title: "review.section.context",
             surface: .memorySearch, arguments: recallArguments, reader: reader,
-            parse: ReviewLineParsing.drawers)
+            parseResponse: ReviewLineParsing.drawers)
         // Open work = the hunter's PROPOSED contradiction edges: findings that
         // need a human accept/reject (moot_review_tunnel), not settled history.
         let openWork = await section(
@@ -360,7 +401,7 @@ public struct EndOfDayReviewBuilder: ReviewBuilder {
         let changes = await section(
             id: "changes", title: "review.section.changes",
             surface: .memorySearch, arguments: recallArguments, reader: reader,
-            parse: ReviewLineParsing.drawers)
+            parseResponse: ReviewLineParsing.drawers)
         // Decisions = KG facts, clipped to today by their `filed=` stamp. A fact
         // is the estate's record of a settled call, which is what an end-of-day
         // review asks for.

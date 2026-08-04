@@ -78,10 +78,11 @@ memory between steps and index it.
 | `room` | `room` (`@Property`) + subtitle | Structural coordinate; recall can group by it. |
 | `adjectiveBitmap` → state/trust/sensitivity/exportability | read-only context | Set by capture; surfaced, not user-edited on the entity. |
 
-**DrawerEntity recall is now wired via gateway-layer text parse.** `moot_memory_search`
-response lines carry the format `<uuid>  [<room>]  <content preview>`.
-`MootToolCalling.parseDrawerLines` (in MootIntentKit) extracts typed `DrawerEntity` values from
-those lines at the gateway layer — no new ARIA tool needed.
+**DrawerEntity recall is wired via structured recall results.** `moot_memory_search`
+replies carry a `structuredContent` block of typed `{id, room, content, subject}` rows
+(declared by the tool's `outputSchema`). `StructuredRecallResults` (in MootIntentKit) decodes
+typed `DrawerEntity` values from that block at the gateway layer — entity data never comes
+from the display text, whose interpolated drawer content is caller-controlled.
 
 - `DrawerEntityQuery.entities(for:)` resolves by running a recall with the UUID as the query
   and exact-id filtering; best-effort but no fabrication.
@@ -90,8 +91,8 @@ those lines at the gateway layer — no new ARIA tool needed.
   dialog — Shortcuts chains the entities into a next step; Siri reads the dialog. One
   `moot_memory_search` call feeds both (composition: `RecallDrawerIntent.entities(from:)`).
 
-Content in `DrawerEntity` is a 120-char preview from the search response; full-body content is
-not returned in the search path.
+Content in `DrawerEntity` is the drawer body from the structured recall row; restricted and
+secret drawers carry the server's redaction marker instead of the body.
 
 ---
 

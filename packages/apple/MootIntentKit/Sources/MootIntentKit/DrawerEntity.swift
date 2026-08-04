@@ -21,8 +21,8 @@ public struct DrawerEntity: AppEntity, Identifiable, Sendable {
     /// drawer in one step and act on it in the next.
     public let id: String
 
-    /// Content preview from recall results. Carries the recall preview text
-    /// (up to 120 characters); not guaranteed to be the verbatim full capture.
+    /// Drawer content from the recall result's structured row. Restricted and
+    /// secret drawers carry the server's redaction marker here, never the body.
     @Property(title: "Content")
     public var content: String
 
@@ -73,11 +73,12 @@ extension DrawerEntity: SyncableEntity {}
 // App Intents requires an EntityQuery so the system can resolve an entity by
 // id (e.g. re-hydrating a drawer a Shortcut saved earlier).
 //
-// Resolution strategy: `moot_memory_search` text response lines carry the UUID,
-// room, and a content preview (up to 120 chars) in the format
-// `<uuid>  [<room>]  <content>`. The gateway-layer parser in
-// MootToolCalling.parseDrawerLines extracts typed DrawerEntity values from
-// those lines — no new ARIA surface needed.
+// Resolution strategy: `moot_memory_search` replies carry a
+// `structuredContent` block of typed `{id, room, content, subject}` rows
+// built server-side from the drawer rows. `StructuredRecallResults` decodes
+// DrawerEntity values from that block — entity data never comes from the
+// display text, whose interpolated drawer content is caller-controlled (see
+// the StructuredRecallResults header in MootToolCalling.swift).
 //
 // By-id resolution (`entities(for:)`) runs one recall per identifier with the
 // UUID string as the query, then filters for an exact id match. This is best-
@@ -110,8 +111,11 @@ public struct DrawerEntityQuery: EntityQuery, EntityStringQuery {
             // by id via the structural BM25 lane if it is in the estate.
             let hits = await caller.recallDrawers(query: id, limit: 5)
             // Exact-match filter: only the drawer whose id is exactly the
-            // requested identifier belongs in the response. Prevents false
-            // matches where a different drawer's content contains the UUID string.
+            // requested identifier belongs in the response. The id compared
+            // here is the structured row's server-supplied id — a drawer whose
+            // CONTENT merely contains the UUID string surfaces as a hit with
+            // its OWN id and is rejected, so injected content can neither add
+            // nor substitute an entity in by-id resolution.
             if let match = hits.first(where: { $0.id == id }) {
                 results.append(match)
             }

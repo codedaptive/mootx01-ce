@@ -57,12 +57,16 @@ private actor LiveDaemonCaller: MootToolCalling {
             case .error(let error):
                 return IntentCallResult(text: error.message, isError: true)
             case .result(let value):
-                // MCP tool result: { content: [{ type: "text", text: … }], isError: Bool }
+                // MCP tool result:
+                // { content: [{ type: "text", text: … }], structuredContent?, isError: Bool }
                 let object = value.objectValue
                 let text = (object?["content"]?.arrayValue ?? [])
                     .compactMap { $0.objectValue?["text"]?.stringValue }
                     .joined(separator: "\n")
-                return IntentCallResult(text: text, isError: object?["isError"]?.boolValue ?? false)
+                return IntentCallResult(
+                    text: text,
+                    structured: object?["structuredContent"],
+                    isError: object?["isError"]?.boolValue ?? false)
             }
         } catch {
             return IntentCallResult(text: "\(error)", isError: true)

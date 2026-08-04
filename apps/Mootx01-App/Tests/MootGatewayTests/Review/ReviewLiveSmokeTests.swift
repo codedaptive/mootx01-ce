@@ -54,13 +54,17 @@ private actor LiveDaemonReviewReader: ReviewSurfaceReading {
             case .error(let error):
                 return ReviewToolResponse(text: error.message, isError: true)
             case .result(let value):
-                // MCP tool result: { content: [{ type: "text", text: … }], isError: Bool }
+                // MCP tool result:
+                // { content: [{ type: "text", text: … }], structuredContent?, isError: Bool }
                 let object = value.objectValue
                 let text = (object?["content"]?.arrayValue ?? [])
                     .compactMap { $0.objectValue?["text"]?.stringValue }
                     .joined(separator: "\n")
                 let isError = object?["isError"]?.boolValue ?? false
-                return ReviewToolResponse(text: text, isError: isError)
+                return ReviewToolResponse(
+                    text: text,
+                    structured: object?["structuredContent"],
+                    isError: isError)
             }
         } catch {
             return ReviewToolResponse(text: "\(error)", isError: true)

@@ -530,31 +530,19 @@ struct CaptureSubjectTests {
 // MARK: - DrawerEntity structured recall tests
 //
 // Tests exercise recallDrawers() (the MootToolCalling protocol extension) and
-// MootToolCalling.parseDrawerLines() directly on a live TestBridge, avoiding
-// the IntentRuntimeBridge singleton (which is one-write and shared across
-// the process). Direct DrawerEntityQuery.entities(for:) coverage is not
-// included here.
+// StructuredRecallResults directly on a live TestBridge, avoiding the
+// IntentRuntimeBridge singleton (which is one-write and shared across the
+// process). DrawerEntityQuery.entities(for:) is covered through the same
+// recallDrawers + exact-id-filter composition its body performs; direct
+// query-object coverage is not included here.
 
-@Suite("DrawerEntity — structured recall via gateway-layer text parse")
+@Suite("DrawerEntity — structured recall")
 struct DrawerEntityRecallTests {
 
-    // NOTE ON THE FAILURES IN THIS SUITE
-    //
-    // Four tests here fail for a reason that has nothing to do with the capture
-    // subject: `moot_memory_search` replies with dense rows
-    // (`<uuid> · <subject> · fdc:… · qid:… · <ISO8601>`) while
-    // `DrawerLineParser` still matches the pre-dense `<uuid>  [<room>]
-    // <content>` shape, so it parses no live row and `recallDrawers()` /
-    // `RecallDrawerIntent.entities(from:)` return empty from a perfectly good
-    // capture. Repairing that means editing `MootToolCalling.swift` /
-    // `DrawerEntity.swift`, which TASK-MXE-2026-0232 owns.
-    //
-    // The entity assertions are deliberately LEFT FAILING. They are the only
-    // coverage of that surface, and rewriting them to sidestep it would hand
-    // 0232 a green suite over a dead code path. Each test instead gains a
-    // dense-row assertion beside the entity one, which passes — so the suite
-    // localises the break precisely: the capture and the recall reply are
-    // correct, the projection into DrawerEntity is not.
+    // Entities are decoded from the reply's structuredContent rows — typed
+    // {id, room, content, subject} data built server-side. The display text
+    // (dense rows) is asserted only as evidence that the recall REPLY is
+    // sound; it is never the source of entity data.
 
     @Test("recallDrawers returns non-empty DrawerEntity values for a seeded estate")
     func recallDrawersNonEmpty() async throws {
@@ -579,13 +567,12 @@ struct DrawerEntityRecallTests {
         #expect(reply.text.contains(subject),
             "the dense recall row must carry the seeded drawer's subject")
 
-        // The PROJECTION is not. Fails on DrawerLineParser's stale format —
-        // TASK-MXE-2026-0232. See the note at the top of this suite.
+        // The projection: typed entities decoded from the structured rows.
         let drawers = await bridge.recallDrawers(query: "recall-by-entity-test")
         #expect(drawers.isEmpty == false, "recallDrawers should return at least the seeded drawer")
         let match = drawers.first(where: { $0.content.contains("quick brown fox") })
         #expect(match != nil, "seeded drawer content should appear in the results")
-        #expect(match?.room == "entity-tests", "room should be parsed from the response line")
+        #expect(match?.room == "entity-tests", "room should come from the structured row")
     }
 
     @Test("recallDrawers publicOnly:true gate: private default excluded, explicit public included")
@@ -624,8 +611,6 @@ struct DrawerEntityRecallTests {
             "the exportable reply must not carry the private drawer's subject")
 
         // Now test recallDrawers(publicOnly:true) — same gate via the extension.
-        // Fails on DrawerLineParser's stale format, not on the gate —
-        // TASK-MXE-2026-0232. See the note at the top of this suite.
         // Use the same query that worked in the raw search.
         let publicHits = await bridge.recallDrawers(
             query: "public entity drawer", publicOnly: true)
@@ -633,36 +618,6 @@ struct DrawerEntityRecallTests {
             "public-only recall should find the public drawer")
         #expect(publicHits.allSatisfy { !$0.content.contains("private default") },
             "public-only recall must not return the private drawer")
-    }
-
-    @Test("parseDrawerLines correctly parses uuid-room-content lines")
-    func parseDrawerLinesTest() {
-        // Simulate a moot_memory_search text response with two result lines
-        // and the header and provenance lines that should be skipped.
-        //
-        // HANDOFF TO TASK-MXE-2026-0232: this fixture is the format
-        // DrawerLineParser parses TODAY, which is no longer the format
-        // moot_memory_search emits. It is left as-is because it is the only
-        // remaining documentation of the parser's current behaviour — but the
-        // moment the parser is taught dense rows, this test flips from passing
-        // to failing, in a file 0232 has no other reason to open. Update the
-        // fixture and these assertions in the same commit as the parser.
-        let sampleText = """
-            found 2 memory(s)
-            550e8400-e29b-41d4-a716-446655440000  [workspace]  the quick brown fox jumps over
-            f47ac10b-58cc-4372-a567-0e02b2c3d479  [archive]  another sample drawer content
-            recall_provenance: denseLaneStatus=nil, degradedStages=[]
-            """
-        // Call the static protocol extension method via TestBridge (a concrete
-        // MootToolCalling conformance), which is accessible from the test target.
-        let drawers = TestBridge.parseDrawerLines(sampleText)
-        #expect(drawers.count == 2, "should parse exactly 2 result lines")
-        #expect(drawers[0].id == "550e8400-e29b-41d4-a716-446655440000")
-        #expect(drawers[0].room == "workspace")
-        #expect(drawers[0].content == "the quick brown fox jumps over")
-        #expect(drawers[1].id == "f47ac10b-58cc-4372-a567-0e02b2c3d479")
-        #expect(drawers[1].room == "archive")
-        #expect(drawers[1].content == "another sample drawer content")
     }
 
     @Test("RecallDrawerIntent.entities(from:) — the typed-result composition perform() returns")
