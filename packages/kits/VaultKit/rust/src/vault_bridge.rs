@@ -519,9 +519,10 @@ impl<'a> VaultBridge<'a> {
     /// class and its own wing/room — is constructed here and written via
     /// `Estate::add_diary_entry` directly.
     ///
-    /// `filed_at` carries the caller-supplied `now` converted from the
-    /// bridge's milliseconds to the diary's epoch-seconds convention, so the
-    /// receipt is deterministic and queryable by time.
+    /// `filed_at` carries the caller-supplied `now` unconverted — it is epoch
+    /// milliseconds on both sides of this call, which is what the diary's
+    /// `TypedValue::Timestamp` codec and the HLC boundary consume. The receipt
+    /// is deterministic and queryable by time.
     fn write_receipt(
         &self,
         entry_text: &str,

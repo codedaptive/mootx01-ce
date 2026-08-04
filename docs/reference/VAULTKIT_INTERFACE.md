@@ -1,6 +1,6 @@
 ---
 title: VaultKit Interface
-version: 1.15.0
+version: 1.16.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -665,7 +665,7 @@ Receipt diary entry shape (both ports):
 | `agentName` | `"vaultkit"` (`VaultBridge.receiptAgentName`) |
 | `topic` | `"vault-receipt"` |
 | `wing` / `room` | `"wing_vaultkit"` / `"receipts"` |
-| `filedAt` | caller-supplied `now` (Rust: `now / 1000`, the diary's epoch-seconds convention) |
+| `filedAt` | caller-supplied `now`, unconverted (Swift: `Date`; Rust: epoch **milliseconds** — the unit the diary's timestamp codec and the HLC boundary consume) |
 | `embeddingModelID` | `"no-embedding"` |
 | `operationalBitmap` | `DiaryEventClass.migration` ∣ `DiarySeverity.info << 4` ∣ `DiaryActorClass.migrationTool << 7` |
 | `entry` | canonical JSON, fixed key order, identical across ports |
@@ -829,6 +829,7 @@ requirements.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.16.0 | 2026-08-03 | Receipt `filedAt` unit contract corrected. The row documented the Rust bridge as filing `now / 1000` in "the diary's epoch-seconds convention". That conversion was removed by the seconds→milliseconds caller migration (MXE-TU, landed by MXE-TV): `VaultBridge::write_receipt` now passes the caller's `now` unconverted, because epoch milliseconds is the unit `TypedValue::Timestamp` codes and `HLCGenerator::send` consumes. The old text described a conversion that no longer exists and named a diary convention that does not — a caller following it would have filed every receipt as a 1970 record. No port divergence: Swift's `writeReceipt` takes a `Date` and always did, so only the Rust half was ever unit-bearing. Doc-only; the corresponding code change and its `import_filed_at_is_epoch_millis` guard are in VaultKit. |
 | 1.15.0 | 2026-08-03 | Bounded the MemPalace importer's reads (Codex finding `7398704cea488191a2ce153ad1d5b016`, availability). New public `MemPalaceImportLimits` (Swift) / `MemPalaceImportLimits` + `MAX_*` constants (Rust) and `MemPalaceImportBudget`; new `limits` property on `MemPalaceChromaAdapter` and `PalaceBridge` (both defaulted, so every existing call site stays source-compatible). Four ceilings — `tunnels.json` max bytes checked before the file is opened, max SQLite rows, max materialized bytes, and a SQLite progress-handler step budget — accounted against one budget per import so rows and bytes are real totals. Every breach names the limit AND the observed value via `adapterError`. Defaults sized against the measured real palace with the headroom factors documented in the table above; identical values in both ports, asserted literally in both suites. Swift `metadataRows` no longer materializes the largest scan twice (new internal `forEachRow`), matching the Rust cursor. rusqlite gains the `hooks` feature for `progress_handler`. Front-matter version corrected from a stale 1.13.0 (a 1.14.0 entry already existed below). |
 | 1.14.0 | 2026-07-23 | Clarified that the watched-source scheduler is a planned 1.1 resident control-layer mission, not a `VaultBridge` responsibility; linked the lifecycle and automated sensitivity requirements in `VAULTKIT_SPEC.md`. |
 | 1.13.0 | 2026-07-16 | Concordance table: added two missing public Rust types re-exported at the `vault_kit` crate root. (1) `PalaceItemJobPayload` — the four-noun checkpoint-job payload struct (fields: `noun`, `source_id`, `body`, `call`); Swift-internal counterpart also documented. (2) `CheckpointQueue` — Rust-only dependency-free maildir-style filesystem queue that stands in for QueueKit on the Rust leg; public methods `mount`/`send`/`send_item`/`pending_jobs`/`read_job`/`read_item_job`/`complete` documented. Both types live in `vault_kit::palace_pump` and were re-exported via `lib.rs` but had no concordance rows. |
