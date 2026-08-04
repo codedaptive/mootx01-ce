@@ -1920,7 +1920,7 @@ impl Estate {
             }
         }
 
-        let result = self.store
+        let outcome = self.store
             .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)?;
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member — not just the room of the
@@ -1929,7 +1929,13 @@ impl Estate {
         for room_uuid in affected_room_ids {
             let _ = self.rollup_merkle_roots(room_uuid, now);
         }
-        Ok(result)
+        // outcome.refused_sibling_ids (gate-refused, preserved accepted
+        // members) is not surfaced through Estate::expunge — this wrapper
+        // keeps its AuditEvent contract so GLK's §B-2a seal path is
+        // unchanged; partial-expunge visibility at the Estate/ARIA
+        // surface is a separate product decision. Twin of the Swift
+        // EstateVerbs.expunge wrapper.
+        Ok(outcome.event)
     }
 
     /// Return all drawer ids sharing the same lineage as `row_id`.

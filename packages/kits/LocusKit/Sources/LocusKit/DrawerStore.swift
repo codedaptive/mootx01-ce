@@ -1187,24 +1187,50 @@ public actor DrawerStore {
         }
     }
 
-    /// Lineage-wide expunge: tombstone the target drawer AND every
-    /// version sharing its lineageID. For each version: set state to
-    /// Tombstoned with dreaming_recalc_required (bit 26), zero the
-    /// content blob, stamp tombstonedAt, and record the drawer id in
-    /// the erasure ledger. Already-tombstoned siblings
-    /// have their content re-zeroed and erasure ledger entry ensured
-    /// but are not re-gated.
+    /// Result of a lineage-wide gated expunge (`expungeGated`).
+    ///
+    /// `refusedSiblingIDs` lists the lineage members whose
+    /// `accepted → tombstoned` transition the `AuditGate` refused
+    /// (S-3: audit-grade rows survive intact), in walk order. A
+    /// refused sibling was left byte-identical — content, state,
+    /// audit trail, and erasure-ledger absence — so a non-empty list
+    /// means the expunge was partial and the caller must not assume
+    /// the whole lineage was erased.
+    public struct ExpungeOutcome: Sendable {
+        /// The target drawer's gate-produced audit event when
+        /// `sealAudit` was false (returned for deferred sealing);
+        /// nil when the event was sealed atomically inside the
+        /// transaction.
+        public let auditEvent: AuditEvent?
+        /// IDs of lineage siblings the gate refused to tombstone,
+        /// in walk order. Empty means the expunge covered the full
+        /// lineage.
+        public let refusedSiblingIDs: [String]
+    }
+
+    /// Lineage-wide expunge: tombstone the target drawer and every
+    /// version sharing its lineageID whose state transition the gate
+    /// admits. For each admitted member: set state to Tombstoned with
+    /// dreaming_recalc_required (bit 26), zero the content blob, stamp
+    /// tombstonedAt, and record the drawer id in the erasure ledger.
+    /// Already-tombstoned siblings have their content re-zeroed and
+    /// erasure ledger entry ensured but are not re-gated.
     ///
     /// Routes the target drawer through `AuditGate.admit` (the primary
-    /// audit event). Lineage siblings are scrubbed and gated
-    /// individually. The gate's verb-state-consistency check refuses
-    /// `accepted → tombstoned` (S-3: audit-grade rows survive intact).
+    /// audit event). Lineage siblings are gated individually. The
+    /// gate's transition table refuses `accepted → tombstoned` (S-3:
+    /// audit-grade rows survive intact), and a refused sibling is left
+    /// byte-identical — no content write, no state write, no audit
+    /// append, no erasure-ledger record. Refused sibling ids are
+    /// carried in `ExpungeOutcome.refusedSiblingIDs` so the caller can
+    /// detect a partial expunge; the walk continues over the remaining
+    /// members.
     ///
     /// When `sealAudit` is `true` (default), the audit event for the
-    /// target drawer is appended atomically inside the transaction.
-    /// When `false`, the event is returned for deferred sealing by
-    /// the GLK orchestration path (§B-2a). Returns nil when
-    /// `sealAudit` is true.
+    /// target drawer is appended atomically inside the transaction and
+    /// the outcome's `auditEvent` is nil. When `false`, the event is
+    /// carried in the outcome for deferred sealing by the GLK
+    /// orchestration path (§B-2a).
     ///
     /// Optionally accepts `commitmentKey` / `commitmentKeyVersion` to
     /// compute a keyed commitment (HMAC-SHA256) over the target
@@ -1219,7 +1245,7 @@ public actor DrawerStore {
         sealAudit: Bool = true,
         commitmentKey: [UInt8]? = nil,
         commitmentKeyVersion: Int = 0
-    ) async throws -> AuditEvent? {
+    ) async throws -> ExpungeOutcome {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
 
@@ -1230,8 +1256,10 @@ public actor DrawerStore {
         let vocab = vocabulary
 
         // Resolve the full lineage chain before entering the
-        // transaction. All members — active, superseded, tombstoned —
-        // are in scope for content scrub.
+        // transaction. Every member is walked; members whose tombstone
+        // transition the gate admits are scrubbed, and accepted members
+        // (refused per S-3) are left untouched and reported in the
+        // outcome.
         let lineageIds = try await lineageChain(for: drawerId)
 
         // Pre-stamp HLC values for each sibling outside the Sendable
@@ -1261,7 +1289,7 @@ public actor DrawerStore {
         let flagsSlot = FieldSlot(column: .adjective, shift: 24, width: 3,
                                   label: "flags")
 
-        let capturedEvent: AuditEvent = try await storage.transaction(isolation: .serializable) { txn in
+        let (capturedEvent, refusedSiblingIds): (AuditEvent, [String]) = try await storage.transaction(isolation: .serializable) { txn in
             // ── Step 1: gate and scrub the target drawer ──
             let rows = try await txn.rowStore.query(
                 table: "drawers",
@@ -1379,11 +1407,13 @@ public actor DrawerStore {
                 erasedHlc: stamp
             )
 
-            // ── Step 2: scrub every lineage sibling ──
+            // ── Step 2: walk every lineage sibling ──
             // Siblings are predecessors (superseded versions) and any
             // other members of the lineage chain. Already-tombstoned
             // siblings have content re-zeroed as a defense-in-depth
-            // measure but are not re-gated.
+            // measure but are not re-gated. Siblings the gate refuses
+            // are left untouched and collected for the outcome.
+            var refused: [String] = []
             for (idx, siblingId) in siblingIds.enumerated() {
                 let sibRows = try await txn.rowStore.query(
                     table: "drawers",
@@ -1463,29 +1493,28 @@ public actor DrawerStore {
                             try await txn.auditLog.append(sibEventWithReason)
                         }
                     } else {
-                        // Gate rejected the state transition (e.g., accepted →
-                        // tombstoned is S-3 forbidden). Content scrub is unconditional
-                        // and independent of the state machine: even when the state
-                        // cannot transition, the verbatim content MUST be zeroed.
-                        // Leaving content intact when the gate fails is a destruction-
-                        // contract violation (secfix/ws2-coredelete). The scrub covers
-                        // the content-derived distilled representation and the
-                        // has_current_representation bit (cookbook §2.4.1).
-                        let sibClearedOpRej = sibOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
-                        _ = try await txn.rowStore.update(
-                            table: "drawers",
-                            values: Self.withClearedRepresentation([
-                                "content": .text(""),
-                                "operationalBitmap": .bitmap(sibClearedOpRej),
-                            ]),
-                            where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
-                        )
-                        try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
+                        // Gate rejected the state transition (accepted →
+                        // tombstoned is S-3 forbidden: accepted rows are
+                        // audit-grade and survive intact). A refused gate is
+                        // a refusal, not a partial apply: the sibling is left
+                        // byte-identical — no content write, no state write,
+                        // no audit append, and no erasure-ledger record (the
+                        // ErasureOverlay nulls ledgered rows at read time, so
+                        // a ledger record alone would still suppress the
+                        // row). The refusal is carried to the caller via
+                        // ExpungeOutcome.refusedSiblingIDs; the walk
+                        // continues over the remaining lineage members.
+                        refused.append(siblingId)
+                        continue
                     }
                 }
 
-                // Record sibling in the erasure ledger. duplicateKey is
-                // expected if the sibling was previously expunged.
+                // Record the scrubbed sibling in the erasure ledger.
+                // Gate-refused siblings never reach this point (they
+                // `continue` above) — a ledger record would suppress
+                // their content at read time via the ErasureOverlay.
+                // duplicateKey is expected if the sibling was
+                // previously expunged.
                 do {
                     try await ErasureLedgerOps.recordErasure(
                         rowStore: txn.rowStore,
@@ -1500,10 +1529,13 @@ public actor DrawerStore {
             if sealAudit {
                 try await txn.auditLog.append(event)
             }
-            return event
+            return (event, refused)
         }
 
-        return sealAudit ? nil : capturedEvent
+        return ExpungeOutcome(
+            auditEvent: sealAudit ? nil : capturedEvent,
+            refusedSiblingIDs: refusedSiblingIds
+        )
     }
 
     /// Seal a previously prepared expunge audit event.

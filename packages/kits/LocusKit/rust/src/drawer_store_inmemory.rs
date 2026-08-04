@@ -1955,12 +1955,14 @@ impl DrawerStore for DrawerStoreCore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
 
-        // Resolve the full lineage chain. All members — active,
-        // superseded, tombstoned — are in scope for content scrub.
+        // Resolve the full lineage chain. Every member is walked;
+        // members whose tombstone transition the gate admits are
+        // scrubbed, and accepted members (refused per S-3) are left
+        // untouched and reported in the outcome.
         let lineage_ids = self.lineage_chain(drawer_id)?;
 
         // Read all three bitmaps so we can construct BitmapFields and
@@ -2119,7 +2121,10 @@ impl DrawerStore for DrawerStoreCore {
             }
         }
 
-        // ── Scrub every lineage sibling ──
+        // ── Walk every lineage sibling ──
+        // Siblings the gate admits are scrubbed; siblings the gate
+        // refuses are left untouched and collected for the outcome.
+        let mut refused_sibling_ids: Vec<String> = Vec::new();
         for sibling_id in &lineage_ids {
             if sibling_id == drawer_id {
                 continue;
@@ -2252,39 +2257,28 @@ impl DrawerStore for DrawerStoreCore {
                             .append(pk_audit_event_from(&sib_event));
                     }
                 } else {
-                    // Gate rejected the state transition (e.g., a sibling
-                    // whose state cannot legally advance to tombstoned via
-                    // S-3). Content scrub is unconditional and independent
-                    // of the state machine: even when the state cannot
-                    // transition, the verbatim content MUST be zeroed.
-                    // Leaving content intact when the gate fails is a
-                    // destruction-contract violation (secfix/ws2-coredelete).
-                    // The scrub covers the content-derived representation too
-                    // (SPEC_DISTILLATION_STORAGE §2; Wave-1 parity fix).
-                    //
-                    // Mirrors Swift DrawerStore.expungeGated lines 1411–1424:
-                    //   values: Self.withClearedRepresentation(["content": .text("")])
-                    //   followed by refreshContentFingerprint.
-                    let mut vals = BTreeMap::new();
-                    vals.insert("content".to_string(), TypedValue::Text(String::new()));
-                    insert_cleared_representation(&mut vals);
-                    if let Ok(fp) = self.recomputed_fingerprint(sibling_id, |d| {
-                        d.content = String::new();
-                    }) {
-                        vals.insert("content_fingerprint".to_string(), fp);
-                    }
-                    let _ = row_store.update(
-                        T_DRAWERS,
-                        vals,
-                        &StoragePredicate::Eq(
-                            Column::new(T_DRAWERS, "id"),
-                            TypedValue::Text(sibling_id.to_string()),
-                        ),
-                    );
+                    // Gate rejected the state transition (accepted →
+                    // tombstoned is S-3 forbidden: accepted rows are
+                    // audit-grade and survive intact). A refused gate is
+                    // a refusal, not a partial apply: the sibling is left
+                    // byte-identical — no content write, no state write,
+                    // no audit append, and no erasure-ledger record (the
+                    // ErasureOverlay nulls ledgered rows at read time, so
+                    // a ledger record alone would still suppress the row).
+                    // The refusal is carried to the caller via
+                    // ExpungeOutcome::refused_sibling_ids; the walk
+                    // continues over the remaining lineage members.
+                    // Mirrors the Swift DrawerStore.expungeGated
+                    // gate-reject branch.
+                    refused_sibling_ids.push(sibling_id.to_string());
+                    continue;
                 }
             }
 
-            // Record sibling in the erasure ledger.
+            // Record the scrubbed sibling in the erasure ledger.
+            // Gate-refused siblings never reach this point (they
+            // `continue` above) — a ledger record would suppress their
+            // content at read time via the ErasureOverlay.
             let mut sib_ledger = BTreeMap::new();
             sib_ledger.insert(
                 "drawer_id".to_string(),
@@ -2305,7 +2299,10 @@ impl DrawerStore for DrawerStoreCore {
             reason: reason.map(|s| s.to_string()),
             ..event
         };
-        Ok(event)
+        Ok(crate::drawer_store::ExpungeOutcome {
+            event,
+            refused_sibling_ids,
+        })
     }
 
     fn seal_expunge_audit(
@@ -5408,7 +5405,7 @@ impl DrawerStore for InMemoryDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
     fn set_distilled_representation(

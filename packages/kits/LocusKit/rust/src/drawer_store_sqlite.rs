@@ -362,7 +362,7 @@ impl DrawerStore for SqliteDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
     fn set_distilled_representation(

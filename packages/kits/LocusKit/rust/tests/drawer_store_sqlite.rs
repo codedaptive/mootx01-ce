@@ -553,22 +553,23 @@ fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
     );
 }
 
-/// Gate-reject conformance: when a lineage sibling's state machine forbids the
-/// tombstone transition (S-3: Accepted → Tombstoned is forbidden), the
-/// content blob AND all four representation columns MUST be zeroed
-/// unconditionally. The sibling's state is preserved. Mirrors Swift
-/// `DrawerStore.expungeGated` lines 1411–1424 (gate-reject branch).
+/// Gate-reject conformance (MXE-EZ): when a lineage sibling's state machine
+/// forbids the tombstone transition (S-3: Accepted → Tombstoned is
+/// forbidden), that sibling is left byte-identical — content verbatim,
+/// representation columns intact, state unchanged. A refused gate is a
+/// refusal, not a partial apply. Mirrors the Swift
+/// `DrawerStore.expungeGated` gate-reject branch.
 ///
 /// Scenario:
 ///   D1 — Trust=Canonical, promoted to Accepted. Representation columns
-///        populated to confirm they are NULLed by the scrub.
+///        populated to confirm they SURVIVE the refusal untouched.
 ///   D2 — Active, same lineage. D1 is Accepted (g_state_cluster = 3 which
 ///        is NOT < 3), so find_active_predecessor does not find it — D1 is
 ///        NOT superseded when D2 is added.
 ///   expunge_gated(D2) → D2 tombstoned; sibling loop processes D1 → gate
-///        rejects (S-3) → gate-reject branch scrubs D1 content + representation.
+///        rejects (S-3) → D1 is preserved verbatim.
 #[test]
-fn expunge_gate_rejected_sibling_content_and_representation_zeroed() {
+fn expunge_gate_rejected_sibling_left_byte_identical() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
     let lineage = Uuid::new_v4();
@@ -611,41 +612,73 @@ fn expunge_gate_rejected_sibling_content_and_representation_zeroed() {
         "D1 must remain Accepted after D2 is added (Accepted is not an active predecessor)"
     );
 
+    // Capture D1's full pre-expunge shape for byte-identity comparison.
+    let d1_before = store.get_drawer(&d1.id).unwrap().unwrap();
+
     // Expunge D2. The sibling loop processes D1. The gate rejects
-    // Accepted → Tombstoned (S-3). The gate-reject branch must scrub D1's
-    // content and all four representation columns.
+    // Accepted → Tombstoned (S-3). The refusal must leave D1
+    // byte-identical: no content write, no state write, no
+    // representation clear.
     store
         .expunge_gated(&d2.id, "test", None, NOW + 300, true)
         .unwrap();
+
+    // D2 itself is scrubbed and tombstoned as before.
+    let d2_after = store.get_drawer(&d2.id).unwrap().unwrap();
+    assert_eq!(
+        d2_after.adjective_bitmap & 0x3F,
+        State::Tombstoned.raw_value(),
+        "the expunge target itself must still be tombstoned"
+    );
+    assert_eq!(d2_after.content, "");
 
     let d1_after = store.get_drawer(&d1.id).unwrap().unwrap();
     // State unchanged — the gate rejected the transition.
     assert_eq!(
         d1_after.adjective_bitmap & 0x3F,
         State::Accepted.raw_value(),
-        "D1 state must remain Accepted after gate-reject scrub"
+        "D1 state must remain Accepted after gate refusal"
     );
-    // Content unconditionally zeroed (destruction contract: secfix/ws2-coredelete).
+    // Content survives verbatim. This also proves D1 was NOT recorded
+    // in the erasure ledger: the read-time ErasureOverlay nulls content
+    // for any ledgered id, so a ledger record alone would fail this.
     assert_eq!(
-        d1_after.content, "",
-        "gate-rejected sibling content must be zeroed"
+        d1_after.content, "accepted-sibling-content",
+        "gate-refused sibling content must survive verbatim"
     );
-    // Four representation columns NULLed (SPEC_DISTILLATION_STORAGE §2; Wave-1 parity).
-    assert!(
-        d1_after.distilled.is_none(),
-        "distilled must be NULL after gate-reject scrub"
+    // Bitmaps unchanged.
+    assert_eq!(
+        d1_after.adjective_bitmap, d1_before.adjective_bitmap,
+        "adjective bitmap must be untouched on refusal"
+    );
+    assert_eq!(
+        d1_after.operational_bitmap, d1_before.operational_bitmap,
+        "operational bitmap must be untouched on refusal"
+    );
+    // All four representation columns intact.
+    assert_eq!(
+        d1_after.distilled.as_deref(),
+        Some("accepted-sibling-distilled-text"),
+        "distilled must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.distilled_pipeline_version.as_deref(),
+        Some("p1"),
+        "distilled_pipeline_version must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.distilled_token_count,
+        Some(7),
+        "distilled_token_count must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.distilled_at,
+        Some(NOW),
+        "distilled_at must survive the refusal"
     );
     assert!(
-        d1_after.distilled_pipeline_version.is_none(),
-        "distilled_pipeline_version must be NULL after gate-reject scrub"
-    );
-    assert!(
-        d1_after.distilled_token_count.is_none(),
-        "distilled_token_count must be NULL after gate-reject scrub"
-    );
-    assert!(
-        d1_after.distilled_at.is_none(),
-        "distilled_at must be NULL after gate-reject scrub"
+        d1_after.tombstoned_at.is_none(),
+        "refused sibling must not be tombstone-stamped"
     );
 }
 

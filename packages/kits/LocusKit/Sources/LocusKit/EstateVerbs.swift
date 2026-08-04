@@ -1063,6 +1063,9 @@ public extension Estate {
     /// synchronously, leaves aggregates untouched (§9.5.1: already
     /// de-identified statistical roll-ups), and emits a sealed audit
     /// event so the fact-of-expunge is preserved (v0.35 I-6).
+    /// Lineage siblings whose tombstone transition the gate admits are
+    /// scrubbed alongside; accepted siblings are refused (S-3) and
+    /// left byte-identical.
     ///
     /// Cookbook preconditions: "None beyond row existing." The
     /// `confirmation: Bool` parameter is a caller-supplied safety
@@ -1115,16 +1118,17 @@ public extension Estate {
         }
         let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
 
-        // WS2-F2: expungeGated tombstones the full lineage chain, which
-        // may span multiple rooms (lineage members can migrate via reanchor).
-        // Collect all distinct parent room IDs for the lineage BEFORE
-        // expunge so they can all be rolled up after tombstoning.
+        // WS2-F2: expungeGated tombstones the gate-admitted members of
+        // the full lineage chain, which may span multiple rooms (lineage
+        // members can migrate via reanchor). Collect all distinct parent
+        // room IDs for the lineage BEFORE expunge so they can all be
+        // rolled up after tombstoning.
         let lineageIds = try await store.lineageChain(for: rowID)
         let idsToFetch = lineageIds.isEmpty ? [rowID] : lineageIds
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
         let affectedRoomIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
-        let result = try await store.expungeGated(
+        let outcome = try await store.expungeGated(
             drawerId: rowID,
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
@@ -1138,7 +1142,11 @@ public extension Estate {
         for roomNodeId in affectedRoomIds {
             try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
         }
-        return result
+        // outcome.refusedSiblingIDs (gate-refused, preserved accepted
+        // members) is not surfaced through Estate.expunge — this wrapper
+        // keeps its AuditEvent? contract; partial-expunge visibility at
+        // the Estate/ARIA surface is a separate product decision.
+        return outcome.auditEvent
     }
 
     /// Expunge a drawer and return the unsealed audit event for deferred sealing.
@@ -1178,7 +1186,7 @@ public extension Estate {
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
         let affectedRoomIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
-        let result = try await store.expungeGated(
+        let outcome = try await store.expungeGated(
             drawerId: rowID,
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
@@ -1190,7 +1198,10 @@ public extension Estate {
         for roomNodeId in affectedRoomIds {
             try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
         }
-        return result
+        // outcome.refusedSiblingIDs is not surfaced through this wrapper
+        // (see expunge() above); GLK receives the unsealed AuditEvent
+        // exactly as before.
+        return outcome.auditEvent
     }
 
     /// Return all drawer ids sharing the same lineage as `rowID`.
