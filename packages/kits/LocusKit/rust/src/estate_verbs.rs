@@ -2843,7 +2843,8 @@ impl Estate {
         } else {
             changed_by
         };
-        // Store expects epoch seconds (it multiplies by 1_000 before HLC).
+        // Store expects epoch milliseconds and passes the value straight to the
+        // HLC — the same contract `reanchor_anchor` relies on below.
         let now = Self::now_ms();
         self.store.reanchor_gated(
             row_id,

@@ -6,7 +6,7 @@
 //! self-report telemetry to `insert`. The `report!` macro calls are
 //! placed at the operation boundary, after the batch completes,
 //! so storage behaviour is unchanged. `insert` unconditionally reads
-//! SystemTime::now() for start_ts, now_secs per chunk, and end_ts
+//! SystemTime::now() for start_ts, now_ms per chunk, and end_ts
 //! before the `report!` calls; the disabled-monitoring path does not
 //! short-circuit these clock reads.
 
