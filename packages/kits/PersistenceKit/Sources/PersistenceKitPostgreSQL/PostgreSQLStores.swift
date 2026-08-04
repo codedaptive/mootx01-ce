@@ -100,10 +100,15 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
         for name in conflictColumns { try validatePSQLIdentifier(name) }
-        // upsert is not wired to encrypt: in the LocusKit schema it is only
-        // called for non-content tables. The structural invariant guards
-        // against a future content-bearing upsert writing plaintext with a
-        // null keyID — it must extend the encryption seam first.
+        // At-rest encryption seam (Mode 2 / RowEncryption): seal this table's
+        // protected columns and stamp the keyID before binding, matching
+        // insert and update. The earlier design left upsert unwired on the
+        // assumption it only reached non-content tables; snapshot replication
+        // upserts drawer rows read back as plaintext, so that assumption was
+        // false and plaintext could reach an encrypting estate at rest.
+        let values = try encryptedForWrite(values, table: table, config: backend.encryptionConfig)
+        // Structural safety net beneath the seam: after sealing, protected
+        // text can only remain if the seam could not run.
         try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         let placeholders = (1...cols.count).map { "$\($0)" }.joined(separator: ", ")

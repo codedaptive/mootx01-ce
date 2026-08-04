@@ -1400,8 +1400,13 @@ impl RowStore for TxRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        // Guard: a content-bearing upsert on a Mode 2 estate must already be
-        // ciphertext under a keyID (the seam runs on insert, not upsert).
+        // Mode 2: seal this table's protected columns client-side and stamp the
+        // keyID before they reach Postgres, exactly as insert and update do.
+        // A seam covering two of three write verbs was the defect; upsert is a
+        // content write path wherever snapshot replication runs.
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
+        // Structural safety net beneath the seam: after sealing, protected text
+        // can only remain if the seam could not run.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name, all value-map column names, and the conflict-column list before
@@ -2071,8 +2076,13 @@ impl RowStore for PgRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        // Guard: a content-bearing upsert on a Mode 2 estate must already be
-        // ciphertext under a keyID (the seam runs on insert, not upsert).
+        // Mode 2: seal this table's protected columns client-side and stamp the
+        // keyID before they reach Postgres, exactly as insert and update do.
+        // A seam covering two of three write verbs was the defect; upsert is a
+        // content write path wherever snapshot replication runs.
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
+        // Structural safety net beneath the seam: after sealing, protected text
+        // can only remain if the seam could not run.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name, all value-map column names, and the conflict-column list before

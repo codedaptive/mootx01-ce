@@ -2,18 +2,23 @@
 //
 // Mission FUP-D (E-1) — the structural content/keyID write-boundary guard.
 //
-// AUDIT-01 Zone E flagged that the content/keyID invariant ("a content-bearing
-// row on an encrypting estate must carry a keyID") was convention-only, living
-// in a comment on upsertRow. A raw write path that bypasses the encryption seam
-// (upsertRow does not run encryptedForWrite) could silently persist plaintext
-// content with a null keyID on an encrypting estate — an unreadable/leaky row.
+// AUDIT-01 Zone E flagged that the content/keyID invariant ("protected text on
+// an encrypting estate must be stored as ciphertext") was convention-only,
+// living in a comment on upsertRow. A raw write path that bypassed the
+// encryption seam could silently persist plaintext on an encrypting estate —
+// a leaky row.
 //
-// These tests pin the structural guard:
-//   - A .text content upsert on a non-plaintext estate with no keyID throws,
-//     rather than silently writing the unreadable row.
+// The seam now runs on every write verb (insertRow, upsertRow, updateRows), so
+// the guard is the structural safety net beneath it rather than the only
+// safeguard. The guard tests the value's TYPE: ciphertext is a blob, so
+// non-empty text in a protected column means the seam did not run — whether or
+// not the row also carries a keyID.
+//
+// These tests pin that contract:
+//   - A .text content upsert on an encrypting estate is sealed and stamped,
+//     not written as plaintext.
 //   - Mode 1 (plaintext) is unaffected — byte-identical to today.
-//   - The correct insert path on an encrypting estate is not disturbed (the
-//     encryption seam stamps a keyID, so the guard passes).
+//   - The insert and update paths on an encrypting estate are undisturbed.
 //
 // NOTE ON PLACEMENT: the mission text lists this file under PersistenceKitTests,
 // but that target depends only on [PersistenceKit, SubstrateLib] and cannot import
@@ -76,27 +81,34 @@ struct EncryptionInvariantTests {
         return dir.appendingPathComponent("test.sqlite")
     }
 
-    /// E-1 (upsert path): a content upsert on an encrypting estate with no keyID must throw.
-    /// upsertRow does not run the encryption seam, so without the structural
-    /// guard this write lands as plaintext content + null keyID — exactly the
-    /// unreadable-row hazard the mission closes.
-    @Test func contentUpsertWithoutKeyIDOnEncryptingEstateThrows() async throws {
-        let storage = try makeStorage(EstateEncryptionConfig(.rowEncryption), at: freshDBURL())
+    /// E-1 (upsert path): a content upsert on an encrypting estate is SEALED,
+    /// not refused. upsertRow runs the encryption seam like insertRow and
+    /// updateRows, so the plaintext becomes ciphertext and the row is stamped
+    /// with the estate keyID before the guard runs.
+    ///
+    /// This assertion inverted when the seam was wired into upsert. It
+    /// previously expected a throw, which was correct only while upsert was
+    /// the one write verb the seam did not cover. Sealing is the better of the
+    /// two outcomes the invariant permits — the write succeeds AND no
+    /// plaintext reaches disk.
+    @Test func contentUpsertOnEncryptingEstateIsSealed() async throws {
+        let encryption = EstateEncryptionConfig(.rowEncryption)
+        let storage = try makeStorage(encryption, at: freshDBURL())
         try await storage.open(schema: makeSchema())
 
-        do {
-            _ = try await storage.rowStore.upsert(
-                table: "drawers",
-                values: ["id": .text("d1"), "content": .text("plaintext secret")],
-                conflictColumns: ["id"]
-            )
-            Issue.record("expected the content/keyID invariant guard to throw on an unencrypted content write to an encrypting estate")
-        } catch let error as StorageError {
-            guard case .constraintViolation = error else {
-                Issue.record("expected StorageError.constraintViolation, got \(error)")
-                return
-            }
-        }
+        _ = try await storage.rowStore.upsert(
+            table: "drawers",
+            values: ["id": .text("d1"), "content": .text("plaintext secret")],
+            conflictColumns: ["id"]
+        )
+        // Read through the decrypt seam: text again, keyID stamped.
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
+        )
+        #expect(rows.count == 1)
+        #expect(rows[0]["content"] == .text("plaintext secret"))
+        #expect(rows[0]["keyID"] == .text(encryption.keyIdentifier!))
         await storage.close()
     }
 

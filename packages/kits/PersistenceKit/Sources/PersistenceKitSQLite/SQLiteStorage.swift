@@ -582,17 +582,15 @@ actor SQLiteBackend {
         return RowHandle(table: table, key: key)
     }
 
-    // The at-rest encryption seam (ENC-01) lives on insertRow/queryRows
-    // only. upsertRow is deliberately NOT wired: in the LocusKit schema it
-    // is only ever called for non-content tables (manifest,
-    // container_fingerprints, node_bundles), none of which carry a
-    // "content" column. The content/keyID invariant is enforced
-    // structurally (FUP-D): an upsert carrying plaintext in one of the
-    // target table's protected columns throws on an encrypting estate,
-    // rather than silently writing plaintext with a null keyID (an
-    // unreadable row). A future content-upsert path must extend the
-    // encryption seam symmetrically with insertRow before this guard would
-    // let such a write through.
+    // The at-rest encryption seam (ENC-01) runs on every write verb —
+    // insertRow, upsertRow and updateRows — so no verb can place plaintext in
+    // a protected column on an encrypting estate. upsertRow was the last one
+    // wired: the earlier design assumed upsert only ever reached non-content
+    // tables (manifest, container_fingerprints, node_bundles), but snapshot
+    // replication upserts drawer rows it has just read back as plaintext, so
+    // upsert is a content write path in practice. Sealing here rather than in
+    // the replication layer keeps the destination's key inside the store that
+    // owns it.
     func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String], origin: ChangeOrigin = .local) throws -> RowHandle {
         // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
         // the table name, all value-map column names, and the conflict-column list
@@ -602,6 +600,15 @@ actor SQLiteBackend {
         try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
         for name in conflictColumns { try validateSQLIdentifier(name) }
+        // At-rest encryption seam (mode 2/3): seal this table's protected
+        // columns and stamp the key identifier before binding, matching
+        // insertRow and updateRows. No-op for mode 1 and for tables with no
+        // protected columns. Sealing cannot disturb the ON CONFLICT match:
+        // the only protected table is "drawers" and its conflict column is
+        // the primary key "id", which is never protected.
+        let values = try encryptedForWrite(values, table: table, config: encryptionConfig)
+        // Structural safety net beneath the seam: after sealing, protected
+        // text can only remain if the seam could not run.
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         let sortedKeys = values.keys.sorted()
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
@@ -630,6 +637,18 @@ actor SQLiteBackend {
         // The SQLite actor serializes writes so there is no interleaving between
         // this read and the upsert below. If the row exists, compute the column diff;
         // if not, treat as insert (all columns are new).
+        //
+        // On an encrypting estate this diff OVER-REPORTS protected columns, by
+        // design. fetchRowByConflictColumns is a raw SELECT that does not run
+        // decryptedForRead, so it returns stored ciphertext, and the seam above
+        // re-seals under a fresh AES-GCM nonce every call. Identical plaintext
+        // therefore compares unequal and the column is reported changed. That
+        // is conservative in the safe direction: changedColumns drives
+        // ConvergenceKit's field-level LWW column stamping, where an extra
+        // stamp is redundant work and a missing one would lose an update.
+        // Decrypting the pre-read to compare plaintext would add a decrypt per
+        // row on the replication hot path to save that redundancy — not worth
+        // it. This is a known trade, not an oversight.
         let existingRowForDiff = try? fetchRowByConflictColumns(
             table: table, values: values, conflictColumns: conflictColumns)
         _ = try stmt.step()

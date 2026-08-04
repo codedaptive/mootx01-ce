@@ -2064,12 +2064,19 @@ impl RowStore for SqliteRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        // The at-rest encryption seam is NOT wired to upsert. In the LocusKit
-        // schema, upsert is only ever called for non-content tables (manifest,
-        // container_fingerprints, node_bundles) — none of which carry a
-        // `content` column. The invariant guard below is the structural safety
-        // net: a content-bearing upsert on an encrypting estate throws rather
-        // than silently writing plaintext. Mirrors Swift `upsertRow` design.
+        // At-rest encryption seam (PAR-5-PK): seal this table's protected
+        // columns and stamp the keyID before binding, exactly as `insert` and
+        // `update` do. A seam covering two of three write verbs WAS the
+        // defect — `replicate_snapshot` reads rows back as plaintext and
+        // upserts them into the destination, so upsert is a content write path
+        // in practice regardless of what the LocusKit schema's own call sites
+        // do. Sealing here (rather than in the replication layer) means the
+        // destination store seals with its own configured key by construction,
+        // so no key crosses a layer boundary. No-op for Plaintext mode and for
+        // tables that declare no protected columns.
+        let values = encrypted_for_write(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
+        // Structural safety net beneath the seam: after sealing, protected
+        // text can only remain if the seam could not run.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (CAND-047): validate the table name,
         // all value-map column names, and the conflict-column list before
@@ -4551,27 +4558,53 @@ mod at_rest_encryption_tests {
 
     // ─── Test 7: Upsert guard — content-bearing upsert on encrypting estate ──
 
-    /// An upsert that carries a text `content` on an encrypting estate must
-    /// be rejected by the invariant guard (the encryption seam is not wired
-    /// to upsert). Mirrors Swift's `assertContentKeyIDInvariant` test.
+    /// An upsert that carries a text `content` on an encrypting estate is
+    /// SEALED, not rejected: the encryption seam runs on upsert exactly as it
+    /// does on insert and update, so the plaintext becomes ciphertext and the
+    /// row is stamped with the estate keyID before the guard runs.
+    ///
+    /// This assertion inverted when the seam was wired into upsert. It
+    /// previously expected an error, which was correct only while upsert was
+    /// the one write verb the seam did not cover. Mirrors Swift's
+    /// `contentUpsertOnEncryptingEstateIsSealed`.
     #[test]
-    fn upsert_content_without_keyid_is_rejected_on_encrypting_estate() {
+    fn upsert_content_on_encrypting_estate_is_sealed() {
         let enc = EstateEncryptionConfig::row_encryption();
+        let estate_key_id = enc.key_identifier.clone().expect("key_identifier");
         let storage = make_storage_with_encryption(enc);
         let rs = Storage::row_store(&storage);
 
+        let secret = "plaintext via upsert";
         let mut v = BTreeMap::new();
         v.insert("id".into(), TypedValue::Text("d1".into()));
-        v.insert("content".into(), TypedValue::Text("plaintext via upsert".into()));
-        let result = rs.upsert("drawers", v, &["id".to_string()]);
-        assert!(
-            result.is_err(),
-            "upsert with plaintext content on an encrypting estate must fail the invariant guard"
+        v.insert("content".into(), TypedValue::Text(secret.into()));
+        rs.upsert("drawers", v, &["id".to_string()])
+            .expect("upsert on an encrypting estate must seal, not fail");
+
+        // Read through the decrypt seam: text again, keyID stamped.
+        let rows = rs
+            .query(
+                "drawers",
+                Some(&StoragePredicate::Eq(
+                    crate::Column::new("drawers", "id"),
+                    TypedValue::Text("d1".into()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("content"),
+            Some(&TypedValue::Text(secret.into())),
+            "upsert must round-trip through the seal/decrypt seam"
         );
-        match result.unwrap_err() {
-            StorageError::ConstraintViolation { .. } => {}
-            other => panic!("expected ConstraintViolation, got {:?}", other),
-        }
+        assert_eq!(
+            rows[0].get("keyID"),
+            Some(&TypedValue::Text(estate_key_id)),
+            "upsert must stamp the estate key identifier"
+        );
     }
 
     /// The structured projection reads `subject` but does not ask for
