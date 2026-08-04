@@ -625,7 +625,7 @@ fn is_sensitivity_filter(f: &locus_kit::filter::Filter) -> bool {
 /// room/content on opaque rows, content at memory_get depth:subject, subject
 /// at memory_get depth:full when the drawer carries none. Mirrors Swift
 /// `ToolDispatcher.StructuredRecallRow`.
-pub(crate) struct StructuredRow {
+pub struct StructuredRow {
     pub id: String,
     pub room: Option<String>,
     pub content: Option<String>,
@@ -656,7 +656,7 @@ impl StructuredRow {
 /// applied must already be applied to `results` by the caller; this helper
 /// only shapes the envelope. Wire-identical to Swift
 /// `ToolDispatcher.structuredTextResult`.
-pub(crate) fn structured_text_result(
+pub fn structured_text_result(
     text: &str,
     results: &[StructuredRow],
 ) -> serde_json::Value {
@@ -678,7 +678,7 @@ pub(crate) fn structured_text_result(
 /// (`PreciseMatch.content`) are PRE-redaction, so they must pass through
 /// this switch, never straight into a row. Mirrors Swift
 /// `ToolDispatcher.structuredRecallRow`.
-pub(crate) fn structured_recall_row(
+pub fn structured_recall_row(
     id: &str,
     room: Option<String>,
     content: Option<String>,
@@ -717,7 +717,7 @@ pub(crate) fn structured_recall_row(
 /// hand at the call site: an id the text renders opaquely (gated or
 /// unhydrated) must be exactly as opaque in the structured block. Mirrors
 /// Swift `ToolDispatcher.opaqueStructuredRow`.
-pub(crate) fn opaque_structured_row(id: &str) -> StructuredRow {
+pub fn opaque_structured_row(id: &str) -> StructuredRow {
     StructuredRow {
         id: id.to_string(),
         room: None,
