@@ -72,8 +72,9 @@ actor TestBridge: MootToolCalling {
             }
             let isError = object["isError"]?.boolValue ?? false
             // Thread structuredContent through, exactly as MootBridge.flatten
-            // does — the entity path reads it, never the text.
-            let structured = object["structuredContent"]
+            // does — the entity path reads it, never the text, and refusals
+            // yield no structured data at the seam (Perkins MXE-DG A1).
+            let structured = isError ? nil : object["structuredContent"]
             guard let content = object["content"]?.arrayValue else {
                 return IntentCallResult(
                     text: prettyPrint(value), structured: structured, isError: isError)

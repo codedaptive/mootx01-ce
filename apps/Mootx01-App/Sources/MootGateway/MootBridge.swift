@@ -318,7 +318,11 @@ public actor MootBridge {
             let isError = object["isError"]?.boolValue ?? false
             // structuredContent rides beside the text block on tools that
             // declare an outputSchema (the recall family). Absent elsewhere.
-            let structured = object["structuredContent"]
+            // Refusals yield NO structured data at the seam (Perkins MXE-DG
+            // A1): consumers must never decode entities from an error
+            // result, and enforcing that here makes it a structural
+            // guarantee instead of a per-consumer discipline.
+            let structured = isError ? nil : object["structuredContent"]
             guard let content = object["content"]?.arrayValue else {
                 return (pretty(value), structured, isError)
             }
