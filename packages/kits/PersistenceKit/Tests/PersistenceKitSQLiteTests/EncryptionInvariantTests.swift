@@ -186,4 +186,118 @@ struct EncryptionInvariantTests {
         #expect(rows[0]["keyID"] == .text(encryption.keyIdentifier!))
         await storage.close()
     }
+
+    // MARK: - MXE-PW: a non-empty keyID is not proof of encryption
+
+    /// Read the database file's raw bytes and report whether `marker` appears.
+    /// The read path cannot be trusted for this question: `decryptedForRead`
+    /// passes non-blob values through unchanged, so a plaintext-at-rest row
+    /// reads back as the correct string and hides the failure. Only the bytes
+    /// on disk answer it.
+    private func rawFileContains(_ marker: String, at url: URL) throws -> Bool {
+        let bytes = try Data(contentsOf: url)
+        return bytes.range(of: Data(marker.utf8)) != nil
+    }
+
+    /// THE REGRESSION TEST. Upsert plaintext content while ALSO supplying a
+    /// non-empty keyID — the exact value pair `decryptedForRead` produces and
+    /// snapshot replication forwards.
+    ///
+    /// Before this fix the guard read the keyID, concluded the text must be
+    /// ciphertext, and returned OK; the row landed as plaintext on an
+    /// encrypting estate's disk. The seam now runs first, so the content is
+    /// sealed and the supplied keyID is replaced by the estate's own. Verified
+    /// against the raw file bytes, not the read path.
+    @Test func upsertWithPlaintextAndNonEmptyKeyIDNeverWritesPlaintext() async throws {
+        let encryption = EstateEncryptionConfig(.rowEncryption)
+        let url = freshDBURL()
+        let storage = try makeStorage(encryption, at: url)
+        try await storage.open(schema: makeSchema())
+
+        let marker = "MXE-PW-UPSERT-PLAINTEXT-MARKER"
+        _ = try await storage.rowStore.upsert(
+            table: "drawers",
+            values: [
+                "id": .text("d1"),
+                "content": .text(marker),
+                // A keyID from some other estate. Presence must prove nothing.
+                "keyID": .text(UUID().uuidString)
+            ],
+            conflictColumns: ["id"]
+        )
+        await storage.close()
+
+        #expect(try rawFileContains(marker, at: url) == false,
+                "plaintext content must never reach disk on an encrypting estate, even when the write carries a keyID")
+    }
+
+    /// The same pairing through `update`. `updateRows` already ran the seam, so
+    /// this pins that the guard change did not open a hole beneath it.
+    @Test func updateWithPlaintextAndNonEmptyKeyIDNeverWritesPlaintext() async throws {
+        let encryption = EstateEncryptionConfig(.rowEncryption)
+        let url = freshDBURL()
+        let storage = try makeStorage(encryption, at: url)
+        try await storage.open(schema: makeSchema())
+
+        _ = try await storage.rowStore.insert(
+            table: "drawers",
+            values: ["id": .text("d1"), "content": .text("original")]
+        )
+        let marker = "MXE-PW-UPDATE-PLAINTEXT-MARKER"
+        let updated = try await storage.rowStore.update(
+            table: "drawers",
+            values: ["content": .text(marker), "keyID": .text(UUID().uuidString)],
+            where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
+        )
+        #expect(updated == 1)
+        await storage.close()
+
+        #expect(try rawFileContains(marker, at: url) == false,
+                "plaintext content must never reach disk via update, even when the write carries a keyID")
+    }
+
+    /// The guard itself, called directly, now rejects plaintext regardless of
+    /// keyID. This is the unit-level statement of the same contract: the store
+    /// tests above prove the seam seals, this proves the net beneath it no
+    /// longer has the keyID-shaped hole.
+    @Test func guardRejectsPlaintextEvenWithANonEmptyKeyID() throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        let withForeignKeyID: [String: TypedValue] = [
+            "id": .text("d1"),
+            "content": .text("plaintext that a keyID must not excuse"),
+            "keyID": .text("a-non-empty-key-identifier")
+        ]
+        #expect(throws: StorageError.self) {
+            try assertContentKeyIDInvariant(withForeignKeyID, table: "drawers", config: config)
+        }
+        // Empty keyID was always rejected; it still is.
+        var withEmptyKeyID = withForeignKeyID
+        withEmptyKeyID["keyID"] = .text("")
+        #expect(throws: StorageError.self) {
+            try assertContentKeyIDInvariant(withEmptyKeyID, table: "drawers", config: config)
+        }
+        // Absent keyID — the original defect's only covered case.
+        var withNoKeyID = withForeignKeyID
+        withNoKeyID["keyID"] = nil
+        #expect(throws: StorageError.self) {
+            try assertContentKeyIDInvariant(withNoKeyID, table: "drawers", config: config)
+        }
+    }
+
+    /// The two exemptions the narrowed guard must preserve: the erasure scrub
+    /// writes empty text to wipe a blob (#76), and already-sealed blob content
+    /// passes untouched. Neither is a violation.
+    @Test func guardStillExemptsErasureScrubAndPassesBlobs() throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        // Erasure scrub: empty text, no keyID.
+        try assertContentKeyIDInvariant(
+            ["id": .text("d1"), "content": .text("")], table: "drawers", config: config)
+        // Sealed content: a blob is what a correct encrypting write produces.
+        try assertContentKeyIDInvariant(
+            ["id": .text("d1"), "content": .blob(Data([0x01, 0x02])), "keyID": .text("k1")],
+            table: "drawers", config: config)
+        // Null content is not a protected-text row.
+        try assertContentKeyIDInvariant(
+            ["id": .text("d1"), "content": .null], table: "drawers", config: config)
+    }
 }

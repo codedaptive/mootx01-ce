@@ -575,3 +575,253 @@ mod table_aware_seam {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MXE-PW — a non-empty keyID is not proof of encryption.
+//
+// The guard used to return Ok whenever a protected column held non-empty text
+// AND the row carried a non-empty keyID, on the reasoning that a keyID is
+// present only when the text is ciphertext. Ciphertext is a Blob, so a row
+// reaching that branch was exactly the state the invariant exists to reject.
+//
+// The pairing is reachable with no attacker: `decrypted_for_read` hands back
+// plaintext while retaining the source row's keyID, and `replicate_snapshot`
+// upserts those values into the destination. Replicating into an encrypting
+// destination therefore stored memory content in cleartext at rest.
+//
+// These tests are the coverage that was missing — the absent test is why the
+// branch survived review twice. Every assertion below fails against pre-fix
+// code.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod keyid_is_not_proof_of_encryption {
+    use crate::encryption::EstateEncryptionConfig;
+    use crate::replication::flush;
+    use crate::sqlite::{assert_content_key_id_invariant, SqliteStorage};
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration, Storage,
+        TableDeclaration, TypedValue,
+    };
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    fn drawers_schema() -> SchemaDeclaration {
+        SchemaDeclaration::new(
+            "mxe-pw-test",
+            1,
+            vec![TableDeclaration::new(
+                "drawers",
+                vec![
+                    ColumnDeclaration::text("id"),
+                    ColumnDeclaration::text("content"),
+                    ColumnDeclaration::text("keyID").nullable(),
+                ],
+                vec!["id".to_string()],
+            )],
+        )
+    }
+
+    /// A SQLite-backed storage at a KNOWN path, so the test can read the raw
+    /// file bytes afterwards. The read path cannot answer "is there plaintext
+    /// on disk": `decrypted_for_read` passes non-blob values through unchanged,
+    /// so a plaintext-at-rest row reads back as the correct string and hides
+    /// the failure. Only the bytes answer it.
+    fn storage_at(path: &std::path::Path, config: EstateEncryptionConfig) -> SqliteStorage {
+        let mut estate = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        estate.encryption_config = config;
+        let storage = SqliteStorage::new(estate).expect("open sqlite");
+        storage.open(&drawers_schema()).expect("open schema");
+        storage
+    }
+
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("mxe_pw_{}_{}.sqlite", tag, Uuid::new_v4()))
+    }
+
+    fn raw_file_contains(path: &std::path::Path, marker: &str) -> bool {
+        let bytes = std::fs::read(path).expect("read db file");
+        bytes
+            .windows(marker.len())
+            .any(|w| w == marker.as_bytes())
+    }
+
+    /// THE REGRESSION TEST. Upsert plaintext content while ALSO supplying a
+    /// non-empty keyID — the exact value pair `decrypted_for_read` produces
+    /// and snapshot replication forwards. Before the fix the guard trusted the
+    /// keyID and the plaintext landed on disk.
+    #[test]
+    fn upsert_with_plaintext_and_non_empty_key_id_never_writes_plaintext() {
+        let path = temp_db("upsert");
+        let marker = "MXE-PW-RUST-UPSERT-MARKER";
+        {
+            let storage = storage_at(&path, EstateEncryptionConfig::row_encryption());
+            let rs = Storage::row_store(&storage);
+            let mut v = BTreeMap::new();
+            v.insert("id".into(), TypedValue::Text("d1".into()));
+            v.insert("content".into(), TypedValue::Text(marker.into()));
+            // A keyID from some other estate. Its presence must prove nothing.
+            v.insert("keyID".into(), TypedValue::Text(Uuid::new_v4().to_string()));
+            rs.upsert("drawers", v, &["id".to_string()])
+                .expect("upsert must seal rather than fail");
+        }
+        assert!(
+            !raw_file_contains(&path, marker),
+            "plaintext content must never reach disk on an encrypting estate, \
+             even when the write carries a keyID"
+        );
+    }
+
+    /// The same pairing through `update`, which already ran the seam. Pins that
+    /// narrowing the guard opened no hole beneath it.
+    #[test]
+    fn update_with_plaintext_and_non_empty_key_id_never_writes_plaintext() {
+        let path = temp_db("update");
+        let marker = "MXE-PW-RUST-UPDATE-MARKER";
+        {
+            let storage = storage_at(&path, EstateEncryptionConfig::row_encryption());
+            let rs = Storage::row_store(&storage);
+            let mut seed = BTreeMap::new();
+            seed.insert("id".into(), TypedValue::Text("d1".into()));
+            seed.insert("content".into(), TypedValue::Text("original".into()));
+            rs.insert("drawers", seed).expect("insert");
+
+            let mut v = BTreeMap::new();
+            v.insert("content".into(), TypedValue::Text(marker.into()));
+            v.insert("keyID".into(), TypedValue::Text(Uuid::new_v4().to_string()));
+            let n = rs
+                .update(
+                    "drawers",
+                    v,
+                    &crate::StoragePredicate::Eq(
+                        crate::Column::new("drawers", "id"),
+                        TypedValue::Text("d1".into()),
+                    ),
+                )
+                .expect("update");
+            assert_eq!(n, 1);
+        }
+        assert!(
+            !raw_file_contains(&path, marker),
+            "plaintext content must never reach disk via update, even with a keyID"
+        );
+    }
+
+    /// The guard itself: plaintext is rejected regardless of keyID state. The
+    /// store tests above prove the seam seals; this proves the net beneath it
+    /// no longer has the keyID-shaped hole.
+    #[test]
+    fn guard_rejects_plaintext_whatever_the_key_id() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let base = |key_id: Option<&str>| {
+            let mut v = BTreeMap::new();
+            v.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+            v.insert(
+                "content".to_string(),
+                TypedValue::Text("plaintext a keyID must not excuse".to_string()),
+            );
+            if let Some(k) = key_id {
+                v.insert("keyID".to_string(), TypedValue::Text(k.to_string()));
+            }
+            v
+        };
+        // The defect: a non-empty keyID used to make this Ok.
+        assert!(assert_content_key_id_invariant(
+            &base(Some("a-non-empty-key-identifier")),
+            "drawers",
+            &config
+        )
+        .is_err());
+        // Empty keyID was always rejected; it still is.
+        assert!(assert_content_key_id_invariant(&base(Some("")), "drawers", &config).is_err());
+        // Absent keyID — the only case the old guard actually caught.
+        assert!(assert_content_key_id_invariant(&base(None), "drawers", &config).is_err());
+    }
+
+    /// The two exemptions the narrowed guard must preserve, plus the sealed
+    /// shape a correct write produces.
+    #[test]
+    fn guard_still_exempts_erasure_scrub_and_passes_blobs() {
+        let config = EstateEncryptionConfig::row_encryption();
+        // Erasure scrub (#76): empty text wipes the blob, nothing to encrypt.
+        let mut scrub = BTreeMap::new();
+        scrub.insert("content".to_string(), TypedValue::Text(String::new()));
+        assert!(assert_content_key_id_invariant(&scrub, "drawers", &config).is_ok());
+        // Sealed content: a blob is what a correct encrypting write produces.
+        let mut sealed = BTreeMap::new();
+        sealed.insert("content".to_string(), TypedValue::Blob(vec![1, 2, 3]));
+        sealed.insert("keyID".to_string(), TypedValue::Text("k1".to_string()));
+        assert!(assert_content_key_id_invariant(&sealed, "drawers", &config).is_ok());
+        // Null content is not a protected-text row.
+        let mut null_content = BTreeMap::new();
+        null_content.insert("content".to_string(), TypedValue::Null);
+        assert!(assert_content_key_id_invariant(&null_content, "drawers", &config).is_ok());
+    }
+
+    /// END-TO-END, the reachable defect path. Snapshot-replicate an encrypting
+    /// source into an encrypting destination and confirm the destination file
+    /// holds no plaintext.
+    ///
+    /// This is the scenario the mission describes: `snapshot_source` reads rows
+    /// through `query`, which decrypts content back to text while retaining the
+    /// keyID, and `replicate_snapshot` upserts those values. Before the fix the
+    /// destination's guard trusted the inherited keyID and wrote cleartext.
+    ///
+    /// `replication.rs` is untouched — the behaviour corrects from beneath it,
+    /// because the destination store seals with its own configured key.
+    #[test]
+    fn snapshot_replication_into_encrypting_destination_stores_ciphertext() {
+        let src_path = temp_db("replsrc");
+        let dst_path = temp_db("repldst");
+        let marker = "MXE-PW-REPLICATED-SECRET-MARKER";
+        let schema = drawers_schema();
+        {
+            let source = storage_at(&src_path, EstateEncryptionConfig::row_encryption());
+            let destination = storage_at(&dst_path, EstateEncryptionConfig::row_encryption());
+
+            let mut v = BTreeMap::new();
+            v.insert("id".into(), TypedValue::Text("d1".into()));
+            v.insert("content".into(), TypedValue::Text(marker.into()));
+            Storage::row_store(&source).insert("drawers", v).expect("insert");
+
+            flush(&source, &destination, &schema).expect("replicate source into destination");
+
+            // The row arrived and still reads correctly at the destination.
+            let rows = Storage::row_store(&destination)
+                .query(
+                    "drawers",
+                    Some(&crate::StoragePredicate::Eq(
+                        crate::Column::new("drawers", "id"),
+                        TypedValue::Text("d1".into()),
+                    )),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("query destination");
+            assert_eq!(rows.len(), 1, "the row must replicate");
+            assert_eq!(
+                rows[0].get("content"),
+                Some(&TypedValue::Text(marker.into())),
+                "destination must still read the content back as plaintext"
+            );
+        }
+        // The deliverable: grep the destination's RAW BYTES. Do not trust the
+        // read path above — it passes non-blob values through unchanged and
+        // would report success on a plaintext-at-rest row.
+        assert!(
+            !raw_file_contains(&dst_path, marker),
+            "replicating into an encrypting destination must store ciphertext at rest"
+        );
+        // Sanity: the source is sealed too, so a marker hit anywhere is real.
+        assert!(
+            !raw_file_contains(&src_path, marker),
+            "the encrypting source must also hold ciphertext"
+        );
+    }
+}
