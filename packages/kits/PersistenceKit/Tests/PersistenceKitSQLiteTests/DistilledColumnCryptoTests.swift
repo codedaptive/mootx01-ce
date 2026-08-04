@@ -425,3 +425,272 @@ struct DistilledColumnCryptoTests {
         #expect(rows.first?["distilled"] == nil || rows.first?["distilled"] == .null)
     }
 }
+
+// MARK: - Protected-map coverage (MXE-RW)
+
+/// The tables in the protected-column map, in a deterministic order, read
+/// FROM the map rather than restated beside it.
+///
+/// This is what makes the suite below self-extending: a table added to
+/// `rowCryptoProtectedColumnsByTable` is covered by every case here on the
+/// next run, with no test edit. A suite that restated the map's contents
+/// would keep passing when the map gained a wrong entry — the exact failure
+/// mode these tests exist to catch.
+private let mappedTables: [String] = rowCryptoProtectedColumnsByTable.keys.sorted()
+
+/// Coverage asserted per TABLE, driven off the map itself.
+///
+/// The sibling suite above pins the seam's behaviour for the columns that
+/// exist today. This one pins the property that has to hold for every entry
+/// the map will ever carry: whatever is listed is sealed on write, opened on
+/// read, refused as plaintext by the guard, and untouched outside Mode 2.
+struct ProtectedColumnMapCoverageTests {
+
+    // MARK: - Fixtures
+
+    /// A schema shaped from the map: an id, the table's protected columns,
+    /// and the `keyID` the seam stamps. Built from
+    /// `rowCryptoProtectedColumns(for:)` so a new map entry gets a correct
+    /// table without a fixture edit.
+    private func schema(for table: String) -> SchemaDeclaration {
+        SchemaDeclaration(
+            kitID: "ProtectedMapCoverageKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: table,
+                    columns: [.text("id")]
+                        + rowCryptoProtectedColumns(for: table).map { .text($0, nullable: true) }
+                        + [.text("keyID", nullable: true)],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+    }
+
+    private func freshDBURL() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("map-coverage-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("test.sqlite")
+    }
+
+    private func makeStorage(_ encryption: EstateEncryptionConfig, at url: URL) throws -> SQLiteStorage {
+        try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: url, busyTimeout: 5.0),
+            encryptionConfig: encryption
+        ))
+    }
+
+    /// A distinct plaintext per column, so a test that passes cannot be
+    /// passing because two columns happened to hold the same bytes.
+    private func plaintext(for column: String) -> String { "plaintext body of \(column)" }
+
+    // MARK: - The map is non-empty
+
+    /// A map that emptied itself would make every parameterised case below
+    /// vacuous — zero arguments is zero assertions, and the suite would go
+    /// green while protecting nothing.
+    @Test("the protected-column map is not empty")
+    func mapIsNotEmpty() {
+        #expect(!mappedTables.isEmpty)
+        for table in mappedTables {
+            #expect(!rowCryptoProtectedColumns(for: table).isEmpty,
+                    "table '\(table)' is mapped but declares no protected columns")
+        }
+    }
+
+    // MARK: - Every mapped table seals
+
+    @Test("every mapped table seals all of its protected columns and stamps keyID",
+          arguments: mappedTables)
+    func everyMappedTableSeals(table: String) throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        var values: [String: TypedValue] = ["id": .text("row-1")]
+        for column in rowCryptoProtectedColumns(for: table) {
+            values[column] = .text(plaintext(for: column))
+        }
+
+        let sealed = try encryptedForWrite(values, table: table, config: config)
+
+        for column in rowCryptoProtectedColumns(for: table) {
+            guard case .blob = sealed[column] else {
+                Issue.record("\(table).\(column) was not sealed"); return
+            }
+        }
+        #expect(sealed["keyID"] == .text(config.keyIdentifier!))
+        // The unprotected column rides through untouched.
+        #expect(sealed["id"] == .text("row-1"))
+    }
+
+    @Test("every mapped table round-trips its protected columns back to text",
+          arguments: mappedTables)
+    func everyMappedTableRoundTrips(table: String) throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        var values: [String: TypedValue] = ["id": .text("row-1")]
+        for column in rowCryptoProtectedColumns(for: table) {
+            values[column] = .text(plaintext(for: column))
+        }
+
+        let opened = try decryptedForRead(
+            try encryptedForWrite(values, table: table, config: config),
+            table: table, config: config)
+
+        for column in rowCryptoProtectedColumns(for: table) {
+            #expect(opened[column] == .text(plaintext(for: column)),
+                    "\(table).\(column) did not round-trip")
+        }
+    }
+
+    /// The at-rest assertion, made through a second connection opened in
+    /// Plaintext mode so the seam cannot decrypt on the way back out. Reading
+    /// through the encrypting handle would prove only that the round-trip
+    /// works, never that the bytes on disk are ciphertext.
+    @Test("a write through storage leaves ciphertext at rest for every mapped table",
+          arguments: mappedTables)
+    func everyMappedTableIsCiphertextAtRest(table: String) async throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        let url = freshDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let storage = try makeStorage(config, at: url)
+        try await storage.open(schema: schema(for: table))
+
+        var values: [String: TypedValue] = ["id": .text("row-1")]
+        for column in rowCryptoProtectedColumns(for: table) {
+            values[column] = .text(plaintext(for: column))
+        }
+        _ = try await storage.rowStore.insert(table: table, values: values)
+
+        let rawStorage = try makeStorage(.plaintext, at: url)
+        try await rawStorage.open(schema: schema(for: table))
+        let raw = try await rawStorage.rowStore.query(
+            table: table,
+            where: .eq(Column(table: table, name: "id"), .text("row-1")))
+
+        for column in rowCryptoProtectedColumns(for: table) {
+            guard case .blob = raw.first?[column] else {
+                Issue.record("\(table).\(column) stored as plaintext at rest"); return
+            }
+        }
+    }
+
+    // MARK: - The guard covers every mapped table
+
+    @Test("the invariant guard refuses plaintext in any protected column of any mapped table",
+          arguments: mappedTables)
+    func guardFiresForEveryMappedTable(table: String) throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        // One case per protected column: a guard that only checked the first
+        // column of the list would pass a whole-row test.
+        for column in rowCryptoProtectedColumns(for: table) {
+            let values: [String: TypedValue] = [
+                "id": .text("row-1"),
+                column: .text(plaintext(for: column)),
+                // A keyID present alongside plaintext proves nothing — the
+                // guard tests the VALUE'S TYPE. This is the decrypt-then-copy
+                // shape that put cleartext on disk before MXE-PW.
+                "keyID": .text(config.keyIdentifier!),
+            ]
+            #expect(throws: StorageError.self, "guard did not fire for \(table).\(column)") {
+                try assertContentKeyIDInvariant(values, table: table, config: config)
+            }
+        }
+    }
+
+    // MARK: - Modes 1 and 3 are pass-throughs
+
+    @Test("Plaintext and FullDatabase pass every mapped table through untouched",
+          arguments: mappedTables)
+    func nonRowCryptoModesPassThrough(table: String) throws {
+        // Mode 3 encrypts the whole file at the connection layer, so the
+        // per-row seam must be as inert for it as it is for Mode 1.
+        for config in [EstateEncryptionConfig.plaintext, EstateEncryptionConfig(.fullDatabase)] {
+            var values: [String: TypedValue] = ["id": .text("row-1")]
+            for column in rowCryptoProtectedColumns(for: table) {
+                values[column] = .text(plaintext(for: column))
+            }
+
+            let out = try encryptedForWrite(values, table: table, config: config)
+            for column in rowCryptoProtectedColumns(for: table) {
+                #expect(out[column] == .text(plaintext(for: column)),
+                        "\(table).\(column) was altered outside RowEncryption")
+            }
+            #expect(out["keyID"] == nil, "keyID stamped outside RowEncryption on \(table)")
+
+            // And the guard must not fire, or Mode 1 writes would start failing.
+            #expect(throws: Never.self) {
+                try assertContentKeyIDInvariant(values, table: table, config: config)
+            }
+        }
+    }
+
+    // MARK: - Narrowing guard
+
+    /// The regression test for the failure MXE-RW was raised to catch: a map
+    /// that silently loses coverage.
+    ///
+    /// Part 0 established that `a70add39e` did NOT drop any production
+    /// table — `drawers` is the only table in the schema declaring a `keyID`
+    /// column, so it is the only table the map can hold at all, and its three
+    /// columns survived that change intact. There is therefore no table to
+    /// name as "lost protection at a70add39e"; asserting one would mean
+    /// inventing it.
+    ///
+    /// What IS real is the narrowing class itself. This test pins the floor:
+    /// drop `distilled` or `subject` from the map — the shape the mission
+    /// describes — and it fails. The cases above are parameterised over the
+    /// map and so cannot catch a removal; only a floor stated independently
+    /// of the map can.
+    @Test("drawers keeps all three protected columns — the map cannot narrow silently")
+    func mapDoesNotNarrow() {
+        let drawers = Set(rowCryptoProtectedColumns(for: "drawers"))
+        for required in ["content", "distilled", "subject"] {
+            #expect(drawers.contains(required),
+                    "drawers.\(required) was dropped from the protected-column map")
+        }
+    }
+
+    /// `kg_facts` is the standing proof that the map's exclusions are load
+    /// bearing, not incidental: it declares a `subject` column but has no
+    /// `keyID` column, so a by-name seam would stamp a column that does not
+    /// exist and encrypt a key that `idx_kg_facts_subject` probes for
+    /// equality. It must never acquire a map entry.
+    @Test("kg_facts is not in the protected map and is never intercepted")
+    func kgFactsStaysOutOfTheMap() throws {
+        #expect(!mappedTables.contains("kg_facts"))
+        #expect(rowCryptoProtectedColumns(for: "kg_facts").isEmpty)
+
+        let config = EstateEncryptionConfig(.rowEncryption)
+        let values: [String: TypedValue] = [
+            "id": .text("f1"),
+            "subject": .text("Ada Lovelace"),
+            "predicate": .text("wrote"),
+            "object": .text("Note G"),
+        ]
+        let out = try encryptedForWrite(values, table: "kg_facts", config: config)
+        #expect(out == values, "kg_facts was altered by the seam")
+        #expect(out["keyID"] == nil, "kg_facts gained a keyID it has no column for")
+    }
+
+    /// Dataset tables (`ds_<uuid>`) take their column names from the caller,
+    /// so a dataset may legitimately carry a column named `content`. They have
+    /// no `keyID` column, so interception would fail the write outright. This
+    /// pins the unmapped-table pass-through that keeps such a write legal.
+    @Test("a dataset table carrying a protected-looking column is not intercepted")
+    func datasetTableIsNotIntercepted() throws {
+        let config = EstateEncryptionConfig(.rowEncryption)
+        let table = datasetTableName(UUID())
+        let values: [String: TypedValue] = [
+            "id": .text("r1"),
+            "content": .text("a user-defined column that merely shares the name"),
+        ]
+        let out = try encryptedForWrite(values, table: table, config: config)
+        #expect(out == values, "dataset table \(table) was intercepted by the seam")
+        #expect(out["keyID"] == nil, "dataset table gained a keyID it has no column for")
+        #expect(throws: Never.self) {
+            try assertContentKeyIDInvariant(values, table: table, config: config)
+        }
+    }
+}

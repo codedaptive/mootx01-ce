@@ -825,3 +825,317 @@ mod keyid_is_not_proof_of_encryption {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Protected-map coverage (MXE-RW) — the Rust twin of
+// `ProtectedColumnMapCoverageTests` in DistilledColumnCryptoTests.swift.
+//
+// Coverage asserted per TABLE, driven off the map itself rather than
+// restated beside it. A table added to ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE
+// is covered by every case here on the next run, with no test edit. A suite
+// that restated the map's contents would keep passing when the map gained a
+// wrong entry — the exact failure mode these tests exist to catch.
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod protected_map_coverage {
+    use super::*;
+    use crate::sqlite::{
+        assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write,
+        protected_cols_for_table, ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE,
+    };
+    use crate::types::TypedValue;
+    use std::collections::BTreeMap;
+
+    /// A distinct plaintext per column, so a passing test cannot be passing
+    /// because two columns happened to hold the same bytes.
+    fn plaintext_for(column: &str) -> String {
+        format!("plaintext body of {column}")
+    }
+
+    /// A value map carrying every protected column of `table`, plus an
+    /// unprotected `id` that must ride through untouched.
+    fn row_for(table: &str) -> BTreeMap<String, TypedValue> {
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("row-1".to_string()));
+        for column in protected_cols_for_table(table) {
+            values.insert(
+                (*column).to_string(),
+                TypedValue::Text(plaintext_for(column)),
+            );
+        }
+        values
+    }
+
+    /// A map that emptied itself would make every loop below iterate zero
+    /// times — zero assertions, and the suite goes green while protecting
+    /// nothing.
+    #[test]
+    fn map_is_not_empty() {
+        assert!(
+            !ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE.is_empty(),
+            "the protected-column map is empty"
+        );
+        for (table, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+            assert!(
+                !columns.is_empty(),
+                "table '{table}' is mapped but declares no protected columns"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mapped_table_seals_and_stamps_key_id() {
+        let config = EstateEncryptionConfig::row_encryption();
+        for (table, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+            let sealed =
+                encrypted_for_write(row_for(table), table, &config, &AesGcmAeadProvider).unwrap();
+            for column in *columns {
+                assert!(
+                    matches!(sealed.get(*column), Some(TypedValue::Blob(_))),
+                    "{table}.{column} was not sealed"
+                );
+            }
+            assert_eq!(
+                sealed.get("keyID"),
+                Some(&TypedValue::Text(config.key_identifier.clone().unwrap())),
+                "{table} was sealed without a keyID stamp"
+            );
+            // The unprotected column rides through untouched.
+            assert_eq!(
+                sealed.get("id"),
+                Some(&TypedValue::Text("row-1".to_string())),
+                "{table}.id was altered by the seam"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mapped_table_round_trips_back_to_text() {
+        let config = EstateEncryptionConfig::row_encryption();
+        for (table, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+            let sealed =
+                encrypted_for_write(row_for(table), table, &config, &AesGcmAeadProvider).unwrap();
+            let opened =
+                decrypted_for_read(sealed, table, &config, &AesGcmAeadProvider).unwrap();
+            for column in *columns {
+                assert_eq!(
+                    opened.get(*column),
+                    Some(&TypedValue::Text(plaintext_for(column))),
+                    "{table}.{column} did not round-trip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guard_refuses_plaintext_in_any_protected_column_of_any_mapped_table() {
+        let config = EstateEncryptionConfig::row_encryption();
+        for (table, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+            // One case per protected column: a guard that only checked the
+            // first column of the list would pass a whole-row test.
+            for column in *columns {
+                let mut values = BTreeMap::new();
+                values.insert("id".to_string(), TypedValue::Text("row-1".to_string()));
+                values.insert(
+                    (*column).to_string(),
+                    TypedValue::Text(plaintext_for(column)),
+                );
+                // A keyID present alongside plaintext proves nothing — the
+                // guard tests the VALUE'S TYPE. This is the decrypt-then-copy
+                // shape that put cleartext on disk before MXE-PW.
+                values.insert(
+                    "keyID".to_string(),
+                    TypedValue::Text(config.key_identifier.clone().unwrap()),
+                );
+                assert!(
+                    assert_content_key_id_invariant(&values, table, &config).is_err(),
+                    "guard did not fire for {table}.{column}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plaintext_and_full_database_pass_every_mapped_table_through() {
+        // Mode 3 encrypts the whole file at the connection layer, so the
+        // per-row seam must be as inert for it as it is for Mode 1.
+        for config in [
+            EstateEncryptionConfig::plaintext(),
+            EstateEncryptionConfig::full_database(),
+        ] {
+            for (table, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+                let values = row_for(table);
+                let out =
+                    encrypted_for_write(values.clone(), table, &config, &AesGcmAeadProvider)
+                        .unwrap();
+                for column in *columns {
+                    assert_eq!(
+                        out.get(*column),
+                        Some(&TypedValue::Text(plaintext_for(column))),
+                        "{table}.{column} was altered outside RowEncryption"
+                    );
+                }
+                assert!(
+                    out.get("keyID").is_none(),
+                    "keyID stamped outside RowEncryption on {table}"
+                );
+                // And the guard must not fire, or Mode 1 writes would fail.
+                assert!(
+                    assert_content_key_id_invariant(&values, table, &config).is_ok(),
+                    "guard fired outside RowEncryption on {table}"
+                );
+            }
+        }
+    }
+
+    /// The regression test for the failure MXE-RW was raised to catch: a map
+    /// that silently loses coverage.
+    ///
+    /// Part 0 established that `a70add39e` did NOT drop any production table —
+    /// `drawers` is the only table in the schema declaring a `keyID` column, so
+    /// it is the only table the map can hold at all, and its three columns
+    /// survived that change intact. There is therefore no table to name as
+    /// "lost protection at a70add39e"; asserting one would mean inventing it.
+    ///
+    /// What IS real is the narrowing class itself. This pins the floor: drop
+    /// `distilled` or `subject` from the map — the shape the mission
+    /// describes — and it fails. The cases above are driven off the map and so
+    /// cannot catch a removal; only a floor stated independently of the map can.
+    #[test]
+    fn map_does_not_narrow() {
+        let drawers = protected_cols_for_table("drawers");
+        for required in ["content", "distilled", "subject"] {
+            assert!(
+                drawers.contains(&required),
+                "drawers.{required} was dropped from the protected-column map"
+            );
+        }
+    }
+
+    /// The at-rest assertion, made on the RAW FILE BYTES. The read path
+    /// cannot answer "is there plaintext on disk": `decrypted_for_read` passes
+    /// non-blob values through unchanged, so a plaintext-at-rest row reads back
+    /// as the correct string and hides the failure. Only the bytes answer it.
+    /// Twin of `everyMappedTableIsCiphertextAtRest` in the Swift suite.
+    #[test]
+    fn every_mapped_table_is_ciphertext_at_rest() {
+        use crate::sqlite::SqliteStorage;
+        use crate::{
+            BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+            Storage, TableDeclaration,
+        };
+        use uuid::Uuid;
+
+        for (table, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+            // A schema shaped from the map: an id, the table's protected
+            // columns, and the keyID the seam stamps. Built from the map so a
+            // new entry gets a correct table without a fixture edit.
+            let mut declared = vec![ColumnDeclaration::text("id")];
+            for column in *columns {
+                declared.push(ColumnDeclaration::text(*column).nullable());
+            }
+            declared.push(ColumnDeclaration::text("keyID").nullable());
+            let schema = SchemaDeclaration::new(
+                "mxe-rw-map-coverage",
+                1,
+                vec![TableDeclaration::new(
+                    *table,
+                    declared,
+                    vec!["id".to_string()],
+                )],
+            );
+
+            let path =
+                std::env::temp_dir().join(format!("mxe_rw_{}_{}.sqlite", table, Uuid::new_v4()));
+            let mut estate = EstateConfiguration::new(
+                Uuid::new_v4(),
+                BackendConfiguration::Sqlite {
+                    path: path.to_string_lossy().into_owned(),
+                    busy_timeout_secs: 5.0,
+                },
+            );
+            estate.encryption_config = EstateEncryptionConfig::row_encryption();
+            let storage = SqliteStorage::new(estate).expect("open sqlite");
+            storage.open(&schema).expect("open schema");
+
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Text("row-1".to_string()));
+            for column in *columns {
+                values.insert(
+                    (*column).to_string(),
+                    TypedValue::Text(plaintext_for(column)),
+                );
+            }
+            storage
+                .row_store()
+                .insert(table, values)
+                .expect("insert row");
+            // Close before reading: under WAL the row may still be sitting in
+            // the -wal sidecar rather than the main file. Dropping the storage
+            // checkpoints it. The sidecars are scanned anyway — a marker in
+            // any of them is plaintext on disk just the same.
+            drop(storage);
+
+            let mut bytes = std::fs::read(&path).expect("read db file");
+            for sidecar in ["-wal", "-shm"] {
+                let side = path.with_extension(format!("sqlite{sidecar}"));
+                if let Ok(extra) = std::fs::read(&side) {
+                    bytes.extend_from_slice(&extra);
+                }
+                let _ = std::fs::remove_file(&side);
+            }
+            for column in *columns {
+                let marker = plaintext_for(column);
+                assert!(
+                    !bytes
+                        .windows(marker.len())
+                        .any(|w| w == marker.as_bytes()),
+                    "{table}.{column} is plaintext at rest on a RowEncryption estate"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// `kg_facts` is the standing proof that the map's exclusions are load
+    /// bearing, not incidental: it declares a `subject` column but has no
+    /// `keyID` column, so a by-name seam would stamp a column that does not
+    /// exist and encrypt a key that `idx_kg_facts_subject` probes for equality.
+    #[test]
+    fn kg_facts_stays_out_of_the_map() {
+        assert!(
+            !ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE
+                .iter()
+                .any(|(table, _)| *table == "kg_facts"),
+            "kg_facts acquired a protected-column map entry"
+        );
+        assert!(protected_cols_for_table("kg_facts").is_empty());
+    }
+
+    /// Dataset tables (`ds_<uuid>`) take their column names from the caller, so
+    /// a dataset may legitimately carry a column named `content`. They have no
+    /// `keyID` column, so interception would fail the write outright. This pins
+    /// the unmapped-table pass-through that keeps such a write legal.
+    #[test]
+    fn dataset_table_carrying_a_protected_name_is_not_intercepted() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let table = "ds_0f8fad5bd9cb469fa16570867728950e";
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("r1".to_string()));
+        values.insert(
+            "content".to_string(),
+            TypedValue::Text("a user-defined column that merely shares the name".to_string()),
+        );
+        let out =
+            encrypted_for_write(values.clone(), table, &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(out, values, "dataset table {table} was intercepted");
+        assert!(
+            out.get("keyID").is_none(),
+            "dataset table gained a keyID it has no column for"
+        );
+        assert!(
+            assert_content_key_id_invariant(&values, table, &config).is_ok(),
+            "guard fired on an unmapped dataset table"
+        );
+    }
+}
