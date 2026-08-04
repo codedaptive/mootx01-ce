@@ -1,12 +1,14 @@
 //! frame_rejection.rs — the regression proof for MXE-MB (Rust twin of
 //! `BridgeFrameRejectionTests.swift`).
 //!
-//! A malformed client line used to be indistinguishable from a valid id-less
-//! notification: both produced `None` for `id`, so both took the notification
-//! branch and the raw bytes were written to BOTH backends. A JSON-RPC backend
-//! answers a malformed frame with a parseError; that response was never read, so
-//! the NEXT send_and_receive consumed it instead of its own result and every
-//! response after that was skewed by one for the life of the process.
+//! The defect these tests exist to keep out: if a malformed client line is
+//! indistinguishable from a valid id-less notification — both yielding `None`
+//! for `id`, both taking the notification branch — the raw bytes go to BOTH
+//! backends. A JSON-RPC backend answers a malformed frame with a parseError,
+//! nothing reads that response, and the NEXT send_and_receive consumes it
+//! instead of its own result. Every response after that is skewed by one for the
+//! life of the process. The bridge must therefore refuse such a frame at the
+//! boundary.
 //!
 //! Two layers of proof here:
 //!
@@ -151,9 +153,9 @@ fn codes_match_the_jsonrpc_standard() {
 /// A malformed line is answered by the BRIDGE with a parseError carrying a null
 /// id, and reaches NEITHER backend.
 ///
-/// This is the regression test. Against pre-fix code the malformed line went out
-/// on the notification path, so both backend logs contained it and the client got
-/// no error at all.
+/// This is the regression test. A regression shows up as the malformed line
+/// taking the notification path: both backend logs contain it and the client
+/// receives no error at all.
 #[test]
 fn malformed_line_is_rejected_and_not_forwarded() {
     let rig = StubRig::new("malformed-rejected");
@@ -189,9 +191,10 @@ fn malformed_line_is_rejected_and_not_forwarded() {
 /// THE DESYNCHRONIZATION TEST. A malformed line followed by two valid requests:
 /// each request must receive ITS OWN response.
 ///
-/// Against pre-fix code the malformed line was forwarded, each backend answered
-/// it with an unread parseError, and the id-1 request then read that stale error
-/// while id 2 read id 1's result — the exact skew Codex observed.
+/// A regression shows up as the malformed line being forwarded: each backend
+/// answers it with an unread parseError, the id-1 request then reads that stale
+/// error, and id 2 reads id 1's result. That one-response skew is the failure
+/// Codex reproduced against the live server.
 #[test]
 fn malformed_line_does_not_desynchronize_the_session() {
     let rig = StubRig::new("malformed-desync");

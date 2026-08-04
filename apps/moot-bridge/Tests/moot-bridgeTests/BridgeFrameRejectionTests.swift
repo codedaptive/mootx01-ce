@@ -4,12 +4,13 @@ import Testing
 
 // BridgeFrameRejectionTests.swift — the regression proof for MXE-MB.
 //
-// A malformed client line used to be indistinguishable from a valid id-less
-// notification: both produced a nil `id`, so both took the notification branch
-// and the raw bytes were written to BOTH backends. A JSON-RPC backend answers a
-// malformed frame with a parseError; that response was never read, so the NEXT
-// sendAndReceive consumed it instead of its own result and every response after
-// that was skewed by one for the life of the process.
+// The defect these tests exist to keep out: if a malformed client line is
+// indistinguishable from a valid id-less notification — both yielding a nil
+// `id`, both taking the notification branch — the raw bytes go to BOTH backends.
+// A JSON-RPC backend answers a malformed frame with a parseError, nothing reads
+// that response, and the NEXT sendAndReceive consumes it instead of its own
+// result. Every response after that is skewed by one for the life of the
+// process. The bridge must therefore refuse such a frame at the boundary.
 //
 // Two layers of proof here:
 //
@@ -138,9 +139,9 @@ struct BridgeFrameRejectionWiredTests {
     /// A malformed line is answered by the BRIDGE with a parseError carrying a
     /// null id, and reaches NEITHER backend.
     ///
-    /// This is the regression test. Against pre-fix code the malformed line went
-    /// out on the notification path, so both backend logs contained it and the
-    /// client got no error at all.
+    /// This is the regression test. A regression shows up as the malformed line
+    /// taking the notification path: both backend logs contain it and the client
+    /// receives no error at all.
     @Test func malformedLineIsRejectedAndNotForwarded() async throws {
         let rig = try StubRig()
         defer { rig.tearDown() }
@@ -159,9 +160,10 @@ struct BridgeFrameRejectionWiredTests {
     /// THE DESYNCHRONIZATION TEST. A malformed line followed by two valid
     /// requests: each request must receive ITS OWN response.
     ///
-    /// Against pre-fix code the malformed line was forwarded, each backend
-    /// answered it with an unread parseError, and the id-1 request then read that
-    /// stale error while id 2 read id 1's result — the exact skew Codex observed.
+    /// A regression shows up as the malformed line being forwarded: each backend
+    /// answers it with an unread parseError, the id-1 request then reads that
+    /// stale error, and id 2 reads id 1's result. That one-response skew is the
+    /// failure Codex reproduced against the live server.
     @Test func malformedLineDoesNotDesynchronizeTheSession() async throws {
         let rig = try StubRig()
         defer { rig.tearDown() }
