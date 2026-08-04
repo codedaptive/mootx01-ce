@@ -345,15 +345,14 @@ package func decryptedForRead(
 /// Structural enforcement of the content/keyID invariant (FUP-D, E-1).
 ///
 /// On an encrypting estate (Mode 2), a content-bearing row must be stored as
-/// ciphertext under a keyID. `encryptedForWrite` produces exactly that —
-/// `.blob` content plus a non-empty keyID — so a correct encrypting write
-/// passes this guard untouched. A `.text` `content` value reaching the write
-/// boundary on an encrypting estate means the encryption seam did not run
-/// (e.g. a raw `upsert`, a migration, or a new store method); persisting it
-/// would leave plaintext content with a null keyID — a row `decryptedForRead`
-/// cannot resolve. Refuse the write rather than let convention be the only
-/// safeguard. Mode 1 (plaintext) and Mode 3 (FullDatabase) return immediately,
-/// so the path is byte-identical to before this guard existed.
+/// ciphertext. `encryptedForWrite` produces exactly that — `.blob` content
+/// plus a non-empty keyID — so a correct encrypting write passes this guard
+/// untouched. A `.text` value in a protected column reaching the write
+/// boundary means the encryption seam did not run (a migration, or a new
+/// store method that skipped it); persisting it would leave plaintext at
+/// rest. Refuse the write rather than let convention be the only safeguard.
+/// Mode 1 (plaintext) and Mode 3 (FullDatabase) return immediately, so the
+/// path is byte-identical to before this guard existed.
 ///
 /// `table` selects which columns the guard covers. It is not decoration on
 /// the error message: a table with no protected columns cannot violate the
@@ -375,9 +374,14 @@ package func assertContentKeyIDInvariant(
         return false
     }
     guard let violating = plaintextColumn else { return }
-    // A keyID is present only when the protected text is ciphertext; .text
-    // with no keyID is the unsafe, unencrypted write.
-    if case .text(let keyID)? = values[rowCryptoKeyIDColumn], !keyID.isEmpty { return }
+    // The test is on the VALUE'S TYPE, never on the presence of a sibling
+    // keyID. Ciphertext is `.blob`, so non-empty `.text` in a protected column
+    // IS the unencrypted write — an accompanying keyID proves nothing about
+    // it. That pairing is exactly what a decrypt-then-copy path produces:
+    // `decryptedForRead` hands back plaintext while retaining the source row's
+    // keyID, and a snapshot replication writes the pair straight through.
+    // Treating the keyID as proof of ciphertext is what let plaintext reach an
+    // encrypting estate's disk with no attacker involved.
     throw StorageError.constraintViolation(detail:
-        "content/keyID invariant: table '\(table)' on an encrypting estate received plaintext '\(violating)' with no keyID; the encryption seam did not run, so this row would be unreadable")
+        "content/keyID invariant: table '\(table)' on an encrypting estate received plaintext '\(violating)'; ciphertext is stored as a blob, so text in a protected column means the encryption seam did not run")
 }

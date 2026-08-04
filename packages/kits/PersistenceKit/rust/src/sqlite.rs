@@ -1720,18 +1720,14 @@ pub(crate) fn decrypted_for_read(
 /// Structural enforcement of the content/keyID invariant.
 ///
 /// On an encrypting estate (mode 2/3), a content-bearing row must be stored
-/// as ciphertext (.blob) under a keyID. `encrypted_for_write` produces
-/// exactly that. A `.text` content value reaching `upsert` or `update`
-/// means the encryption seam did not run; persisting it would write
-/// plaintext with a null keyID — a row `decrypted_for_read` cannot resolve.
+/// as ciphertext (.blob). `encrypted_for_write` produces exactly that. A
+/// `.text` value in a protected column reaching the write boundary means the
+/// encryption seam did not run; persisting it would leave plaintext at rest.
 ///
-/// The upsert path is deliberately NOT wired with `encrypted_for_write`
-/// (matching Swift's design: in the LocusKit schema upsert is only ever
-/// called for non-content tables — manifest, container_fingerprints,
-/// node_bundles — none of which carry a `content` column). The guard here
-/// is the structural safety net: an upsert carrying plaintext in one of
-/// the target table's protected columns errors on an encrypting estate
-/// rather than silently writing plaintext.
+/// The guard is the structural safety net beneath the seam, not a substitute
+/// for it. A write that ran `encrypted_for_write` arrives already sealed, so
+/// the guard is a no-op for it; the guard fires only for a path that reached
+/// the write boundary without sealing.
 ///
 /// `table` selects which columns the guard covers. It is not decoration
 /// on the error message: a table with no protected columns cannot violate
@@ -1763,19 +1759,20 @@ pub(crate) fn assert_content_key_id_invariant(
         matches!(values.get(**column), Some(TypedValue::Text(t)) if !t.is_empty())
     });
     if let Some(violating) = violating {
-        // A keyID is present only when the protected text is ciphertext
-        // (.blob); .text with no keyID is an unencrypted write the seam
-        // missed.
-        if let Some(TypedValue::Text(id)) = values.get(KEY_ID_COL) {
-            if !id.is_empty() {
-                return Ok(()); // keyID present — text is already encrypted
-            }
-        }
+        // The test is on the VALUE'S TYPE, never on the presence of a sibling
+        // keyID. Ciphertext is `Blob`, so non-empty `Text` in a protected
+        // column IS the unencrypted write — an accompanying keyID proves
+        // nothing about it. That pairing is exactly what a decrypt-then-copy
+        // path produces: `decrypted_for_read` hands back plaintext while
+        // retaining the source row's keyID, and a snapshot replication writes
+        // the pair straight through. Treating the keyID as proof of ciphertext
+        // is what let plaintext reach an encrypting estate's disk with no
+        // attacker involved.
         return Err(StorageError::ConstraintViolation {
             detail: format!(
                 "content/keyID invariant: table '{}' on an encrypting estate received \
-                 plaintext '{}' with no keyID; the encryption seam did not run, so \
-                 this row would be unreadable",
+                 plaintext '{}'; ciphertext is stored as a blob, so text in a \
+                 protected column means the encryption seam did not run",
                 table, violating
             ),
         });
