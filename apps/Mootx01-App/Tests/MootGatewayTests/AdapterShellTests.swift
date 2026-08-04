@@ -46,24 +46,27 @@ struct AdapterShellTests {
         _ = try await RecallDrawerIntent(query: "intent-shell", publicOnly: true).perform()
     }
 
-    @Test("MootURLRouter routes a capture x-callback URL through the tool surface")
-    func urlRouterRoutesCapture() async throws {
+    @Test("MootURLRouter rejects a capture x-callback URL at the verb allowlist")
+    func urlRouterRejectsCapture() async throws {
         let bridge = try await MootBridge.attachInMemory()
-        // "app" is in the callback-scheme allowlist so the x-success URL is
-        // returned; this mirrors how a real host would configure the router.
         let router = MootURLRouter(permittedCallbackSchemes: ["app"])
-        let url = URL(string: "mootx01://x-callback-url/capture?content=hello%20moot&location=urls&x-success=app://done")!
+        // The URL carries a complete capture payload including the `subject`
+        // the tool layer requires, so a rejection can only come from the
+        // router's allowlist — not from a tool-layer argument refusal.
+        let url = URL(string: "mootx01://x-callback-url/capture?content=hello%20moot&subject=Adapter%20shell%20capture%20gate%20drawer.&location=urls&x-success=app://done")!
         // MootBridge conforms to MootToolCalling, so it passes directly.
         let outcome = await router.route(url, using: bridge)
-        guard case .routed(let returnURL, let text, let isError) = outcome else {
-            Issue.record("expected routed outcome, got \(outcome)")
+        guard case .notHandled(let reason) = outcome else {
+            Issue.record("a capture URL must not route to the substrate; got \(outcome)")
             return
         }
-        #expect(isError == false)
-        #expect(text.contains("filed memory"))
-        // The x-success callback is echoed back with the result appended.
-        #expect(returnURL?.absoluteString.contains("app://done") == true)
-        #expect(returnURL?.absoluteString.contains("result=") == true)
+        #expect(reason.contains("capture"), "the rejection reason names the verb; got: \(reason)")
+        // Nothing persisted: the estate has no drawer carrying that subject.
+        let recall = await bridge.callTool("moot_memory_search", arguments: [
+            "query": .string("hello moot"),
+        ])
+        #expect(!recall.text.contains("Adapter shell capture gate drawer."),
+            "a rejected capture URL must leave no drawer behind")
     }
 
     @Test("MootURLRouter rejects an unknown verb without touching the substrate")

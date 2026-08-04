@@ -204,49 +204,83 @@ struct IntentToolCallTests {
 @Suite("MootURLRouter — allowlist and routing")
 struct URLRouterTests {
 
-    @Test("allowed verb (capture) routes through to the substrate")
-    func allowedVerbRoutes() async throws {
+    @Test("capture URL is rejected at the allowlist and persists nothing")
+    func captureURLRejectedAndPersistsNothing() async throws {
         let bridge = try await TestBridge.makeInMemory()
         let router = MootURLRouter(permittedCallbackSchemes: ["app"])
-        // `subject` is carried as an ordinary query item: the router forwards
-        // every non-x- item verbatim as a tool argument, so the required
-        // argument reaches the dispatcher with no router-side mapping. That is
-        // why this mission changes no router source — only this URL.
+        // The URL carries a COMPLETE, valid capture payload — including the
+        // `subject` the tool layer requires. That is deliberate: if the gate
+        // were absent, this exact call would succeed at the substrate, so a
+        // .notHandled outcome can only come from the router's allowlist. A
+        // subject-less URL would be refused by the tool layer regardless of
+        // any gate and the test would pass for the wrong reason.
+        let subject = "URL router capture test drawer."
         let url = URL(string: "mootx01://x-callback-url/capture?content=url-router-test&subject=URL%20router%20capture%20test%20drawer.&location=urls&x-success=app://done")!
         let outcome = await router.route(url, using: bridge)
-        guard case .routed(let returnURL, let text, let isError) = outcome else {
-            Issue.record("expected routed, got \(outcome)")
+        guard case .notHandled(let reason) = outcome else {
+            Issue.record("a capture URL must not route to the substrate; got \(outcome)")
             return
         }
-        #expect(isError == false)
-        #expect(text.contains("filed memory"))
-        #expect(returnURL?.absoluteString.contains("app://done") == true)
-        #expect(returnURL?.absoluteString.contains("result=") == true)
+        #expect(reason.contains("capture"), "the rejection reason names the verb; got: \(reason)")
+
+        // And nothing was persisted: the estate has no drawer carrying the
+        // subject the URL tried to file.
+        let recall = await bridge.callTool("moot_memory_search", arguments: [
+            "query": .string("url-router-test"),
+        ])
+        #expect(!recall.text.contains(subject),
+            "a rejected capture URL must leave no drawer behind; got: \(recall.text)")
     }
 
-    @Test("capture without a subject is refused: the router does not invent one")
+    @Test("capture URL without a subject is rejected at the allowlist, before the substrate")
     func captureWithoutSubjectRefused() async throws {
         let bridge = try await TestBridge.makeInMemory()
         let router = MootURLRouter(permittedCallbackSchemes: ["app"])
-        // No subject query item. The router must NOT synthesise one — a subject
-        // is the caller's assertion about their own content, and an x-callback
-        // caller is an arbitrary other app. The substrate refuses, and the
-        // refusal is what the caller gets back.
-        //
-        // HANDOFF TO TASK-MXE-2026-0235: this test asserts the *substrate*
-        // refuses, which presumes `capture` is still in the router's verb
-        // allowlist. If that task drops `capture` from the allowlist, the
-        // outcome becomes .notHandled and this test must be rewritten to assert
-        // the refusal happens at the allowlist instead — a stronger gate, since
-        // it never reaches the substrate at all.
+        // No subject query item. Previously the substrate refused this call
+        // (missing required argument); now the allowlist refuses it first —
+        // a stronger gate, since the URL never reaches the substrate at all.
         let url = URL(string: "mootx01://x-callback-url/capture?content=no-subject-here&location=urls&x-success=app://done")!
         let outcome = await router.route(url, using: bridge)
-        guard case .routed(_, let text, let isError) = outcome else {
-            Issue.record("expected routed (the call ran and was refused), got \(outcome)")
+        guard case .notHandled(let reason) = outcome else {
+            Issue.record("expected notHandled at the allowlist, got \(outcome)")
             return
         }
-        #expect(isError == true, "a capture with no subject must be refused, not filed")
-        #expect(text.contains("subject"), "the refusal must name the missing argument; got: \(text)")
+        #expect(reason.contains("capture"), "the rejection happens at the allowlist and names the verb; got: \(reason)")
+    }
+
+    @Test("reanchor URL is rejected at the allowlist and the drawer does not move")
+    func reanchorURLRejectedAndDrawerUnmoved() async throws {
+        let bridge = try await TestBridge.makeInMemory()
+        // Seed a drawer through the tool surface — the consented path.
+        let captured = await bridge.callTool("moot_file_memory", arguments: [
+            "content": .string("reanchor-gate drawer"),
+            "subject": .string("Reanchor gate test drawer stays where it was filed."),
+            "location": .string("origin"),
+        ])
+        #expect(captured.isError == false, "seeding capture should succeed")
+        guard let drawerID = extractID(from: captured.text) else {
+            Issue.record("could not extract id from: \(captured.text)")
+            return
+        }
+
+        let router = MootURLRouter(permittedCallbackSchemes: ["app"])
+        let url = URL(string: "mootx01://x-callback-url/reanchor?id=\(drawerID)&location=elsewhere&x-success=app://done")!
+        let outcome = await router.route(url, using: bridge)
+        guard case .notHandled(let reason) = outcome else {
+            Issue.record("a reanchor URL must not route to the substrate; got \(outcome)")
+            return
+        }
+        #expect(reason.contains("reanchor"), "the rejection reason names the verb; got: \(reason)")
+
+        // The drawer is still where the consented capture filed it.
+        let readBack = await bridge.callTool("moot_memory_get", arguments: [
+            "id": .string(drawerID),
+        ])
+        #expect(readBack.isError == false, "by-id read-back should succeed")
+        #expect(readBack.text.contains("origin"),
+            "the drawer must still be in its original room; got: \(readBack.text)")
+        #expect(!readBack.text.contains("elsewhere"),
+            "the rejected reanchor must not have moved the drawer; got: \(readBack.text)")
     }
 
     @Test("destructive verb (expunge) is rejected by the allowlist")
@@ -339,9 +373,11 @@ struct URLRouterTests {
     @Test("callback scheme not in allowlist: returnURL is nil")
     func callbackSchemeGate() async throws {
         let bridge = try await TestBridge.makeInMemory()
-        // No permitted schemes registered.
+        // No permitted schemes registered. The vehicle is `recall` — the one
+        // verb still allowlisted — so the route reaches the callback gate
+        // rather than short-circuiting at the verb allowlist.
         let router = MootURLRouter(permittedCallbackSchemes: [])
-        let url = URL(string: "mootx01://x-callback-url/capture?content=scheme-test&x-success=https://evil.example/done")!
+        let url = URL(string: "mootx01://x-callback-url/recall?query=scheme-test&x-success=https://evil.example/done")!
         let outcome = await router.route(url, using: bridge)
         guard case .routed(let returnURL, _, _) = outcome else {
             Issue.record("expected routed (the tool call still ran); got \(outcome)")
