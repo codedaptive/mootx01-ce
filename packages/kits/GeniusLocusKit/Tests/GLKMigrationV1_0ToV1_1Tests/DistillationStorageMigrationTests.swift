@@ -81,7 +81,13 @@ struct DistillationStorageMigrationTests {
         let owner = OwnerCredentials(ownerIdentifier: "dsm-owner")
         let (storage, url) = try scratchStorage()
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        // Inject an in-memory identity key store so this file-backed estate's
+        // Ed25519 signing key never touches the Keychain (test-loop key-residue
+        // fix). Deleting the .sqlite file does not dispose Keychain items, so a
+        // default (Keychain-backed) store would orphan one entry per run.
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Capture source drawers (never distilled — left alone throughout).
         let sourceA = try await kit.capture(handle, CaptureFrame(
@@ -376,7 +382,13 @@ struct DistillationStorageMigrationTests {
         let (storage, url) = try scratchStorage()
         defer { try? FileManager.default.removeItem(at: url) }
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        // Inject an in-memory identity key store so this file-backed estate's
+        // Ed25519 signing key never touches the Keychain (test-loop key-residue
+        // fix). Deleting the .sqlite file does not dispose Keychain items, so a
+        // default (Keychain-backed) store would orphan one entry per run.
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Capture a regular drawer — should not be touched.
         _ = try await kit.capture(handle, CaptureFrame(
