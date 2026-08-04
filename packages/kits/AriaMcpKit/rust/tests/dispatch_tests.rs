@@ -2720,9 +2720,38 @@ fn file_fact_round_trips_through_coordinator() {
 #[test]
 fn fact_search_exact_fields_reject_substring_and_source_collisions() {
     let registry = EstateRegistry::new_inmemory();
+    // source_id must name a drawer that exists in this estate — a fact inherits
+    // its source drawer's sensitivity, so an unresolvable anchor fails the
+    // write. Two real drawers stand in for what used to be two synthetic
+    // "miner:*" tags; the substring-collision case this test guards lives on
+    // subject_exact ("ev-1" vs "ev-10"), which is unaffected.
+    let mut source_ids: Vec<String> = Vec::new();
+    for label in ["calendar-source", "other-source"] {
+        let filed = dispatch_tool(
+            "moot_file_memory",
+            &args![
+                "content" => format!("fixture drawer {label}"),
+                "location" => format!("fixtures/{label}"),
+                "subject" => format!("fixture anchor drawer {label}")
+            ],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("file memory");
+        assert!(is_success(&filed), "moot_file_memory must succeed: {filed:?}");
+        // The body opens with "filed memory <drawer-id>".
+        let text = content_text(&filed);
+        let first_line = text.lines().next().unwrap_or("");
+        let id = first_line
+            .trim_start_matches("filed memory ")
+            .trim()
+            .to_string();
+        assert!(!id.is_empty(), "could not read drawer id from: {text}");
+        source_ids.push(id);
+    }
     for (subject, source) in [
-        ("calendar.event.ev-1", "miner:calendar"),
-        ("calendar.event.ev-10", "miner:other"),
+        ("calendar.event.ev-1", source_ids[0].as_str()),
+        ("calendar.event.ev-10", source_ids[1].as_str()),
     ] {
         let filed = dispatch_tool(
             "moot_file_fact",
@@ -2743,7 +2772,7 @@ fn fact_search_exact_fields_reject_substring_and_source_collisions() {
         &args![
             "subject_exact" => "calendar.event.ev-1",
             "predicate_exact" => "scheduled",
-            "source_id_exact" => "miner:calendar"
+            "source_id_exact" => source_ids[0].as_str()
         ],
         &registry,
         &SurfacedRecallLedger::new(),
@@ -7278,9 +7307,13 @@ fn lens_contradiction_hides_secret_fact_source() {
     .expect("lens_contradiction must succeed");
     assert!(is_success(&result));
     let text = content_text(&result);
+    // Facts inherit their source drawer's sensitivity, so a fact drawn from a
+    // Secret drawer is itself Secret and is dropped by the lens's disclosure
+    // ceiling before rendering. Withholding the fact outright is strictly
+    // stronger than masking its source= token.
     assert!(
-        text.contains("source=<hidden>"),
-        "secret fact source must be redacted; got: {text}"
+        !text.contains("Project Aardvark"),
+        "facts derived from a Secret drawer must be withheld; got: {text}"
     );
     assert!(
         !text.contains(&secret_source),

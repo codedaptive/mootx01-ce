@@ -11323,10 +11323,16 @@ mod tests {
     #[test]
     fn ft1_fact_timeline_shows_retired_fact() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft1 = coord
+            .capture(&h, cap_frame("ft1 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         // File a fact: Earth orbits Sun.
         let fact = coord
-            .add_kg_fact(&h, "Earth", "orbits", "Sun", "drawer-ft1", NOW)
+            .add_kg_fact(&h, "Earth", "orbits", "Sun", &src_ft1.id, NOW)
             .expect("add_kg_fact should succeed");
 
         // Before retirement: both paths show the fact.
@@ -11385,12 +11391,18 @@ mod tests {
     #[test]
     fn ft2_fact_timeline_entity_filter() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft2 = coord
+            .capture(&h, cap_frame("ft2 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         let alice = coord
-            .add_kg_fact(&h, "alice", "worksAt", "ACME", "drawer-ft2", NOW)
+            .add_kg_fact(&h, "alice", "worksAt", "ACME", &src_ft2.id, NOW)
             .expect("add alice fact");
         let bob = coord
-            .add_kg_fact(&h, "bob", "worksAt", "ACME", "drawer-ft2", NOW + 1)
+            .add_kg_fact(&h, "bob", "worksAt", "ACME", &src_ft2.id, NOW + 1)
             .expect("add bob fact");
 
         let filtered = coord
@@ -11407,7 +11419,7 @@ mod tests {
         // entity, so `"Voss".contains("voss")` was false and any capitalised
         // entity filtered to zero — exactly the field-reported regression.
         let voss = coord
-            .add_kg_fact(&h, "Voss", "commands", "East Spire", "drawer-ft2", NOW + 2)
+            .add_kg_fact(&h, "Voss", "commands", "East Spire", &src_ft2.id, NOW + 2)
             .expect("add Voss fact");
         for needle in ["voss", "VOSS", "Voss", "spire", "EAST SPIRE"] {
             let hit = coord
@@ -11429,15 +11441,21 @@ mod tests {
     #[test]
     fn ft3_fact_timeline_is_time_ordered() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft3 = coord
+            .capture(&h, cap_frame("ft3 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         let f1 = coord
-            .add_kg_fact(&h, "A", "rel", "B", "drawer-ft3", NOW)
+            .add_kg_fact(&h, "A", "rel", "B", &src_ft3.id, NOW)
             .expect("fact 1");
         let f2 = coord
-            .add_kg_fact(&h, "B", "rel", "C", "drawer-ft3", NOW + 10)
+            .add_kg_fact(&h, "B", "rel", "C", &src_ft3.id, NOW + 10)
             .expect("fact 2");
         let f3 = coord
-            .add_kg_fact(&h, "C", "rel", "D", "drawer-ft3", NOW + 20)
+            .add_kg_fact(&h, "C", "rel", "D", &src_ft3.id, NOW + 20)
             .expect("fact 3");
 
         let timeline = coord
@@ -11462,12 +11480,18 @@ mod tests {
     #[test]
     fn ft4_recall_kg_facts_active_only_regression() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft4 = coord
+            .capture(&h, cap_frame("ft4 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         let active1 = coord
-            .add_kg_fact(&h, "Mars", "has_moon", "Phobos", "drawer-ft4", NOW)
+            .add_kg_fact(&h, "Mars", "has_moon", "Phobos", &src_ft4.id, NOW)
             .expect("active fact 1");
         let to_retire = coord
-            .add_kg_fact(&h, "Pluto", "classifiedAs", "planet", "drawer-ft4", NOW + 1)
+            .add_kg_fact(&h, "Pluto", "classifiedAs", "planet", &src_ft4.id, NOW + 1)
             .expect("fact to retire");
 
         // Baseline: both are active.

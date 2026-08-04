@@ -167,8 +167,10 @@ fn explicit_source_id_naming_no_drawer_fails_the_write() {
     let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
         .expect("moot_fact_search must not error");
     let text = content_text(&search_result);
+    // The search header echoes the query verbatim; the fact ROW is what must
+    // be absent, so match on the predicate.
     assert!(
-        !text.contains("Tokyo"),
+        !text.contains("is_capital_of"),
         "a rejected write must leave no fact behind; got: {text}"
     );
 }
