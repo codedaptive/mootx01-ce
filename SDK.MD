@@ -155,7 +155,7 @@ named, composable behaviour recipes that turn tool calls into workflows.
 Protocol. Any MCP client — Claude Code, Cursor, Codex, and the rest — speaks
 to your memory with zero integration code.
 
-**Portability — `VaultKit`.** Encrypted, portable estate export and import.
+**Portability — `VaultKit`.** Portable, plaintext estate export and import.
 Your memory moves when you do.
 
 **The product experience.** The `mootx01` CLI and installer with three

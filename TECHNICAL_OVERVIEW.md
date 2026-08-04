@@ -109,7 +109,7 @@ Foundation (SDK: moot-core / moot-system):
 
 Product surface (this repo):
     AriaMcpKit      ARIA-over-MCP server surface
-    VaultKit        Encrypted, portable estate export/import
+    VaultKit        Portable estate export/import (plaintext vault)
 ```
 
 ## Implementations
