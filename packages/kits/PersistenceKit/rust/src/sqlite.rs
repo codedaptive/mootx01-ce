@@ -1516,14 +1516,10 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
 // encryptedForWrite / decryptedForRead / assertContentKeyIDInvariant.
 //
 // The seam intercepts by (table, column) PAIR, never by column name
-// alone, matching the Swift RowCrypto design. The protected names are
-// not unique across the LocusKit schema: `kg_facts` declares its own
-// `subject` column — the subject term of an S-P-O knowledge-graph
-// triple — on a table that has no `keyID` column and that indexes
-// `subject` for equality lookup. Sealing by name would make every KG
-// fact write name a column the table does not have, and would encrypt
-// an indexed lookup key under a fresh nonce per write. The table filter
-// is what keeps protection targeted at the rows that need it.
+// alone, matching the Swift RowCrypto design. Which pairs those are, and
+// the rule that decides whether a newly added table joins them, is stated
+// once on `ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE` below. That declaration
+// is the authority; do not restate the membership rule here.
 //
 // Mode 1 (Plaintext) is a complete no-op: neither encrypt nor decrypt
 // is called and the values map passes through unchanged. So is any
@@ -1541,31 +1537,74 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
 /// why the seam must not stamp it onto an unprotected table.
 pub(crate) const KEY_ID_COL: &str = "keyID";
 
+/// The protected text columns, keyed by table.
+///
+/// # The inclusion rule — apply it to every table you add to the schema
+///
+/// A table belongs in this map when BOTH of the following hold. Neither
+/// alone is enough, and the second is the one that is easy to miss.
+///
+/// 1. **It declares a column that holds content, or text DERIVED from
+///    content.** Per SPEC_DISTILLATION_STORAGE §2, a representation carries
+///    the same row-level protection class as the content it renders — a
+///    subject summarises the body it was generated from, so leaving it
+///    plaintext on an encrypting estate discloses the substance of a sealed
+///    row. A column that records only *how* or *when* a value was produced
+///    is not content-derived and stays plaintext:
+///    `subject_pipeline_version`, `subject_at`, `distilled_pipeline_version`,
+///    `distilled_at`. Nor are the `content_hash` / `content_fingerprint`
+///    digests, which are computed over content rather than carrying it, and
+///    which index and deduplication read directly.
+///
+/// 2. **It declares a `keyID` column.** `encrypted_for_write` stamps `keyID`
+///    on every row it seals, so listing a table that has no such column
+///    produces a write naming a column that does not exist — the write fails
+///    outright rather than degrading. A content-bearing table that cannot
+///    carry `keyID` is therefore a schema question, not a map entry.
+///
+/// Today `drawers` is the only table in the schema that satisfies rule 2 at
+/// all: it is the sole declarer of `keyID` in either port. That makes this
+/// map *maximal*, not merely current — a second entry becomes possible only
+/// once some other table gains a `keyID` column, and whoever makes that
+/// schema change is the one who must come back here.
+///
+/// Two shapes are deliberately excluded under rule 2 and must stay excluded:
+///
+/// - `kg_facts` declares its own `subject` — the subject term of an S-P-O
+///   triple, not content-derived — on a table with no `keyID`, and indexes
+///   it for equality (`idx_kg_facts_subject`). Sealing it under a fresh
+///   nonce per write would make that index match nothing.
+/// - Dataset tables (`ds_<uuid>`) take their column names from the caller,
+///   so a dataset may legitimately carry a column named `content`. They have
+///   no `keyID` column and cannot be enumerated at compile time.
+///
+/// Mirrors the Swift `rowCryptoProtectedColumnsByTable` verbatim — the two
+/// ports must agree or stored envelopes stop being byte-compatible.
+///
+/// Held as a slice rather than folded into the `match` in
+/// `protected_cols_for_table` so the coverage tests can iterate the map
+/// itself; a test that restates the map cannot fail when the map gains a
+/// wrong entry.
+pub(crate) const ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE: &[(&str, &[&str])] =
+    &[("drawers", &["content", "distilled", "subject"])];
+
 /// The protected text columns for `table`, or an empty slice when the
 /// table has none.
 ///
-/// The match is exact — no prefix rule, no wildcard, no default arm that
-/// protects anything — so a new content-bearing table joins the
-/// protected set only by being added here deliberately. The empty slice
+/// The name comparison is exact — no prefix rule, no wildcard, no fallback
+/// that protects anything — so a new content-bearing table joins the
+/// protected set only by being added to
+/// [`ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE`] deliberately. The empty slice
 /// for every other table is load-bearing: it is what keeps
-/// `kg_facts.subject` byte-identical to a pre-seam write.
-///
-/// `distilled` and `subject` are protected because both are content-DERIVED
-/// text (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
-/// row-level protection class as the content it renders). A subject is a
-/// summary of the body it was generated from, so leaving it plaintext on an
-/// encrypting estate discloses the substance of a sealed row. The subject's
-/// provenance columns — `subject_pipeline_version` and `subject_at` — are
-/// deliberately NOT protected: they record how a subject was produced and
-/// when, not what it says.
-///
-/// Mirrors the Swift `rowCryptoProtectedColumns(for:)` map verbatim — the
-/// two ports must agree or stored envelopes stop being byte-compatible.
+/// `kg_facts.subject` and every dataset column byte-identical to a pre-seam
+/// write.
 pub(crate) fn protected_cols_for_table(table: &str) -> &'static [&'static str] {
-    match table {
-        "drawers" => &["content", "distilled", "subject"],
-        _ => &[],
+    for (name, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+        if *name == table {
+            return columns;
+        }
     }
+    &[]
 }
 
 /// True when an explicit column projection of `table` reads a protected

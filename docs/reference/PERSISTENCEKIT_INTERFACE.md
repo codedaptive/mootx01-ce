@@ -3,7 +3,7 @@ title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-08-03
-version: 1.13.0
+version: 1.14.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -1046,7 +1046,20 @@ encryption seam at the storage layer:
 | Read (query / query_projected) | `decryptedForRead` → decrypt protected columns | `decrypted_for_read` → decrypt protected columns | Only when `keyID` matches estate key identifier |
 | Write-boundary guard (all verbs) | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Runs beneath the seam on insert, upsert and update. Rejects non-empty TEXT in a protected column on an encrypting estate regardless of `keyID` — ciphertext is a blob, so text means the seam did not run. Blob, null/absent and empty text (erasure scrub) are accepted |
 
-Column names intercepted: `"content"` and `"keyID"`. Plaintext mode is a
+Interception is by **(table, column) pair**, never by column name alone. The
+protected columns are `"content"`, `"distilled"` and `"subject"` on the
+`drawers` table; `"keyID"` is the key-identifier column the seam stamps on
+every row it seals. A table absent from the map passes through untouched in
+both directions and never receives a `keyID` stamp.
+
+A table joins the map only when it BOTH carries content or content-derived
+text AND declares a `keyID` column — the seam stamps `keyID` on write, so a
+mapped table without that column would produce a write naming a column that
+does not exist. `drawers` is currently the only table in the schema declaring
+`keyID`, which makes the map maximal rather than merely current. Two shapes
+are deliberately outside it: `kg_facts.subject` (the subject term of an S-P-O
+triple, indexed for equality, on a table with no `keyID`) and dataset tables
+`ds_<uuid>` (caller-supplied column names, no `keyID`). Plaintext mode is a
 no-op on every path. Cross-port compatibility applies to Mode 2
 (RowEncryption) only: a Mode 2 content value encrypted by the Swift backend
 is decryptable by the Rust backend because both use AES-GCM-256 with the same
@@ -1500,6 +1513,19 @@ fn perform_maintenance(
 ```
 
 ## Changelog
+
+### 1.14.0 -- 2026-08-03
+Corrected the intercepted-column contract (MXE-RW). The at-rest wiring
+section said "Column names intercepted: `content` and `keyID`" — wording that
+predated `distilled`, `subject` and the (table, column) map, and that
+described interception by column name alone, which the seam has not done
+since the table filter landed. It now names the protected columns per table,
+states that interception is by (table, column) pair, and records the
+inclusion rule: a table joins the map when it BOTH carries content or
+content-derived text AND declares a `keyID` column, since the seam stamps
+`keyID` on every row it seals. `kg_facts.subject` and dataset tables
+`ds_<uuid>` are named as the two shapes deliberately outside the map. No
+signature or behavioural change.
 
 ### 1.13.0 -- 2026-08-03
 At-rest encryption wiring table corrected (MXE-PW): the seam runs on

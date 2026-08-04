@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.11.0
+version: 1.12.0
 status: active
 date: 2026-08-03
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -529,8 +529,9 @@ works on SQLite AND PostgreSQL. Mode 3 (whole-file SQLCipher) is SQLite-only
 (both Swift and Rust ports). See the whole-file encryption contract (Backend coverage).
 
 **B-12a (cross-port at-rest format parity — Mode 2 only):** for Mode 2
-(RowEncryption), the Rust SQLite backend encrypts the `content` column at
-rest using AES-GCM-256, mirroring the Swift
+(RowEncryption), the Rust SQLite backend encrypts a table's protected
+columns at rest using AES-GCM-256 — `content`, `distilled` and `subject` on
+`drawers` — mirroring the Swift
 `SQLiteBackend.encryptedForWrite`/`decryptedForRead` seam exactly. The
 stored envelope layout is `[12-byte nonce][16-byte GCM tag][ciphertext]`
 on both ports. A Mode 2 column value encrypted by the Swift port can be
@@ -852,6 +853,19 @@ Authority for the Package.swift / Cargo.toml addition:
 `the package-dependency rule`.
 
 ## Changelog
+
+### 1.12.0 -- 2026-08-03
+Stated the protected-column inclusion rule (MXE-RW). B-12a described the
+Mode 2 at-rest seam as encrypting "the `content` column", wording that
+predated `distilled`, `subject` and the (table, column) map. It now names a
+table's protected columns and records the rule that governs membership: a
+table is protected when it BOTH carries content or content-derived text AND
+declares a `keyID` column, because the seam stamps `keyID` on every row it
+seals. `drawers` is currently the only table in the schema declaring `keyID`,
+so the map is maximal rather than merely current. `kg_facts.subject` and
+dataset tables `ds_<uuid>` are recorded as the two shapes that carry a
+protected-looking column with no `keyID` and are therefore outside the map.
+No behavioural change: the protected set is unchanged.
 
 ### 1.11.0 -- 2026-08-03
 Corrected the at-rest write-boundary contract (MXE-PW). The per-row AEAD

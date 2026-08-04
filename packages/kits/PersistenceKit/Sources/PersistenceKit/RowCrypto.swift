@@ -192,14 +192,10 @@ package enum RowCrypto {
 // equality probe. The table filter is what keeps protection targeted at the
 // rows that need it.
 //
-// `distilled` and `subject` are protected because both are content-DERIVED
-// text (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
-// row-level protection class as the content it renders). A subject is a
-// summary of the body it was generated from, so leaving it plaintext on an
-// encrypting estate discloses the substance of a sealed row. The subject's
-// provenance columns — `subject_pipeline_version` and `subject_at` — are
-// deliberately NOT protected: they record how a subject was produced and
-// when, not what it says.
+// Which (table, column) pairs are intercepted, and the rule that decides
+// whether a newly added table joins them, is stated once on
+// `rowCryptoProtectedColumnsByTable` below. That declaration is the
+// authority; do not restate the membership rule here.
 //
 // Both the SQLite and PostgreSQL backends call these functions, which is
 // what keeps their stored envelopes byte-compatible.
@@ -211,15 +207,58 @@ package let rowCryptoKeyIDColumn = "keyID"
 
 /// The protected text columns, keyed by table.
 ///
-/// A table absent from this map is not intercepted in either direction —
-/// its values pass through untouched and it never receives a keyID stamp.
-/// That absence is load-bearing: it is what keeps `kg_facts.subject`
-/// byte-identical to a pre-seam write.
+/// ## The inclusion rule — apply it to every table you add to the schema
+///
+/// A table belongs in this map when BOTH of the following hold. Neither
+/// alone is enough, and the second is the one that is easy to miss.
+///
+/// 1. **It declares a column that holds content, or text DERIVED from
+///    content.** Per SPEC_DISTILLATION_STORAGE §2, a representation carries
+///    the same row-level protection class as the content it renders — a
+///    subject summarises the body it was generated from, so leaving it
+///    plaintext on an encrypting estate discloses the substance of a sealed
+///    row. A column that records only *how* or *when* a value was produced is
+///    not content-derived and stays plaintext: `subject_pipeline_version`,
+///    `subject_at`, `distilled_pipeline_version`, `distilled_at`. Nor are the
+///    `content_hash` / `content_fingerprint` digests, which are computed over
+///    content rather than carrying it, and which index and deduplication
+///    read directly.
+///
+/// 2. **It declares a `keyID` column.** `encryptedForWrite` stamps `keyID`
+///    on every row it seals, so listing a table that has no such column
+///    produces a write naming a column that does not exist — the write fails
+///    outright rather than degrading. A content-bearing table that cannot
+///    carry `keyID` is therefore a schema question, not a map entry.
+///
+/// Today `drawers` is the only table in the schema that satisfies rule 2 at
+/// all: it is the sole declarer of `keyID` in either port. That makes this
+/// map *maximal*, not merely current — a second entry becomes possible only
+/// once some other table gains a `keyID` column, and whoever makes that
+/// schema change is the one who must come back here.
+///
+/// Two shapes are deliberately excluded under rule 2 and must stay excluded:
+///
+/// - `kg_facts` declares its own `subject` — the subject term of an S-P-O
+///   triple, not content-derived — on a table with no `keyID`, and indexes it
+///   for equality (`idx_kg_facts_subject`). Sealing it under a fresh nonce per
+///   write would make that index match nothing.
+/// - Dataset tables (`ds_<uuid>`) take their column names from the caller, so
+///   a dataset may legitimately carry a column named `content`. They have no
+///   `keyID` column and cannot be enumerated at compile time.
+///
+/// A table absent from this map is not intercepted in either direction — its
+/// values pass through untouched and it never receives a keyID stamp. That
+/// absence is load-bearing: it is what keeps both shapes above byte-identical
+/// to a pre-seam write.
 ///
 /// Order within a table's list is meaningful only for determinism of
 /// iteration; each present column is sealed independently under the same
 /// row key.
-private let rowCryptoProtectedColumnsByTable: [String: [String]] = [
+///
+/// Visible at `package` scope so the coverage tests can iterate the map
+/// itself rather than restate its contents — a test that restates the map
+/// cannot fail when the map gains a wrong entry.
+package let rowCryptoProtectedColumnsByTable: [String: [String]] = [
     "drawers": ["content", "distilled", "subject"]
 ]
 
