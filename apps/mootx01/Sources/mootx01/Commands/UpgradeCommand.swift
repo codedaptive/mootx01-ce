@@ -196,8 +196,12 @@ struct UpgradeCommand: AsyncParsableCommand {
             guard let tag else {
                 print("Already up to date (\(Mootx01.currentVersion)).")
                 // Bob's ruling: `mootx01 upgrade` is the ONLY migration
-                // vehicle, and it offers whether or not a new version is
-                // available — so the up-to-date early return still offers.
+                // vehicle, and it converges whether or not a new version is
+                // available — so the up-to-date early return still backfills
+                // and offers. The backfill may quiesce the daemon, so restore
+                // the installed agents before returning, as below.
+                await runKGFactIdentityBackfill(home: home)
+                restartAgents(home: home)
                 offerEstateEncryptionIfNeeded(home: home)
                 return
             }

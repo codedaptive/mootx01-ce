@@ -303,7 +303,7 @@ public final class AppModel {
         let outcome = await router.route(url, using: bridge)
         switch outcome {
         case .routed(_, let text, let isError):
-            Self.log.info("x-callback-url routed: isError=\(isError, privacy: .public) result=\(text.prefix(80), privacy: .public)")
+            Self.log.info("x-callback-url routed: isError=\(isError, privacy: .public) result=\(text.prefix(80), privacy: .private)")
         case .notHandled(let reason):
             Self.log.info("x-callback-url not handled: \(reason, privacy: .public)")
         }
