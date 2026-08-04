@@ -286,14 +286,23 @@ public final class AppModel {
     private static let log = Logger(subsystem: "com.mootx01.kit", category: "AppModel")
 
     /// Route an inbound x-callback-url through MootURLRouter. Called from
-    /// the view layer's `.onOpenURL` modifier. The router enforces a verb
-    /// allowlist (capture/recall/reanchor only) and a callback-scheme
-    /// allowlist (empty here — the host does not auto-open return URLs;
-    /// the caller is responsible for checking the returnURL in its own process).
-    /// See MootURLRouter for the full security rationale.
+    /// the view layer's `.onOpenURL` modifier.
+    ///
+    /// Inbound URLs are UNTRUSTED INPUT: any local process, any
+    /// `<iframe src="mootx01://…">`, any link a user clicks can deliver one,
+    /// and no platform gives the URL a trustworthy caller identity. The
+    /// router therefore admits read verbs only (`recall`); verbs that mutate
+    /// the estate (capture, reanchor) are rejected at its allowlist and must
+    /// go through the consented, device-authenticated App Intents path.
+    /// The callback-scheme allowlist is empty here — the host does not
+    /// auto-open return URLs; the caller is responsible for checking the
+    /// returnURL in its own process. See MootURLRouter for the invariant
+    /// that binds any future extension of the allowlist.
     func handleOpenURL(_ url: URL) async {
         guard let bridge else {
-            Self.log.error("handleOpenURL: no bridge attached, dropping \(url.absoluteString, privacy: .public)")
+            // The URL is attacker-composable and its query string can carry
+            // content/ids — never let it reach the log at public privacy.
+            Self.log.error("handleOpenURL: no bridge attached, dropping \(url.absoluteString, privacy: .private)")
             return
         }
         // Empty permitted-callback-schemes: the app never opens a return URL
@@ -305,7 +314,9 @@ public final class AppModel {
         case .routed(_, let text, let isError):
             Self.log.info("x-callback-url routed: isError=\(isError, privacy: .public) result=\(text.prefix(80), privacy: .private)")
         case .notHandled(let reason):
-            Self.log.info("x-callback-url not handled: \(reason, privacy: .public)")
+            // The reason echoes the attacker-controlled verb text — keep it
+            // out of the public log stream.
+            Self.log.info("x-callback-url not handled: \(reason, privacy: .private)")
         }
     }
 }
