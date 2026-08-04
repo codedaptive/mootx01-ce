@@ -236,9 +236,9 @@ struct URLRouterTests {
     func captureWithoutSubjectRefused() async throws {
         let bridge = try await TestBridge.makeInMemory()
         let router = MootURLRouter(permittedCallbackSchemes: ["app"])
-        // No subject query item. Previously the substrate refused this call
-        // (missing required argument); now the allowlist refuses it first —
-        // a stronger gate, since the URL never reaches the substrate at all.
+        // No subject query item. The allowlist refuses the verb before the
+        // substrate could ever see the missing argument — the strongest gate,
+        // since the URL never reaches the substrate at all.
         let url = URL(string: "mootx01://x-callback-url/capture?content=no-subject-here&location=urls&x-success=app://done")!
         let outcome = await router.route(url, using: bridge)
         guard case .notHandled(let reason) = outcome else {
