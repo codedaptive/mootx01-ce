@@ -2065,6 +2065,99 @@ fn erase_memory_with_confirmed_true_succeeds() {
     assert!(is_success(&result), "erase with confirmed:true must succeed; got: {result:?}");
     let text = content_text(&result);
     assert!(text.contains(&id), "success text must include id; got: {text}");
+    // A single-row lineage has nothing for the gate to refuse — the
+    // historical response shape must be byte-identical (SPEC B-8b).
+    assert_eq!(
+        text,
+        format!("erased memory {id}"),
+        "a full expunge must keep the exact historical response shape"
+    );
+}
+
+/// A lineage expunge that the audit gate refused for an accepted sibling
+/// must NOT respond "erased memory <id>" — the response names the partial
+/// outcome, the refused count, and the surviving ids (SPEC B-8b, MXE-FA).
+/// A caller acting on this sentence is making a privacy decision on it.
+/// Mirrors Swift `ErasePartialResponseTests`.
+#[test]
+fn erase_memory_partial_lineage_response_names_refused_count() {
+    use locus_kit::adjectives::Trust;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::{CaptureFrame, MutationKind};
+
+    let registry = EstateRegistry::new_inmemory();
+    let now = aria_mcp::dispatch::wall_now();
+
+    // D1: captured, promoted to Accepted (S-1 requires trust ≥ canonical;
+    // the accepted state is what the gate protects from tombstoning, S-3).
+    // D2: same lineage, still active — the expunge target. D1 is accepted
+    // BEFORE D2 is captured so the capture does not supersede it.
+    let (d1_id, d2_id) = {
+        let coord = registry.coord.lock().unwrap();
+        let d1 = coord
+            .capture(
+                &registry.default.handle,
+                CaptureFrame::new(
+                    "accepted iridium fact held for audit",
+                    CaptureChannel::Typed,
+                    "aria-erase-partial-tests",
+                    LatticeAnchor::udc("004"),
+                    "aria-mcp-tests",
+                    "default",
+                ),
+                now,
+            )
+            .expect("capture d1");
+        coord
+            .mutate(
+                &registry.default.handle,
+                &d1.id,
+                MutationKind::CorrectTrust(Trust::Canonical),
+                None,
+            )
+            .expect("correct trust to canonical");
+        coord
+            .mutate(&registry.default.handle, &d1.id, MutationKind::Accept, None)
+            .expect("promote d1 to accepted");
+
+        let mut d2_frame = CaptureFrame::new(
+            "active iridium draft in the same lineage",
+            CaptureChannel::Typed,
+            "aria-erase-partial-tests",
+            LatticeAnchor::udc("004"),
+            "aria-mcp-tests",
+            "default",
+        );
+        d2_frame.lineage_id = Some(d1.lineage_id);
+        let d2 = coord
+            .capture(&registry.default.handle, d2_frame, now + 100)
+            .expect("capture d2");
+        (d1.id, d2.id)
+    };
+
+    let result = dispatch_tool(
+        "moot_erase_memory",
+        &args!["id" => d2_id.as_str(), "reason" => "partial response shape test", "confirmed" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("erase_memory must not throw");
+    // A partial expunge is a completed operation with a partial outcome,
+    // not a tool error.
+    assert!(is_success(&result), "partial erase must not be isError; got: {result:?}");
+    let text = content_text(&result);
+    assert_ne!(
+        text,
+        format!("erased memory {d2_id}"),
+        "a partial lineage expunge must NOT claim a plain success"
+    );
+    assert!(text.contains("partial"), "response must say the expunge was partial; got: {text}");
+    assert!(text.contains("1 "), "response must name the refused count; got: {text}");
+    assert!(
+        text.contains(&d1_id),
+        "response must name the refused sibling id so the caller can act on it; got: {text}"
+    );
 }
 
 #[test]

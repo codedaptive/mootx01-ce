@@ -234,11 +234,14 @@ struct ExpungeTests {
         )
         let drawer = try await estate.capture(frame)
 
-        try await estate.expunge(
+        let outcome = try await estate.expunge(
             rowID: drawer.id,
             reason: "operator request",
             confirmation: true
         )
+        // A single-row lineage has no siblings for the gate to refuse:
+        // the outcome must report a complete expunge (SPEC B-8b).
+        #expect(outcome.refusedSiblingIDs.isEmpty)
         // The row is still readable through the unfiltered recall path,
         // but its state is now tombstoned with bit 26 set and content
         // zeroed. (Cluster-A filtering at the recall layer excludes
@@ -695,11 +698,15 @@ struct ExpungeTests {
         let attackerRow = try await estate.capture(attackerFrame)
 
         // Expunging the attacker's own row walks the shared lineage.
-        try await estate.expunge(
+        // The Estate wrapper must report the refusal — an expunge that
+        // refused a sibling is not a success (SPEC B-8b, MXE-FA).
+        let outcome = try await estate.expunge(
             rowID: attackerRow.id,
             reason: "attacker-initiated expunge",
             confirmation: true
         )
+        #expect(outcome.refusedSiblingIDs == [protectedId],
+                "Estate.expunge must surface the gate-refused accepted sibling to its caller")
 
         // The attacker's row is gone…
         let attackerAfter = try await estate.store.getDrawer(id: attackerRow.id)
