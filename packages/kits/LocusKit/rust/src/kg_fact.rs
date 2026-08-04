@@ -52,6 +52,24 @@ use crate::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State, Tru
 // ─────────────────────────────────────────────────────────────────
 use substrate_kernel::bit_field;
 
+/// The three provenance strings a fact carries alongside its
+/// `source_drawer_id`: who filed it, and — for palace-imported facts —
+/// which foreign key and foreign record it came from.
+///
+/// Swift expresses these as defaulted initializer parameters
+/// (`addedBy: String = ""` and friends). Rust has no default arguments,
+/// so the same "callers who do not record an origin say nothing extra"
+/// ergonomics come from `KGFactOrigin::default()`, which is all-empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct KGFactOrigin {
+    /// Identity of the agent or host binary filing the fact.
+    pub added_by: String,
+    /// The foreign palace's stable source key for the anchoring drawer.
+    pub foreign_source_key: String,
+    /// The foreign palace's own id for the record that produced the fact.
+    pub foreign_record_id: String,
+}
+
 /// A knowledge-graph fact extracted from drawer content.
 ///
 /// Mirrors `KGFact.swift` field-for-field. Equality and hashing follow
@@ -78,9 +96,40 @@ pub struct KGFact {
     /// predicate; the value type makes no distinction.
     pub object: String,
 
-    /// Identifier of the drawer this fact was extracted from. Every
-    /// fact must trace back to a drawer.
+    /// Identifier of the drawer this fact was extracted from — a
+    /// **local** drawer id, or `""` when the fact is not anchored to a
+    /// drawer. Nothing else is ever stored here: a host identity, a
+    /// foreign palace's key, and a foreign record id each have their own
+    /// field below. A non-empty value must resolve to a drawer in this
+    /// estate; the capture verb fails the write when it does not.
     pub source_drawer_id: String,
+
+    /// Identity of the agent or host binary that filed this fact — for
+    /// example `"mootx01"` or `"aria-mcp-server"` when the fact arrives
+    /// through the MCP surface. Free-form; `""` when the filer is not
+    /// recorded. Provenance about *who wrote the row*, which is a
+    /// different question from which drawer the fact was drawn from.
+    pub added_by: String,
+
+    /// The foreign palace's stable source key for the drawer this fact
+    /// anchors to, carried verbatim from the exporting estate. Set only
+    /// on palace-imported facts; `""` otherwise. The key is meaningful in
+    /// the *foreign* estate's namespace and resolves to no local drawer,
+    /// which is why it cannot live in `source_drawer_id`.
+    ///
+    /// The palace re-import dedup signature (CAND-049) is built over this
+    /// value, so it must survive round-trips byte-for-byte.
+    pub foreign_source_key: String,
+
+    /// The foreign palace's own identifier for the record that produced
+    /// this fact — the triple id, e.g. `"t_fleet_works_with_skippy_0001"`.
+    /// Set only on palace-imported facts; `""` otherwise. Like
+    /// `foreign_source_key` this names a row in the foreign estate, not a
+    /// local drawer.
+    ///
+    /// The Rust importer signs the CAND-049 signature with this value when
+    /// `foreign_source_key` is empty, so it too must round-trip verbatim.
+    pub foreign_record_id: String,
 
     /// Adjective bitmap encoding state, trust, sensitivity, and
     /// exportability per spec § 5.5. Shares the encoding with
@@ -102,8 +151,14 @@ pub struct KGFact {
 }
 
 impl KGFact {
-    /// Construct a fact with all-zero bitmaps. Mirrors the Swift
-    /// designated initializer's safe-baseline defaults.
+    /// Construct a fact with all-zero bitmaps and empty provenance
+    /// strings. Mirrors the Swift designated initializer's safe-baseline
+    /// defaults, where `addedBy`, `foreignSourceKey`, and
+    /// `foreignRecordID` all default to `""`.
+    ///
+    /// Rust has no default arguments, so callers that do record a filing
+    /// host or a foreign palace origin set those fields with struct-update
+    /// syntax on the returned value — the same pattern the bitmaps use.
     pub fn new(
         id: String,
         subject: String,
@@ -118,6 +173,9 @@ impl KGFact {
             predicate,
             object,
             source_drawer_id,
+            added_by: String::new(),
+            foreign_source_key: String::new(),
+            foreign_record_id: String::new(),
             adjective_bitmap: 0,
             operational_bitmap: 0,
             provenance_bitmap: 0,

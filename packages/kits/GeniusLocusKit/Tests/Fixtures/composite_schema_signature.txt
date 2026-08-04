@@ -207,6 +207,9 @@ table=kg_facts
   col=predicate type=text null=0 default=- role=-
   col=object type=text null=0 default=- role=-
   col=sourceDrawerID type=text null=0 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=foreignSourceKey type=text null=0 default=- role=-
+  col=foreignRecordID type=text null=0 default=- role=-
   col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
   col=operationalBitmap type=bitmap null=0 default=bitmap role=-
   col=provenanceBitmap type=bitmap null=0 default=bitmap role=-

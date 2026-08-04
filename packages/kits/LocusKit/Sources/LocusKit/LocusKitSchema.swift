@@ -521,6 +521,15 @@ public enum LocusKitSchema {
             .text("predicate"),
             .text("object"),
             .text("sourceDrawerID"),
+            // Provenance columns that are deliberately NOT sourceDrawerID:
+            // the filing host identity, and the foreign palace's own key and
+            // record id for imported facts. sourceDrawerID carries a local
+            // drawer id or "" and nothing else. All three default to "" so a
+            // locally-filed, unanchored fact writes the same shape it always
+            // did. The palace re-import dedup signature reads foreignSourceKey.
+            .text("addedBy"),
+            .text("foreignSourceKey"),
+            .text("foreignRecordID"),
             .bitmap("adjectiveBitmap"),
             .bitmap("operationalBitmap"),
             .bitmap("provenanceBitmap"),

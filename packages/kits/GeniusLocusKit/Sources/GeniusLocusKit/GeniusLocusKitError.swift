@@ -32,6 +32,15 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     /// passed in. The carried UUID matches the handle's `estateUUID`.
     case estateNotOpen(estateUUID: UUID)
 
+    /// `captureKGFact` was given a non-empty `sourceDrawerID` that names
+    /// no drawer in the addressed estate. A fact inherits its source
+    /// drawer's sensitivity and provenance, so an unresolvable anchor
+    /// would file a fact with default (Normal) sensitivity and silently
+    /// disclose material the source drawer restricts. The write fails
+    /// instead. An empty `sourceDrawerID` is the sourceless case and is
+    /// always accepted.
+    case sourceDrawerNotFound(drawerID: String)
+
     /// An attempt to open an estate whose UUID matches one already in
     /// the registry. Per spec § 7.7, estate UUIDs are immutable, so a
     /// duplicate open is almost certainly the same database file being
@@ -132,6 +141,8 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
             return "invalid manifest field '\(key)': \(detail)"
         case let .estateNotOpen(uuid):
             return "estate \(uuid) is not open in this kit"
+        case let .sourceDrawerNotFound(drawerID):
+            return "sourceDrawerID '\(drawerID)' names no drawer in this estate"
         case let .duplicateEstate(uuid):
             return "estate \(uuid) is already open"
         case let .underlyingEstateFailure(reason):

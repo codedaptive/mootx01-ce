@@ -3364,7 +3364,11 @@ impl DrawerStore for DrawerStoreCore {
         validate_non_empty(&fact.subject, "subject")?;
         validate_non_empty(&fact.predicate, "predicate")?;
         validate_non_empty(&fact.object, "object")?;
-        validate_non_empty(&fact.source_drawer_id, "sourceDrawerID")?;
+        // source_drawer_id = "" is the "not anchored to a specific drawer"
+        // sentinel, used by the MCP surface for freestanding triples and by
+        // palace import for facts whose anchor lives in the foreign estate.
+        // Non-empty values are admitted as-is. Matches Swift
+        // `DrawerStore.addKGFact`, which has never rejected the empty value.
         self.storage
             .row_store()
             .insert(T_KG_FACTS, kg_fact_values(fact))
@@ -6200,6 +6204,18 @@ fn kg_fact_values(f: &KGFact) -> BTreeMap<String, TypedValue> {
         TypedValue::Text(f.source_drawer_id.clone()),
     );
     m.insert(
+        "addedBy".to_string(),
+        TypedValue::Text(f.added_by.clone()),
+    );
+    m.insert(
+        "foreignSourceKey".to_string(),
+        TypedValue::Text(f.foreign_source_key.clone()),
+    );
+    m.insert(
+        "foreignRecordID".to_string(),
+        TypedValue::Text(f.foreign_record_id.clone()),
+    );
+    m.insert(
         "adjectiveBitmap".to_string(),
         TypedValue::Bitmap(f.adjective_bitmap),
     );
@@ -6787,6 +6803,9 @@ fn kg_fact_from_row(row: &StorageRow) -> KGFact {
         predicate: string_value_of(row.get("predicate")),
         object: string_value_of(row.get("object")),
         source_drawer_id: string_value_of(row.get("sourceDrawerID")),
+        added_by: string_value_of(row.get("addedBy")),
+        foreign_source_key: string_value_of(row.get("foreignSourceKey")),
+        foreign_record_id: string_value_of(row.get("foreignRecordID")),
         adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
         provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),

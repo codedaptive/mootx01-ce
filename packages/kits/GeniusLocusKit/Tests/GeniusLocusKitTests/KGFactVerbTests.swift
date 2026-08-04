@@ -50,7 +50,18 @@ struct KGFactVerbTests {
     @Test("captureKGFact with sourceDrawerID: fact appears in recallKGFacts")
     func captureKGFactAnchored() async throws {
         let (kit, handle) = try await openOneEstate()
-        let sourceID = "drawer-anchor-001"
+        // The anchor must be a drawer that exists: the fact inherits that
+        // drawer's sensitivity, so an id resolving to nothing fails the write.
+        let source = try await kit.capture(
+            handle,
+            CaptureFrame(
+                content: "anchor drawer for captureKGFact",
+                channel: .typed,
+                room: "kg-anchor",
+                latticeAnchor: .udc("000"),
+                addedBy: "kgfact-verb-tests",
+                embeddingModelID: "test-embed-v1"))
+        let sourceID = source.id
 
         let captured = try await kit.captureKGFact(
             handle,

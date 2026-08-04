@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.17.0
+version: 1.18.0
 status: active
-date: 2026-08-02
+date: 2026-08-03
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -317,11 +317,17 @@ bitmaps (I-2) and TEXT ISO8601 dates (I-7).
 ```swift
 public struct KGFact: Equatable, Hashable, Codable, Sendable {
     public let id, subject, predicate, object, sourceDrawerID: String
+    // sourceDrawerID holds a LOCAL drawer id or "" — never a host name or a
+    // foreign estate's key. Those have their own fields:
+    public let addedBy: String            // filing host/agent identity, "" when unrecorded
+    public let foreignSourceKey: String   // foreign palace's stable source key, "" when local
+    public let foreignRecordID: String    // foreign palace's own record id, "" when local
     public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
     public let filedAt: Date
     public init(id: String = UUID().uuidString, subject: String, predicate: String, object: String,
-                sourceDrawerID: String, adjectiveBitmap: Int64 = 0, operationalBitmap: Int64 = 0,
-                provenanceBitmap: Int64 = 0, filedAt: Date)
+                sourceDrawerID: String, addedBy: String = "", foreignSourceKey: String = "",
+                foreignRecordID: String = "", adjectiveBitmap: Int64 = 0,
+                operationalBitmap: Int64 = 0, provenanceBitmap: Int64 = 0, filedAt: Date)
     // All four adjective-bitmap axes (cookbook §2.3 / §5.5; same encoding as Drawer):
     public var state: State                            // bits 0–5,  default .active
     public var adjectiveSensitivity: AdjectiveSensitivity  // bits 6–11, default .normal
@@ -1408,6 +1414,15 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-08-03
+
+- **`KGFact` gains `addedBy`, `foreignSourceKey`, and `foreignRecordID`
+  (MXE-KH).** All three default to `""`, so existing call sites are
+  unaffected. They give the filing host identity and a palace-imported
+  fact's foreign origin their own homes, leaving `sourceDrawerID` to hold a
+  local drawer id or nothing. The Rust port adds the peer struct
+  `KGFactOrigin` because it has no default arguments.
 
 ### 1.17.0 -- 2026-08-02
 

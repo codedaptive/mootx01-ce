@@ -76,12 +76,41 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
     /// predicate; the value type makes no distinction.
     public let object: String
 
-    /// Identifier of the drawer this fact was extracted from. Every
-    /// fact must trace back to a drawer; cross-drawer derivations
-    /// (multi-source synthesis) record the primary source here and
-    /// surface the secondary sources in a derivation-link table that
-    /// ships with the federated layer.
+    /// Identifier of the drawer this fact was extracted from — a
+    /// **local** drawer id, or `""` when the fact is not anchored to a
+    /// drawer. Nothing else is ever stored here: a host identity, a
+    /// foreign palace's key, and a foreign record id each have their own
+    /// field below. A non-empty value must resolve to a drawer in this
+    /// estate; the capture verb fails the write when it does not.
+    /// Cross-drawer derivations (multi-source synthesis) record the
+    /// primary source here and surface the secondary sources in a
+    /// derivation-link table that ships with the federated layer.
     public let sourceDrawerID: String
+
+    /// Identity of the agent or host binary that filed this fact — for
+    /// example `"mootx01"` or `"aria-mcp-server"` when the fact arrives
+    /// through the MCP surface. Free-form; `""` when the filer is not
+    /// recorded. This is provenance about *who wrote the row*, which is
+    /// a different question from which drawer the fact was drawn from,
+    /// so it does not share `sourceDrawerID`'s slot.
+    public let addedBy: String
+
+    /// The foreign palace's stable source key for the drawer this fact
+    /// anchors to, carried verbatim from the exporting estate. Set only
+    /// on palace-imported facts; `""` otherwise. The key is meaningful
+    /// in the *foreign* estate's namespace and resolves to no local
+    /// drawer, which is why it cannot live in `sourceDrawerID`.
+    ///
+    /// The palace re-import dedup signature (CAND-049) is built over
+    /// this value, so it must survive round-trips byte-for-byte.
+    public let foreignSourceKey: String
+
+    /// The foreign palace's own identifier for the record that produced
+    /// this fact — the triple id, e.g. `"t_fleet_works_with_skippy_0001"`.
+    /// Set only on palace-imported facts; `""` otherwise. Like
+    /// `foreignSourceKey` this names a row in the foreign estate, not a
+    /// local drawer.
+    public let foreignRecordID: String
 
     /// Adjective bitmap encoding state, trust, sensitivity, and
     /// exportability per spec § 5.5. Shares the encoding with
@@ -118,6 +147,9 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
         predicate: String,
         object: String,
         sourceDrawerID: String,
+        addedBy: String = "",
+        foreignSourceKey: String = "",
+        foreignRecordID: String = "",
         adjectiveBitmap: Int64 = 0,
         operationalBitmap: Int64 = 0,
         provenanceBitmap: Int64 = 0,
@@ -128,6 +160,9 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
         self.predicate = predicate
         self.object = object
         self.sourceDrawerID = sourceDrawerID
+        self.addedBy = addedBy
+        self.foreignSourceKey = foreignSourceKey
+        self.foreignRecordID = foreignRecordID
         self.adjectiveBitmap = adjectiveBitmap
         self.operationalBitmap = operationalBitmap
         self.provenanceBitmap = provenanceBitmap

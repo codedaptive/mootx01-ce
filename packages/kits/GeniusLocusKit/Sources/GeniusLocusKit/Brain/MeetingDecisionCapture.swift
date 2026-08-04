@@ -82,7 +82,13 @@ public extension GeniusLocusKit {
                 skipped.append(id)
                 continue
             }
-            try await store.addKGFact(KGFact(
+            // Routed through captureKGFact rather than writing the store
+            // directly so a decision inherits its transcript drawer's
+            // sensitivity and provenance on the same code path every other
+            // fact uses — a decision extracted from a Secret transcript is
+            // itself Secret. A sourceDrawerID naming no drawer fails here.
+            _ = try await captureKGFact(
+                handle,
                 id: id,
                 subject: decision.entity,
                 // The rule's canonical dimension spelling, so projection's
@@ -90,7 +96,7 @@ public extension GeniusLocusKit {
                 predicate: decision.dimension,
                 object: decision.rawValue,
                 sourceDrawerID: sourceDrawerID,
-                filedAt: now))
+                now: now)
             filed.append(id)
         }
         return MeetingDecisionCaptureReport(

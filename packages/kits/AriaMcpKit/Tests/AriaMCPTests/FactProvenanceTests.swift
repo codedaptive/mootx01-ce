@@ -3,9 +3,10 @@
 // Tests for two fact-surface fixes:
 //
 //   Bug C — Host identity injected into ToolDispatcher so rows filed via
-//            `moot_file_fact` carry the correct source stamp for whichever
-//            binary is hosting the dispatcher (aria-mcp-server, mootx01, etc.)
-//            rather than the hardcoded "aria-mcp-server" constant.
+//            `moot_file_fact` record which binary hosted the dispatcher
+//            (aria-mcp-server, mootx01, etc.). The identity lands in the
+//            fact's `addedBy` field and renders as `addedBy=`; `sourceDrawerID`
+//            holds a local drawer id or nothing and never a host name.
 //
 //   Bug D — `moot_fact_search` surfaces a `recall_provenance:` hint when the
 //            dense lane is unavailable so AI callers can distinguish "no lexical
@@ -58,9 +59,9 @@ private func openBareEstate(identity: String = "aria-mcp-server")
 struct FactProvenanceIdentityTests {
 
     /// A dispatcher constructed with identity "mootx01" must stamp facts
-    /// filed via moot_file_fact with source="mootx01" when no explicit
-    /// source_id is supplied by the caller.
-    @Test func factFiledWithMootx01IdentityGetsMootx01Source() async throws {
+    /// filed via moot_file_fact with addedBy="mootx01". With no explicit
+    /// source_id the fact is sourceless, so source= renders empty.
+    @Test func factFiledWithMootx01IdentityGetsMootx01AddedBy() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate(identity: "mootx01")
         defer { Task { try? await kit.close(handle) } }
 
@@ -76,18 +77,24 @@ struct FactProvenanceIdentityTests {
         let searchResult = try await dispatcher.runFactSearch(["query": .string("Paris")])
         let searchBody = factText(of: searchResult)
         #expect(
-            searchBody.contains("source=mootx01"),
-            "fact filed via identity 'mootx01' must carry source=mootx01; got: \(searchBody)"
+            searchBody.contains("addedBy=mootx01"),
+            "fact filed via identity 'mootx01' must carry addedBy=mootx01; got: \(searchBody)"
         )
         #expect(
-            !searchBody.contains("source=aria-mcp-server"),
+            !searchBody.contains("addedBy=aria-mcp-server"),
             "mootx01-hosted dispatcher must NOT stamp 'aria-mcp-server'; got: \(searchBody)"
+        )
+        // The host identity is never a drawer id, so it must not appear in the
+        // source slot. No source_id was supplied, so the fact is sourceless.
+        #expect(
+            !searchBody.contains("source=mootx01"),
+            "host identity must not land in sourceDrawerID; got: \(searchBody)"
         )
     }
 
     /// A dispatcher constructed with identity "aria-mcp-server" must stamp
-    /// facts with source="aria-mcp-server".
-    @Test func factFiledWithAriaMcpIdentityGetsAriaMcpSource() async throws {
+    /// facts with addedBy="aria-mcp-server".
+    @Test func factFiledWithAriaMcpIdentityGetsAriaMcpAddedBy() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate(identity: "aria-mcp-server")
         defer { Task { try? await kit.close(handle) } }
 
@@ -100,33 +107,35 @@ struct FactProvenanceIdentityTests {
         let searchResult = try await dispatcher.runFactSearch(["query": .string("Berlin")])
         let body = factText(of: searchResult)
         #expect(
-            body.contains("source=aria-mcp-server"),
-            "fact filed via identity 'aria-mcp-server' must carry source=aria-mcp-server; got: \(body)"
+            body.contains("addedBy=aria-mcp-server"),
+            "fact filed via identity 'aria-mcp-server' must carry addedBy=aria-mcp-server; got: \(body)"
         )
     }
 
-    /// When the caller explicitly supplies a source_id, that value wins over
-    /// the injected server identity — the explicit source is honoured.
-    @Test func explicitSourceIdOverridesServerIdentity() async throws {
+    /// An explicit source_id must name a drawer that exists in this estate.
+    /// A fact inherits its source drawer's sensitivity, so an anchor that
+    /// resolves to nothing is rejected rather than filed at the Normal
+    /// default — filing it would disclose at a tier no drawer authorised.
+    @Test func explicitSourceIdNamingNoDrawerFailsTheWrite() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate(identity: "mootx01")
         defer { Task { try? await kit.close(handle) } }
 
-        _ = try await dispatcher.runFileFact([
-            "subject": .string("Tokyo"),
-            "predicate": .string("is_capital_of"),
-            "object": .string("Japan"),
-            "source_id": .string("external-agent"),
-        ], now: Date())
+        await #expect(throws: GeniusLocusKitError.sourceDrawerNotFound(
+            drawerID: "external-agent")) {
+            _ = try await dispatcher.runFileFact([
+                "subject": .string("Tokyo"),
+                "predicate": .string("is_capital_of"),
+                "object": .string("Japan"),
+                "source_id": .string("external-agent"),
+            ], now: Date())
+        }
 
+        // Nothing was filed, so the fact surface stays empty.
         let searchResult = try await dispatcher.runFactSearch(["query": .string("Tokyo")])
         let body = factText(of: searchResult)
         #expect(
-            body.contains("source=external-agent"),
-            "explicit source_id must override server identity; got: \(body)"
-        )
-        #expect(
-            !body.contains("source=mootx01"),
-            "server identity must NOT appear when explicit source_id is supplied; got: \(body)"
+            !body.contains("Tokyo"),
+            "a rejected write must leave no fact behind; got: \(body)"
         )
     }
 }

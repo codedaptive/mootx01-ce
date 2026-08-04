@@ -176,6 +176,16 @@ pub(crate) fn describe_verb_dispatch_error(e: &VerbDispatchError) -> String {
             // estate with a corpus backend or switch to AllowDegraded.
             format!("recall lane unavailable: {reason}")
         }
+        VerbDispatchError::SourceDrawerNotFound { drawer_id } => {
+            // source_id must name a drawer that exists in this estate, because
+            // the filed fact inherits that drawer's sensitivity. Naming a
+            // missing drawer is rejected rather than filed at the Normal
+            // default, which would over-disclose.
+            format!(
+                "source_id '{drawer_id}' names no drawer in this estate; \
+                 omit source_id to file an unanchored fact"
+            )
+        }
         VerbDispatchError::Verb(ve) => describe_verb_error(ve),
     }
 }
@@ -1814,16 +1824,22 @@ fn run_file_fact(
     let subject = require_string(args, "subject")?;
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
-    // source_id grounds the fact (provenance — KGFact: every fact traces back to a
-    // source). When the caller omits it, infer the source as the injected host
-    // identity so a fact is never stored unanchored and provenance reflects the
-    // actual binary filing it ("aria-mcp" or "mootx01").
-    let provided = optional_string(args, "source_id")?.unwrap_or("");
-    let source_id = if provided.is_empty() { registry.server_identity.as_str() } else { provided };
+    // source_id anchors the fact to a drawer in this estate. It is a local drawer
+    // id or nothing — when the caller omits it the fact is filed sourceless, and a
+    // value naming no drawer fails the write. The filing binary's identity
+    // ("aria-mcp-server" or "mootx01") is provenance about the writer, not about
+    // the source, so it is stamped into `added_by` rather than substituted here.
+    let source_id = optional_string(args, "source_id")?.unwrap_or("");
+    let origin = locus_kit::kg_fact::KGFactOrigin {
+        added_by: registry.server_identity.clone(),
+        ..Default::default()
+    };
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
-    match coord.add_kg_fact(&estate.handle, subject, predicate, object, source_id, now) {
+    match coord.add_kg_fact_with_origin(
+        &estate.handle, subject, predicate, object, source_id, &origin, now,
+    ) {
         Ok(fact) => Ok(text_result(&format!(
             "filed fact {}: [{subject}] {predicate} [{object}]",
             fact.id
@@ -1893,9 +1909,9 @@ fn run_fact_search(
     // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are about
     // to emit, check whether it references an actual drawer row in the estate. If it does
     // AND that drawer is Restricted/Secret (outside the default sensitivity ceiling), hide
-    // the ID at the MCP boundary. If it is NOT a drawer row (e.g. a server identity string
-    // such as "mootx01" or "aria-mcp-server"), pass it through — it carries provenance
-    // metadata, not a confidential drawer reference. Parity with Swift runFactSearch.
+    // the ID at the MCP boundary. sourceDrawerID holds a local drawer id or "", so the
+    // only non-matching value is the empty one, which names no drawer and stays visible.
+    // Parity with Swift runFactSearch.
     let hidden_source_ids: std::collections::HashSet<String> = {
         let mut seen = std::collections::HashSet::new();
         let unique_source_ids: Vec<String> = matches
@@ -1929,18 +1945,22 @@ fn run_fact_search(
     for f in matches.iter().take(limit) {
         let filed_iso = epoch_to_iso8601(f.filed_at);
         // Gate source= on source-drawer sensitivity: hide only when the source drawer
-        // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
-        // (server identity, custom tags) are not in hidden_source_ids and pass through.
+        // EXISTS in the estate AND is Restricted/Secret. source_drawer_id holds a
+        // local drawer id or "", so a sourceless fact renders an empty source=.
         let source_field = if hidden_source_ids.contains(&f.source_drawer_id) {
             "source=<hidden>".to_string()
         } else {
             format!("source={}", f.source_drawer_id)
         };
-        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<id|hidden>".
+        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate>
+        // [<object>]  filed=<iso>  source=<id|hidden>  addedBy=<host>".
         // Double space after id, no leading indent, no dash separator.
+        // added_by names the binary that filed the row — provenance about the
+        // writer, distinct from which drawer the fact was drawn from. Never
+        // gated: it is not a drawer id and carries no drawer's sensitivity.
         lines.push(format!(
-            "{}  [{}] {} [{}]  filed={}  {}",
-            f.id, f.subject, f.predicate, f.object, filed_iso, source_field
+            "{}  [{}] {} [{}]  filed={}  {}  addedBy={}",
+            f.id, f.subject, f.predicate, f.object, filed_iso, source_field, f.added_by
         ));
     }
     // Dark-lane hint: when a query was supplied and the dense lane is dark (no
@@ -2122,9 +2142,9 @@ fn run_fact_timeline(
     // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are about
     // to emit (capped at 200), check whether it references an actual drawer row in the
     // estate. If it does AND that drawer is Restricted/Secret (outside the default
-    // sensitivity ceiling), hide the ID at the MCP boundary. Non-drawer provenance strings
-    // (e.g. server identity tags) are not in the store and pass through unchanged.
-    // Parity with Swift runFactTimeline.
+    // sensitivity ceiling), hide the ID at the MCP boundary. sourceDrawerID holds a local
+    // drawer id or "", so the only non-matching value is the empty one, which names no
+    // drawer and stays visible. Parity with Swift runFactTimeline.
     let hidden_source_ids: std::collections::HashSet<String> = {
         let mut seen = std::collections::HashSet::new();
         let unique_source_ids: Vec<String> = facts
@@ -2159,8 +2179,8 @@ fn run_fact_timeline(
         // filed_at is epoch seconds; format as UTC RFC3339 / ISO8601.
         let filed_iso = epoch_to_iso8601(f.filed_at);
         // Gate source= on source-drawer sensitivity: hide only when the source drawer
-        // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
-        // (server identity, custom tags) are not in hidden_source_ids and pass through.
+        // EXISTS in the estate AND is Restricted/Secret. source_drawer_id holds a
+        // local drawer id or "", so a sourceless fact renders an empty source=.
         let source_field = if hidden_source_ids.contains(&f.source_drawer_id) {
             "source=<hidden>".to_string()
         } else {

@@ -413,6 +413,13 @@ pub enum VerbDispatchError {
     /// A verb-surface failure (boundary guard, underlying estate failure,
     /// or not-supported), parity of the Swift `VerbError`.
     Verb(VerbError),
+    /// `add_kg_fact` was given a non-empty `source_drawer_id` that names no
+    /// drawer in the addressed estate. A fact inherits its source drawer's
+    /// sensitivity and provenance, so an unresolvable anchor would file at
+    /// the Normal default and silently disclose material the source drawer
+    /// restricts. Parity of Swift
+    /// `GeniusLocusKitError.sourceDrawerNotFound`.
+    SourceDrawerNotFound { drawer_id: String },
 }
 
 impl From<VerbError> for VerbDispatchError {
@@ -4335,18 +4342,23 @@ impl EstateCoordinator {
                 skipped.push(id);
                 continue;
             }
-            estate
-                .add_kg_fact(&KGFact::new(
-                    id.clone(),
-                    decision.entity.clone(),
-                    // The rule's canonical dimension spelling, so
-                    // projection's dimension_key(predicate) round-trips.
-                    decision.dimension.clone(),
-                    decision.raw_value.clone(),
-                    source_drawer_id.to_string(),
-                    now,
-                ))
-                .map_err(remap_err)?;
+            // Routed through the coordinator verb rather than writing the
+            // store directly so a decision inherits its transcript drawer's
+            // sensitivity and provenance on the same code path every other
+            // fact uses — a decision extracted from a Secret transcript is
+            // itself Secret. A source_drawer_id naming no drawer fails here.
+            self.add_kg_fact_with_id_and_origin(
+                handle,
+                &id,
+                &decision.entity,
+                // The rule's canonical dimension spelling, so projection's
+                // dimension_key(predicate) round-trips.
+                &decision.dimension,
+                &decision.raw_value,
+                source_drawer_id,
+                &locus_kit::kg_fact::KGFactOrigin::default(),
+                now,
+            )?;
             filed.push(id);
         }
         Ok(MeetingDecisionCaptureReport {
@@ -5209,15 +5221,107 @@ impl EstateCoordinator {
         source_drawer_id: &str,
         now: i64,
     ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
-        let estate = self.estate_for_verb(handle)?;
-        let fact = locus_kit::kg_fact::KGFact::new(
-            Uuid::new_v4().to_string(),
-            subject.to_string(),
-            predicate.to_string(),
-            object.to_string(),
-            source_drawer_id.to_string(),
+        self.add_kg_fact_with_origin(
+            handle,
+            subject,
+            predicate,
+            object,
+            source_drawer_id,
+            &locus_kit::kg_fact::KGFactOrigin::default(),
             now,
-        );
+        )
+    }
+
+    /// File a KGFact that records where it came from — the filing host, or
+    /// the foreign palace key and record id of an imported triple.
+    ///
+    /// Swift spells this as defaulted parameters on `captureKGFact`; Rust
+    /// has no default arguments, so `add_kg_fact` above is the empty-origin
+    /// entry point and delegates here. One implementation, two spellings.
+    ///
+    /// `source_drawer_id` is a **local** drawer id or `""` — a foreign
+    /// palace key belongs in `origin.foreign_source_key`, never here.
+    pub fn add_kg_fact_with_origin(
+        &self,
+        handle: &EstateHandle,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_drawer_id: &str,
+        origin: &locus_kit::kg_fact::KGFactOrigin,
+        now: i64,
+    ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
+        self.add_kg_fact_with_id_and_origin(
+            handle,
+            &Uuid::new_v4().to_string(),
+            subject,
+            predicate,
+            object,
+            source_drawer_id,
+            origin,
+            now,
+        )
+    }
+
+    /// File a KGFact under a caller-supplied id.
+    ///
+    /// Callers that derive a deterministic id — the meeting-decision seam
+    /// derives one from source drawer + subject + predicate + object so a
+    /// re-run recognises what it already filed — need to name the row rather
+    /// than take a fresh UUID. Swift spells this as a defaulted `id:`
+    /// parameter on `captureKGFact`; this is the same single implementation
+    /// reached without default arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_kg_fact_with_id_and_origin(
+        &self,
+        handle: &EstateHandle,
+        id: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_drawer_id: &str,
+        origin: &locus_kit::kg_fact::KGFactOrigin,
+        now: i64,
+    ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // A fact drawn from a drawer is as sensitive as the drawer it came
+        // from, so it inherits that drawer's adjective and provenance bitmaps
+        // verbatim. Loading by id deliberately bypasses the recall sensitivity
+        // ceiling: the bitmaps are being copied onto the fact, not disclosed,
+        // and a Restricted/Secret source is exactly the case that must be
+        // carried through. An unresolvable anchor fails the write rather than
+        // filing at the Normal default — that default would disclose material
+        // the source drawer restricts.
+        let (adjective_bitmap, provenance_bitmap) = if source_drawer_id.is_empty() {
+            (0, 0)
+        } else {
+            let found = estate
+                .get_drawers(&[source_drawer_id])
+                .map_err(|e| VerbDispatchError::from(remap("add_kg_fact", "", e)))?;
+            match found.first() {
+                Some(d) => (d.adjective_bitmap, d.provenance),
+                None => {
+                    return Err(VerbDispatchError::SourceDrawerNotFound {
+                        drawer_id: source_drawer_id.to_string(),
+                    })
+                }
+            }
+        };
+        let fact = locus_kit::kg_fact::KGFact {
+            added_by: origin.added_by.clone(),
+            foreign_source_key: origin.foreign_source_key.clone(),
+            foreign_record_id: origin.foreign_record_id.clone(),
+            adjective_bitmap,
+            provenance_bitmap,
+            ..locus_kit::kg_fact::KGFact::new(
+                id.to_string(),
+                subject.to_string(),
+                predicate.to_string(),
+                object.to_string(),
+                source_drawer_id.to_string(),
+                now,
+            )
+        };
         estate.add_kg_fact(&fact).map_err(|e| VerbDispatchError::from(remap("add_kg_fact", "", e)))?;
         Ok(fact)
     }

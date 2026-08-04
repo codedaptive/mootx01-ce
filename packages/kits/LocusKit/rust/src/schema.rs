@@ -489,6 +489,15 @@ fn kg_facts_table() -> TableDeclaration {
             ColumnDeclaration::text("predicate"),
             ColumnDeclaration::text("object"),
             ColumnDeclaration::text("sourceDrawerID"),
+            // Provenance columns that are deliberately NOT sourceDrawerID:
+            // the filing host identity, and the foreign palace's own key and
+            // record id for imported facts. sourceDrawerID carries a local
+            // drawer id or "" and nothing else. All three default to "" so a
+            // locally-filed, unanchored fact writes the same shape it always
+            // did. The palace re-import dedup signature reads foreignSourceKey.
+            ColumnDeclaration::text("addedBy"),
+            ColumnDeclaration::text("foreignSourceKey"),
+            ColumnDeclaration::text("foreignRecordID"),
             ColumnDeclaration::bitmap("adjectiveBitmap"),
             ColumnDeclaration::bitmap("operationalBitmap"),
             ColumnDeclaration::bitmap("provenanceBitmap"),

@@ -2,14 +2,15 @@
 //!
 //! # Bug C — Host identity injected into EstateRegistry
 //!
-//! Every `moot_file_fact` call (with no explicit `source_id`) stamps
-//! `source=<server_identity>` from the registry field. The constant
+//! Every `moot_file_fact` call stamps `addedBy=<server_identity>` from the
+//! registry field. `source=` carries the fact's local drawer anchor and is
+//! empty when no `source_id` is supplied. The constant
 //! `SERVER_ADDED_BY = "aria-mcp-server"` is gone; the correct identity is
 //! injected at registry construction time and overrideable before the first
 //! tool call. Tests verify:
 //!
-//! 1. A registry with `server_identity = "mootx01"` stamps `source=mootx01`.
-//! 2. A registry with the default identity stamps `source=aria-mcp-server`.
+//! 1. A registry with `server_identity = "mootx01"` stamps `addedBy=mootx01`.
+//! 2. A registry with the default identity stamps `addedBy=aria-mcp-server`.
 //! 3. When the caller supplies an explicit `source_id`, that value wins over
 //!    the registry identity.
 //!
@@ -62,11 +63,11 @@ fn is_success(result: &serde_json::Value) -> bool {
 // ---------------------------------------------------------------------------
 
 /// A registry with server_identity = "mootx01" must stamp facts with
-/// source=mootx01 when no explicit source_id is supplied.
+/// addedBy=mootx01 when no explicit source_id is supplied.
 ///
-/// Mirrors Swift test: factFiledWithMootx01IdentityGetsMootx01Source.
+/// Mirrors Swift test: factFiledWithMootx01IdentityGetsMootx01AddedBy.
 #[test]
-fn fact_filed_with_mootx01_identity_gets_mootx01_source() {
+fn fact_filed_with_mootx01_identity_gets_mootx01_added_by() {
     // Bare estate — no corpus needed for provenance tests.
     let mut registry = EstateRegistry::new_inmemory_bare();
     registry.server_identity = "mootx01".to_owned();
@@ -84,27 +85,27 @@ fn fact_filed_with_mootx01_identity_gets_mootx01_source() {
         "moot_file_fact must succeed; got: {file_result:?}"
     );
 
-    // Retrieve via moot_fact_search and inspect the source= stamp.
+    // Retrieve via moot_fact_search and inspect the addedBy= stamp.
     let search_args = args!["query" => "Paris"];
     let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
         .expect("moot_fact_search must not error");
     let text = content_text(&search_result);
     assert!(
-        text.contains("source=mootx01"),
-        "fact filed via identity 'mootx01' must carry source=mootx01; got: {text}"
+        text.contains("addedBy=mootx01"),
+        "fact filed via identity 'mootx01' must carry addedBy=mootx01; got: {text}"
     );
     assert!(
-        !text.contains("source=aria-mcp-server"),
+        !text.contains("addedBy=aria-mcp-server"),
         "mootx01-hosted registry must NOT stamp 'aria-mcp-server'; got: {text}"
     );
 }
 
 /// A registry with the default server_identity ("aria-mcp-server") must stamp
-/// facts with source=aria-mcp-server.
+/// facts with addedBy=aria-mcp-server.
 ///
-/// Mirrors Swift test: factFiledWithAriaMcpIdentityGetsAriaMcpSource.
+/// Mirrors Swift test: factFiledWithAriaMcpIdentityGetsAriaMcpAddedBy.
 #[test]
-fn fact_filed_with_aria_mcp_identity_gets_aria_mcp_source() {
+fn fact_filed_with_aria_mcp_identity_gets_aria_mcp_added_by() {
     // Set the host identity explicitly (mirrors Swift openBareEstate(identity:
     // "aria-mcp-server")). The bare registry defaults to "mootx01" (the product
     // identity), so this test — which verifies the aria-mcp-server identity path
@@ -126,17 +127,19 @@ fn fact_filed_with_aria_mcp_identity_gets_aria_mcp_source() {
         .expect("moot_fact_search must not error");
     let text = content_text(&search_result);
     assert!(
-        text.contains("source=aria-mcp-server"),
-        "fact filed via identity 'aria-mcp-server' must carry source=aria-mcp-server; got: {text}"
+        text.contains("addedBy=aria-mcp-server"),
+        "fact filed via identity 'aria-mcp-server' must carry addedBy=aria-mcp-server; got: {text}"
     );
 }
 
-/// When the caller explicitly supplies a source_id, that value wins over the
-/// registry's server_identity — explicit source is honoured.
+/// An explicit source_id must name a drawer that exists in this estate. A
+/// fact inherits its source drawer's sensitivity, so an anchor that resolves
+/// to nothing is rejected rather than filed at the Normal default — filing it
+/// would disclose at a tier no drawer authorised.
 ///
-/// Mirrors Swift test: explicitSourceIdOverridesServerIdentity.
+/// Mirrors Swift test: explicitSourceIdNamingNoDrawerFailsTheWrite.
 #[test]
-fn explicit_source_id_overrides_server_identity() {
+fn explicit_source_id_naming_no_drawer_fails_the_write() {
     let mut registry = EstateRegistry::new_inmemory_bare();
     registry.server_identity = "mootx01".to_owned();
     let ledger = SurfacedRecallLedger::new();
@@ -147,20 +150,26 @@ fn explicit_source_id_overrides_server_identity() {
         "object" => "Japan",
         "source_id" => "external-agent",
     ];
-    dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
-        .expect("moot_file_fact must not error");
+    let file_result = dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
+        .expect("moot_file_fact must return a tool result");
+    assert!(
+        !is_success(&file_result),
+        "source_id naming no drawer must be rejected; got: {file_result:?}"
+    );
+    assert!(
+        content_text(&file_result).contains("names no drawer"),
+        "rejection must say why; got: {}",
+        content_text(&file_result)
+    );
 
+    // Nothing was filed, so the fact surface stays empty.
     let search_args = args!["query" => "Tokyo"];
     let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
         .expect("moot_fact_search must not error");
     let text = content_text(&search_result);
     assert!(
-        text.contains("source=external-agent"),
-        "explicit source_id must override server identity; got: {text}"
-    );
-    assert!(
-        !text.contains("source=mootx01"),
-        "server identity must NOT appear when explicit source_id is supplied; got: {text}"
+        !text.contains("Tokyo"),
+        "a rejected write must leave no fact behind; got: {text}"
     );
 }
 

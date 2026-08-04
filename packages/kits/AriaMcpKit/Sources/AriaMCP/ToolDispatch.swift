@@ -2290,17 +2290,19 @@ extension ToolDispatcher {
         let subject = try requireString(args, "subject")
         let predicate = try requireString(args, "predicate")
         let object = try requireString(args, "object")
-        // source_id grounds the fact (provenance — KGFact: every fact traces back to
-        // a source). When the caller omits it, infer the source as the ingest
-        // channel that asserted it, so a fact is never stored unanchored.
+        // source_id anchors the fact to a drawer in this estate. It is a local
+        // drawer id or nothing — when the caller omits it the fact is filed
+        // sourceless, and a value naming no drawer fails the write. The filing
+        // binary's identity is provenance about the writer, not about the
+        // source, so it is stamped into `addedBy` rather than substituted here.
         let providedSource = try optionalString(args["source_id"], argument: "source_id") ?? ""
-        let sourceDrawerID = providedSource.isEmpty ? serverIdentity : providedSource
         let fact = try await kit.captureKGFact(
             handle,
             subject: subject,
             predicate: predicate,
             object: object,
-            sourceDrawerID: sourceDrawerID,
+            sourceDrawerID: providedSource,
+            addedBy: serverIdentity,
             now: now
         )
         return Self.textResult("filed fact \(fact.id): [\(subject)] \(predicate) [\(object)]")
@@ -2355,8 +2357,8 @@ extension ToolDispatcher {
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit, check whether it references an actual drawer row in the estate.
         // If it does AND is Restricted/Secret (outside the default sensitivity ceiling),
-        // hide the ID at the MCP boundary. Non-drawer provenance strings (server identity
-        // tags like "mootx01") are not found in the estate and pass through unchanged.
+        // hide the ID at the MCP boundary. sourceDrawerID holds a local drawer id or "",
+        // so the only non-matching value is the empty one, which names no drawer.
         // We use getDrawers(ids:matchingFrame:hydrationLevel:) which returns both the
         // admissible set and the full loadedIDs set — the difference is the blocked set.
         // Parity with Rust run_fact_search.
@@ -2383,11 +2385,15 @@ extension ToolDispatcher {
         let lines = emittedFacts.map { f -> String in
             let filed = formatter.string(from: f.filedAt)
             // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. Non-drawer provenance strings pass through.
+            // exists AND is Restricted/Secret. sourceDrawerID holds a local drawer
+            // id or "", so a sourceless fact renders an empty source=.
             let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
                 ? "source=<hidden>"
                 : "source=\(f.sourceDrawerID)"
-            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  \(sourceField)"
+            // addedBy names the binary that filed the row — provenance about the
+            // writer, distinct from which drawer the fact was drawn from. Never
+            // gated: it is not a drawer id and carries no drawer's sensitivity.
+            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  \(sourceField)  addedBy=\(f.addedBy)"
         }
         let header = query != nil
             ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
@@ -2513,9 +2519,9 @@ extension ToolDispatcher {
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit (capped at 200), check whether it references an actual drawer in
         // the estate. If it does AND is Restricted/Secret, hide the ID at the MCP boundary.
-        // Non-drawer provenance strings (server identity tags) are not in the estate and
-        // pass through unchanged. loadedIDs − admissible = the blocked (restricted/secret)
-        // drawer-reference set. Parity with Rust run_fact_timeline.
+        // sourceDrawerID holds a local drawer id or "", so the only non-matching value is
+        // the empty one, which names no drawer. loadedIDs − admissible = the blocked
+        // (restricted/secret) drawer-reference set. Parity with Rust run_fact_timeline.
         let emittedFacts = Array(facts.prefix(200))
         let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
         let estate = try await kit.estate(for: handle)
@@ -2538,7 +2544,8 @@ extension ToolDispatcher {
             let filed = formatter.string(from: f.filedAt)
             let lifecycleTag = Self.lifecycleTag(forAdjectiveBitmap: f.adjectiveBitmap)
             // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. Non-drawer provenance strings pass through.
+            // exists AND is Restricted/Secret. sourceDrawerID holds a local drawer
+            // id or "", so a sourceless fact renders an empty source=.
             let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
                 ? "source=<hidden>"
                 : "source=\(f.sourceDrawerID)"

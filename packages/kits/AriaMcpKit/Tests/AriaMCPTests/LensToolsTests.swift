@@ -281,8 +281,12 @@ struct LensToolsTests {
         let result = try await dispatcher.dispatch(
             name: "moot_lens_contradiction", arguments: .object([:]))
         let body = try text(result)
-        #expect(body.contains("source=<hidden>"),
-                "secret fact source must be redacted; got: \(body)")
+        // Facts inherit their source drawer's sensitivity, so a fact drawn from
+        // a Secret drawer is itself Secret and is dropped by the lens's
+        // disclosure ceiling before rendering. Withholding the fact outright is
+        // strictly stronger than masking its source= token.
+        #expect(!body.contains("Project Aardvark"),
+                "facts derived from a Secret drawer must be withheld; got: \(body)")
         #expect(!body.contains(secret.id),
                 "secret source drawer id must not leak; got: \(body)")
     }

@@ -447,18 +447,49 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func captureKGFact(
         _ handle: EstateHandle,
+        id: String = UUID().uuidString,
         subject: String,
         predicate: String,
         object: String,
         sourceDrawerID: String = "",
+        addedBy: String = "",
+        foreignSourceKey: String = "",
+        foreignRecordID: String = "",
         now: Date
     ) async throws -> KGFact {
         let store = try await ensureKGStore(for: handle)
+        // A fact drawn from a drawer is as sensitive as the drawer it came
+        // from, so it inherits that drawer's adjective and provenance bitmaps
+        // verbatim. Loading by id deliberately bypasses the recall sensitivity
+        // ceiling: the bitmaps are being copied onto the fact, not disclosed,
+        // and a Restricted/Secret source is exactly the case that must be
+        // carried through. An unresolvable anchor fails the write rather than
+        // filing at the Normal default — that default would disclose material
+        // the source drawer restricts.
+        var adjectiveBitmap: Int64 = 0
+        var provenanceBitmap: Int64 = 0
+        if !sourceDrawerID.isEmpty {
+            let estate = try await estate(for: handle)
+            guard let source = try await estate.getDrawers(
+                ids: [sourceDrawerID],
+                hydrationLevel: .structured
+            ).first else {
+                throw GeniusLocusKitError.sourceDrawerNotFound(drawerID: sourceDrawerID)
+            }
+            adjectiveBitmap = source.adjectiveBitmap
+            provenanceBitmap = source.provenance
+        }
         let fact = KGFact(
+            id: id,
             subject: subject,
             predicate: predicate,
             object: object,
             sourceDrawerID: sourceDrawerID,
+            addedBy: addedBy,
+            foreignSourceKey: foreignSourceKey,
+            foreignRecordID: foreignRecordID,
+            adjectiveBitmap: adjectiveBitmap,
+            provenanceBitmap: provenanceBitmap,
             filedAt: now
         )
         try await store.addKGFact(fact)

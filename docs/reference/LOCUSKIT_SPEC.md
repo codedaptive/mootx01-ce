@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.13.0
+version: 1.14.0
 status: active
-date: 2026-08-02
+date: 2026-08-03
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -990,6 +990,21 @@ NULL-together lifecycle.
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.14.0 -- 2026-08-03
+
+- **`sourceDrawerID` holds a local drawer id or nothing (MXE-KH).** The
+  field had accumulated three kinds of value that are not drawer ids: the
+  MCP host identity, a foreign palace's stable source key, and a palace
+  triple's own id. Each now has its own `KGFact` field — `addedBy`,
+  `foreignSourceKey`, `foreignRecordID` — and three matching `TEXT NOT NULL`
+  columns on `kg_facts` in both ports. The binding invariant is that
+  `sourceDrawerID` contains a local drawer id or the empty string, nothing
+  else.
+- **Rust accepts the empty `sourceDrawerID` sentinel.** `add_kg_fact` no
+  longer rejects `""` via `validate_non_empty`, aligning it with Swift's
+  `addKGFact`, which has always documented `""` as "not anchored to a
+  specific drawer". Sourceless facts are supported in both ports.
 
 ### 1.13.0 -- 2026-08-02
 

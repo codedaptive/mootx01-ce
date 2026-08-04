@@ -167,8 +167,37 @@ struct LexiconGapsTests {
     @Test("moot_fact_search exact fields do not accept substring or provenance collisions")
     func factSearchExactFields() async throws {
         let dispatcher = try await makeDispatcher()
-        for (subject, source) in [("calendar.event.ev-1", "miner:calendar"),
-                                  ("calendar.event.ev-10", "miner:other")] {
+        // source_id must name a drawer that exists in this estate — a fact
+        // inherits its source drawer's sensitivity, so an unresolvable anchor
+        // fails the write. Two real drawers stand in for what used to be two
+        // synthetic "miner:*" tags; the substring-collision case the test
+        // guards lives on subject_exact ("ev-1" vs "ev-10"), which is
+        // unaffected.
+        var sourceIDs: [String] = []
+        for label in ["calendar-source", "other-source"] {
+            let filed = await dispatcher.handle(JSONRPCRequest(
+                id: .integer(0), method: "tools/call", params: .object([
+                    "name": .string("moot_file_memory"),
+                    "arguments": .object([
+                        "content": .string("fixture drawer \(label)"),
+                        "location": .string("fixtures/\(label)"),
+                    ]),
+                ])
+            ))
+            let response = try #require(filed)
+            guard case .result(let result) = response.payload else {
+                Issue.record("moot_file_memory failed: \(response.payload)")
+                return
+            }
+            let text = try #require(
+                result.objectValue?["content"]?.arrayValue?.first?
+                    .objectValue?["text"]?.stringValue
+            )
+            // "filed memory <drawer-id>" — the id is the trailing token.
+            sourceIDs.append(String(text.split(separator: " ").last ?? ""))
+        }
+        for (subject, source) in [("calendar.event.ev-1", sourceIDs[0]),
+                                  ("calendar.event.ev-10", sourceIDs[1])] {
             _ = await dispatcher.handle(JSONRPCRequest(
                 id: .integer(0), method: "tools/call", params: .object([
                     "name": .string("moot_file_fact"),
@@ -187,7 +216,7 @@ struct LexiconGapsTests {
                 "arguments": .object([
                     "subject_exact": .string("calendar.event.ev-1"),
                     "predicate_exact": .string("scheduled"),
-                    "source_id_exact": .string("miner:calendar"),
+                    "source_id_exact": .string(sourceIDs[0]),
                 ]),
             ])
         ))

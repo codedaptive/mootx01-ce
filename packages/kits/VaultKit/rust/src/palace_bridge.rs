@@ -374,12 +374,27 @@ impl<'a> PalaceBridge<'a> {
             // Canonical separator: U+001F (ASCII Unit Separator) — cannot appear
             // in natural-language subject/predicate/object/sourceDrawerID values
             // from MemPalace stores. Matches the Swift PalaceBridge dedup signature.
+            // The signature's fourth slot is the palace anchor. Facts filed by this
+            // importer carry it in foreign_source_key (or foreign_record_id when the
+            // triple named no source key); facts already in the estate from an
+            // importer that predates those columns carry the same value in
+            // source_drawer_id. Reading the new fields and falling back to the old
+            // one yields the identical string for both shapes, so a re-import still
+            // recognises everything it imported before. Reading only the new fields
+            // would miss every pre-existing row and duplicate all of them.
             let mut existing_kg_signatures: HashSet<String> = existing_kg_facts
                 .iter()
                 .map(|f| {
+                    let anchor = if !f.foreign_source_key.is_empty() {
+                        f.foreign_source_key.as_str()
+                    } else if !f.foreign_record_id.is_empty() {
+                        f.foreign_record_id.as_str()
+                    } else {
+                        f.source_drawer_id.as_str()
+                    };
                     format!(
                         "{}\x1f{}\x1f{}\x1f{}",
-                        f.subject, f.predicate, f.object, f.source_drawer_id
+                        f.subject, f.predicate, f.object, anchor
                     )
                 })
                 .collect();
@@ -851,35 +866,40 @@ impl<'a> PalaceBridge<'a> {
             }
         }
 
-        // The Rust substrate requires source_drawer_id to be non-empty (unlike
-        // Swift which accepts "" as "not anchored"). When the palace triple has
-        // no source drawer, use the triple's own id as the anchor — it is the
-        // record that produced this fact.
+        // The palace anchor: the foreign palace's source key when the triple
+        // names one, else the triple's own id — the record that produced this
+        // fact. Neither is a local drawer id, so neither goes in
+        // source_drawer_id; both are stored in the foreign_* fields below.
         //
-        // IMPORTANT: effective_src must be computed BEFORE the CAND-049 dedup
-        // check so that the signature uses the value that will actually be stored
-        // in the estate (effective_src, not the raw empty source_drawer_id). If
-        // we signed with raw source_drawer_id and stored effective_src, a re-
-        // import would compute a different signature and miss the dedup.
-        let effective_src = if source_drawer_id.is_empty() { id } else { source_drawer_id };
+        // IMPORTANT: this value must be computed BEFORE the CAND-049 dedup check
+        // so the signature uses the same string that lands in the estate. Signing
+        // one value and storing another makes a re-import compute a different
+        // signature and miss the dedup.
+        let palace_anchor = if source_drawer_id.is_empty() { id } else { source_drawer_id };
 
         // CAND-049: skip re-imported facts that are content-identical. The
-        // signature encodes all four identity-bearing fields of a KGFact using
-        // U+001F (ASCII Unit Separator) as a delimiter — a character that cannot
-        // appear in natural-language values from MemPalace stores. Uses
-        // effective_src (not raw source_drawer_id) so the signature matches the
-        // stored field on re-import.
+        // signature encodes subject, predicate, object, and the palace anchor
+        // using U+001F (ASCII Unit Separator) as a delimiter — a character that
+        // cannot appear in natural-language values from MemPalace stores.
         let sig = format!(
             "{}\x1f{}\x1f{}\x1f{}",
-            subject, predicate, object, effective_src
+            subject, predicate, object, palace_anchor
         );
         if existing_kg_signatures.contains(&sig) {
             report.items_skipped += 1;
             return Ok(());
         }
 
+        // source_drawer_id is left empty: the palace key names a drawer in the
+        // *foreign* estate and resolves to nothing local. The key and the
+        // triple's own id ride in their own fields.
+        let origin = locus_kit::kg_fact::KGFactOrigin {
+            added_by: String::new(),
+            foreign_source_key: source_drawer_id.to_string(),
+            foreign_record_id: id.to_string(),
+        };
         self.coordinator
-            .add_kg_fact(handle, subject, predicate, object, effective_src, now)
+            .add_kg_fact_with_origin(handle, subject, predicate, object, "", &origin, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         // Record the signature so within-call duplicates are caught on subsequent
         // iterations without a round-trip to the estate.
@@ -890,22 +910,23 @@ impl<'a> PalaceBridge<'a> {
         // stored columns for.
         if let Some(vf) = valid_from.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_from", vf, effective_src, now)
+                .add_kg_fact_with_origin(handle, id, "temporal:valid_from", vf, "", &origin, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(vt) = valid_to.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_to", vt, effective_src, now)
+                .add_kg_fact_with_origin(handle, id, "temporal:valid_to", vt, "", &origin, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(conf) = confidence_text.and_then(|s| s.parse::<f64>().ok()) {
             self.coordinator
-                .add_kg_fact(
+                .add_kg_fact_with_origin(
                     handle,
                     id,
                     "temporal:confidence",
                     &conf.to_string(),
-                    effective_src,
+                    "",
+                    &origin,
                     now,
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
