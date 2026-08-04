@@ -24,6 +24,7 @@ const NOW: i64 = 1_700_000_000;
 const AI_V1: &str = "ai-v1";
 const MINILLM_V1: &str = "minillm-v1";
 const TEST_PARENT: &str = "00000000-0000-4000-8000-000000000001";
+const TEST_ACTOR: &str = "test-actor";
 const SAMPLE_SUBJECT: &str =
     "Quarterly planning moved to Thursday; Sarah sends invites Monday; travel plans need updating.";
 
@@ -111,7 +112,7 @@ fn set_subject_populates_all_three_atomically() {
     store.add_drawer(&sample_drawer(&id), NOW).expect("add");
 
     let updated = store
-        .set_subject_representation(&id, SAMPLE_SUBJECT, AI_V1, NOW + 200)
+        .set_subject_representation(&id, SAMPLE_SUBJECT, AI_V1, NOW + 200, TEST_ACTOR, None)
         .expect("set subject");
     assert_eq!(updated, 1);
 
@@ -127,10 +128,10 @@ fn set_subject_replaces_prior() {
     let id = make_id();
     store.add_drawer(&sample_drawer(&id), NOW).expect("add");
     store
-        .set_subject_representation(&id, "First subject line.", AI_V1, NOW + 200)
+        .set_subject_representation(&id, "First subject line.", AI_V1, NOW + 200, TEST_ACTOR, None)
         .expect("first set");
     store
-        .set_subject_representation(&id, "Second subject line, regenerated.", MINILLM_V1, NOW + 300)
+        .set_subject_representation(&id, "Second subject line, regenerated.", MINILLM_V1, NOW + 300, TEST_ACTOR, None)
         .expect("second set");
     let d = get(&store, &id);
     assert_eq!(d.subject.as_deref(), Some("Second subject line, regenerated."));
@@ -147,6 +148,8 @@ fn set_subject_unknown_id_updates_zero_rows() {
             "x-marks-the-spot subject",
             AI_V1,
             NOW + 200,
+            TEST_ACTOR,
+            None,
         )
         .expect("set subject on unknown id");
     assert_eq!(updated, 0);
@@ -159,13 +162,13 @@ fn length_contract_enforced_at_boundary() {
     store.add_drawer(&sample_drawer(&id), NOW).expect("add");
 
     let oversize = "x".repeat(SUBJECT_LENGTH_CONTRACT + 1);
-    let err = store.set_subject_representation(&id, &oversize, AI_V1, NOW + 200);
+    let err = store.set_subject_representation(&id, &oversize, AI_V1, NOW + 200, TEST_ACTOR, None);
     assert!(err.is_err(), "oversize subject must be rejected");
 
     // Exactly at the contract: accepted.
     let exact = "y".repeat(SUBJECT_LENGTH_CONTRACT);
     let updated = store
-        .set_subject_representation(&id, &exact, AI_V1, NOW + 201)
+        .set_subject_representation(&id, &exact, AI_V1, NOW + 201, TEST_ACTOR, None)
         .expect("exact-length subject accepted");
     assert_eq!(updated, 1);
 }
@@ -180,7 +183,7 @@ fn expunge_clears_subject_with_content() {
     let id = make_id();
     store.add_drawer(&sample_drawer(&id), NOW).expect("add");
     store
-        .set_subject_representation(&id, "Derived subject line.", AI_V1, NOW + 100)
+        .set_subject_representation(&id, "Derived subject line.", AI_V1, NOW + 100, TEST_ACTOR, None)
         .expect("set subject");
 
     store
@@ -212,10 +215,10 @@ fn count_missing_subject_semantics() {
         store.add_drawer(&sample_drawer(id), NOW).expect("add");
     }
     store
-        .set_subject_representation(&i2, "Current-contract subject.", MINILLM_V1, NOW + 100)
+        .set_subject_representation(&i2, "Current-contract subject.", MINILLM_V1, NOW + 100, TEST_ACTOR, None)
         .expect("set d2");
     store
-        .set_subject_representation(&i3, "Stale-contract subject.", "ai-v0-legacy", NOW + 100)
+        .set_subject_representation(&i3, "Stale-contract subject.", "ai-v0-legacy", NOW + 100, TEST_ACTOR, None)
         .expect("set d3");
     store
         .expunge_gated(&i4, "test", None, NOW + 200, false)
@@ -241,13 +244,13 @@ fn tier_aware_debt_enumeration() {
         store.add_drawer(&sample_drawer(id), NOW).expect("add");
     }
     store
-        .set_subject_representation(&ai_id, "Filing-AI subject.", "ai-v1", NOW + 1)
+        .set_subject_representation(&ai_id, "Filing-AI subject.", "ai-v1", NOW + 1, TEST_ACTOR, None)
         .expect("set ai");
     store
-        .set_subject_representation(&cons_id, "Deterministic vague subject.", "consolidation-v1", NOW + 1)
+        .set_subject_representation(&cons_id, "Deterministic vague subject.", "consolidation-v1", NOW + 1, TEST_ACTOR, None)
         .expect("set cons");
     store
-        .set_subject_representation(&model_id, "Model subject.", "minillm-v1", NOW + 1)
+        .set_subject_representation(&model_id, "Model subject.", "minillm-v1", NOW + 1, TEST_ACTOR, None)
         .expect("set model");
 
     // NULL-only (the PR-09 default): just the NULL row.

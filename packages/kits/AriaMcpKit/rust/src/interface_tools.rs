@@ -1524,9 +1524,10 @@ fn run_update_memory(
     let mutation_str = require_string(args, "mutation")?;
 
     let kind = if mutation_str == "setSubject" {
-        // setSubject carries its payload in a dedicated `subject` arg (the
-        // `note` arg stays an audit annotation, as for every other
-        // mutation). Boundary-validated here so the caller gets the register
+        // setSubject carries its payload in a dedicated `subject` arg; the
+        // `note` arg is read below and forwarded as the mutate payload —
+        // the audit annotation — as for every other mutation.
+        // Boundary-validated here so the caller gets the register
         // guidance, not the bare store error. Mirrors Swift runUpdateMemory.
         let subject = match args.get("subject").and_then(|v| v.as_str()) {
             Some(s) => s.trim().to_string(),
@@ -1555,10 +1556,15 @@ fn run_update_memory(
     } else {
         decode_mutation_kind(mutation_str)?
     };
+    // The optional `note` argument is the caller's audit annotation,
+    // forwarded as the mutate payload so it reaches the sealed audit
+    // row's `reason` column. Mirrors Swift runUpdateMemory's
+    // `optionalString(args["note"], ...)` → MutateFrame.payload.
+    let note = optional_string(args, "note")?;
     // Note usage before acquiring the coord lock so note_usage can also lock.
     note_usage(id, &estate, ledger);
     let coord = estate.coord.lock().unwrap();
-    match coord.mutate(&estate.handle, id, kind, None) {
+    match coord.mutate(&estate.handle, id, kind, note.as_deref()) {
         Ok(()) => Ok(text_result(&format!("updated memory {id} ({mutation_str})"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
@@ -1632,11 +1638,14 @@ fn run_confirm_memory(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
+    // The optional `note` argument is the caller's audit annotation,
+    // forwarded as the mutate payload. Mirrors Swift runConfirmMemory.
+    let note = optional_string(args, "note")?;
 
     // Note usage: confirming a surfaced drawer means the user acted on it.
     note_usage(id, &estate, ledger);
     let coord = estate.coord.lock().unwrap();
-    match coord.mutate(&estate.handle, id, MutationKind::Confirm, None) {
+    match coord.mutate(&estate.handle, id, MutationKind::Confirm, note.as_deref()) {
         Ok(()) => Ok(text_result(&format!("confirmed memory {id}"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }

@@ -1439,8 +1439,18 @@ impl Estate {
         pipeline_version: &str,
         generated_at: i64,
     ) -> Result<usize, LocusKitError> {
-        self.store
-            .set_subject_representation(drawer_id, subject, pipeline_version, generated_at)
+        // This public seam keeps its 4-arg signature (callers: GLK
+        // coordinator + subject backfill). The custody event those writes
+        // seal carries the manifest owner (or "estate") as actor and no
+        // note — the backfill has no caller-supplied reason.
+        self.store.set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            &self.changed_by_or_estate(),
+            None,
+        )
     }
 
     /// Count of active drawers still awaiting a subject line (PR-01
@@ -2431,7 +2441,7 @@ impl Estate {
         &self,
         row_id: &str,
         kind: MutationKind,
-        _payload: Option<&str>,
+        payload: Option<&str>,
     ) -> Result<(), LocusKitError> {
         match kind {
             MutationKind::Confirm => {
@@ -2482,7 +2492,7 @@ impl Estate {
                     State::Rejected,
                     RowVerb::Reject,
                     &changed_by,
-                    Some(_payload.unwrap_or("rejected via Estate.mutate")),
+                    Some(payload.unwrap_or("rejected via Estate.mutate")),
                     now,
                 )
             }
@@ -2499,7 +2509,7 @@ impl Estate {
                     State::Contested,
                     RowVerb::Contest,
                     &changed_by,
-                    Some(_payload.unwrap_or("contested via Estate.mutate")),
+                    Some(payload.unwrap_or("contested via Estate.mutate")),
                     now,
                 )
             }
@@ -2526,7 +2536,7 @@ impl Estate {
                     State::Active,
                     RowVerb::ResolveContest,
                     &changed_by,
-                    Some(_payload.unwrap_or("resolved via Estate.mutate")),
+                    Some(payload.unwrap_or("resolved via Estate.mutate")),
                     now,
                 )
             }
@@ -2554,7 +2564,7 @@ impl Estate {
                     State::Accepted,
                     RowVerb::Promote,
                     &changed_by,
-                    Some(_payload.unwrap_or("accepted via Estate.mutate")),
+                    Some(payload.unwrap_or("accepted via Estate.mutate")),
                     now,
                 )
             }
@@ -2571,7 +2581,7 @@ impl Estate {
                     State::Superseded,
                     RowVerb::Supersede,
                     &changed_by,
-                    Some(_payload.unwrap_or("superseded via Estate.mutate")),
+                    Some(payload.unwrap_or("superseded via Estate.mutate")),
                     now,
                 )
             }
@@ -2673,7 +2683,7 @@ impl Estate {
                     State::Active,
                     RowVerb::Observe,
                     &changed_by,
-                    Some(_payload.unwrap_or("revived via Estate.mutate")),
+                    Some(payload.unwrap_or("revived via Estate.mutate")),
                     now,
                 )
             }
@@ -2698,7 +2708,7 @@ impl Estate {
                     row_id,
                     new_adjective,
                     &changed_by,
-                    Some(_payload.unwrap_or("sensitivity corrected via Estate.mutate")),
+                    Some(payload.unwrap_or("sensitivity corrected via Estate.mutate")),
                     now,
                 )
             }
@@ -2723,7 +2733,7 @@ impl Estate {
                     row_id,
                     new_adjective,
                     &changed_by,
-                    Some(_payload.unwrap_or("trust corrected via Estate.mutate")),
+                    Some(payload.unwrap_or("trust corrected via Estate.mutate")),
                     now,
                 )
             }
@@ -2754,7 +2764,7 @@ impl Estate {
                     row_id,
                     new_adjective,
                     &changed_by,
-                    Some(_payload.unwrap_or("exportability corrected via Estate.mutate")),
+                    Some(payload.unwrap_or("exportability corrected via Estate.mutate")),
                     now,
                 )
             }
@@ -2764,16 +2774,29 @@ impl Estate {
                         id: row_id.to_string(),
                     });
                 }
-                // Backfill/correction write path for the subject trio
-                // (SPEC § 14). No bitmap, no state transition, no
-                // container-fingerprint rollup — the store verb writes the
-                // three columns in one UPDATE and enforces the 1–120-char
-                // contract (B-18). The producer at this boundary is the
-                // calling AI, so the pipeline version is ai-v1. Mirrors
-                // Swift MutationKind.setSubject in EstateVerbs.swift.
+                // Correction write path for the subject trio (SPEC § 14).
+                // No bitmap, no state transition, no container-fingerprint
+                // rollup — the store verb writes the three columns and
+                // seals the "setSubject" custody audit event in one
+                // transaction, and enforces the 1–120-char contract
+                // (B-18). The caller's `payload` is the audit note
+                // (reason), passed through verbatim — None when the
+                // caller supplied none; no synthesized default, so the
+                // audit row honestly records that no reason was given.
+                // The producer at this boundary is the calling AI, so
+                // the pipeline version is ai-v1. Mirrors Swift
+                // MutationKind.setSubject in EstateVerbs.swift.
+                let changed_by = self.changed_by_or_estate();
                 let now = Self::now_ms();
                 self.store
-                    .set_subject_representation(row_id, &subject, SUBJECT_PIPELINE_AI_V1, now)
+                    .set_subject_representation(
+                        row_id,
+                        &subject,
+                        SUBJECT_PIPELINE_AI_V1,
+                        now,
+                        &changed_by,
+                        payload,
+                    )
                     .map(|_| ())
             }
         }

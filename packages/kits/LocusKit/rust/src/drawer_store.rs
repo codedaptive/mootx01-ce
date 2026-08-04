@@ -712,18 +712,26 @@ pub trait DrawerStore: Send + Sync {
 
     /// Write the subject line of one drawer — all three subject columns
     /// in ONE atomic UPDATE (PR-01; same invariant family as the
-    /// distilled quad: NULL together or populated together). Enforces the
+    /// distilled quad: NULL together or populated together) PLUS a sealed
+    /// `"setSubject"` custody audit event, committed together in one
+    /// transaction (Codex cc90c5dcecb081918c159788e1ffb3d6): the column
+    /// write and the audit append succeed or fail together. `changed_by`
+    /// is the audit actor; `reason` is the caller's note (None when none
+    /// was supplied — the audit row is still sealed). Enforces the
     /// SUBJECT_LENGTH_CONTRACT at the storage boundary. `generated_at` is
     /// epoch millis (deterministic clock — passed in, never read here).
     ///
-    /// Returns the count of rows updated (0 = drawer not found;
-    /// 1 = success). Mirrors Swift `DrawerStore.setSubjectRepresentation`.
+    /// Returns the count of rows updated (0 = drawer not found, in which
+    /// case no audit event is sealed; 1 = success). Mirrors Swift
+    /// `DrawerStore.setSubjectRepresentation`.
     fn set_subject_representation(
         &self,
         _drawer_id: &str,
         _subject: &str,
         _pipeline_version: &str,
         _generated_at: i64,
+        _changed_by: &str,
+        _reason: Option<&str>,
     ) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "set_subject_representation not implemented for this DrawerStore impl".to_string(),
@@ -2210,12 +2218,16 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         subject: &str,
         pipeline_version: &str,
         generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
     ) -> Result<usize, LocusKitError> {
         self.as_ref().set_subject_representation(
             drawer_id,
             subject,
             pipeline_version,
             generated_at,
+            changed_by,
+            reason,
         )
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {

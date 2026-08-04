@@ -336,9 +336,17 @@ impl DrawerStore for PostgresDrawerStore {
         subject: &str,
         pipeline_version: &str,
         generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
     ) -> Result<usize, LocusKitError> {
-        self.0
-            .set_subject_representation(drawer_id, subject, pipeline_version, generated_at)
+        self.0.set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            changed_by,
+            reason,
+        )
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_missing_subject(pipeline_version)

@@ -2563,6 +2563,8 @@ impl DrawerStore for DrawerStoreCore {
         subject: &str,
         pipeline_version: &str,
         generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
     ) -> Result<usize, LocusKitError> {
         if drawer_id.is_empty() {
             return Err(LocusKitError::InvalidContent(
@@ -2579,6 +2581,11 @@ impl DrawerStore for DrawerStoreCore {
                 "pipelineVersion must not be empty".to_string(),
             ));
         }
+        if changed_by.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "changedBy must not be empty".to_string(),
+            ));
+        }
         // Length contract enforced at the storage boundary — the last
         // common gate under every producer (filing AI, backfill AI, model
         // rider), so no producer can quietly inflate contact-sheet rows.
@@ -2590,16 +2597,74 @@ impl DrawerStore for DrawerStoreCore {
                  ({char_count} characters); the AI-facing register requires one capped sentence"
             )));
         }
-        // One atomic UPDATE of the three columns. Unlike the distilled
-        // quad there is NO presence bit (feature-flag region is full; see
+        // One UPDATE of the three columns plus a sealed custody event,
+        // committed together in one transaction (Codex
+        // cc90c5dcecb081918c159788e1ffb3d6): a subject change that
+        // persists without its audit row is the defect this closes.
+        // Unlike the distilled quad there is NO presence bit
+        // (feature-flag region is full; see
         // PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
         // rollup — the rollup exists because recall FILTERS on bit 19,
         // and nothing filters on subject presence.
-        let row_store = self.storage.row_store();
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
         let id_pred = StoragePredicate::Eq(
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
         );
+        // Read the current row once for the custody event's value fields.
+        // An absent row preserves the historical contract: Ok(0), no
+        // audit row, no error.
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else {
+            return Ok(0);
+        };
+        let bitmaps = (
+            i64_value_of(row.get("adjectiveBitmap")),
+            i64_value_of(row.get("operationalBitmap")),
+            i64_value_of(row.get("provenance")),
+        );
+        let anchor =
+            substrate_lib::verbs::LatticeAnchor::udc(&string_value_of(row.get("udcCode")));
+        let stamp = self.hlc.lock().unwrap().send(generated_at);
+        // Custody event on the existing AuditEvent shape, constructed
+        // directly rather than through `audit_gate::admit` — the gate
+        // validates bitmap FieldWrites and setSubject touches no bitmap.
+        // The custom verb string follows the "expungeOrphan" precedent:
+        // the substrate trail preserves it verbatim so consumers can
+        // identify subject changes, while GLK's AuditBridge collapses
+        // unknown verbs to `.mutate` (safe default). Bitmaps and anchor
+        // are unchanged, so before == after on every value field; the
+        // row records WHO changed the subject, WHEN, and WHY. The prior
+        // subject text is deliberately NOT preserved: the audit shape
+        // carries no text values, subject is derived from `content`,
+        // and content has its own audit trail — custody row + content
+        // trail reconstructs the picture.
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                &stamp,
+                "setSubject",
+                bitmaps,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            hlc: stamp,
+            verb: "setSubject".to_string(),
+            before_bitmaps: Some(bitmaps),
+            after_bitmaps: bitmaps,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: changed_by.to_string(),
+            // The caller's note; None when none was supplied (the audit
+            // row still exists — an absent reason is not an absent row).
+            reason: reason.map(|s| s.to_string()),
+        };
         let mut values = BTreeMap::new();
         values.insert(
             "subject".to_string(),
@@ -2613,9 +2678,32 @@ impl DrawerStore for DrawerStoreCore {
             "subject_at".to_string(),
             TypedValue::Timestamp(generated_at),
         );
-        row_store
-            .update(T_DRAWERS, values, &id_pred)
-            .map_err(map_storage_err)
+        // Fold the recomputed content_fingerprint into the SAME update —
+        // the blanket rule for every `drawers` write in this file (see
+        // `recomputed_fingerprint`).
+        let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| {
+            d.subject = Some(subject.to_string());
+            d.subject_pipeline_version = Some(pipeline_version.to_string());
+            d.subject_at = Some(generated_at);
+        })?;
+        values.insert("content_fingerprint".to_string(), fingerprint_value);
+        let audit_row = pk_audit_event_from(&event);
+        // Column write + audit append succeed or fail together. The
+        // closure returns StorageResult<()>; errors are converted to
+        // LocusKitError by map_storage_err on the outer transaction() call.
+        let mut updated: usize = 0;
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                updated = txn.row_store().update(T_DRAWERS, values.clone(), &id_pred)?;
+                // The row can vanish between the read above and this
+                // transaction; a 0-row update seals no custody event.
+                if updated > 0 {
+                    txn.audit_log().append(audit_row.clone())?;
+                }
+                Ok(())
+            })
+            .map_err(map_storage_err)?;
+        Ok(updated)
     }
 
     /// Count of active drawers still awaiting a subject line (PR-01
@@ -5433,9 +5521,17 @@ impl DrawerStore for InMemoryDrawerStore {
         subject: &str,
         pipeline_version: &str,
         generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
     ) -> Result<usize, LocusKitError> {
-        self.inner
-            .set_subject_representation(drawer_id, subject, pipeline_version, generated_at)
+        self.inner.set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            changed_by,
+            reason,
+        )
     }
     fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
         self.inner.count_subject_debt()
