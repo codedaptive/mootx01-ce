@@ -4,6 +4,16 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# One Rust target directory per checkout. Cargo's default is per-workspace,
+# and this repo has 30 workspaces, so shared dependencies were being compiled
+# and stored once each (31 GB of build output, measured 2026-08-04).
+# Per-checkout rather than machine-global because cargo locks the target
+# directory exclusively — one global path would serialize concurrent builds.
+#
+# The Makefile exports the same value; this script is invoked as a subprocess
+# for discovery, so it cannot inherit that export and must set its own.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/.cargo-target}"
+
 SWIFT_TEST_ARGS="${SWIFT_TEST_ARGS:-}"
 CARGO_TEST_ARGS="${CARGO_TEST_ARGS:-}"
 PYTEST_ARGS="${PYTEST_ARGS:-}"

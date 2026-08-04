@@ -36,7 +36,10 @@ def run_json(cmd, cwd):
 
 def rust_table():
     subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=RUST, env=ENV, check=True)
-    rep = run_json([os.path.join(RUST, "target/release/substrate-validator"), "--json"], RUST)
+    # The repo sets one CARGO_TARGET_DIR per checkout, so the binary is not
+    # under this crate's own target/ when that variable is present.
+    target = ENV.get("CARGO_TARGET_DIR") or os.path.join(RUST, "target")
+    rep = run_json([os.path.join(target, "release/substrate-validator"), "--json"], RUST)
     out = {}
     for p in rep["primitives"]:
         scalar = next((k["crc"] for k in p["kernels"] if k["kernel"] == "scalar"), None)
