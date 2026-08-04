@@ -218,11 +218,17 @@ public struct ARIA_MCPDispatcher: Sendable {
 
     private func toolsList() -> JSONValue {
         let entries: [JSONValue] = tools.map { tool in
-            .object([
+            var entry: [String: JSONValue] = [
                 "name": .string(tool.name),
                 "description": .string(tool.description),
                 "inputSchema": tool.inputSchema,
-            ])
+            ]
+            // MCP structured results: only tools that declare a schema get
+            // the key — text-only tool entries stay byte-identical.
+            if let outputSchema = tool.outputSchema {
+                entry["outputSchema"] = outputSchema
+            }
+            return .object(entry)
         }
         return .object(["tools": .array(entries)])
     }

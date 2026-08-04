@@ -305,7 +305,8 @@ fn memory_search_tool() -> serde_json::Value {
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
             }),
             json!([])
-        )))
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
@@ -339,7 +340,8 @@ fn memory_get_tool() -> serde_json::Value {
                 "depth": string_schema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid.")
             }),
             json!([])
-        )))
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
@@ -810,7 +812,8 @@ fn recall_precise_tool() -> serde_json::Value {
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!(["query"])
-        )))
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
@@ -869,7 +872,8 @@ fn recall_shaped_tool() -> serde_json::Value {
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!([])
-        )))
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
@@ -1520,6 +1524,39 @@ pub fn with_teachme(mut schema: serde_json::Value) -> serde_json::Value {
         );
     }
     schema
+}
+
+/// The shared `outputSchema` for the recall family (`moot_memory_search`,
+/// `moot_memory_get`, `moot_recall_shaped`, `moot_recall_precise`): one
+/// `results` array carrying the typed twin of each rendered row.
+///
+/// ONE schema for all four tools, field names pinned across ports — the
+/// Swift twin is `ToolProjection.recallResultsOutputSchema()` and the
+/// cross-port test asserts structural equality. The text block stays the
+/// human-readable rendering; `structuredContent` conforming to this schema
+/// is its typed twin, subject to every redaction the text applies (see the
+/// Blast Radius Report MXE-SS, rules R1-R9).
+fn recall_results_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "description": "One entry per drawer row the text block renders — same admissible set, same order, same 50-row cap. Redaction parity: provenance-gated rows carry the same redaction markers as the text block in subject and content; rows the text renders opaquely carry id and the '(no subject)' marker only.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": string_schema("Drawer UUID — the address."),
+                        "room": string_schema("Resolved room display name. Absent when the row is opaque."),
+                        "content": string_schema("Drawer content for this tool's tier: verbatim body (search/shaped/precise and get depth:full), distillate or fallback body (get depth:distilled). Carries the redaction marker for provenance-gated rows. Absent at get depth:subject and for opaque rows."),
+                        "subject": string_schema("The subject slot exactly as the text renders it: stored subject, '(no subject)', or the redaction marker. Absent at get depth:full when the drawer has no subject.")
+                    },
+                    "required": ["id"]
+                }
+            }
+        },
+        "required": ["results"]
+    })
 }
 
 fn object_schema(properties: serde_json::Value, required: serde_json::Value) -> serde_json::Value {

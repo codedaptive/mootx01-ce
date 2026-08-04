@@ -53,6 +53,26 @@ public struct ProjectedTool: Sendable, Equatable {
     public let inputSchema: JSONValue
     /// Where this tool comes from.
     public let provenance: ToolProvenance
+    /// JSON Schema for the tool's `structuredContent` result payload,
+    /// advertised in `tools/list` as `outputSchema` (the MCP-sanctioned
+    /// structured-result mechanism). `nil` for text-only tools — the key
+    /// is then omitted from the wire entry entirely, so tools that never
+    /// declared a schema are byte-identical to before this field existed.
+    public let outputSchema: JSONValue?
+
+    public init(
+        name: String,
+        description: String,
+        inputSchema: JSONValue,
+        provenance: ToolProvenance,
+        outputSchema: JSONValue? = nil
+    ) {
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema
+        self.provenance = provenance
+        self.outputSchema = outputSchema
+    }
 }
 
 public enum ToolProjection {
@@ -167,7 +187,11 @@ public enum ToolProjection {
                 name: tool.name,
                 description: tool.description,
                 inputSchema: withTeachme(tool.inputSchema),
-                provenance: tool.provenance
+                provenance: tool.provenance,
+                // Carried through explicitly: this re-wrap constructs a NEW
+                // ProjectedTool, so omitting the field here would silently
+                // strip every declared output schema from tools/list.
+                outputSchema: tool.outputSchema
             )
         }
     }
@@ -220,7 +244,8 @@ public enum ToolProjection {
                     ],
                     required: []
                 )),
-                provenance: .interface
+                provenance: .interface,
+                outputSchema: recallResultsOutputSchema()
             ),
             ProjectedTool(
                 name: "moot_memory_list",
@@ -246,7 +271,8 @@ public enum ToolProjection {
                     ],
                     required: []
                 )),
-                provenance: .interface
+                provenance: .interface,
+                outputSchema: recallResultsOutputSchema()
             ),
             ProjectedTool(
                 name: "moot_update_memory",
@@ -611,6 +637,57 @@ public enum ToolProjection {
     }
 
     // MARK: - Schema helpers
+
+    /// The shared `outputSchema` for the recall family (`moot_memory_search`,
+    /// `moot_memory_get`, `moot_recall_shaped`, `moot_recall_precise`): one
+    /// `results` array carrying the typed twin of each rendered row.
+    ///
+    /// ONE schema for all four tools, field names pinned across ports — the
+    /// Rust twin is `tool_list.rs::recall_results_output_schema()` and the
+    /// cross-port test asserts structural equality. The text block stays the
+    /// human-readable rendering; `structuredContent` conforming to this
+    /// schema is its typed twin, subject to every redaction the text applies
+    /// (see the Blast Radius Report MXE-SS, rules R1-R9).
+    static func recallResultsOutputSchema() -> JSONValue {
+        .object([
+            "type": .string("object"),
+            "properties": .object([
+                "results": .object([
+                    "type": .string("array"),
+                    "description": .string(
+                        "One entry per drawer row the text block renders — same "
+                        + "admissible set, same order, same 50-row cap. Redaction "
+                        + "parity: provenance-gated rows carry the same redaction "
+                        + "markers as the text block in subject and content; rows "
+                        + "the text renders opaquely carry id and the '(no subject)' "
+                        + "marker only."),
+                    "items": .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "id": stringSchema("Drawer UUID — the address."),
+                            "room": stringSchema(
+                                "Resolved room display name. Absent when the row "
+                                + "is opaque."),
+                            "content": stringSchema(
+                                "Drawer content for this tool's tier: verbatim body "
+                                + "(search/shaped/precise and get depth:full), "
+                                + "distillate or fallback body (get depth:distilled). "
+                                + "Carries the redaction marker for provenance-gated "
+                                + "rows. Absent at get depth:subject and for opaque "
+                                + "rows."),
+                            "subject": stringSchema(
+                                "The subject slot exactly as the text renders it: "
+                                + "stored subject, '(no subject)', or the redaction "
+                                + "marker. Absent at get depth:full when the drawer "
+                                + "has no subject."),
+                        ]),
+                        "required": .array([.string("id")]),
+                    ]),
+                ]),
+            ]),
+            "required": .array([.string("results")]),
+        ])
+    }
 
     /// Inject an optional `teachme` property into an object schema.
     /// Parallel to `withEstateID` — applied in `tools()` after all per-tool

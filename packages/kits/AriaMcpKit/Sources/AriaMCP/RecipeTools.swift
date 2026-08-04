@@ -184,7 +184,8 @@ enum RecipeTools {
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: []),
-            provenance: .recipe)
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
     }
 
     /// The cognition-discovery tool. At runtime (`runListRecipes`), returns
@@ -262,7 +263,8 @@ enum RecipeTools {
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
-            provenance: .recipe)
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
     }
 
     private static func vagueRecallTool() -> ProjectedTool {
