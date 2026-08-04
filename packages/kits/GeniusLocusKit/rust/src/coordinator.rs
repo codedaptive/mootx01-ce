@@ -7061,7 +7061,9 @@ impl EstateCoordinator {
     /// `hint_added_by`, which is provenance-only.)
     ///
     /// - `handle`: An open estate handle in the coordinator's registry.
-    /// - `now`:    Write timestamp (epoch seconds) for any hints seeded.
+    /// - `now`:    Write timestamp (epoch MILLISECONDS) for any hints seeded.
+    ///             Milliseconds is what the store and HLC boundary consume;
+    ///             seconds here stamp every seeded hint drawer as 1970.
     ///             Pass `SystemTime::now()` from serve entry points (acceptable
     ///             at an app boundary). Pass a fixed value in tests for determinism.
     /// - Returns: `Ok(())` on success, or a `GeniusLocusKitError` if the estate
