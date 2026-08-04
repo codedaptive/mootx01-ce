@@ -9271,4 +9271,184 @@ mod tests {
             "rolled-back insert must leave no orphaned drawer row in storage"
         );
     }
+
+    // -------------------------------------------------------------------
+    // setSubject custody atomicity (Codex cc90c5dcecb081918c159788e1ffb3d6)
+    // -------------------------------------------------------------------
+
+    /// AuditLog wrapper that refuses to append `"setSubject"` events and
+    /// delegates everything else, so the gated capture's genesis event
+    /// still seals and the fixture drawer can be added normally. Forces
+    /// the failure at the production append site INSIDE the transaction,
+    /// proving the column write rolls back with it.
+    struct SetSubjectAppendRefusingAuditLog {
+        inner: Arc<dyn persistence_kit::audit_log::AuditLog>,
+    }
+
+    impl persistence_kit::audit_log::AuditLog for SetSubjectAppendRefusingAuditLog {
+        fn append(&self, event: PkAuditEvent) -> persistence_kit::error::StorageResult<()> {
+            if event.verb == "setSubject" {
+                return Err(persistence_kit::error::StorageError::BackendUnavailable {
+                    reason: "injected setSubject audit-append failure".to_string(),
+                });
+            }
+            self.inner.append(event)
+        }
+        fn append_batch(
+            &self,
+            events: Vec<PkAuditEvent>,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner.append_batch(events)
+        }
+        fn iterate(
+            &self,
+            after: Option<substrate_types::hlc::HLC>,
+            row_id: Option<persistence_kit::types::RowKey>,
+            limit: usize,
+        ) -> persistence_kit::error::StorageResult<Vec<PkAuditEvent>> {
+            self.inner.iterate(after, row_id, limit)
+        }
+        fn events_for_row(
+            &self,
+            row_id: persistence_kit::types::RowKey,
+        ) -> persistence_kit::error::StorageResult<Vec<PkAuditEvent>> {
+            self.inner.events_for_row(row_id)
+        }
+        fn row_ids_with_audit_verbs(
+            &self,
+            row_ids: &[persistence_kit::types::RowKey],
+            verbs: &[&str],
+        ) -> persistence_kit::error::StorageResult<
+            std::collections::HashSet<persistence_kit::types::RowKey>,
+        > {
+            self.inner.row_ids_with_audit_verbs(row_ids, verbs)
+        }
+        fn count(&self) -> persistence_kit::error::StorageResult<usize> {
+            self.inner.count()
+        }
+    }
+
+    /// Storage wrapper over a real InMemoryStorage whose `audit_log()`
+    /// (both direct and transactional) refuses `"setSubject"` appends.
+    struct SetSubjectAuditFailingStorage {
+        inner: Arc<InMemoryStorage>,
+    }
+
+    impl SetSubjectAuditFailingStorage {
+        fn failing_log(
+            log: Arc<dyn persistence_kit::audit_log::AuditLog>,
+        ) -> Arc<dyn persistence_kit::audit_log::AuditLog> {
+            Arc::new(SetSubjectAppendRefusingAuditLog { inner: log })
+        }
+    }
+
+    /// Transaction view handed to the block: same row/blob stores as the
+    /// real transaction, failing audit log.
+    struct FailingTxnView<'a> {
+        inner: &'a dyn persistence_kit::storage::StorageTransaction,
+    }
+
+    impl persistence_kit::storage::StorageTransaction for FailingTxnView<'_> {
+        fn row_store(&self) -> Arc<dyn persistence_kit::row_store::RowStore> {
+            self.inner.row_store()
+        }
+        fn blob_store(&self) -> Arc<dyn persistence_kit::blob_store::BlobStore> {
+            self.inner.blob_store()
+        }
+        fn audit_log(&self) -> Arc<dyn persistence_kit::audit_log::AuditLog> {
+            SetSubjectAuditFailingStorage::failing_log(self.inner.audit_log())
+        }
+    }
+
+    impl Storage for SetSubjectAuditFailingStorage {
+        fn configuration(&self) -> &persistence_kit::storage::EstateConfiguration {
+            self.inner.configuration()
+        }
+        fn row_store(&self) -> Arc<dyn persistence_kit::row_store::RowStore> {
+            Storage::row_store(&*self.inner)
+        }
+        fn blob_store(&self) -> Arc<dyn persistence_kit::blob_store::BlobStore> {
+            Storage::blob_store(&*self.inner)
+        }
+        fn audit_log(&self) -> Arc<dyn persistence_kit::audit_log::AuditLog> {
+            Self::failing_log(Storage::audit_log(&*self.inner))
+        }
+        fn observer(&self) -> Arc<dyn persistence_kit::observer::StorageObserver> {
+            self.inner.observer()
+        }
+        fn open(
+            &self,
+            schema: &persistence_kit::schema::SchemaDeclaration,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner.open(schema)
+        }
+        fn close(&self) -> persistence_kit::error::StorageResult<()> {
+            self.inner.close()
+        }
+        fn current_schema_version(&self) -> persistence_kit::error::StorageResult<i32> {
+            self.inner.current_schema_version()
+        }
+        fn migrate(
+            &self,
+            schema: &persistence_kit::schema::SchemaDeclaration,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner.migrate(schema)
+        }
+        fn transaction(
+            &self,
+            isolation: IsolationLevel,
+            block: &mut dyn FnMut(
+                &dyn persistence_kit::storage::StorageTransaction,
+            ) -> persistence_kit::error::StorageResult<()>,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner
+                .transaction(isolation, &mut |txn| block(&FailingTxnView { inner: txn }))
+        }
+    }
+
+    /// Atomicity invariant (MXE-SK): a forced failure of the custody
+    /// audit append leaves the subject columns unchanged — the column
+    /// write and the audit append succeed or fail together.
+    #[test]
+    fn set_subject_failed_audit_append_rolls_back_subject_write() {
+        let storage = Arc::new(SetSubjectAuditFailingStorage {
+            inner: Arc::new(InMemoryStorage::with_estate(Uuid::new_v4())),
+        });
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        let id = tid("atomicity-subject");
+        let mut d = Drawer::new(
+            &id,
+            "Content whose subject write must roll back.",
+            "test-parent",
+            "bilby",
+            NOW,
+            "test-v1",
+        );
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+
+        let err = store.set_subject_representation(
+            &id,
+            "Subject that must not persist.",
+            "ai-v1",
+            NOW + 100,
+            "test-actor",
+            Some("note that must not persist"),
+        );
+        assert!(err.is_err(), "injected audit failure must surface as Err");
+
+        // The subject trio must be unchanged (rolled back with the append).
+        let after = store.get_drawer(&id).unwrap().unwrap();
+        assert!(after.subject.is_none(), "subject column must roll back");
+        assert!(after.subject_pipeline_version.is_none());
+        assert!(after.subject_at.is_none());
+
+        // And no setSubject custody event may exist.
+        let events = store.audit_events_for_row(&id).unwrap();
+        assert!(
+            events.iter().all(|e| e.verb != "setSubject"),
+            "no setSubject custody event may survive the rollback"
+        );
+    }
 }

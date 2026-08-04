@@ -212,3 +212,116 @@ fn unknown_filter_is_rejected_naming_the_accepted() {
     .expect_err("unknown filter must be rejected");
     assert!(err.message.contains("missing_subject"), "got: {}", err.message);
 }
+
+// ---------------------------------------------------------------------------
+// 4. Note propagation (MXE-SK — the boundary must not discard the caller's
+//    audit annotation). Regression tests for the defect where both
+//    `coord.mutate` call sites passed `None` as the payload: these fail
+//    against pre-fix code because the note never reached the audit row.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_memory_note_reaches_the_set_subject_custody_audit_row() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let id = capture_without_subject(&registry, "Row whose subject gets a noted backfill.", "subject-tests");
+
+    let updated = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => id.as_str(),
+               "mutation" => "setSubject",
+               "subject" => "Subject set with an audit note.",
+               "note" => "backfilled during MXE-SK verification"],
+        &registry,
+        &ledger,
+    )
+    .expect("setSubject with note must succeed");
+    assert!(is_success(&updated), "got: {updated:?}");
+
+    // The custody audit row must carry the caller's note as its reason.
+    let coord = registry.coord.lock().unwrap();
+    let estate = coord
+        .estate_for(&registry.default.handle)
+        .expect("estate_for");
+    let trail = estate.audit_trail(&id).expect("audit trail");
+    let custody: Vec<_> = trail.iter().filter(|e| e.verb == "setSubject").collect();
+    assert_eq!(custody.len(), 1, "exactly one setSubject custody event");
+    assert_eq!(
+        custody[0].reason.as_deref(),
+        Some("backfilled during MXE-SK verification"),
+        "the note argument must reach the audit row's reason"
+    );
+    assert!(!custody[0].actor.is_empty(), "custody row records an actor");
+}
+
+#[test]
+fn update_memory_without_note_seals_custody_row_with_absent_reason() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let id = capture_without_subject(&registry, "Row backfilled without a note.", "subject-tests");
+
+    let updated = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => id.as_str(),
+               "mutation" => "setSubject",
+               "subject" => "Subject set without an audit note."],
+        &registry,
+        &ledger,
+    )
+    .expect("setSubject without note must succeed");
+    assert!(is_success(&updated), "got: {updated:?}");
+
+    let coord = registry.coord.lock().unwrap();
+    let estate = coord
+        .estate_for(&registry.default.handle)
+        .expect("estate_for");
+    let trail = estate.audit_trail(&id).expect("audit trail");
+    let custody: Vec<_> = trail.iter().filter(|e| e.verb == "setSubject").collect();
+    assert_eq!(
+        custody.len(),
+        1,
+        "an absent note is not an absent row: the custody event still seals"
+    );
+    assert_eq!(custody[0].reason, None, "no note ⇒ absent reason");
+}
+
+#[test]
+fn update_memory_note_is_generic_not_set_subject_special_cased() {
+    // The note-drop was not setSubject-specific: EVERY Rust mutation
+    // discarded its annotation. Prove the fixed boundary forwards the
+    // note for an ordinary bitmap mutation too: `contest`, whose arm
+    // consumes the payload as its audit reason.
+    //
+    // (The other boundary call site, moot_confirm_memory, also forwards
+    // the note now — but BOTH ports' Confirm ARMS hardcode their reason
+    // and drop the forwarded payload, an out-of-scope arm defect recorded
+    // in the MXE-SK completion report's Discoveries. End-to-end confirm
+    // note delivery is asserted when that arm is fixed.)
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let id = capture_without_subject(&registry, "Row contested with a note.", "subject-tests");
+
+    let contested = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => id.as_str(),
+               "mutation" => "contest",
+               "note" => "disputed by a later meeting recording"],
+        &registry,
+        &ledger,
+    )
+    .expect("contest with note must succeed");
+    assert!(is_success(&contested), "got: {contested:?}");
+
+    let coord = registry.coord.lock().unwrap();
+    let estate = coord
+        .estate_for(&registry.default.handle)
+        .expect("estate_for");
+    let trail = estate.audit_trail(&id).expect("audit trail");
+    assert!(
+        trail
+            .iter()
+            .any(|e| e.reason.as_deref() == Some("disputed by a later meeting recording")),
+        "the note must reach the contest audit row's reason; trail reasons: {:?}",
+        trail.iter().map(|e| e.reason.clone()).collect::<Vec<_>>()
+    );
+}

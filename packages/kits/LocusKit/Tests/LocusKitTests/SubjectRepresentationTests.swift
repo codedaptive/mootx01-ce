@@ -348,4 +348,186 @@ extension SubjectRepresentationTests {
         try await store.addDrawer(d, now: Date())
         return d.id
     }
+
+    // MARK: - Custody audit row (MXE-SK — Codex cc90c5dcecb081918c159788e1ffb3d6)
+    //
+    // Cross-port equivalence: the Rust twin suite
+    // (subject_representation_tests.rs) asserts the same
+    // (verb, actor, reason, before == after) tuple for the same inputs.
+
+    @Test("setSubjectRepresentation seals exactly one custody event carrying actor and note")
+    func setSubjectSealsCustodyEventWithNote() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let d = sampleDrawer(id: "scustody1")
+        try await store.addDrawer(d)
+        let rowID = try #require(UUID(uuidString: d.id))
+
+        let before = try await store.auditEventsForRow(rowID).count
+        _ = try await store.setSubjectRepresentation(
+            drawerId: d.id,
+            subject: sampleSubject,
+            pipelineVersion: "ai-v1",
+            at: t(1_700_000_200),
+            changedBy: "test-actor",
+            reason: "meeting moved; subject stale")
+
+        let events = try await store.auditEventsForRow(rowID)
+        #expect(events.count == before + 1, "exactly one custody event sealed")
+        let e = try #require(events.last)
+        #expect(e.verb == "setSubject")
+        #expect(e.actor == "test-actor")
+        #expect(e.reason == "meeting moved; subject stale")
+        // setSubject changes no bitmap and no anchor: before == after on
+        // every value field.
+        let beforeBitmaps = try #require(e.beforeBitmaps)
+        #expect(beforeBitmaps == e.afterBitmaps)
+        #expect(e.beforeLatticeAnchor == e.afterLatticeAnchor)
+    }
+
+    @Test("setSubjectRepresentation without a note seals a custody event with an absent reason")
+    func setSubjectWithoutNoteSealsRowWithAbsentReason() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let d = sampleDrawer(id: "scustody2")
+        try await store.addDrawer(d)
+        let rowID = try #require(UUID(uuidString: d.id))
+
+        let before = try await store.auditEventsForRow(rowID).count
+        _ = try await store.setSubjectRepresentation(
+            drawerId: d.id,
+            subject: sampleSubject,
+            pipelineVersion: "ai-v1",
+            at: t(1_700_000_200),
+            changedBy: "test-actor")
+
+        let events = try await store.auditEventsForRow(rowID)
+        #expect(
+            events.count == before + 1,
+            "an absent reason is not an absent row: the custody event still seals")
+        let e = try #require(events.last)
+        #expect(e.verb == "setSubject")
+        #expect(e.reason == nil, "no note supplied ⇒ absent reason")
+    }
+
+    @Test("setSubjectRepresentation on an unknown id seals no custody event")
+    func setSubjectUnknownIDSealsNoEvent() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let ghost = "99999999-9999-4999-8999-999999999999"
+        let updated = try await store.setSubjectRepresentation(
+            drawerId: ghost, subject: "x", pipelineVersion: "ai-v1",
+            at: t(1_700_000_200), changedBy: "test-actor")
+        #expect(updated == 0)
+        let events = try await store.auditEventsForRow(try #require(UUID(uuidString: ghost)))
+        #expect(events.isEmpty, "no row updated ⇒ no custody event")
+    }
+
+    @Test("a forced audit-append failure leaves the subject unchanged (atomicity)")
+    func setSubjectFailedAuditAppendRollsBackSubjectWrite() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        // Wrap the real backend so the custody append fails at the
+        // production call site INSIDE the transaction: the column write
+        // must roll back with it. Genesis "capture" events still seal, so
+        // the fixture drawer can be added normally.
+        let failing = SetSubjectAuditFailingStorage(inner: TestStorage.sqlite(url))
+        let store = try await DrawerStore(storage: failing)
+        let d = sampleDrawer(id: "satomic1")
+        try await store.addDrawer(d)
+
+        await #expect(throws: (any Error).self, "injected audit failure must surface") {
+            _ = try await store.setSubjectRepresentation(
+                drawerId: d.id,
+                subject: "Subject that must not persist.",
+                pipelineVersion: "ai-v1",
+                at: t(1_700_000_100),
+                changedBy: "test-actor",
+                reason: "note that must not persist")
+        }
+
+        // The subject trio must be unchanged (rolled back with the append).
+        let after = try await store.getDrawer(id: d.id)
+        #expect(after?.subject == nil, "subject column must roll back")
+        #expect(after?.subjectPipelineVersion == nil)
+        #expect(after?.subjectAt == nil)
+
+        // And no setSubject custody event may exist.
+        let events = try await store.auditEventsForRow(try #require(UUID(uuidString: d.id)))
+        #expect(
+            events.allSatisfy { $0.verb != "setSubject" },
+            "no setSubject custody event may survive the rollback")
+    }
+}
+
+// MARK: - Failure-injection storage (MXE-SK atomicity test support)
+
+/// `AuditLog` wrapper that refuses to append `"setSubject"` events and
+/// delegates everything else, so gated-capture genesis events still seal.
+private struct SetSubjectAppendRefusingAuditLog: AuditLog {
+    let inner: any AuditLog
+
+    struct InjectedAuditFailure: Error {}
+
+    func append(_ event: AuditEvent) async throws {
+        if event.verb == "setSubject" { throw InjectedAuditFailure() }
+        try await inner.append(event)
+    }
+    func appendBatch(_ events: [AuditEvent]) async throws {
+        try await inner.appendBatch(events)
+    }
+    func iterate(after: HLC?, rowID: UUID?, limit: Int) async throws -> [AuditEvent] {
+        try await inner.iterate(after: after, rowID: rowID, limit: limit)
+    }
+    func eventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
+        try await inner.eventsForRow(rowID)
+    }
+    func count() async throws -> Int {
+        try await inner.count()
+    }
+}
+
+/// Transaction view handed to the block: same row/blob stores as the real
+/// transaction, failing audit log.
+private struct SetSubjectFailingTransaction: StorageTransaction {
+    let inner: any StorageTransaction
+    var rowStore: any RowStore { inner.rowStore }
+    var blobStore: any BlobStore { inner.blobStore }
+    var auditLog: any AuditLog { SetSubjectAppendRefusingAuditLog(inner: inner.auditLog) }
+}
+
+/// Storage wrapper over a real backend whose `auditLog` (both direct and
+/// transactional) refuses `"setSubject"` appends.
+private struct SetSubjectAuditFailingStorage: Storage {
+    let inner: any Storage
+
+    var configuration: EstateConfiguration { inner.configuration }
+    var rowStore: any RowStore { inner.rowStore }
+    var blobStore: any BlobStore { inner.blobStore }
+    var auditLog: any AuditLog { SetSubjectAppendRefusingAuditLog(inner: inner.auditLog) }
+    var observer: any StorageObserver { inner.observer }
+
+    func open(schema: SchemaDeclaration) async throws {
+        try await inner.open(schema: schema)
+    }
+    func close() async {
+        await inner.close()
+    }
+    func transaction<T: Sendable>(
+        isolation: IsolationLevel,
+        _ block: @Sendable (any StorageTransaction) async throws -> T
+    ) async throws -> T {
+        try await inner.transaction(isolation: isolation) { txn in
+            try await block(SetSubjectFailingTransaction(inner: txn))
+        }
+    }
+    func currentSchemaVersion() async throws -> Int {
+        try await inner.currentSchemaVersion()
+    }
+    func currentSchemaVersion(for kitID: String) async throws -> Int {
+        try await inner.currentSchemaVersion(for: kitID)
+    }
+    func migrate(to schema: SchemaDeclaration) async throws {
+        try await inner.migrate(to: schema)
+    }
 }

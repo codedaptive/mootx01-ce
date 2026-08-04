@@ -269,3 +269,77 @@ fn tier_aware_debt_enumeration() {
     assert_eq!(got, want);
     assert_eq!(store.count_subject_debt_including(&tiers).unwrap(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Custody audit row (MXE-SK — Codex cc90c5dcecb081918c159788e1ffb3d6).
+// The atomicity half (forced audit-append failure rolls back the column
+// write) lives inline in drawer_store_inmemory.rs, where the pub(crate)
+// core constructor allows storage injection:
+// `set_subject_failed_audit_append_rolls_back_subject_write`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_subject_seals_exactly_one_custody_event_with_note() {
+    let store = new_store();
+    let id = make_id();
+    store.add_drawer(&sample_drawer(&id), NOW).expect("add");
+
+    let before = store.audit_events_for_row(&id).expect("trail before").len();
+    store
+        .set_subject_representation(
+            &id,
+            SAMPLE_SUBJECT,
+            AI_V1,
+            NOW + 200,
+            TEST_ACTOR,
+            Some("meeting moved; subject stale"),
+        )
+        .expect("set subject");
+
+    let events = store.audit_events_for_row(&id).expect("trail after");
+    assert_eq!(events.len(), before + 1, "exactly one custody event sealed");
+    let e = events.last().expect("custody event");
+    assert_eq!(e.verb, "setSubject");
+    assert_eq!(e.actor, TEST_ACTOR);
+    assert_eq!(e.reason.as_deref(), Some("meeting moved; subject stale"));
+    // setSubject changes no bitmap and no anchor: before == after on
+    // every value field. Cross-port equivalence: the Swift twin asserts
+    // the same (verb, actor, reason, before==after) tuple for the same
+    // inputs (SubjectRepresentationTests).
+    assert_eq!(e.before_bitmaps, Some(e.after_bitmaps));
+    assert_eq!(e.before_lattice_anchor, Some(e.after_lattice_anchor));
+}
+
+#[test]
+fn set_subject_without_note_seals_row_with_absent_reason() {
+    let store = new_store();
+    let id = make_id();
+    store.add_drawer(&sample_drawer(&id), NOW).expect("add");
+
+    let before = store.audit_events_for_row(&id).expect("trail before").len();
+    store
+        .set_subject_representation(&id, SAMPLE_SUBJECT, AI_V1, NOW + 200, TEST_ACTOR, None)
+        .expect("set subject");
+
+    let events = store.audit_events_for_row(&id).expect("trail after");
+    assert_eq!(
+        events.len(),
+        before + 1,
+        "an absent reason is not an absent row: the custody event still seals"
+    );
+    let e = events.last().expect("custody event");
+    assert_eq!(e.verb, "setSubject");
+    assert_eq!(e.reason, None, "no note supplied ⇒ absent reason");
+}
+
+#[test]
+fn set_subject_unknown_id_seals_no_audit_event() {
+    let store = new_store();
+    let ghost = "99999999-9999-4999-8999-999999999999";
+    let updated = store
+        .set_subject_representation(ghost, "x", AI_V1, NOW + 200, TEST_ACTOR, None)
+        .expect("unknown id returns Ok(0)");
+    assert_eq!(updated, 0);
+    let events = store.audit_events_for_row(ghost).expect("trail");
+    assert!(events.is_empty(), "no row updated ⇒ no custody event");
+}
