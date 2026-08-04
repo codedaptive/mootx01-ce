@@ -535,7 +535,7 @@ mod tests {
             values.insert("provenanceBitmap".into(), TypedValue::Bitmap(0));
             values.insert("filedAt".into(), TypedValue::Timestamp(NOW));
             storage.row_store().insert("kg_facts", values).unwrap();
-            storage.close();
+            let _ = storage.close();
         }
 
         let config = EstateConfiguration::new(
@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(text_value(&rows[0], "addedBy"), "mootx01");
         assert!(text_value(&rows[0], "sourceDrawerID").is_empty());
-        storage.close();
+        let _ = storage.close();
         let _ = std::fs::remove_file(&path);
     }
 }

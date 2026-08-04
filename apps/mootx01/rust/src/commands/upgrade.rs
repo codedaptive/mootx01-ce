@@ -170,7 +170,7 @@ fn run_kg_fact_identity_backfill() {
             &|key| vault_kit::drawer_mapping::DrawerMapping::lineage_id(key),
         )
         .map_err(|e| e.to_string())?;
-        storage.close();
+        let _ = storage.close();
         Ok(report)
     })();
 
