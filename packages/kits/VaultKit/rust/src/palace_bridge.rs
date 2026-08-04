@@ -1800,4 +1800,155 @@ mod tests {
         assert!(message.contains("1024"), "must name the LIMIT: {message}");
         assert!(!message.contains("malformed"), "{message}");
     }
+
+    // -----------------------------------------------------------------
+    // MXE-MI: palace re-import after the kg_facts identity backfill.
+    // Twin of Swift `PalaceReimportAfterBackfillTests` — the estate is
+    // put into the PRE-MXE-KH RUST shape by hand (keys AND triple ids
+    // back in `sourceDrawerID`, identity columns cleared), the backfill
+    // runs with the REAL resolver `mootx01 upgrade` injects, and
+    // re-import must file zero duplicates. The unmigrated-shape test
+    // documents that MXE-KH's fallback anchor ladder already keeps the
+    // unmigrated shape duplicate-free — the backfill is what removes
+    // dedup's dependence on that legacy fallback.
+    // -----------------------------------------------------------------
+
+    /// Like open_estate, but keeps the concrete store so the reshape and
+    /// backfill can reach row-level storage.
+    fn open_estate_with_store() -> (EstateCoordinator, EstateHandle, Arc<InMemoryDrawerStore>) {
+        let mut coordinator = EstateCoordinator::new();
+        let store = Arc::new(InMemoryDrawerStore::new(NOW, None).expect("InMemoryDrawerStore::new"));
+        let handle = coordinator
+            .open(
+                Arc::clone(&store) as Arc<dyn DrawerStore>,
+                OwnerCredentials::new("backfill-reimport-rust-tests"),
+                0,
+                100,
+            )
+            .expect("open estate");
+        (coordinator, handle, store)
+    }
+
+    /// Rewrite every imported fact into the pre-KH Rust shape: the palace
+    /// key (or, when the triple named no key, the triple's own id) back
+    /// in `sourceDrawerID` with the identity columns cleared. Returns the
+    /// (keyed, triple-id) fact-id lists.
+    fn reshape_to_pre_kh(
+        coordinator: &EstateCoordinator,
+        handle: &EstateHandle,
+        store: &InMemoryDrawerStore,
+    ) -> (Vec<String>, Vec<String>) {
+        use persistence_kit::predicate::StoragePredicate;
+        use persistence_kit::types::{Column, TypedValue};
+        let storage = DrawerStore::storage(store).expect("in-memory store exposes storage");
+        let rows = storage.row_store();
+        let mut keyed = Vec::new();
+        let mut triple_ids = Vec::new();
+        for f in coordinator.recall_kg_facts(handle).unwrap() {
+            // Pre-KH Rust effective_src: the source key when the triple
+            // named one, else the triple's own id.
+            let legacy = if !f.foreign_source_key.is_empty() {
+                keyed.push(f.id.clone());
+                f.foreign_source_key.clone()
+            } else if !f.foreign_record_id.is_empty() {
+                triple_ids.push(f.id.clone());
+                f.foreign_record_id.clone()
+            } else {
+                continue;
+            };
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("sourceDrawerID".to_string(), TypedValue::Text(legacy));
+            values.insert("foreignSourceKey".to_string(), TypedValue::Text(String::new()));
+            values.insert("foreignRecordID".to_string(), TypedValue::Text(String::new()));
+            rows.update(
+                "kg_facts",
+                values,
+                &StoragePredicate::Eq(
+                    Column::new("kg_facts", "id"),
+                    TypedValue::Text(f.id.clone()),
+                ),
+            )
+            .unwrap();
+        }
+        (keyed, triple_ids)
+    }
+
+    #[test]
+    fn reimport_against_unmigrated_pre_kh_shape_files_zero_duplicates() {
+        let palace_root = fixture_palace_root();
+        let (mut coordinator, handle, store) = open_estate_with_store();
+        PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let (keyed, triple_ids) = reshape_to_pre_kh(&coordinator, &handle, &store);
+        assert!(keyed.len() >= 3, "t_fleet main + temporal siblings carry the key");
+        assert!(triple_ids.len() >= 2, "t_minimal main + temporal sibling carry the id");
+        let count_before = coordinator.recall_kg_facts(&handle).unwrap().len();
+
+        let second = PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let count_after = coordinator.recall_kg_facts(&handle).unwrap().len();
+        assert_eq!(
+            count_after, count_before,
+            "the source_drawer_id fallback in the anchor ladder must keep the unmigrated shape duplicate-free"
+        );
+        assert!(second.items_skipped > 0);
+    }
+
+    #[test]
+    fn reimport_after_backfill_files_zero_duplicates() {
+        let palace_root = fixture_palace_root();
+        let (mut coordinator, handle, store) = open_estate_with_store();
+        PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let (keyed, triple_ids) = reshape_to_pre_kh(&coordinator, &handle, &store);
+        let count_before = coordinator.recall_kg_facts(&handle).unwrap().len();
+
+        // The backfill, with the REAL resolver `mootx01 upgrade` injects.
+        let storage = DrawerStore::storage(store.as_ref()).expect("storage");
+        let report = locus_kit::kg_fact_identity_backfill::run(
+            storage.as_ref(),
+            &crate::drawer_mapping::DrawerMapping::lineage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            report.foreign_palace_keys,
+            keyed.len(),
+            "every reshaped palace key must classify as class B via the real resolver"
+        );
+        assert_eq!(
+            report.triple_ids,
+            triple_ids.len(),
+            "every reshaped triple id must classify as class C via its temporal sibling"
+        );
+        assert_eq!(report.unclassified, 0);
+
+        // Migrated invariants: values back in their columns, anchors
+        // unchanged, sourceDrawerID cleared.
+        for f in coordinator.recall_kg_facts(&handle).unwrap() {
+            if keyed.contains(&f.id) {
+                assert_eq!(f.foreign_source_key, "drawer_alpha_0001");
+                assert!(f.source_drawer_id.is_empty());
+                assert_eq!(dedup_anchor(&f), "drawer_alpha_0001");
+            }
+            if triple_ids.contains(&f.id) {
+                assert_eq!(f.foreign_record_id, "t_minimal_0002");
+                assert!(f.source_drawer_id.is_empty());
+                assert_eq!(dedup_anchor(&f), "t_minimal_0002");
+            }
+        }
+
+        // The regression this mission exists for: re-import files nothing.
+        let second = PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let count_after = coordinator.recall_kg_facts(&handle).unwrap().len();
+        assert_eq!(
+            count_after, count_before,
+            "re-import against the migrated estate must file zero duplicate facts"
+        );
+        assert!(second.items_skipped > 0);
+    }
 }
