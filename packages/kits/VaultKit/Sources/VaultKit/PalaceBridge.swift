@@ -307,7 +307,7 @@ public struct PalaceBridge: Sendable {
             // duplicate all of them on the next import.
             let existingKGFacts = try await kit.recallKGFacts(handle)
             var existingKGSignatures: Set<String> = Set(existingKGFacts.map {
-                let anchor = $0.foreignSourceKey.isEmpty ? $0.sourceDrawerID : $0.foreignSourceKey
+                let anchor = Self.dedupAnchor(for: $0)
                 return "\($0.subject)\u{1F}\($0.predicate)\u{1F}\($0.object)\u{1F}\(anchor)"
             })
 
@@ -796,6 +796,22 @@ public struct PalaceBridge: Sendable {
                 now: now
             )
         }
+    }
+
+    /// The value that occupies the fourth slot of a stored fact's CAND-049
+    /// signature.
+    ///
+    /// A fact this importer filed carries the palace key in `foreignSourceKey`.
+    /// A fact already in the estate from an importer that predates that column
+    /// carries the same value in `sourceDrawerID`. Both shapes must produce the
+    /// identical string, or a re-import would fail to recognise what it
+    /// imported before and duplicate every row.
+    ///
+    /// A locally-filed fact has no foreign key and its `sourceDrawerID` is a
+    /// local drawer id (or empty) — returning it is what the importer has
+    /// always compared against, so local rows are unaffected.
+    static func dedupAnchor(for fact: KGFact) -> String {
+        fact.foreignSourceKey.isEmpty ? fact.sourceDrawerID : fact.foreignSourceKey
     }
 
     // MARK: - Snapshot helpers (mirrors VaultBridge private helpers)

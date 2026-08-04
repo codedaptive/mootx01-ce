@@ -112,6 +112,29 @@ pub struct PalaceBridge<'a> {
     limits: MemPalaceImportLimits,
 }
 
+/// The value that occupies the fourth slot of a stored fact's CAND-049
+/// signature.
+///
+/// A fact this importer filed carries the palace key in `foreign_source_key`,
+/// or — when the triple named no source key — the triple's own id in
+/// `foreign_record_id`. A fact already in the estate from an importer that
+/// predates those columns carries the same value in `source_drawer_id`. All
+/// shapes must produce the identical string, or a re-import would fail to
+/// recognise what it imported before and duplicate every row.
+///
+/// A locally-filed fact has no foreign origin and its `source_drawer_id` is a
+/// local drawer id (or empty) — returning it is what the importer has always
+/// compared against, so local rows are unaffected.
+pub(crate) fn dedup_anchor(f: &locus_kit::kg_fact::KGFact) -> &str {
+    if !f.foreign_source_key.is_empty() {
+        f.foreign_source_key.as_str()
+    } else if !f.foreign_record_id.is_empty() {
+        f.foreign_record_id.as_str()
+    } else {
+        f.source_drawer_id.as_str()
+    }
+}
+
 impl<'a> PalaceBridge<'a> {
     /// Create a new `PalaceBridge` wrapping the given coordinator, at the
     /// shipping import limits.
@@ -385,16 +408,12 @@ impl<'a> PalaceBridge<'a> {
             let mut existing_kg_signatures: HashSet<String> = existing_kg_facts
                 .iter()
                 .map(|f| {
-                    let anchor = if !f.foreign_source_key.is_empty() {
-                        f.foreign_source_key.as_str()
-                    } else if !f.foreign_record_id.is_empty() {
-                        f.foreign_record_id.as_str()
-                    } else {
-                        f.source_drawer_id.as_str()
-                    };
                     format!(
                         "{}\x1f{}\x1f{}\x1f{}",
-                        f.subject, f.predicate, f.object, anchor
+                        f.subject,
+                        f.predicate,
+                        f.object,
+                        dedup_anchor(f)
                     )
                 })
                 .collect();
@@ -1384,6 +1403,55 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&synthetic_palace).ok();
+    }
+
+    /// The CAND-049 anchor must be identical however a row was written.
+    /// `source_drawer_id` used to hold the foreign palace key; it now holds a
+    /// local drawer id or nothing, and the key lives in `foreign_source_key`.
+    /// If the signature only read the new fields, the first re-import against
+    /// an estate populated by the previous importer would match nothing and
+    /// duplicate every fact it had already imported.
+    #[test]
+    fn dedup_anchor_is_stable_across_row_shapes() {
+        let make = |src: &str, key: &str, rec: &str| locus_kit::kg_fact::KGFact {
+            foreign_source_key: key.to_string(),
+            foreign_record_id: rec.to_string(),
+            ..locus_kit::kg_fact::KGFact::new(
+                "f1".to_string(),
+                "fleet".to_string(),
+                "works_with".to_string(),
+                "skippy".to_string(),
+                src.to_string(),
+                0,
+            )
+        };
+
+        // A row this importer wrote: key in foreign_source_key.
+        let current = make("", "drawer_alpha_0001", "t_fleet_0001");
+        assert_eq!(dedup_anchor(&current), "drawer_alpha_0001");
+
+        // A row written before those columns existed: same key, old home.
+        let legacy = make("drawer_alpha_0001", "", "");
+        assert_eq!(
+            dedup_anchor(&legacy),
+            dedup_anchor(&current),
+            "a pre-change row must sign identically to the row this importer writes"
+        );
+
+        // An anchorless triple: Rust substitutes the triple's own id, both in
+        // the signature and in storage.
+        let anchorless = make("", "", "t_fleet_0001");
+        assert_eq!(dedup_anchor(&anchorless), "t_fleet_0001");
+        let anchorless_legacy = make("t_fleet_0001", "", "");
+        assert_eq!(dedup_anchor(&anchorless_legacy), dedup_anchor(&anchorless));
+
+        // A locally-filed fact still compares on its own drawer id.
+        let local = make("6E7F1A2B-local-drawer", "", "");
+        assert_eq!(dedup_anchor(&local), "6E7F1A2B-local-drawer");
+
+        // A sourceless fact anchors on the empty string, as it always has.
+        let sourceless = make("", "", "");
+        assert_eq!(dedup_anchor(&sourceless), "");
     }
 
     /// CAND-049: re-importing an identical KG fact does not create a duplicate.

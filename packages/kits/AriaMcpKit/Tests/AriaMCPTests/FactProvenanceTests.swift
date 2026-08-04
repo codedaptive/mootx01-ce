@@ -133,8 +133,10 @@ struct FactProvenanceIdentityTests {
         // Nothing was filed, so the fact surface stays empty.
         let searchResult = try await dispatcher.runFactSearch(["query": .string("Tokyo")])
         let body = factText(of: searchResult)
+        // The search header echoes the query verbatim; the fact ROW is what
+        // must be absent, so match on the predicate.
         #expect(
-            !body.contains("Tokyo"),
+            !body.contains("is_capital_of"),
             "a rejected write must leave no fact behind; got: \(body)"
         )
     }

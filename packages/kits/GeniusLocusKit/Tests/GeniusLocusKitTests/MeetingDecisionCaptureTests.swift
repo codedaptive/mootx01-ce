@@ -44,6 +44,62 @@ struct MeetingDecisionCaptureTests {
             eventTime: Date(timeIntervalSince1970: 1_690_000_000)))
     }
 
+    /// A decision extracted from a Secret transcript is itself Secret.
+    ///
+    /// The seam routes through `captureKGFact`, so the decision inherits the
+    /// transcript drawer's adjective and provenance bitmaps rather than filing
+    /// at the Normal default. Against pre-MXE-KH code the filed fact carried a
+    /// zero bitmap and was disclosed by the fact-search ceiling.
+    @Test func decisionsFromASecretTranscriptInheritSecrecy() async throws {
+        let (kit, handle) = try await openEstate(owner: "meeting-secrecy")
+        let estate = try await kit.estate(for: handle)
+        let secretTranscript = try await estate.capture(CaptureFrame(
+            content: "Meeting transcript, closed session.",
+            channel: .typed,
+            room: "meeting-tests",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "meeting-decision-tests",
+            embeddingModelID: "test-model-v1",
+            sensitivity: .secret,
+            eventTime: Date(timeIntervalSince1970: 1_690_000_000)))
+
+        let report = try await kit.captureMeetingDecisions(
+            in: handle,
+            transcript: """
+            Attendees: the platform group.
+            Decision: project-phoenix.launch_date = 2026-09-15
+            """,
+            sourceDrawerID: secretTranscript.id,
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(report.filedFactIDs.count == 1)
+
+        let facts = try await kit.recallKGFacts(handle)
+        let filed = try #require(facts.first { $0.id == report.filedFactIDs[0] })
+        #expect(filed.adjectiveSensitivity == .secret,
+                "a decision from a Secret transcript must itself be Secret")
+        #expect(filed.adjectiveBitmap == secretTranscript.adjectiveBitmap,
+                "the transcript's adjective bitmap must be carried verbatim")
+        #expect(!filed.adjectiveSensitivity.isBulkExportable,
+                "a Secret decision must fall outside the disclosure ceiling")
+    }
+
+    /// A decision whose source drawer does not exist fails the write rather
+    /// than filing at the Normal default.
+    @Test func decisionWithMissingSourceDrawerFails() async throws {
+        let (kit, handle) = try await openEstate(owner: "meeting-missing-source")
+        await #expect(throws: GeniusLocusKitError.sourceDrawerNotFound(
+            drawerID: "no-such-drawer")) {
+            _ = try await kit.captureMeetingDecisions(
+                in: handle,
+                transcript: """
+                Attendees: the platform group.
+                Decision: project-phoenix.launch_date = 2026-09-15
+                """,
+                sourceDrawerID: "no-such-drawer",
+                now: Date(timeIntervalSince1970: 1_700_000_000))
+        }
+    }
+
     /// Golden deterministic fact id (generated once, pinned in both ports).
     @Test func goldenFactID() {
         #expect(GeniusLocusKit.meetingDecisionFactID(

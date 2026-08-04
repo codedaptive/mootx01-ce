@@ -181,6 +181,7 @@ struct LexiconGapsTests {
                     "arguments": .object([
                         "content": .string("fixture drawer \(label)"),
                         "location": .string("fixtures/\(label)"),
+                        "subject": .string("fixture anchor drawer \(label)"),
                     ]),
                 ])
             ))
@@ -193,8 +194,15 @@ struct LexiconGapsTests {
                 result.objectValue?["content"]?.arrayValue?.first?
                     .objectValue?["text"]?.stringValue
             )
-            // "filed memory <drawer-id>" — the id is the trailing token.
-            sourceIDs.append(String(text.split(separator: " ").last ?? ""))
+            // The body opens with "filed memory <drawer-id>" and may carry
+            // further advisory lines, so read the id from the marker line
+            // rather than taking the last token in the whole payload.
+            let firstLine = String(text.split(separator: "\n").first ?? "")
+            let id = firstLine
+                .replacingOccurrences(of: "filed memory ", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            #expect(!id.isEmpty, "could not read drawer id from: \(text)")
+            sourceIDs.append(id)
         }
         for (subject, source) in [("calendar.event.ev-1", sourceIDs[0]),
                                   ("calendar.event.ev-10", sourceIDs[1])] {
