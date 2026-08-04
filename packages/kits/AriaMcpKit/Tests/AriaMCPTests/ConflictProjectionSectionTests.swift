@@ -5,7 +5,7 @@
 // moot_dream / moot_hunt_contradictions (one renderer, M0 §7), so the
 // lens is the cheapest end-to-end probe: no vector store required.
 // Ledger case F13 (restricted+normal pair redaction) lives here per
-// DCP_M0_CONTRACT §10; the secret-ceiling counted-but-silent case rides
+// SUBSTRATEML_SPEC § 5.29; the secret-ceiling counted-but-silent case rides
 // along. Rust twin: dispatch_tests conflict-projection cases.
 
 import Testing

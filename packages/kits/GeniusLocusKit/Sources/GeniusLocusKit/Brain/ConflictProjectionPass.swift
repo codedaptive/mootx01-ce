@@ -3,8 +3,8 @@
 // DCP M2 — the typed lane's projection step: KGFacts → ConflictSignatures
 // plus the in-memory coordinate index that buckets signatures by
 // (key, dimension) so evaluation is pairwise-within-bucket, never O(N²)
-// over the whole fact table. Contract: docs_internal/analysis/
-// DCP_M0_CONTRACT.md §2–§5; the value/identity types live in
+// over the whole fact table. Contract:
+// docs/reference/SUBSTRATEML_SPEC.md § 5.27; the value/identity types live in
 // SubstrateML/ConflictProjection.swift (M1).
 //
 // This layer is PURE and deterministic: facts and per-drawer event times

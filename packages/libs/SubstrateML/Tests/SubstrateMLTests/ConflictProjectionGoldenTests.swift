@@ -5,7 +5,7 @@ import Testing
 /// the CROSS-PORT FIXTURE: `conflict_projection_golden.rs` asserts the
 /// byte-identical strings from the same inputs, so the two ports cannot
 /// silently diverge in canonical values, outcome classes, reason codes,
-/// or stable identities. Ledger cases (DCP_M0_CONTRACT §10): F01–F05,
+/// or stable identities. Ledger cases (SUBSTRATEML_SPEC § 5.29): F01–F05,
 /// F07–F10, F17, F20.
 @Suite struct ConflictProjectionGoldenTests {
 

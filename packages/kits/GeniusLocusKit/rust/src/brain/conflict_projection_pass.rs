@@ -3,8 +3,8 @@
 // DCP M2 — the typed lane's projection step: KGFacts → ConflictSignatures
 // plus the in-memory coordinate index that buckets signatures by
 // (key, dimension) so evaluation is pairwise-within-bucket, never O(N²)
-// over the whole fact table. Contract: docs_internal/analysis/
-// DCP_M0_CONTRACT.md §2–§5; the value/identity types live in
+// over the whole fact table. Contract:
+// docs/reference/SUBSTRATEML_SPEC.md § 5.27; the value/identity types live in
 // substrate_ml::conflict_projection (M1).
 //
 // This layer is PURE and deterministic: facts and per-drawer event times
@@ -230,7 +230,7 @@ impl ConflictCoordinateIndex {
 // DCP M2 tests — Rust leg. The hardcoded key/transaction-time/stableID
 // literals are the CROSS-PORT FIXTURE shared with
 // ConflictProjectionPassTests.swift. Ledger case F16 lives here per
-// DCP_M0_CONTRACT §10.
+// SUBSTRATEML_SPEC § 5.29.
 #[cfg(test)]
 mod tests {
     use super::*;

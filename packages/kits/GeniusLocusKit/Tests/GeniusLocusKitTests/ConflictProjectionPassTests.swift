@@ -9,7 +9,7 @@ import SubstrateML
 /// `brain/conflict_projection_pass.rs` asserts the byte-identical strings
 /// from the same fact, so the two ports cannot silently diverge in key
 /// derivation, units handling, or identity. Ledger case F16 (oversized
-/// bucket → truncation diagnostics) lives here per DCP_M0_CONTRACT §10.
+/// bucket → truncation diagnostics) lives here per SUBSTRATEML_SPEC § 5.29.
 @Suite struct ConflictProjectionPassTests {
 
     static func fact(

@@ -1,8 +1,7 @@
 // ConflictProjection.swift
 //
 // Deterministic Contradiction Projection v0.1 — the substrate core
-// (DCP M1; contract: docs_internal/analysis/DCP_M0_CONTRACT.md; spec
-// E7EE4031). Pure value types and pure functions: no database, clock,
+// (contract: docs/reference/SUBSTRATEML_SPEC.md § 5.27). Pure value types and pure functions: no database, clock,
 // network, locale, or random dependency anywhere in this file.
 //
 // The mathematical contract: a set of claims C is contradictory under

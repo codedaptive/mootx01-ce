@@ -1,6 +1,7 @@
 // MeetingDecisionExtractor.swift
 //
-// DCP M6 — the controlled-decision grammar (DCP_M0_CONTRACT §9, locked).
+// The controlled-decision grammar, locked in
+// docs/reference/SUBSTRATEML_SPEC.md § 5.28.
 // Line-anchored, one decision per line; anything the grammar cannot
 // prove it understands resolves to Unknown WITH a reason — the extractor
 // never guesses, because its output feeds the typed proving lane

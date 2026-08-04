@@ -5,7 +5,7 @@ import Testing
 /// `meeting_decision_extractor.rs` tests one-for-one; the accepted
 /// canonical values and reject reasons are the cross-port fixture.
 /// Ledger cases F11 (pronoun entity) and F12 (quoted/hypothetical)
-/// live here per DCP_M0_CONTRACT §10.
+/// live here per SUBSTRATEML_SPEC § 5.29.
 @Suite struct MeetingDecisionExtractorTests {
 
     static let registry = ConflictRuleRegistry.v01

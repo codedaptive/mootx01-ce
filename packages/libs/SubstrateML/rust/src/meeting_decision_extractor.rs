@@ -1,6 +1,7 @@
 //! meeting_decision_extractor.rs — Rust twin of MeetingDecisionExtractor.swift.
 //!
-//! DCP M6 — the controlled-decision grammar (DCP_M0_CONTRACT §9, locked).
+//! The controlled-decision grammar, locked in
+//! docs/reference/SUBSTRATEML_SPEC.md § 5.28.
 //! Line-anchored, one decision per line; anything the grammar cannot
 //! prove it understands resolves to Unknown WITH a reason — the extractor
 //! never guesses, because its output feeds the typed proving lane
@@ -259,7 +260,7 @@ fn finish(
 // DCP M6 golden corpus — Rust leg. Mirrors
 // MeetingDecisionExtractorTests.swift one-for-one; the accepted
 // canonical values and reject reasons are the cross-port fixture.
-// Ledger cases F11 and F12 live here per DCP_M0_CONTRACT §10.
+// Ledger cases F11 and F12 live here per SUBSTRATEML_SPEC § 5.29.
 #[cfg(test)]
 mod tests {
     use super::*;

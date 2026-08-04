@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Specification
-version: 1.0.2
+version: 1.1.0
 status: active
-date: 2026-07-16
+date: 2026-08-04
 description: "Behavioral specification for SubstrateML: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1007,6 +1007,138 @@ z-scores because of the 0.6745 normalization above.
 path is non-conformance-critical (side-effect only); monitoring on/off
 conformance is verified by `VizGraphSignalsTests.swift` / `viz_graph_signals_tests.rs`.
 
+### § 5.27 ConflictProjection
+
+Deterministic Contradiction Projection (DCP) v0.1 — the typed lane that proves
+contradiction between two recorded claims, as distinct from `ConflictCue`
+(§ 5.25), which only *screens* text and never proves. Pure value types and pure
+functions: no database, clock, network, locale, or randomness.
+
+The mathematical contract: a set of claims C is contradictory under rule set R
+exactly when R ∪ C is unsatisfiable. v0.1 proves the pairwise
+functional-dependency subset — same canonical key, same dimension, overlapping
+scope and time, mutually exclusive normalized values — and reports everything
+weaker as candidate evidence, never as proof.
+
+**Registered dimensions (v0.1 registry).** All rules share: scope policy =
+exact-equal canonical scoped key; minimum proof trust = both facts active and
+not below the default trust floor; supersession converts overlap to
+`HistoricalSuccession` only via an ACCEPTED supersedes tunnel or disjoint
+validity.
+
+| ruleID | canonical dimension | type | cardinality | comparator |
+|---|---|---|---|---|
+| `dim.person.employer v1` | `employer` | enum token (closed set, case-insensitive exact) | single | non-equivalent ⇒ exclusive |
+| `dim.person.city v1` | `city` | enum token | single | non-equivalent ⇒ exclusive |
+| `dim.person.role v1` | `role` | enum token | single | non-equivalent ⇒ exclusive |
+| `dim.person.primary_language v1` | `primary language` | enum token | single | non-equivalent ⇒ exclusive |
+| `dim.decision.launch_date v1` | `decision:launch_date` | date (ISO `YYYY-MM-DD` only) | single | date inequality ⇒ exclusive |
+| `dim.decision.budget_ceiling v1` | `decision:budget_ceiling` | decimal + unit (`USD`; `k`/`m` ×1000/×1e6, exact) | single | numeric inequality after exact unit normalization ⇒ exclusive |
+
+Every other dimension resolves to `UnknownRule` — the lookup is total and never
+proves.
+
+**Canonical serialization (identity bytes).** UTF-8, lowercase type tag, `:`
+separator, no whitespace, NFC-normalized text, no locale involvement anywhere:
+
+- boolean → `b:true` | `b:false`
+- integer → `i:<base-10, no leading zeros, "-" for negatives, "0">`
+- decimal → `d:<sign><integer part, no leading zeros>.<fraction, no trailing
+  zeros>`; integral values carry NO fraction and NO dot (`d:1500000`); scale is
+  exact (integer mantissa + exponent, never floating point)
+- duration → `dur:<seconds as integer>` (exact conversion only: h×3600, min×60)
+- date → `dt:<YYYY-MM-DD>` (explicit-format parse only)
+- instant → `ts:<epoch seconds as integer>`
+- version → `v:<numeric dot components, no leading zeros per component>`
+  (compared componentwise numeric)
+- enum token → `e:<ruleID>#<canonical token>` (canonical token = NFC,
+  lowercased, internal whitespace collapsed to one space, trimmed; membership in
+  the rule's closed set is required — a non-member is INVALID for that rule, not
+  a free string)
+- entity id → `id:<canonical scoped id>` (as-is after NFC + trim)
+- string → `s:<NFC, trimmed, whitespace-collapsed; case preserved>` (equality
+  only; never proves contradiction on similarity)
+
+`ConflictSignature.stableID` digests the `|`-joined UTF-8 concatenation
+`dcp1|<ruleID>@<ruleVersion>|<canonical key>|<canonical dimension>|<value
+bytes>|<sourceDrawerID>|<temporal basis bytes>` with SHA-256 (domain-separated
+by the `dcp1|` prefix), rendered lowercase hex. Temporal basis bytes are
+`t:pt:<epoch-secs>`, `t:iv:<from>:<to>`, or `t:unknown`. A RESULT's identity
+sorts the two stableIDs lexicographically and joins them with `+` before
+digesting, so pair order can never change contradiction identity.
+
+**Reason codes (stable API spellings).** `same_coordinate`,
+`value_equivalent`, `values_exclusive`, `cardinality_multi`, `scope_mismatch`,
+`scope_unknown`, `validity_overlap`, `validity_disjoint`, `validity_unknown`,
+`accepted_supersession`, `source_below_threshold`, `parse_ambiguous`,
+`rule_unknown`, `bucket_truncated`. No additions in v0.1.
+
+**Time semantics.** `point(t)` is a closed instant: it overlaps `point(u)` iff
+`t == u`, and overlaps `interval[a,b]` iff `a ≤ t ≤ b`. `interval[a,b]` is
+closed and overlaps by standard closed-interval intersection; malformed (`a > b`)
+is `InvalidInput`. `unknown` is distinct from all-time; every v0.1 rule uses
+`unknown-pair-concurrent`, so two unknowns at the same coordinate are treated as
+concurrent (both filed as current truth) with `validity_unknown` recorded, while
+unknown versus known is `CandidateReview` — never proof.
+
+**Outcome precedence (first match wins).** `InvalidInput`, `Irrelevant`,
+`Agreement`, `CompatiblePlurality`, `HistoricalSuccession`,
+`ProvenContradiction`, `CandidateReview`. Exactly one primary outcome per
+evaluated pair.
+
+**Consumers:** GeniusLocusKit `ConflictProjectionPass` (the projection step and
+its in-memory coordinate index); AriaMcpKit's contradiction report sections.
+
+**Conformance:** cross-port byte equality on canonical values, outcome classes,
+reason codes, and stable identities, via the golden corpus in
+`ConflictProjectionGoldenTests.swift` / `conflict_projection_golden.rs`.
+
+### § 5.28 MeetingDecisionExtractor
+
+DCP's controlled-decision grammar. Line-anchored, one decision per line; the
+entity and dimension must both resolve, and everything else yields `Unknown`.
+Accepted forms:
+
+- `Decision: <entity>.<dimension> = <value>`
+- `Approved <dimension> for <entity>: <value>`
+- `Replaces decision <result-or-fact id>: <entity>.<dimension> = <value>`
+
+Rejected to `Unknown`: a pronoun as entity, an unregistered dimension, an
+ambiguous date form, a quoted span, a line containing `if`, `would`, `might`,
+`reportedly`, or `according to` (hypothetical and reported speech), and multiple
+`=` on one line. Extractor id `dcp-meeting-v1`; output is PROPOSED KGFacts
+through the existing capture API — the extractor never asserts.
+
+### § 5.29 DCP fixture ledger
+
+The normative case list. Each case is cited by ID from the test that owns it, so
+a reader can move between a test and the behavior it pins.
+
+| # | Case | Test home |
+|---|---|---|
+| F01 | identical decision, different wording (same normalized value) → Agreement | golden corpus |
+| F02 | same number, equivalent units (1h vs 60min) → Agreement | golden corpus |
+| F03 | genuinely different numeric values → ProvenContradiction | golden corpus |
+| F04 | true vs false, same proposition → ProvenContradiction | golden corpus |
+| F05 | same dimension, different scopes → Irrelevant (`scope_mismatch`) | golden corpus |
+| F06 | explicit accepted supersession → HistoricalSuccession | GLK evaluator tests |
+| F07 | overlapping validity, still contradictory → ProvenContradiction | golden corpus + GLK |
+| F08 | multi-valued compatible facts → CompatiblePlurality | golden corpus |
+| F09 | unknown predicate cardinality → CandidateReview (`rule_unknown`) | golden corpus |
+| F10 | ambiguous date (`03/04/26`) → InvalidInput/Unknown (`parse_ambiguous`) | golden corpus |
+| F11 | pronoun entity → Unknown (extractor reject) | extractor tests |
+| F12 | quoted/hypothetical decision text → Unknown | extractor tests |
+| F13 | restricted+normal pair redaction | AriaMcpKit report tests |
+| F14 | rejected tunnel; exact repeat suppressed | tunnel lifecycle tests |
+| F15 | rejected tunnel; rule-version change → new instance | tunnel lifecycle tests |
+| F16 | oversized bucket → `bucket_truncated` diagnostics | GLK index tests |
+| F17 | malformed typed values → InvalidInput | golden corpus |
+| F18 | 10/10 planted recovery (four enum dimensions) | benchmarker structured tier |
+| F19 | zero false positives across F01/F02/F05/F06/F08/F12 shapes at benchmark scale | benchmarker adversarial tier |
+| F20 | pair-order invariance of result identity | golden corpus + GLK |
+| F21 | two conflicting controlled transcripts → one proposed contradicts tunnel end to end | GLK integration test |
+| F22 | later explicit replacement → HistoricalSuccession end to end | GLK integration test |
+
 ## § 6 — Error model (conceptual)
 
 ML algorithms here reject out-of-domain input at the public entry
@@ -1133,6 +1265,16 @@ verified by the `conformance*` tests in `VizGraphSignalsTests.swift` and
 `viz_graph_signals_tests.rs`.
 
 ## Changelog
+
+### 1.1.0 -- 2026-08-04
+Additive: promoted the Deterministic Contradiction Projection (DCP) v0.1 locked
+contract into this spec, so SHARED code stops citing a maintainer-only path for
+its normative behavior. New sections: § 5.27 ConflictProjection (v0.1 dimension
+registry, canonical serialization and identity bytes, reason codes, time
+semantics, outcome precedence); § 5.28 MeetingDecisionExtractor (the
+controlled-decision grammar and its rejection set); § 5.29 DCP fixture ledger
+(cases F01-F22 with their test homes, so a test can cite a case ID that a reader
+can resolve).
 
 ### 1.0.2 -- 2026-07-16
 Additive (audit): closed AnomalyDetection behavioral contract gap. Added § 5.26
