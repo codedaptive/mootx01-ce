@@ -4920,14 +4920,24 @@ public actor DrawerStore {
 
     /// Write the subject line of one drawer — all three columns in ONE
     /// atomic UPDATE (PR-01; same invariant family as the distilled quad:
-    /// NULL together or populated together).
+    /// NULL together or populated together) PLUS a sealed `"setSubject"`
+    /// custody audit event, committed together in one transaction (Codex
+    /// cc90c5dcecb081918c159788e1ffb3d6): the column write and the audit
+    /// append succeed or fail together. No supersession cascade, no
+    /// lifecycle or lineage field touched, and no content digest/revision
+    /// bump (the subject is returned, never indexed, so no index job is
+    /// emitted).
     ///
-    /// A subject is a deterministic-or-provenance-labeled function of
-    /// (content, producer contract) — a view, not a belief-state change —
-    /// so like `setDistilledRepresentation` this is a direct column
-    /// write: no audit event, no supersession cascade, no lifecycle or
-    /// lineage field touched, and no content digest/revision bump (the
-    /// subject is returned, never indexed, so no index job is emitted).
+    /// The custody event is constructed directly on the existing
+    /// `AuditEvent` shape (the `"expungeOrphan"` precedent: a custom verb
+    /// string is preserved verbatim in the substrate trail; GLK's
+    /// AuditBridge collapses unknown verbs to `.mutate`). Bitmaps and
+    /// anchor are unchanged, so before == after on every value field —
+    /// the row records WHO changed the subject, WHEN, and WHY. The prior
+    /// subject text is deliberately NOT preserved: the audit shape
+    /// carries no text values, subject is derived from `content`, and
+    /// content has its own audit trail — custody row + content trail
+    /// reconstructs the picture.
     ///
     /// Enforces the subject LENGTH CONTRACT at the storage boundary: the
     /// AI-facing register caps the sentence at 120 characters so contact-
@@ -4935,7 +4945,12 @@ public actor DrawerStore {
     /// last common gate under every producer (filing AI, backfill AI,
     /// model rider) — so no producer can quietly inflate the row budget.
     ///
-    /// Mirrors Rust `set_subject_representation` (twin parity).
+    /// Mirrors Rust `set_subject_representation` (twin parity; audit
+    /// fields match field-for-field). Parity note (eventID): the Rust
+    /// port computes `event_id` via `audit_gate::content_id`
+    /// (deterministic SHA-256); this initializer uses the `AuditEvent`
+    /// default (random UUID) — the same accepted divergence documented at
+    /// `sealExpungeOrphanAudit`.
     ///
     /// - Parameters:
     ///   - drawerId: The drawer row id (`Drawer.id`).
@@ -4944,12 +4959,22 @@ public actor DrawerStore {
     ///     "minillm-v1").
     ///   - at: Generation instant (deterministic clock — passed in, never
     ///     read here).
-    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    ///   - changedBy: Audit actor. `nil` (the default, used by the
+    ///     backfill path through `Estate.setSubjectRepresentation`)
+    ///     resolves to the manifest owner, or "estate" when empty —
+    ///     the same resolution Rust's `Estate::changed_by_or_estate`
+    ///     applies at its seam.
+    ///   - reason: The caller's audit note. `nil` when none was supplied —
+    ///     the audit row is still sealed (absent reason ≠ absent row).
+    /// - Returns: Count of rows updated (0 = drawer not found, in which
+    ///   case no audit event is sealed; 1 = success).
     public func setSubjectRepresentation(
         drawerId: String,
         subject: String,
         pipelineVersion: String,
-        at generatedAt: Date
+        at generatedAt: Date,
+        changedBy: String? = nil,
+        reason: String? = nil
     ) async throws -> Int {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(subject, label: "subject")
@@ -4959,15 +4984,59 @@ public actor DrawerStore {
                 "subject exceeds the \(Self.subjectLengthContract)-character length contract "
                 + "(\(subject.count) characters); the AI-facing register requires one capped sentence")
         }
-        return try await storage.rowStore.update(
-            table: "drawers",
-            values: [
-                "subject": .text(subject),
-                "subject_pipeline_version": .text(pipelineVersion),
-                "subject_at": .timestamp(generatedAt),
-            ],
-            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
-        )
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let actor: String
+        if let changedBy, !changedBy.isEmpty {
+            actor = changedBy
+        } else {
+            let owner = (try? await readManifest().ownerIdentifier) ?? ""
+            actor = owner.isEmpty ? "estate" : owner
+        }
+        let nowMillis = Int64(generatedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        return try await storage.transaction(isolation: .serializable) { txn in
+            // Read the current row inside the transaction for the custody
+            // event's value fields. An absent row preserves the historical
+            // contract: 0, no audit row, no error.
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            guard let row = rows.first else { return 0 }
+            let bitmaps = (
+                adjective: Self.int64(row["adjectiveBitmap"]),
+                operational: Self.int64(row["operationalBitmap"]),
+                provenance: Self.int64(row["provenance"])
+            )
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let event = AuditEvent(
+                estateUuid: estate,
+                rowId: rowUuid,
+                hlc: stamp,
+                verb: "setSubject",
+                beforeBitmaps: bitmaps,
+                afterBitmaps: bitmaps,
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: actor,
+                reason: reason)
+            let updated = try await txn.rowStore.update(
+                table: "drawers",
+                values: [
+                    "subject": .text(subject),
+                    "subject_pipeline_version": .text(pipelineVersion),
+                    "subject_at": .timestamp(generatedAt),
+                ],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+            if updated > 0 {
+                // Blanket fingerprint rule: every `drawers` write refreshes
+                // content_fingerprint in the same transaction.
+                try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
+                try await txn.auditLog.append(event)
+            }
+            return updated
+        }
     }
 
     /// The subject length contract (characters). One capped sentence in

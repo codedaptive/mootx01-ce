@@ -1588,17 +1588,25 @@ public extension Estate {
             guard try await store.getDrawer(id: rowID) != nil else {
                 throw LocusKitError.drawerNotFound(id: rowID)
             }
-            // Backfill/correction write path for the subject trio
-            // (SPEC § 14). No bitmap, no state transition, no
-            // container-fingerprint rollup — the store verb writes the
-            // three columns in one UPDATE and enforces the 1–120-char
-            // contract (B-18). The producer at this boundary is the
-            // calling AI, so the pipeline version is ai-v1.
+            // Correction write path for the subject trio (SPEC § 14).
+            // No bitmap, no state transition, no container-fingerprint
+            // rollup — the store verb writes the three columns and seals
+            // the "setSubject" custody audit event in one transaction,
+            // and enforces the 1–120-char contract (B-18). The caller's
+            // `payload` is the audit note (reason), passed through
+            // verbatim — nil when the caller supplied none; no
+            // synthesized default, so the audit row honestly records
+            // that no reason was given. The producer at this boundary is
+            // the calling AI, so the pipeline version is ai-v1. Mirrors
+            // Rust MutationKind::SetSubject in estate_verbs.rs.
+            let subjectChangedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
             _ = try await store.setSubjectRepresentation(
                 drawerId: rowID,
                 subject: subject,
                 pipelineVersion: DrawerStore.subjectPipelineAIV1,
-                at: Date()
+                at: Date(),
+                changedBy: subjectChangedBy.isEmpty ? "estate" : subjectChangedBy,
+                reason: payload
             )
         }
     }
