@@ -177,11 +177,11 @@ impl BridgeServer {
                     .unwrap_or("")
                     .to_string();
                 if tool_name == SET_PRIMARY_TOOL {
-                    Some(self.handle_set_primary(Some(&parsed), id_value))
+                    Some(self.handle_set_primary(&parsed, id_value))
                 } else if tool_name == STATUS_TOOL {
                     Some(self.handle_status(id_value))
                 } else {
-                    Some(self.handle_tool_call(line, Some(&parsed), &tool_name))
+                    Some(self.handle_tool_call(line, &parsed, &tool_name))
                 }
             }
             // initialize and any other id-bearing method: forward to primary.
@@ -273,7 +273,7 @@ impl BridgeServer {
 
     /// Handles a backend tools/call: forward to primary (response → client), and
     /// for WRITE-classified calls translate + fan out to the secondary.
-    fn handle_tool_call(&mut self, line: &str, parsed: Option<&Value>, tool_name: &str) -> String {
+    fn handle_tool_call(&mut self, line: &str, parsed: &Value, tool_name: &str) -> String {
         let pi = self.primary_idx();
         let start = Instant::now();
         let response = match self.backends[pi].transport.send_and_receive(line) {
@@ -294,7 +294,7 @@ impl BridgeServer {
         self.next_secondary_id += 1;
         let si = self.secondary_idx();
         let translated = Self::translate_call(
-            parsed,
+            Some(parsed),
             BridgeCallType::Write,
             &self.backends[pi].verb_map,
             &self.backends[si].verb_map,
@@ -338,9 +338,9 @@ impl BridgeServer {
 
     /// bridge_set_primary { backend }: flip which backend is primary, effective
     /// immediately, and confirm. Unknown backend → tool-result error.
-    fn handle_set_primary(&mut self, parsed: Option<&Value>, id: Value) -> String {
+    fn handle_set_primary(&mut self, parsed: &Value, id: Value) -> String {
         let requested = parsed
-            .and_then(|v| v.get("params"))
+            .get("params")
             .and_then(|p| p.get("arguments"))
             .and_then(|a| a.get("backend"))
             .and_then(|b| b.as_str());

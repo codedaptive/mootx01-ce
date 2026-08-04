@@ -244,6 +244,31 @@ fn non_envelope_json_is_rejected_and_not_forwarded() {
     assert!(rig.lines_received_by_b().is_empty());
 }
 
+/// A non-envelope that DOES carry an id is refused too, end to end.
+///
+/// Worth wiring separately from the id-less case: an id-bearing frame took the
+/// request path, not the notification path, so it is refused for a different
+/// reason and by a different branch. Only the classifier unifies them, and a
+/// classifier is not the thing the client talks to.
+#[test]
+fn non_envelope_with_an_id_is_rejected_and_not_forwarded() {
+    let rig = StubRig::new("non-envelope-with-id");
+    let marker = r#"{"id":7,"method":"tools/list"}"#; // no `jsonrpc` member
+    let responses = rig.drive(&[marker]);
+
+    assert_eq!(responses.len(), 1);
+    assert_eq!(
+        responses[0]["error"]["code"],
+        serde_json::json!(INVALID_REQUEST_CODE)
+    );
+    // Null even though the frame carried id 7: the frame is not a JSON-RPC
+    // message, so the bytes at `id` are not a JSON-RPC id to echo.
+    assert_eq!(responses[0]["id"], Value::Null);
+
+    assert!(rig.lines_received_by_a().is_empty());
+    assert!(rig.lines_received_by_b().is_empty());
+}
+
 /// A GENUINE notification is unaffected: valid envelope, no id, still forwarded
 /// to both backends, still no response to the client. The fix narrows the
 /// notification path; it must not close it.

@@ -216,6 +216,30 @@ struct BridgeFrameRejectionWiredTests {
         #expect(rig.linesReceivedByB().isEmpty)
     }
 
+    /// A non-envelope that DOES carry an id is refused too, end to end.
+    ///
+    /// Worth wiring separately from the id-less case: an id-bearing frame took
+    /// the request path, not the notification path, so it is refused for a
+    /// different reason and by a different branch. Only the classifier unifies
+    /// them, and a classifier is not the thing the client talks to.
+    @Test func nonEnvelopeWithAnIDIsRejectedAndNotForwarded() async throws {
+        let rig = try StubRig()
+        defer { rig.tearDown() }
+
+        let marker = #"{"id":7,"method":"tools/list"}"#  // no `jsonrpc` member
+        let responses = try await rig.drive([marker])
+
+        try #require(responses.count == 1)
+        #expect(responses[0]["error"]?["code"]
+                == JSONValue.number(Double(BridgeServer.invalidRequestCode)))
+        // Null even though the frame carried id 7: the frame is not a JSON-RPC
+        // message, so the bytes at `id` are not a JSON-RPC id to echo.
+        #expect(responses[0]["id"] == JSONValue.null)
+
+        #expect(rig.linesReceivedByA().isEmpty)
+        #expect(rig.linesReceivedByB().isEmpty)
+    }
+
     /// A GENUINE notification is unaffected: valid envelope, no id, still
     /// forwarded to both backends, still no response to the client. The fix
     /// narrows the notification path; it must not close it.
