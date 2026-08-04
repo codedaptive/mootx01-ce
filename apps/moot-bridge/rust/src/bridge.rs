@@ -14,7 +14,17 @@
 //!   5. bridge-owned calls — handled inside the bridge; never touch a backend.
 //!      bridge_set_primary swaps which backend serves reads + whose response is
 //!      returned, effective on the very next call.
-//!   6. notifications (no id) — forwarded to BOTH backends, no response awaited.
+//!   6. notifications — a VALID JSON-RPC envelope with no id is forwarded to
+//!      BOTH backends, no response awaited.
+//!   7. unreadable frames — a line that is not valid JSON, or that is valid JSON
+//!      but not a JSON-RPC envelope, is REJECTED here: the client receives a
+//!      JSON-RPC error (parseError -32700 / invalidRequest -32600, null id) and
+//!      NO backend ever sees the line. The bridge is the boundary; a frame it
+//!      cannot read is a frame the backends should never receive. Forwarding one
+//!      as a notification would leave the backend's own parseError response
+//!      unread on its stdout, and the next send_and_receive would consume that
+//!      stale error instead of its own result — skewing every response from then
+//!      on until the process restarts.
 //!
 //! SAFETY (dual-write rule): a WRITE fan-out re-issues the write to BOTH
 //! backends — the whole point of the bridge. Both must be writable targets the
@@ -36,6 +46,37 @@ pub enum BridgeCallType {
 
 pub const SET_PRIMARY_TOOL: &str = "bridge_set_primary";
 pub const STATUS_TOOL: &str = "bridge_status";
+
+/// JSON-RPC 2.0 code for a frame that is not valid JSON at all.
+pub const PARSE_ERROR_CODE: i64 = -32700;
+/// JSON-RPC 2.0 code for valid JSON that is not a valid JSON-RPC envelope.
+pub const INVALID_REQUEST_CODE: i64 = -32600;
+
+/// What the bridge decides to do with one raw client line, decided BEFORE any
+/// backend transport is touched.
+///
+/// There are THREE outcomes here, not two. Asking only "does it have an id?"
+/// collapses a genuine id-less notification together with a frame that could not
+/// be read at all, and routes both down the notification path — which is exactly
+/// how a single malformed line desynchronizes a whole session.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameDisposition {
+    /// A valid JSON-RPC envelope carrying an `id`. Served on the request path
+    /// with the client's id preserved. `method` and `id` are carried alongside
+    /// the parsed value because the classifier has already proved both present,
+    /// so no downstream site needs to re-check or supply a fallback.
+    Request {
+        parsed: Value,
+        method: String,
+        id: Value,
+    },
+    /// A valid JSON-RPC envelope with no `id`: a real notification. Forwarded to
+    /// both backends; no response is owed to the client.
+    Notification,
+    /// Unreadable, or readable but not a JSON-RPC envelope. Answered at the
+    /// bridge with a JSON-RPC error and forwarded to NO backend.
+    Reject { code: i64, message: String },
+}
 
 /// A handle to one configured backend: its live transport, name, and verbMap.
 pub struct BridgeBackend {
@@ -97,52 +138,105 @@ impl BridgeServer {
 
     /// Handles one client message end to end, returning the response line to
     /// write back to the client (None for a notification, which has no response).
+    ///
+    /// The three-way split is the whole point: reject / notify / request. A frame
+    /// the bridge cannot read is answered here and forwarded nowhere, so a
+    /// backend never has to reply to garbage the bridge would then fail to read
+    /// back off its stdout.
     pub fn handle_message(&mut self, line: &str) -> Option<String> {
-        let parsed: Option<Value> = serde_json::from_str(line).ok();
-        let method = parsed
-            .as_ref()
-            .and_then(|v| v.get("method"))
-            .and_then(|m| m.as_str())
-            .map(|s| s.to_string());
-        let has_id = parsed.as_ref().and_then(|v| v.get("id")).is_some();
+        let (parsed, method, id_value) = match Self::classify_frame(line) {
+            // Rejected at the boundary: the client gets a JSON-RPC error and NO
+            // backend sees the line. Draining a backend's stdout after the fact
+            // would race legitimate traffic and would still have let the
+            // malformed frame through, so the refusal happens before any write.
+            FrameDisposition::Reject { code, message } => {
+                return Some(Self::protocol_error_line(code, &message));
+            }
+            // A real notification: valid envelope, no id, so no response is owed.
+            // Forward to BOTH backends so a backend that relies on, e.g.,
+            // `notifications/initialized` stays in sync. Hoist the indices into
+            // locals first — indexing mutably while a method call borrows `self`
+            // would otherwise conflict under the borrow checker.
+            FrameDisposition::Notification => {
+                let pi = self.primary_idx();
+                let si = self.secondary_idx();
+                let _ = self.backends[pi].transport.send_notification(line);
+                let _ = self.backends[si].transport.send_notification(line);
+                return None;
+            }
+            FrameDisposition::Request { parsed, method, id } => (parsed, method, id),
+        };
 
-        // Notification: forward to BOTH backends, no response. Hoist the indices
-        // into locals first — indexing mutably while a method call borrows `self`
-        // would otherwise conflict under the borrow checker.
-        if !has_id {
-            let pi = self.primary_idx();
-            let si = self.secondary_idx();
-            let _ = self.backends[pi].transport.send_notification(line);
-            let _ = self.backends[si].transport.send_notification(line);
-            return None;
-        }
-
-        let id_value = parsed
-            .as_ref()
-            .and_then(|v| v.get("id"))
-            .cloned()
-            .unwrap_or(Value::Null);
-
-        match method.as_deref() {
-            Some("tools/list") => Some(self.handle_tools_list(line)),
-            Some("tools/call") => {
+        match method.as_str() {
+            "tools/list" => Some(self.handle_tools_list(line)),
+            "tools/call" => {
                 let tool_name = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("params"))
+                    .get("params")
                     .and_then(|p| p.get("name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("")
                     .to_string();
                 if tool_name == SET_PRIMARY_TOOL {
-                    Some(self.handle_set_primary(parsed.as_ref(), id_value))
+                    Some(self.handle_set_primary(Some(&parsed), id_value))
                 } else if tool_name == STATUS_TOOL {
                     Some(self.handle_status(id_value))
                 } else {
-                    Some(self.handle_tool_call(line, parsed.as_ref(), &tool_name))
+                    Some(self.handle_tool_call(line, Some(&parsed), &tool_name))
                 }
             }
             // initialize and any other id-bearing method: forward to primary.
-            _ => Some(self.forward_to_primary(line, method.as_deref())),
+            _ => Some(self.forward_to_primary(line, &method)),
+        }
+    }
+
+    // MARK: - Frame classification (the boundary)
+
+    /// Classifies one raw client line into the bridge's three frame dispositions.
+    ///
+    /// The envelope test mirrors `JSONRPCRequest::decode` in AriaMcpKit
+    /// (Swift `JSONRPC.swift:68-79`) exactly — an object, `jsonrpc` equal to the
+    /// string `"2.0"`, and a string `method`. Failing the JSON parse is
+    /// `parseError`; parsing but failing the envelope test is `invalidRequest`.
+    /// The backends draw the same line, so a frame refused here receives the same
+    /// answer it would have received had it been forwarded, minus the
+    /// desynchronization. Collapsing the two codes into one would tell a client
+    /// "bad JSON" when the JSON was fine and only the envelope was wrong.
+    ///
+    /// `id` is deliberately tested for PRESENCE, not for non-null: JSON-RPC 2.0
+    /// permits an id to be a string, a number, or null, and an explicit
+    /// `"id": null` is a request, not a notification.
+    ///
+    /// Pure and `pub` for direct unit testing without a live `BridgeServer`.
+    pub fn classify_frame(line: &str) -> FrameDisposition {
+        let parsed: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => {
+                return FrameDisposition::Reject {
+                    code: PARSE_ERROR_CODE,
+                    message: "Parse error: client frame is not valid JSON".to_string(),
+                }
+            }
+        };
+        // A non-object (bare array, string, number, bool, null) fails every
+        // lookup below, but the object test is written out so the envelope
+        // contract is legible rather than implied by serde_json's Value::get.
+        let is_envelope = parsed.is_object()
+            && parsed.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0")
+            && parsed.get("method").and_then(|v| v.as_str()).is_some();
+        if !is_envelope {
+            return FrameDisposition::Reject {
+                code: INVALID_REQUEST_CODE,
+                message: "Invalid Request: malformed JSON-RPC envelope".to_string(),
+            };
+        }
+        let method = parsed
+            .get("method")
+            .and_then(|v| v.as_str())
+            .expect("envelope test above proved `method` is a string")
+            .to_string();
+        match parsed.get("id").cloned() {
+            None => FrameDisposition::Notification,
+            Some(id) => FrameDisposition::Request { parsed, method, id },
         }
     }
 
@@ -228,14 +322,14 @@ impl BridgeServer {
     }
 
     /// Forwards an arbitrary id-bearing method (e.g. initialize) to the primary.
-    fn forward_to_primary(&mut self, line: &str, method: Option<&str>) -> String {
+    fn forward_to_primary(&mut self, line: &str, method: &str) -> String {
         let pi = self.primary_idx();
         let start = Instant::now();
         let response = match self.backends[pi].transport.send_and_receive(line) {
             Ok(r) => r,
             Err(e) => return Self::transport_error_line(&e.to_string()),
         };
-        let label = format!("{}.{}", self.backends[pi].name, method.unwrap_or("?"));
+        let label = format!("{}.{}", self.backends[pi].name, method);
         self.stats.record_latency(start.elapsed().as_secs_f64(), &label);
         response
     }
@@ -412,6 +506,29 @@ impl BridgeServer {
         let envelope = json!({
             "jsonrpc": "2.0", "id": id,
             "result": { "content": [ { "type": "text", "text": message } ], "isError": true }
+        });
+        serde_json::to_string(&envelope).unwrap_or_default()
+    }
+
+    /// A JSON-RPC PROTOCOL error for the client — an `error` member, not an
+    /// `isError` tool result. Used only for frames the bridge refuses at the
+    /// boundary; nothing is sent to any backend on this path.
+    ///
+    /// The id is null because a refused frame has no id the bridge can trust: it
+    /// either failed to parse, or failed the envelope test, so any `id` bytes
+    /// inside it are not a JSON-RPC id. JSON-RPC 2.0 prescribes a null id for
+    /// exactly this case, and AriaMcpKit's `StdioServer` answers the same way —
+    /// the bridge and the backends must give a client the same answer, or the
+    /// client sees two different protocols depending on how far its frame
+    /// happened to travel.
+    ///
+    /// This is distinct from `tool_error_line`, which reports bridge-TOOL misuse
+    /// as a successful call carrying `isError: true`. A frame that is not a valid
+    /// JSON-RPC message never reached a tool, so it cannot be reported as one.
+    pub fn protocol_error_line(code: i64, message: &str) -> String {
+        let envelope = json!({
+            "jsonrpc": "2.0", "id": Value::Null,
+            "error": { "code": code, "message": message }
         });
         serde_json::to_string(&envelope).unwrap_or_default()
     }
