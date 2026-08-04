@@ -24,8 +24,12 @@
 use locus_kit::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State, Trust};
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+use locus_kit::estate::Estate;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+use locus_kit::frames::CaptureFrame;
 use locus_kit::error::LocusKitError;
 use locus_kit::kg_fact::KGFact;
 use locus_kit::manifest::ManifestKey;
@@ -680,6 +684,147 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
         d1_after.tombstoned_at.is_none(),
         "refused sibling must not be tombstone-stamped"
     );
+}
+
+/// The caller can tell the expunge was partial: the outcome carries the
+/// refused sibling ids in walk order. Twin of Swift
+/// `expungeOutcomeReportsRefusedSiblings`.
+#[test]
+fn expunge_outcome_reports_refused_siblings() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let lineage = Uuid::new_v4();
+
+    let mut d1 = sample_drawer("d1-outcome-accepted", "w", "r", "accepted-content");
+    d1.lineage_id = lineage;
+    d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
+    store.add_drawer(&d1, NOW).unwrap();
+    store
+        .mutate_state(&d1.id, State::Accepted, RowVerb::Promote, "alice", None, NOW + 100)
+        .unwrap();
+
+    let mut d2 = sample_drawer("d2-outcome-head", "w", "r", "head-content");
+    d2.lineage_id = lineage;
+    store.add_drawer(&d2, NOW + 200).unwrap();
+
+    let outcome = store
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .unwrap();
+    assert_eq!(
+        outcome.refused_sibling_ids,
+        vec![d1.id.clone()],
+        "the refused accepted sibling must be reported to the caller"
+    );
+}
+
+/// A lineage with no accepted members: every member is scrubbed and
+/// tombstoned, and the outcome reports zero refusals. Twin of Swift
+/// `expungeOutcomeEmptyForCleanLineage`.
+#[test]
+fn expunge_outcome_empty_for_clean_lineage() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let lineage = Uuid::new_v4();
+
+    let mut d1 = sample_drawer("d1-clean-predecessor", "w", "r", "predecessor-content");
+    d1.lineage_id = lineage;
+    store.add_drawer(&d1, NOW).unwrap();
+    let mut d2 = sample_drawer("d2-clean-head", "w", "r", "head-content");
+    d2.lineage_id = lineage;
+    store.add_drawer(&d2, NOW + 100).unwrap();
+
+    let outcome = store
+        .expunge_gated(&d2.id, "test", None, NOW + 200, true)
+        .unwrap();
+    assert!(
+        outcome.refused_sibling_ids.is_empty(),
+        "no refusals in a lineage without accepted members"
+    );
+
+    // Gate-admitted members are still scrubbed and tombstoned as before.
+    let d1_after = store.get_drawer(&d1.id).unwrap().unwrap();
+    assert_eq!(d1_after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
+    assert_eq!(d1_after.content, "");
+    let d2_after = store.get_drawer(&d2.id).unwrap().unwrap();
+    assert_eq!(d2_after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
+    assert_eq!(d2_after.content, "");
+}
+
+/// The reachability case from Codex finding 06cce9cc4, end to end:
+/// lineage membership is selected solely by matching lineageID, and a
+/// capture accepts a caller-supplied lineage id (VaultKit maps a vault
+/// note's frontmatter `moot_id` straight into `CaptureFrame.lineage_id` —
+/// finding de1284c73). An attacker can therefore create their own row
+/// inside a protected accepted row's lineage and then expunge it, walking
+/// the shared lineage. The accepted row must survive byte-identical.
+/// Twin of Swift `attackerLineageJoinCannotScrubAcceptedRow`.
+#[test]
+fn attacker_lineage_join_cannot_scrub_accepted_row() {
+    let db = TempDb::new();
+    let store = Arc::new(open_sqlite(db.path()));
+    let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
+    let lineage = Uuid::new_v4();
+
+    // The protected row: added and promoted to accepted legitimately
+    // (trust=canonical at bits 18-23 satisfies S-1).
+    let mut protected = sample_drawer(
+        "protected-accepted-row",
+        "w",
+        "r",
+        "protected-audit-grade-content",
+    );
+    protected.lineage_id = lineage;
+    protected.adjective_bitmap = Trust::Canonical.raw_value() << 18;
+    store.add_drawer(&protected, NOW).unwrap();
+    store
+        .mutate_state(
+            &protected.id,
+            State::Accepted,
+            RowVerb::Promote,
+            "owner",
+            None,
+            NOW + 100,
+        )
+        .unwrap();
+    let before = store.get_drawer(&protected.id).unwrap().unwrap();
+    assert_eq!(before.adjective_bitmap & 0x3F, State::Accepted.raw_value());
+
+    // The attacker's row: an ordinary capture that names the protected
+    // row's lineage id — the moot_id path.
+    let mut frame = CaptureFrame::new(
+        "attacker-controlled note",
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("004"),
+        "attacker",
+        "test-v1",
+    );
+    frame.lineage_id = Some(lineage);
+    let attacker_row = estate.capture(frame, NOW + 200).unwrap();
+
+    // Expunging the attacker's own row walks the shared lineage.
+    estate
+        .expunge(&attacker_row.id, "attacker-initiated expunge", true, NOW + 300, true)
+        .unwrap();
+
+    // The attacker's row is gone…
+    let attacker_after = store.get_drawer(&attacker_row.id).unwrap().unwrap();
+    assert_eq!(
+        attacker_after.adjective_bitmap & 0x3F,
+        State::Tombstoned.raw_value()
+    );
+    assert_eq!(attacker_after.content, "");
+
+    // …and the protected accepted row is byte-identical.
+    let after = store.get_drawer(&protected.id).unwrap().unwrap();
+    assert_eq!(
+        after.content, "protected-audit-grade-content",
+        "the protected accepted row must survive an attacker-initiated lineage expunge"
+    );
+    assert_eq!(after.adjective_bitmap & 0x3F, State::Accepted.raw_value());
+    assert_eq!(after.adjective_bitmap, before.adjective_bitmap);
+    assert_eq!(after.operational_bitmap, before.operational_bitmap);
+    assert!(after.tombstoned_at.is_none());
 }
 
 // ---------------------------------------------------------------------------

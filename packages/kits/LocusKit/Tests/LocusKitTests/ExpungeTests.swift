@@ -475,4 +475,244 @@ struct ExpungeTests {
         #expect(predecessorAfter?.content == "",
                 "Predecessor content must be empty after lineage-wide expunge")
     }
+
+    // MARK: - Gate rejection preserves the sibling row (MXE-EZ)
+
+    static let idAcceptedSibling = "33333333-3333-4333-8333-333333333333"
+    static let idLineageHead     = "44444444-4444-4444-8444-444444444444"
+
+    /// Build a lineage containing one ACCEPTED (audit-grade) row and one
+    /// active head: D1 is captured with trust=canonical (raw 3 at bits
+    /// 18-23, satisfying S-1), promoted to accepted, then D2 is added
+    /// with the same lineageID. An accepted row is not an active
+    /// predecessor, so adding D2 does NOT supersede D1.
+    private func makeAcceptedSiblingLineage(
+        _ store: DrawerStore
+    ) async throws {
+        let lineage = UUID()
+        let d1 = Drawer(
+            id: Self.idAcceptedSibling,
+            content: "accepted-audit-grade-content",
+            parentNodeId: "test-parent",
+            addedBy: "test",
+            filedAt: t(1_700_000_000),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 3 << 18,
+            operationalBitmap: 0,
+            lineageID: lineage
+        )
+        try await store.addDrawer(d1)
+        try await store.mutateState(
+            drawerId: Self.idAcceptedSibling,
+            to: .accepted,
+            via: .promote,
+            changedBy: "test",
+            now: t(1_700_000_100)
+        )
+        let d2 = Drawer(
+            id: Self.idLineageHead,
+            content: "head-content",
+            parentNodeId: "test-parent",
+            addedBy: "test",
+            filedAt: t(1_700_000_200),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 0,
+            operationalBitmap: 0,
+            lineageID: lineage
+        )
+        try await store.addDrawer(d2)
+    }
+
+    /// THE regression test for MXE-EZ: when the AuditGate refuses a
+    /// sibling's `accepted → tombstoned` transition (S-3), that sibling
+    /// is left byte-identical — content, state, bitmaps, tombstonedAt,
+    /// and audit trail all untouched. Fails against pre-fix code, where
+    /// the gate-reject branch scrubbed the content anyway.
+    @Test("expungeGated: gate-refused accepted sibling is left byte-identical")
+    func gateRefusedAcceptedSiblingLeftIntact() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+        try await makeAcceptedSiblingLineage(store)
+
+        let before = try await store.getDrawer(id: Self.idAcceptedSibling)
+        #expect(before?.state == .accepted)
+        #expect(before?.content == "accepted-audit-grade-content")
+        let auditBefore = try await auditEventCount(store, Self.idAcceptedSibling)
+        #expect(auditBefore == 2)  // capture + promote
+
+        try await store.expungeGated(
+            drawerId: Self.idLineageHead,
+            changedBy: "test",
+            reason: "MXE-EZ regression",
+            now: t(1_700_000_300)
+        )
+
+        // The head itself is scrubbed and tombstoned as before.
+        let headAfter = try await store.getDrawer(id: Self.idLineageHead)
+        #expect(headAfter?.state == .tombstoned)
+        #expect(headAfter?.content == "")
+
+        // The refused sibling is byte-identical: content verbatim (this
+        // also proves it was NOT recorded in the erasure ledger — the
+        // ErasureOverlay nulls content at read time for ledgered ids),
+        // state, both bitmaps, no tombstone stamp, no new audit event.
+        let after = try await store.getDrawer(id: Self.idAcceptedSibling)
+        #expect(after?.content == "accepted-audit-grade-content",
+                "refused sibling content must survive verbatim")
+        #expect(after?.state == .accepted)
+        #expect(after?.adjectiveBitmap == before?.adjectiveBitmap)
+        #expect(after?.operationalBitmap == before?.operationalBitmap)
+        #expect(after?.tombstonedAt == nil)
+        let auditAfter = try await auditEventCount(store, Self.idAcceptedSibling)
+        #expect(auditAfter == auditBefore,
+                "no audit event may be appended for a refused sibling")
+    }
+
+    /// The caller can tell the expunge was partial: the outcome carries
+    /// the refused sibling ids in walk order.
+    @Test("expungeGated: outcome reports refused siblings — partial expunge is detectable")
+    func expungeOutcomeReportsRefusedSiblings() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+        try await makeAcceptedSiblingLineage(store)
+
+        let outcome = try await store.expungeGated(
+            drawerId: Self.idLineageHead,
+            changedBy: "test",
+            reason: "partial-detection test",
+            now: t(1_700_000_300)
+        )
+        #expect(outcome.refusedSiblingIDs == [Self.idAcceptedSibling],
+                "the refused accepted sibling must be reported to the caller")
+        // sealAudit defaulted to true, so the event was sealed in the
+        // transaction and is not carried in the outcome.
+        #expect(outcome.auditEvent == nil)
+    }
+
+    /// A lineage with no accepted members: every member is scrubbed and
+    /// tombstoned, and the outcome reports zero refusals.
+    @Test("expungeGated: lineage with no accepted members scrubs all and reports zero refusals")
+    func expungeOutcomeEmptyForCleanLineage() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(url))
+
+        let lineage = UUID()
+        let predecessorId = "55555555-5555-4555-8555-555555555555"
+        let headId = "66666666-6666-4666-8666-666666666666"
+        try await store.addDrawer(Drawer(
+            id: predecessorId,
+            content: "predecessor-content",
+            parentNodeId: "test-parent",
+            addedBy: "test",
+            filedAt: t(1_700_000_000),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 0,
+            operationalBitmap: 0,
+            lineageID: lineage
+        ))
+        try await store.addDrawer(Drawer(
+            id: headId,
+            content: "head-content",
+            parentNodeId: "test-parent",
+            addedBy: "test",
+            filedAt: t(1_700_000_100),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 0,
+            operationalBitmap: 0,
+            lineageID: lineage
+        ))
+
+        let outcome = try await store.expungeGated(
+            drawerId: headId,
+            changedBy: "test",
+            reason: "clean-lineage test",
+            now: t(1_700_000_200)
+        )
+        #expect(outcome.refusedSiblingIDs.isEmpty,
+                "no refusals in a lineage without accepted members")
+
+        // Gate-admitted members are still scrubbed and tombstoned as before.
+        let predecessorAfter = try await store.getDrawer(id: predecessorId)
+        #expect(predecessorAfter?.state == .tombstoned)
+        #expect(predecessorAfter?.content == "")
+        let headAfter = try await store.getDrawer(id: headId)
+        #expect(headAfter?.state == .tombstoned)
+        #expect(headAfter?.content == "")
+    }
+
+    /// The reachability case from Codex finding 06cce9cc4, end to end:
+    /// lineage membership is selected solely by matching lineageID, and
+    /// a capture accepts an attacker-supplied lineageID (VaultKit maps a
+    /// vault note's frontmatter `moot_id` straight into
+    /// `CaptureFrame.lineageID` — finding de1284c73). An attacker can
+    /// therefore create their own row inside a protected accepted row's
+    /// lineage and then expunge it, walking the shared lineage. The
+    /// accepted row must survive that walk byte-identical.
+    @Test("reachability: capturing into an accepted row's lineage and expunging does not touch the accepted row")
+    func attackerLineageJoinCannotScrubAcceptedRow() async throws {
+        let (estate, url) = try await makeEstate()
+        defer { cleanup(url) }
+
+        // The protected row: captured and promoted to accepted
+        // legitimately (trust=canonical at bits 18-23 satisfies S-1).
+        let lineage = UUID()
+        let protectedId = "77777777-7777-4777-8777-777777777777"
+        try await estate.store.addDrawer(Drawer(
+            id: protectedId,
+            content: "protected-audit-grade-content",
+            parentNodeId: "test-parent",
+            addedBy: "owner",
+            filedAt: t(1_700_000_000),
+            embeddingModelID: "minilm-v6",
+            adjectiveBitmap: 3 << 18,
+            operationalBitmap: 0,
+            lineageID: lineage
+        ))
+        try await estate.store.mutateState(
+            drawerId: protectedId,
+            to: .accepted,
+            via: .promote,
+            changedBy: "owner",
+            now: t(1_700_000_100)
+        )
+        let before = try await estate.store.getDrawer(id: protectedId)
+        #expect(before?.state == .accepted)
+
+        // The attacker's row: an ordinary capture that names the
+        // protected row's lineageID — the moot_id path.
+        let attackerFrame = CaptureFrame(
+            content: "attacker-controlled note",
+            channel: .typed,
+            room: "test-room",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "attacker",
+            embeddingModelID: "minilm-v6",
+            lineageID: lineage
+        )
+        let attackerRow = try await estate.capture(attackerFrame)
+
+        // Expunging the attacker's own row walks the shared lineage.
+        try await estate.expunge(
+            rowID: attackerRow.id,
+            reason: "attacker-initiated expunge",
+            confirmation: true
+        )
+
+        // The attacker's row is gone…
+        let attackerAfter = try await estate.store.getDrawer(id: attackerRow.id)
+        #expect(attackerAfter?.state == .tombstoned)
+        #expect(attackerAfter?.content == "")
+
+        // …and the protected accepted row is byte-identical.
+        let after = try await estate.store.getDrawer(id: protectedId)
+        #expect(after?.content == "protected-audit-grade-content",
+                "the protected accepted row must survive an attacker-initiated lineage expunge")
+        #expect(after?.state == .accepted)
+        #expect(after?.adjectiveBitmap == before?.adjectiveBitmap)
+        #expect(after?.operationalBitmap == before?.operationalBitmap)
+        #expect(after?.tombstonedAt == nil)
+    }
 }
