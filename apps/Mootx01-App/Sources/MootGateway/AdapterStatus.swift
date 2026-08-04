@@ -51,7 +51,7 @@ public enum GatewayEdges {
         AdapterRow(code: "A4", name: "App Intents (Siri/Spotlight/Shortcuts)", state: .pendingRegistration,
                    why: "Six live verb intents in MootIntentKit, all routed through the ARIA tool surface in-process. Mootx01Shortcuts.updateAppShortcutParameters() is called at every app launch to refresh donated phrases. System registration (Siri phrases, Shortcuts catalog) activates when xcodegen regenerates the Xcode project and the app bundle is built — that Xcode project build step is outside SPM."),
         AdapterRow(code: "A5", name: "Callback URL (x-callback-url)", state: .pendingRegistration,
-                   why: "MootURLRouter parses and routes correctly (tested). CFBundleURLTypes for the mootx01:// scheme is declared in project.yml (the xcodegen spec). System URL-scheme registration activates when xcodegen regenerates the Xcode project and the app bundle is built."),
+                   why: "MootURLRouter serves read-only recall; mutating verbs are rejected — mutations require the consented App Intents path (tested). CFBundleURLTypes for the mootx01:// scheme is declared in project.yml (the xcodegen spec). System URL-scheme registration activates when xcodegen regenerates the Xcode project and the app bundle is built."),
         AdapterRow(code: "A6", name: "Shortcuts catalog donation", state: .pendingRegistration,
                    why: "Mootx01Shortcuts (the app-target AppShortcutsProvider) donates capture and recall phrases; MootShortcutsProvider in MootIntentKit donates all six. updateAppShortcutParameters() is called at launch. Phrases appear in the Shortcuts app once the xcodegen-derived app bundle is built and installed."),
     ]

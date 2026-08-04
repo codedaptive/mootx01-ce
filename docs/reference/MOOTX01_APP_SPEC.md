@@ -1,8 +1,8 @@
 ---
 title: MOOTx01-App — Specification
-version: v0.2
+version: v0.3
 status: draft
-date: 2026-07-23
+date: 2026-08-04
 relates_to:
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#11-edition-and-application-boundary
   - apps/Mootx01-App/LEXICON_TO_APPLE_MAPPING.md
@@ -119,10 +119,14 @@ intents, `CFBundleURLTypes` registers the URL scheme, and
 - Recall: "Recall from MOOTx01", "Search my memories in MOOTx01"
 
 **Callback URLs** (A5): `mootx01://x-callback-url/<verb>?…` with an x-callback
-success/error return. A verb allowlist admits only safe verbs; destructive
-verbs (expunge, withdraw, mutate) are rejected from the URL surface, and
-open-redirect is blocked (return URL is dropped unless its scheme is
-allowlisted).
+success/error return. The URL surface is read-only: the verb allowlist admits
+`recall` only. Verbs that mutate persistent estate state — capture and
+reanchor as much as expunge, withdraw, and mutate — are rejected, because an
+inbound URL carries no trustworthy caller identity and this path has no
+per-invocation consent surface; mutations go through the device-authenticated
+App Intents path instead. Open-redirect is blocked (return URL is dropped
+unless its scheme is allowlisted), and URL-routed recall is forced to the
+exportable filter.
 
 **Heavy verbs** (macOS/iOS 27 gated): reindex, import-palace, import-vault,
 and dream are `LongRunningIntent` + `CancellableIntent` — the system shows a
@@ -345,6 +349,14 @@ guarded on this branch; its local fold-in path is not the federation transport.
 ---
 
 ## 12. Development changelog
+
+### v0.3 — 2026-08-04
+
+- A5 callback-URL surface narrowed to read-only (MXE-UT, Codex finding
+  `fd15875dc75c8191a86cfb6225371359`): the verb allowlist admits `recall`
+  only; capture and reanchor are rejected alongside the destructive verbs.
+  Mutations require the consented App Intents path. URL-path logging no
+  longer emits inbound URLs or routing reasons at public privacy.
 
 ### v0.2 — 2026-07-23
 
