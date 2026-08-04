@@ -543,10 +543,18 @@ struct ProtectedColumnMapCoverageTests {
         }
     }
 
-    /// The at-rest assertion, made through a second connection opened in
-    /// Plaintext mode so the seam cannot decrypt on the way back out. Reading
-    /// through the encrypting handle would prove only that the round-trip
-    /// works, never that the bytes on disk are ciphertext.
+    /// The at-rest assertion, made on the RAW FILE BYTES and cross-checked
+    /// through a second connection opened in Plaintext mode.
+    ///
+    /// Two assertions, because neither alone is sufficient. Reading through the
+    /// encrypting handle would prove only that the round-trip works, never that
+    /// the bytes on disk are ciphertext — hence the Plaintext connection, which
+    /// checks the stored value is a blob rather than text. But a blob check is
+    /// itself weak: the envelope carries no magic or version byte, so plaintext
+    /// written as a blob would satisfy it. Only grepping the file for the
+    /// plaintext marker rules that out, which makes the byte grep the primary
+    /// assertion and the twin of the Rust suite's
+    /// `every_mapped_table_is_ciphertext_at_rest`.
     @Test("a write through storage leaves ciphertext at rest for every mapped table",
           arguments: mappedTables)
     func everyMappedTableIsCiphertextAtRest(table: String) async throws {
@@ -563,16 +571,40 @@ struct ProtectedColumnMapCoverageTests {
         }
         _ = try await storage.rowStore.insert(table: table, values: values)
 
+        // Cross-check through a Plaintext connection: the stored value must be
+        // a blob, not text. Recorded as an expectation rather than a guarded
+        // early return, so a failure here cannot mask the byte grep below.
         let rawStorage = try makeStorage(.plaintext, at: url)
         try await rawStorage.open(schema: schema(for: table))
         let raw = try await rawStorage.rowStore.query(
             table: table,
             where: .eq(Column(table: table, name: "id"), .text("row-1")))
-
         for column in rowCryptoProtectedColumns(for: table) {
-            guard case .blob = raw.first?[column] else {
-                Issue.record("\(table).\(column) stored as plaintext at rest"); return
+            if case .blob = raw.first?[column] {} else {
+                Issue.record("\(table).\(column) is not stored as a blob at rest")
             }
+        }
+
+        // THE PRIMARY ASSERTION. A blob check alone is not enough: the envelope
+        // carries no magic or version byte, so plaintext written as a blob
+        // would satisfy it. Only the absence of the marker in the file's bytes
+        // proves the value was encrypted. Close both handles first — under WAL
+        // the row may still be in the -wal sidecar rather than the main file;
+        // the sidecars are scanned regardless, since a marker in any of them is
+        // plaintext on disk just the same.
+        await storage.close()
+        await rawStorage.close()
+
+        var bytes = try Data(contentsOf: url)
+        for sidecar in ["-wal", "-shm"] {
+            if let extra = try? Data(contentsOf: URL(fileURLWithPath: url.path + sidecar)) {
+                bytes.append(extra)
+            }
+        }
+        for column in rowCryptoProtectedColumns(for: table) {
+            let marker = Data(plaintext(for: column).utf8)
+            #expect(bytes.range(of: marker) == nil,
+                    "\(table).\(column) is plaintext at rest on a RowEncryption estate")
         }
     }
 

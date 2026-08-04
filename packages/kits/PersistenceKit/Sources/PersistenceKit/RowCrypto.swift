@@ -244,7 +244,19 @@ package let rowCryptoKeyIDColumn = "keyID"
 ///   write would make that index match nothing.
 /// - Dataset tables (`ds_<uuid>`) take their column names from the caller, so
 ///   a dataset may legitimately carry a column named `content`. They have no
-///   `keyID` column and cannot be enumerated at compile time.
+///   `keyID` column and cannot be enumerated at compile time. Note this is a
+///   boundary, not protection: such a column is written in the clear on an
+///   encrypting estate. Dataset tables sit wholly outside Mode 2 whatever
+///   their columns are named.
+///
+/// That list is NOT an inventory of every content-bearing column in the
+/// estate. `corpus_documents.text` and `.dense_text` hold document body text
+/// on the same physical database, written through this same seam, and are
+/// content-derived by rule 1 — but the table declares no `keyID`, so rule 2
+/// excludes it and the text is at rest in the clear. That is an open gap
+/// awaiting a schema change, not a deliberate exemption, and it is queued as
+/// its own mission. Do not read "maximal" as "everything content-bearing is
+/// either sealed or deliberately spared".
 ///
 /// A table absent from this map is not intercepted in either direction — its
 /// values pass through untouched and it never receives a keyID stamp. That

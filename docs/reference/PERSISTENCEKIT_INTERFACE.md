@@ -1059,8 +1059,16 @@ does not exist. `drawers` is currently the only table in the schema declaring
 `keyID`, which makes the map maximal rather than merely current. Two shapes
 are deliberately outside it: `kg_facts.subject` (the subject term of an S-P-O
 triple, indexed for equality, on a table with no `keyID`) and dataset tables
-`ds_<uuid>` (caller-supplied column names, no `keyID`). Plaintext mode is a
-no-op on every path. Cross-port compatibility applies to Mode 2
+`ds_<uuid>` (caller-supplied column names, no `keyID` — a boundary, not
+protection: such a column is written in the clear on an encrypting estate).
+
+That pair is not an inventory of every content-bearing column in the estate.
+`corpus_documents.text` and `.dense_text` hold document body text on the same
+physical database through the same seam and are content-derived, but the table
+declares no `keyID`, so they are at rest in the clear. That is an open gap
+awaiting a schema change rather than a deliberate exemption, and it is tracked
+as its own mission; Mode 2 is not an end-to-end at-rest content guarantee until
+it closes. Plaintext mode is a no-op on every path. Cross-port compatibility applies to Mode 2
 (RowEncryption) only: a Mode 2 content value encrypted by the Swift backend
 is decryptable by the Rust backend because both use AES-GCM-256 with the same
 `[nonce][tag][ciphertext]` envelope layout and the same key bytes from
@@ -1524,8 +1532,13 @@ states that interception is by (table, column) pair, and records the
 inclusion rule: a table joins the map when it BOTH carries content or
 content-derived text AND declares a `keyID` column, since the seam stamps
 `keyID` on every row it seals. `kg_facts.subject` and dataset tables
-`ds_<uuid>` are named as the two shapes deliberately outside the map. No
-signature or behavioural change.
+`ds_<uuid>` are named as the two shapes deliberately outside the map, and the
+dataset case is stated as a boundary rather than protection. The section also
+now records that those two are not an inventory of every content-bearing
+column: `corpus_documents.text` / `.dense_text` are content-derived text on a
+table with no `keyID` and are at rest in the clear, an open gap tracked
+separately, so Mode 2 is not an end-to-end at-rest content guarantee until it
+closes. No signature or behavioural change.
 
 ### 1.13.0 -- 2026-08-03
 At-rest encryption wiring table corrected (MXE-PW): the seam runs on
