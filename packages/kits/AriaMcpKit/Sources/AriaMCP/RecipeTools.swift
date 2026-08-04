@@ -799,6 +799,12 @@ enum RecipeTools {
         let drawersByID = try await structuredDrawersByID(
             ids: shownMatches.map { $0.id }, estate: estate)
         let denseByID = drawersByID.mapValues { DenseRow.render($0) }
+        // Room comes from the node tree, NOT from PreciseMatch.room — the
+        // Swift recipe carries the raw parentNodeId there (ShapedRecall
+        // builds it from hit.drawer?.parentNodeId), while the structured
+        // field is the resolved display name in both ports.
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
 
         var lines: [String] = ["found \(matches.count) memory(s)"]
         var results: [ToolDispatcher.StructuredRecallRow] = []
@@ -809,7 +815,9 @@ enum RecipeTools {
                 // above); the row builder's provenance switch decides whether
                 // it enters the structured block.
                 results.append(ToolDispatcher.structuredRecallRow(
-                    id: match.id, room: match.room, content: match.content, drawer: d))
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
             } else {
                 // Gated id: the text shows the opaque unhydrated row, so the
                 // structured block is exactly as opaque — the match's room
@@ -959,6 +967,12 @@ enum RecipeTools {
         let drawersByID = try await structuredDrawersByID(
             ids: displayedMatches.map { $0.id }, estate: estate)
         let denseByID = drawersByID.mapValues { DenseRow.render($0) }
+        // Room comes from the node tree, NOT from PreciseMatch.room — the
+        // Swift recipe carries the raw parentNodeId there (ShapedRecall
+        // builds it from hit.drawer?.parentNodeId), while the structured
+        // field is the resolved display name in both ports.
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
 
         var lines: [String] = ["found \(shownMatches.count) memory(s)"]
         var results: [ToolDispatcher.StructuredRecallRow] = []
@@ -969,7 +983,9 @@ enum RecipeTools {
                 // provenance switch decides whether it enters the
                 // structured block.
                 results.append(ToolDispatcher.structuredRecallRow(
-                    id: match.id, room: match.room, content: match.content, drawer: d))
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
             } else {
                 // Gated id: opaque in text, exactly as opaque in the
                 // structured block.
