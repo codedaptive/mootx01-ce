@@ -169,10 +169,9 @@ struct LexiconGapsTests {
         let dispatcher = try await makeDispatcher()
         // source_id must name a drawer that exists in this estate — a fact
         // inherits its source drawer's sensitivity, so an unresolvable anchor
-        // fails the write. Two real drawers stand in for what used to be two
-        // synthetic "miner:*" tags; the substring-collision case the test
-        // guards lives on subject_exact ("ev-1" vs "ev-10"), which is
-        // unaffected.
+        // fails the write, so the two distinct sources this test needs are two
+        // real drawers. The substring-collision case the test guards lives on
+        // subject_exact ("ev-1" vs "ev-10"), which is unaffected.
         var sourceIDs: [String] = []
         for label in ["calendar-source", "other-source"] {
             let filed = await dispatcher.handle(JSONRPCRequest(

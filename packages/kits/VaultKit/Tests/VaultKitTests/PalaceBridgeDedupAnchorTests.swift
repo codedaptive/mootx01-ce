@@ -1,11 +1,11 @@
 // PalaceBridgeDedupAnchorTests.swift
 //
 // The CAND-049 re-import signature must produce the same string for a fact
-// however it was written. `sourceDrawerID` used to hold the foreign palace
-// key; it now holds a local drawer id or nothing, and the key lives in
-// `foreignSourceKey`. If the signature only read the new field, the first
-// re-import against an estate populated by the previous importer would match
-// nothing and duplicate every fact it had already imported.
+// whichever column holds its palace key. Rows this importer writes carry the
+// key in `foreignSourceKey` and leave `sourceDrawerID` empty; rows already in
+// an estate from an earlier importer carry that same key in `sourceDrawerID`.
+// A signature that read only `foreignSourceKey` would match none of the
+// second kind, so the first re-import would duplicate every one of them.
 
 import Testing
 import Foundation
@@ -36,16 +36,16 @@ struct PalaceBridgeDedupAnchorTests {
         #expect(anchor == "drawer_alpha_0001")
     }
 
-    /// A row written before `foreignSourceKey` existed: the same palace key
-    /// sits in `sourceDrawerID`. It must yield the identical anchor, or the
+    /// A row that carries the same palace key in `sourceDrawerID` — the shape
+    /// an earlier importer wrote. It must yield the identical anchor, or the
     /// re-import stops deduping against everything already in the estate.
-    @Test func legacyShapeYieldsTheIdenticalAnchor() {
-        let current = PalaceBridge.dedupAnchor(
+    @Test func keyInSourceDrawerIDYieldsTheIdenticalAnchor() {
+        let inNewColumn = PalaceBridge.dedupAnchor(
             for: fact(foreignSourceKey: "drawer_alpha_0001"))
-        let legacy = PalaceBridge.dedupAnchor(
+        let inOldColumn = PalaceBridge.dedupAnchor(
             for: fact(sourceDrawerID: "drawer_alpha_0001"))
-        #expect(legacy == current,
-                "a pre-change row must sign identically to the row this importer writes")
+        #expect(inOldColumn == inNewColumn,
+                "both column placements must sign identically")
     }
 
     /// A locally-filed fact anchored to a real drawer keeps comparing on that

@@ -115,12 +115,12 @@ pub struct PalaceBridge<'a> {
 /// The value that occupies the fourth slot of a stored fact's CAND-049
 /// signature.
 ///
-/// A fact this importer filed carries the palace key in `foreign_source_key`,
-/// or — when the triple named no source key — the triple's own id in
-/// `foreign_record_id`. A fact already in the estate from an importer that
-/// predates those columns carries the same value in `source_drawer_id`. All
-/// shapes must produce the identical string, or a re-import would fail to
-/// recognise what it imported before and duplicate every row.
+/// A fact this importer files carries the palace key in `foreign_source_key`,
+/// or — when the triple names no source key — the triple's own id in
+/// `foreign_record_id`. A fact already in the estate from an earlier importer
+/// carries that same value in `source_drawer_id`. All three placements must
+/// produce the identical string, or a re-import fails to recognise what it
+/// imported before and duplicates every row.
 ///
 /// A locally-filed fact has no foreign origin and its `source_drawer_id` is a
 /// local drawer id (or empty) — returning it is what the importer has always

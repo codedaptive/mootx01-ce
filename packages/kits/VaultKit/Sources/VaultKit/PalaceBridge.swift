@@ -801,11 +801,11 @@ public struct PalaceBridge: Sendable {
     /// The value that occupies the fourth slot of a stored fact's CAND-049
     /// signature.
     ///
-    /// A fact this importer filed carries the palace key in `foreignSourceKey`.
-    /// A fact already in the estate from an importer that predates that column
-    /// carries the same value in `sourceDrawerID`. Both shapes must produce the
-    /// identical string, or a re-import would fail to recognise what it
-    /// imported before and duplicate every row.
+    /// A fact this importer files carries the palace key in `foreignSourceKey`.
+    /// A fact already in the estate from an earlier importer carries that same
+    /// value in `sourceDrawerID`. Both placements must produce the identical
+    /// string, or a re-import fails to recognise what it imported before and
+    /// duplicates every row.
     ///
     /// A locally-filed fact has no foreign key and its `sourceDrawerID` is a
     /// local drawer id (or empty) — returning it is what the importer has

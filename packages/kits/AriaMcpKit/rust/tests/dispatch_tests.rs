@@ -2722,9 +2722,9 @@ fn fact_search_exact_fields_reject_substring_and_source_collisions() {
     let registry = EstateRegistry::new_inmemory();
     // source_id must name a drawer that exists in this estate — a fact inherits
     // its source drawer's sensitivity, so an unresolvable anchor fails the
-    // write. Two real drawers stand in for what used to be two synthetic
-    // "miner:*" tags; the substring-collision case this test guards lives on
-    // subject_exact ("ev-1" vs "ev-10"), which is unaffected.
+    // write, so the two distinct sources this test needs are two real drawers.
+    // The substring-collision case this test guards lives on subject_exact
+    // ("ev-1" vs "ev-10"), which is unaffected.
     let mut source_ids: Vec<String> = Vec::new();
     for label in ["calendar-source", "other-source"] {
         let filed = dispatch_tool(
