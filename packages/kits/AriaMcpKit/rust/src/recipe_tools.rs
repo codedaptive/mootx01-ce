@@ -90,6 +90,9 @@ use crate::dispatch::{
     optional_string, require_string, text_result, LIMIT_HARD_CEILING,
 };
 use crate::estate_registry::EstateRegistry;
+use crate::interface_tools::{
+    opaque_structured_row, structured_recall_row, structured_text_result, StructuredRow,
+};
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
 /// Render the typed conflict-projection sweep as the ADDITIVE report
@@ -703,6 +706,10 @@ fn run_precise_recall_tool(
     let satisfied = neuron_kit::containment_satisfied(&query, &candidate_contents);
 
     if has_distinctive && !satisfied {
+        // Containment gate fired — zero results with not_found. The
+        // structured block is the empty results array: the tool declares an
+        // outputSchema, so every success reply carries the typed twin,
+        // including the deliberate zero-result shape.
         let lines = vec![
             "found 0 memory(s)".to_string(),
             crate::recall_discrimination::result_line(
@@ -710,7 +717,7 @@ fn run_precise_recall_tool(
             )
             .to_string(),
         ];
-        return Ok(text_result(&lines.join("\n")));
+        return Ok(structured_text_result(&lines.join("\n"), &[]));
     }
 
     // Part 1b — discrimination computed over composition precision scores
@@ -722,14 +729,27 @@ fn run_precise_recall_tool(
     // Dense-row reply (PR-03): same row shape as moot_memory_search.
     // Drawer lookups come from the already-loaded all_drawers set.
     // Mirrors Swift runPreciseRecall.
+    // Structured twin (MXE-SS): rows are built in the SAME loop as the text
+    // lines. m.content is PRE-redaction (it fed the containment gate above);
+    // structured_recall_row's provenance switch decides whether it enters
+    // the structured block. An id the text renders opaquely stays exactly
+    // as opaque in the structured block.
     let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
         all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
+    let mut results: Vec<StructuredRow> = Vec::new();
     for m in matches.iter().take(50) {
-        lines.push(
-            by_id.get(m.id.as_str())
-                .map(|d| crate::dense_row::render(d))
-                .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                results.push(structured_recall_row(
+                    &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
+            }
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
     }
     // Deviation-only narration (PR-03): line only on low/medium; the
     // zero-result containment-gate path above keeps its explicit
@@ -751,7 +771,7 @@ fn run_precise_recall_tool(
                 .to_string(),
         );
     }
-    Ok(text_result(&lines.join("\n")))
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 // ---------------------------------------------------------------------------
@@ -893,11 +913,23 @@ fn run_shaped_recall_tool(
         .filter(|m| anchor_id.as_deref().map(|a| m.id != a).unwrap_or(true))
         .collect();
     let mut lines = vec![format!("found {} memory(s)", shown.len())];
+    // Structured twin (MXE-SS): rows built in the SAME loop as the text
+    // lines. m.content is PRE-redaction; structured_recall_row's provenance
+    // switch decides whether it enters the structured block. An id the text
+    // renders opaquely stays exactly as opaque in the structured block.
+    let mut results: Vec<StructuredRow> = Vec::new();
     for m in shown.iter().take(50) {
-        lines.push(
-            by_id.get(m.id.as_str())
-                .map(|d| crate::dense_row::render(d))
-                .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                results.push(structured_recall_row(
+                    &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
+            }
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
     }
     // Deviation-only narration (PR-03): line only on low/medium.
     if matches!(
@@ -907,7 +939,7 @@ fn run_shaped_recall_tool(
     ) {
         lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
     }
-    Ok(text_result(&lines.join("\n")))
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 // ---------------------------------------------------------------------------

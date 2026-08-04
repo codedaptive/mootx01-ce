@@ -981,6 +981,93 @@ public struct ToolDispatcher: Sendable {
         ])
     }
 
+    // MARK: - Structured recall results (MXE-SS)
+
+    /// One structured recall row — the typed twin of a rendered row, per the
+    /// recall family's `outputSchema` (`ToolProjection.recallResultsOutputSchema`).
+    /// Optional fields are OMITTED (never null) when the text analog is
+    /// absent: room/content on opaque rows, content at memory_get
+    /// depth:subject, subject at memory_get depth:full when the drawer
+    /// carries none.
+    struct StructuredRecallRow {
+        let id: String
+        var room: String? = nil
+        var content: String? = nil
+        var subject: String? = nil
+
+        var asJSONValue: JSONValue {
+            var object: [String: JSONValue] = ["id": .string(id)]
+            if let room { object["room"] = .string(room) }
+            if let content { object["content"] = .string(content) }
+            if let subject { object["subject"] = .string(subject) }
+            return .object(object)
+        }
+    }
+
+    /// MCP `tools/call` success result carrying BOTH the text block —
+    /// byte-identical to `textResult` — and its typed twin under
+    /// `structuredContent`, the MCP-sanctioned structured-result mechanism
+    /// the recall family's `outputSchema` declares. Every redaction the text
+    /// path applied must already be applied to `results` by the caller;
+    /// this helper only shapes the envelope. Wire-identical to Rust
+    /// `interface_tools::structured_text_result`.
+    static func structuredTextResult(
+        _ text: String, results: [StructuredRecallRow]
+    ) -> JSONValue {
+        .object([
+            "content": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string(text),
+                ])
+            ]),
+            "structuredContent": .object([
+                "results": .array(results.map { $0.asJSONValue })
+            ]),
+            "isError": .bool(false),
+        ])
+    }
+
+    /// Build the structured row for a drawer the text path renders as a
+    /// dense row. The subject slot mirrors `DenseRow.render`'s priority
+    /// exactly (redaction marker → stored subject → absence marker), and the
+    /// SAME provenance redaction extends to the content field: a
+    /// restricted/secret row's body never enters the structured block —
+    /// both fields carry the marker the text shows. Content values in hand
+    /// at the recipe call sites (`PreciseMatch.content`) are PRE-redaction,
+    /// so they must pass through this switch, never straight into a row.
+    static func structuredRecallRow(
+        id: String,
+        room: String?,
+        content: String?,
+        drawer: Drawer
+    ) -> StructuredRecallRow {
+        switch drawer.sensitivity {
+        case .restricted:
+            return StructuredRecallRow(
+                id: id, room: room,
+                content: content == nil ? nil : DenseRow.restrictedMarker,
+                subject: DenseRow.restrictedMarker)
+        case .secret:
+            return StructuredRecallRow(
+                id: id, room: room,
+                content: content == nil ? nil : DenseRow.secretMarker,
+                subject: DenseRow.secretMarker)
+        case .normal, .elevated:
+            return StructuredRecallRow(
+                id: id, room: room, content: content,
+                subject: drawer.subject ?? DenseRow.noSubjectMarker)
+        }
+    }
+
+    /// The structured twin of `DenseRow.renderUnhydrated` — id plus the
+    /// absence marker only. Room and content stay absent even when values
+    /// are in hand at the call site: an id the text renders opaquely (gated
+    /// or unhydrated) must be exactly as opaque in the structured block.
+    static func opaqueStructuredRow(id: String) -> StructuredRecallRow {
+        StructuredRecallRow(id: id, subject: DenseRow.noSubjectMarker)
+    }
+
     private func describe(_ error: VerbError) -> String {
         switch error {
         case .notSupportedByEstate(let verb):
@@ -1575,11 +1662,27 @@ extension ToolDispatcher {
         // must not be bypassable through its content-derived summary. The
         // full text is one hop away via moot_memory_get depth:full.
         var lines: [String] = ["found \(hits.count) memory(s)"]
-        for hit in hits.prefix(50) {
+        // Structured twin (MXE-SS): room is resolved in ONE batched node-name
+        // read over the shown rows (the same resolution `fullRecordLines`
+        // uses per drawer) — disclosed in the BRR §Part 0 (2). Rows are built
+        // in the SAME loop as the text lines so the two blocks can never
+        // cover different sets.
+        let shownHits = Array(hits.prefix(50))
+        let searchEstate = try await kit.estate(for: handle)
+        let searchNodeNames = try await searchEstate.resolveNodeNames(
+            parentNodeIds: shownHits.compactMap { $0.drawer?.parentNodeId })
+        var results: [StructuredRecallRow] = []
+        for hit in shownHits {
             if let drawer = hit.drawer {
                 lines.append(DenseRow.render(drawer))
+                results.append(Self.structuredRecallRow(
+                    id: drawer.id,
+                    room: searchNodeNames[drawer.parentNodeId]?.room,
+                    content: drawer.content,
+                    drawer: drawer))
             } else {
                 lines.append(DenseRow.renderUnhydrated(id: hit.id))
+                results.append(Self.opaqueStructuredRow(id: hit.id))
             }
             if explain {
                 for line in hit.explanation { lines.append("  \(line)") }
@@ -1629,7 +1732,7 @@ extension ToolDispatcher {
                 "`mootx01 unlock secret` for secret memories."
             )
         }
-        return Self.textResult(lines.joined(separator: "\n"))
+        return Self.structuredTextResult(lines.joined(separator: "\n"), results: results)
     }
 
     /// `moot_memory_get` — fetch one memory drawer by id, in full.
@@ -1776,6 +1879,13 @@ extension ToolDispatcher {
         // falls through to the original full record below.
         if !singleIDMode || depthName != "full" {
             var lines: [String] = []
+            // Structured twin (MXE-SS): one batched node-name read for room
+            // over the admissible rows. Not-found ids are omitted from the
+            // structured block — the text's "not found:" line is the signal,
+            // and the row has no drawer fields to carry.
+            let getNodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: rowIDs.compactMap { admissibleByID[$0]?.parentNodeId })
+            var results: [StructuredRecallRow] = []
             for id in rowIDs {
                 guard let d = admissibleByID[id] else {
                     lines.append("not found: \(id)")
@@ -1790,13 +1900,21 @@ extension ToolDispatcher {
                         break
                     }
                 }
+                let room = getNodeNames[d.parentNodeId]?.room
                 switch depthName {
                 case "subject":
                     lines.append(DenseRow.render(d))
+                    // Content stays ABSENT at the travel tier — the text
+                    // carries no body here, and the structured block must
+                    // not defeat the depth knob's token economy.
+                    results.append(Self.structuredRecallRow(
+                        id: d.id, room: room, content: nil, drawer: d))
                 case "distilled":
                     lines.append(DenseRow.render(d))
                     if let distilled = d.distilled, !distilled.isEmpty {
                         lines.append(distilled)
+                        results.append(Self.structuredRecallRow(
+                            id: d.id, room: room, content: distilled, drawer: d))
                     } else {
                         // Fallback marker on fallback hits ONLY (PR-03
                         // deviation-only contract): its presence tells the
@@ -1804,15 +1922,27 @@ extension ToolDispatcher {
                         // below is verbatim content.
                         lines.append("source: content (not yet distilled)")
                         lines.append(d.content)
+                        results.append(Self.structuredRecallRow(
+                            id: d.id, room: room, content: d.content, drawer: d))
                     }
                 default: // "full" in batch mode: repeat the full record shape
                     lines.append(contentsOf: try await fullRecordLines(
                         for: d, estate: estate))
+                    // Full-record tier: subject mirrors the text's deviation
+                    // tolerance — the record omits the subject line when the
+                    // drawer has none, so the field is omitted too (no
+                    // absence marker at this tier). Provenance-gated rows
+                    // cannot reach here (admissibleByID excludes them), so
+                    // the row is built directly, not via the marker switch.
+                    results.append(StructuredRecallRow(
+                        id: d.id, room: room, content: d.content,
+                        subject: d.subject))
                 }
                 lines.append("")
             }
             if lines.last == "" { lines.removeLast() }
-            return Self.textResult(lines.joined(separator: "\n"))
+            return Self.structuredTextResult(
+                lines.joined(separator: "\n"), results: results)
         }
 
         let drawer = admissibleByID[rowID]!
@@ -1846,7 +1976,22 @@ extension ToolDispatcher {
                 "`mootx01 unlock secret` for secret memories."
             )
         }
-        return Self.textResult(lines.joined(separator: "\n"))
+        // Structured twin (MXE-SS) of the single-id full record. The node
+        // tree is consulted a second time here (fullRecordLines resolves
+        // internally but returns rendered lines); one extra by-id lookup on
+        // the in-memory node tree is preferred over widening
+        // fullRecordLines' signature. Subject is omitted when the drawer has
+        // none, mirroring the record's omitted subject line; provenance-
+        // gated rows cannot reach here (admissibleByID excludes them).
+        let getNodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: [drawer.parentNodeId])
+        let row = StructuredRecallRow(
+            id: drawer.id,
+            room: getNodeNames[drawer.parentNodeId]?.room,
+            content: drawer.content,
+            subject: drawer.subject)
+        return Self.structuredTextResult(
+            lines.joined(separator: "\n"), results: [row])
     }
 
     /// The full-record block for one drawer — the depth:full tier and the

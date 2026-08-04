@@ -771,11 +771,15 @@ enum RecipeTools {
 
         if hasDistinctive && !satisfied {
             // Containment gate fired — return zero results with not_found.
+            // The structured block is the empty results array: the tool
+            // declares an outputSchema, so every success reply carries the
+            // typed twin, including the deliberate zero-result shape.
             let lines: [String] = [
                 "found 0 memory(s)",
                 RecallDiscrimination.resultLine(for: .notFound),
             ]
-            return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+            return ToolDispatcher.structuredTextResult(
+                lines.joined(separator: "\n"), results: [])
         }
 
         // Part 1b — discrimination is computed over composition precision
@@ -786,13 +790,32 @@ enum RecipeTools {
         let preciseDiscrimination = RecallDiscrimination.classify(preciseScores)
 
         // Dense-row reply (PR-03): same row shape as moot_memory_search.
+        // MXE-SS: ONE structured-tier fetch through the same gate feeds BOTH
+        // blocks — the dense text rows (rendered locally, byte-identical to
+        // the former denseRowsByID output: same admissible set, same
+        // DenseRow.render) and the typed structured rows.
         let estate = try await kit.estate(for: handle)
-        let denseByID = try await denseRowsByID(
-            ids: matches.prefix(50).map { $0.id }, estate: estate)
+        let shownMatches = Array(matches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: shownMatches.map { $0.id }, estate: estate)
+        let denseByID = drawersByID.mapValues { DenseRow.render($0) }
 
         var lines: [String] = ["found \(matches.count) memory(s)"]
-        for match in matches.prefix(50) {
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in shownMatches {
             lines.append(denseByID[match.id] ?? DenseRow.renderUnhydrated(id: match.id))
+            if let d = drawersByID[match.id] {
+                // match.content is PRE-redaction (it fed the containment gate
+                // above); the row builder's provenance switch decides whether
+                // it enters the structured block.
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id, room: match.room, content: match.content, drawer: d))
+            } else {
+                // Gated id: the text shows the opaque unhydrated row, so the
+                // structured block is exactly as opaque — the match's room
+                // and content in hand are deliberately NOT emitted.
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
         }
         // Deviation-only narration (PR-03): the discrimination line appears
         // only when the signal is low or medium; a clear result and the
@@ -804,7 +827,8 @@ enum RecipeTools {
             lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
                 + "results may be imprecise. Refine with specific identifiers for higher confidence.")
         }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
     }
 
     // MARK: - recall_shaped
@@ -925,20 +949,39 @@ enum RecipeTools {
 
         // Dense-row reply (PR-03): same row shape as moot_memory_search;
         // anchor excluded when near: pivoted.
+        // MXE-SS: ONE structured-tier fetch through the same gate feeds BOTH
+        // blocks — the dense text rows (rendered locally, byte-identical to
+        // the former denseRowsByID output: same admissible set, same
+        // DenseRow.render) and the typed structured rows.
         let estate = try await kit.estate(for: handle)
         let shownMatches = out.matches.filter { anchorID == nil || $0.id != anchorID }
-        let denseByID = try await denseRowsByID(
-            ids: shownMatches.prefix(50).map { $0.id }, estate: estate)
+        let displayedMatches = Array(shownMatches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: displayedMatches.map { $0.id }, estate: estate)
+        let denseByID = drawersByID.mapValues { DenseRow.render($0) }
 
         var lines: [String] = ["found \(shownMatches.count) memory(s)"]
-        for match in shownMatches.prefix(50) {
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in displayedMatches {
             lines.append(denseByID[match.id] ?? DenseRow.renderUnhydrated(id: match.id))
+            if let d = drawersByID[match.id] {
+                // match.content is PRE-redaction; the row builder's
+                // provenance switch decides whether it enters the
+                // structured block.
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id, room: match.room, content: match.content, drawer: d))
+            } else {
+                // Gated id: opaque in text, exactly as opaque in the
+                // structured block.
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
         }
         // Deviation-only narration (PR-03): line only on low/medium.
         if shapedDiscrimination == .low || shapedDiscrimination == .medium {
             lines.append(RecallDiscrimination.resultLine(for: shapedDiscrimination))
         }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
     }
 
     /// Fetch dense rows for a set of hit ids in one structured-tier read.
@@ -947,10 +990,12 @@ enum RecipeTools {
     /// hauling content blobs.
     ///
     /// THIS IS THE SENSITIVITY BOUNDARY for every by-id dense-row caller —
-    /// all six graph-lens arms in `LensTools`, the recall arms here, and the
-    /// tunnel-citation arms in `ToolDispatch`. Gate here, once; never at the
-    /// call sites. A per-arm check is how the hole reappears: the next arm
-    /// that hydrates an id inherits whatever this helper does.
+    /// all six graph-lens arms in `LensTools` and the tunnel-citation arms
+    /// in `ToolDispatch`. (The recall arms here fetch through
+    /// `structuredDrawersByID` below — the same frame, the same gate — and
+    /// render their dense rows from its result.) Gate here, once; never at
+    /// the call sites. A per-arm check is how the hole reappears: the next
+    /// arm that hydrates an id inherits whatever this helper does.
     ///
     /// THE EMPTY `filterChain` IS LOAD-BEARING, NOT AN ABSENT ARGUMENT.
     /// `BitmapEvaluator.insertDefaults` inserts `.sensitivityAtMost(.elevated)`
@@ -985,6 +1030,25 @@ enum RecipeTools {
         return Dictionary(uniqueKeysWithValues: fetched.admissible.map {
             ($0.id, DenseRow.render($0))
         })
+    }
+
+    /// Typed-drawer twin of `denseRowsByID` (MXE-SS): the SAME by-id read
+    /// through the SAME empty-filter-chain `RecallFrame` — the load-bearing
+    /// default gate documented on `denseRowsByID` — returning the drawers
+    /// themselves so the structured block can take subject and provenance
+    /// sensitivity from the row. Structured hydration: content blobs are NOT
+    /// loaded here; recall-recipe content comes from the match and passes
+    /// through the redaction switch in `ToolDispatcher.structuredRecallRow`.
+    /// Gated ids are ABSENT from the map exactly as they are from
+    /// `denseRowsByID`, and callers fall through to the opaque row (the twin
+    /// of `DenseRow.renderUnhydrated`).
+    static func structuredDrawersByID(ids: [String], estate: Estate) async throws -> [String: Drawer] {
+        guard !ids.isEmpty else { return [:] }
+        let fetched = try await estate.getDrawers(
+            ids: ids,
+            matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .structured),
+            hydrationLevel: .structured)
+        return Dictionary(uniqueKeysWithValues: fetched.admissible.map { ($0.id, $0) })
     }
 
     // MARK: - typed conflict projection section (DCP M4)

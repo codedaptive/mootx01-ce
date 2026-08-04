@@ -614,6 +614,118 @@ fn is_sensitivity_filter(f: &locus_kit::filter::Filter) -> bool {
 /// the final result order is driven by scores. All other orderings are decoded
 /// strictly; unknown values return an invalidParams transport fault.
 ///
+// ---------------------------------------------------------------------------
+// Structured recall results (MXE-SS) — shared by the recall family here and
+// in recipe_tools.rs (moot_recall_shaped / moot_recall_precise).
+// ---------------------------------------------------------------------------
+
+/// One structured recall row — the typed twin of a rendered row, per the
+/// recall family's `outputSchema` (`tool_list::recall_results_output_schema`).
+/// Optional fields are OMITTED (never null) when the text analog is absent:
+/// room/content on opaque rows, content at memory_get depth:subject, subject
+/// at memory_get depth:full when the drawer carries none. Mirrors Swift
+/// `ToolDispatcher.StructuredRecallRow`.
+pub(crate) struct StructuredRow {
+    pub id: String,
+    pub room: Option<String>,
+    pub content: Option<String>,
+    pub subject: Option<String>,
+}
+
+impl StructuredRow {
+    fn as_json(&self) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        object.insert("id".to_string(), serde_json::Value::String(self.id.clone()));
+        if let Some(ref room) = self.room {
+            object.insert("room".to_string(), serde_json::Value::String(room.clone()));
+        }
+        if let Some(ref content) = self.content {
+            object.insert("content".to_string(), serde_json::Value::String(content.clone()));
+        }
+        if let Some(ref subject) = self.subject {
+            object.insert("subject".to_string(), serde_json::Value::String(subject.clone()));
+        }
+        serde_json::Value::Object(object)
+    }
+}
+
+/// MCP `tools/call` success result carrying BOTH the text block —
+/// byte-identical to `text_result` — and its typed twin under
+/// `structuredContent`, the MCP-sanctioned structured-result mechanism the
+/// recall family's `outputSchema` declares. Every redaction the text path
+/// applied must already be applied to `results` by the caller; this helper
+/// only shapes the envelope. Wire-identical to Swift
+/// `ToolDispatcher.structuredTextResult`.
+pub(crate) fn structured_text_result(
+    text: &str,
+    results: &[StructuredRow],
+) -> serde_json::Value {
+    serde_json::json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": {
+            "results": results.iter().map(|r| r.as_json()).collect::<Vec<_>>()
+        },
+        "isError": false
+    })
+}
+
+/// Build the structured row for a drawer the text path renders as a dense
+/// row. The subject slot mirrors `dense_row::render`'s priority exactly
+/// (redaction marker → stored subject → absence marker), and the SAME
+/// provenance redaction extends to the content field: a restricted/secret
+/// row's body never enters the structured block — both fields carry the
+/// marker the text shows. Content values in hand at the recipe call sites
+/// (`PreciseMatch.content`) are PRE-redaction, so they must pass through
+/// this switch, never straight into a row. Mirrors Swift
+/// `ToolDispatcher.structuredRecallRow`.
+pub(crate) fn structured_recall_row(
+    id: &str,
+    room: Option<String>,
+    content: Option<String>,
+    drawer: &locus_kit::drawer::Drawer,
+) -> StructuredRow {
+    use locus_kit::provenance::Sensitivity;
+    match drawer.sensitivity() {
+        Sensitivity::Restricted => StructuredRow {
+            id: id.to_string(),
+            room,
+            content: content.map(|_| crate::dense_row::RESTRICTED_MARKER.to_string()),
+            subject: Some(crate::dense_row::RESTRICTED_MARKER.to_string()),
+        },
+        Sensitivity::Secret => StructuredRow {
+            id: id.to_string(),
+            room,
+            content: content.map(|_| crate::dense_row::SECRET_MARKER.to_string()),
+            subject: Some(crate::dense_row::SECRET_MARKER.to_string()),
+        },
+        _ => StructuredRow {
+            id: id.to_string(),
+            room,
+            content,
+            subject: Some(
+                drawer
+                    .subject
+                    .clone()
+                    .unwrap_or_else(|| crate::dense_row::NO_SUBJECT_MARKER.to_string()),
+            ),
+        },
+    }
+}
+
+/// The structured twin of `dense_row::render_unhydrated` — id plus the
+/// absence marker only. Room and content stay absent even when values are in
+/// hand at the call site: an id the text renders opaquely (gated or
+/// unhydrated) must be exactly as opaque in the structured block. Mirrors
+/// Swift `ToolDispatcher.opaqueStructuredRow`.
+pub(crate) fn opaque_structured_row(id: &str) -> StructuredRow {
+    StructuredRow {
+        id: id.to_string(),
+        room: None,
+        content: None,
+        subject: Some(crate::dense_row::NO_SUBJECT_MARKER.to_string()),
+    }
+}
+
 /// Mirrors Swift `ToolDispatch.runMemorySearch` and `decodeOrdering`.
 fn run_memory_search(
     args: &BTreeMap<String, JsonValue>,
@@ -884,10 +996,37 @@ fn run_memory_search(
     // bypassable through its content-derived summary. The full text is one
     // hop away via moot_memory_get depth:full. Mirrors Swift runMemorySearch.
     let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
+    // Structured twin (MXE-SS): room is resolved in ONE batched node-name
+    // read over the shown rows (the same resolution
+    // `memory_get_full_record_lines` uses per drawer) — disclosed in the BRR
+    // §Part 0 (2). Rows are built in the SAME loop as the text lines so the
+    // two blocks can never cover different sets. Mirrors Swift
+    // runMemorySearch.
+    let shown_parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        result.hits.iter().take(50)
+            .filter_map(|h| h.drawer.as_ref().map(|d| d.parent_node_id.clone()))
+            .filter(|p| seen.insert(p.clone()))
+            .collect()
+    };
+    let search_node_names =
+        coord.resolve_drawer_node_names(&estate.handle, &shown_parent_ids);
+    let mut results: Vec<StructuredRow> = Vec::new();
     for hit in result.hits.iter().take(50) {
         match hit.drawer.as_ref() {
-            Some(d) => lines.push(crate::dense_row::render(d)),
-            None => lines.push(crate::dense_row::render_unhydrated(&hit.id)),
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                results.push(structured_recall_row(
+                    &d.id,
+                    search_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone()),
+                    Some(d.content.clone()),
+                    d,
+                ));
+            }
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&hit.id));
+                results.push(opaque_structured_row(&hit.id));
+            }
         }
     }
     // Deviation-only narration (PR-03): the discrimination line appears ONLY
@@ -943,7 +1082,7 @@ fn run_memory_search(
              `mootx01 unlock secret` for secret memories.".to_string()
         );
     }
-    Ok(text_result(&lines.join("\n")))
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
@@ -1085,6 +1224,19 @@ fn run_memory_get(
     // through to the original full record below.
     if !single_id_mode || depth != "full" {
         let mut lines: Vec<String> = Vec::new();
+        // Structured twin (MXE-SS): one batched node-name read for room over
+        // the admissible rows. Not-found ids are omitted from the structured
+        // block — the text's "not found:" line is the signal, and the row
+        // has no drawer fields to carry. Mirrors Swift runMemoryGet.
+        let get_parent_ids: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            row_ids.iter()
+                .filter_map(|id| admissible_by_id.get(id).map(|d| d.parent_node_id.clone()))
+                .filter(|p| seen.insert(p.clone()))
+                .collect()
+        };
+        let get_node_names = coord.resolve_drawer_node_names(&estate.handle, &get_parent_ids);
+        let mut results: Vec<StructuredRow> = Vec::new();
         for id in &row_ids {
             let Some(d) = admissible_by_id.get(id) else {
                 lines.push(format!("not found: {id}"));
@@ -1104,24 +1256,49 @@ fn run_memory_get(
                     _ => {}
                 }
             }
+            let room = get_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone());
             match depth.as_str() {
-                "subject" => lines.push(crate::dense_row::render(d)),
+                "subject" => {
+                    lines.push(crate::dense_row::render(d));
+                    // Content stays ABSENT at the travel tier — the text
+                    // carries no body here, and the structured block must
+                    // not defeat the depth knob's token economy.
+                    results.push(structured_recall_row(&d.id, room, None, d));
+                }
                 "distilled" => {
                     lines.push(crate::dense_row::render(d));
                     match d.distilled.as_deref() {
-                        Some(text) if !text.is_empty() => lines.push(text.to_string()),
+                        Some(text) if !text.is_empty() => {
+                            lines.push(text.to_string());
+                            results.push(structured_recall_row(
+                                &d.id, room, Some(text.to_string()), d));
+                        }
                         _ => {
                             // Fallback marker on fallback hits ONLY (PR-03
                             // deviation-only contract): the text below is
                             // verbatim content, not a distillate.
                             lines.push("source: content (not yet distilled)".to_string());
                             lines.push(d.content.clone());
+                            results.push(structured_recall_row(
+                                &d.id, room, Some(d.content.clone()), d));
                         }
                     }
                 }
                 _ => {
                     // depth:full in batch mode — repeat the full record shape.
                     lines.extend(memory_get_full_record_lines(&mut coord, &estate.handle, d)?);
+                    // Full-record tier: subject mirrors the text's deviation
+                    // tolerance — the record omits the subject line when the
+                    // drawer has none, so the field is omitted too.
+                    // Provenance-gated rows cannot reach here
+                    // (admissible_by_id excludes them), so the row is built
+                    // directly, not via the marker switch.
+                    results.push(StructuredRow {
+                        id: d.id.clone(),
+                        room,
+                        content: Some(d.content.clone()),
+                        subject: d.subject.clone(),
+                    });
                 }
             }
             lines.push(String::new());
@@ -1129,7 +1306,7 @@ fn run_memory_get(
         if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
             lines.pop();
         }
-        return Ok(text_result(&lines.join("\n")));
+        return Ok(structured_text_result(&lines.join("\n"), &results));
     }
 
     let drawer = admissible_by_id.get(row_id).cloned().expect("guarded above");
@@ -1170,7 +1347,22 @@ fn run_memory_get(
              `mootx01 unlock secret` for secret memories.".to_string()
         );
     }
-    Ok(text_result(&lines.join("\n")))
+    // Structured twin (MXE-SS) of the single-id full record. The node tree
+    // is consulted a second time here (memory_get_full_record_lines resolves
+    // internally but returns rendered lines); one extra by-id lookup is
+    // preferred over widening that function's signature. Subject is omitted
+    // when the drawer has none, mirroring the record's omitted subject line;
+    // provenance-gated rows cannot reach here (admissible_by_id excludes
+    // them). Mirrors Swift runMemoryGet.
+    let get_node_names =
+        coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
+    let row = StructuredRow {
+        id: drawer.id.clone(),
+        room: get_node_names.get(&drawer.parent_node_id).map(|(_, room)| room.clone()),
+        content: Some(drawer.content.clone()),
+        subject: drawer.subject.clone(),
+    };
+    Ok(structured_text_result(&lines.join("\n"), &[row]))
 }
 
 /// The full-record block for one drawer — the depth:full tier and the
