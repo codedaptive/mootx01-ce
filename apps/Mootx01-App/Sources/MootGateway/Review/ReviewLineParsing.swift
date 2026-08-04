@@ -1,5 +1,4 @@
 import Foundation
-import AriaMCP        // JSONValue (structured recall rows)
 import MootIntentKit   // StructuredRecallResults
 
 // MARK: - ReviewLineParsing  (FAB5-G1 — ARIA text responses → ReviewItem)
