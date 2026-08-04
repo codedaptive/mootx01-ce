@@ -359,3 +359,219 @@ mod distilled_seam {
         assert!(assert_content_key_id_invariant(&scrub, "drawers", &config).is_ok());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Table-aware protection (MXE-RD).
+//
+// `subject` is content-derived text on the drawers table and carries the
+// same protection class as `content`. It is ALSO the name of an unrelated
+// column on `kg_facts` — the subject term of an S-P-O triple, on a table
+// with no `keyID` column — so these cases pin both halves: drawers.subject
+// is sealed, kg_facts.subject is byte-identical to a pre-seam write. A seam
+// intercepting by column name alone fails the kg_facts cases.
+//
+// Mirrors the Swift DistilledColumnCryptoTests table-aware section
+// (twin-parity gate).
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod table_aware_seam {
+    use super::*;
+    use crate::sqlite::{
+        assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write,
+    };
+    use crate::types::TypedValue;
+    use std::collections::BTreeMap;
+
+    fn kg_fact_row() -> BTreeMap<String, TypedValue> {
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("f1".to_string()));
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text("Ada Lovelace".to_string()),
+        );
+        values.insert(
+            "predicate".to_string(),
+            TypedValue::Text("worked_on".to_string()),
+        );
+        values.insert(
+            "object".to_string(),
+            TypedValue::Text("Analytical Engine".to_string()),
+        );
+        values
+    }
+
+    /// The regression this rescope exists for. A by-name seam would seal
+    /// `kg_facts.subject` and stamp a keyID, producing an INSERT that names
+    /// a column the table does not have.
+    #[test]
+    fn kg_facts_subject_is_never_sealed_and_never_gains_a_key_id() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let fact = kg_fact_row();
+        let out =
+            encrypted_for_write(fact.clone(), "kg_facts", &config, &AesGcmAeadProvider).unwrap();
+        // Byte-identical to the input: no sealing, no keyID stamp.
+        assert_eq!(out, fact);
+        assert!(out.get("keyID").is_none());
+        // A read of the same row is equally untouched.
+        let read =
+            decrypted_for_read(fact.clone(), "kg_facts", &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(read, fact);
+    }
+
+    /// Before the table filter the guard would have rejected every KG fact
+    /// write on an encrypting estate: `subject` carried plaintext and the
+    /// row has no keyID to satisfy it.
+    #[test]
+    fn invariant_guard_does_not_fire_for_kg_facts() {
+        let config = EstateEncryptionConfig::row_encryption();
+        assert!(assert_content_key_id_invariant(&kg_fact_row(), "kg_facts", &config).is_ok());
+    }
+
+    #[test]
+    fn seals_subject_alongside_content_and_distilled() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+        values.insert(
+            "content".to_string(),
+            TypedValue::Text("original body".to_string()),
+        );
+        values.insert(
+            "distilled".to_string(),
+            TypedValue::Text("dense body".to_string()),
+        );
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text("a summary of the body".to_string()),
+        );
+        let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        for column in ["content", "distilled", "subject"] {
+            assert!(
+                matches!(sealed.get(column), Some(TypedValue::Blob(_))),
+                "{column} was not sealed"
+            );
+        }
+        assert_eq!(
+            sealed.get("keyID"),
+            Some(&TypedValue::Text(config.key_identifier.clone().unwrap()))
+        );
+    }
+
+    /// Provenance columns describe how a subject was produced, not what it
+    /// says — the recall path reads them without holding a key.
+    #[test]
+    fn subject_provenance_columns_stay_plaintext() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("content".to_string(), TypedValue::Text("body".to_string()));
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text("a summary".to_string()),
+        );
+        values.insert(
+            "subject_pipeline_version".to_string(),
+            TypedValue::Text("2.1.0".to_string()),
+        );
+        values.insert(
+            "subject_at".to_string(),
+            TypedValue::Text("2026-08-03T10:00:00Z".to_string()),
+        );
+        let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(
+            sealed.get("subject_pipeline_version"),
+            Some(&TypedValue::Text("2.1.0".to_string()))
+        );
+        assert_eq!(
+            sealed.get("subject_at"),
+            Some(&TypedValue::Text("2026-08-03T10:00:00Z".to_string()))
+        );
+        assert!(matches!(sealed.get("subject"), Some(TypedValue::Blob(_))));
+    }
+
+    #[test]
+    fn opens_sealed_subject_back_to_text() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text("a summary of the body".to_string()),
+        );
+        let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        assert!(matches!(sealed.get("subject"), Some(TypedValue::Blob(_))));
+        let opened = decrypted_for_read(sealed, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(
+            opened.get("subject"),
+            Some(&TypedValue::Text("a summary of the body".to_string()))
+        );
+    }
+
+    #[test]
+    fn invariant_guard_refuses_plaintext_subject_on_drawers() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text("leaked summary".to_string()),
+        );
+        assert!(assert_content_key_id_invariant(&values, "drawers", &config).is_err());
+        // Empty-string subject is the erasure exemption, same as content.
+        let mut scrub = BTreeMap::new();
+        scrub.insert("id".to_string(), TypedValue::Text("d1".to_string()));
+        scrub.insert("subject".to_string(), TypedValue::Text(String::new()));
+        assert!(assert_content_key_id_invariant(&scrub, "drawers", &config).is_ok());
+    }
+
+    /// Plaintext and FullDatabase never reach the per-row seam, so subject
+    /// passes through in both directions exactly as it did before the
+    /// column joined the protected set.
+    #[test]
+    fn plaintext_and_full_database_pass_subject_through_untouched() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text("a summary".to_string()),
+        );
+        for config in [
+            EstateEncryptionConfig::plaintext(),
+            EstateEncryptionConfig::full_database(),
+        ] {
+            let out =
+                encrypted_for_write(values.clone(), "drawers", &config, &AesGcmAeadProvider)
+                    .unwrap();
+            assert_eq!(out, values);
+            assert!(out.get("keyID").is_none());
+            let read =
+                decrypted_for_read(values.clone(), "drawers", &config, &AesGcmAeadProvider)
+                    .unwrap();
+            assert_eq!(read, values);
+        }
+    }
+
+    /// A plaintext subject already on disk (written before the column joined
+    /// the protected set) reads back untouched alongside sealed columns —
+    /// the non-blob guard is what makes the residual-exposure case readable
+    /// rather than broken.
+    #[test]
+    fn pre_existing_plaintext_subject_still_reads() {
+        let config = EstateEncryptionConfig::row_encryption();
+        let mut values = BTreeMap::new();
+        values.insert("content".to_string(), TypedValue::Text("body".to_string()));
+        let mut sealed =
+            encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        // Simulate the older row shape: sealed content, plaintext subject.
+        sealed.insert(
+            "subject".to_string(),
+            TypedValue::Text("an old plaintext summary".to_string()),
+        );
+        let opened = decrypted_for_read(sealed, "drawers", &config, &AesGcmAeadProvider).unwrap();
+        assert_eq!(
+            opened.get("content"),
+            Some(&TypedValue::Text("body".to_string()))
+        );
+        assert_eq!(
+            opened.get("subject"),
+            Some(&TypedValue::Text("an old plaintext summary".to_string()))
+        );
+    }
+}

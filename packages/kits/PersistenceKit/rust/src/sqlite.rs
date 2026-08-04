@@ -4112,6 +4112,8 @@ mod at_rest_encryption_tests {
                 vec![
                     ColumnDeclaration::text("id"),
                     ColumnDeclaration::text("content"),
+                    // Content-derived summary; protected on drawers alongside content.
+                    ColumnDeclaration::text("subject").nullable(),
                     // keyID is nullable: NULL for plaintext rows, UUID string for encrypted rows.
                     ColumnDeclaration::text("keyID").nullable(),
                 ],
@@ -4571,6 +4573,41 @@ mod at_rest_encryption_tests {
             StorageError::ConstraintViolation { .. } => {}
             other => panic!("expected ConstraintViolation, got {:?}", other),
         }
+    }
+
+    /// The structured projection reads `subject` but does not ask for
+    /// `keyID` — the seam needs the key identifier to open the value, so
+    /// `query_projected` selects it and strips it back out. Without that,
+    /// `subject` comes back as raw ciphertext bytes and decodes as absent.
+    /// Mirrors Swift's `projectedReadDecryptsSubject`.
+    #[test]
+    fn projected_read_that_omits_key_id_still_decrypts_subject() {
+        let enc = EstateEncryptionConfig::row_encryption();
+        let storage = make_storage_with_encryption(enc);
+        let rs = Storage::row_store(&storage);
+
+        let mut v = BTreeMap::new();
+        v.insert("id".into(), TypedValue::Text("d1".into()));
+        v.insert("content".into(), TypedValue::Text("original body".into()));
+        v.insert(
+            "subject".into(),
+            TypedValue::Text("a summary of the body".into()),
+        );
+        rs.insert("drawers", v).expect("insert");
+
+        // The no-blob projection shape: subject rides it, keyID does not.
+        let rows = rs
+            .query_projected("drawers", &["id", "subject"], None, &[], None, None)
+            .expect("projected query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].values.get("subject"),
+            Some(&TypedValue::Text("a summary of the body".to_string()))
+        );
+        // The projection contract is unchanged: the borrowed keyID is gone
+        // and the omitted content column never appears.
+        assert!(rows[0].values.get("keyID").is_none());
+        assert!(rows[0].values.get("content").is_none());
     }
 }
 
