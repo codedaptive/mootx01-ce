@@ -27,6 +27,32 @@ EE repo before the sync; everything else is in CE.
       verify block — a stale or reverted tree fails it). The EE-leak lint runs
       unconditionally on every CE push via `.githooks/pre-push`.
 
+## 1.5 · Cut the release the same way the port is cut
+
+A release cut is a push to a public repository and gets the same discipline as a
+port. On 2026-08-05 it did not: the version bump was made directly in the live CE
+checkout with `git add -A`, which swept 92 untracked files from `.agents/` and
+`.codex/` into `develop/1.1.x`, `candidate/1.1.x` and the `1.1.0-beta-11` tag.
+Recovering it needed a force-push over a protected branch and a tag rewrite. The
+port immediately before it went through a disposable clone with seven gates and
+was clean.
+
+- [ ] **Never `git add -A` on a release commit.** Stage the version-stamp paths
+      explicitly. `bump_version.py` tells you exactly which files it rewrote;
+      those plus `CHANGELOG.md` are the whole commit, and `git show --name-only`
+      on the result must contain nothing else.
+- [ ] **Fetch before touching a promotion branch.** The same cut merged `develop`
+      into a `candidate/1.1.x` that was four merges stale locally, producing a
+      merge that dropped beta-07 through beta-10. Caught only because the push
+      was rejected as non-fast-forward.
+- [ ] **Confirm the branch push succeeded before tagging.** That cut pushed the
+      tag after the branch push was rejected, leaving a tag pointing at a commit
+      reachable from nothing.
+- [ ] **Run CE's push guards by hand before pushing**, not just via the hook:
+      `sh scripts/prepush_ee_leak_guard.sh`. The guard now allowlists the five
+      root dot entries CE tracks and refuses every other one, so an unnamed
+      agent-content directory cannot slip through the way `.agents/` did.
+
 ## 2 · Tag and build
 
 - [ ] Promote to `stable/1.0.x`, tag `vX.Y.Z`; `release.yml` builds, signs,
