@@ -2,10 +2,10 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-04
-version: 1.28.0
+date: 2026-08-05
+version: 1.29.0
 spec_type: kit
-description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.22.0: MXE-BB — circuit-breaker API (migrationParked, isParked, clearParked) on both ports.
+description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
 languages: [swift, rust]
 relates_to:
@@ -1031,13 +1031,16 @@ role, source file. Full signatures live in the cited file.
   `maintenance-daemon`, `vector-similarity`, `contradiction-scout`,
   `decay-sweep`, `by-reference-validity`, `end-of-day-tournament`,
   `temporal-causality-fold`, `distillation-sweep`, `training-daemon`.
-  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)` —
+  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:probeLimit:corpus:)` —
   production factory; captures `VectorStore` (and the estate's `Corpus`
   when registered), scans row embeddings via `findNearest` on each
   5-minute pass across two lanes — Drawer-keyed rows under `modelID`,
   and Corpus-derived rows already keyed by Drawer id (no chunk-owner map) —
-  and emits `AssociateFrames` carrying Drawer ids for pairs
-  within Hamming threshold (default 64).
+  and emits `AssociateFrames` carrying Drawer ids for pairs within Hamming
+  threshold (default 64). `probeLimit` (default 50 via `defaultProbeLimit`)
+  controls how many item IDs are sampled from the VectorStore on each pass;
+  the probe window is one-sided (recency-sampled probes, whole-estate neighbor
+  search). Rust: `probe_limit: usize` (`DEFAULT_PROBE_LIMIT = 50`).
 - **Recall cold-path signals:** `GraphCache`,
   `PreferenceStore` — public protocols defined in `GeniusLocusKit.swift`.
   Registered via `registerGraphCache(_:for:)` and `registerPreferenceStore(_:for:)`.
@@ -2113,6 +2116,19 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.29.0 -- 2026-08-05
+
+- **`VectorSimilaritySignal.spec` gains a `probeLimit` / `probe_limit`
+  parameter (default 50).** Swift: `probeLimit: Int = defaultProbeLimit`
+  added after `proximityThreshold`; `defaultProbeLimit` static constant
+  replaces the former private `maxProbeCount`. Rust:
+  `probe_limit: usize` added after `proximity_threshold`;
+  `DEFAULT_PROBE_LIMIT: usize = 50` (pub const) replaces
+  `MAX_PROBE_COUNT`. Resident behavior is byte-unchanged at the default.
+  The probe window is one-sided (recency-sampled probes, whole-estate
+  neighbor search); widening `probeLimit` relieves the constraint that
+  two dormant old items never pair unless one was probed while recent.
 
 ### 1.28.0 -- 2026-08-04
 

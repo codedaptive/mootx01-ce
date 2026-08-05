@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.22.0
+version: 1.23.0
 status: accepted-1.1-target
-date: 2026-08-04
-description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
+date: 2026-08-05
+description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -1088,16 +1088,22 @@ retrieval always routes through CorpusKit per the kit-roles doctrine.
 
 ### VectorSimilaritySignal real VectorKit queries
 
-`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)`
+`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:probeLimit:corpus:)`
 produces the production signal spec. The emit closure captures the
 `VectorStore` (and the estate's `Corpus`, when one is registered) and on
 each five-minute fire:
 
-1. Calls `VectorStore.recentItemIDs(limit: 50)` to sample the 50 most
-   recently filed candidate item IDs (newest-first — new captures are
-   what need association screening; the earlier ascending-item_id
-   enumeration was a static UUID-ordered window new content rarely
-   entered on a large estate).
+1. Calls `VectorStore.recentItemIDs(limit: probeLimit)` (default 50) to
+   sample the most recently filed candidate item IDs (newest-first — new
+   captures are what need association screening; the earlier
+   ascending-item_id enumeration was a static UUID-ordered window new
+   content rarely entered on a large estate).
+   **One-sided probe window:** probes are recency-sampled while neighbors
+   are searched across the whole estate. Two dormant old items will never
+   pair unless one was probed while recent. This is the documented
+   limitation the `probeLimit` / `probe_limit` parameter exists to
+   relieve — callers such as the dream associate step and benchmark
+   protocol v2 can widen the window when a full-estate sweep is warranted.
 2. Lane 1 — Drawer-keyed rows: for each candidate, retrieves its engram
    via `VectorStore.getVector(itemID:modelID:)` under the caller's
    `modelID` and calls `VectorStore.findNearest(probe:modelID:limit:5)`
@@ -1137,10 +1143,11 @@ GLK may orchestrate VectorKit directly for non-RAG vector work per the
 kit-roles doctrine; row-similarity is Brain math, not RAG.
 
 **Rust parity:** `VectorSimilaritySignal::spec(vector_store, model_id,
-proximity_threshold, corpus)` mirrors the Swift factory (the fourth
-parameter is `Option<Arc<Corpus>>` — `None` scans only the drawer-keyed
-lane). `default_standing_signal_specs` accepts an `Arc<VectorStore>` plus
-the optional corpus and forwards both to the signal.
+proximity_threshold, probe_limit, corpus, edge_checker)` mirrors the
+Swift factory. `probe_limit: usize` (default `DEFAULT_PROBE_LIMIT = 50`)
+is the fourth positional parameter after `proximity_threshold`.
+`default_standing_signal_specs` passes `DEFAULT_PROBE_LIMIT` to keep
+the registered default behavior identical to Swift.
 `ExternalCorpus::hybrid_recall` routes through `corpus_kit::Corpus::recall`.
 
 ## § RECALL_GRAPH — Graph cache + preference store cold-path signals
@@ -1915,6 +1922,23 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.23.0 -- 2026-08-05
+
+- **VectorSimilaritySignal probe window parameterized.**
+  `spec(...)` gains `probeLimit: Int = defaultProbeLimit` (Swift) /
+  `probe_limit: usize` (Rust) controlling how many item IDs are sampled
+  from the VectorStore on each five-minute pass. Default 50 keeps
+  resident behavior byte-unchanged. `defaultProbeLimit` (Swift) /
+  `DEFAULT_PROBE_LIMIT` (Rust) replace the formerly private
+  `maxProbeCount` / `MAX_PROBE_COUNT` constants.
+  **One-sided probe window documented:** probes are recency-sampled
+  (newest first) while neighbors are searched across the whole estate.
+  Two dormant old items never pair unless one was probed while recent —
+  widening `probeLimit` relieves this constraint. Expected callers:
+  dream associate step, benchmark protocol v2.
+  SPEC section §VectorSimilaritySignal updated to describe the
+  parameterized probe limit and one-sided window limitation.
 
 ### 1.22.0 -- 2026-08-04
 

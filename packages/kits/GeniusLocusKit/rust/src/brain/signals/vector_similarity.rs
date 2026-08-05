@@ -47,9 +47,12 @@ impl VectorSimilaritySignal {
     /// 64 = 25% of 256 bits. Mirrors Swift's defaultProximityThreshold.
     pub const DEFAULT_PROXIMITY_THRESHOLD: i32 = 64;
 
-    /// Maximum drawer IDs sampled per pass. Bounds the scan to O(N·K)
-    /// comparisons per fire. Mirrors Swift's maxProbeCount.
-    const MAX_PROBE_COUNT: usize = 50;
+    /// Default number of item IDs sampled per pass from the VectorStore.
+    /// Bounds the scan to O(N·K) comparisons per fire: 50 probes ×
+    /// 5 neighbours = 250 distance comparisons. Callers that need a
+    /// wider or narrower window pass an explicit `probe_limit` to
+    /// `spec(...)`. Mirrors Swift's `defaultProbeLimit`.
+    pub const DEFAULT_PROBE_LIMIT: usize = 50;
 
     /// Neighbours requested per probe via find_nearest. Mirrors Swift's
     /// neighboursPerProbe.
@@ -68,6 +71,16 @@ impl VectorSimilaritySignal {
     ///   on the drawer-keyed lane.
     /// - `proximity_threshold`: max Hamming distance (0-256) for a pair to
     ///   qualify as an association candidate. Default 64.
+    /// - `probe_limit`: maximum number of item IDs sampled from the
+    ///   VectorStore on each pass via `recent_item_ids`. Use
+    ///   `DEFAULT_PROBE_LIMIT` (50) to keep resident behavior unchanged.
+    ///   Widen for callers that need a broader recency window — the dream
+    ///   associate step and benchmark protocol v2 are the expected
+    ///   non-default users. The probe window is one-sided: probes are
+    ///   recency-sampled (newest first), while neighbors search the whole
+    ///   estate; two dormant old items never pair unless one was probed
+    ///   while recent — this is the limitation widening `probe_limit`
+    ///   relieves. Mirrors Swift's `probeLimit` parameter on `spec(...)`.
     /// - `corpus`: the estate's `Corpus`, when one is registered. Enables
     ///   the chunk-keyed corpus lane — the row population production
     ///   estates actually hold. `None` scans only the drawer-keyed lane,
@@ -85,6 +98,7 @@ impl VectorSimilaritySignal {
         vector_store: Arc<VectorStore>,
         model_id: String,
         proximity_threshold: i32,
+        probe_limit: usize,
         corpus: Option<Arc<CorpusContentEngine>>,
         edge_checker: Option<AssociationEdgeChecker>,
     ) -> SignalSpec {
@@ -101,6 +115,7 @@ impl VectorSimilaritySignal {
                     &vector_store,
                     &model_id,
                     proximity_threshold,
+                    probe_limit,
                     corpus.as_deref(),
                     edge_checker.as_deref(),
                     context,
@@ -111,25 +126,29 @@ impl VectorSimilaritySignal {
 
     /// Execute one proximity scan pass.
     ///
-    /// Samples the MAX_PROBE_COUNT most recently filed item IDs via
-    /// recent_item_ids, retrieves each row's engram, calls find_nearest to
-    /// locate nearby rows, deduplicates pairs, optionally filters already-
-    /// persisted edges, and emits AssociateFrames.
+    /// Samples up to `probe_limit` most recently filed item IDs via
+    /// `recent_item_ids`, retrieves each row's engram, calls `find_nearest`
+    /// to locate nearby rows, deduplicates pairs, optionally filters
+    /// already-persisted edges, and emits `AssociateFrames`.
     fn proximity_pass(
         vector_store: &VectorStore,
         model_id: &str,
         proximity_threshold: i32,
+        probe_limit: usize,
         corpus: Option<&CorpusContentEngine>,
         edge_checker: Option<&(dyn Fn(&str, &str) -> bool + Send + Sync)>,
         context: &SignalContext,
     ) -> Vec<SignalEmission> {
         let mut emissions = Vec::new();
 
-        // Newest-first probe sample: the MAX_PROBE_COUNT most recently
-        // filed items. New captures are what need association screening;
-        // the prior ascending-item_id enumeration was a static UUID-ordered
-        // window that new content rarely entered on a large estate.
-        let drawer_ids = match vector_store.recent_item_ids(Self::MAX_PROBE_COUNT) {
+        // Newest-first probe sample bounded by `probe_limit`. New captures
+        // are what need association screening; the prior ascending-item_id
+        // enumeration was a static UUID-ordered window that new content
+        // rarely entered on a large estate. The probe window is one-sided:
+        // neighbors search the whole estate, so two dormant old items never
+        // pair unless one was probed while recent — widening `probe_limit`
+        // is how callers relieve that constraint.
+        let drawer_ids = match vector_store.recent_item_ids(probe_limit) {
             Ok(ids) => ids,
             Err(e) => {
                 emissions.push(SignalEmission::Diagnostic(DiagnosticReport {

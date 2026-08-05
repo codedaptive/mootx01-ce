@@ -90,6 +90,7 @@ pub fn default_standing_signal_specs(
             vector_store,
             model_id.into(),
             VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+            VectorSimilaritySignal::DEFAULT_PROBE_LIMIT,
             corpus,
             None, // edge_checker: DB-level uniqueness (LocusKit v10) prevents
                   // duplicates; wire a checker for production frame-churn reduction.

@@ -25,13 +25,20 @@ public typealias AssociationEdgeChecker =
 /// pairs whose embeddings have drifted into similarity proximity since
 /// the last pass, and emits `associate` proposals for each candidate pair.
 ///
-/// How pairs are found: the emit closure samples the 50 most recently
-/// filed item IDs via `VectorStore.recentItemIDs(limit:)`, retrieves each
-/// row's engram via `getVector(itemID:modelID:)`, and calls
+/// How pairs are found: the emit closure samples up to `probeLimit` most
+/// recently filed item IDs via `VectorStore.recentItemIDs(limit:)`,
+/// retrieves each row's engram via `getVector(itemID:modelID:)`, and calls
 /// `VectorStore.findNearest(probe:modelID:limit:)` to locate nearby
 /// vectors. Pairs within `proximityThreshold` Hamming distance (default
 /// 64 — 25% of 256 bits) are deduplicated and emitted as
 /// `AssociationFrame` values with weight = 1 − (distance / 256).
+///
+/// The probe window is one-sided: probes are recency-sampled (newest first),
+/// while neighbors are searched across the whole estate. Two dormant old
+/// items will never pair unless one of them was probed while recent. This
+/// is the documented limitation the `probeLimit` parameter exists to relieve
+/// — callers such as the dream associate step and the benchmark protocol v2
+/// can widen the window when a full-estate sweep is warranted.
 ///
 /// TWO model populations are mined (same lane split as the contradiction
 /// hunter): Drawer-keyed rows under the caller's `modelID` (bespoke lanes and
@@ -52,7 +59,7 @@ public typealias AssociationEdgeChecker =
 /// column, so the verb accepts and discards it (see `Verbs.associate`,
 /// the drop site). The value is computed and plumbed on purpose — a
 /// pre-2.0 gauntlet experiment will test whether feeding weight into
-/// recall improves results; until that runs, it is honestly carried and
+/// recall improves results; until that runs, it is faithfully carried and
 /// dropped, never persisted and never silently fabricated.
 ///
 /// Cadence: every five minutes — matches the cookbook §15.2 bucket-
@@ -73,11 +80,12 @@ public enum VectorSimilaritySignal {
     /// SimHash scale used by this substrate.
     public static let defaultProximityThreshold: Int = 64
 
-    /// Maximum drawer IDs sampled per pass from the VectorStore.
+    /// Default number of item IDs sampled per pass from the VectorStore.
     /// Bounded to keep each 5-minute fire O(N·K) in the number of
     /// stored vectors rather than quadratic: 50 probes × 5 neighbours
-    /// = 250 distance comparisons per pass.
-    private static let maxProbeCount = 50
+    /// = 250 distance comparisons per pass. Callers that need a wider
+    /// or narrower window pass an explicit `probeLimit` to `spec(...)`.
+    public static let defaultProbeLimit: Int = 50
 
     /// Neighbours requested per probe via findNearest. Small limit keeps
     /// the scan bounded; the signal's goal is proximity detection, not
@@ -104,6 +112,16 @@ public enum VectorSimilaritySignal {
     ///   - corpus: The estate's `CorpusContentEngine`, when registered.
     ///     Enables its Drawer-keyed model population. `nil` scans only the
     ///     caller-selected `modelID` population.
+    ///   - probeLimit: Maximum number of item IDs sampled from the
+    ///     VectorStore on each pass via `recentItemIDs(limit:)`. Default
+    ///     `defaultProbeLimit` (50). Resident behavior is byte-unchanged
+    ///     at the default. Widen for callers that need a broader recency
+    ///     window — the dream associate step and benchmark protocol v2
+    ///     are the expected non-default users. The probe window is
+    ///     one-sided: probes are recency-sampled (newest first), while
+    ///     neighbors search the whole estate; two dormant old items
+    ///     never pair unless one was probed while recent — this is
+    ///     the limitation widening `probeLimit` relieves.
     ///   - edgeChecker: Optional async closure that returns `true` when
     ///     a persisted (non-tombstoned) association already exists between
     ///     the two drawer IDs in either direction (FINDING-3 optimization).
@@ -115,6 +133,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int = defaultProximityThreshold,
+        probeLimit: Int = defaultProbeLimit,
         corpus: CorpusContentEngine? = nil,
         edgeChecker: AssociationEdgeChecker? = nil
     ) -> SignalSpec {
@@ -128,6 +147,7 @@ public enum VectorSimilaritySignal {
                     vectorStore: vectorStore,
                     modelID: modelID,
                     proximityThreshold: proximityThreshold,
+                    probeLimit: probeLimit,
                     corpus: corpus,
                     edgeChecker: edgeChecker,
                     context: context)
@@ -144,6 +164,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int,
+        probeLimit: Int,
         corpus: CorpusContentEngine?,
         edgeChecker: AssociationEdgeChecker?,
         context: SignalContext
@@ -152,11 +173,14 @@ public enum VectorSimilaritySignal {
 
         let itemIDs: [String]
         do {
-            // Newest-first probe sample: the 50 most recently filed items.
-            // New captures are what need association screening; the prior
-            // ascending-item_id enumeration was a static UUID-ordered window
-            // that new content rarely entered on a large estate.
-            itemIDs = try await vectorStore.recentItemIDs(limit: maxProbeCount)
+            // Newest-first probe sample bounded by `probeLimit`. New captures
+            // are what need association screening; the prior ascending-item_id
+            // enumeration was a static UUID-ordered window that new content
+            // rarely entered on a large estate. The probe window is one-sided:
+            // neighbors search the whole estate, so two dormant old items never
+            // pair unless one was probed while recent — widening `probeLimit`
+            // is how callers relieve that constraint.
+            itemIDs = try await vectorStore.recentItemIDs(limit: probeLimit)
         } catch {
             emissions.append(.diagnostic(DiagnosticReport(
                 title: "vector_similarity.scan.summary",
