@@ -8842,3 +8842,61 @@ fn dm_gated_endpoint_is_indistinguishable_from_absent_endpoint() {
          any difference is an existence oracle.\ngated:  {gated_body}\nabsent: {absent_body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dream associate step (item 5) — Rust twins of the Swift
+// DreamAssociatesDispatchTests. Registry estates are fully wired
+// (provisioned hint drawers + vector store), so the default and "all"
+// modes REALLY sweep: the report line appears with live counts, and
+// "off" suppresses the step entirely.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dream_associates_default_sweeps_and_reports() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool("moot_dream", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("dream must succeed");
+    let text = content_text(&result);
+    assert!(text.contains("moot_dream: matrix rebuilt"), "got: {text}");
+    assert!(text.contains("associationsWritten: "), "default mode must sweep: {text}");
+    assert!(!text.contains("association sweep error"), "got: {text}");
+}
+
+#[test]
+fn dream_associates_off_skips_the_step() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_dream",
+        &args!["associates" => "off"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dream must succeed");
+    let text = content_text(&result);
+    assert!(!text.contains("associationsWritten"), "off must skip: {text}");
+}
+
+#[test]
+fn dream_associates_all_sweeps_dedups_on_second_dream() {
+    let registry = EstateRegistry::new_inmemory();
+    let first = dispatch_tool(
+        "moot_dream", &args!["associates" => "all"], &registry, &SurfacedRecallLedger::new())
+        .expect("dream must succeed");
+    let t1 = content_text(&first);
+    assert!(t1.contains("associationsWritten: "), "all mode must sweep: {t1}");
+    // Second dream: the edges already exist — written drops to zero and
+    // the zero-gated line disappears, or reports deduplicated > 0.
+    let second = dispatch_tool(
+        "moot_dream", &args!["associates" => "all"], &registry, &SurfacedRecallLedger::new())
+        .expect("second dream must succeed");
+    let t2 = content_text(&second);
+    assert!(
+        !t2.contains("associationsWritten: 0 (probed: 0")
+            && !t2.contains("association sweep error"),
+        "got: {t2}"
+    );
+    if let Some(line) = t2.lines().find(|l| l.starts_with("associationsWritten")) {
+        assert!(line.contains("deduplicated: "), "got: {line}");
+        assert!(line.starts_with("associationsWritten: 0 "), "re-run writes nothing: {line}");
+    }
+}

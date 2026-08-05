@@ -1304,6 +1304,38 @@ fn run_dream_tool(
             "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel.",
         );
     }
+    // Step 3.5 — association sweep (dream associate step). Three modes
+    // from the "associates" argument: "all" = probe_limit None (full
+    // estate coverage, for post-import runs), "recent" = the signal's
+    // default probe window (fast, mirrors the standing cadence; the
+    // DEFAULT), "off" = skip. Reuses the coordinator guard held since
+    // the accelerator rebuild at the top of this function — re-locking
+    // self-deadlocked once before. Mirrors Swift runDream step 3.5;
+    // report line appends after the subject line below, matching the
+    // Swift body ordering.
+    let associates_mode = optional_string(args, "associates")?.unwrap_or("recent");
+    let mut assoc_line = String::new();
+    if associates_mode != "off" {
+        let probe_limit = if associates_mode == "all" {
+            None
+        } else {
+            Some(genius_locus_kit::brain::signals::vector_similarity::VectorSimilaritySignal::DEFAULT_PROBE_LIMIT)
+        };
+        match coord.associate_sweep(&estate.handle, probe_limit, now_epoch_ms) {
+            Ok(sweep) => {
+                if sweep.probed > 0 || sweep.written > 0 {
+                    assoc_line = format!(
+                        "\nassociationsWritten: {} (probed: {}, deduplicated: {})",
+                        sweep.written, sweep.probed, sweep.deduplicated
+                    );
+                }
+            }
+            Err(e) => {
+                assoc_line = format!("\n(association sweep error: {e:?} — continuing)");
+            }
+        }
+    }
+
     // Step 4 — subject backfill dispatch (rider-default ruling,
     // 2026-08-02): dreaming pays subject debt when a producer is
     // registered. The Rust lane is DARK (no producer ships), so this is
@@ -1331,6 +1363,7 @@ fn run_dream_tool(
             }
         }
     }
+    body.push_str(&assoc_line);
     // DCP M4 — the typed proving lane's additive section (M0 §7).
     body.push('\n');
     body.push_str(

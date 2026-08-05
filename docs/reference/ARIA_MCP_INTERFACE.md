@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.32.0
+version: 1.33.0
 status: accepted-1.1-target
 date: 2026-08-04
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1205,6 +1205,12 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.33.0 -- 2026-08-05
+
+- moot_dream `associates` argument (all|recent|off, default recent)
+  and the zero-gated `associationsWritten:` report line, both ports
+  (Swift step by the item-5 worker; Rust twin completes it).
 
 ### 1.32.0 -- 2026-08-04
 

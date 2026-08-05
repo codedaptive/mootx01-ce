@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-08-05
-version: 1.29.0
+version: 1.30.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
@@ -2116,6 +2116,13 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.30.0 -- 2026-08-05
+
+- `associateSweep(in:probeLimit:now:)` ↔
+  `associate_sweep(handle, probe_limit: Option<usize>, now)` — returns
+  probed / candidatePairs / written / deduplicated
+  (AssociateSweepReport both ports).
 
 ### 1.29.0 -- 2026-08-05
 

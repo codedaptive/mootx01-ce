@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.23.0
+version: 1.24.0
 status: accepted-1.1-target
 date: 2026-08-05
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
@@ -1922,6 +1922,18 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.24.0 -- 2026-08-05
+
+Dream associate step: the vector-similarity pairing runs as an
+on-demand verb (`associateSweep` ↔ `associate_sweep`) sharing one
+implementation with the standing signal (ProximityScanCore ↔
+proximity_scan_candidates). Coverage: a probe limit, or None/nil for
+the full estate (post-import recovery for pairs the one-sided recency
+window can never examine — two dormant items associate only through a
+full-coverage sweep). A store-less estate reports zeros, never errors.
+Probe order is recency with id tiebreak, so same-seed estates write
+the same associations.
 
 ### 1.23.0 -- 2026-08-05
 

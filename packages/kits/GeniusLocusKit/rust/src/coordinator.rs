@@ -10496,6 +10496,45 @@ mod tests {
         assert_eq!(ghost_unresolved, vec!["no-such-fact".to_string()]);
     }
 
+    // Dream associate step — associate_sweep verb (mirrors the Swift
+    // verb tests): planted-similar pairs associate, the second run
+    // dedups to zero writes, and a store-less estate reports zeros
+    // rather than erroring.
+    #[test]
+    fn associate_sweep_writes_dedups_and_zeroes_without_store() {
+        use persistence_kit::inmemory::InMemoryStorage;
+        use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
+        use std::sync::Arc;
+        use vectorkit::vector_store::VectorStore;
+
+        // Store-less estate: zeros, not an error.
+        let (coord0, h0) = open_one();
+        let empty = coord0.associate_sweep(&h0, None, NOW).expect("sweep");
+        assert_eq!((empty.probed, empty.written), (0, 0));
+
+        // Planted-similar pair under the drawer-keyed default lane.
+        let (mut coord, h) = open_one();
+        let a = coord.capture(&h, cap_frame("The sunrise painting."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("The sunrise painting."), NOW + 1).unwrap();
+        let config =
+            EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
+        let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
+        let store = Arc::new(VectorStore::open(storage).expect("VectorStore::open"));
+        // Identical engrams → Hamming distance 0 → guaranteed pair.
+        let engram = engram_lib::Engram::ZERO;
+        store.add_vector(&a.id, &engram, "minilm-v6", "1", NOW).expect("add_vector a");
+        store.add_vector(&b.id, &engram, "minilm-v6", "1", NOW + 1).expect("add_vector b");
+        coord.register_vector_store(&h, store);
+
+        let first = coord.associate_sweep(&h, None, NOW + 2).expect("sweep");
+        assert!(first.probed >= 2, "both items probed under full coverage");
+        assert!(first.written >= 1, "the planted-similar pair must associate");
+
+        let second = coord.associate_sweep(&h, None, NOW + 3).expect("sweep again");
+        assert_eq!(second.written, 0, "re-run writes nothing");
+        assert!(second.deduplicated >= 1, "the existing edge is deduplicated");
+    }
+
     // CO-9: a verb on a closed handle surfaces EstateNotOpen, not an empty
     // result — parity of the Swift stale-handle case.
     #[test]

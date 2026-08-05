@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.28.0
+version: 1.29.0
 status: accepted-1.1-target
 date: 2026-08-04
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -963,6 +963,16 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.29.0 -- 2026-08-05
+
+- moot_dream gains the association sweep (step 3.5): `associates`
+  argument `all` (full-estate coverage, for post-import runs) /
+  `recent` (default, the standing-signal window) / `off`. Report line
+  appends `associationsWritten: N (probed: P, deduplicated: D)` —
+  additive and zero-gated (silent when nothing was probed or written).
+  Dreaming now triggers every cognition layer: matrix, proposals,
+  contradiction hunt, associations, subject backfill.
 
 ### 1.28.0 -- 2026-08-04
 

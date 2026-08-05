@@ -883,7 +883,8 @@ fn dream_tool() -> serde_json::Value {
         "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock.")
+                "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
+                "associates": string_schema("Association sweep mode: 'all' = probe every item in the estate (full coverage, for post-import runs), 'recent' = probe the 50 most-recently-filed items (default, fast), 'off' = skip the association sweep entirely.")
             }),
             json!([])
         )))
