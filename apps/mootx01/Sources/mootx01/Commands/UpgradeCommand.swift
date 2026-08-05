@@ -238,6 +238,11 @@ struct UpgradeCommand: AsyncParsableCommand {
             print("Installed:      \(binaryPath)")
         } catch {
             print("Could not place binary: \(error)")
+            // Same root-owned ~/.local/bin defect the install path explains; an
+            // upgrade hits it identically because it also replaces the symlink.
+            if let hint = permissionRepairHint(for: error, homeDirectory: home) {
+                print(hint)
+            }
             throw error
         }
 

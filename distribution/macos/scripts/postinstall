@@ -138,6 +138,20 @@ if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
 fi
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     chown -R "$REAL_USER" "$INSTALL_DIR" 2>/dev/null
+    # The PATH directory and its parent, NOT just the symlinks inside it.
+    # `mkdir -p "$LOCAL_BIN"` above runs as root, so any component it had to
+    # create — commonly both ~/.local and ~/.local/bin on a fresh Mac — is left
+    # root-owned. Chowning only the symlinks (as this did until 2026-08-05) still
+    # leaves the user unable to REPLACE them, because unlink needs write on the
+    # containing directory. `mootx01 install` then dies with
+    # NSCocoaErrorDomain 513 / EPERM 13 "couldn't be removed because you don't
+    # have permission", and the follow-up setup never runs: no server, no
+    # database. Reported from a clean 1.0.38 install on 2026-08-05.
+    #
+    # Deliberately NOT recursive: ~/.local is shared with pipx, cargo, codegraph
+    # and others, and re-owning their files would be a far worse bug than the one
+    # being fixed. Only the two directories themselves.
+    chown "$REAL_USER" "$HOME/.local" "$LOCAL_BIN" 2>/dev/null
     chown -h "$REAL_USER" "$LOCAL_BIN/mootx01" 2>/dev/null
     chown -h "$REAL_USER" "$LOCAL_BIN/moot-mgr" 2>/dev/null
 fi
