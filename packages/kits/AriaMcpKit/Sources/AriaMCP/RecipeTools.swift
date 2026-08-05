@@ -350,10 +350,11 @@ enum RecipeTools {
     private static func dreamTool() -> ProjectedTool {
         ProjectedTool(
             name: dreamToolName,
-            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
+            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review), and optionally run one vector-similarity association sweep (proximity-based edge mining). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction and association counts.",
             inputSchema: objectSchema(
                 properties: [
                     "now": stringSchema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
+                    "associates": stringSchema("Association sweep mode: 'all' = probe every item in the estate (full coverage, for post-import runs), 'recent' = probe the 50 most-recently-filed items (default, fast), 'off' = skip the association sweep entirely."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
                 ],
                 required: []),
@@ -1331,6 +1332,34 @@ enum RecipeTools {
         let hunt = try await kit.huntContradictions(
             in: handle, probeLimit: 500, now: now)
 
+        // Step 3.5 — vector-similarity association sweep.
+        //
+        // Mines proximity pairs from the estate's VectorStore and writes
+        // new associations directly (no scheduler round-trip). Dedup is
+        // durable: existing active associations are skipped. Mirrors the
+        // ContradictionHunt one-impl pattern: associateSweep is the same
+        // core used by the resident VectorSimilaritySignal, exposed here
+        // for on-demand coverage.
+        //
+        // Three modes decoded from the "associates" argument:
+        //   "all"    — probeLimit nil = all items (full estate coverage)
+        //   "recent" — probeLimit VectorSimilaritySignal.defaultProbeLimit (default)
+        //   "off"    — skip the step entirely
+        //
+        // Default is "recent" (fast, mirrors the standing-signal cadence).
+        // Use "all" after bulk imports for full-estate coverage.
+        let associatesMode = (try? optionalString(args["associates"], argument: "associates")) ?? "recent"
+        var assocLine = ""
+        if associatesMode != "off" {
+            let assocProbeLimit: Int? = associatesMode == "all" ? nil : VectorSimilaritySignal.defaultProbeLimit
+            let assocReport = try await kit.associateSweep(
+                in: handle, probeLimit: assocProbeLimit, now: now)
+            if assocReport.probed > 0 || assocReport.written > 0 {
+                assocLine = "\nassociationsWritten: \(assocReport.written) "
+                    + "(probed: \(assocReport.probed), deduplicated: \(assocReport.deduplicated))"
+            }
+        }
+
         // Step 4 — subject backfill dispatch (rider-default ruling,
         // 2026-08-02): dreaming pays subject debt when a producer is
         // registered (on Apple the serve layer registers the miniLLM
@@ -1360,6 +1389,7 @@ enum RecipeTools {
         contradictionCandidatesBorderline: \(hunt.borderline.count)
         """
         body += backfillLine
+        body += assocLine
         if !hunt.vectorStoreAvailable {
             body += "\n(contradiction hunt skipped: no vector index for this estate — run moot_reindex first)"
         }

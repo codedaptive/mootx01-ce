@@ -951,10 +951,10 @@ enum TeachmeGuides {
     }
 
     private static let dreamGuide = """
-        moot_dream — Dream the estate: matrix, dreaming cycle, and a
-        contradiction-hunt sweep.
+        moot_dream — Dream the estate: matrix, dreaming cycle, contradiction-hunt
+        sweep, and vector-similarity association sweep.
 
-        Three effects:
+        Four effects:
           1. Rebuilds the co-occurrence/temporal MATRIX TIER from the
              estate's audit log and registers it for recall scoring. The
              matrix is built by dreaming, NOT by capture — so a freshly
@@ -967,26 +967,36 @@ enum TeachmeGuides {
              screens them for lexical conflict, and persists strong findings
              as PROPOSED contradicts links (review with
              moot_lens_contradiction, settle with moot_review_tunnel).
+          3.5. Runs one ASSOCIATION SWEEP: mines kNN proximity pairs from
+             the estate's vector index and writes new association tunnels
+             directly. Dedup is durable — existing active associations are
+             skipped so re-running never duplicates edges. Three modes via
+             the `associates` argument:
+               "recent" (default) — probe the 50 most-recently-filed items
+               "all"              — probe every item (use after bulk import)
+               "off"              — skip this step entirely
 
-        HONEST SCOPE — dreaming-cycle proposals (effect 2) are
-        USAGE-DRIVEN: mined from recall co-occurrence (which memories the
+        Important scope note: dreaming-cycle proposals (effect 2) are
+        USAGE-DRIVEN — mined from recall co-occurrence (which memories the
         estate recalls together, accumulated over use), NOT from memory
         content. A freshly imported estate that has not been recalled
         against yet will legitimately report 0 cycle proposals — that is
-        expected, not a fault. Content is examined only by the
-        contradiction-hunt sweep (effect 3), which needs the corpus search
-        index (run moot_reindex after bulk import).
+        expected, not a fault. Content is examined by the
+        contradiction-hunt sweep (effect 3) and the association sweep
+        (effect 3.5), both of which need the vector index (run
+        moot_reindex after bulk import).
 
         When to use:
           - After bulk-loading an estate, before relying on matrix /
             association recall (moot_recall_precise composition=matrix,
-            text+matrix, weighted-all). Run moot_reindex first so the
-            hunt sweep has vectors to mine.
+            text+matrix, weighted-all). Run moot_reindex first so both
+            content sweeps have vectors to mine. Use associates="all" for
+            full-estate association coverage after import.
           - To trigger an association-mining + contradiction-hunt pass on
             demand rather than waiting for the resident governor's schedule.
 
-        Example (deterministic run):
-          { "now": "2026-06-11T00:00:00Z" }
+        Example (deterministic run, full association sweep):
+          { "now": "2026-06-11T00:00:00Z", "associates": "all" }
 
         Response:
           moot_dream: matrix rebuilt, dreaming cycle complete
@@ -996,6 +1006,7 @@ enum TeachmeGuides {
           belowThreshold: N
           contradictionsProposed: N
           contradictionCandidatesBorderline: N
+          associationsWritten: N (probed: N, deduplicated: N)
         """
 
     // MARK: - Maintenance
