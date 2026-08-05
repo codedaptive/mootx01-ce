@@ -337,4 +337,156 @@ struct MemPalaceChromaAdapterTests {
             #expect(note.frontmatter["filed_at"] != nil)
         }
     }
+
+    // MARK: - Import bounds (the palace root is untrusted input)
+
+    /// Copy the fixture palace into a fresh temp directory so a test can
+    /// oversize or corrupt one store without touching the shared fixture
+    /// that every other test in both ports asserts against.
+    private func temporaryPalaceCopy() throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mempalace-bounds-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: Self.fixturePalaceURL, to: root)
+        return root
+    }
+
+    /// The message of the `VaultKitError` a bounded import threw, or a
+    /// recorded failure when it did not throw at all.
+    private func limitErrorMessage(
+        _ operation: () throws -> some Any
+    ) -> String {
+        do {
+            _ = try operation()
+            Issue.record("expected the import limit to reject this palace")
+            return ""
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    @Test("an oversized tunnels.json is rejected BEFORE the file is read, naming the limit")
+    func oversizedTunnelsRejectedBeforeRead() throws {
+        let root = try temporaryPalaceCopy()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Deliberately MALFORMED as well as oversized. If the size check did
+        // not precede the read, this would fail with the JSON decode error
+        // instead of the limit — which is exactly what pre-fix code does.
+        // That is what makes this a regression test for the unbounded read
+        // rather than a test that some rejection happens.
+        let oversized = String(repeating: "x", count: 4096)
+        try oversized.write(
+            to: root.appendingPathComponent("tunnels.json"),
+            atomically: true, encoding: .utf8)
+
+        let adapter = MemPalaceChromaAdapter(
+            limits: MemPalaceImportLimits(maxTunnelsJSONBytes: 1024))
+        let message = limitErrorMessage { try adapter.toIR(vaultURL: root) }
+
+        #expect(message.contains("maxTunnelsJSONBytes"))
+        #expect(message.contains("4096"), "the error must name the OBSERVED value")
+        #expect(message.contains("1024"), "the error must name the LIMIT")
+        // The proof the file was never parsed: no decode diagnostic.
+        #expect(!message.contains("malformed"))
+    }
+
+    @Test("a row count over the cap is rejected, naming the limit and the count")
+    func rowCapRejectedWithNamedLimit() throws {
+        // The fixture's drawers scan alone returns more than three rows.
+        let adapter = MemPalaceChromaAdapter(
+            limits: MemPalaceImportLimits(maxImportRows: 3))
+        let message = limitErrorMessage {
+            try adapter.toIR(vaultURL: Self.fixturePalaceURL)
+        }
+        #expect(message.contains("maxImportRows"))
+        #expect(message.contains("3"), "the error must name the limit")
+        #expect(message.contains("SQLite rows"))
+    }
+
+    @Test("a materialized-byte total over the cap is rejected, naming the limit")
+    func byteCapRejectedWithNamedLimit() throws {
+        let adapter = MemPalaceChromaAdapter(
+            limits: MemPalaceImportLimits(maxMaterializedBytes: 16))
+        let message = limitErrorMessage {
+            try adapter.toIR(vaultURL: Self.fixturePalaceURL)
+        }
+        #expect(message.contains("maxMaterializedBytes"))
+        #expect(message.contains("16"))
+    }
+
+    @Test("the SQLite progress guard abandons a query past the step budget")
+    func stepBudgetAbandonsQuery() throws {
+        // Grain 1 fires the handler every virtual-machine instruction, so a
+        // one-step budget trips on the first statement rather than depending
+        // on how much work the fixture happens to need.
+        let adapter = MemPalaceChromaAdapter(
+            limits: MemPalaceImportLimits(
+                maxSQLiteVMSteps: 1, sqliteProgressGrain: 1))
+        let message = limitErrorMessage {
+            try adapter.toIR(vaultURL: Self.fixturePalaceURL)
+        }
+        #expect(message.contains("maxSQLiteVMSteps"))
+        // The named limit, not SQLite's bare "interrupted" diagnostic.
+        #expect(message.contains("virtual-machine steps"))
+    }
+
+    @Test("the fixture palace imports identically under the shipping defaults")
+    func defaultsDoNotAlterNormalImport() throws {
+        // The caps must be invisible to real input. Same 11 notes, same
+        // order, same kinds as `fixtureShape` asserts — read through the
+        // default (bounded) path.
+        let bounded = try MemPalaceChromaAdapter(limits: .default)
+            .toIR(vaultURL: Self.fixturePalaceURL)
+        #expect(bounded.count == 11)
+        #expect(bounded.map(\.stableSourceKey) == [
+            "aaaa000011112222",
+            "bbbb000011112222",
+            "closet_clarity_0004",
+            "closet_entities_0005",
+            "diary_fulcrum_0002",
+            "drawer_alpha_0001",
+            "drawer_min_0003",
+            "fleet",
+            "skippy",
+            "t_fleet_works_with_skippy_0001",
+            "t_minimal_0002",
+        ])
+    }
+
+    @Test("the shipping limit defaults are the documented values, identical to Rust")
+    func defaultLimitValuesAreTheDocumentedConstants() {
+        // Asserted literally in BOTH ports: divergent caps would mean an
+        // import that succeeds in one port and fails in the other. Changing
+        // a default here must change it in
+        // `rust/tests/mem_palace_adapter.rs` in the same commit.
+        let limits = MemPalaceImportLimits.default
+        #expect(limits.maxTunnelsJSONBytes == 67_108_864)
+        #expect(limits.maxImportRows == 20_000_000)
+        #expect(limits.maxMaterializedBytes == 1_073_741_824)
+        #expect(limits.maxSQLiteVMSteps == 1_000_000_000)
+        #expect(limits.sqliteProgressGrain == 1_000_000)
+    }
+
+    @Test("raising the limit above the file restores the pre-fix code path")
+    func raisingTheLimitRestoresThePreFixCodePath() throws {
+        // The runnable proof that the size check is what changes the outcome,
+        // and therefore that `oversizedTunnelsRejectedBeforeRead` is a real
+        // regression test. With the cap raised ABOVE the same
+        // oversized-and-malformed file, the read proceeds and the JSON decode
+        // fails — exactly what pre-fix code did for every file size, because
+        // no size check existed. That test asserts this message is ABSENT;
+        // this one asserts it is present once the bound is lifted. Same
+        // fixture, same file, opposite outcomes.
+        let root = try temporaryPalaceCopy()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try String(repeating: "x", count: 4096).write(
+            to: root.appendingPathComponent("tunnels.json"),
+            atomically: true, encoding: .utf8)
+
+        let adapter = MemPalaceChromaAdapter(
+            limits: MemPalaceImportLimits(maxTunnelsJSONBytes: 1_000_000))
+        let message = limitErrorMessage { try adapter.toIR(vaultURL: root) }
+        #expect(message.contains("malformed"))
+        #expect(!message.contains("maxTunnelsJSONBytes"))
+    }
 }

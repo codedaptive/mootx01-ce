@@ -20,6 +20,10 @@ let package = Package(
     ],
     products: [
         .library(name: "ConvergenceKit", targets: ["ConvergenceKit"]),
+        .library(
+            name: "ConvergenceKitAppleSecurity",
+            targets: ["ConvergenceKitAppleSecurity"]
+        ),
         .library(name: "ConvergenceKitNone", targets: ["ConvergenceKitNone"]),
         .library(name: "ConvergenceKitCloudKit", targets: ["ConvergenceKitCloudKit"]),
         .library(name: "ConvergenceKitFederation", targets: ["ConvergenceKitFederation"]),
@@ -38,6 +42,13 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ],
             path: "Sources/ConvergenceKit"
+        ),
+        .target(
+            name: "ConvergenceKitAppleSecurity",
+            dependencies: [
+                "ConvergenceKit",
+            ],
+            path: "Sources/ConvergenceKitAppleSecurity"
         ),
 
         // Backends.
@@ -95,6 +106,14 @@ let package = Package(
             path: "Tests/ConvergenceKitTests"
         ),
         .testTarget(
+            name: "ConvergenceKitAppleSecurityTests",
+            dependencies: [
+                "ConvergenceKitAppleSecurity",
+                "ConvergenceKit",
+            ],
+            path: "Tests/ConvergenceKitAppleSecurityTests"
+        ),
+        .testTarget(
             name: "ConvergenceKitNoneTests",
             dependencies: [
                 "ConvergenceKit",
@@ -128,6 +147,15 @@ let package = Package(
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],
             path: "Tests/ConvergenceKitFederationTests"
+        ),
+        .testTarget(
+            name: "ConvergenceKitSecretSyncConformanceTests",
+            dependencies: [
+                "ConvergenceKit",
+                "ConvergenceKitAppleSecurity",
+                "ConvergenceKitCloudKit",
+            ],
+            path: "Tests/ConvergenceKitSecretSyncConformanceTests"
         ),
     ]
 )

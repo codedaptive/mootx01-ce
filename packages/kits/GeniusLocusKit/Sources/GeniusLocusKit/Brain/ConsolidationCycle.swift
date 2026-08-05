@@ -421,7 +421,12 @@ extension GeniusLocusKit {
                 adjectiveBitmap: v2AdjBitmap,
                 operationalBitmap: DrawerFeatureFlags.isVague.rawValue
                     | ((Int64(level) & 0b11) << 22),
-                lineageID: vagueItem.lineageID
+                lineageID: vagueItem.lineageID,
+                // Fold-in v2 is a fresh derived row: same subject rule as the
+                // new-cluster path below — never born as debt.
+                subject: Self.vagueSubject(from: regen.rendering),
+                subjectPipelineVersion: Self.consolidationSubjectPipeline,
+                subjectAt: now
             )
             try await estate.foldInTransactionally(
                 vagueV2: v2,
@@ -499,7 +504,20 @@ extension GeniusLocusKit {
                 embeddingModelID: constituents[0].embeddingModelID,
                 provenance: newVagueProvBitmap,
                 adjectiveBitmap: newVagueAdjBitmap,
-                operationalBitmap: vagueBitmap
+                operationalBitmap: vagueBitmap,
+                // Derived writers emit their own subject at creation (PR-02):
+                // a vague item must never be born as subject debt, because
+                // the debt counter would then grow with every consolidation
+                // sweep. The daemon has no AI at hand, so the subject is the
+                // deterministic best available — the rendering's first line,
+                // character-capped to the contract (a truncation cap, not the
+                // AI register's compress-don't-truncate rule; miniLLM
+                // regeneration upgrades these rows later via the
+                // pipeline-version lever). Distinct pipeline tag so those
+                // regeneration sweeps can target exactly this producer.
+                subject: Self.vagueSubject(from: rendering),
+                subjectPipelineVersion: Self.consolidationSubjectPipeline,
+                subjectAt: now
             )
 
             // §3.2 steps 2–4 in ONE transaction (LocusKit owns atomicity).
@@ -529,6 +547,25 @@ extension GeniusLocusKit {
             foldIns: foldIns,
             foldInRejections: foldInRejections,
             repairedItems: repairedItems)
+    }
+
+    /// Pipeline-version tag for subjects the consolidation daemon writes on
+    /// vague items. Deliberately NOT `ai-v1`: these subjects are
+    /// deterministic first-line caps, not AI-authored assertions, and the
+    /// distinct tag lets a future miniLLM regeneration sweep target exactly
+    /// this producer via `countMissingSubject(pipelineVersion:)`.
+    /// Twin: Rust `CONSOLIDATION_SUBJECT_PIPELINE`.
+    static let consolidationSubjectPipeline = "consolidation-v1"
+
+    /// Deterministic subject for a vague item: the rendering's first
+    /// non-empty line, character-capped to the store contract. Never
+    /// returns empty for the renderings `composeAndDistill` produces
+    /// (it rejects all-blank clusters). Twin: Rust `vague_subject`.
+    static func vagueSubject(from rendering: String) -> String {
+        let firstLine = rendering
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .first.map(String.init) ?? rendering
+        return String(firstLine.prefix(DrawerStore.subjectLengthContract))
     }
 
     /// D6/D7 composition + distillation shared by the consolidation act and
@@ -589,10 +626,27 @@ extension GeniusLocusKit {
         now: Date,
         config: ConsolidationConfig = ConsolidationConfig()
     ) async throws -> ConsolidationSweepReport {
-        try await expunge(handle, ExpungeFrame(
+        let outcome = try await expunge(handle, ExpungeFrame(
             rowID: vagueDrawerID,
             reason: "wave-2 defrag: cluster drift exceeded the D10 threshold",
             confirmation: true), now: now)
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling is
+        // not a success. This path returns a ConsolidationSweepReport, which
+        // cannot represent a partial cascade, so a refusal must surface as an
+        // error rather than be summarised away. Vague items are
+        // machine-generated and their lineage should never contain an
+        // accepted row; if one does (a user accepted a vague revision), the
+        // gate preserves it and defrag stops before re-consolidating.
+        guard outcome.refusedSiblingIDs.isEmpty else {
+            throw VerbError.underlyingEstateFailure(
+                verb: "expunge",
+                reason: "defrag expunge of vague drawer \(vagueDrawerID) was partial: "
+                    + "\(outcome.refusedSiblingIDs.count) accepted lineage sibling(s) "
+                    + "refused by the audit gate and preserved "
+                    + "(\(outcome.refusedSiblingIDs.joined(separator: ", "))); "
+                    + "the vague cascade cannot complete"
+            )
+        }
         return try await consolidationSweepReport(
             handle: handle, distillFn: distillFn, now: now, config: config)
     }

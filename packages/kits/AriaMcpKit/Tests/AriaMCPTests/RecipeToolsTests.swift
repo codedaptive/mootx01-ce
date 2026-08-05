@@ -37,6 +37,7 @@ struct RecipeToolsTests {
     private func fileArgs(content: String) -> JSONValue {
         .object([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("recipe-tests"),
         ])
     }
@@ -405,11 +406,13 @@ struct RecipeToolsTests {
                 .object([
                     "id": .string("a"),
                     "content": .string("alpha topic about felines"),
+                    "subject": .string("alpha topic about felines"),
                     "tags": .array([]),
                 ]),
                 .object([
                     "id": .string("b"),
                     "content": .string("beta topic about canines"),
+                    "subject": .string("beta topic about canines"),
                     "tags": .array([]),
                 ]),
             ]),
@@ -520,6 +523,7 @@ struct RecipeToolsTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content": .string(text),
+                    "subject": .string(String(text.prefix(120))),
                     "location": .string("history/treaty"),
                 ]))
         }
@@ -594,6 +598,7 @@ struct RecipeToolsTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content": .string("study content"),
+                    "subject": .string("study content"),
                     "location": .string("study"),
                 ]))
         }
@@ -639,6 +644,7 @@ struct RecipeToolsTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content": .string("study content"),
+                    "subject": .string("study content"),
                     "location": .string("study"),
                 ]))
         }
@@ -746,12 +752,16 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Default output starts with "found N memory(s) [distilled]" — no
-        // query echo. (echo_query:true opt-in restores the "for:" suffix.)
+        // Default output starts with "found N memory(s)" — no query echo
+        // and, since PR-03, no [distilled] tag (deviation-only narration:
+        // distilled service is this verb's norm, only fallback rows carry
+        // a marker). (echo_query:true opt-in restores the "for:" suffix.)
         #expect(text.hasPrefix("found "),
-                "moot_recall_distilled output must start with 'found N memory(s) [distilled]'")
-        #expect(text.contains("memory(s) [distilled]"),
-                "output header must include 'memory(s) [distilled]'")
+                "moot_recall_distilled output must start with 'found N memory(s)'")
+        #expect(text.contains("memory(s)"),
+                "output header must include 'memory(s)'")
+        #expect(!text.contains("[distilled]"),
+                "PR-03: the [distilled] header tag is retired")
         #expect(!text.contains("] for:"),
                 "default response must NOT echo the query in the header")
     }
@@ -804,7 +814,7 @@ struct RecipeToolsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         // With echo_query:true, header must echo the query.
-        #expect(text.hasPrefix("found 0 memory(s) [distilled] for: test echo query"),
+        #expect(text.hasPrefix("found 0 memory(s) for: test echo query"),
                 "echo_query:true must restore 'for: {query}' suffix in header")
         // echo_query is a declared arg — no unrecognized-arg hint must appear.
         #expect(!text.contains("hint: unrecognized argument(s) ignored"),
@@ -832,7 +842,7 @@ struct RecipeToolsTests {
         // Default (no echo_query) must omit the query from the header.
         #expect(!text.contains("] for:"),
                 "default response must NOT echo the query in the header")
-        #expect(text.contains("found 0 memory(s) [distilled]"),
+        #expect(text.contains("found 0 memory(s)"),
                 "header must still contain the count line")
     }
 

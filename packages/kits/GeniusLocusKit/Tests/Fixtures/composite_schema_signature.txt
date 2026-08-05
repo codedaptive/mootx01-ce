@@ -90,6 +90,14 @@ table=corpus_provider_coverage
   col=updated_at type=timestamp null=0 default=- role=-
   pk=content_id,model_id
   appendOnly=0 hashable=0
+table=corpus_provider_vocab
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=term type=text null=0 default=- role=-
+  col=vector type=blob null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=model_id,model_version,term
+  appendOnly=0 hashable=0
 table=diary
   col=id type=text null=0 default=- role=-
   col=agentName type=text null=0 default=- role=-
@@ -135,6 +143,9 @@ table=drawers
   col=distilled_pipeline_version type=text null=1 default=- role=-
   col=distilled_token_count type=int null=1 default=- role=-
   col=distilled_at type=timestamp null=1 default=- role=-
+  col=subject type=text null=1 default=- role=-
+  col=subject_pipeline_version type=text null=1 default=- role=-
+  col=subject_at type=timestamp null=1 default=- role=-
   gen=g_state_cluster type=int
   gen=g_provenance_source type=int
   gen=g_provenance_confirmation type=int
@@ -196,6 +207,9 @@ table=kg_facts
   col=predicate type=text null=0 default=- role=-
   col=object type=text null=0 default=- role=-
   col=sourceDrawerID type=text null=0 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=foreignSourceKey type=text null=0 default=- role=-
+  col=foreignRecordID type=text null=0 default=- role=-
   col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
   col=operationalBitmap type=bitmap null=0 default=bitmap role=-
   col=provenanceBitmap type=bitmap null=0 default=bitmap role=-

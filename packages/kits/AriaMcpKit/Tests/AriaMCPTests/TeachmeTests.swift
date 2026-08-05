@@ -109,6 +109,7 @@ struct TeachmeTests {
             arguments: .object([
                 "teachme": .bool(true),
                 "content": .string("this content must never be filed"),
+                "subject": .string("this content must never be filed"),
                 "location": .string("test"),
             ])
         )
@@ -156,6 +157,7 @@ struct TeachmeTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("nohintkey phrase for test six isolation"),
+                "subject": .string("nohintkey phrase for test six isolation"),
                 "location": .string("test"),
             ])
         )
@@ -195,6 +197,7 @@ struct TeachmeTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string(largeContent),
+                "subject": .string(String(largeContent.prefix(120))),
                 "location": .string("test"),
             ])
         )
@@ -216,6 +219,7 @@ struct TeachmeTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string(shortContent),
+                "subject": .string(String(shortContent.prefix(120))),
                 "location": .string("test"),
             ])
         )
@@ -290,6 +294,7 @@ struct TeachmeTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("erase field-name regression test"),
+                "subject": .string("erase field-name regression test"),
                 "location": .string("archive"),
             ])
         )

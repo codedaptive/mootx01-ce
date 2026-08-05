@@ -93,16 +93,18 @@ struct RecallProvenanceSurfacingTests {
 
     // MARK: - A. Provenance line is always present (deterministic provider)
 
-    /// Prove that `moot_memory_search` always appends a `recall_provenance:`
-    /// status line, regardless of hit count. The deterministic provider has Lane D
-    /// live; the line must be present and non-empty.
-    @Test func provenanceLineAlwaysPresentDeterministicProvider() async throws {
+    /// PR-03 deviation-only contract: a nominal search (Lane D live,
+    /// nothing degraded) emits NO recall_provenance: line — its absence IS
+    /// the nominal signal. Deviations (dark lane, degraded stages) are
+    /// pinned by tests D/E below, which still require the line.
+    @Test func provenanceLineAbsentOnNominalRecall() async throws {
         let (dispatcher, kit, handle) = try await openInMemoryEstateWithSemanticRecall()
         defer { Task { try? await kit.close(handle) } }
 
         // Capture a memory and drain so it is searchable.
         _ = try await dispatcher.runFileMemory([
             "content": .string("peregrine falcon stoop dive speed aerial predator"),
+            "subject": .string("peregrine falcon stoop dive speed aerial predator"),
             "location": .string("birds/falcons"),
             "impatient": .bool(true),
         ])
@@ -112,32 +114,23 @@ struct RecallProvenanceSurfacingTests {
         ])
         let body = text(of: result)
         #expect(
-            body.contains("recall_provenance:"),
-            "moot_memory_search must always include a recall_provenance: status line; got: \(body)"
-        )
-        // The provenance line must contain a dense_lane token and a degraded_stages token.
-        #expect(
-            body.contains("dense_lane:"),
-            "recall_provenance line must include a dense_lane: token; got: \(body)"
-        )
-        #expect(
-            body.contains("degraded_stages:"),
-            "recall_provenance line must include a degraded_stages: token; got: \(body)"
+            !body.contains("recall_provenance:"),
+            "nominal recall must NOT include a recall_provenance: line (deviation-only); got: \(body)"
         )
     }
 
     // MARK: - B. Deterministic provider — dense lane active, provenance never blank
 
-    /// Prove that when the deterministic provider is used, the recall_provenance
-    /// line is present and non-empty with a dense_lane: and degraded_stages: token.
-    /// The deterministic provider implements embedFloat, so Lane D is active.
-    /// The critical invariant is that the field is never blank or absent.
-    @Test func deterministicProviderProvenanceIsNeverBlank() async throws {
+    /// PR-03: with the deterministic provider live, the search is nominal —
+    /// the reply carries dense rows and NO provenance line. (Pre-PR-03 this
+    /// test pinned an always-present line; absence is now the invariant.)
+    @Test func deterministicProviderNominalSearchOmitsProvenance() async throws {
         let (dispatcher, kit, handle) = try await openInMemoryEstateWithSemanticRecall()
         defer { Task { try? await kit.close(handle) } }
 
         _ = try await dispatcher.runFileMemory([
             "content": .string("hobby falcon aerial insect hunting speed agility"),
+            "subject": .string("hobby falcon aerial insect hunting speed agility"),
             "location": .string("birds/falcons"),
             "impatient": .bool(true),
         ])
@@ -146,31 +139,14 @@ struct RecallProvenanceSurfacingTests {
             "query": .string("hobby falcon insect"),
         ])
         let body = text(of: result)
-
-        // Extract the recall_provenance line.
-        let provenanceLine = body
-            .components(separatedBy: "\n")
-            .first(where: { $0.hasPrefix("recall_provenance:") })
         #expect(
-            provenanceLine != nil,
-            "recall_provenance: line must be present; got body: \(body)"
+            !body.contains("recall_provenance:"),
+            "nominal recall must omit the provenance line entirely; got: \(body)"
         )
-        let line = provenanceLine ?? ""
-        // The line must be non-trivially populated: it must carry a dense_lane token
-        // and a degraded_stages token.
+        // The hit must surface as a dense row carrying the subject.
         #expect(
-            line.contains("dense_lane:"),
-            "provenance line must have dense_lane token; got: \(line)"
-        )
-        #expect(
-            line.contains("degraded_stages:"),
-            "provenance line must have degraded_stages token; got: \(line)"
-        )
-        // The provenance line must not be "recall_provenance: " (just the label with nothing).
-        let afterColon = line.dropFirst("recall_provenance:".count).trimmingCharacters(in: .whitespaces)
-        #expect(
-            !afterColon.isEmpty,
-            "recall_provenance: line must carry at least one token after the colon; got: \(line)"
+            body.contains("hobby falcon aerial insect hunting speed agility"),
+            "dense row must carry the subject; got: \(body)"
         )
     }
 
@@ -189,6 +165,7 @@ struct RecallProvenanceSurfacingTests {
         // Impatient capture writes directly into Corpus (BM25 + float rows).
         _ = try await dispatcher.runFileMemory([
             "content": .string("merlin small falcon moorland heather hunting pipits"),
+            "subject": .string("merlin small falcon moorland heather hunting pipits"),
             "location": .string("birds/falcons"),
             "impatient": .bool(true),
         ])
@@ -198,22 +175,12 @@ struct RecallProvenanceSurfacingTests {
         ])
         let body = text(of: result)
 
-        let provenanceLine = body
-            .components(separatedBy: "\n")
-            .first(where: { $0.hasPrefix("recall_provenance:") })
-        let line = provenanceLine ?? ""
-
-        // When the corpus is wired and float rows are present, Lane D is active.
-        // The deterministic provider's embedFloat returns a float vector, so the
-        // dense lane ran and contributed. denseLaneStatus is nil => "dense_lane:active".
+        // When the corpus is wired and float rows are present, Lane D is
+        // active (denseLaneStatus nil) and nothing degraded — under the
+        // PR-03 deviation-only contract that renders as NO provenance line.
         #expect(
-            line.contains("dense_lane:active"),
-            "Lane D must be active when corpus is wired with deterministic provider and docs ingested; got: \(line)"
-        )
-        // Happy path: no degraded stages.
-        #expect(
-            line.contains("degraded_stages:none"),
-            "No degraded stages expected in happy path; got: \(line)"
+            !body.contains("recall_provenance:"),
+            "Lane D live + happy path must render as ABSENCE of the provenance line; got: \(body)"
         )
     }
 
@@ -253,6 +220,7 @@ struct RecallProvenanceSurfacingTests {
         // File a memory to ensure there is something to recall.
         _ = try await dispatcher.runFileMemory([
             "content": .string("buzzard soaring thermal upland woodland edges"),
+            "subject": .string("buzzard soaring thermal upland woodland edges"),
             "location": .string("birds/raptors"),
             "impatient": .bool(true),
         ])

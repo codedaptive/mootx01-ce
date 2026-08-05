@@ -167,10 +167,11 @@ enum RecipeTools {
     private static func shapedRecallTool() -> ProjectedTool {
         ProjectedTool(
             name: shapedRecallToolName,
-            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that produce narrower relative score gaps on small estates, so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision.",
+            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Accepts near:<uuid> instead of query to fan out from an anchor memory under the chosen preset. Returns dense rows in the same shape as moot_memory_search; a discrimination line appears only when the signal is low/medium (expected for associative/conceptual presets on small estates — switch to moot_recall_precise for precision).",
             inputSchema: objectSchema(
                 properties: [
-                    "query": stringSchema("The search query text — drives BM25 + vector recall."),
+                    "query": stringSchema("The search query text — drives BM25 + vector recall. Provide query OR near — exactly one."),
+                    "near": stringSchema("UUID of an anchor memory — returns the memories most similar to it under the preset (the anchor itself is excluded). Alternative to query; pass exactly one of the two."),
                     "preset": .object([
                         "type": .string("string"),
                         "description": .string("The RecallShape preset to apply (how to steer the fusion). One of the roster names. balanced (or an omitted preset) is the unsteered default. Unknown names are rejected."),
@@ -182,8 +183,9 @@ enum RecipeTools {
                     "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
-                required: ["query"]),
-            provenance: .recipe)
+                required: []),
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
     }
 
     /// The cognition-discovery tool. At runtime (`runListRecipes`), returns
@@ -194,8 +196,15 @@ enum RecipeTools {
     private static func listRecipesTool() -> ProjectedTool {
         ProjectedTool(
             name: listRecipesToolName,
-            description: "List the available reasoning lenses and CognitionKit behaviour recipes — each with its version, description, and the NeuronKit capabilities it requires.",
-            inputSchema: objectSchema(properties: [:], required: []),
+            description: "List the available reasoning lenses and CognitionKit behaviour recipes. Terse by default (name + one-liner per tool); pass verbose:true for full descriptions and required arguments.",
+            inputSchema: objectSchema(
+                properties: [
+                    "verbose": .object([
+                        "type": .string("boolean"),
+                        "description": .string("Full catalogue with complete descriptions and required args. Omit for the terse default; null is invalid."),
+                    ]),
+                ],
+                required: []),
             provenance: .recipe)
     }
 
@@ -206,8 +215,15 @@ enum RecipeTools {
     private static func listRecipesCatalogTool() -> ProjectedTool {
         ProjectedTool(
             name: listRecipesCatalogToolName,
-            description: "List every shipped CognitionKit recipe — name, version, description, and required NeuronKit capabilities — in catalog order.",
-            inputSchema: objectSchema(properties: [:], required: []),
+            description: "List every shipped CognitionKit recipe in catalog order. Terse by default (name, version, one-liner); pass verbose:true for full descriptions and required capabilities.",
+            inputSchema: objectSchema(
+                properties: [
+                    "verbose": .object([
+                        "type": .string("boolean"),
+                        "description": .string("Full catalogue with complete descriptions and capabilities. Omit for the terse default; null is invalid."),
+                    ]),
+                ],
+                required: []),
             provenance: .recipe)
     }
 
@@ -235,7 +251,7 @@ enum RecipeTools {
     private static func preciseRecallTool() -> ProjectedTool {
         ProjectedTool(
             name: preciseRecallToolName,
-            description: "Precise recall: coarse-grab a generous candidate pool then re-rank by query-specific precision (distinctive number/proper-noun match) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search including a discrimination signal. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
+            description: "Precise recall: coarse-grab a generous candidate pool then re-rank by query-specific precision (distinctive number/proper-noun match) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns dense rows in the same shape as moot_memory_search; a discrimination line appears only when the signal is low/medium. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema("The search query text — drives BM25 + vector recall and the precision re-rank."),
@@ -247,7 +263,8 @@ enum RecipeTools {
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
-            provenance: .recipe)
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
     }
 
     private static func vagueRecallTool() -> ProjectedTool {
@@ -477,10 +494,10 @@ enum RecipeTools {
         // Recipe discovery needs no estate; answer before resolving a handle
         // so discovery tools work even with no estate targeted.
         if name == listRecipesToolName {
-            return runListRecipes()
+            return try runListRecipes(args)
         }
         if name == listRecipesCatalogToolName {
-            return runListRecipesCatalog()
+            return try runListRecipesCatalog(args)
         }
 
         // MARK: ACK gates and notice-only stubs
@@ -541,7 +558,31 @@ enum RecipeTools {
     /// `moot_recall_precise`, `moot_recall_shaped`) for 27 total.
     /// Migration and distillation tools (Tier 7) are intentionally excluded;
     /// they have their own teachme guides and a separate caller workflow.
-    private static func runListRecipes() -> JSONValue {
+    /// Decode the shared `verbose` flag for the two catalogue tools
+    /// (PR-04). Absent → false (terse default); present-but-non-bool →
+    /// invalidParams (omit-to-default contract).
+    private static func decodeVerbose(_ args: [String: JSONValue]) throws -> Bool {
+        guard let raw = args["verbose"] else { return false }
+        guard let b = raw.boolValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "verbose must be a boolean; omit it for the terse default")
+        }
+        return b
+    }
+
+    /// First sentence of a tool description, for the terse catalogue rows
+    /// (PR-04). Deterministic and byte-identical to the Rust twin: cut at
+    /// the first ". " boundary, keeping the period.
+    static func oneLiner(_ description: String) -> String {
+        if let range = description.range(of: ". ") {
+            return String(description[..<range.lowerBound]) + "."
+        }
+        return description
+    }
+
+    private static func runListRecipes(_ args: [String: JSONValue]) throws -> JSONValue {
+        let verbose = try decodeVerbose(args)
         // Tier 6 recipe tools: list-lenses + synthesize + precise recall + shaped
         // recall (not migration or distillation, which are Tier 7).
         let tier6RecipeNames: Set<String> = [
@@ -554,32 +595,51 @@ enum RecipeTools {
         let cognitionTools = recipeTools + lensTools
 
         var lines: [String] = ["\(listRecipesToolName): \(cognitionTools.count) cognition tools"]
-        for tool in cognitionTools {
-            let required = requiredArgNames(from: tool.inputSchema)
-            let requiredText = required.isEmpty ? "none" : required.joined(separator: ", ")
+        if verbose {
+            for tool in cognitionTools {
+                let required = requiredArgNames(from: tool.inputSchema)
+                let requiredText = required.isEmpty ? "none" : required.joined(separator: ", ")
+                lines.append("")
+                lines.append(tool.name)
+                lines.append("  \(tool.description)")
+                lines.append("  Required: \(requiredText).")
+            }
             lines.append("")
-            lines.append(tool.name)
-            lines.append("  \(tool.description)")
-            lines.append("  Required: \(requiredText).")
+        } else {
+            // Terse default (PR-04): one row per tool — name and first
+            // sentence. The always-verbose ~8.8KB catalogue reply ends;
+            // pass verbose:true for full descriptions + required args.
+            for tool in cognitionTools {
+                lines.append("\(tool.name) — \(Self.oneLiner(tool.description))")
+            }
+            lines.append("(terse — pass verbose:true for full descriptions and required args)")
         }
-        lines.append("")
         lines.append("Call any tool with teachme:true for a full usage guide.")
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
     /// Return every shipped recipe from `RecipeCatalog.all` — name, version,
     /// description, and required NeuronKit capabilities — in catalog order.
-    /// Reads the catalog directly; hard-codes nothing.
-    private static func runListRecipesCatalog() -> JSONValue {
+    /// Reads the catalog directly; hard-codes nothing. Terse by default
+    /// (PR-04); verbose:true restores the full per-recipe block.
+    private static func runListRecipesCatalog(_ args: [String: JSONValue]) throws -> JSONValue {
+        let verbose = try decodeVerbose(args)
         let catalog = RecipeCatalog.all
         var lines: [String] = ["\(listRecipesCatalogToolName): \(catalog.count) recipe(s)"]
-        for recipe in catalog {
-            lines.append("")
-            lines.append(recipe.name)
-            lines.append("  version: \(recipe.version)")
-            lines.append("  \(recipe.description)")
-            let caps = recipe.requiredCapabilities.map { "\($0)" }
-            lines.append("  requires: \(caps.isEmpty ? "none" : caps.joined(separator: ", "))")
+        if verbose {
+            for recipe in catalog {
+                lines.append("")
+                lines.append(recipe.name)
+                lines.append("  version: \(recipe.version)")
+                lines.append("  \(recipe.description)")
+                let caps = recipe.requiredCapabilities.map { "\($0)" }
+                lines.append("  requires: \(caps.isEmpty ? "none" : caps.joined(separator: ", "))")
+            }
+        } else {
+            for recipe in catalog {
+                lines.append("\(recipe.name) \(recipe.version) — \(Self.oneLiner(recipe.description))")
+            }
+            lines.append("(terse — pass verbose:true for versions, capabilities, and full descriptions)")
         }
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
@@ -711,11 +771,15 @@ enum RecipeTools {
 
         if hasDistinctive && !satisfied {
             // Containment gate fired — return zero results with not_found.
+            // The structured block is the empty results array: the tool
+            // declares an outputSchema, so every success reply carries the
+            // typed twin, including the deliberate zero-result shape.
             let lines: [String] = [
                 "found 0 memory(s)",
                 RecallDiscrimination.resultLine(for: .notFound),
             ]
-            return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+            return ToolDispatcher.structuredTextResult(
+                lines.joined(separator: "\n"), results: [])
         }
 
         // Part 1b — discrimination is computed over composition precision
@@ -725,24 +789,54 @@ enum RecipeTools {
         let preciseScores = matches.map { $0.score }
         let preciseDiscrimination = RecallDiscrimination.classify(preciseScores)
 
-        // resolve parentNodeIds to room display names via the
-        // node tree, matching moot_memory_search's resolution path.
+        // Dense-row reply (PR-03): same row shape as moot_memory_search.
+        // MXE-SS: ONE structured-tier fetch through the same gate feeds BOTH
+        // blocks — the dense text rows (rendered locally, byte-identical to
+        // the former denseRowsByID output: same admissible set, same
+        // DenseRow.render) and the typed structured rows.
         let estate = try await kit.estate(for: handle)
-        let parentNodeIds = matches.map { $0.room }
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: parentNodeIds)
+        let shownMatches = Array(matches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: shownMatches.map { $0.id }, estate: estate)
+        let denseByID = drawersByID.mapValues { DenseRow.render($0) }
+        // Room comes from the node tree, NOT from PreciseMatch.room — the
+        // Swift recipe carries the raw parentNodeId there (ShapedRecall
+        // builds it from hit.drawer?.parentNodeId), while the structured
+        // field is the resolved display name in both ports.
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
 
         var lines: [String] = ["found \(matches.count) memory(s)"]
-        for match in matches.prefix(50) {
-            let preview = match.content.prefix(120)
-            let room = nodeNames[match.room]?.room ?? (match.room.isEmpty ? "?" : match.room)
-            lines.append("\(match.id)  [\(room)]  \(preview)")
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in shownMatches {
+            lines.append(denseByID[match.id] ?? DenseRow.renderUnhydrated(id: match.id))
+            if let d = drawersByID[match.id] {
+                // match.content is PRE-redaction (it fed the containment gate
+                // above); the row builder's provenance switch decides whether
+                // it enters the structured block.
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
+            } else {
+                // Gated id: the text shows the opaque unhydrated row, so the
+                // structured block is exactly as opaque — the match's room
+                // and content in hand are deliberately NOT emitted.
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
         }
-        lines.append(RecallDiscrimination.resultLine(for: preciseDiscrimination))
+        // Deviation-only narration (PR-03): the discrimination line appears
+        // only when the signal is low or medium; a clear result and the
+        // single/zero "n/a" case stay silent.
+        if preciseDiscrimination == .low || preciseDiscrimination == .medium {
+            lines.append(RecallDiscrimination.resultLine(for: preciseDiscrimination))
+        }
         if !hasDistinctive {
             lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
                 + "results may be imprecise. Refine with specific identifiers for higher confidence.")
         }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
     }
 
     // MARK: - recall_shaped
@@ -765,7 +859,62 @@ enum RecipeTools {
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> JSONValue {
-        let query = try requireString(args, "query")
+        // Anchor pivot (PR-03): near:<uuid> as an alternative to query:,
+        // identical contract to moot_memory_search — the anchor's content
+        // runs through the SAME shaped pipeline (preset/filter/limit
+        // inherited); the anchor row is excluded from the reply; a gated
+        // anchor reads as not-found (default containment gate for adjective
+        // sensitivity bits 6-11, plus an explicit `Drawer.sensitivity` check
+        // for provenance sensitivity bits 30-35, which the frame does not
+        // cover; no grant lift — oracle-free, byte-identical to an absent id).
+        let queryArg = try optionalString(args["query"], argument: "query")
+        let nearArg = try optionalString(args["near"], argument: "near")
+        let query: String
+        var anchorID: String? = nil
+        switch (queryArg, nearArg) {
+        case (nil, nil):
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Provide either query (text search) or near (UUID of an anchor "
+                    + "memory — returns the memories most similar to it under the preset)."
+            )
+        case (.some, .some):
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "query and near are mutually exclusive — pass exactly one."
+            )
+        case (.some(let q), nil):
+            query = q
+        case (nil, .some(let anchor)):
+            let anchorEstate = try await kit.estate(for: handle)
+            let fetched = try await anchorEstate.getDrawers(
+                ids: [anchor],
+                matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full),
+                hydrationLevel: .full)
+            // The provenance reject is evaluated BEFORE the empty-content
+            // check, so a gated row and an empty row collapse into the one
+            // not-found shape below, byte-identical to the message an absent
+            // id produces. Ordering discipline and defence in depth: this
+            // fetch requests a single id, so `admissible` holds at most one
+            // drawer and either order yields the same error today. Should
+            // this ever resolve a set, provenance-first is the order that
+            // cannot leak.
+            let admissibleAnchor = fetched.admissible.first { d in
+                switch d.sensitivity {
+                case .restricted, .secret: return false
+                case .normal, .elevated: return true
+                }
+            }
+            guard let anchorDrawer = admissibleAnchor,
+                  !anchorDrawer.content.isEmpty else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "near: anchor memory not found: \(anchor)"
+                )
+            }
+            query = anchorDrawer.content
+            anchorID = anchor
+        }
         // Clamp to [1, 500]: reject negative/zero, cap absurdly-large values.
         // DoS prevention at the MCP boundary before the substrate is touched.
         // Parity: Rust run_shaped_recall_tool uses clamp_limit with same ceiling.
@@ -806,20 +955,206 @@ enum RecipeTools {
         let shapedScores = out.matches.map { $0.score }
         let shapedDiscrimination = RecallDiscrimination.classify(shapedScores)
 
-        // resolve parentNodeIds to room display names via the
-        // node tree, matching moot_memory_search's resolution path.
+        // Dense-row reply (PR-03): same row shape as moot_memory_search;
+        // anchor excluded when near: pivoted.
+        // MXE-SS: ONE structured-tier fetch through the same gate feeds BOTH
+        // blocks — the dense text rows (rendered locally, byte-identical to
+        // the former denseRowsByID output: same admissible set, same
+        // DenseRow.render) and the typed structured rows.
         let estate = try await kit.estate(for: handle)
-        let parentNodeIds = out.matches.map { $0.room }
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: parentNodeIds)
+        let shownMatches = out.matches.filter { anchorID == nil || $0.id != anchorID }
+        let displayedMatches = Array(shownMatches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: displayedMatches.map { $0.id }, estate: estate)
+        let denseByID = drawersByID.mapValues { DenseRow.render($0) }
+        // Room comes from the node tree, NOT from PreciseMatch.room — the
+        // Swift recipe carries the raw parentNodeId there (ShapedRecall
+        // builds it from hit.drawer?.parentNodeId), while the structured
+        // field is the resolved display name in both ports.
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
 
-        var lines: [String] = ["found \(out.matches.count) memory(s)"]
-        for match in out.matches.prefix(50) {
-            let preview = match.content.prefix(120)
-            let room = nodeNames[match.room]?.room ?? (match.room.isEmpty ? "?" : match.room)
-            lines.append("\(match.id)  [\(room)]  \(preview)")
+        var lines: [String] = ["found \(shownMatches.count) memory(s)"]
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in displayedMatches {
+            lines.append(denseByID[match.id] ?? DenseRow.renderUnhydrated(id: match.id))
+            if let d = drawersByID[match.id] {
+                // match.content is PRE-redaction; the row builder's
+                // provenance switch decides whether it enters the
+                // structured block.
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
+            } else {
+                // Gated id: opaque in text, exactly as opaque in the
+                // structured block.
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
         }
-        lines.append(RecallDiscrimination.resultLine(for: shapedDiscrimination))
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        // Deviation-only narration (PR-03): line only on low/medium.
+        if shapedDiscrimination == .low || shapedDiscrimination == .medium {
+            lines.append(RecallDiscrimination.resultLine(for: shapedDiscrimination))
+        }
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
+    }
+
+    /// Fetch dense rows for a set of hit ids in one structured-tier read.
+    /// The structured tier carries every dense-row field (subject trio,
+    /// lattice anchor, event time, provenance bitmap for redaction) without
+    /// hauling content blobs.
+    ///
+    /// THIS IS THE SENSITIVITY BOUNDARY for every by-id dense-row caller —
+    /// all six graph-lens arms in `LensTools` and the tunnel-citation arms
+    /// in `ToolDispatch`. (The recall arms here fetch through
+    /// `structuredDrawersByID` below — the same frame, the same gate — and
+    /// render their dense rows from its result.) Gate here, once; never at
+    /// the call sites. A per-arm check is how the hole reappears: the next
+    /// arm that hydrates an id inherits whatever this helper does.
+    ///
+    /// THE EMPTY `filterChain` IS LOAD-BEARING, NOT AN ABSENT ARGUMENT.
+    /// `BitmapEvaluator.insertDefaults` inserts `.sensitivityAtMost(.elevated)`
+    /// into any chain carrying no sensitivity filter, and that predicate is
+    /// evaluated against the ADJECTIVE bitmap (bits 4–7) — the same axis
+    /// `AdjectiveSensitivity.isBulkExportable` tests. So a `.restricted` or
+    /// `.secret` drawer never reaches `fetched.admissible`, and
+    /// `DenseRow.render` is never called with one. No explicit sensitivity
+    /// check appears below because it could never fire; the frame has already
+    /// removed those rows.
+    ///
+    /// Do NOT "simplify" this to the frameless `estate.getDrawers(ids:
+    /// hydrationLevel:)`. That read applies no ceiling at all, and these ids
+    /// arrive from tunnel graphs whose edges carry the sensitivity their
+    /// endpoints had AT LINK TIME — a drawer restricted after its tunnels
+    /// were created is still reachable through a stale edge. Dropping the
+    /// frame would emit that drawer's subject. (The Rust port carried exactly
+    /// that defect at its raw-store lens sites; `dense_row::rows_by_id` is its
+    /// twin of this method and reaches the ceiling through the same frame.)
+    ///
+    /// Gated rows are simply ABSENT from the returned map rather than
+    /// substituted, so each arm's existing `DenseRow.renderUnhydrated`
+    /// fallback produces the opaque row: the id and its ranking value still
+    /// appear, the subject does not. Omitting the row entirely would change
+    /// result counts and rankings and make the gate itself an oracle.
+    static func denseRowsByID(ids: [String], estate: Estate) async throws -> [String: String] {
+        guard !ids.isEmpty else { return [:] }
+        let fetched = try await estate.getDrawers(
+            ids: ids,
+            matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .structured),
+            hydrationLevel: .structured)
+        return Dictionary(uniqueKeysWithValues: fetched.admissible.map {
+            ($0.id, DenseRow.render($0))
+        })
+    }
+
+    /// Typed-drawer twin of `denseRowsByID` (MXE-SS): the SAME by-id read
+    /// through the SAME empty-filter-chain `RecallFrame` — the load-bearing
+    /// default gate documented on `denseRowsByID` — returning the drawers
+    /// themselves so the structured block can take subject and provenance
+    /// sensitivity from the row. Structured hydration: content blobs are NOT
+    /// loaded here; recall-recipe content comes from the match and passes
+    /// through the redaction switch in `ToolDispatcher.structuredRecallRow`.
+    /// Gated ids are ABSENT from the map exactly as they are from
+    /// `denseRowsByID`, and callers fall through to the opaque row (the twin
+    /// of `DenseRow.renderUnhydrated`).
+    static func structuredDrawersByID(ids: [String], estate: Estate) async throws -> [String: Drawer] {
+        guard !ids.isEmpty else { return [:] }
+        let fetched = try await estate.getDrawers(
+            ids: ids,
+            matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .structured),
+            hydrationLevel: .structured)
+        return Dictionary(uniqueKeysWithValues: fetched.admissible.map { ($0.id, $0) })
+    }
+
+    // MARK: - typed conflict projection section (DCP M4)
+
+    /// Render the typed conflict-projection sweep as the ADDITIVE report
+    /// section every contradiction surface appends (M0 §7):
+    /// moot_hunt_contradictions, moot_dream, and moot_lens_contradiction
+    /// all route through this one renderer so the lines never drift.
+    ///
+    /// Redaction (M0 §8, ceiling = MAX endpoint sensitivity, no grant
+    /// plumbing in v0.1 — same fixed posture as the lexical hunter):
+    /// - ceiling ≤ elevated (raw 16): full block incl. dense rows.
+    /// - restricted (raw 32): one line naming only the coordinate
+    ///   DIGEST — no source ids, no value digests (enum domains are
+    ///   small, digests would be guessable), no dense rows.
+    /// - secret (raw 48): counted in `proven: N`, no block at all.
+    ///
+    /// `lexicalCandidates` is the borderline count from the lexical
+    /// hunter (the `candidates:` relabel); pass nil on surfaces with no
+    /// lexical lane (the lens).
+    static func conflictProjectionSection(
+        _ sweep: ConflictProjectionSweepReport,
+        denseRows: [String: String],
+        lexicalCandidates: Int?
+    ) -> [String] {
+        var lines: [String] = [
+            "proven: \(sweep.counts.provenContradiction)",
+            "historical: \(sweep.counts.historicalSuccession)",
+            "compatible: \(sweep.counts.compatiblePlurality)",
+        ]
+        if let candidates = lexicalCandidates {
+            lines.append("candidates: \(candidates)")
+        }
+        // Unparsed facts and unjudgeable pairs share the line: both are
+        // "the typed lane saw it and refused to guess".
+        lines.append("unknown_or_invalid: "
+            + "\(sweep.counts.unknownOrInvalid + sweep.diagnostics.unparsed)")
+        lines.append("coverage: \(sweep.diagnostics.projected)/\(sweep.diagnostics.scanned)")
+        if sweep.truncatedBuckets > 0 {
+            // Deviation-only line (M0 §7): silence means no bucket hit
+            // its cap.
+            lines.append("truncated_buckets: \(sweep.truncatedBuckets)")
+        }
+        let secretRaw = AdjectiveSensitivity.secret.rawValue
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        for finding in sweep.proven {
+            if finding.sensitivityCeilingRaw >= secretRaw { continue }
+            let outcome = finding.outcome
+            if finding.sensitivityCeilingRaw >= restrictedRaw {
+                lines.append("  a conflicting claim exists at "
+                    + "\(outcome.coordinateDigest) [restricted]")
+                continue
+            }
+            lines.append("  PROVEN \(outcome.resultID)")
+            lines.append("    rule: \(outcome.ruleID)@\(outcome.ruleVersion)")
+            lines.append("    coordinate: \(outcome.key)|\(outcome.dimension)")
+            lines.append("    values: \(outcome.valueDigests.joined(separator: " vs "))")
+            lines.append("    time: \(outcome.temporalBases.joined(separator: " | "))")
+            lines.append("    reasons: "
+                + outcome.reasons.map(\.rawValue).joined(separator: ", "))
+            for id in outcome.sourceDrawerIDs {
+                lines.append("    \(denseRows[id] ?? "\(id) · - · - · - · -")")
+            }
+        }
+        for finding in sweep.historical where finding.sensitivityCeilingRaw < restrictedRaw {
+            let outcome = finding.outcome
+            lines.append("  HISTORICAL \(outcome.resultID) "
+                + "\(outcome.key)|\(outcome.dimension) ("
+                + outcome.reasons.map(\.rawValue).joined(separator: ", ") + ")")
+        }
+        return lines
+    }
+
+    /// Run the typed sweep for a report surface and render its section,
+    /// hydrating dense rows only for fully visible findings.
+    static func renderConflictProjection(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        estate: Estate,
+        lexicalCandidates: Int?
+    ) async throws -> [String] {
+        let sweep = try await kit.conflictProjectionSweep(in: handle)
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        let visibleIDs = sweep.proven
+            .filter { $0.sensitivityCeilingRaw < restrictedRaw }
+            .flatMap(\.outcome.sourceDrawerIDs)
+        let denseRows = try await denseRowsByID(
+            ids: Array(Set(visibleIDs)), estate: estate)
+        return conflictProjectionSection(
+            sweep, denseRows: denseRows, lexicalCandidates: lexicalCandidates)
     }
 
     // MARK: - run_migration_benchmark
@@ -996,6 +1331,25 @@ enum RecipeTools {
         let hunt = try await kit.huntContradictions(
             in: handle, probeLimit: 500, now: now)
 
+        // Step 4 — subject backfill dispatch (rider-default ruling,
+        // 2026-08-02): dreaming pays subject debt when a producer is
+        // registered (on Apple the serve layer registers the miniLLM
+        // rider by default). One bounded batch per dream call — the
+        // sweep's settled-skip makes repeated dreams converge; estates
+        // with no rider (disabled, non-Apple, kit-level tests) skip
+        // silently and the interactive consent path remains the only
+        // subject writer.
+        var backfillLine = ""
+        if await kit.subjectProducerPipeline(for: handle) != nil {
+            let debt = try await kit.estate(for: handle).countSubjectDebt()
+            if debt > 0 {
+                let sweep = try await kit.subjectBackfillSweep(
+                    handle, batchLimit: 32, now: now)
+                backfillLine = "\nsubjectsBackfilled: \(sweep.written) "
+                    + "(skipped: \(sweep.skippedInadmissible), remaining: \(sweep.remainingDebt))"
+            }
+        }
+
         var body = """
         moot_dream: matrix rebuilt, dreaming cycle complete
         consideredCandidates: \(report.candidatesConsidered)
@@ -1005,12 +1359,19 @@ enum RecipeTools {
         contradictionsProposed: \(hunt.proposed.count)
         contradictionCandidatesBorderline: \(hunt.borderline.count)
         """
+        body += backfillLine
         if !hunt.vectorStoreAvailable {
             body += "\n(contradiction hunt skipped: no vector index for this estate — run moot_reindex first)"
         }
         if !hunt.proposed.isEmpty {
             body += "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel."
         }
+        // DCP M4 — the typed proving lane's additive section (M0 §7).
+        let typedSection = try await renderConflictProjection(
+            kit: kit, handle: handle,
+            estate: kit.estate(for: handle),
+            lexicalCandidates: hunt.borderline.count)
+        body += "\n" + typedSection.joined(separator: "\n")
         return ToolDispatcher.textResult(body)
     }
 
@@ -1081,6 +1442,11 @@ enum RecipeTools {
             lines.append("Judge each CANDIDATE pair: if the two memories genuinely conflict, "
                 + "record it with moot_link_memories kind=contradicts proposed=true; otherwise ignore it.")
         }
+        // DCP M4 — the typed proving lane's additive section (M0 §7).
+        lines += try await renderConflictProjection(
+            kit: kit, handle: handle,
+            estate: kit.estate(for: handle),
+            lexicalCandidates: report.borderline.count)
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
@@ -1164,24 +1530,21 @@ enum RecipeTools {
             constituentsPerHit: perHit,
             totalConstituents: total)
 
-        let estate = try await kit.estate(for: handle)
-        let allParents = (out.vagueHits + out.constituents).map(\.parentNodeId)
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: allParents)
-        func room(_ parent: String) -> String {
-            nodeNames[parent].map { "\($0.wing)/\($0.room)" }
-                ?? (parent.isEmpty ? "?" : parent)
-        }
-
+        // Dense-row reply (PR-03): both the vague hits and the hydrated
+        // originals travel as dense rows — the AI winnows on subjects and
+        // pinpoints via moot_memory_get depth:distilled/full. The vague
+        // hits keep a [vague L<n>] tier marker; the two sections are
+        // separated by the existing "originals:" divider.
         var lines: [String] = [
             "found \(out.vagueHits.count) vague summary(ies), \(out.constituents.count) hydrated original(s)"
         ]
         for hit in out.vagueHits {
-            lines.append("\(hit.id)  [\(room(hit.parentNodeId))]  [vague L\(hit.vagueLevel)]  \(hit.content)")
+            lines.append("\(DenseRow.render(hit))  [vague L\(hit.vagueLevel)]")
         }
         if !out.constituents.isEmpty {
             lines.append("originals:")
             for c in out.constituents {
-                lines.append("\(c.id)  [\(room(c.parentNodeId))]  \(c.content)")
+                lines.append(DenseRow.render(c))
             }
         }
         if out.vagueHits.isEmpty {
@@ -1220,44 +1583,41 @@ enum RecipeTools {
             input: .init(query: query, filter: filter, limit: limit),
             estate: handle, kit: kit)
 
-        // Resolve room display names via the node tree, matching
-        // moot_memory_search's resolution path.
+        // Dense-row reply (PR-03): dense row THEN the distilled text — this
+        // verb is the "confirm on distilled" tier, so the text stays, but
+        // the [distilled] header tag and per-hit tokens:/source: metadata
+        // lines are gone (deviation-only: distilled service is the NORM
+        // here; only the fallback deviation gets a marker).
         let estate = try await kit.estate(for: handle)
-        let nodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: out.matches.map(\.parentNodeId))
-
+        let denseByID = try await denseRowsByID(
+            ids: out.matches.prefix(50).map { $0.id }, estate: estate)
         let header = echoQuery
-            ? "found \(out.matches.count) memory(s) [distilled] for: \(query)"
-            : "found \(out.matches.count) memory(s) [distilled]"
+            ? "found \(out.matches.count) memory(s) for: \(query)"
+            : "found \(out.matches.count) memory(s)"
         var lines: [String] = [header]
         var anyFallback = false
         for match in out.matches.prefix(50) {
-            let room = nodeNames[match.parentNodeId]?.room
-                ?? (match.parentNodeId.isEmpty ? "?" : match.parentNodeId)
-            lines.append("\(match.id)  [\(room)]  \(match.text)")
-            // Per-hit metadata: token count (§6 budgeting) and the §10.2
-            // served-from marker so clients can distinguish "distilled
-            // representation" from "fallback".
+            lines.append(denseByID[match.id] ?? DenseRow.renderUnhydrated(id: match.id))
             if match.servedFromContent {
                 anyFallback = true
-                lines.append("    tokens: — | source: content (not yet distilled)")
-            } else {
-                lines.append("    tokens: \(match.tokenCount.map(String.init) ?? "—") | source: distilled")
+                // Fallback marker on fallback hits ONLY (§10.2): the text
+                // below is verbatim content, not a distillate.
+                lines.append("source: content (not yet distilled)")
             }
+            lines.append(match.text)
         }
-        // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
-        // geometry over originals). Wire prefix matches moot_memory_search phrasing;
-        // wording unified with the RecallDiscrimination main ladder.
-        let discLevel: String
+        // Deviation-only narration (PR-03): discrimination line only on
+        // low/medium; clear and single/zero stay silent.
         switch out.discrimination {
-        case .high:   discLevel = "discrimination: high — clear top result."
-        case .medium: discLevel = "discrimination: medium — partial separation."
-        case .low:    discLevel = "discrimination: low — top results are within epsilon; treat as effectively unranked. "
-                                + "Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for "
-                                + "precision, or widen the query."
-        case .single: discLevel = "discrimination: n/a — single/zero results."
+        case .medium:
+            lines.append("discrimination: medium — partial separation.")
+        case .low:
+            lines.append("discrimination: low — top results are within epsilon; treat as effectively unranked. "
+                + "Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for "
+                + "precision, or widen the query.")
+        case .high, .single:
+            break
         }
-        lines.append(discLevel)
         if anyFallback {
             // The SPEC §10.3 fallback notice: results still return, served
             // from content, with a hint to populate the representations.

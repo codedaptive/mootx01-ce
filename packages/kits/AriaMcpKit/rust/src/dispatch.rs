@@ -459,23 +459,14 @@ fn run_federated_search(
                     fr.grant.id,
                     fr.drawers.len(),
                 );
-                // Resolve room display names from node tree for federated drawers.
-                let fed_node_ids: Vec<String> = fr.drawers.iter()
-                    .take(50)
-                    .map(|d| d.parent_node_id.clone())
+                // Dense-row reply (PR-03): federated hits travel as dense
+                // rows like every other recall surface — subjects instead
+                // of content previews, which also tightens the cross-estate
+                // disclosure to assertions the source chose to write (plus
+                // lattice metadata). Mirrors Swift renderContribution.
+                let lines: Vec<String> = fr.drawers.iter().take(50)
+                    .map(crate::dense_row::render)
                     .collect();
-                let fed_node_names = coord.resolve_drawer_node_names(
-                    &source_handle,
-                    &fed_node_ids,
-                );
-                let lines: Vec<String> = fr.drawers.iter().take(50).map(|d| {
-                    let preview: String = d.content.chars().take(80).collect();
-                    let room = fed_node_names
-                        .get(&d.parent_node_id)
-                        .map(|(_, r)| r.as_str())
-                        .unwrap_or("");
-                    format!("{}  [{}]  {}", d.id, room, preview)
-                }).collect();
                 let section = std::iter::once(header).chain(lines).collect::<Vec<_>>().join("\n");
                 sections.push(section);
             }

@@ -41,7 +41,10 @@ use crate::error::validate_sql_identifier;
 // has no whole-file analogue (the server owns the schema), so per-row content
 // encryption is how the bytes are ciphertext at rest in the database. No-op for
 // Plaintext / FullDatabase (see EstateEncryptionConfig::uses_row_crypto).
-use crate::sqlite::{assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write};
+use crate::sqlite::{
+    assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write,
+    projection_needs_key_id, KEY_ID_COL,
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Value codec — TypedValue -> boxed postgres parameter. Native PG types
@@ -1348,7 +1351,7 @@ impl RowStore for TxRowStore {
     ) -> StorageResult<RowHandle> {
         // Mode 2: encrypt the content column client-side before it reaches
         // Postgres (no-op for Plaintext / FullDatabase). Mirrors the SQLite path.
-        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name and all column names from the caller-supplied `values` map before
@@ -1397,8 +1400,13 @@ impl RowStore for TxRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        // Guard: a content-bearing upsert on a Mode 2 estate must already be
-        // ciphertext under a keyID (the seam runs on insert, not upsert).
+        // Mode 2: seal this table's protected columns client-side and stamp the
+        // keyID before they reach Postgres, exactly as insert and update do.
+        // A seam covering two of three write verbs was the defect; upsert is a
+        // content write path wherever snapshot replication runs.
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
+        // Structural safety net beneath the seam: after sealing, protected text
+        // can only remain if the seam could not run.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name, all value-map column names, and the conflict-column list before
@@ -1474,7 +1482,7 @@ impl RowStore for TxRowStore {
         // (SPEC_DISTILLATION_STORAGE §2/§7.2). Seals non-empty protected
         // text and stamps keyID; no-op for bitmap/timestamp updates and the
         // expunge scrub. Mirrors the SQLite update path.
-        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name and all column names from the caller-supplied `values` map before
@@ -1608,7 +1616,7 @@ impl RowStore for TxRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
-            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
+            let values = decrypted_for_read(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -1642,8 +1650,18 @@ impl RowStore for TxRowStore {
         // Explicit column list so the omitted columns (notably the content
         // blob) are never read off disk — the no-blob recall path's I/O win.
         // Column names are validated and quoted identifiers.
+        // Key-identifier augmentation: `decrypted_for_read` cannot open a
+        // sealed value without the row's keyID, and a caller's projection has
+        // no reason to know that. When the projection reads a protected column
+        // on an encrypting estate but omits keyID, SELECT it anyway and strip
+        // it from the row below — the caller's projection contract is
+        // unchanged, and the seam gets what it needs. Mirrors the SQLite
+        // backend and Swift's `rowCryptoProjectionNeedsKeyID`.
+        let injected_key_id = projection_needs_key_id(table, columns, &self.encryption_config);
         let select_list = columns
             .iter()
+            .copied()
+            .chain(injected_key_id.then_some(KEY_ID_COL))
             .map(|c| format!("\"{c}\""))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1692,7 +1710,12 @@ impl RowStore for TxRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
-            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
+            let mut values = decrypted_for_read(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
+            // Drop the keyID this query added on the caller's behalf, so a
+            // projected read returns exactly the columns that were asked for.
+            if injected_key_id {
+                values.remove(KEY_ID_COL);
+            }
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -2005,7 +2028,7 @@ impl RowStore for PgRowStore {
     ) -> StorageResult<RowHandle> {
         // Mode 2: encrypt the content column client-side before it reaches
         // Postgres (no-op for Plaintext / FullDatabase). Mirrors the SQLite path.
-        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name and all column names from the caller-supplied `values` map before
@@ -2053,8 +2076,13 @@ impl RowStore for PgRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        // Guard: a content-bearing upsert on a Mode 2 estate must already be
-        // ciphertext under a keyID (the seam runs on insert, not upsert).
+        // Mode 2: seal this table's protected columns client-side and stamp the
+        // keyID before they reach Postgres, exactly as insert and update do.
+        // A seam covering two of three write verbs was the defect; upsert is a
+        // content write path wherever snapshot replication runs.
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
+        // Structural safety net beneath the seam: after sealing, protected text
+        // can only remain if the seam could not run.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name, all value-map column names, and the conflict-column list before
@@ -2128,7 +2156,7 @@ impl RowStore for PgRowStore {
         // (SPEC_DISTILLATION_STORAGE §2/§7.2). Seals non-empty protected
         // text and stamps keyID; no-op for bitmap/timestamp updates and the
         // expunge scrub. Mirrors the SQLite update path.
-        let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
+        let values = encrypted_for_write(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name and all column names from the caller-supplied `values` map before
@@ -2261,7 +2289,7 @@ impl RowStore for PgRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
-            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
+            let values = decrypted_for_read(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -2294,8 +2322,18 @@ impl RowStore for PgRowStore {
         let mut conn = self.pool.checkout()?;
         // Explicit column list so the omitted columns (notably the content
         // blob) are never read off disk — the no-blob recall path's I/O win.
+        // Key-identifier augmentation: `decrypted_for_read` cannot open a
+        // sealed value without the row's keyID, and a caller's projection has
+        // no reason to know that. When the projection reads a protected column
+        // on an encrypting estate but omits keyID, SELECT it anyway and strip
+        // it from the row below — the caller's projection contract is
+        // unchanged, and the seam gets what it needs. Mirrors the SQLite
+        // backend and Swift's `rowCryptoProjectionNeedsKeyID`.
+        let injected_key_id = projection_needs_key_id(table, columns, &self.encryption_config);
         let select_list = columns
             .iter()
+            .copied()
+            .chain(injected_key_id.then_some(KEY_ID_COL))
             .map(|c| format!("\"{c}\""))
             .collect::<Vec<_>>()
             .join(", ");
@@ -2344,7 +2382,12 @@ impl RowStore for PgRowStore {
                 let kit = table_column_type(schema.as_ref(), table, &name);
                 values.insert(name, read_value(row, i, kit));
             }
-            let values = decrypted_for_read(values, &self.encryption_config, &AesGcmAeadProvider)?;
+            let mut values = decrypted_for_read(values, table, &self.encryption_config, &AesGcmAeadProvider)?;
+            // Drop the keyID this query added on the caller's behalf, so a
+            // projected read returns exactly the columns that were asked for.
+            if injected_key_id {
+                values.remove(KEY_ID_COL);
+            }
             out.push(StorageRow::new(values));
         }
         Ok(out)

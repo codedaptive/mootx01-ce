@@ -8,12 +8,18 @@
 #
 # The path list mirrors the [ee-only] section of EE's edition-boundary
 # manifest, minus `scripts` — CE owns its own scripts/ directory (an
-# edition-surface path, not a leak). Update both together.
+# edition-surface path, not a leak). That single omission is the only allowed
+# difference, and EE's scripts/repo_sync/check-boundary-drift.py asserts it:
+# any other divergence between this regex, EDITION_BOUNDARY.md, and
+# edition-boundary.conf fails `make check-edition-boundary` on the EE side.
+# The three lists drifted silently before that check existed (docs/analysis and
+# docs/status were added to the conf on 2026-08-03 and reached neither the
+# manifest nor this regex until 2026-08-04).
 #
 # Invoked from .githooks/pre-push. Checks the index (tracked files only);
 # untracked local noise is not a publication risk.
 
-EE_ONLY_RE='^(ee-edition|tools|port|docs_internal|\.claude|CLAUDE\.md|CLAUDE-EE\.md|CLAUDE-CE\.md|docs/AGENTS\.md|docs/CLAUDE\.md|\.worktreeinclude|codex-code-comment-audit\.md|EDITION_BOUNDARY\.md|docs/archive|docs/missions|docs/findings|apps/moot-math-benchmark/HINTS-GO\.md|apps/moot-math-benchmark/HINTS-PYTHON\.md)(/|$)'
+EE_ONLY_RE='^(ee-edition|tools|port|docs_internal|\.claude|CLAUDE\.md|CLAUDE-EE\.md|CLAUDE-CE\.md|docs/AGENTS\.md|docs/CLAUDE\.md|\.worktreeinclude|codex-code-comment-audit\.md|EDITION_BOUNDARY\.md|docs/archive|docs/missions|docs/findings|docs/analysis|docs/status|apps/moot-math-benchmark/HINTS-GO\.md|apps/moot-math-benchmark/HINTS-PYTHON\.md)(/|$)'
 
 leak=$(git ls-files | grep -E "$EE_ONLY_RE")
 if [ -n "$leak" ]; then

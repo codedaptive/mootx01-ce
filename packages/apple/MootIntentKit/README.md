@@ -17,7 +17,7 @@ The engine kits (`GeniusLocusKit`, `LocusKit`, etc.) are platform-neutral and ha
 | `WithdrawDrawerIntent` | `CallerVerbIntents.swift` | withdraw |
 | `ExpungeDrawerIntent` | `CallerVerbIntents.swift` | expunge |
 | `DrawerEntity` | `DrawerEntity.swift` | noun |
-| `MootURLRouter` | `MootURLRouter.swift` | capture/recall/reanchor via x-callback-url |
+| `MootURLRouter` | `MootURLRouter.swift` | read-only recall via x-callback-url (mutating verbs rejected — App Intents is the consented path) |
 | `CaptureSink` | `CaptureSink.swift` | capture via Share Sheet |
 | `MootShortcutsProvider` | `MootShortcutsProvider.swift` | Shortcuts catalog donation |
 

@@ -21,6 +21,26 @@
 
 SHELL := /bin/bash
 
+# ── Shared Rust target directory ──────────────────────────────────────────
+# VISIBLE, not dotted (Bob, 2026-08-04). This directory reaches tens of GB.
+# A hidden one is where cleanup silently fails, because nobody sees what
+# accumulated. If it is on disk it should show up in a plain `ls`.
+# This repo holds 30 independent Cargo workspaces. With cargo's default
+# per-workspace `target/`, every shared dependency is compiled and stored
+# once per workspace — the tree reached 31 GB of build output (measured
+# 2026-08-04). One target directory per CHECKOUT collapses that to a single
+# copy of each dependency.
+#
+# Per-checkout, not machine-global, on purpose: cargo takes an exclusive
+# lock on the target directory, so a single shared path would serialize
+# builds across concurrent checkouts.
+#
+# $(CURDIR) is this Makefile's directory (the repo root), so the value is
+# absolute and every `cd $$d && cargo ...` recipe below inherits it.
+# scripts/moot-test sets the same value independently — it is invoked as a
+# subprocess for discovery, so it does not inherit this export.
+export CARGO_TARGET_DIR := $(CURDIR)/cargo-target
+
 # ── Discovery ─────────────────────────────────────────────────────────────
 TEST_RUNNER := bash scripts/moot-test
 SWIFT_PKGS  := $(shell $(TEST_RUNNER) list-swift all)
@@ -315,6 +335,9 @@ clean:
 		find . -type f -name "$$f" -print -delete ; \
 	done
 	@find . -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' -o -name '*.test' \) -print -delete
+	@# The shared Rust target directory is removed by path, not by name: the
+	@# ARTIFACT_DIRS sweep above matches `target`, which cargo-target is not.
+	@if [ -d "$(CARGO_TARGET_DIR)" ]; then echo "$(CARGO_TARGET_DIR)"; rm -rf "$(CARGO_TARGET_DIR)"; fi
 	@echo "Clean complete."
 
 clean-dry:
@@ -326,6 +349,7 @@ clean-dry:
 		find . -type f -name "$$f" -print ; \
 	done
 	@find . -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' -o -name '*.test' \) -print
+	@if [ -d "$(CARGO_TARGET_DIR)" ]; then echo "$(CARGO_TARGET_DIR)"; fi
 
 # Also drops the codegraph index. Separate target so a routine `clean`
 # never forces an expensive re-index.

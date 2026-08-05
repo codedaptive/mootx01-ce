@@ -39,6 +39,7 @@ use uuid::Uuid;
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     default_wings::DEFAULT_WING_NAME,
+    drawer_store::SUBJECT_LENGTH_CONTRACT,
     estate_types::LatticeAnchor,
     filter::RecallFrame,
     frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
@@ -174,6 +175,16 @@ pub(crate) fn describe_verb_dispatch_error(e: &VerbDispatchError) -> String {
             // estate. Surface as a clear user-facing error so callers can open the
             // estate with a corpus backend or switch to AllowDegraded.
             format!("recall lane unavailable: {reason}")
+        }
+        VerbDispatchError::SourceDrawerNotFound { drawer_id } => {
+            // source_id must name a drawer that exists in this estate, because
+            // the filed fact inherits that drawer's sensitivity. Naming a
+            // missing drawer is rejected rather than filed at the Normal
+            // default, which would over-disclose.
+            format!(
+                "source_id '{drawer_id}' names no drawer in this estate; \
+                 omit source_id to file an unanchored fact"
+            )
         }
         VerbDispatchError::Verb(ve) => describe_verb_error(ve),
     }
@@ -420,6 +431,39 @@ fn run_file_memory(
     let estate = registry.resolve_direct(args)?;
     let content = require_string(args, "content")?;
     let location = require_string(args, "location")?;
+    // Subject is REQUIRED at this boundary (PR-02): the calling AI is the
+    // only party that knows what the content asserts, and a subject written
+    // at capture is the cheapest one the estate will ever get. The error is
+    // instructive rather than the generic missing-argument text because the
+    // fix is a register, not just a field. Mirrors Swift runFileMemory.
+    let subject = match args.get("subject").and_then(|v| v.as_str()) {
+        Some(s) => s.trim().to_string(),
+        None => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "Missing required argument: subject. Provide one sentence \
+                     (≤{SUBJECT_LENGTH_CONTRACT} chars) stating what this memory asserts, \
+                     written for the NEXT AI that will scan it — telegraphic, entities and \
+                     claims front-loaded, no narrative framing. Example: \"Quarterly \
+                     planning moved to Thursday; Sarah sends invites Monday.\""
+                ),
+            ));
+        }
+    };
+    {
+        let n = subject.chars().count();
+        if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
+                     One telegraphic sentence in the AI-facing register — compress, \
+                     don't truncate."
+                ),
+            ));
+        }
+    }
     let exportability = decode_exportability(args)?;
 
     // Decode caller-supplied adjectives. Absent → keep CaptureFrame defaults.
@@ -461,6 +505,9 @@ fn run_file_memory(
     // Provenance channel: marks this row as MCP-agent-sourced in the provenance
     // bitmap (§2.5). Mirrors Swift's `provenanceChannel: .mcpAgent`.
     frame.provenance_channel = Channel::McpAgent;
+    // Subject trio threading (PR-02): boundary-validated above; the LocusKit
+    // capture verb stamps pipeline ai-v1 + subject_at from this slot.
+    frame.subject = Some(subject);
     // optional `wing` argument routes this memory into a specific wing.
     // When supplied, the drawer files into that wing.
     // When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory") — the AI's
@@ -567,6 +614,118 @@ fn is_sensitivity_filter(f: &locus_kit::filter::Filter) -> bool {
 /// the final result order is driven by scores. All other orderings are decoded
 /// strictly; unknown values return an invalidParams transport fault.
 ///
+// ---------------------------------------------------------------------------
+// Structured recall results (MXE-SS) — shared by the recall family here and
+// in recipe_tools.rs (moot_recall_shaped / moot_recall_precise).
+// ---------------------------------------------------------------------------
+
+/// One structured recall row — the typed twin of a rendered row, per the
+/// recall family's `outputSchema` (`tool_list::recall_results_output_schema`).
+/// Optional fields are OMITTED (never null) when the text analog is absent:
+/// room/content on opaque rows, content at memory_get depth:subject, subject
+/// at memory_get depth:full when the drawer carries none. Mirrors Swift
+/// `ToolDispatcher.StructuredRecallRow`.
+pub struct StructuredRow {
+    pub id: String,
+    pub room: Option<String>,
+    pub content: Option<String>,
+    pub subject: Option<String>,
+}
+
+impl StructuredRow {
+    fn as_json(&self) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        object.insert("id".to_string(), serde_json::Value::String(self.id.clone()));
+        if let Some(ref room) = self.room {
+            object.insert("room".to_string(), serde_json::Value::String(room.clone()));
+        }
+        if let Some(ref content) = self.content {
+            object.insert("content".to_string(), serde_json::Value::String(content.clone()));
+        }
+        if let Some(ref subject) = self.subject {
+            object.insert("subject".to_string(), serde_json::Value::String(subject.clone()));
+        }
+        serde_json::Value::Object(object)
+    }
+}
+
+/// MCP `tools/call` success result carrying BOTH the text block —
+/// byte-identical to `text_result` — and its typed twin under
+/// `structuredContent`, the MCP-sanctioned structured-result mechanism the
+/// recall family's `outputSchema` declares. Every redaction the text path
+/// applied must already be applied to `results` by the caller; this helper
+/// only shapes the envelope. Wire-identical to Swift
+/// `ToolDispatcher.structuredTextResult`.
+pub fn structured_text_result(
+    text: &str,
+    results: &[StructuredRow],
+) -> serde_json::Value {
+    serde_json::json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": {
+            "results": results.iter().map(|r| r.as_json()).collect::<Vec<_>>()
+        },
+        "isError": false
+    })
+}
+
+/// Build the structured row for a drawer the text path renders as a dense
+/// row. The subject slot mirrors `dense_row::render`'s priority exactly
+/// (redaction marker → stored subject → absence marker), and the SAME
+/// provenance redaction extends to the content field: a restricted/secret
+/// row's body never enters the structured block — both fields carry the
+/// marker the text shows. Content values in hand at the recipe call sites
+/// (`PreciseMatch.content`) are PRE-redaction, so they must pass through
+/// this switch, never straight into a row. Mirrors Swift
+/// `ToolDispatcher.structuredRecallRow`.
+pub fn structured_recall_row(
+    id: &str,
+    room: Option<String>,
+    content: Option<String>,
+    drawer: &locus_kit::drawer::Drawer,
+) -> StructuredRow {
+    use locus_kit::provenance::Sensitivity;
+    match drawer.sensitivity() {
+        Sensitivity::Restricted => StructuredRow {
+            id: id.to_string(),
+            room,
+            content: content.map(|_| crate::dense_row::RESTRICTED_MARKER.to_string()),
+            subject: Some(crate::dense_row::RESTRICTED_MARKER.to_string()),
+        },
+        Sensitivity::Secret => StructuredRow {
+            id: id.to_string(),
+            room,
+            content: content.map(|_| crate::dense_row::SECRET_MARKER.to_string()),
+            subject: Some(crate::dense_row::SECRET_MARKER.to_string()),
+        },
+        _ => StructuredRow {
+            id: id.to_string(),
+            room,
+            content,
+            subject: Some(
+                drawer
+                    .subject
+                    .clone()
+                    .unwrap_or_else(|| crate::dense_row::NO_SUBJECT_MARKER.to_string()),
+            ),
+        },
+    }
+}
+
+/// The structured twin of `dense_row::render_unhydrated` — id plus the
+/// absence marker only. Room and content stay absent even when values are in
+/// hand at the call site: an id the text renders opaquely (gated or
+/// unhydrated) must be exactly as opaque in the structured block. Mirrors
+/// Swift `ToolDispatcher.opaqueStructuredRow`.
+pub fn opaque_structured_row(id: &str) -> StructuredRow {
+    StructuredRow {
+        id: id.to_string(),
+        room: None,
+        content: None,
+        subject: Some(crate::dense_row::NO_SUBJECT_MARKER.to_string()),
+    }
+}
+
 /// Mirrors Swift `ToolDispatch.runMemorySearch` and `decodeOrdering`.
 fn run_memory_search(
     args: &BTreeMap<String, JsonValue>,
@@ -579,7 +738,79 @@ fn run_memory_search(
     };
 
     let estate = registry.resolve_direct(args)?;
-    let query = require_string(args, "query")?;
+    // Anchor pivot (PR-03): `near:<uuid>` is accepted as an ALTERNATIVE to
+    // `query:` — "find memories similar to this one". Exactly one of the two
+    // must be present. The anchor's verbatim content becomes the query text
+    // through the SAME scored pipeline (full fusion stack), so the fan-out
+    // inherits every shape/filter/limit unchanged; the anchor row itself is
+    // excluded from the reply. The anchor is fetched under the DEFAULT
+    // containment gate (no grant lift, deliberately) AND is then checked
+    // against the provenance sensitivity axis: the frame gate covers
+    // adjective sensitivity (bits 6–11) only, while `Drawer::sensitivity()`
+    // decodes provenance sensitivity (bits 30–35). Both checks are needed —
+    // a provenance-Secret row with the default adjective-Normal passes the
+    // frame. Pivoting through a restricted/secret anchor's content would leak
+    // content-derived neighbors past the redaction boundary, so a gated
+    // anchor reads as not-found, byte-identical to an absent id — the same
+    // oracle-free shape memory_get uses. Mirrors Swift runMemorySearch.
+    let query_arg = optional_string(args, "query")?.map(|s| s.to_string());
+    let near_arg = optional_string(args, "near")?.map(|s| s.to_string());
+    let (query, anchor_id): (String, Option<String>) = match (query_arg, near_arg) {
+        (None, None) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "Provide either query (text search) or near (UUID of an anchor memory — \
+                 returns the memories most similar to it)."
+                    .to_string(),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "query and near are mutually exclusive — pass exactly one.".to_string(),
+            ));
+        }
+        (Some(q), None) => (q, None),
+        (None, Some(anchor)) => {
+            let coord = estate.coord.lock().unwrap();
+            let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                    format!("{e:?}"),
+                )
+            })?;
+            let mut frame = RecallFrame::new(vec![]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+            let fetched = locus_estate
+                .get_drawers_matching_frame(&[anchor.clone()], &frame)
+                .map_err(|e| JSONRPCError::new(
+                    JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                    format!("{e}"),
+                ))?;
+            drop(coord);
+            // The provenance reject runs BEFORE the empty-content check, so a
+            // gated row and an empty row collapse into the one not-found
+            // shape. Ordering discipline and defence in depth: this fetch
+            // requests a single id, so `admissible` holds at most one drawer
+            // and either order yields the same error today. Should this ever
+            // resolve a set, provenance-first is the order that cannot leak.
+            let anchor_drawer = fetched
+                .admissible
+                .into_iter()
+                .find(|d| !matches!(
+                    d.sensitivity(),
+                    locus_kit::provenance::Sensitivity::Restricted
+                        | locus_kit::provenance::Sensitivity::Secret
+                ))
+                .filter(|d| !d.content.is_empty())
+                .ok_or_else(|| JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("near: anchor memory not found: {anchor}"),
+                ))?;
+            (anchor_drawer.content, Some(anchor))
+        }
+    };
+    let query = query.as_str();
 
     // Decode optional `scoring` argument. Absent/None keeps the documented
     // default (matrixAware) to match Swift. An unknown NON-EMPTY string is a
@@ -701,9 +932,15 @@ fn run_memory_search(
     // binding can call `&self` methods too).
     let mut coord = estate.coord.lock().unwrap();
 
-    let result = coord
+    let mut result = coord
         .recall_scored(&estate.handle, request, now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+    // Anchor exclusion (PR-03): a near: pivot must not hand the anchor back
+    // as its own top neighbor. Every consumer below (ledger, discrimination
+    // scores, rendering, count) works from the filtered list.
+    if let Some(ref anchor) = anchor_id {
+        result.hits.retain(|h| h.id != *anchor);
+    }
 
     // Record surfaced drawer ids in the session ledger so dereference verbs can
     // trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12.md §session-ledger).
@@ -752,108 +989,100 @@ fn run_memory_search(
     // "high — clear top result" is never reported on a lexical-only ranking.
     let dense_lane_dark = result.dense_lane_status.is_some();
 
-    // Resolve room display names from the node tree for all hydrated hit drawers.
-    let hit_node_ids: Vec<String> = result.hits.iter()
-        .filter_map(|h| h.drawer.as_ref().map(|d| d.parent_node_id.clone()))
-        .collect();
-    let hit_node_names = coord.resolve_drawer_node_names(&estate.handle, &hit_node_ids);
-
-    // Release the coordinator lock before the sensitivity advisory check.
-    // has_sensitive_rows() acquires the same non-reentrant Mutex — holding
-    // it here would deadlock the server on every no-grant search call.
-    drop(coord);
-
+    // Dense-row reply (PR-03): UUID · subject · fdc · qid · event_time per
+    // hit — the address plus the assertion, no content hauling. Redaction
+    // (provenance sensitivity restricted/secret) replaces the subject field
+    // inside dense_row::render — the body's access control must not be
+    // bypassable through its content-derived summary. The full text is one
+    // hop away via moot_memory_get depth:full. Mirrors Swift runMemorySearch.
     let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
+    // Structured twin (MXE-SS): room is resolved in ONE batched node-name
+    // read over the shown rows (the same resolution
+    // `memory_get_full_record_lines` uses per drawer) — disclosed in the BRR
+    // §Part 0 (2). Rows are built in the SAME loop as the text lines so the
+    // two blocks can never cover different sets. Mirrors Swift
+    // runMemorySearch.
+    let shown_parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        result.hits.iter().take(50)
+            .filter_map(|h| h.drawer.as_ref().map(|d| d.parent_node_id.clone()))
+            .filter(|p| seen.insert(p.clone()))
+            .collect()
+    };
+    let search_node_names =
+        coord.resolve_drawer_node_names(&estate.handle, &shown_parent_ids);
+    let mut results: Vec<StructuredRow> = Vec::new();
     for hit in result.hits.iter().take(50) {
-        // Sensitivity-aware content preview. LocusKit stores sensitivity in bits
-        // 30–35 of the provenance bitmap; Drawer::sensitivity() decodes them.
-        //
-        // Normal (0) and Elevated (16): show 120-char content preview. These are
-        // the bulk-export tiers and safe to surface to the MCP client.
-        //
-        // Restricted (32) and Secret (48): replace with a redacted placeholder.
-        // A raw content preview at the ARIA boundary leaks text that the
-        // sensitivity designation marks as access-controlled. Recall can return
-        // these rows for relevance ranking without exposing the body.
-        //
-        // NOTE on moot_memory_get (the shipped fetch-drawer-by-ID tool): it
-        // does NOT bypass this redaction
-        // via a different door. moot_memory_get gates on the ADJECTIVE axis
-        // (state/trust/adjective_sensitivity, bits 6-11, via
-        // BitmapEvaluator's default insertion) — the same gate this tool
-        // applies to admit a row into `result.hits` at all. The provenance
-        // `Sensitivity` checked here (bits 30-35) is a SEPARATE preview
-        // redaction — Swift's `runMemorySearch` now applies the identical
-        // redaction (search-redaction parity fix, Wave 6; previously a
-        // Rust-only behavior) — not something moot_memory_get's gate is
-        // scoped to reconcile. moot_memory_get's own gate is byte-for-byte
-        // the same adjective-axis default both ports' moot_memory_search
-        // already use.
-        let preview: String = hit.drawer.as_ref().map(|d| {
-            use locus_kit::provenance::Sensitivity;
-            match d.sensitivity() {
-                Sensitivity::Restricted => "[sensitivity: restricted — content redacted]".to_string(),
-                Sensitivity::Secret    => "[sensitivity: secret — content access requires explicit grant]".to_string(),
-                Sensitivity::Normal | Sensitivity::Elevated => {
-                    d.content.chars().take(120).collect()
-                }
+        match hit.drawer.as_ref() {
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                results.push(structured_recall_row(
+                    &d.id,
+                    search_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone()),
+                    Some(d.content.clone()),
+                    d,
+                ));
             }
-        }).unwrap_or_else(|| "(not hydrated)".to_string());
-        let room = hit.drawer.as_ref()
-            .and_then(|d| hit_node_names.get(&d.parent_node_id))
-            .map(|(_, r)| r.as_str())
-            .unwrap_or("");
-        // Row format matches Swift: "<id>  [<room>]  <preview>" — no score suffix.
-        // Swift runMemorySearch emits the score only via the discrimination line,
-        // not per-row, so per-row score annotation is removed for output parity.
-        lines.push(format!(
-            "{}  [{}]  {}",
-            hit.id, room, preview
-        ));
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&hit.id));
+                results.push(opaque_structured_row(&hit.id));
+            }
+        }
     }
-    lines.push(crate::recall_discrimination::result_line_with_dense_dark(discrimination, dense_lane_dark));
-    // Recall provenance: surface the dense-lane status and any degraded stages
-    // so callers can distinguish retrieval quality.
-    //
-    // dense_lane_status non-None means the dense float vector lane (Lane D) did not
-    // contribute hits. Lane D uses the deterministic embedding provider (FNV-1a +
-    // FloatSimHash projection — the permanent federation-grade vector, not a learned
-    // distributional model); callers use this to detect when ranking came from
-    // structural/BM25 lanes only rather than the vector lane. The learned semantic
-    // vector (MiniLM/MPNet/Gemma) is an additive v1.1 on-device lane, not wired here.
-    // The response must label embedding provenance honestly.
-    //
-    // degraded_stages lists every pipeline stage that was skipped due to a
-    // recoverable error. An empty vec means every attempted stage succeeded.
-    //
-    // Format: a single "recall_provenance:" status line, always present, never blank.
-    // Mirrors Swift ToolDispatch.runMemorySearch provenance block exactly.
-    let dense_part = match &result.dense_lane_status {
-        Some(reason) => format!("dense_lane:{}", reason),
-        None => "dense_lane:active".to_string(),
-    };
-    let degraded_part = if result.degraded_stages.is_empty() {
-        "degraded_stages:none".to_string()
+    // Deviation-only narration (PR-03): the discrimination line appears ONLY
+    // when the EFFECTIVE signal is low or medium (the dense-lane-dark cap is
+    // applied first so a dark-capped high still surfaces as medium+caveat).
+    // A clear top result and the single/zero case stay silent — the advisory
+    // paragraph lives in the tool description now.
+    let effective = if dense_lane_dark
+        && discrimination == crate::recall_discrimination::DiscriminationLevel::High
+    {
+        crate::recall_discrimination::DiscriminationLevel::Medium
     } else {
-        format!("degraded_stages:[{}]", result.degraded_stages.join(","))
+        discrimination
     };
-    lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
-    // redaction advisory stat.
-    // When no grant is active, check cheaply whether the estate holds any
-    // restricted or secret rows. If so, append an advisory so the AI client
-    // knows results may be incomplete and how to request access.
-    // Gated on `!sensitivity_ceiling_lifted` — when a grant IS live, the rows
-    // are already included and no advisory is appropriate.
-    // The stat uses a limit-1 LocusOnly scan with no query text (origin:
-    // Internal — no trace rows, B-10a). See `has_sensitive_rows`.
-    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
+    if matches!(
+        effective,
+        crate::recall_discrimination::DiscriminationLevel::Low
+            | crate::recall_discrimination::DiscriminationLevel::Medium
+    ) {
+        lines.push(crate::recall_discrimination::result_line_with_dense_dark(discrimination, dense_lane_dark));
+    }
+    // Recall provenance — DEVIATION-ONLY (PR-03): the line appears only when
+    // something is off-nominal (dense lane dark, or degraded stages). Its
+    // absence now MEANS nominal. The response labels embedding provenance
+    // accurately whenever it deviates. Mirrors Swift runMemorySearch.
+    if result.dense_lane_status.is_some() || !result.degraded_stages.is_empty() {
+        let dense_part = match &result.dense_lane_status {
+            Some(reason) => format!("dense_lane:{}", reason),
+            None => "dense_lane:active".to_string(),
+        };
+        let degraded_part = if result.degraded_stages.is_empty() {
+            "degraded_stages:none".to_string()
+        } else {
+            format!("degraded_stages:[{}]", result.degraded_stages.join(","))
+        };
+        lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
+    }
+    // Sensitivity-gate advisory — conditioned on GRANT STATE ALONE.
+    // When no grant is live the gate is in effect, so the client is told
+    // the gate exists and which commands lift it. The message asserts
+    // NOTHING about what this estate holds: any condition that consulted
+    // estate contents would make advisory presence a disclosure channel
+    // for exactly the restricted/secret rows the gate protects, to a
+    // caller with no grant. Emitting on grant state alone discloses
+    // nothing — the caller is the party that did not unlock, so they
+    // already know it. Gated on `!sensitivity_ceiling_lifted`: under a live
+    // grant those rows are already included and no advisory applies.
+    // Mirrors Swift `runMemorySearch`.
+    if !sensitivity_ceiling_lifted {
         lines.push(
-            "sensitivity_advisory: results may be hidden by sensitivity tier — \
+            "sensitivity_advisory: a sensitivity tier gate is in effect — \
              run `mootx01 unlock private` to include restricted memories, \
              `mootx01 unlock secret` for secret memories.".to_string()
         );
     }
-    Ok(text_result(&lines.join("\n")))
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
@@ -885,14 +1114,55 @@ fn run_memory_search(
 /// which strips the content blob this tool exists to return. Provenance
 /// `Sensitivity::Restricted` and `Sensitivity::Secret` remain access-controlled
 /// at the MCP boundary and are reported with the same not-found shape as other
-/// gate failures until an explicit grant mechanism exists.
+/// gate failures. A live sensitivity grant lifts the ADJECTIVE ceiling ONLY —
+/// the provenance gate is unconditional and does not consult the grant ledger,
+/// matching Swift `ToolDispatcher.runMemoryGet` (conformance parity: if that
+/// ruling is revisited, both verticals change together).
 fn run_memory_get(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     sensitivity_ledger: &SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
-    let row_id = require_string(args, "id")?;
+    // Hydration depth (PR-03): one verb, three tiers — subject (dense row
+    // only, travel), distilled (dense row + distilled rendering, confirm;
+    // content fallback carries an explicit marker), full (complete record,
+    // the DEFAULT — preserves the pre-PR-03 single-id reply shape). Batch
+    // `ids:[...]` makes the Case-2 winnow one call. Mirrors Swift
+    // runMemoryGet.
+    let depth = optional_string(args, "depth")?.unwrap_or("full").to_string();
+    if !["subject", "distilled", "full"].contains(&depth.as_str()) {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown depth: {depth}. Valid: subject, distilled, full"),
+        ));
+    }
+    let mut row_ids: Vec<String> = Vec::new();
+    if let Some(single) = optional_string(args, "id")? {
+        row_ids.push(single.to_string());
+    }
+    if let Some(JsonValue::Array(raw_ids)) = args.get("ids") {
+        for raw in raw_ids {
+            match raw.as_str() {
+                Some(s) => row_ids.push(s.to_string()),
+                None => {
+                    return Err(JSONRPCError::new(
+                        JSONRPCErrorCode::INVALID_PARAMS,
+                        "ids must be an array of memory UUID strings".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    if row_ids.is_empty() {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "Provide id (single memory UUID) or ids (array of UUIDs).".to_string(),
+        ));
+    }
+    let single_id_mode = row_ids.len() == 1;
+    let row_id = row_ids[0].clone();
+    let row_id = row_id.as_str();
 
     // `mut`: out-of-band sensitivity grants read-under-grant audit recording below needs a
     // mutable coordinator borrow. `locus_estate`'s immutable borrow (just
@@ -920,37 +1190,126 @@ fn run_memory_get(
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
     let filtered = locus_estate
-        .get_drawers_matching_frame(&[row_id.to_string()], &frame)
+        .get_drawers_matching_frame(&row_ids, &frame)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
 
-    // Same message and error code whether the id is genuinely absent,
-    // tombstoned, or exists but failed a disclosure gate — see the
-    // containment note above. Mirrors moot_link_memories' "not found" shape.
-    let Some(drawer) = filtered.admissible.into_iter().next() else {
+    // Provenance-sensitivity redaction boundary for by-id reads: the frame
+    // gate above checks adjective sensitivity (bits 6–11);
+    // Drawer::sensitivity() decodes provenance sensitivity (bits 30–35),
+    // where Restricted/Secret content is access-controlled and must not be
+    // returned verbatim. Gated rows use the standard not-found shape so
+    // by-id lookup is not an oracle for hidden rows. Mirrors Swift.
+    let admissible_by_id: BTreeMap<String, locus_kit::drawer::Drawer> = filtered
+        .admissible
+        .into_iter()
+        .filter(|d| !matches!(
+            d.sensitivity(),
+            locus_kit::provenance::Sensitivity::Restricted
+                | locus_kit::provenance::Sensitivity::Secret
+        ))
+        .map(|d| (d.id.clone(), d))
+        .collect();
+
+    // Single-id compat: the original thrown not-found stays. In batch mode
+    // gate failures become per-row "not found:" lines instead — fail-loud
+    // without sinking the whole winnow call.
+    if single_id_mode && !admissible_by_id.contains_key(row_id) {
         return Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
             format!("Memory not found: {row_id}"),
         ));
-    };
-
-    // Preserve moot_memory_search's provenance-sensitivity redaction boundary
-    // for the full-content by-id path. The default RecallFrame gate above only
-    // checks adjective sensitivity (bits 6–11); Drawer::sensitivity() decodes
-    // provenance sensitivity (bits 30–35), where Restricted/Secret content is
-    // access-controlled and must not be returned verbatim without an explicit
-    // grant mechanism. Use the standard not-found shape so by-id lookup does not
-    // become an oracle for rows hidden by this MCP disclosure gate.
-    match drawer.sensitivity() {
-        locus_kit::provenance::Sensitivity::Restricted
-        | locus_kit::provenance::Sensitivity::Secret => {
-            return Err(JSONRPCError::new(
-                JSONRPCErrorCode::INVALID_PARAMS,
-                format!("Memory not found: {row_id}"),
-            ));
-        }
-        locus_kit::provenance::Sensitivity::Normal
-        | locus_kit::provenance::Sensitivity::Elevated => {}
     }
+
+    // Batch / shallow-depth rendering (PR-03). depth:full + single id falls
+    // through to the original full record below.
+    if !single_id_mode || depth != "full" {
+        let mut lines: Vec<String> = Vec::new();
+        // Structured twin (MXE-SS): one batched node-name read for room over
+        // the admissible rows. Not-found ids are omitted from the structured
+        // block — the text's "not found:" line is the signal, and the row
+        // has no drawer fields to carry. Mirrors Swift runMemoryGet.
+        let get_parent_ids: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            row_ids.iter()
+                .filter_map(|id| admissible_by_id.get(id).map(|d| d.parent_node_id.clone()))
+                .filter(|p| seen.insert(p.clone()))
+                .collect()
+        };
+        let get_node_names = coord.resolve_drawer_node_names(&estate.handle, &get_parent_ids);
+        let mut results: Vec<StructuredRow> = Vec::new();
+        for id in &row_ids {
+            let Some(d) = admissible_by_id.get(id) else {
+                lines.push(format!("not found: {id}"));
+                continue;
+            };
+            if sensitivity_ceiling_lifted {
+                match d.adjective_sensitivity() {
+                    locus_kit::adjectives::AdjectiveSensitivity::Restricted
+                    | locus_kit::adjectives::AdjectiveSensitivity::Secret => {
+                        let _ = coord.record_sensitivity_read_under_grant(
+                            &estate.handle,
+                            d.adjective_sensitivity(),
+                            &d.id,
+                            now,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let room = get_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone());
+            match depth.as_str() {
+                "subject" => {
+                    lines.push(crate::dense_row::render(d));
+                    // Content stays ABSENT at the travel tier — the text
+                    // carries no body here, and the structured block must
+                    // not defeat the depth knob's token economy.
+                    results.push(structured_recall_row(&d.id, room, None, d));
+                }
+                "distilled" => {
+                    lines.push(crate::dense_row::render(d));
+                    match d.distilled.as_deref() {
+                        Some(text) if !text.is_empty() => {
+                            lines.push(text.to_string());
+                            results.push(structured_recall_row(
+                                &d.id, room, Some(text.to_string()), d));
+                        }
+                        _ => {
+                            // Fallback marker on fallback hits ONLY (PR-03
+                            // deviation-only contract): the text below is
+                            // verbatim content, not a distillate.
+                            lines.push("source: content (not yet distilled)".to_string());
+                            lines.push(d.content.clone());
+                            results.push(structured_recall_row(
+                                &d.id, room, Some(d.content.clone()), d));
+                        }
+                    }
+                }
+                _ => {
+                    // depth:full in batch mode — repeat the full record shape.
+                    lines.extend(memory_get_full_record_lines(&mut coord, &estate.handle, d)?);
+                    // Full-record tier: subject mirrors the text's deviation
+                    // tolerance — the record omits the subject line when the
+                    // drawer has none, so the field is omitted too.
+                    // Provenance-gated rows cannot reach here
+                    // (admissible_by_id excludes them), so the row is built
+                    // directly, not via the marker switch.
+                    results.push(StructuredRow {
+                        id: d.id.clone(),
+                        room,
+                        content: Some(d.content.clone()),
+                        subject: d.subject.clone(),
+                    });
+                }
+            }
+            lines.push(String::new());
+        }
+        if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+        return Ok(structured_text_result(&lines.join("\n"), &results));
+    }
+
+    let drawer = admissible_by_id.get(row_id).cloned().expect("guarded above");
 
     // same read-under-grant audit recording as
     // run_memory_search — gated on BOTH the ceiling having been lifted AND
@@ -971,9 +1330,52 @@ fn run_memory_get(
         }
     }
 
+    let mut lines = memory_get_full_record_lines(&mut coord, &estate.handle, &drawer)?;
+
+    // Sensitivity-gate advisory — same rule as run_memory_search: grant
+    // state alone, never estate contents. It matters more here than in
+    // search, because this reply follows a SUCCESSFUL fetch of a visible
+    // row; a contents-dependent advisory would attach an estate-wide
+    // existence signal to that reply, which is precisely what this
+    // function's containment contract (see its doc comment: gated rows
+    // must be indistinguishable from absent ones) forbids.
+    // Mirrors Swift `ToolDispatcher.runMemoryGet`.
+    if !sensitivity_ceiling_lifted {
+        lines.push(
+            "sensitivity_advisory: a sensitivity tier gate is in effect on this estate — \
+             run `mootx01 unlock private` to include restricted memories, \
+             `mootx01 unlock secret` for secret memories.".to_string()
+        );
+    }
+    // Structured twin (MXE-SS) of the single-id full record. The node tree
+    // is consulted a second time here (memory_get_full_record_lines resolves
+    // internally but returns rendered lines); one extra by-id lookup is
+    // preferred over widening that function's signature. Subject is omitted
+    // when the drawer has none, mirroring the record's omitted subject line;
+    // provenance-gated rows cannot reach here (admissible_by_id excludes
+    // them). Mirrors Swift runMemoryGet.
+    let get_node_names =
+        coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
+    let row = StructuredRow {
+        id: drawer.id.clone(),
+        room: get_node_names.get(&drawer.parent_node_id).map(|(_, room)| room.clone()),
+        content: Some(drawer.content.clone()),
+        subject: drawer.subject.clone(),
+    };
+    Ok(structured_text_result(&lines.join("\n"), &[row]))
+}
+
+/// The full-record block for one drawer — the depth:full tier and the
+/// original single-id moot_memory_get reply shape. Shared by the single-id
+/// path and the batch depth:full path. Mirrors Swift `fullRecordLines`.
+fn memory_get_full_record_lines(
+    coord: &mut std::sync::MutexGuard<'_, genius_locus_kit::EstateCoordinator>,
+    handle: &genius_locus_kit::EstateHandle,
+    drawer: &locus_kit::drawer::Drawer,
+) -> Result<Vec<String>, JSONRPCError> {
     // Drawer no longer carries stored wing/room; resolve via the
     // node tree, same pattern as every other read tool in this file.
-    let node_names = coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
+    let node_names = coord.resolve_drawer_node_names(handle, &[drawer.parent_node_id.clone()]);
     let (wing, room) = node_names.get(&drawer.parent_node_id).cloned().unwrap_or_default();
 
     // Linked tunnel summary: estate-wide scan filtered to confirmed-active,
@@ -983,14 +1385,9 @@ fn run_memory_get(
     // confirmed edges — the same gate moot_connection_search/moot_connection_map
     // enforce.
     let all_tunnels = coord
-        .all_tunnels(&estate.handle)
+        .all_tunnels(handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
-
-    // Release the coordinator lock before the sensitivity advisory check.
-    // has_sensitive_rows() acquires the same non-reentrant Mutex — holding
-    // it here would deadlock the server on every no-grant get call.
-    drop(coord);
-
+    let row_id = drawer.id.as_str();
     let linked: Vec<_> = all_tunnels
         .iter()
         .filter(|t| {
@@ -1003,6 +1400,14 @@ fn run_memory_get(
     let mut lines = vec![
         format!("memory {}", drawer.id),
         format!("room: {room}  wing: {wing}"),
+    ];
+    // Subject line (PR-03): present only when the drawer carries one — the
+    // full record is deviation-tolerant, absence simply omits the line (the
+    // dense tiers show the absence marker). Mirrors Swift fullRecordLines.
+    if let Some(ref subject) = drawer.subject {
+        lines.push(format!("subject: {subject}"));
+    }
+    lines.extend(vec![
         format!("filed_at: {}", epoch_to_iso8601(drawer.filed_at)),
         format!("event_time: {}", epoch_to_iso8601(drawer.event_time)),
         format!("state: {:?}", drawer.state()).to_lowercase(),
@@ -1012,7 +1417,7 @@ fn run_memory_get(
         format!("confirmation: {:?}", drawer.confirmation()).to_lowercase(),
         format!("lineage: {}", drawer.lineage_id),
         format!("tunnels: {}", linked.len()),
-    ];
+    ]);
     for tunnel in linked.iter().take(50) {
         let outgoing = tunnel.source_drawer_id.as_deref() == Some(row_id);
         let other = if outgoing {
@@ -1027,62 +1432,7 @@ fn run_memory_get(
     // tool exists to return.
     lines.push("content:".to_string());
     lines.push(drawer.content.clone());
-    // redaction advisory stat  — same logic as
-    // run_memory_search. When no grant is active, surface an advisory if the
-    // estate contains any restricted/secret rows the default gate suppresses.
-    // Consistent with search so the AI client receives the same hint from
-    // both tools. Mirrors Swift ToolDispatcher.runMemoryGet.
-    if !sensitivity_ceiling_lifted && has_sensitive_rows(&estate, now) {
-        lines.push(
-            "sensitivity_advisory: some memories may be hidden by sensitivity tier — \
-             run `mootx01 unlock private` to include restricted memories, \
-             `mootx01 unlock secret` for secret memories.".to_string()
-        );
-    }
-    Ok(text_result(&lines.join("\n")))
-}
-
-/// Returns `true` if the estate has at least one row tagged restricted or secret.
-///
-/// Used by `run_memory_search` and `run_memory_get` to decide whether to append a
-/// sensitivity advisory. The advisory tells the AI client
-/// that results may be incomplete and how to unlock the hidden tier.
-///
-/// Implementation: two limit-1 `GLKRecallRequest` probes with explicit
-/// `Filter::Sensitivity(tier)` — these filters suppress the default
-/// `sensitivityAtMost(Elevated)` gate (see `BitmapEvaluator::insert_defaults`),
-/// so restricted/secret rows become visible for counting. Mode `LocusOnly` +
-/// scoring `Raw` skips the BM25/vector pipeline — a pure bitmap filter probe.
-///
-/// Origin defaults to `RecallOrigin::Internal` (the builder default) — must NOT
-/// write recall-trace rows (B-10a: only the ARIA_MCP external boundary sets External).
-fn has_sensitive_rows(estate: &crate::estate_registry::OpenEstate, now: i64) -> bool {
-    use genius_locus_kit::recall::{
-        GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    };
-    use locus_kit::adjectives::AdjectiveSensitivity;
-    use locus_kit::filter::{Filter, RecallFrame};
-
-    let coord = estate.coord.lock().unwrap();
-    for tier in &[AdjectiveSensitivity::Restricted, AdjectiveSensitivity::Secret] {
-        // Limit 1: stop at first match — no need to count.
-        let mut frame = RecallFrame::new(vec![Filter::Sensitivity(*tier)]);
-        // Structured hydration (default): no content body needed — existence check only.
-        // Limit: 1 — stops at the first matching row.
-        frame.limit = Some(1);
-        let request = GLKRecallRequest::new(frame)
-            .with_mode(GLKRecallMode::LocusOnly) // Skip BM25/vector — pure bitmap probe.
-            .with_scoring(GLKRecallScoring::Raw) // No matrix scoring needed.
-            .with_limit(1);
-        // A failed call is treated as "no sensitive rows" — fail-safe:
-        // don't surface the advisory when we can't confirm sensitive rows exist.
-        if let Ok(result) = coord.recall_scored(&estate.handle, request, now) {
-            if !result.hits.is_empty() {
-                return true;
-            }
-        }
-    }
-    false
+    Ok(lines)
 }
 
 /// Note that a drawer id was "used" (acted upon) by a dereference verb.
@@ -1173,11 +1523,48 @@ fn run_update_memory(
     let id = require_string(args, "id")?;
     let mutation_str = require_string(args, "mutation")?;
 
-    let kind = decode_mutation_kind(mutation_str)?;
+    let kind = if mutation_str == "setSubject" {
+        // setSubject carries its payload in a dedicated `subject` arg; the
+        // `note` arg is read below and forwarded as the mutate payload —
+        // the audit annotation — as for every other mutation.
+        // Boundary-validated here so the caller gets the register
+        // guidance, not the bare store error. Mirrors Swift runUpdateMemory.
+        let subject = match args.get("subject").and_then(|v| v.as_str()) {
+            Some(s) => s.trim().to_string(),
+            None => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!(
+                        "mutation=setSubject requires a `subject` argument: one sentence \
+                         (≤{SUBJECT_LENGTH_CONTRACT} chars) in the AI-facing register — \
+                         telegraphic, entities and claims front-loaded."
+                    ),
+                ));
+            }
+        };
+        let n = subject.chars().count();
+        if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
+                     Compress, don't truncate."
+                ),
+            ));
+        }
+        MutationKind::SetSubject(subject)
+    } else {
+        decode_mutation_kind(mutation_str)?
+    };
+    // The optional `note` argument is the caller's audit annotation,
+    // forwarded as the mutate payload so it reaches the sealed audit
+    // row's `reason` column. Mirrors Swift runUpdateMemory's
+    // `optionalString(args["note"], ...)` → MutateFrame.payload.
+    let note = optional_string(args, "note")?;
     // Note usage before acquiring the coord lock so note_usage can also lock.
     note_usage(id, &estate, ledger);
     let coord = estate.coord.lock().unwrap();
-    match coord.mutate(&estate.handle, id, kind, None) {
+    match coord.mutate(&estate.handle, id, kind, note.as_deref()) {
         Ok(()) => Ok(text_result(&format!("updated memory {id} ({mutation_str})"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
@@ -1236,7 +1623,22 @@ fn run_erase_memory(
     // (§B-2a) threads it so the success-audit timestamp is deterministic downstream.
     let now = wall_now();
     match coord.expunge(&estate.handle, id, reason, confirmed, now) {
-        Ok(()) => Ok(text_result(&format!("erased memory {id}"))),
+        // Honest reporting (SPEC B-8b, MXE-FA): a caller acting on this
+        // sentence is making a privacy decision on it. When the audit gate
+        // refused accepted lineage siblings, the expunge was partial — say
+        // so, name the count, and name the surviving ids. The full-success
+        // shape stays byte-identical to the historical response. Mirrors
+        // Swift `runEraseMemory`.
+        Ok(outcome) if !outcome.refused_sibling_ids.is_empty() => {
+            let refused = &outcome.refused_sibling_ids;
+            Ok(text_result(&format!(
+                "partially erased memory {id}: {} accepted lineage sibling(s) \
+                 refused erasure and remain readable: {}",
+                refused.len(),
+                refused.join(", ")
+            )))
+        }
+        Ok(_) => Ok(text_result(&format!("erased memory {id}"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }
@@ -1251,11 +1653,14 @@ fn run_confirm_memory(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
+    // The optional `note` argument is the caller's audit annotation,
+    // forwarded as the mutate payload. Mirrors Swift runConfirmMemory.
+    let note = optional_string(args, "note")?;
 
     // Note usage: confirming a surfaced drawer means the user acted on it.
     note_usage(id, &estate, ledger);
     let coord = estate.coord.lock().unwrap();
-    match coord.mutate(&estate.handle, id, MutationKind::Confirm, None) {
+    match coord.mutate(&estate.handle, id, MutationKind::Confirm, note.as_deref()) {
         Ok(()) => Ok(text_result(&format!("confirmed memory {id}"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
@@ -1529,10 +1934,22 @@ fn run_connection_search(
         })
         .collect();
 
+    // Dense-row citations (PR-03): each drawer endpoint is cited as a dense
+    // row so the AI can judge the neighbor without another call. Room-level
+    // endpoints (no drawer id) keep the wing/room text. Endpoint drawers are
+    // looked up from the id-resolution recall above. Mirrors Swift.
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all.iter().map(|d| (d.id.as_str(), d)).collect();
     let mut lines = vec![format!("connections from {from_id}: {}", outgoing.len())];
-    for t in &outgoing {
-        let target = t.target_drawer_id.as_deref().unwrap_or(&t.target_room);
-        lines.push(format!("  {} [{}] → {}", t.id, t.label, target));
+    for t in outgoing.iter().take(50) {
+        let cite = match t.target_drawer_id.as_deref() {
+            Some(id) => by_id
+                .get(id)
+                .map(|d| crate::dense_row::render(d))
+                .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+            None => format!("{}/{}", t.target_wing, t.target_room),
+        };
+        lines.push(format!("{}  [{}]  → {}", t.id, t.label, cite));
     }
     Ok(text_result(&lines.join("\n")))
 }
@@ -1589,10 +2006,19 @@ fn run_connection_map(
         }
     }
 
+    // Dense-row citations (PR-03) — mirror of connection_search.
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all.iter().map(|d| (d.id.as_str(), d)).collect();
     let mut lines = vec![format!("connections to {to_id}: {}", incoming.len())];
-    for t in &incoming {
-        let src = t.source_drawer_id.as_deref().unwrap_or(&t.source_room);
-        lines.push(format!("  {} [{}] ← {}", t.id, t.label, src));
+    for t in incoming.iter().take(50) {
+        let cite = match t.source_drawer_id.as_deref() {
+            Some(id) => by_id
+                .get(id)
+                .map(|d| crate::dense_row::render(d))
+                .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+            None => format!("{}/{}", t.source_wing, t.source_room),
+        };
+        lines.push(format!("{}  [{}]  ← {}", t.id, t.label, cite));
     }
     Ok(text_result(&lines.join("\n")))
 }
@@ -1614,16 +2040,22 @@ fn run_file_fact(
     let subject = require_string(args, "subject")?;
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
-    // source_id grounds the fact (provenance — KGFact: every fact traces back to a
-    // source). When the caller omits it, infer the source as the injected host
-    // identity so a fact is never stored unanchored and provenance reflects the
-    // actual binary filing it ("aria-mcp" or "mootx01").
-    let provided = optional_string(args, "source_id")?.unwrap_or("");
-    let source_id = if provided.is_empty() { registry.server_identity.as_str() } else { provided };
+    // source_id anchors the fact to a drawer in this estate. It is a local drawer
+    // id or nothing — when the caller omits it the fact is filed sourceless, and a
+    // value naming no drawer fails the write. The filing binary's identity
+    // ("aria-mcp-server" or "mootx01") is provenance about the writer, not about
+    // the source, so it is stamped into `added_by` rather than substituted here.
+    let source_id = optional_string(args, "source_id")?.unwrap_or("");
+    let origin = locus_kit::kg_fact::KGFactOrigin {
+        added_by: registry.server_identity.clone(),
+        ..Default::default()
+    };
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
-    match coord.add_kg_fact(&estate.handle, subject, predicate, object, source_id, now) {
+    match coord.add_kg_fact_with_origin(
+        &estate.handle, subject, predicate, object, source_id, &origin, now,
+    ) {
         Ok(fact) => Ok(text_result(&format!(
             "filed fact {}: [{subject}] {predicate} [{object}]",
             fact.id
@@ -1693,9 +2125,9 @@ fn run_fact_search(
     // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are about
     // to emit, check whether it references an actual drawer row in the estate. If it does
     // AND that drawer is Restricted/Secret (outside the default sensitivity ceiling), hide
-    // the ID at the MCP boundary. If it is NOT a drawer row (e.g. a server identity string
-    // such as "mootx01" or "aria-mcp-server"), pass it through — it carries provenance
-    // metadata, not a confidential drawer reference. Parity with Swift runFactSearch.
+    // the ID at the MCP boundary. sourceDrawerID holds a local drawer id or "", so the
+    // only non-matching value is the empty one, which names no drawer and stays visible.
+    // Parity with Swift runFactSearch.
     let hidden_source_ids: std::collections::HashSet<String> = {
         let mut seen = std::collections::HashSet::new();
         let unique_source_ids: Vec<String> = matches
@@ -1729,18 +2161,22 @@ fn run_fact_search(
     for f in matches.iter().take(limit) {
         let filed_iso = epoch_to_iso8601(f.filed_at);
         // Gate source= on source-drawer sensitivity: hide only when the source drawer
-        // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
-        // (server identity, custom tags) are not in hidden_source_ids and pass through.
+        // EXISTS in the estate AND is Restricted/Secret. source_drawer_id holds a
+        // local drawer id or "", so a sourceless fact renders an empty source=.
         let source_field = if hidden_source_ids.contains(&f.source_drawer_id) {
             "source=<hidden>".to_string()
         } else {
             format!("source={}", f.source_drawer_id)
         };
-        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<id|hidden>".
+        // Row format mirrors Swift runFactSearch: "<id>  [<subject>] <predicate>
+        // [<object>]  filed=<iso>  source=<id|hidden>  addedBy=<host>".
         // Double space after id, no leading indent, no dash separator.
+        // added_by names the binary that filed the row — provenance about the
+        // writer, distinct from which drawer the fact was drawn from. Never
+        // gated: it is not a drawer id and carries no drawer's sensitivity.
         lines.push(format!(
-            "{}  [{}] {} [{}]  filed={}  {}",
-            f.id, f.subject, f.predicate, f.object, filed_iso, source_field
+            "{}  [{}] {} [{}]  filed={}  {}  addedBy={}",
+            f.id, f.subject, f.predicate, f.object, filed_iso, source_field, f.added_by
         ));
     }
     // Dark-lane hint: when a query was supplied and the dense lane is dark (no
@@ -1922,9 +2358,9 @@ fn run_fact_timeline(
     // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are about
     // to emit (capped at 200), check whether it references an actual drawer row in the
     // estate. If it does AND that drawer is Restricted/Secret (outside the default
-    // sensitivity ceiling), hide the ID at the MCP boundary. Non-drawer provenance strings
-    // (e.g. server identity tags) are not in the store and pass through unchanged.
-    // Parity with Swift runFactTimeline.
+    // sensitivity ceiling), hide the ID at the MCP boundary. sourceDrawerID holds a local
+    // drawer id or "", so the only non-matching value is the empty one, which names no
+    // drawer and stays visible. Parity with Swift runFactTimeline.
     let hidden_source_ids: std::collections::HashSet<String> = {
         let mut seen = std::collections::HashSet::new();
         let unique_source_ids: Vec<String> = facts
@@ -1959,8 +2395,8 @@ fn run_fact_timeline(
         // filed_at is epoch seconds; format as UTC RFC3339 / ISO8601.
         let filed_iso = epoch_to_iso8601(f.filed_at);
         // Gate source= on source-drawer sensitivity: hide only when the source drawer
-        // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
-        // (server identity, custom tags) are not in hidden_source_ids and pass through.
+        // EXISTS in the estate AND is Restricted/Secret. source_drawer_id holds a
+        // local drawer id or "", so a sourceless fact renders an empty source=.
         let source_field = if hidden_source_ids.contains(&f.source_drawer_id) {
             "source=<hidden>".to_string()
         } else {
@@ -2100,26 +2536,37 @@ fn run_estate_status(
         })
         .collect();
 
-    // "total" = all non-erased rows (tombstone = permanently erased).
-    let total: Vec<_> = all_drawers
-        .iter()
-        .filter(|d| d.tombstoned_at.is_none())
-        .collect();
-
     let kg_facts = coord
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    // Sensitivity ceiling (#50): exclude restricted/secret drawers from
-    // the wing listing, matching the estate-map ceiling. Wing names derived
-    // from restricted/secret drawers can leak topic metadata.
-    let visible: Vec<_> = active.iter().filter(|d| {
-        let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
-        sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
-    }).collect();
+    // Sensitivity ceiling (#50): restricted/secret drawers contribute nothing
+    // to this surface — not the wing listing, and not any count. Wing names
+    // derived from restricted/secret drawers leak topic metadata; a count that
+    // moves with the restricted set is the same leak in scalar form, since
+    // this tool has no sensitivity-grant plumbing and every caller is an
+    // ungranted one. Matches the estate-map ceiling. `is_bulk_exportable` is
+    // true for Normal and Elevated, false for Restricted and Secret — the
+    // parity of Swift `AdjectiveSensitivity.isBulkExportable`.
+    //
+    // EVERY drawer-derived aggregate below reads from `visible` or
+    // `visible_total`. An aggregate added here inherits that rule: derive it
+    // from a filtered set, or the next reader learns the size of a population
+    // they cannot see. Mirrors Swift runEstateStatus.
+    let visible: Vec<_> = active
+        .iter()
+        .filter(|d| d.adjective_sensitivity().is_bulk_exportable())
+        .collect();
+    // "total" = all non-erased rows (tombstone = permanently erased), under
+    // the same ceiling — hence the wider cluster scope but the identical
+    // sensitivity predicate.
+    let visible_total: Vec<_> = all_drawers
+        .iter()
+        .filter(|d| d.tombstoned_at.is_none() && d.adjective_sensitivity().is_bulk_exportable())
+        .collect();
     let visible_node_ids: Vec<String> = visible.iter().map(|d| d.parent_node_id.clone()).collect();
-    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &visible_node_ids);
-    let wings: std::collections::BTreeSet<String> = active_node_names
+    let visible_node_names = coord.resolve_drawer_node_names(&estate.handle, &visible_node_ids);
+    let wings: std::collections::BTreeSet<String> = visible_node_names
         .values()
         .map(|(w, _)| w.clone())
         .collect();
@@ -2165,13 +2612,33 @@ fn run_estate_status(
         "stale"
     };
 
+    // Subject-debt counter (PR-04): presence debt over the live
+    // sensitivity-visible set — N subject-bearing / M eligible (non-empty
+    // content), K missing. It counts `visible`, not `active`, under the
+    // ceiling declared above: the debt an ungranted caller is being asked to
+    // pay is exactly the debt it is allowed to see, so this counter and the
+    // `moot_memory_list filter:missing_subject` enumerator it points the AI at
+    // describe one population. The every-load reminder driving the
+    // consent-gated interactive backfill (walk the enumerator → setSubject
+    // only after the user grants time and permission). Presence debt only —
+    // pipeline-version regeneration debt stays count_missing_subject's
+    // concern. Mirrors Swift runEstateStatus.
+    let subject_eligible = visible.iter().filter(|d| !d.content.is_empty()).count();
+    let subject_bearing = visible
+        .iter()
+        .filter(|d| !d.content.is_empty() && d.subject.is_some())
+        .count();
+
     // Field order and wording mirror Swift runEstateStatus exactly:
-    //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
+    //   estate / memories / subjects / wings / kg facts (space, "active" suffix) / trace_rows / sync
     //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
     let mut body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
-        active.len(),
-        total.len(),
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
+        visible.len(),
+        visible_total.len(),
+        subject_bearing,
+        subject_eligible,
+        subject_eligible - subject_bearing,
         wings_list,
         kg_facts.len(),
         trace_rows,
@@ -2229,6 +2696,21 @@ fn run_memory_list(
     let estate = registry.resolve_direct(args)?;
     let wing = require_string(args, "wing")?;
     let room_filter = optional_string(args, "room")?;
+    // Optional filter. `missing_subject` is the subject-debt backfill
+    // enumerator (PR-02): id-only rows of live drawers whose subject is
+    // NULL, so a consenting backfill session can walk them with
+    // moot_update_memory mutation=setSubject without hauling content.
+    // Mirrors Swift runMemoryList.
+    let missing_subject_only = match optional_string(args, "filter")? {
+        None => false,
+        Some("missing_subject") => true,
+        Some(other) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("Unknown filter: {other}. Accepted: missing_subject"),
+            ));
+        }
+    };
     let coord = estate.coord.lock().unwrap();
 
     let all = coord
@@ -2249,8 +2731,9 @@ fn run_memory_list(
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &node_ids);
     drop(coord);
 
-    let mut matches: Vec<(String, String, String)> = Vec::new();
-    for d in &drawers {
+    let mut matches: Vec<(locus_kit::drawer::Drawer, String)> = Vec::new();
+    for d in drawers {
+        if missing_subject_only && d.subject.is_some() { continue; }
         let (d_wing, d_room) = node_names
             .get(&d.parent_node_id)
             .cloned()
@@ -2259,24 +2742,32 @@ fn run_memory_list(
         if let Some(ref rf) = room_filter {
             if !rf.is_empty() && d_room != *rf { continue; }
         }
-        let preview: String = d.content.chars().take(80).collect::<String>()
-            .replace('\n', " ");
-        matches.push((d.id.clone(), d_room, preview));
+        matches.push((d, d_room));
     }
 
     let total = matches.len();
     matches.truncate(200);
+    let filter_suffix = if missing_subject_only { " [filter: missing_subject]" } else { "" };
     let mut lines = vec![format!(
-        "memory_list: {} drawer(s) in {}{}",
+        "memory_list: {} drawer(s) in {}{}{}",
         matches.len(),
         wing,
-        room_filter.as_ref().map(|r| format!("/{}", r)).unwrap_or_default()
+        room_filter.as_ref().map(|r| format!("/{}", r)).unwrap_or_default(),
+        filter_suffix
     )];
     if total > 200 {
         lines.push(format!("(showing first 200 of {})", total));
     }
-    for (id, room, preview) in &matches {
-        lines.push(format!("  {} [{}] {}", id, room, preview));
+    for (d, room) in &matches {
+        // Debt enumeration stays id-only by design (PR-02): the backfill
+        // walker fetches content per-row via moot_memory_get when ready to
+        // write a subject. Every other listing row is the dense row (PR-03)
+        // — address + assertion, no content preview. Mirrors Swift.
+        if missing_subject_only {
+            lines.push(format!("  {} [{}]", d.id, room));
+        } else {
+            lines.push(format!("  {}", crate::dense_row::render(d)));
+        }
     }
     Ok(text_result(&lines.join("\n")))
 }
@@ -2699,6 +3190,16 @@ fn run_reindex(
 /// called repeatedly while a drain settles. Today the only drain is
 /// `corpus_encode`; the report is a LIST so additional drains surface here
 /// automatically when they exist. Read-only. Mirrors Swift `runDrainStatus`.
+///
+/// Reserved lane name for the subject-backfill drain (PR-04): the
+/// PR-09/10 rider registers a drain under this name and the generic
+/// renderer carries it unchanged. Its `pending` will be a row-level
+/// ELIGIBILITY count (subject debt), not queue depth — when the rider
+/// lands, the benchmarker's `BARRIER_NON_GATING_LANES` denylist must
+/// gain this name in the same mission (the distillation-lane
+/// precedent). Twin: Swift `ToolDispatcher.subjectBackfillLaneName`.
+pub const SUBJECT_BACKFILL_LANE_NAME: &str = "subject_backfill";
+
 fn run_drain_status(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -3228,7 +3729,8 @@ fn decode_mutation_kind(s: &str) -> Result<MutationKind, JSONRPCError> {
             JSONRPCErrorCode::INVALID_PARAMS,
             format!(
                 "Unknown mutation: {s}. Valid: confirm, reject, contest, resolve, \
-                 supersede, revive, accept, correctExportability(public), correctExportability(private)"
+                 supersede, revive, accept, correctExportability(public), \
+                 correctExportability(private), setSubject (with a `subject` argument)"
             ),
         )),
     }

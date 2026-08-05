@@ -84,6 +84,7 @@ fn impatient_file_memory_succeeds() {
     let registry = EstateRegistry::new_inmemory();
     let a = args![
         "content" => "kingfisher heron osprey wading bird",
+        "subject" => "kingfisher heron osprey wading bird",
         "location" => "memories/birds",
         "impatient" => true,
     ];
@@ -102,6 +103,7 @@ fn regular_file_memory_succeeds_without_impatient_arg() {
     let registry = EstateRegistry::new_inmemory();
     let a = args![
         "content" => "apple mango banana fruit",
+        "subject" => "apple mango banana fruit",
         "location" => "memories/fruit",
     ];
     let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
@@ -118,6 +120,7 @@ fn explicit_impatient_false_succeeds() {
     let registry = EstateRegistry::new_inmemory();
     let a = args![
         "content" => "tungsten molybdenum refractory",
+        "subject" => "tungsten molybdenum refractory",
         "location" => "memories/metals",
         "impatient" => false,
     ];

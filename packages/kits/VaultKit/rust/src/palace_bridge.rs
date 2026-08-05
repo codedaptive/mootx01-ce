@@ -40,7 +40,8 @@ use uuid::Uuid;
 use crate::drawer_mapping::{iso8601_to_ms, ms_to_iso8601, DrawerMapping};
 use crate::error::VaultKitError;
 use crate::mem_palace_chroma_adapter::{
-    canonical_iso8601_from_mem_palace, metadata_rows, metadata_segment_id,
+    canonical_iso8601_from_mem_palace, file_byte_count, metadata_rows, metadata_segment_id,
+    MemPalaceImportBudget, MemPalaceImportLimits,
     CHROMA_RELATIVE_PATH, KNOWLEDGE_GRAPH_RELATIVE_PATH, TUNNELS_RELATIVE_PATH,
 };
 use crate::vault_bridge::ImportReport;
@@ -104,12 +105,53 @@ struct TunnelEndpoint {
 
 pub struct PalaceBridge<'a> {
     coordinator: &'a mut EstateCoordinator,
+    /// The ceilings this bridge enforces on an untrusted palace root.
+    /// Identical defaults to `MemPalaceChromaAdapter::limits` — the two
+    /// entry points read the same palaces and must not disagree about what
+    /// is too large. Mirrors Swift `PalaceBridge.limits`.
+    limits: MemPalaceImportLimits,
+}
+
+/// The value that occupies the fourth slot of a stored fact's CAND-049
+/// signature.
+///
+/// A fact this importer files carries the palace key in `foreign_source_key`,
+/// or — when the triple names no source key — the triple's own id in
+/// `foreign_record_id`. A fact already in the estate from an earlier importer
+/// carries that same value in `source_drawer_id`. All three placements must
+/// produce the identical string, or a re-import fails to recognise what it
+/// imported before and duplicates every row.
+///
+/// A locally-filed fact has no foreign origin and its `source_drawer_id` is a
+/// local drawer id (or empty) — returning it is what the importer has always
+/// compared against, so local rows are unaffected.
+pub(crate) fn dedup_anchor(f: &locus_kit::kg_fact::KGFact) -> &str {
+    if !f.foreign_source_key.is_empty() {
+        f.foreign_source_key.as_str()
+    } else if !f.foreign_record_id.is_empty() {
+        f.foreign_record_id.as_str()
+    } else {
+        f.source_drawer_id.as_str()
+    }
 }
 
 impl<'a> PalaceBridge<'a> {
-    /// Create a new `PalaceBridge` wrapping the given coordinator.
+    /// Create a new `PalaceBridge` wrapping the given coordinator, at the
+    /// shipping import limits.
     pub fn new(coordinator: &'a mut EstateCoordinator) -> Self {
-        Self { coordinator }
+        Self {
+            coordinator,
+            limits: MemPalaceImportLimits::default(),
+        }
+    }
+
+    /// Create a new `PalaceBridge` with explicit import limits, for a caller
+    /// that has a known-good oversized palace.
+    pub fn with_limits(
+        coordinator: &'a mut EstateCoordinator,
+        limits: MemPalaceImportLimits,
+    ) -> Self {
+        Self { coordinator, limits }
     }
 
     /// Import all three MemPalace stores at `palace_root` into `handle`.
@@ -141,7 +183,12 @@ impl<'a> PalaceBridge<'a> {
         // are included in existingTunnelSignatures. Without this a re-import
         // would not find tunnels created by a prior import because their
         // sourceWing comes from the JSON, not from the drawer wing set.
-        let tunnel_records = self.read_tunnel_records(palace_root)?;
+        //
+        // ONE budget covers this whole import — the tunnels.json size check
+        // and every SQLite read below — so the row and byte ceilings are
+        // totals for the import rather than a fresh allowance per store.
+        let mut budget = MemPalaceImportBudget::new(self.limits);
+        let tunnel_records = self.read_tunnel_records(palace_root, &mut budget)?;
         let tunnel_source_wings: HashSet<String> =
             tunnel_records.iter().map(|r| r.source.wing.clone()).collect();
 
@@ -179,6 +226,9 @@ impl<'a> PalaceBridge<'a> {
         if chroma_path.exists() {
             let conn = Connection::open_with_flags(&chroma_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| VaultKitError::AdapterError(format!("chroma.sqlite3: {e}")))?;
+            // The palace root is untrusted: abandon a query that burns VM
+            // steps without returning rows.
+            budget.install_progress_guard(&conn);
             // Gather all chroma rows across both collections up front so the
             // progress callback can report a real total instead of 0. The
             // rows are materialized once (no double read).
@@ -186,13 +236,13 @@ impl<'a> PalaceBridge<'a> {
             for (collection, is_closet) in
                 &[(DRAWERS_COLLECTION, false), (CLOSETS_COLLECTION, true)]
             {
-                let seg_id = match metadata_segment_id(&conn, collection).map_err(|e| {
+                let seg_id = match metadata_segment_id(&conn, collection, &mut budget).map_err(|e| {
                     VaultKitError::AdapterError(format!("segment_id: {e}"))
                 })? {
                     Some(id) => id,
                     None => continue,
                 };
-                let rows = metadata_rows(&conn, &seg_id)
+                let rows = metadata_rows(&conn, &seg_id, &mut budget)
                     .map_err(|e| VaultKitError::AdapterError(format!("metadata_rows: {e}")))?;
                 for (embedding_id, metadata) in rows {
                     all_rows.push((embedding_id, metadata, *is_closet));
@@ -285,6 +335,12 @@ impl<'a> PalaceBridge<'a> {
         if kg_path.exists() {
             let conn = Connection::open_with_flags(&kg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| VaultKitError::AdapterError(format!("knowledge_graph.sqlite3: {e}")))?;
+            // Same untrusted-input guard as the chroma connection above: a
+            // degenerate KG file's query is abandoned rather than run to
+            // completion. The Swift twin gets this structurally because its
+            // budget lives on SQLiteReadOnly; Rust charges at call sites, so
+            // every open must install it explicitly.
+            budget.install_progress_guard(&conn);
 
             // KG entities: each entity becomes a drawer in knowledge_graph/entities.
             {
@@ -292,7 +348,7 @@ impl<'a> PalaceBridge<'a> {
                     .prepare(
                         "SELECT id, name, type, properties, created_at FROM entities ORDER BY id",
                     )
-                    .map_err(|e| VaultKitError::AdapterError(format!("entities: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("entities", e))?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok((
@@ -301,10 +357,15 @@ impl<'a> PalaceBridge<'a> {
                             row.get::<_, Option<String>>(4)?,
                         ))
                     })
-                    .map_err(|e| VaultKitError::AdapterError(format!("entities query: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("entities query", e))?;
                 for row in rows {
                     let (id, name, created_at) =
-                        row.map_err(|e| VaultKitError::AdapterError(format!("{e}")))?;
+                        row.map_err(|e| budget.map_sql_error("read entity row", e))?;
+                    budget.charge_row(
+                        id.len()
+                            + name.as_ref().map_or(0, String::len)
+                            + created_at.as_ref().map_or(0, String::len),
+                    )?;
                     self.import_kg_entity(
                         &id,
                         name.as_deref().unwrap_or(""),
@@ -336,12 +397,23 @@ impl<'a> PalaceBridge<'a> {
             // Canonical separator: U+001F (ASCII Unit Separator) — cannot appear
             // in natural-language subject/predicate/object/sourceDrawerID values
             // from MemPalace stores. Matches the Swift PalaceBridge dedup signature.
+            // The signature's fourth slot is the palace anchor. Facts filed by this
+            // importer carry it in foreign_source_key (or foreign_record_id when the
+            // triple named no source key); facts already in the estate from an
+            // importer that predates those columns carry the same value in
+            // source_drawer_id. Reading the new fields and falling back to the old
+            // one yields the identical string for both shapes, so a re-import still
+            // recognises everything it imported before. Reading only the new fields
+            // would miss every pre-existing row and duplicate all of them.
             let mut existing_kg_signatures: HashSet<String> = existing_kg_facts
                 .iter()
                 .map(|f| {
                     format!(
                         "{}\x1f{}\x1f{}\x1f{}",
-                        f.subject, f.predicate, f.object, f.source_drawer_id
+                        f.subject,
+                        f.predicate,
+                        f.object,
+                        dedup_anchor(f)
                     )
                 })
                 .collect();
@@ -355,7 +427,7 @@ impl<'a> PalaceBridge<'a> {
                          CAST(confidence AS TEXT), source_drawer_id \
                          FROM triples ORDER BY id",
                     )
-                    .map_err(|e| VaultKitError::AdapterError(format!("triples: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("triples", e))?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok((
@@ -369,10 +441,20 @@ impl<'a> PalaceBridge<'a> {
                             row.get::<_, Option<String>>(7)?,
                         ))
                     })
-                    .map_err(|e| VaultKitError::AdapterError(format!("triples query: {e}")))?;
+                    .map_err(|e| budget.map_sql_error("triples query", e))?;
                 for row in rows {
                     let (id, subject, predicate, object, valid_from, valid_to, conf, src_drawer) =
-                        row.map_err(|e| VaultKitError::AdapterError(format!("{e}")))?;
+                        row.map_err(|e| budget.map_sql_error("read triple row", e))?;
+                    budget.charge_row(
+                        id.len()
+                            + subject.as_ref().map_or(0, String::len)
+                            + predicate.as_ref().map_or(0, String::len)
+                            + object.as_ref().map_or(0, String::len)
+                            + valid_from.as_ref().map_or(0, String::len)
+                            + valid_to.as_ref().map_or(0, String::len)
+                            + conf.as_ref().map_or(0, String::len)
+                            + src_drawer.as_ref().map_or(0, String::len),
+                    )?;
                     self.import_kg_triple(
                         &id,
                         subject.as_deref().unwrap_or(""),
@@ -803,35 +885,40 @@ impl<'a> PalaceBridge<'a> {
             }
         }
 
-        // The Rust substrate requires source_drawer_id to be non-empty (unlike
-        // Swift which accepts "" as "not anchored"). When the palace triple has
-        // no source drawer, use the triple's own id as the anchor — it is the
-        // record that produced this fact.
+        // The palace anchor: the foreign palace's source key when the triple
+        // names one, else the triple's own id — the record that produced this
+        // fact. Neither is a local drawer id, so neither goes in
+        // source_drawer_id; both are stored in the foreign_* fields below.
         //
-        // IMPORTANT: effective_src must be computed BEFORE the CAND-049 dedup
-        // check so that the signature uses the value that will actually be stored
-        // in the estate (effective_src, not the raw empty source_drawer_id). If
-        // we signed with raw source_drawer_id and stored effective_src, a re-
-        // import would compute a different signature and miss the dedup.
-        let effective_src = if source_drawer_id.is_empty() { id } else { source_drawer_id };
+        // IMPORTANT: this value must be computed BEFORE the CAND-049 dedup check
+        // so the signature uses the same string that lands in the estate. Signing
+        // one value and storing another makes a re-import compute a different
+        // signature and miss the dedup.
+        let palace_anchor = if source_drawer_id.is_empty() { id } else { source_drawer_id };
 
         // CAND-049: skip re-imported facts that are content-identical. The
-        // signature encodes all four identity-bearing fields of a KGFact using
-        // U+001F (ASCII Unit Separator) as a delimiter — a character that cannot
-        // appear in natural-language values from MemPalace stores. Uses
-        // effective_src (not raw source_drawer_id) so the signature matches the
-        // stored field on re-import.
+        // signature encodes subject, predicate, object, and the palace anchor
+        // using U+001F (ASCII Unit Separator) as a delimiter — a character that
+        // cannot appear in natural-language values from MemPalace stores.
         let sig = format!(
             "{}\x1f{}\x1f{}\x1f{}",
-            subject, predicate, object, effective_src
+            subject, predicate, object, palace_anchor
         );
         if existing_kg_signatures.contains(&sig) {
             report.items_skipped += 1;
             return Ok(());
         }
 
+        // source_drawer_id is left empty: the palace key names a drawer in the
+        // *foreign* estate and resolves to nothing local. The key and the
+        // triple's own id ride in their own fields.
+        let origin = locus_kit::kg_fact::KGFactOrigin {
+            added_by: String::new(),
+            foreign_source_key: source_drawer_id.to_string(),
+            foreign_record_id: id.to_string(),
+        };
         self.coordinator
-            .add_kg_fact(handle, subject, predicate, object, effective_src, now)
+            .add_kg_fact_with_origin(handle, subject, predicate, object, "", &origin, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         // Record the signature so within-call duplicates are caught on subsequent
         // iterations without a round-trip to the estate.
@@ -842,22 +929,23 @@ impl<'a> PalaceBridge<'a> {
         // stored columns for.
         if let Some(vf) = valid_from.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_from", vf, effective_src, now)
+                .add_kg_fact_with_origin(handle, id, "temporal:valid_from", vf, "", &origin, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(vt) = valid_to.filter(|s| !s.is_empty()) {
             self.coordinator
-                .add_kg_fact(handle, id, "temporal:valid_to", vt, effective_src, now)
+                .add_kg_fact_with_origin(handle, id, "temporal:valid_to", vt, "", &origin, now)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
         if let Some(conf) = confidence_text.and_then(|s| s.parse::<f64>().ok()) {
             self.coordinator
-                .add_kg_fact(
+                .add_kg_fact_with_origin(
                     handle,
                     id,
                     "temporal:confidence",
                     &conf.to_string(),
-                    effective_src,
+                    "",
+                    &origin,
                     now,
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
@@ -867,11 +955,20 @@ impl<'a> PalaceBridge<'a> {
 
     // MARK: - Pre-read tunnels.json
 
-    fn read_tunnel_records(&self, palace_root: &Path) -> Result<Vec<TunnelRecord>, VaultKitError> {
+    fn read_tunnel_records(
+        &self,
+        palace_root: &Path,
+        budget: &mut MemPalaceImportBudget,
+    ) -> Result<Vec<TunnelRecord>, VaultKitError> {
         let tunnels_path = palace_root.join(TUNNELS_RELATIVE_PATH);
         if !tunnels_path.exists() {
             return Ok(vec![]);
         }
+        // Charged from the filesystem size BEFORE the file is opened, so an
+        // oversized tunnels.json is never read into memory. Same constant and
+        // same message as the adapter path — this is the LIVE import path, so
+        // leaving it unbounded would close the finding on paper only.
+        budget.charge_tunnels_file(file_byte_count(&tunnels_path), &tunnels_path)?;
         let data = std::fs::read(&tunnels_path)
             .map_err(|e| VaultKitError::AdapterError(format!("tunnels.json read: {e}")))?;
         serde_json::from_slice(&data).map_err(|e| {
@@ -1308,6 +1405,55 @@ mod tests {
         std::fs::remove_dir_all(&synthetic_palace).ok();
     }
 
+    /// The CAND-049 anchor must be identical however a row was written.
+    /// `source_drawer_id` used to hold the foreign palace key; it now holds a
+    /// local drawer id or nothing, and the key lives in `foreign_source_key`.
+    /// If the signature only read the new fields, the first re-import against
+    /// an estate populated by the previous importer would match nothing and
+    /// duplicate every fact it had already imported.
+    #[test]
+    fn dedup_anchor_is_stable_across_row_shapes() {
+        let make = |src: &str, key: &str, rec: &str| locus_kit::kg_fact::KGFact {
+            foreign_source_key: key.to_string(),
+            foreign_record_id: rec.to_string(),
+            ..locus_kit::kg_fact::KGFact::new(
+                "f1".to_string(),
+                "fleet".to_string(),
+                "works_with".to_string(),
+                "skippy".to_string(),
+                src.to_string(),
+                0,
+            )
+        };
+
+        // A row this importer wrote: key in foreign_source_key.
+        let current = make("", "drawer_alpha_0001", "t_fleet_0001");
+        assert_eq!(dedup_anchor(&current), "drawer_alpha_0001");
+
+        // A row written before those columns existed: same key, old home.
+        let legacy = make("drawer_alpha_0001", "", "");
+        assert_eq!(
+            dedup_anchor(&legacy),
+            dedup_anchor(&current),
+            "a pre-change row must sign identically to the row this importer writes"
+        );
+
+        // An anchorless triple: Rust substitutes the triple's own id, both in
+        // the signature and in storage.
+        let anchorless = make("", "", "t_fleet_0001");
+        assert_eq!(dedup_anchor(&anchorless), "t_fleet_0001");
+        let anchorless_legacy = make("t_fleet_0001", "", "");
+        assert_eq!(dedup_anchor(&anchorless_legacy), dedup_anchor(&anchorless));
+
+        // A locally-filed fact still compares on its own drawer id.
+        let local = make("6E7F1A2B-local-drawer", "", "");
+        assert_eq!(dedup_anchor(&local), "6E7F1A2B-local-drawer");
+
+        // A sourceless fact anchors on the empty string, as it always has.
+        let sourceless = make("", "", "");
+        assert_eq!(dedup_anchor(&sourceless), "");
+    }
+
     /// CAND-049: re-importing an identical KG fact does not create a duplicate.
     #[test]
     fn cand049_kg_fact_deduplication_on_reimport() {
@@ -1557,5 +1703,252 @@ mod tests {
         assert_eq!(second.drawers_updated, 0);
 
         std::fs::remove_dir_all(&temp).ok();
+    }
+
+    // MARK: - Import bounds on the live import path
+    //
+    // PalaceBridge is the path behind `moot_palace_import`, so the ceilings
+    // that protect the adapter must protect it too. The Swift twins live in
+    // `Tests/VaultKitTests/PalaceBridgeTests.swift`.
+
+    #[test]
+    fn bridge_row_cap_bounds_the_knowledge_graph_scan_too() {
+        // Regression guard for the gap Perkins found in security review: the
+        // KG connection was opened without the progress guard and its two row
+        // loops charged nothing, so the KG store escaped the budget entirely
+        // on this port while Swift covered it structurally.
+        //
+        // The cap value is load-bearing and must sit BETWEEN the two sections,
+        // or this test proves nothing. The fixture charges 38 rows in the
+        // chroma section first (36 `embedding_metadata` rows + 2 segment-id
+        // lookups), then 2 entities and 2 triples in the knowledge-graph
+        // section — 42 total. A cap of 39 therefore clears chroma and can only
+        // be tripped by a KG row, so this test FAILS the moment someone
+        // deletes the KG `charge_row` calls. A cap below 38 would trip in the
+        // chroma section, which was already charged before this fix, and would
+        // pass against the pre-fix code while claiming to guard it.
+        let (mut coordinator, handle) = open_estate();
+        let mut bridge = PalaceBridge::with_limits(
+            &mut coordinator,
+            MemPalaceImportLimits {
+                max_import_rows: 39,
+                ..MemPalaceImportLimits::default()
+            },
+        );
+        let err = bridge
+            .import_palace(
+                &fixture_palace_root(),
+                &handle,
+                NOW,
+                None,
+                EncodeSpeed::Foreground,
+            )
+            .expect_err("the row cap must reject this palace");
+        let message = err.to_string();
+        assert!(message.contains("max_import_rows"), "{message}");
+        assert!(message.contains("SQLite rows"), "{message}");
+        // Row 40 is the second KG entity — proof the breach happened INSIDE
+        // the knowledge-graph scan and not earlier in the chroma section.
+        assert!(
+            message.contains("40"),
+            "the breach must occur on a knowledge-graph row, not in chroma: {message}"
+        );
+    }
+
+    #[test]
+    fn bridge_rejects_oversized_tunnels_json_before_reading_it() {
+        let (mut coordinator, handle) = open_estate();
+        let root = std::env::temp_dir()
+            .join(format!("palacebridge-bounds-{}", uuid::Uuid::new_v4()));
+        let src = fixture_palace_root();
+        std::fs::create_dir_all(root.join("palace")).expect("create palace dir");
+        std::fs::copy(
+            src.join("palace/chroma.sqlite3"),
+            root.join("palace/chroma.sqlite3"),
+        )
+        .expect("copy chroma");
+        std::fs::copy(
+            src.join("knowledge_graph.sqlite3"),
+            root.join("knowledge_graph.sqlite3"),
+        )
+        .expect("copy kg");
+        // Oversized AND malformed: a "malformed" diagnostic would prove the
+        // file had been read and parsed before its size was checked.
+        std::fs::write(root.join("tunnels.json"), "x".repeat(4096)).expect("write tunnels");
+
+        let mut bridge = PalaceBridge::with_limits(
+            &mut coordinator,
+            MemPalaceImportLimits {
+                max_tunnels_json_bytes: 1024,
+                ..MemPalaceImportLimits::default()
+            },
+        );
+        let err = bridge
+            .import_palace(
+                &root,
+                &handle,
+                NOW,
+                None,
+                EncodeSpeed::Foreground,
+            )
+            .expect_err("the tunnels.json cap must reject this palace");
+        let message = err.to_string();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(message.contains("max_tunnels_json_bytes"), "{message}");
+        assert!(message.contains("4096"), "must name the OBSERVED value: {message}");
+        assert!(message.contains("1024"), "must name the LIMIT: {message}");
+        assert!(!message.contains("malformed"), "{message}");
+    }
+
+    // -----------------------------------------------------------------
+    // MXE-MI: palace re-import after the kg_facts identity backfill.
+    // Twin of Swift `PalaceReimportAfterBackfillTests` — the estate is
+    // put into the PRE-MXE-KH RUST shape by hand (keys AND triple ids
+    // back in `sourceDrawerID`, identity columns cleared), the backfill
+    // runs with the REAL resolver `mootx01 upgrade` injects, and
+    // re-import must file zero duplicates. The unmigrated-shape test
+    // documents that MXE-KH's fallback anchor ladder already keeps the
+    // unmigrated shape duplicate-free — the backfill is what removes
+    // dedup's dependence on that legacy fallback.
+    // -----------------------------------------------------------------
+
+    /// Like open_estate, but keeps the concrete store so the reshape and
+    /// backfill can reach row-level storage.
+    fn open_estate_with_store() -> (EstateCoordinator, EstateHandle, Arc<InMemoryDrawerStore>) {
+        let mut coordinator = EstateCoordinator::new();
+        let store = Arc::new(InMemoryDrawerStore::new(NOW, None).expect("InMemoryDrawerStore::new"));
+        let handle = coordinator
+            .open(
+                Arc::clone(&store) as Arc<dyn DrawerStore>,
+                OwnerCredentials::new("backfill-reimport-rust-tests"),
+                0,
+                100,
+            )
+            .expect("open estate");
+        (coordinator, handle, store)
+    }
+
+    /// Rewrite every imported fact into the pre-KH Rust shape: the palace
+    /// key (or, when the triple named no key, the triple's own id) back
+    /// in `sourceDrawerID` with the identity columns cleared. Returns the
+    /// (keyed, triple-id) fact-id lists.
+    fn reshape_to_pre_kh(
+        coordinator: &EstateCoordinator,
+        handle: &EstateHandle,
+        store: &InMemoryDrawerStore,
+    ) -> (Vec<String>, Vec<String>) {
+        use persistence_kit::predicate::StoragePredicate;
+        use persistence_kit::types::{Column, TypedValue};
+        let storage = DrawerStore::storage(store).expect("in-memory store exposes storage");
+        let rows = storage.row_store();
+        let mut keyed = Vec::new();
+        let mut triple_ids = Vec::new();
+        for f in coordinator.recall_kg_facts(handle).unwrap() {
+            // Pre-KH Rust effective_src: the source key when the triple
+            // named one, else the triple's own id.
+            let legacy = if !f.foreign_source_key.is_empty() {
+                keyed.push(f.id.clone());
+                f.foreign_source_key.clone()
+            } else if !f.foreign_record_id.is_empty() {
+                triple_ids.push(f.id.clone());
+                f.foreign_record_id.clone()
+            } else {
+                continue;
+            };
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("sourceDrawerID".to_string(), TypedValue::Text(legacy));
+            values.insert("foreignSourceKey".to_string(), TypedValue::Text(String::new()));
+            values.insert("foreignRecordID".to_string(), TypedValue::Text(String::new()));
+            rows.update(
+                "kg_facts",
+                values,
+                &StoragePredicate::Eq(
+                    Column::new("kg_facts", "id"),
+                    TypedValue::Text(f.id.clone()),
+                ),
+            )
+            .unwrap();
+        }
+        (keyed, triple_ids)
+    }
+
+    #[test]
+    fn reimport_against_unmigrated_pre_kh_shape_files_zero_duplicates() {
+        let palace_root = fixture_palace_root();
+        let (mut coordinator, handle, store) = open_estate_with_store();
+        PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let (keyed, triple_ids) = reshape_to_pre_kh(&coordinator, &handle, &store);
+        assert!(keyed.len() >= 3, "t_fleet main + temporal siblings carry the key");
+        assert!(triple_ids.len() >= 2, "t_minimal main + temporal sibling carry the id");
+        let count_before = coordinator.recall_kg_facts(&handle).unwrap().len();
+
+        let second = PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let count_after = coordinator.recall_kg_facts(&handle).unwrap().len();
+        assert_eq!(
+            count_after, count_before,
+            "the source_drawer_id fallback in the anchor ladder must keep the unmigrated shape duplicate-free"
+        );
+        assert!(second.items_skipped > 0);
+    }
+
+    #[test]
+    fn reimport_after_backfill_files_zero_duplicates() {
+        let palace_root = fixture_palace_root();
+        let (mut coordinator, handle, store) = open_estate_with_store();
+        PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let (keyed, triple_ids) = reshape_to_pre_kh(&coordinator, &handle, &store);
+        let count_before = coordinator.recall_kg_facts(&handle).unwrap().len();
+
+        // The backfill, with the REAL resolver `mootx01 upgrade` injects.
+        let storage = DrawerStore::storage(store.as_ref()).expect("storage");
+        let report = locus_kit::kg_fact_identity_backfill::run(
+            storage.as_ref(),
+            &crate::drawer_mapping::DrawerMapping::lineage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            report.foreign_palace_keys,
+            keyed.len(),
+            "every reshaped palace key must classify as class B via the real resolver"
+        );
+        assert_eq!(
+            report.triple_ids,
+            triple_ids.len(),
+            "every reshaped triple id must classify as class C via its temporal sibling"
+        );
+        assert_eq!(report.unclassified, 0);
+
+        // Migrated invariants: values back in their columns, anchors
+        // unchanged, sourceDrawerID cleared.
+        for f in coordinator.recall_kg_facts(&handle).unwrap() {
+            if keyed.contains(&f.id) {
+                assert_eq!(f.foreign_source_key, "drawer_alpha_0001");
+                assert!(f.source_drawer_id.is_empty());
+                assert_eq!(dedup_anchor(&f), "drawer_alpha_0001");
+            }
+            if triple_ids.contains(&f.id) {
+                assert_eq!(f.foreign_record_id, "t_minimal_0002");
+                assert!(f.source_drawer_id.is_empty());
+                assert_eq!(dedup_anchor(&f), "t_minimal_0002");
+            }
+        }
+
+        // The regression this mission exists for: re-import files nothing.
+        let second = PalaceBridge::new(&mut coordinator)
+            .import_palace(&palace_root, &handle, NOW, None, EncodeSpeed::Foreground)
+            .unwrap();
+        let count_after = coordinator.recall_kg_facts(&handle).unwrap().len();
+        assert_eq!(
+            count_after, count_before,
+            "re-import against the migrated estate must file zero duplicate facts"
+        );
+        assert!(second.items_skipped > 0);
     }
 }

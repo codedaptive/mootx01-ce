@@ -285,7 +285,7 @@ struct MutateMutationKindTests {
     func revive_fromTombstoned_throwsUnrecoverable() async throws {
         let estate = try await makeEstate()
         let drawer = try await captureActive(in: estate)
-        try await estate.expunge(rowID: drawer.id, reason: "test", confirmation: true)
+        _ = try await estate.expunge(rowID: drawer.id, reason: "test", confirmation: true)
         #expect(try await peek(estate, id: drawer.id).state == .tombstoned)
 
         let thrown = await #expect(throws: LocusKitError.self) {

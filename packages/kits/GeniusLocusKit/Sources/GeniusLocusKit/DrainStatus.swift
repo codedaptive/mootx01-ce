@@ -76,20 +76,32 @@ public struct DrainStatus: Sendable, Equatable {
     /// and `encodeSettled` both key on it.
     public static let corpusEncodeName = "corpus_encode"
 
+    /// Canonical name of the subject-backfill drain lane (PR-09). The
+    /// lane renders ONLY while a subject producer is registered for the
+    /// estate (PR-10's Apple miniLLM rider; test stubs) — an
+    /// always-present eligibility-count lane would hold the
+    /// benchmarker's encode barrier open on healthy estates. When a
+    /// rider first ships enabled, the benchmarker's non-gating denylist
+    /// must gain this name in the same mission (the distillation-lane
+    /// precedent). Dispatcher-side mirrors:
+    /// AriaMcpKit `ToolDispatcher.subjectBackfillLaneName` /
+    /// `SUBJECT_BACKFILL_LANE_NAME`.
+    public static let subjectBackfillName = "subject_backfill"
+
     /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
     /// detached `mootx01 drain` finisher may exit and release the encode
     /// DrainLease, and a stdio serve need not spawn one.
     ///
-    /// Deliberately ignores every drain except "corpus_encode"
-    /// (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3): the "distillation" entry
-    /// counts rows that only a `moot_distill` sweep or the hourly standing
-    /// signal can distill — system-provisioned drawers (wing seeds,
-    /// AI_Charter_Hint) never transit the encode queue, so the drain-stage
-    /// rider never fires for them and the entry does not settle under the
-    /// drain command. A finisher keyed on ALL drains would poll to its full
-    /// maxWait holding the encode lease, wedging the next serve session's
-    /// encode queue (pending > 0, in_flight = 0, indefinitely). The T5
-    /// finisher's contract is the encode queue and its lease — nothing else.
+    /// Deliberately ignores every drain except "corpus_encode" — the T5
+    /// finisher's CONTRACT is the encode queue and its DrainLease, nothing
+    /// else (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3 established the gate).
+    /// Since DISTILL_SEED_STALL routed the wing-seed hints through the encode
+    /// stream, the "distillation" entry also settles under a normal drain
+    /// (every enqueued drawer distills via the drain-stage rider before its
+    /// job replies); the gate stays encode-only anyway so the finisher's
+    /// lease tenure is bounded by its own queue, not by any other lane's
+    /// accounting (e.g. a pipeline-version bump that re-opens distillation
+    /// eligibility estate-wide without enqueuing anything).
     /// Mirrors Rust `DrainStatus::encode_settled`.
     public static func encodeSettled(_ statuses: [DrainStatus]) -> Bool {
         !statuses.contains { $0.name == corpusEncodeName && $0.isDraining }
@@ -148,6 +160,23 @@ extension GeniusLocusKit {
             inFlight: 0,
             detail: "pipeline: \(DistillationPipelineVersion.current)"
         ))
+
+        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // subject producer is registered (rider-gated — see
+        // `subjectBackfillName`). `pending` is the NULL-only presence
+        // debt (`countSubjectDebt`), a row-level eligibility count like
+        // the distillation lane's; `in_flight` is 0 — sweeps are
+        // synchronous bounded batches, never a queue.
+        if let producer = subjectProducers[handle] {
+            let debt = try await estate.countSubjectDebt(
+                includingPipelines: producer.regeneratesPipelines)
+            statuses.append(DrainStatus(
+                name: DrainStatus.subjectBackfillName,
+                pending: debt,
+                inFlight: 0,
+                detail: "pipeline: \(producer.pipelineVersion)"
+            ))
+        }
 
         return statuses
     }

@@ -69,6 +69,7 @@ struct WithdrawRecallDropDispatchTests {
         let content = "withdraw target content marmalade quasar threnody"
         let filed = try await dispatcher.runFileMemory([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("lab"),
             "impatient": .bool(true),
         ])

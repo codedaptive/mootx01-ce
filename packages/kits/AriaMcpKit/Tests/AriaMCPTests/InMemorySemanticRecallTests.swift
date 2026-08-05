@@ -110,6 +110,7 @@ struct InMemorySemanticRecallTests {
         let content = "swallow migration flyway altitude thermocline spring departure"
         _ = try await dispatcher.runFileMemory([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("birds/swallows"),
             "impatient": .bool(true),
         ])
@@ -137,6 +138,7 @@ struct InMemorySemanticRecallTests {
         let content = "arctic tern pole-to-pole record endurance longest migration circumnavigation"
         _ = try await dispatcher.runFileMemory([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("birds/terns"),
             // Non-impatient: enqueues to the encode queue.
         ])
@@ -251,6 +253,7 @@ struct InMemorySemanticRecallTests {
             let content = "red kite reintroduction success recovery conservation Chilterns"
             _ = try await dispatcher.runFileMemory([
                 "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
                 "location": .string("birds/kites"),
                 "impatient": .bool(true),
             ])

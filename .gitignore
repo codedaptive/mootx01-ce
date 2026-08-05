@@ -63,6 +63,10 @@ Icon
 # Rust build artifacts — global, any depth (every crate's target/ dir)
 **/target/
 
+# The shared per-checkout Rust target directory (CARGO_TARGET_DIR, set by the
+# Makefile and scripts/moot-test). Replaces the 30 per-workspace target/ dirs.
+cargo-target/
+
 # Cargo lockfiles are not tracked, any depth
 **/Cargo.lock
 
@@ -132,3 +136,19 @@ docs/analysis/blast_radius/
 docs/missions/
 docs/agentic_output/
 docs/analysis/
+
+# Apple signing and authentication material — never commit (Codex review,
+# 2026-08-04). Entitlements, container IDs, bundle IDs and app-group IDs are
+# identifiers and ARE published; these authenticate and are not. Not a present
+# leak — these patterns exist so an accident cannot become one.
+AuthKey_*.p8
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+# Agent-system trees. Same class as .claude/ — internal agent content that must
+# never be published. Synced here from the docs repo; not CE deliverables.
+.agents/
+.codex/

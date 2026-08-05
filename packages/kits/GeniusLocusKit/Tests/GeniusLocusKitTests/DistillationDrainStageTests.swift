@@ -182,15 +182,21 @@ struct DistillationDrainStageTests {
             "Quarterly metrics show reactor uptime improved by twelve percent.",
             "The travel policy for contractor visits was updated last week.",
         ]
+        // Settle the provision-seeded hint jobs first (DISTILL_SEED_STALL:
+        // provision enqueues the 7 wing hints; they encode + distill at drain),
+        // so the sweep below measures the fixture bodies from a settled estate.
+        try await kit.awaitEncodeDrain(for: handle)
         for body in bodies {
             _ = try await kit.capture(handle, captureFrame(body), mode: .impatient)
         }
         let queries = ["reactor maintenance Geneva", "vendor contract", "travel policy"]
 
-        // Pre-sweep: verify the estate is undistilled.
+        // Pre-sweep: verify the fixture bodies are undistilled (the seeded
+        // hints already distilled at the provision drain above).
         let estate = try await kit.estate(for: handle)
         let preRows = try await estate.allDrawers()
-        #expect(preRows.allSatisfy { $0.distilled == nil })
+        #expect(preRows.filter { bodies.contains($0.content) }
+            .allSatisfy { $0.distilled == nil })
 
         // Encode queue is idle before the sweep.
         let corpus = try #require(await kit.corpusKits[handle])
@@ -210,9 +216,10 @@ struct DistillationDrainStageTests {
             distillFn: GeniusLocusKit.defaultDistillFn,
             now: Date(timeIntervalSince1970: 1_750_000_000),
             limit: nil)
-        // ≥, not ==: a provisioned estate carries system drawers (e.g. the
-        // AI-charter hint) beyond the four fixture bodies, and §13.1 says
-        // EVERY active non-empty item distills — the fixture bodies are the floor.
+        // ≥, not ==: §13.1 says EVERY active non-empty undistilled item
+        // distills — the four impatient-captured fixture bodies are the floor
+        // (the seeded hints already distilled at the provision drain and are
+        // skipped by the sweep's eligibility predicate).
         #expect(produced >= bodies.count, "§13.1: every active non-empty item distills")
 
         // §9.2: representation-only writes emitted NO ContentIndexJob.
@@ -317,10 +324,13 @@ struct DistillationDrainStageTests {
     @Test("live estate: undistilled rows leave the T5 gate open for exit")
     func t5GateSettlesOnLiveEstateWithUndistilledRows() async throws {
         let (kit, handle) = try await provisionGLKEstate()
-        // Impatient captures are the same shape as Finding 3's system drawers:
-        // rows present and searchable, but never routed through the encode
-        // queue, so only a sweep can distill them. The distillation drain is
-        // non-idle; the encode drain is idle.
+        // Settle the provision-seeded hint jobs (they ride the encode stream
+        // since DISTILL_SEED_STALL), leaving the encode drain idle.
+        try await kit.awaitEncodeDrain(for: handle)
+        // Impatient captures are the Finding 3 shape: rows present and
+        // searchable, but never routed through the encode queue, so only a
+        // sweep can distill them. The distillation drain is non-idle; the
+        // encode drain is idle.
         for body in ["First fact stands alone here.", "Second fact stands alone here."] {
             _ = try await kit.capture(handle, captureFrame(body), mode: .impatient)
         }

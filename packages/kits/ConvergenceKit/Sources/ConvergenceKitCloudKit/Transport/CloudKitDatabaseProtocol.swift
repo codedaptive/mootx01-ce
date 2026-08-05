@@ -135,6 +135,69 @@ public protocol CloudKitDatabaseProtocol: Sendable {
                        deleteResults: [CKSubscription.ID: Result<Void, any Error>])
 }
 
+public extension CloudKitDatabaseProtocol {
+    /// Save one exact-zone SecretSync batch with atomic conditional semantics.
+    ///
+    /// Per-record CloudKit outcomes are returned unchanged so the caller can
+    /// distinguish `serverRecordChanged` from transport failure. Missing or
+    /// unexpected outcomes fail closed instead of being treated as success.
+    func modifySecretSyncRecords(
+        saving records: [CKRecord],
+        digester: any SecretSyncDigesting
+    ) async throws -> (
+        saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
+        deleteResults: [CKRecord.ID: Result<Void, any Error>]
+    ) {
+        guard !records.isEmpty else {
+            throw SecretSyncCloudKitError.invalidWriteBatch
+        }
+
+        var types: [SecretSyncCloudKitRecordType] = []
+        types.reserveCapacity(records.count)
+        for record in records {
+            types.append(
+                try CKRecordMapping.validateSecretSyncRecordForWrite(
+                    record,
+                    digester: digester
+                )
+            )
+        }
+
+        let requestedIDs = records.map(\.recordID)
+        guard Set(requestedIDs).count == requestedIDs.count,
+              Set(records.map { $0.recordID.zoneID }).count == 1 else {
+            throw SecretSyncCloudKitError.invalidWriteBatch
+        }
+
+        let headCount = types.filter { $0 == .scopeHead }.count
+        guard headCount == 0 || (headCount == 1 && records.count == 1) else {
+            throw SecretSyncCloudKitError.invalidWriteBatch
+        }
+        // Immutable records are creates or exact idempotent retries. A record
+        // carrying a change tag is an overwrite attempt and is never emitted by
+        // the immutable mapper. Scope-head updates deliberately retain the tag.
+        for (record, type) in zip(records, types)
+            where type.isImmutable && record.recordChangeTag != nil
+        {
+            _ = record
+            throw SecretSyncCloudKitError.invalidWriteBatch
+        }
+
+        let result = try await modifyRecords(
+            saving: records,
+            deleting: [],
+            savePolicy: .ifServerRecordUnchanged,
+            atomically: true
+        )
+        let expected = Set(requestedIDs)
+        guard Set(result.saveResults.keys) == expected,
+              result.deleteResults.isEmpty else {
+            throw SecretSyncCloudKitError.incompleteModifyResults
+        }
+        return result
+    }
+}
+
 // MARK: - CKDatabase conformance
 //
 // CKDatabase (from CloudKit framework) conforming to CloudKitDatabaseProtocol

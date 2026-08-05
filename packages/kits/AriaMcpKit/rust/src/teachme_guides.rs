@@ -75,37 +75,58 @@ moot_file_memory — store a memory in the estate
 
 Required args:
   content  (string) the text to store
+  subject  (string) one sentence (≤120 chars) stating what the memory
+           asserts — written for the NEXT AI that will scan it in a
+           result list: telegraphic register, entities and claims
+           front-loaded, no narrative framing. Returned in recall rows,
+           never searched.
   location (string) room path, e.g. \"projects/notes\"
 
 Example:
-  { \"content\": \"Meeting notes from standup\", \"location\": \"work/meetings\" }
+  { \"content\": \"Meeting notes from standup\",
+    \"subject\": \"Standup: release slips one week; QA owns the gate.\",
+    \"location\": \"work/meetings\" }
 
 Response: \"filed memory <id>\\nroom: <room>\\nlineage: <uuid>\"
 
 Mistakes:
   — Sending udcCode, embeddingModelID, or latticeAnchor: server owns these fields.
-  — Sending an empty content string (rejected by substrate).";
+  — Sending an empty content string (rejected by substrate).
+  — Writing the subject as a title (\"Meeting notes\") instead of an
+    assertion (\"Release slips one week\").
+  — Truncating the subject mid-sentence: compress the claim, don't cut it.";
 
 const GUIDE_MEMORY_SEARCH: &str = "\
-moot_memory_search — search memories by keyword
+moot_memory_search — search memories by keyword, or pivot with near:<uuid>
 
-Required args:
-  query (string) keyword or phrase to match against content and room
+Args (exactly one of):
+  query (string) keyword or phrase — hybrid BM25+vector recall
+  near  (string) UUID of an anchor memory — returns the memories most
+        similar to it (the anchor itself is excluded)
 
 Example:
   { \"query\": \"meeting notes\" }
+  { \"near\": \"<uuid>\" }
 
-Response: \"found N memory(s)\\n<id>  [<room>]  <content_preview>\"
+Response: \"found N memory(s)\" then one DENSE ROW per hit:
+  <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
+Travel on subjects; fetch bodies via moot_memory_get
+(depth:subject|distilled|full). \"(no subject)\" rows are subject debt.
+A discrimination line appears ONLY when the ranking is not clear
+(low/medium); a recall_provenance line ONLY when the dense lane was dark
+or stages degraded. Silence means nominal.
 
 Mistakes:
   — Queries over 200 characters trigger a hint to shorten the query.
+  — Passing both query and near: they are mutually exclusive.
   — Zero results usually means the estate is empty or the query is too specific.";
 
 const GUIDE_MEMORY_LIST: &str = "\
 moot_memory_list — enumerate all memory drawer IDs in a wing
 
-Returns each drawer's ID, room, and an 80-character content preview.
-Capped at 200 results. Use for structural inventory, not semantic search.
+Returns one dense row per drawer — uuid · subject · fdc · qid ·
+event_time. Capped at 200 results. Use for structural inventory, not
+semantic search.
 
 When to use vs siblings:
   — moot_memory_search: when you need ranked semantic results by query
@@ -116,13 +137,18 @@ Required args:
   wing (string) wing name to enumerate, e.g. \"Agentic Memory\"
 
 Optional args:
-  room (string) further narrow to a single room within the wing
+  room   (string) further narrow to a single room within the wing
+  filter (string) missing_subject — the subject-debt enumerator: lists
+         only live drawers with no subject line, id-only (no preview).
+         Walk them with moot_memory_get, then write each subject via
+         moot_update_memory mutation=setSubject.
 
 Example:
   { \"wing\": \"Agentic Memory\" }
   { \"wing\": \"Agentic Memory\", \"room\": \"architecture\" }
+  { \"wing\": \"Agentic Memory\", \"filter\": \"missing_subject\" }
 
-Response: \"drawers in wing <wing>: N\\n<uuid>  [<room>]  <80-char preview>\"
+Response: \"drawers in wing <wing>: N\" then one dense row per drawer.
 
 Mistakes:
   — Calling without wing: wing is required; omitting it returns an error.
@@ -131,11 +157,18 @@ Mistakes:
   — Expecting more than 200 results: for large wings, filter by room.";
 
 const GUIDE_MEMORY_GET: &str = "\
-moot_memory_get — fetch one memory drawer by id, in full
+moot_memory_get — fetch memory drawers by id, at a chosen depth
 
-Returns verbatim content (never truncated), room/wing, filed_at and
-event_time, the adjective-axis metadata (state, trust, sensitivity,
-exportability, confirmation), lineage, and a linked-tunnel summary.
+One hydration verb, three tiers (depth argument): subject (dense row
+only — travel), distilled (dense row + distilled text; fallback rows
+carry \"source: content (not yet distilled)\" then verbatim content),
+full (default — the complete record). Batch with ids:[…] to winnow a
+shortlist in ONE call.
+
+At depth:full, returns verbatim content (never truncated), room/wing,
+subject (when present), filed_at and event_time, the adjective-axis
+metadata (state, trust, sensitivity, exportability, confirmation),
+lineage, and a linked-tunnel summary.
 Applies the same default gate as moot_memory_search — a drawer that
 exists but is contested/withdrawn/rejected, untrustworthy, or
 restricted/secret is reported not-found, identical to a genuinely
@@ -170,16 +203,29 @@ moot_update_memory — apply a named mutation to a memory
 
 Required args:
   id       (string) drawer ID returned by moot_file_memory
-  mutation (string) one of: confirm, reject, contest, resolve, supersede, revive, accept
+  mutation (string) one of: confirm, reject, contest, resolve, supersede,
+           revive, accept, correctExportability(public),
+           correctExportability(private), setSubject
+
+Optional args:
+  subject (string) required for mutation=setSubject, ignored otherwise:
+          one sentence (≤120 chars) in the AI-facing register —
+          telegraphic, entities and claims front-loaded. This is the
+          backfill/correction path for subject-debt rows found via
+          moot_memory_list filter:missing_subject.
 
 Example:
   { \"id\": \"<uuid>\", \"mutation\": \"confirm\" }
+  { \"id\": \"<uuid>\", \"mutation\": \"setSubject\",
+    \"subject\": \"Deploy pipeline: staging gate now requires two approvals.\" }
 
 Response: \"updated memory <id> (<mutation>)\"
 
 Mistakes:
   — Using unknown mutation names returns invalidParams.
-  — The preferred path for user confirmation is moot_confirm_memory.";
+  — The preferred path for user confirmation is moot_confirm_memory.
+  — Passing the subject text in `note` for setSubject: it goes in the
+    dedicated `subject` argument.";
 
 const GUIDE_WITHDRAW_MEMORY: &str = "\
 moot_withdraw_memory — soft-delete a memory (reversible via revive)
@@ -211,9 +257,19 @@ Example:
 
 Response: \"erased memory <id>\"
 
+Partial response (lineage contains accepted rows):
+  \"partially erased memory <id>: <N> accepted lineage sibling(s) refused \
+erasure and remain readable: <ids>\"
+Erasure walks the target's full lineage, but the audit gate refuses to
+tombstone accepted rows — those siblings keep their content and stay
+recallable. Treat a partial response as a partial erasure: the named ids
+were NOT erased.
+
 Mistakes:
   — Omitting confirmed or sending confirmed:false returns isError:true.
-  — This action cannot be undone. Use moot_withdraw_memory for recoverable deletion.";
+  — This action cannot be undone. Use moot_withdraw_memory for recoverable deletion.
+  — Reading a partial response as success. The refused ids named in the
+    response still hold their content.";
 
 const GUIDE_CONFIRM_MEMORY: &str = "\
 moot_confirm_memory — mark a memory as user-confirmed
@@ -446,8 +502,16 @@ Optional args:
   estateID (string) defaults to the default estate
   teachme  (bool)   true returns this guide without touching the estate
 
-Returns: estate name, drawer count, KG fact count, wing list, plus the ARIA
+Returns: estate name, drawer count, subject-debt counter
+(\"subjects: N/M (K missing)\"), KG fact count, wing list, plus the ARIA
 session protocol block.
+
+Subject debt — STANDING BEHAVIOR: when K > 0, offer the user an
+interactive backfill, and only proceed with their explicit
+time-and-permission consent. The walk: moot_memory_list
+filter:missing_subject → moot_memory_get per id → moot_update_memory
+mutation=setSubject with a one-sentence AI-facing subject. Never
+backfill silently; the debt line is a reminder, not a license.
 
 Tips:
   — Call moot_estate_status with teachme:true for a full orientation on first connect.

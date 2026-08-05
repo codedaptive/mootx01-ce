@@ -75,6 +75,7 @@ extension SyncRecord {
 
 actor CloudKitStateActor {
     let containerIdentifier: String?
+    private let secretSyncDigester: (any SecretSyncDigesting)?
     private var _container: CKContainer?
     var container: CKContainer {
         if let c = _container { return c }
@@ -137,6 +138,11 @@ actor CloudKitStateActor {
     /// (10 s) guarantees a trigger even under a sustained write stream.
     var drainDebouncer: OutboxDrainDebouncer?
 
+    /// Optional SecretSync control actors. They are configured only by the
+    /// additive engine initializer and share the already-injected database seam.
+    private var _secretSyncPolicyStore: SecretSyncCloudKitPolicyStore?
+    private var _secretSyncFreshnessTransport: SecretSyncFreshnessTransport?
+
     /// Monotonic HLC source for locally-originated changes that reach the push
     /// path without an HLC of their own.
     ///
@@ -151,8 +157,12 @@ actor CloudKitStateActor {
     /// concurrently active devices.
     var hlcGenerator = HLCGenerator(nodeID: Int32.random(in: 1...0x0F))
 
-    init(containerIdentifier: String?) {
+    init(
+        containerIdentifier: String?,
+        secretSyncDigester: (any SecretSyncDigesting)? = nil
+    ) {
         self.containerIdentifier = containerIdentifier
+        self.secretSyncDigester = secretSyncDigester
     }
 
     func enable(manifest: SyncManifest, storage: any Storage) async throws {
@@ -179,6 +189,41 @@ actor CloudKitStateActor {
         } catch {
             // Zone might already exist; that's fine.
             logger.info("zone setup (may already exist): \(String(describing: error))")
+        }
+
+        if let secretSyncDigester {
+            // Both SecretSync zones must exist before either actor is exposed.
+            // Partial success is unusable because one immutable graph spans the
+            // control and payload zones, so validate the exact result set.
+            do {
+                let zones = SecretSyncCloudKitZones.recordZones
+                let result = try await db.modifyRecordZones(
+                    saving: zones,
+                    deleting: []
+                )
+                let expected = Set(zones.map(\.zoneID))
+                guard Set(result.saveResults.keys) == expected,
+                      result.deleteResults.isEmpty,
+                      result.saveResults.values.allSatisfy({ outcome in
+                          if case .success = outcome { return true }
+                          return false
+                      }) else {
+                    throw SyncError.transportFailure(
+                        detail: "SecretSync zone setup failed"
+                    )
+                }
+            } catch {
+                throw SyncError.transportFailure(
+                    detail: "SecretSync zone setup failed"
+                )
+            }
+            self._secretSyncPolicyStore = SecretSyncCloudKitPolicyStore(
+                database: db,
+                digester: secretSyncDigester
+            )
+            self._secretSyncFreshnessTransport = SecretSyncFreshnessTransport(
+                database: db
+            )
         }
 
         // Ensure all ConvergenceKit side tables exist (consolidated schema, B-12).
@@ -387,6 +432,24 @@ actor CloudKitStateActor {
         database = nil
         currentIdentity = nil
         identityStore = nil
+        _secretSyncPolicyStore = nil
+        _secretSyncFreshnessTransport = nil
+    }
+
+    func secretSyncPolicyStore() throws -> SecretSyncCloudKitPolicyStore {
+        guard isEnabled, let store = _secretSyncPolicyStore else {
+            throw SyncError.notEnabled
+        }
+        return store
+    }
+
+    func secretSyncFreshnessTransport() throws
+        -> SecretSyncFreshnessTransport
+    {
+        guard isEnabled, let transport = _secretSyncFreshnessTransport else {
+            throw SyncError.notEnabled
+        }
+        return transport
     }
 
     func attachSubscriber(_ continuation: AsyncStream<SyncEvent>.Continuation) {

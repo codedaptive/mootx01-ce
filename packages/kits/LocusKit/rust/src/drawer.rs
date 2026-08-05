@@ -191,6 +191,33 @@ pub struct Drawer {
     /// observability only; carries no behavioral weight. None iff
     /// `distilled` is None.
     pub distilled_at: Option<i64>,
+
+    /// The one-sentence AI-FACING subject line for this drawer's content
+    /// (progressive recall PR-01): telegraphic register, entities and
+    /// claims front-loaded, length-contracted (SUBJECT_LENGTH_CONTRACT
+    /// chars) at every producer boundary. RETURNED on recall rows so a
+    /// consuming AI can judge pursue-or-skip without reading the body;
+    /// NEVER indexed or searched — ranking math is content-only by design
+    /// ruling. None means "no subject yet" and is the backfill-eligibility
+    /// predicate — no staleness flag, no bool; callers test
+    /// `subject.is_some()`. The three `subject*` fields are None together
+    /// or populated together (one atomic write,
+    /// `set_subject_representation`); every write that touches `content`
+    /// NULLs all three in the same statement. Mirrors Swift
+    /// `Drawer.subject`.
+    pub subject: Option<String>,
+
+    /// Identifier of the producer contract that wrote `subject`, carrying
+    /// the provenance tier ("ai-v1" filing/backfill AI; "minillm-v1"
+    /// model rider). A row whose value differs from the estate's current
+    /// best contract is a regeneration candidate. None iff `subject` is
+    /// None.
+    pub subject_pipeline_version: Option<String>,
+
+    /// When the subject was generated (epoch millis, stored as TEXT
+    /// ISO8601 by the timestamp column type). Audit and sweep
+    /// observability only. None iff `subject` is None.
+    pub subject_at: Option<i64>,
 }
 
 impl Drawer {
@@ -234,6 +261,9 @@ impl Drawer {
             distilled_pipeline_version: None,
             distilled_token_count: None,
             distilled_at: None,
+            subject: None,
+            subject_pipeline_version: None,
+            subject_at: None,
         }
     }
 }

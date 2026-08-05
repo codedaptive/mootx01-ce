@@ -63,6 +63,13 @@ enum LensTools {
         lensToolNames.contains(name)
     }
 
+    /// How many extent drawer ids a formal-concept row lists before
+    /// truncating to "+N more". Twenty matches the default recall frame
+    /// limit, so an untruncated extent is the common case; the cap exists so
+    /// one giant concept cannot flood the reply. Parity: Rust
+    /// `LENS_EXTENT_ID_CAP`.
+    static let lensExtentIDCap = 20
+
     // MARK: - tools/list projection
 
     static func tools() -> [ProjectedTool] {
@@ -403,9 +410,9 @@ enum LensTools {
             // only requirement; content is not needed.
             // Feature-flag adoption §3.
             let keystoneOnly = try optionalBool(args["keystoneOnly"], argument: "keystoneOnly") ?? false
+            let estate = try await kit.estate(for: handle)
             let filtered: [Keystone]
             if keystoneOnly && !ranked.isEmpty {
-                let estate = try await kit.estate(for: handle)
                 let loadResult = try await estate.getDrawers(
                     ids: ranked.map(\.id),
                     matchingFrame: RecallFrame(filterChain: []),
@@ -417,7 +424,15 @@ enum LensTools {
             } else {
                 filtered = ranked
             }
-            return list("keystones", filtered.map { "\($0.id) centrality=\($0.centrality)" })
+            // Dense-row citations: every keystone finding carries its drawer
+            // address and lattice metadata so the caller can memory_get it
+            // immediately (progressive-recall rule). The centrality score is
+            // appended after the dense row as the lens-specific signal.
+            let denseByID = try await RecipeTools.denseRowsByID(ids: filtered.map(\.id), estate: estate)
+            return list("keystones", filtered.map {
+                let row = denseByID[$0.id] ?? DenseRow.renderUnhydrated(id: $0.id)
+                return "\(row) centrality=\($0.centrality)"
+            })
 
         case "moot_lens_constellation":
             // Date() is permitted here: this is the ARIA MCP boundary, not a kit.
@@ -450,7 +465,17 @@ enum LensTools {
                     + "walk (this lens is a forward walk), or the seed is not in the given wing. Use "
                     + "moot_connection_map to see links pointing into this drawer.")
             }
-            return list("free_association", out.map { "\($0.drawerID) activation=\($0.activation)" })
+            // Dense-row citations: each associated memory carries its address
+            // and lattice metadata so the caller can memory_get it immediately
+            // (progressive-recall rule). The activation score is appended after
+            // the dense row as the lens-specific signal.
+            let faEstate = try await kit.estate(for: handle)
+            let faDenseByID = try await RecipeTools.denseRowsByID(
+                ids: out.map(\.drawerID), estate: faEstate)
+            return list("free_association", out.map {
+                let row = faDenseByID[$0.drawerID] ?? DenseRow.renderUnhydrated(id: $0.drawerID)
+                return "\(row) activation=\($0.activation)"
+            })
 
         case "moot_lens_theme_weather":
             let weather = try await ThemeWeather.run(
@@ -565,9 +590,15 @@ enum LensTools {
             let out = try await Contradiction.run(
                 kit: kit, handle: handle, frame: try frame(args),
                 threshold: Float(try number(args, "threshold", default: 1.5)))
+            // Dense-row citations: each outlier memory carries its address and
+            // lattice metadata so the caller can memory_get it immediately
+            // (progressive-recall rule). The outlier ids are drawer ids.
+            let cohEstate = try await kit.estate(for: handle)
+            let cohDenseByID = try await RecipeTools.denseRowsByID(
+                ids: out.outliers, estate: cohEstate)
             return list(
                 "cohesion_outliers (considered \(out.considered))",
-                out.outliers)
+                out.outliers.map { cohDenseByID[$0] ?? DenseRow.renderUnhydrated(id: $0) })
 
         case "moot_lens_contradiction":
             // Genuine contradiction detector: (a) drawer pairs linked by a
@@ -602,10 +633,16 @@ enum LensTools {
             let hiddenTunnelEndpointIDs: Set<String>
             // isKeystone contradiction weighting: sort emitted tunnels so pairs
             // where either endpoint carries the isKeystone bit surface first.
-            // Drawers are loaded bitmapOnly alongside the existing admissibility
-            // check; the sort uses those same loaded rows.
+            // Drawers are loaded structured alongside the existing admissibility
+            // check; the sort uses those same loaded rows AND they seed the
+            // dense-row map for Part B citations (reuses the structured fetch —
+            // no second round-trip needed).
             // Feature-flag adoption §3.
             let keystoneEndpointIDs: Set<String>
+            // Dense-row map: id → rendered row for admissible contradiction
+            // endpoints. Admissible drawers are already .structured here, so
+            // DenseRow.render() can be called directly — no extra fetch.
+            var contradictionDenseByID: [String: String] = [:]
             if endpointIDs.isEmpty {
                 hiddenTunnelEndpointIDs = []
                 keystoneEndpointIDs = []
@@ -619,6 +656,10 @@ enum LensTools {
                 keystoneEndpointIDs = Set(result.admissible
                     .filter { $0.hasFeatureFlag(.isKeystone) }
                     .map(\.id))
+                // Build the dense-row map from the same admissible drawers —
+                // avoids a second getDrawers round-trip for citation rendering.
+                contradictionDenseByID = Dictionary(uniqueKeysWithValues:
+                    result.admissible.map { ($0.id, DenseRow.render($0)) })
             }
             // Stable sort: keystone-involving contradictions first, then original
             // order. `.stable` is not needed (sort is applied to the prefix slice
@@ -637,12 +678,28 @@ enum LensTools {
             } else {
                 lines.append("contradicts_tunnels: \(contradictsTunnels.count)")
                 for t in keystoneFirst {
-                    let src = t.sourceDrawerId.map {
-                        hiddenTunnelEndpointIDs.contains($0) ? "<hidden>" : $0
-                    } ?? "\(t.sourceWing)/\(t.sourceRoom)"
-                    let tgt = t.targetDrawerId.map {
-                        hiddenTunnelEndpointIDs.contains($0) ? "<hidden>" : $0
-                    } ?? "\(t.targetWing)/\(t.targetRoom)"
+                    // Dense-row citation: when the endpoint is a known drawer
+                    // within the sensitivity ceiling, surface its full dense
+                    // row so the caller can follow up via memory_get. When
+                    // hidden (outside the ceiling) show the redaction marker;
+                    // when the tunnel has no drawer id (wing-fallback) show the
+                    // wing/room coordinate. Parity: Rust contradiction arm.
+                    let src: String
+                    if let sid = t.sourceDrawerId {
+                        src = hiddenTunnelEndpointIDs.contains(sid)
+                            ? "<hidden>"
+                            : (contradictionDenseByID[sid] ?? DenseRow.renderUnhydrated(id: sid))
+                    } else {
+                        src = "\(t.sourceWing)/\(t.sourceRoom)"
+                    }
+                    let tgt: String
+                    if let tid = t.targetDrawerId {
+                        tgt = hiddenTunnelEndpointIDs.contains(tid)
+                            ? "<hidden>"
+                            : (contradictionDenseByID[tid] ?? DenseRow.renderUnhydrated(id: tid))
+                    } else {
+                        tgt = "\(t.targetWing)/\(t.targetRoom)"
+                    }
                     let tier = t.lifecycle == .proposed
                         ? " [proposed (agent-derived, unreviewed) — accept/reject via moot_review_tunnel]"
                         : ""
@@ -698,16 +755,34 @@ enum LensTools {
                     }
                 }
             }
+            // DCP M4 — route through the typed evaluator: the same
+            // additive section (M0 §7) every contradiction surface
+            // appends. The legacy grouped-objects view above remains
+            // decodable and unchanged; the lens has no lexical lane, so
+            // no candidates line.
+            lines += try await RecipeTools.renderConflictProjection(
+                kit: kit, handle: handle, estate: estate,
+                lexicalCandidates: nil)
             return ToolDispatcher.textResult(lines.joined(separator: "\n"))
 
         case "moot_lens_trust_synthesis":
             let out = try await TrustLens.run(
                 kit: kit, handle: handle, frame: try frame(args))
-            return ToolDispatcher.textResult("""
-            trust_grounded_synthesis: \(out.rankedIDs.count) drawer(s), \(out.highTrustCount) high-trust
-            ranked: \(out.rankedIDs.joined(separator: ", "))
-            summary: \(out.context.summary)
-            """)
+            // Dense-row citations: each ranked memory carries its address and
+            // lattice metadata so the caller can memory_get it immediately
+            // (progressive-recall rule). Ranked order is preserved — the first
+            // row is the most trust-grounded hit.
+            let tsEstate = try await kit.estate(for: handle)
+            let tsDenseByID = try await RecipeTools.denseRowsByID(
+                ids: out.rankedIDs, estate: tsEstate)
+            var tsLines = [
+                "trust_grounded_synthesis: \(out.rankedIDs.count) drawer(s), \(out.highTrustCount) high-trust",
+            ]
+            for id in out.rankedIDs {
+                tsLines.append("  " + (tsDenseByID[id] ?? DenseRow.renderUnhydrated(id: id)))
+            }
+            tsLines.append("summary: \(out.context.summary)")
+            return ToolDispatcher.textResult(tsLines.joined(separator: "\n"))
 
         case "moot_lens_partial_cue":
             do {
@@ -723,7 +798,17 @@ enum LensTools {
                 let cueScores = out.map { $0.score }
                 let cueDiscrimination = RecallDiscrimination.classify(cueScores)
                 let discriminationLine = RecallDiscrimination.resultLine(for: cueDiscrimination)
-                let resultLines = out.map { "\($0.id) score=\($0.score)" }
+                // Dense-row citations: each match carries its address and lattice
+                // metadata so the caller can memory_get it immediately
+                // (progressive-recall rule). The score is appended as the
+                // lens-specific signal after the dense row.
+                let pcEstate = try await kit.estate(for: handle)
+                let pcDenseByID = try await RecipeTools.denseRowsByID(
+                    ids: out.map(\.id), estate: pcEstate)
+                let resultLines = out.map {
+                    let row = pcDenseByID[$0.id] ?? DenseRow.renderUnhydrated(id: $0.id)
+                    return "\(row) score=\($0.score)"
+                }
                 var body = "partial_cue_recall: \(resultLines.count) result(s)"
                 for line in resultLines { body += "\n  - \(line)" }
                 body += "\n\(discriminationLine)"
@@ -807,7 +892,17 @@ enum LensTools {
                 wing: try requireString(args, "wing"),
                 anchorID: try requireString(args, "anchorID"),
                 k: try integer(args, "k", default: 5))
-            return list("tunnel_successor", out.map { "\($0.id) weight=\($0.weight)" })
+            // Dense-row citations: each successor carries its address and
+            // lattice metadata so the caller can memory_get it immediately
+            // (progressive-recall rule). The tunnel weight is appended as the
+            // lens-specific signal after the dense row.
+            let sucEstate = try await kit.estate(for: handle)
+            let sucDenseByID = try await RecipeTools.denseRowsByID(
+                ids: out.map(\.id), estate: sucEstate)
+            return list("tunnel_successor", out.map {
+                let row = sucDenseByID[$0.id] ?? DenseRow.renderUnhydrated(id: $0.id)
+                return "\(row) weight=\($0.weight)"
+            })
 
         case "moot_lens_overlap":
             // resolvePeer is used here (not resolveHandle) because estateIDB
@@ -948,6 +1043,13 @@ enum LensTools {
                     + "sup=\(String(format: "%.3f", rule.support)) "
                     + "conf=\(String(format: "%.3f", rule.confidence)) "
                     + "lift=\(String(format: "%.3f", rule.lift))")
+                // Exemplar addresses so the rule's evidence is hydratable
+                // (progressive-recall rule: findings carry cursors). Absent
+                // for dataset-mode rules, whose rows are not drawers.
+                if !rule.exemplarDrawerIDs.isEmpty {
+                    arLines.append(
+                        "    exemplars: \(rule.exemplarDrawerIDs.joined(separator: ", "))")
+                }
             }
             return ToolDispatcher.textResult(arLines.joined(separator: "\n"))
 
@@ -1160,7 +1262,18 @@ enum LensTools {
             for (i, concept) in fcOut.concepts.enumerated() {
                 fcLines.append("  concept \(i + 1): support=\(concept.support)")
                 fcLines.append("    intent: \(concept.intent.joined(separator: ", "))")
-                fcLines.append("    extent: \(concept.extentDrawerIDs.count) drawer(s)")
+                // Extent lists the drawer ADDRESSES, not just a count: every
+                // lens finding must be followable to its evidence
+                // (progressive-recall rule — a result that names a grouping
+                // but withholds the cursor strands the consumer). Capped so
+                // one giant concept cannot flood the reply; the "+N more"
+                // rows are reachable by tightening the frame filter.
+                let extent = concept.extentDrawerIDs
+                let shown = extent.prefix(lensExtentIDCap)
+                let more = extent.count > lensExtentIDCap
+                    ? " +\(extent.count - lensExtentIDCap) more" : ""
+                fcLines.append(
+                    "    extent (\(extent.count)): \(shown.joined(separator: ", "))\(more)")
             }
             return ToolDispatcher.textResult(fcLines.joined(separator: "\n"))
 

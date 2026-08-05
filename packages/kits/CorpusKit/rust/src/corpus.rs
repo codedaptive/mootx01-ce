@@ -3379,12 +3379,13 @@ impl Corpus {
         // first-ingest train (incl. the auto-triggered governor reindex) does NOT
         // re-embed it back into recall from the chunks table.
         // `removed_at` is audit-only metadata — mirrors BundleStore's `created_at`
-        // SystemTime stamp; not a deterministic computation input.
-        let now_secs = std::time::SystemTime::now()
+        // SystemTime stamp; not a deterministic computation input. Epoch
+        // MILLISECONDS: it lands in a `TypedValue::Timestamp`, a millisecond codec.
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        self.removed_source_store.mark_removed(source_id, now_secs)?;
+        self.removed_source_store.mark_removed(source_id, now_ms)?;
         Ok(())
     }
 

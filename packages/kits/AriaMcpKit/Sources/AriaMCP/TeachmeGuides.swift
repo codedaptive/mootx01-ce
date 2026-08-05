@@ -45,7 +45,15 @@ enum TeachmeGuides {
         moot_file_memory — Store a memory in the estate.
 
         Use this to file any content worth keeping. The server assigns
-        classification and embedding; you supply content and location.
+        classification and embedding; you supply content, subject, and
+        location.
+
+        The subject is one sentence (≤120 chars) stating what the memory
+        asserts. Write it for the NEXT AI that will scan it in a result
+        list — telegraphic register, entities and claims front-loaded, no
+        narrative framing. It is returned in recall rows, never searched,
+        so optimise it for a reader deciding "is this row worth opening?",
+        not for keyword matching.
 
         When to use vs siblings:
           - moot_update_memory — when the memory already exists and needs revision
@@ -54,6 +62,7 @@ enum TeachmeGuides {
 
         Example:
           { "content": "Decided to use actor isolation for all estate writes.",
+            "subject": "Estate writes: actor isolation adopted for all paths.",
             "location": "mootx01/architecture",
             "kind": "prose" }
 
@@ -68,41 +77,55 @@ enum TeachmeGuides {
           - Using moot_file_memory to update existing content. Use
             moot_update_memory with the existing id instead.
           - Omitting location. The estate has no structure without it.
+          - Writing the subject as a title ("Meeting notes") instead of an
+            assertion ("Quarterly planning moved to Thursday"). A subject
+            that states nothing helps no one triage.
+          - Truncating content to fit the subject cap. Compress the claim,
+            don't cut it mid-sentence.
         """
 
     private static let memorySearchGuide = """
-        moot_memory_search — Search the estate for memories matching a query.
+        moot_memory_search — Search the estate for memories matching a query,
+        or pivot from an anchor with near:<uuid>.
 
-        Uses hybrid BM25+vector recall. Returns ranked memory rows with
-        content previews. This is the primary way to retrieve filed memories.
+        Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — the
+        address plus the assertion, no content hauling. Travel on subjects,
+        confirm on distilled, read full text only at the end:
+        moot_memory_get with depth:subject|distilled|full is the next hop.
 
         When to use vs siblings:
           - moot_estate_map — when browsing structure rather than searching content
           - moot_fact_search — when looking for structured KG assertions
           - moot_read_journal — when retrieving agent diary entries
-          - moot_memory_get — when you already have a specific id and need
-            the full verbatim content and metadata, not a ranked preview
+          - moot_memory_get — when you already have ids and need deeper tiers
 
         Example:
-          { "query": "actor isolation concurrency decisions",
-            "limit": 10 }
+          { "query": "actor isolation concurrency decisions", "limit": 10 }
+          { "near": "<uuid of an interesting memory>" }   ← similar-to-this pivot
 
         Response:
           found N memory(s)
-          <uuid>  [room]  <content preview…>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
+
+        A "(no subject)" row is subject debt — the memory predates subjects;
+        judge it by its lattice coordinates or fetch it by id. A
+        discrimination line appears ONLY when the ranking is not clear
+        (low/medium); a recall_provenance line appears ONLY when the dense
+        lane was dark or stages degraded. Silence means nominal.
 
         Common mistakes:
           - Using a query over 200 chars. Queries work best as keywords or a
             short question under 50 words. Long queries dilute the semantic signal.
-          - Calling without a query arg. Use moot_estate_map to browse structure.
+          - Passing both query and near — they are mutually exclusive.
           - Omitting limit when expecting many results; default is 20.
         """
 
     private static let memoryListGuide = """
         moot_memory_list — Enumerate all memory drawer IDs in a wing.
 
-        Returns each drawer's ID, room, and an 80-character content preview.
-        Capped at 200 results. Use for structural inventory, not semantic search.
+        Returns one dense row per drawer — uuid · subject · fdc · qid ·
+        event_time. Capped at 200 results. Use for structural inventory,
+        not semantic search.
 
         When to use vs siblings:
           - moot_memory_search — when you need ranked semantic results by query
@@ -112,10 +135,16 @@ enum TeachmeGuides {
         Example:
           { "wing": "Agentic Memory" }
           { "wing": "Agentic Memory", "room": "architecture" }
+          { "wing": "Agentic Memory", "filter": "missing_subject" }
 
         Response:
           drawers in wing Agentic Memory: N
-          <uuid>  [room]  <80-char preview>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
+
+        filter:missing_subject is the subject-debt enumerator: it lists
+        only live drawers with no subject line, id-only (no preview), so a
+        backfill session can walk them — fetch each with moot_memory_get,
+        then write the subject via moot_update_memory mutation=setSubject.
 
         Common mistakes:
           - Calling without wing. Wing is required; omitting it returns an error.
@@ -125,11 +154,21 @@ enum TeachmeGuides {
         """
 
     private static let memoryGetGuide = """
-        moot_memory_get — Fetch one memory drawer by id, in full.
+        moot_memory_get — Fetch memory drawers by id, at a chosen depth.
 
-        Returns verbatim content (never truncated), room/wing, filed_at and
-        event_time, the adjective-axis metadata (state, trust, sensitivity,
-        exportability, confirmation), lineage, and a linked-tunnel summary.
+        One hydration verb, three tiers (depth argument):
+          subject   — dense row only (travel tier; cheapest)
+          distilled — dense row + distilled text (confirm tier; rows still
+                      owing a distillate fall back to verbatim content
+                      behind a "source: content (not yet distilled)" marker)
+          full      — the complete record (terminal tier; the default)
+        Batch with ids:[…] to winnow a shortlist in ONE call — judge at
+        depth:subject/distilled, then fetch the winner at depth:full.
+
+        At depth:full, returns verbatim content (never truncated), room/wing,
+        subject (when present), filed_at and event_time, the adjective-axis
+        metadata (state, trust, sensitivity, exportability, confirmation),
+        lineage, and a linked-tunnel summary.
         Applies the same default gate as moot_memory_search — a drawer that
         exists but is contested/withdrawn/rejected, untrustworthy, or
         restricted/secret is reported not-found, identical to a genuinely
@@ -171,8 +210,10 @@ enum TeachmeGuides {
     private static let updateMemoryGuide = """
         moot_update_memory — Apply a named mutation to an existing memory.
 
-        Mutations: confirm, reject, contest, resolve, supersede, revive, accept.
-        Use to change a memory's trust state without rewriting its content.
+        Mutations: confirm, reject, contest, resolve, supersede, revive, accept,
+        correctExportability(public|private), setSubject.
+        Use to change a memory's trust state — or its subject line — without
+        rewriting its content.
 
         When to use vs siblings:
           - moot_file_memory — when filing new content (no existing id)
@@ -183,6 +224,13 @@ enum TeachmeGuides {
           { "id": "abc-123", "mutation": "confirm",
             "note": "Verified against implementation on 2026-06-05." }
 
+        setSubject example (the subject-debt backfill path):
+          { "id": "abc-123", "mutation": "setSubject",
+            "subject": "Deploy pipeline: staging gate now requires two approvals." }
+        The subject is one sentence (≤120 chars) in the AI-facing register —
+        telegraphic, entities and claims front-loaded. Find debt rows with
+        moot_memory_list filter:missing_subject.
+
         Response:
           updated memory abc-123 (confirm)
 
@@ -190,6 +238,8 @@ enum TeachmeGuides {
           - Using supersede to soft-delete. Use moot_withdraw_memory instead.
           - Calling with an id that does not exist. Verify with moot_memory_search first.
           - Omitting note for contest or resolve mutations; a note is good practice.
+          - Passing the subject text in `note` for setSubject — it goes in the
+            dedicated `subject` argument.
         """
 
     private static let withdrawMemoryGuide = """
@@ -238,6 +288,14 @@ enum TeachmeGuides {
         Response:
           erased memory abc-123
 
+        Partial response (lineage contains accepted rows):
+          partially erased memory abc-123: 1 accepted lineage sibling(s)
+          refused erasure and remain readable: def-456
+        Erasure walks the target's full lineage, but the audit gate refuses
+        to tombstone accepted rows — those siblings keep their content and
+        stay recallable. Treat a partial response as a partial erasure: the
+        named ids were NOT erased.
+
         Common mistakes:
           - Calling without confirmed=true. The call is refused immediately.
           - Using erase when withdraw would suffice. Erase is intended for
@@ -245,6 +303,8 @@ enum TeachmeGuides {
           - Erasing with a vague reason. The reason is the audit record.
           - Setting confirmed=true without owner review. The gate protects
             against prompt-injection attacks; do not bypass it.
+          - Reading a partial response as success. The refused ids named in
+            the response still hold their content.
         """
 
     private static let confirmMemoryGuide = """
@@ -711,6 +771,15 @@ enum TeachmeGuides {
 
             Total: \(totalVaultOn) tools vault-on / \(totalVaultOff) vault-off.
             All accept teachme. All may return hint.
+
+            Subject debt (the "subjects: N/M (K missing)" line) — STANDING
+            BEHAVIOR: when K > 0, offer the user an interactive backfill,
+            and only proceed with their explicit time-and-permission
+            consent. The walk: moot_memory_list filter:missing_subject →
+            moot_memory_get per id → moot_update_memory
+            mutation=setSubject with a one-sentence AI-facing subject.
+            Never backfill silently; the debt line is a reminder, not a
+            license.
             """
     }
 
@@ -826,7 +895,7 @@ enum TeachmeGuides {
 
         Response:
           estate <name> [<uuid>] — grant <uuid>, N row(s)
-          <uuid>  [room]  <content preview…>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
 
         Common mistakes:
           - Supplying a requesterEstateID that doesn't match the default estate.
@@ -1072,9 +1141,9 @@ enum TeachmeGuides {
           { "query": "the indemnity was 46 million marks",
             "limit": 10, "pool": 30, "filter": "unconfirmed" }
 
-        Response (same shape as moot_memory_search):
+        Response (same dense-row shape as moot_memory_search):
           found N memory(s)
-          <id>  [room]  <preview>
+          <uuid> · <subject> · fdc:<code> · qid:<QID> · <event_time>
           ...
 
         Common mistakes:

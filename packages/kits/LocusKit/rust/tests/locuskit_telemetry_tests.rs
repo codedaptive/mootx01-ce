@@ -204,6 +204,9 @@ fn sample_drawer(label: &str) -> Drawer {
         distilled_pipeline_version: None,
         distilled_token_count: None,
         distilled_at: None,
+        subject: None,
+        subject_pipeline_version: None,
+        subject_at: None,
     }
 }
 
@@ -243,6 +246,9 @@ fn sample_kgfact(label: &str, drawer_label: &str) -> KGFact {
         predicate: "relatesTo".to_string(),
         object: "ObjectB".to_string(),
         source_drawer_id: tid(drawer_label),
+        added_by: String::new(),
+        foreign_source_key: String::new(),
+        foreign_record_id: String::new(),
         adjective_bitmap: 0,
         operational_bitmap: 0,
         provenance_bitmap: 0,

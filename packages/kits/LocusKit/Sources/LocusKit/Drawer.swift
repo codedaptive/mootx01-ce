@@ -208,6 +208,33 @@ public struct Drawer: Equatable, Hashable, Sendable {
     /// ISO8601 per the fleet date rule. Nil iff `distilled` is nil.
     public let distilledAt: Date?
 
+    /// The one-sentence AI-FACING subject line for this drawer's content
+    /// (progressive recall PR-01): telegraphic register, entities and
+    /// claims front-loaded, length-contracted (~120 chars) at every
+    /// producer boundary. RETURNED on recall rows so a consuming AI can
+    /// judge pursue-or-skip without reading the body; NEVER indexed or
+    /// searched — ranking math is content-only by design ruling. NULL
+    /// means "no subject yet" and is the backfill-eligibility predicate —
+    /// no separate staleness flag and no Bool accessor; callers test
+    /// `subject != nil`. The three `subject*` fields are NULL together or
+    /// populated together (one atomic write,
+    /// `DrawerStore.setSubjectRepresentation`), and every write that
+    /// touches `content` NULLs all three in the same statement (derived
+    /// text must not outlive edited or erased content).
+    public let subject: String?
+
+    /// Identifier of the producer contract that wrote `subject`, carrying
+    /// the provenance tier: "ai-v1" (filing or backfill AI) or
+    /// "minillm-v1" (on-device model rider). A row whose value differs
+    /// from the estate's current best contract is a regeneration
+    /// candidate. Nil iff `subject` is nil.
+    public let subjectPipelineVersion: String?
+
+    /// When the subject was generated. Audit and sweep observability
+    /// only. Stored as TEXT ISO8601 per the fleet date rule. Nil iff
+    /// `subject` is nil.
+    public let subjectAt: Date?
+
     /// Designated initializer.
     public init(
         id: String = UUID().uuidString,
@@ -236,7 +263,10 @@ public struct Drawer: Equatable, Hashable, Sendable {
         distilled: String? = nil,
         distilledPipelineVersion: String? = nil,
         distilledTokenCount: Int64? = nil,
-        distilledAt: Date? = nil
+        distilledAt: Date? = nil,
+        subject: String? = nil,
+        subjectPipelineVersion: String? = nil,
+        subjectAt: Date? = nil
     ) {
         self.id = id
         self.lineageID = lineageID
@@ -261,6 +291,9 @@ public struct Drawer: Equatable, Hashable, Sendable {
         self.distilledPipelineVersion = distilledPipelineVersion
         self.distilledTokenCount = distilledTokenCount
         self.distilledAt = distilledAt
+        self.subject = subject
+        self.subjectPipelineVersion = subjectPipelineVersion
+        self.subjectAt = subjectAt
     }
 }
 
@@ -276,6 +309,7 @@ extension Drawer: Codable {
         case provenance, adjectiveBitmap, operationalBitmap
         case udcCode, udcFacets, wikidataQID, wikidataQidsSecondary
         case distilled, distilledPipelineVersion, distilledTokenCount, distilledAt
+        case subject, subjectPipelineVersion, subjectAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -303,6 +337,11 @@ extension Drawer: Codable {
         distilledPipelineVersion = try c.decodeIfPresent(String.self, forKey: .distilledPipelineVersion)
         distilledTokenCount = try c.decodeIfPresent(Int64.self, forKey: .distilledTokenCount)
         distilledAt = try c.decodeIfPresent(Date.self, forKey: .distilledAt)
+        // Subject trio (PR-01): decodeIfPresent so payloads encoded before
+        // the trio existed decode with nil subjects (missing = truthful).
+        subject = try c.decodeIfPresent(String.self, forKey: .subject)
+        subjectPipelineVersion = try c.decodeIfPresent(String.self, forKey: .subjectPipelineVersion)
+        subjectAt = try c.decodeIfPresent(Date.self, forKey: .subjectAt)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -330,5 +369,8 @@ extension Drawer: Codable {
         try c.encodeIfPresent(distilledPipelineVersion, forKey: .distilledPipelineVersion)
         try c.encodeIfPresent(distilledTokenCount, forKey: .distilledTokenCount)
         try c.encodeIfPresent(distilledAt, forKey: .distilledAt)
+        try c.encodeIfPresent(subject, forKey: .subject)
+        try c.encodeIfPresent(subjectPipelineVersion, forKey: .subjectPipelineVersion)
+        try c.encodeIfPresent(subjectAt, forKey: .subjectAt)
     }
 }

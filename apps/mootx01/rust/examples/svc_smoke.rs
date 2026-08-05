@@ -14,9 +14,14 @@ fn main() {
     use mootx01_cli::core::service;
     use std::time::{Duration, Instant};
 
-    let exe = std::env::current_dir()
-        .unwrap()
-        .join("target/debug/mootx01.exe");
+    // Examples get no CARGO_BIN_EXE_* from cargo (that is integration-test
+    // only), so the binary is located by hand. CARGO_TARGET_DIR is honored
+    // because the repo shares one target directory per checkout; without it,
+    // cargo's per-workspace default puts the binary under ./target.
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap().join("target"));
+    let exe = target_dir.join("debug/mootx01.exe");
     assert!(exe.exists(), "build first: cargo build (missing {})", exe.display());
 
     let scratch = std::env::temp_dir().join(format!("moot-svc-smoke-{}", std::process::id()));

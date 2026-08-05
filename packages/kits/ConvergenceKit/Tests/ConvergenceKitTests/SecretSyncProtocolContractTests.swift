@@ -58,7 +58,11 @@ struct SecretSyncProtocolContractTests {
             candidateEntry: entry,
             validatedSnapshot: snapshot
         )
+        #expect(precondition.recoveryPublicationCapability == nil)
         let store = PolicyStoreFake()
+        #expect(
+            await store.cancelRecoveryAdvance(precondition) == .notRecovery
+        )
         await #expect(throws: SecretSyncInterfaceError.self) {
             try await store.compareAndAdvance(precondition)
         }
@@ -73,15 +77,15 @@ struct SecretSyncProtocolContractTests {
             try await store.compareAndAdvance(precondition)
                 == .advanced(precondition.candidateHead)
         )
-        let committed = try #require(
-            try await store.committedPolicy(
+        let hydrated = try #require(
+            try await store.unvalidatedHeadPolicy(
                 for: entry.commit.scopeID,
                 epoch: entry.commit.policyEpoch
             )
         )
-        #expect(committed.commit == snapshot.commit)
-        #expect(committed.records == snapshot.records)
-        #expect(committed.trustRecords == snapshot.trustedDeviceRecords)
+        #expect(hydrated.commit == snapshot.commit)
+        #expect(hydrated.records == snapshot.records)
+        #expect(hydrated.trustRecords == snapshot.trustedDeviceRecords)
     }
 
     @Test("purge receipts are category-idempotent and admission defaults closed")
@@ -644,7 +648,12 @@ private actor PolicyStoreFake: SecretSyncPolicyStore {
         return stagedEntry
     }
 
-    func committedPolicy(
+    // This double keeps the entry `compareAndAdvance` accepted, so what it
+    // hands back is material the validator already admitted through the
+    // precondition. It still answers under the unvalidated name because the
+    // protocol promises the caller nothing about authority — a conformer that
+    // happens to hold validated material does not widen the contract.
+    func unvalidatedHeadPolicy(
         for scopeID: SecretScopeID,
         epoch: UInt64
     ) async throws -> SecretPolicyStoreEntry? {
@@ -687,10 +696,20 @@ private actor PolicyStoreFake: SecretSyncPolicyStore {
         committedEntry = try SecretPolicyStoreEntry(
             commit: precondition.validatedSnapshot.commit,
             records: precondition.validatedSnapshot.records,
-            trustRecords: precondition.validatedSnapshot.trustedDeviceRecords
+            credentials: precondition.candidateEntry.credentials,
+            trustRecords: precondition.validatedSnapshot.trustedDeviceRecords,
+            digester: ProtocolEntryDigester()
         )
         stagedEntry = nil
         return .advanced(candidate)
+    }
+
+    func cancelRecoveryAdvance(
+        _ precondition: SecretPolicyAdvancePrecondition
+    ) async -> SecretRecoveryAdvanceCancellationResult {
+        precondition.recoveryPublicationCapability == nil
+            ? .notRecovery
+            : .cancelled
     }
 }
 
@@ -840,8 +859,12 @@ private func trustedCredential(
             challengeBytes: Data([byte]),
             signingProofBytes: Data([byte &+ 1]),
             keyAgreementProofBytes: Data([byte &+ 2]),
-            authorityCredentialID: fixtureCredentialID(99),
-            authoritySignature: Data([byte &+ 3])
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: fixtureCredentialID(99),
+                    signature: Data([byte &+ 3])
+                )
+            )
         )
     )
 }
@@ -903,6 +926,18 @@ private func policyStoreEntry(
     let scopeID = SecretScopeID(fixtureUUID(seed))
     let generationID = SecretGenerationID(fixtureUUID(seed + 1))
     let credentialID = fixtureCredentialID(seed + 2)
+    let activeCredential = try policyEntryCredential(
+        deviceID: TrustedDeviceID(fixtureUUID(seed + 5)),
+        credentialID: credentialID,
+        byte: byte
+    )
+    let revokedCredential = try policyEntryCredential(
+        deviceID: TrustedDeviceID(fixtureUUID(seed + 6)),
+        credentialID: fixtureCredentialID(seed + 6),
+        byte: byte &+ 1,
+        status: .revoked
+    )
+    let entryDigester = ProtocolEntryDigester()
     let snapshot = try SecretScopeSnapshot(
         scopeID: scopeID,
         rootRecordID: fixtureUUID(seed + 3),
@@ -955,7 +990,8 @@ private func policyStoreEntry(
         recipientEnvelopes: [envelope],
         recoveryEnvelope: nil,
         purgeRequirements: [],
-        purgeReceipts: []
+        purgeReceipts: [],
+        recoveryAuthorization: nil
     )
     let commit = try SecretTransitionCommit(
         recordDigest: digest(byte &+ 5),
@@ -970,23 +1006,28 @@ private func policyStoreEntry(
         recoveryEnvelopeDigest: nil,
         purgeRequirementDigests: [],
         purgeReceiptDigests: [],
+        recoveryAuthorizationDigest: nil,
         signerCredentialID: credentialID,
         signature: Data([byte &+ 5])
     )
     let trustRecords = [
         try DeviceTrustRecord(
             recordDigest: digest(byte &+ 1),
-            credentialDigest: digest(byte &+ 7),
-            deviceID: TrustedDeviceID(fixtureUUID(seed + 5)),
+            credentialDigest: entryDigester.digest(
+                canonicalBytes: activeCredential.canonicalBytes()
+            ),
+            deviceID: activeCredential.deviceID,
             credentialID: credentialID,
             trustState: .trusted,
             effectivePolicyEpoch: 1
         ),
         try DeviceTrustRecord(
             recordDigest: digest(byte &+ 6),
-            credentialDigest: digest(byte &+ 8),
-            deviceID: TrustedDeviceID(fixtureUUID(seed + 6)),
-            credentialID: fixtureCredentialID(seed + 6),
+            credentialDigest: entryDigester.digest(
+                canonicalBytes: revokedCredential.canonicalBytes()
+            ),
+            deviceID: revokedCredential.deviceID,
+            credentialID: revokedCredential.credentialID,
             trustState: .revoked,
             effectivePolicyEpoch: 1
         ),
@@ -994,8 +1035,49 @@ private func policyStoreEntry(
     return try SecretPolicyStoreEntry(
         commit: commit,
         records: records,
-        trustRecords: trustRecords
+        credentials: [activeCredential, revokedCredential],
+        trustRecords: trustRecords,
+        digester: entryDigester
     )
+}
+
+private func policyEntryCredential(
+    deviceID: TrustedDeviceID,
+    credentialID: DeviceCredentialID,
+    byte: UInt8,
+    status: TrustedDeviceCredentialStatus = .active
+) throws -> TrustedDeviceCredential {
+    try TrustedDeviceCredential(
+        deviceID: deviceID,
+        credentialID: credentialID,
+        credentialVersion: 1,
+        status: status,
+        signingPublicKey: signingDescriptor(byte),
+        keyAgreementPublicKey: agreementDescriptor(byte),
+        enrollmentProof: DeviceCredentialEnrollmentProof(
+            challengeID: fixtureUUID(990 + Int(byte)),
+            challengeBytes: Data([byte &+ 2]),
+            signingProofBytes: Data([byte &+ 3]),
+            keyAgreementProofBytes: Data([byte &+ 4]),
+            provenance: .trustedDevice(
+                try TrustedDeviceEnrollmentAuthority(
+                    credentialID: fixtureCredentialID(99),
+                    signature: Data([byte &+ 5])
+                )
+            )
+        )
+    )
+}
+
+private struct ProtocolEntryDigester: SecretSyncDigesting {
+    func digest(canonicalBytes: Data) throws -> SecretRecordDigest {
+        var bytes = [UInt8](repeating: 0, count: SecretRecordDigest.byteCount)
+        for (index, byte) in canonicalBytes.enumerated() {
+            let slot = index % bytes.count
+            bytes[slot] = bytes[slot] &+ byte &+ UInt8(truncatingIfNeeded: index)
+        }
+        return try SecretRecordDigest(bytes: Data(bytes))
+    }
 }
 
 private func authoritativeSnapshotFixture(
@@ -1013,6 +1095,19 @@ private func recoveryRecipient(
 ) throws -> RecoveryRecipientDescriptor {
     try RecoveryRecipientDescriptor(
         recoveryRecipientID: fixtureUUID(500 + suffix),
-        keyAgreementPublicKey: agreementDescriptor(UInt8(80 + suffix))
+        keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .agreementAlgorithmIdentifier,
+            keyIdentifier: Data([UInt8(80 + suffix)]),
+            publicKeyBytes: Data([0x04])
+                + Data(repeating: UInt8(81 + suffix), count: 64)
+        ),
+        authorizationSigningPublicKey: SigningPublicKeyDescriptor(
+            algorithmIdentifier: RecoveryRecipientDescriptor
+                .authorizationSigningAlgorithmIdentifier,
+            keyIdentifier: Data([UInt8(82 + suffix)]),
+            publicKeyBytes: Data([0x04])
+                + Data(repeating: UInt8(83 + suffix), count: 64)
+        )
     )
 }

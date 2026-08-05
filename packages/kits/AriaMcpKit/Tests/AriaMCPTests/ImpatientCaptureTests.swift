@@ -89,6 +89,7 @@ struct ImpatientCaptureTests {
         let content = "peregrine falcon stooping dive raptor velocity record"
         _ = try await dispatcher.runFileMemory([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("birds"),
             "impatient": .bool(true),
         ])
@@ -110,6 +111,7 @@ struct ImpatientCaptureTests {
         // Default (no impatient arg) = regular mode.
         _ = try await dispatcher.runFileMemory([
             "content": .string(content),
+            "subject": .string(String(content.prefix(120))),
             "location": .string("geology"),
         ])
 

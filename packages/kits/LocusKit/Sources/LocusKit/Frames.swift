@@ -113,6 +113,14 @@ public struct CaptureFrame: Sendable {
     /// reanchor step. The follow-up VaultKit/file_memory wiring threads
     /// this field through from the ARIA surface.
     public var wing: String?
+    /// One-sentence AI-facing subject for the progressive-recall dense
+    /// row (SPEC § 14). Optional at the frame level: intake/import paths
+    /// deliberately leave it nil so the row is born as subject debt
+    /// (B-21); the ARIA `moot_file_memory` boundary REQUIRES it. When
+    /// present, the capture verb writes the trio at insert with pipeline
+    /// version `ai-v1` and `subject_at = now`, enforcing the 120-char
+    /// contract (B-18) before the row exists.
+    public var subject: String?
 
     public init(
         content: String,
@@ -132,7 +140,8 @@ public struct CaptureFrame: Sendable {
         eventTime: Date? = nil,
         featureFlags: DrawerFeatureFlags = [],
         exportability: AdjectiveExportability = .private_,
-        wing: String? = nil
+        wing: String? = nil,
+        subject: String? = nil
     ) {
         self.content = content
         self.channel = channel
@@ -152,6 +161,7 @@ public struct CaptureFrame: Sendable {
         self.featureFlags = featureFlags
         self.exportability = exportability
         self.wing = wing
+        self.subject = subject
     }
 }
 
@@ -334,6 +344,14 @@ public enum MutationKind: Sendable {
     /// only path to mark a drawer public after capture, completing the
     /// exportability write side (DEBT-1).
     case correctExportability(AdjectiveExportability)
+    /// Set (or replace) the row's subject line — the backfill/correction
+    /// write path for the progressive-recall dense row (SPEC § 14). The
+    /// payload is the subject text itself (1–120 chars, AI-facing
+    /// register); `Estate.mutate` routes it to
+    /// `setSubjectRepresentation` with pipeline version
+    /// `DrawerStore.subjectPipelineAIV1`. Unlike the state mutations
+    /// above this touches no bitmap — it writes only the subject trio.
+    case setSubject(String)
 }
 
 // MARK: - LearnFrame

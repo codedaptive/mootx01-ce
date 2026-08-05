@@ -57,12 +57,13 @@ impl RemovedSourceStore {
     }
 
     /// Mark a source removed (recall-suppressed). Idempotent: UPSERT on the
-    /// source_id primary key. `now_secs` is the caller's instant (audit-only
+    /// source_id primary key. `now_ms` is the caller's instant in epoch
+    /// MILLISECONDS — the unit `TypedValue::Timestamp` codes (audit-only
     /// metadata — presence is what the active-chunk filter reads).
-    pub fn mark_removed(&self, source_id: &str, now_secs: i64) -> CorpusKitResult<()> {
+    pub fn mark_removed(&self, source_id: &str, now_ms: i64) -> CorpusKitResult<()> {
         let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
         values.insert("source_id".into(), TypedValue::Text(source_id.to_string()));
-        values.insert("removed_at".into(), TypedValue::Timestamp(now_secs));
+        values.insert("removed_at".into(), TypedValue::Timestamp(now_ms));
         self.storage
             .row_store()
             .upsert("removed_sources", values, &["source_id".to_string()])

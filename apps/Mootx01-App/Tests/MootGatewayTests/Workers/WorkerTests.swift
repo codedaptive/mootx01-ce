@@ -7,18 +7,22 @@ import MootIntentKit
 // MARK: - Test infrastructure
 
 /// A mock MootToolCalling actor that records every tool call and returns
-/// fixture text. Used to verify read-only invariants without a live estate.
+/// fixture text (plus an optional structuredContent block, the shape the
+/// recall family carries). Used to verify read-only invariants without a
+/// live estate.
 actor MockCaller: MootToolCalling {
     private(set) var calledTools: [String] = []
     private let fixture: String
+    private let structured: JSONValue?
 
-    init(fixture: String = "found 0 memory(s)") {
+    init(fixture: String = "found 0 memory(s)", structured: JSONValue? = nil) {
         self.fixture = fixture
+        self.structured = structured
     }
 
     func callTool(_ name: String, arguments: [String: JSONValue]) async -> IntentCallResult {
         calledTools.append(name)
-        return IntentCallResult(text: fixture, isError: false)
+        return IntentCallResult(text: fixture, structured: structured, isError: false)
     }
 }
 

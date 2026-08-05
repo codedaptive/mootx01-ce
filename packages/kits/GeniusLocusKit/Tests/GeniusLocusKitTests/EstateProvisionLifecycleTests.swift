@@ -654,7 +654,12 @@ struct EstateProvisionSQLiteTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 10,
             frameworkProfile: "KnowledgeWork",
-            syncMode: .none
+            syncMode: .none,
+            // Ephemeral: the Ed25519 identity key stays in process memory, so this
+            // file-backed estate leaves zero Keychain residue when its file is
+            // deleted (test-loop key-residue fix). Only the identity key store
+            // changes; the SQLite file backend still exercises the regression path.
+            lifetime: .ephemeral
         )
         let owner = OwnerCredentials(ownerIdentifier: "sqlite-provision-test")
 
@@ -717,7 +722,10 @@ struct EstateProvisionSQLiteTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "CorpusTest",
-            syncMode: .none
+            syncMode: .none,
+            // Ephemeral identity key: no Keychain write for this file-backed
+            // estate (test-loop key-residue fix). SQLite backend path unchanged.
+            lifetime: .ephemeral
         )
         let owner = OwnerCredentials(ownerIdentifier: "sqlite-provision-test")
 

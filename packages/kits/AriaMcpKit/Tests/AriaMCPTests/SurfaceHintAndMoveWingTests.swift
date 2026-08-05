@@ -57,6 +57,7 @@ struct SurfaceHintAndMoveWingTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("surface-hint-test unique content alpha bravo charlie"),
+                "subject": .string("surface-hint-test unique content alpha bravo charlie"),
                 "location": .string("test/wing-hint-check"),
             ])
         )
@@ -134,6 +135,7 @@ struct SurfaceHintAndMoveWingTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("cross-wing move test payload unique zeta omega"),
+                "subject": .string("cross-wing move test payload unique zeta omega"),
                 "location": .string("origin-room"),
                 "wing": .string("OriginWing"),
             ])
@@ -216,6 +218,7 @@ struct SurfaceHintAndMoveWingTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("room-only move test payload unique lambda sigma"),
+                "subject": .string("room-only move test payload unique lambda sigma"),
                 "location": .string("old-room"),
                 "wing": .string("StableWing"),
             ])

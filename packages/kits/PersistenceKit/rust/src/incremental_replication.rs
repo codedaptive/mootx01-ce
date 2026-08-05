@@ -18,9 +18,58 @@
 //!      violating the module's backend-agnostic design.
 //!   3. Re-read on sync is O(dirty count) — cheap.
 //!
+//!   TWO GRANULARITIES OF DIRT — why (B) alone is not enough:
+//!
+//!   Approach (B) can only name a row when the observer event carries that
+//!   row's primary-key values. The durable backends do not always supply them:
+//!   SQLite emits `values: None` for predicate `update` and `delete` in both
+//!   ports, and the PostgreSQL backend emits neither `values` nor `row_key` for
+//!   either verb. Nothing else in the change identifies the row —
+//!   `TableChange.hlc` is `None` at every emission site, no schema-wide
+//!   modified-at column exists, and `row_key` is a UUID derived from only the
+//!   FIRST primary-key column (hashed for non-UUID TEXT keys), so it is not
+//!   invertible and does not identify a row under a composite key.
+//!
+//!   So the session tracks dirt at two granularities:
+//!     ROW dirt   — the change carried its primary-key values. Re-scan exactly
+//!                  that row; absent in the source means "delete at the
+//!                  destination", present means "upsert".
+//!     TABLE dirt — the change did not. The row cannot be named, but the TABLE
+//!                  can, so the whole table is re-scanned and reconciled: every
+//!                  source row is upserted, and every destination row whose
+//!                  primary key is absent from the source is deleted. The
+//!                  deletion half is what carries an expunge, a tombstone, or
+//!                  an erasure across; without it a value-less delete would
+//!                  vanish. It is the row-level form of the rule the
+//!                  full-snapshot path already applies to blobs (SECFIX-WS2-PK
+//!                  F5): a replica that holds keys the source does not is
+//!                  divergence.
+//!
+//!   A change the session cannot resolve at EITHER granularity — a table that
+//!   declares no primary key, so there is no column set to reconcile on — does
+//!   not vanish either. It marks the cycle INCOMPLETE (see the watermark
+//!   contract below). An observed change always produces propagation or a
+//!   surfaced refusal; it is never silently dropped.
+//!
+//!   MIRROR ASSUMPTION: table-granularity dirt reconciles the destination
+//!   against the source, so this module's declared model — destination mirrors
+//!   source — is load-bearing. A destination fanned in from several sources
+//!   would lose the other sources' rows. That model is already assumed by the
+//!   restart semantics below and by the blob reconciliation in the snapshot
+//!   path.
+//!
 //!   RESTART SEMANTICS: the dirty-set is in-memory. On process restart, the
 //!   caller falls back to a full snapshot. Correct: full snapshot is always a
 //!   valid substitute.
+//!
+//! WATERMARK CONTRACT:
+//!   The audit watermark advances only for a cycle that resolved every change
+//!   it observed. A cycle carrying an unresolvable change copies no audit
+//!   events and returns the incoming watermark unchanged, so the next cycle
+//!   re-reads the same audit range. Advancing the watermark past work that was
+//!   not done is what would make a missed row permanent: the destination would
+//!   record that it had replicated a deletion it never received, and only a
+//!   forced full snapshot could repair it.
 //!
 //! FAIL-LOUD CONTRACT:
 //!   A StorageError encountered during a dirty-row read aborts the entire sync
@@ -34,6 +83,14 @@
 //!   via `try_recv` in a non-blocking loop before each sync run, accumulating
 //!   all pending changes into the dirty-set. This is the synchronous equivalent
 //!   of Swift's `for await change in stream { ... }` task.
+//!
+//!   SURFACING AN INCOMPLETE CYCLE: the Swift port logs the refusal through
+//!   OSLog as well as returning it. This crate has no logging framework — its
+//!   only observability seam is Intellectus `report!`, a metrics sampler gated
+//!   on `is_enabled()`, and a counter nobody consumes is not evidence. So on
+//!   this port the returned `IncrementalSyncOutcome` IS the surface: it names
+//!   the unresolved tables, and the held-back watermark inside it makes the
+//!   refusal impossible to lose even for a caller that reads only the cursor.
 
 use crate::audit_log::AuditEvent;
 use crate::blob_store::BlobKey;
@@ -125,6 +182,36 @@ impl DirtyKey {
     }
 }
 
+// MARK: - DirtyDrain
+
+/// One atomic drain of the dirty-set, at all three resolutions the session
+/// tracks. Draining is all-or-nothing: a caller can never take the keys and
+/// leave the table-granularity dirt behind, which is what would let a
+/// value-less change fall out of the cycle unnoticed.
+#[derive(Debug, Clone, Default)]
+pub struct DirtyDrain {
+    /// Rows the session could name, because their change carried its
+    /// primary-key values.
+    pub keys: Vec<DirtyKey>,
+    /// Tables carrying at least one change the session could NOT name, but
+    /// CAN re-scan. Each is re-read in full and reconciled against the
+    /// destination during the sync run.
+    pub rescan_tables: Vec<String>,
+    /// Tables carrying a change the session can neither name nor re-scan,
+    /// because the table declares no primary key and reconciliation has no
+    /// column set to compare on. A cycle carrying any of these is INCOMPLETE.
+    pub unresolvable_tables: Vec<String>,
+}
+
+impl DirtyDrain {
+    /// True only when the session observed nothing at all. Changes the session
+    /// could not key are NOT nothing, and must never collapse into this signal
+    /// — that collapse is the whole of the silence.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.rescan_tables.is_empty() && self.unresolvable_tables.is_empty()
+    }
+}
+
 // MARK: - DirtySet
 
 /// Thread-safe accumulator for dirty (table, pk) pairs.
@@ -133,6 +220,12 @@ impl DirtyKey {
 /// before each sync run via `drain`.
 pub struct DirtySet {
     entries: Mutex<BTreeSet<DirtyKey>>,
+    /// Tables with an observed change whose row could not be identified.
+    /// See `DirtyDrain::rescan_tables`.
+    rescan_tables: Mutex<BTreeSet<String>>,
+    /// Tables with an observed change that can be neither identified nor
+    /// reconciled. See `DirtyDrain::unresolvable_tables`.
+    unresolvable_tables: Mutex<BTreeSet<String>>,
     /// Primary-key column names per table, from the schema at session start.
     primary_keys: BTreeMap<String, Vec<String>>,
 }
@@ -146,46 +239,102 @@ impl DirtySet {
             .collect();
         DirtySet {
             entries: Mutex::new(BTreeSet::new()),
+            rescan_tables: Mutex::new(BTreeSet::new()),
+            unresolvable_tables: Mutex::new(BTreeSet::new()),
             primary_keys,
         }
     }
 
     /// Record a change for replication.
     ///
-    /// Inserts, updates, and deletes all add the same DirtyKey — there is no
-    /// tombstone sentinel type. At sync time the re-scan determines intent:
-    /// if the source row is absent, the sync path issues a delete on the
-    /// destination for the given PK.
+    /// BINDING INVARIANT: a change this method observes is never treated as no
+    /// change. It resolves to one of three outcomes, and the two fallbacks are
+    /// the reason updates and deletes reach the replica at all:
     ///
-    /// If the TableChange's values dict does not contain all PK columns,
-    /// the change is silently skipped (defensive; a conforming backend always
-    /// emits the PK columns).
+    /// 1. **Row dirt.** The change carried every primary-key column, so the
+    ///    exact row is recorded. Inserts, updates, and deletes all add the same
+    ///    DirtyKey — there is no tombstone sentinel type. At sync time the
+    ///    re-scan determines intent: absent in the source means delete at the
+    ///    destination, present means upsert.
+    /// 2. **Table dirt.** `values` is `None`, or present but missing a
+    ///    primary-key column, so the row cannot be named. The TABLE is recorded
+    ///    for a whole-table re-scan instead. This is the path every predicate
+    ///    `update` and `delete` on a durable backend takes: SQLite emits
+    ///    `values: None` for both verbs, and PostgreSQL emits neither `values`
+    ///    nor `row_key`. Dropping them here would silently discard every update
+    ///    and delete on a durable backend — expunge, tombstoning, withdrawal,
+    ///    and erasure included — so they are kept.
+    /// 3. **Unresolvable.** The table declares no primary key, so there is no
+    ///    column set to reconcile source against destination on. Recorded as
+    ///    unresolvable, which holds the audit watermark back for the cycle
+    ///    rather than letting it advance past work that was not done.
+    ///
+    /// A change for a table absent from this session's schema is still ignored:
+    /// that table is not ours to replicate, which is a scope judgement, not a
+    /// failure to resolve.
     pub fn accumulate(&self, change: &TableChange) {
         let pk_cols = match self.primary_keys.get(&change.table) {
             Some(cols) => cols,
-            None => return, // table not in schema, skip
+            None => return, // not our table to replicate
         };
+        if pk_cols.is_empty() {
+            // No declared primary key: neither naming nor reconciliation is
+            // possible. Surface it rather than swallowing it.
+            self.unresolvable_tables
+                .lock()
+                .unwrap()
+                .insert(change.table.clone());
+            return;
+        }
+        // TableChange.values carries the full row on insert/upsert; the durable
+        // backends leave it None on predicate update and delete.
         let values = match &change.values {
             Some(v) => v,
-            None => return, // no values, cannot extract PK
+            None => {
+                self.rescan_tables
+                    .lock()
+                    .unwrap()
+                    .insert(change.table.clone());
+                return;
+            }
         };
         let mut pk_values: BTreeMap<String, TypedValue> = BTreeMap::new();
         for col in pk_cols {
             match values.get(col) {
-                Some(v) => { pk_values.insert(col.clone(), v.clone()); }
-                None => return, // PK column missing, skip
+                Some(v) => {
+                    pk_values.insert(col.clone(), v.clone());
+                }
+                None => {
+                    // Values present but not carrying the full key — same
+                    // remedy as no values at all: the row is unnameable, the
+                    // table is not.
+                    self.rescan_tables
+                        .lock()
+                        .unwrap()
+                        .insert(change.table.clone());
+                    return;
+                }
             }
         }
         let key = DirtyKey::new(change.table.clone(), pk_values);
         self.entries.lock().unwrap().insert(key);
     }
 
-    /// Drain all accumulated dirty keys sorted for deterministic ordering.
-    /// The dirty-set is cleared atomically.
-    pub fn drain(&self) -> Vec<DirtyKey> {
-        let mut guard = self.entries.lock().unwrap();
-        let drained: Vec<DirtyKey> = guard.iter().cloned().collect();
-        guard.clear();
+    /// Drain everything accumulated since the last drain, sorted for
+    /// deterministic sync ordering. All three sets are cleared atomically —
+    /// see `DirtyDrain`.
+    pub fn drain(&self) -> DirtyDrain {
+        let mut entries = self.entries.lock().unwrap();
+        let mut rescan = self.rescan_tables.lock().unwrap();
+        let mut unresolvable = self.unresolvable_tables.lock().unwrap();
+        let drained = DirtyDrain {
+            keys: entries.iter().cloned().collect(),
+            rescan_tables: rescan.iter().cloned().collect(),
+            unresolvable_tables: unresolvable.iter().cloned().collect(),
+        };
+        entries.clear();
+        rescan.clear();
+        unresolvable.clear();
         drained
     }
 
@@ -199,16 +348,50 @@ impl DirtySet {
     /// is a no-op when the element already exists, so newer dirt for the same row
     /// is never overwritten by a stale restored key. This is correct: the newer
     /// event subsumes the restored one, and retrying with it is safe and sufficient.
-    pub fn restore(&self, keys: &[DirtyKey]) {
-        let mut guard = self.entries.lock().unwrap();
-        for key in keys {
-            guard.insert(key.clone());
+    ///
+    /// All three resolutions are restored together. Restoring only the keys
+    /// would drop the table-granularity dirt on a failed run, which is the same
+    /// silent loss this session exists to prevent — just moved to the retry path.
+    ///
+    /// Locks are taken in the same order as `drain` (entries, rescan,
+    /// unresolvable); nothing in this type takes them in any other order.
+    pub fn restore(&self, drained: &DirtyDrain) {
+        let mut entries = self.entries.lock().unwrap();
+        let mut rescan = self.rescan_tables.lock().unwrap();
+        let mut unresolvable = self.unresolvable_tables.lock().unwrap();
+        for key in &drained.keys {
+            entries.insert(key.clone());
+        }
+        for table in &drained.rescan_tables {
+            rescan.insert(table.clone());
+        }
+        for table in &drained.unresolvable_tables {
+            unresolvable.insert(table.clone());
         }
     }
 
-    /// Current count — for tests.
+    /// Count of individually-named dirty rows — for tests. Table-granularity
+    /// dirt is deliberately NOT counted here: one entry stands for an unknown
+    /// number of rows, so folding it into this number would make the count mean
+    /// two different things. Use `pending_rescan_tables` for that.
     pub fn count(&self) -> usize {
         self.entries.lock().unwrap().len()
+    }
+
+    /// Tables awaiting a whole-table re-scan, sorted — for tests.
+    pub fn pending_rescan_tables(&self) -> Vec<String> {
+        self.rescan_tables.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Tables carrying a change that can be neither named nor reconciled,
+    /// sorted — for tests.
+    pub fn pending_unresolvable_tables(&self) -> Vec<String> {
+        self.unresolvable_tables
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -293,6 +476,56 @@ impl BlobDirtyAccumulator {
     pub(crate) fn inject_nil_bytes_put(&self, key: BlobKey) {
         let mut guard = self.entries.lock().unwrap();
         guard.insert(key, BlobDirtyEntry { event: BlobEvent::Put, bytes: None });
+    }
+}
+
+// MARK: - IncrementalSyncOutcome
+
+/// The result of one incremental sync cycle: the cursor to persist, plus what
+/// the cycle had to do to resolve what it observed.
+///
+/// The cursor alone cannot carry this. `ReplicationCursor` is the DURABLE
+/// watermark a caller stores and passes back on the next run; cycle resolution
+/// is a report about a single run and has no meaning once persisted. Keeping
+/// them apart also means a caller that only wants the watermark keeps reading
+/// `.cursor` and is unaffected by anything here.
+///
+/// A caller that ignores `unresolved_tables` still cannot lose data silently:
+/// the watermark in `cursor` did not advance for an incomplete cycle, so the
+/// next run re-reads the same audit range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncrementalSyncOutcome {
+    /// The watermark to persist and pass to the next `sync` call.
+    ///
+    /// For an incomplete cycle this carries the INCOMING watermark unchanged —
+    /// see `unresolved_tables`.
+    pub cursor: ReplicationCursor,
+
+    /// Tables this cycle re-scanned in full because it observed a change it
+    /// could not attribute to a row (sorted).
+    ///
+    /// Non-empty is normal, not an error: every predicate update and delete on
+    /// a durable backend arrives without values and lands here. It is reported
+    /// because a whole-table re-scan costs O(table), not O(dirty rows), and a
+    /// caller watching replication cost needs to see when that happens.
+    pub rescanned_tables: Vec<String>,
+
+    /// Tables carrying a change this cycle could resolve at NO granularity —
+    /// the table declares no primary key, so it can be neither named nor
+    /// reconciled (sorted).
+    ///
+    /// Non-empty means the cycle is INCOMPLETE: no audit events were copied and
+    /// `cursor.hlc_watermark` is the incoming watermark, unmoved. Row work that
+    /// COULD be resolved was still propagated — an unresolvable change withholds
+    /// the watermark, it does not veto the rest of the cycle.
+    pub unresolved_tables: Vec<String>,
+}
+
+impl IncrementalSyncOutcome {
+    /// Whether every observed change was resolved. `false` means the audit
+    /// watermark deliberately did not advance.
+    pub fn is_complete(&self) -> bool {
+        self.unresolved_tables.is_empty()
     }
 }
 
@@ -423,18 +656,33 @@ impl IncrementalReplicationSession {
     ///
     /// AUDIT EVENTS: only events with HLC strictly after `from_cursor.hlc_watermark`
     /// are copied (`audit_log.iterate(after=watermark)` — exclusive lower bound).
+    /// An INCOMPLETE cycle copies none at all — see the watermark contract below.
+    ///
+    /// TABLE-GRANULARITY DIRT: a change that arrived without primary-key values
+    /// marks its whole table for re-scan (see `DirtySet::accumulate`). Every
+    /// source row in such a table is upserted, and every destination row whose
+    /// primary key is absent from the source is deleted. That deletion pass is
+    /// what carries a value-less delete — an expunge, a tombstone, an erasure —
+    /// across to the replica.
+    ///
+    /// WATERMARK: advances only for a cycle that resolved every change it
+    /// observed. If any observed change was unresolvable, no audit events are
+    /// copied and the returned cursor carries `from_cursor`'s watermark
+    /// unchanged, so the next cycle re-reads the same range. Row work that
+    /// could be resolved still propagates.
     ///
     /// - `source`: Source storage to read dirty rows from.
     /// - `destination`: Storage to write dirty rows to.
     /// - `from_cursor`: Watermark from the previous sync run. Pass a zero-watermark
     ///   cursor for the first incremental sync.
-    /// - Returns: Updated `ReplicationCursor` with new watermark.
+    /// - Returns: An `IncrementalSyncOutcome` carrying the cursor to persist and
+    ///   this cycle's resolution report.
     pub fn sync(
         &self,
         source: &dyn Storage,
         destination: &dyn Storage,
         from_cursor: ReplicationCursor,
-    ) -> Result<ReplicationCursor, ReplicationError> {
+    ) -> Result<IncrementalSyncOutcome, ReplicationError> {
         // Schema gate: both backends must be at the same per-kit schema version.
         let src_version = source
             .current_schema_version_for(&self.schema.kit_id)
@@ -458,13 +706,26 @@ impl IncrementalReplicationSession {
         // RETRY-PRESERVATION: we capture the drained keys before any fallible work.
         // Both dirty_keys and dirty_blobs are restored on every error path so the
         // next retry re-attempts the same rows and blobs.
-        let dirty_keys = self.dirty_set.drain();
+        let drained = self.dirty_set.drain();
+        let dirty_keys = &drained.keys;
         let dirty_blobs = self.blob_dirty.drain();
 
-        if dirty_keys.is_empty() && dirty_blobs.is_empty() {
-            // Nothing dirty — return the cursor unchanged.
-            return Ok(from_cursor);
+        // The early return fires ONLY when nothing at all was observed. It may
+        // never stand in for "changes were observed but could not be keyed":
+        // that equivalence is what would make a deletions-only cycle
+        // indistinguishable from an idle one.
+        if drained.is_empty() && dirty_blobs.is_empty() {
+            return Ok(IncrementalSyncOutcome {
+                cursor: from_cursor,
+                rescanned_tables: Vec::new(),
+                unresolved_tables: Vec::new(),
+            });
         }
+
+        // A cycle is complete when every observed change resolved to either a
+        // named row or a re-scannable table. Unresolvable changes withhold the
+        // watermark (see the watermark contract on the type).
+        let cycle_resolved = drained.unresolvable_tables.is_empty();
 
         // Build a per-table index for PK columns and generated column names.
         let table_index: BTreeMap<&str, &crate::schema::TableDeclaration> = self
@@ -476,9 +737,17 @@ impl IncrementalReplicationSession {
 
         // Snapshot dirty rows from source BEFORE opening the destination transaction.
         // On error: restore drained keys (and blobs) before propagating so retry sees them.
-        let payload = self.snapshot_dirty_rows(source, &dirty_keys, &table_index, &from_cursor)
+        let payload = self
+            .snapshot_dirty_rows(
+                source,
+                dirty_keys,
+                &drained.rescan_tables,
+                &table_index,
+                &from_cursor,
+                cycle_resolved,
+            )
             .map_err(|e| {
-                self.dirty_set.restore(&dirty_keys);
+                self.dirty_set.restore(&drained);
                 self.blob_dirty.restore(&dirty_blobs);
                 e
             })?;
@@ -505,7 +774,76 @@ impl IncrementalReplicationSession {
                 let audit_log = txn.audit_log();
                 let blob_store = txn.blob_store();
 
-                // 1. Row upserts and deletes.
+                // 1. Reconcile every wholly-dirty table: delete destination
+                // rows whose primary key is absent from the source. This is the
+                // half a value-less change cannot express — which rows went
+                // away. Without it an expunge, tombstone, or erasure would leave
+                // the removed content live at the destination.
+                //
+                // Same rule the full-snapshot path applies to blobs
+                // (SECFIX-WS2-PK F5): keys the destination holds and the source
+                // does not are divergence.
+                //
+                // ORDER IS DELIBERATE: this pass runs BEFORE the upserts in
+                // step 2.
+                //
+                // Both sides are encoded through DirtyKey, but they are READ
+                // through different decoders — the source via
+                // `source.row_store()`, the destination via `txn.row_store()` —
+                // and those coincide only when both ends are the same backend
+                // type. The decoders in this repo do agree for the primary-key
+                // column types the tests cover (verified SQLite→InMemory,
+                // §10.C8), so this ordering is not fixing an observed bug. It
+                // removes the DEPENDENCE on that agreement, which nothing
+                // enforces.
+                //
+                // Why the order decides the blast radius: if a future backend
+                // pair ever decoded a PK value into a different TypedValue
+                // variant, every destination row would look absent from the
+                // source. Deleting first makes that delete-then-reinsert churn
+                // and the destination still ends up matching the source exactly.
+                // Deleting AFTER the upserts would instead delete the rows just
+                // written and leave the table empty. Correct under both
+                // agreement and divergence is worth more than correct under
+                // agreement alone.
+                for rescan in &payload_ref.table_rescans {
+                    let destination_rows =
+                        row_store.query(&rescan.table, None, &[], None, None)?;
+                    for row in &destination_rows {
+                        let pk_values = extract_pk_values(&row.values, &rescan.primary_key)
+                            .ok_or_else(|| {
+                                // A destination row missing a declared PK column
+                                // cannot be compared, and guessing would risk
+                                // deleting a row the source still holds. Fail
+                                // loud (§15).
+                                crate::error::StorageError::BackendError {
+                                    underlying: format!(
+                                        "incremental re-scan of '{}': destination row is missing \
+                                         a primary-key column; cannot reconcile against the source",
+                                        rescan.table
+                                    ),
+                                }
+                            })?;
+                        let encoded =
+                            DirtyKey::new(rescan.table.clone(), pk_values.clone()).pk_encoded;
+                        if rescan.source_pk_encodings.contains(&encoded) {
+                            continue;
+                        }
+                        // Note: on an append-only table the backend rejects
+                        // DELETE by contract and this fails. That is unreachable
+                        // in practice — an append-only table also rejects the
+                        // UPDATE and DELETE that are the only sources of
+                        // value-less changes — and a loud failure is the right
+                        // answer if it ever is reached. A silent skip here would
+                        // be exactly the quiet exemption this session exists to
+                        // remove.
+                        let predicate = pk_predicate(&pk_values, &rescan.table);
+                        row_store.delete(&rescan.table, &predicate)?;
+                        *deletes_written_ref += 1;
+                    }
+                }
+
+                // 2. Row upserts and per-key deletes.
                 for op in &payload_ref.row_ops {
                     match op {
                         RowOp::Upsert { table, primary_key, values } => {
@@ -531,7 +869,7 @@ impl IncrementalReplicationSession {
                     }
                 }
 
-                // 2. Audit events after the previous watermark.
+                // 3. Audit events after the previous watermark.
                 if !payload_ref.audit_events.is_empty() {
                     audit_log.append_batch(payload_ref.audit_events.clone())?;
                     *audit_events_written_ref = payload_ref.audit_events.len();
@@ -546,7 +884,7 @@ impl IncrementalReplicationSession {
                     }
                 }
 
-                // 3. Blob ops from the BlobDirtyAccumulator.
+                // 4. Blob ops from the BlobDirtyAccumulator.
                 // Put: write the captured bytes to the destination (fail-loud if bytes
                 // are None — that would be a programmer error, not a runtime condition,
                 // since accumulate always stores bytes for Put events).
@@ -580,16 +918,29 @@ impl IncrementalReplicationSession {
             .map_err(|e| {
                 // Transaction rolled back — restore drained keys AND blob ops so
                 // retry re-attempts all of them.
-                self.dirty_set.restore(&dirty_keys);
+                self.dirty_set.restore(&drained);
                 self.blob_dirty.restore(&dirty_blobs);
                 ReplicationError::from(e)
             })?;
 
-        Ok(ReplicationCursor {
-            hlc_watermark: max_hlc,
-            rows_written: rows_written + deletes_written,
-            audit_events_written,
-            blobs_written,
+        // WATERMARK GATE: an incomplete cycle keeps the incoming watermark.
+        // `max_hlc` starts at `from_cursor.hlc_watermark` and only ever grows,
+        // so pinning it back here is the whole of the gate.
+        let watermark = if cycle_resolved {
+            max_hlc
+        } else {
+            from_cursor.hlc_watermark
+        };
+
+        Ok(IncrementalSyncOutcome {
+            cursor: ReplicationCursor {
+                hlc_watermark: watermark,
+                rows_written: rows_written + deletes_written,
+                audit_events_written,
+                blobs_written,
+            },
+            rescanned_tables: drained.rescan_tables.clone(),
+            unresolved_tables: drained.unresolvable_tables.clone(),
         })
     }
 
@@ -597,18 +948,93 @@ impl IncrementalReplicationSession {
 
     /// Snapshot dirty rows from source before opening the destination transaction.
     /// Errors during read surface immediately (fail-loud) — no row is skipped.
+    ///
+    /// - `rescan_tables`: Tables to read in FULL because a change on them could
+    ///   not be attributed to a row. Every source row is staged for upsert and
+    ///   the table's source primary-key set is captured so the caller can delete
+    ///   destination rows the source no longer has.
+    /// - `copy_audit_events`: `false` for an incomplete cycle. Audit events and
+    ///   the watermark move together: copying events for a cycle whose watermark
+    ///   is held back would re-copy the same events on the next run, so an
+    ///   incomplete cycle copies none.
     fn snapshot_dirty_rows(
         &self,
         source: &dyn Storage,
         dirty_keys: &[DirtyKey],
+        rescan_tables: &[String],
         table_index: &BTreeMap<&str, &crate::schema::TableDeclaration>,
         from_cursor: &ReplicationCursor,
+        copy_audit_events: bool,
     ) -> Result<IncrementalPayload, ReplicationError> {
         let row_store = source.row_store();
         let audit_log = source.audit_log();
         let mut row_ops: Vec<RowOp> = Vec::new();
+        let mut table_rescans: Vec<TableRescan> = Vec::new();
+
+        // Whole-table re-scan first, so per-key work on the same table can be
+        // skipped below: a table being read in full already covers every row in
+        // it, and re-querying those rows one at a time would be pure waste.
+        let rescan_set: BTreeSet<&str> = rescan_tables.iter().map(|t| t.as_str()).collect();
+        for table in rescan_tables {
+            let table_decl = match table_index.get(table.as_str()) {
+                Some(t) => t,
+                None => continue, // Table left the schema; nothing to reconcile against.
+            };
+            let generated_names: BTreeSet<String> = table_decl
+                .generated_columns
+                .iter()
+                .map(|g| g.name.clone())
+                .collect();
+
+            // Unbounded read: correctness first. A value-less change names no
+            // row, so the only sound lower bound on what to re-read is the whole
+            // table. This is why `IncrementalSyncOutcome::rescanned_tables`
+            // reports which tables paid that cost.
+            let source_rows = row_store
+                .query(table, None, &[], None, None)
+                .map_err(ReplicationError::from)?;
+
+            let mut source_pk_encodings: BTreeSet<String> = BTreeSet::new();
+            for row in &source_rows {
+                let pk_values = extract_pk_values(&row.values, &table_decl.primary_key)
+                    .ok_or_else(|| {
+                        // A source row missing a declared PK column would make
+                        // the reconciliation set incomplete, and an incomplete
+                        // source set deletes destination rows that should have
+                        // survived.
+                        ReplicationError::StorageFailure {
+                            detail: format!(
+                                "incremental re-scan of '{}': source row is missing a \
+                                 primary-key column; the re-scan set would be incomplete",
+                                table
+                            ),
+                        }
+                    })?;
+                source_pk_encodings
+                    .insert(DirtyKey::new(table.clone(), pk_values).pk_encoded);
+                let filtered: BTreeMap<String, TypedValue> = row
+                    .values
+                    .iter()
+                    .filter(|(k, _)| !generated_names.contains(*k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                row_ops.push(RowOp::Upsert {
+                    table: table.clone(),
+                    primary_key: table_decl.primary_key.clone(),
+                    values: filtered,
+                });
+            }
+            table_rescans.push(TableRescan {
+                table: table.clone(),
+                primary_key: table_decl.primary_key.clone(),
+                source_pk_encodings,
+            });
+        }
 
         for key in dirty_keys {
+            if rescan_set.contains(key.table.as_str()) {
+                continue; // Already covered by the whole-table re-scan above.
+            }
             let table_decl = match table_index.get(key.table.as_str()) {
                 Some(t) => t,
                 None => continue, // Table not in schema.
@@ -655,12 +1081,41 @@ impl IncrementalReplicationSession {
         // delivered in a previous sync run.
         // iterate(after) is an exclusive lower bound (HLC > watermark).
         // Pass the watermark directly; HLC is Copy.
-        let audit_events = audit_log
-            .iterate(from_cursor.hlc_watermark, None, usize::MAX)
-            .map_err(ReplicationError::from)?;
+        //
+        // An incomplete cycle copies none: its watermark stays where it was, so
+        // copying events now would append them again on the next run.
+        let audit_events = if copy_audit_events {
+            audit_log
+                .iterate(from_cursor.hlc_watermark, None, usize::MAX)
+                .map_err(ReplicationError::from)?
+        } else {
+            Vec::new()
+        };
 
-        Ok(IncrementalPayload { row_ops, audit_events })
+        Ok(IncrementalPayload {
+            row_ops,
+            table_rescans,
+            audit_events,
+        })
     }
+}
+
+// MARK: - Primary-key helper
+
+/// Pull the declared primary-key columns out of a row's values.
+///
+/// Returns `None` when any declared PK column is absent — the caller must treat
+/// that as a failure rather than reconciling on a partial key, since a partial
+/// key cannot distinguish two rows and would license deleting the wrong one.
+fn extract_pk_values(
+    values: &BTreeMap<String, TypedValue>,
+    columns: &[String],
+) -> Option<BTreeMap<String, TypedValue>> {
+    let mut out: BTreeMap<String, TypedValue> = BTreeMap::new();
+    for col in columns {
+        out.insert(col.clone(), values.get(col)?.clone());
+    }
+    Some(out)
 }
 
 // MARK: - Predicate builder
@@ -700,9 +1155,25 @@ enum RowOp {
     },
 }
 
-/// Payload holding dirty-row operations and new audit events.
+/// One wholly-dirty table: the source's complete primary-key set for it, so the
+/// destination can be reconciled against the source inside the sync transaction.
+///
+/// Only the ENCODED keys are carried, not the rows — the upserts are already in
+/// `IncrementalPayload::row_ops`, and all this pass needs is set membership.
+struct TableRescan {
+    table: String,
+    primary_key: Vec<String>,
+    /// `DirtyKey::pk_encoded` for every row present in the source at snapshot
+    /// time. A destination row whose encoding is absent from this set was
+    /// removed at the source and is deleted at the destination.
+    source_pk_encodings: BTreeSet<String>,
+}
+
+/// Payload holding dirty-row operations, whole-table reconciliations, and new
+/// audit events.
 struct IncrementalPayload {
     row_ops: Vec<RowOp>,
+    table_rescans: Vec<TableRescan>,
     audit_events: Vec<AuditEvent>,
 }
 
@@ -834,7 +1305,7 @@ mod incremental_replication_tests {
 
         // Incremental sync.
         let inc_cursor = session.sync(&source, &destination, full_cursor.clone())
-            .expect("incremental sync failed");
+            .expect("incremental sync failed").cursor;
         assert_eq!(inc_cursor.rows_written, 3, "Incremental sync should write only 3 dirty rows");
 
         // Destination must still have 100 rows.
@@ -892,7 +1363,7 @@ mod incremental_replication_tests {
 
         // Sync — re-scan finds no row → delete issued to destination.
         let del_cursor = session.sync(&source, &destination, full_cursor)
-            .expect("sync failed");
+            .expect("sync failed").cursor;
         assert_eq!(del_cursor.rows_written, 1, "Delete sync should record 1 operation");
 
         let dst_count = destination.row_store().count("items", None).expect("count");
@@ -936,7 +1407,7 @@ mod incremental_replication_tests {
         session2.drain_channels();
 
         let cursor2 = session2.sync(&source, &destination, full_cursor)
-            .expect("sync2 failed");
+            .expect("sync2 failed").cursor;
 
         assert_eq!(cursor2.rows_written, 1, "Second session should sync only the new row");
         assert_eq!(cursor2.audit_events_written, 1,
@@ -967,7 +1438,7 @@ mod incremental_replication_tests {
 
         // No writes → empty dirty-set (after drain_channels).
         let output_cursor = session.sync(&source, &destination, input_cursor.clone())
-            .expect("sync failed");
+            .expect("sync failed").cursor;
 
         assert_eq!(output_cursor.hlc_watermark, Some(hlc));
         assert_eq!(output_cursor.rows_written, 17);
@@ -1003,7 +1474,7 @@ mod incremental_replication_tests {
 
         let zero_cursor = ReplicationCursor { hlc_watermark: None, rows_written: 0, audit_events_written: 0, blobs_written: 0 };
         let cursor = session.sync(&source, &destination, zero_cursor)
-            .expect("sync failed");
+            .expect("sync failed").cursor;
         assert_eq!(cursor.rows_written, 2);
 
         let item_count = destination.row_store().count("items", None).expect("count items");
@@ -1052,7 +1523,7 @@ mod incremental_replication_tests {
         session.drain_channels();
 
         let cursor2 = session.sync(&source, &destination, full_cursor)
-            .expect("sync2 failed");
+            .expect("sync2 failed").cursor;
         assert_eq!(cursor2.audit_events_written, 1,
             "Incremental sync should deliver only the new audit event");
 
@@ -1134,7 +1605,7 @@ mod incremental_replication_tests {
         // path does). This verifies the restore mechanism without requiring a
         // concrete FailingStorage implementation.
         let drained = session.dirty_set.drain();
-        assert_eq!(drained.len(), 1, "Drain should return 1 key");
+        assert_eq!(drained.keys.len(), 1, "Drain should return 1 key");
         assert_eq!(session.dirty_set.count(), 0, "After drain, dirty-set must be empty");
 
         // Restore — simulates what sync does when it encounters an error.
@@ -1144,7 +1615,7 @@ mod incremental_replication_tests {
 
         // Now do a real sync — it should replicate the restored dirty key.
         let cursor = session.sync(&source, &destination, full_cursor)
-            .expect("retry sync failed");
+            .expect("retry sync failed").cursor;
         assert_eq!(cursor.rows_written, 1, "Retry sync must replicate the restored dirty row");
 
         // Verify the updated bitmap value arrived at destination.
@@ -1204,7 +1675,7 @@ mod incremental_replication_tests {
 
         // Drain (simulates sync draining before fallible work).
         let drained = session.dirty_set.drain();
-        assert_eq!(drained.len(), 1, "Drain must yield 1 key (rowA)");
+        assert_eq!(drained.keys.len(), 1, "Drain must yield 1 key (rowA)");
 
         // Accumulate rowB AFTER drain (simulates observer event during inflight sync).
         source.row_store()
@@ -1220,7 +1691,7 @@ mod incremental_replication_tests {
 
         // Sync must replicate both rows.
         let cursor = session.sync(&source, &destination, full_cursor)
-            .expect("sync failed");
+            .expect("sync failed").cursor;
         assert_eq!(cursor.rows_written, 2,
             "Sync must replicate both rowA (restored) and rowB (new dirty)");
 
@@ -1267,7 +1738,7 @@ mod incremental_replication_tests {
             hlc_watermark: None, rows_written: 0, audit_events_written: 0, blobs_written: 0
         };
         let cursor = session.sync(&source, &destination, zero_cursor)
-            .expect("incremental sync failed");
+            .expect("incremental sync failed").cursor;
         assert!(cursor.blobs_written >= 1,
             "Incremental sync must propagate the blob put");
 
@@ -1306,7 +1777,7 @@ mod incremental_replication_tests {
             hlc_watermark: None, rows_written: 0, audit_events_written: 0, blobs_written: 0
         };
         let cursor = session.sync(&source, &destination, zero_cursor)
-            .expect("sync failed");
+            .expect("sync failed").cursor;
         assert!(cursor.blobs_written >= 1,
             "Incremental sync must propagate the blob delete");
 
@@ -1356,7 +1827,7 @@ mod incremental_replication_tests {
             hlc_watermark: None, rows_written: 0, audit_events_written: 0, blobs_written: 0
         };
         let cursor = session.sync(&source, &destination, zero_cursor)
-            .expect("sync failed");
+            .expect("sync failed").cursor;
         assert!(cursor.blobs_written >= 1,
             "Incremental sync must propagate the blob put via real observer events");
 
@@ -1458,7 +1929,7 @@ mod incremental_replication_tests {
 
         // --- Retry sync: real blob must replicate. ---
         let retry_cursor = session.sync(&source, &destination, full_cursor)
-            .expect("retry sync must succeed after removing the poison entry");
+            .expect("retry sync must succeed after removing the poison entry").cursor;
         assert!(retry_cursor.blobs_written >= 1,
             "Retry must replicate the real blob that was drain-restored (got {})", retry_cursor.blobs_written);
         assert!(retry_cursor.rows_written >= 1,
@@ -1511,13 +1982,558 @@ mod incremental_replication_tests {
             hlc_watermark: None, rows_written: 0, audit_events_written: 0, blobs_written: 0
         };
         let cursor = session.sync(&source, &destination, zero_cursor)
-            .expect("retry sync failed");
+            .expect("retry sync failed").cursor;
         assert!(cursor.blobs_written >= 1, "Retry sync must replicate the blob");
 
         let actual = destination.blob_store().get(blob_key).expect("get")
             .expect("blob must be present after retry sync");
         assert_eq!(actual, blob_bytes,
             "Blob must be byte-identical at destination after retry sync");
+    }
+
+    // ── §10.C Value-less changes on a durable backend (MXE-IR) ────────────
+    //
+    // The whole §10.C block exercises the durable path, which is the one that
+    // was dark. Every test above this point runs on InMemoryStorage, which
+    // populates `TableChange.values` on all four verbs — so they passed while
+    // SQLite, which emits `values: None` for predicate update and delete, was
+    // dropping every update and delete on the floor.
+    //
+    // Codex finding 74e3b7f7e6288191ba31644e4fa4b43b.
+
+    /// A schema carrying one keyed table and one table with NO declared primary
+    /// key, for the unresolvable-cycle tests (§10.C6, §10.C7).
+    ///
+    /// An empty `primary_key` is legal — the DDL emitter guards with
+    /// `if !decl.primary_key.is_empty()` and simply omits the PRIMARY KEY clause
+    /// (rust/src/sqlite.rs:452). Such a table cannot be reconciled: there is no
+    /// column set on which to compare a source row against a destination row, so
+    /// a change the session cannot key on it is unresolvable at every
+    /// granularity.
+    fn pk_less_schema() -> SchemaDeclaration {
+        let mut schema = synthetic_schema();
+        schema.tables.push(TableDeclaration {
+            name: "keyless".into(),
+            columns: vec![
+                ColumnDeclaration { name: "label".into(), column_type: ColumnType::Text, nullable: false, default_value: None, role: None },
+                ColumnDeclaration { name: "counter".into(), column_type: ColumnType::Int, nullable: false, default_value: None, role: None },
+            ],
+            primary_key: vec![],
+            unique_constraints: vec![],
+            generated_columns: vec![],
+            append_only: false,
+            hashable: false,
+        });
+        schema
+    }
+
+    /// Open a durable SQLite estate in a fresh temp file.
+    ///
+    /// Uses the public `SqliteStorage` surface only — this mission does not
+    /// modify `sqlite.rs`, which is reserved by TASK-MXE-2026-0220 / 0225.
+    fn make_sqlite_storage(schema: &SchemaDeclaration) -> crate::sqlite::SqliteStorage {
+        let path = std::env::temp_dir().join(format!("pk_mxe_ir_{}.sqlite", Uuid::new_v4()));
+        let config = crate::storage::EstateConfiguration::new(
+            Uuid::new_v4(),
+            crate::storage::BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = crate::sqlite::SqliteStorage::new(config).expect("open sqlite storage");
+        storage.open(schema).expect("open schema");
+        storage
+    }
+
+    /// §10.C1 — An update through `row_store.update` on SQLite reaches the
+    /// destination.
+    ///
+    /// REGRESSION TEST: fails against pre-fix code. `sqlite.rs` update emits
+    /// `values: None`, the old `DirtySet::accumulate` returned without recording
+    /// anything, the dirty set came back empty, and `sync` took the early
+    /// return — reporting success having replicated nothing.
+    #[test]
+    fn update_through_row_store_propagates_on_sqlite() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        let row_id = Uuid::new_v4();
+        source.row_store()
+            .insert("items", item_row(row_id, 0b0001))
+            .expect("insert");
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+        assert_eq!(full_cursor.rows_written, 1);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Predicate update — the verb that emits no values on this backend.
+        let mut set_values = BTreeMap::new();
+        set_values.insert("adjective_bitmap".to_string(), TypedValue::Bitmap(0b1111));
+        let predicate =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(row_id));
+        let updated = source.row_store()
+            .update("items", set_values, &predicate)
+            .expect("update");
+        assert_eq!(updated, 1, "Source update must affect exactly one row");
+
+        session.drain_channels();
+        assert_eq!(
+            session.dirty_set.pending_rescan_tables(),
+            vec!["items".to_string()],
+            "A value-less update must mark its table for re-scan"
+        );
+        assert_eq!(
+            session.dirty_set.count(), 0,
+            "No row can be named from a value-less change"
+        );
+
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert_eq!(outcome.rescanned_tables, vec!["items".to_string()]);
+        assert!(outcome.is_complete(), "Nothing here is unresolvable");
+
+        let rows = destination.row_store()
+            .query("items", Some(&predicate), &[], None, None)
+            .expect("query");
+        assert_eq!(rows.len(), 1, "Destination must still hold the row");
+        assert_eq!(
+            rows[0].values.get("adjective_bitmap"),
+            Some(&TypedValue::Bitmap(0b1111)),
+            "Destination must carry the UPDATED value, not the pre-update one"
+        );
+    }
+
+    /// §10.C2 — A delete through `row_store.delete` on SQLite removes the
+    /// destination row.
+    ///
+    /// REGRESSION TEST: fails against pre-fix code for the same reason as
+    /// §10.C1. This is the confidentiality case in its simplest form — the
+    /// replica kept content the source had removed.
+    #[test]
+    fn delete_through_row_store_propagates_on_sqlite() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        let doomed_id = Uuid::new_v4();
+        let survivor_id = Uuid::new_v4();
+        for id in [doomed_id, survivor_id] {
+            source.row_store().insert("items", item_row(id, 0b0101)).expect("insert");
+        }
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+        assert_eq!(destination.row_store().count("items", None).expect("count"), 2);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        let doomed_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(doomed_id));
+        source.row_store().delete("items", &doomed_pred).expect("delete");
+
+        session.drain_channels();
+        assert_eq!(
+            session.dirty_set.pending_rescan_tables(),
+            vec!["items".to_string()],
+            "A value-less delete must mark its table for re-scan"
+        );
+
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert!(outcome.is_complete());
+
+        assert!(
+            destination.row_store().query("items", Some(&doomed_pred), &[], None, None)
+                .expect("query doomed").is_empty(),
+            "The deleted row must be gone from the destination"
+        );
+        // The reconciliation must not overreach: a row the source still has is
+        // not collateral damage.
+        let survivor_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(survivor_id));
+        assert_eq!(
+            destination.row_store().query("items", Some(&survivor_pred), &[], None, None)
+                .expect("query survivor").len(),
+            1,
+            "The row that survived at the source must survive at the destination"
+        );
+        assert_eq!(destination.row_store().count("items", None).expect("count"), 1);
+    }
+
+    /// §10.C3 — TOMBSTONE-THEN-REPLICATE, the confidentiality case stated
+    /// directly rather than inferred from the generic update test.
+    ///
+    /// A withdrawal marks the row rather than removing it: `tombstoned_at` goes
+    /// from null to a timestamp through a predicate update, which is exactly the
+    /// value-less verb. If that update does not travel, the destination keeps
+    /// presenting a withdrawn row as live — and because a later insert would
+    /// advance the destination's audit watermark anyway, the system would record
+    /// that it had replicated a withdrawal it never sent.
+    ///
+    /// Both shapes are asserted: the withdrawn row carries its tombstone at the
+    /// destination, and an expunged (hard-deleted) row is absent entirely.
+    #[test]
+    fn tombstoned_and_expunged_rows_are_not_live_at_destination_after_one_cycle() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        let withdrawn_id = Uuid::new_v4();
+        let expunged_id = Uuid::new_v4();
+        let live_id = Uuid::new_v4();
+        for id in [withdrawn_id, expunged_id, live_id] {
+            source.row_store().insert("items", item_row(id, 0b0101)).expect("insert");
+        }
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+
+        let withdrawn_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(withdrawn_id));
+
+        // Baseline: the destination shows the row as live (no tombstone).
+        let baseline = destination.row_store()
+            .query("items", Some(&withdrawn_pred), &[], None, None)
+            .expect("baseline query");
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(
+            baseline[0].values.get("tombstoned_at"),
+            Some(&TypedValue::Null),
+            "Before the withdrawal the destination copy must be live"
+        );
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Withdrawal: tombstone the row at the source.
+        let mut tombstone_values = BTreeMap::new();
+        tombstone_values.insert(
+            "tombstoned_at".to_string(),
+            TypedValue::Timestamp(1_800_000_000),
+        );
+        source.row_store()
+            .update("items", tombstone_values, &withdrawn_pred)
+            .expect("tombstone update");
+        // Expunge: remove the row at the source outright.
+        let expunged_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(expunged_id));
+        source.row_store().delete("items", &expunged_pred).expect("expunge delete");
+
+        session.drain_channels();
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert!(outcome.is_complete(), "Both changes are resolvable by re-scan");
+
+        // The withdrawn row must carry its tombstone at the destination, so a
+        // tombstone-honouring read no longer returns it as live.
+        let withdrawn_rows = destination.row_store()
+            .query("items", Some(&withdrawn_pred), &[], None, None)
+            .expect("query withdrawn");
+        assert_eq!(withdrawn_rows.len(), 1);
+        assert_ne!(
+            withdrawn_rows[0].values.get("tombstoned_at"),
+            Some(&TypedValue::Null),
+            "The destination must not still present a withdrawn row as live"
+        );
+
+        // The expunged row must be absent outright.
+        assert!(
+            destination.row_store().query("items", Some(&expunged_pred), &[], None, None)
+                .expect("query expunged").is_empty(),
+            "An expunged row must not be readable at the destination"
+        );
+
+        // The untouched row is unaffected.
+        let live_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(live_id));
+        let live_rows = destination.row_store()
+            .query("items", Some(&live_pred), &[], None, None)
+            .expect("query live");
+        assert_eq!(live_rows.len(), 1, "An untouched row must survive the reconciliation");
+        assert_eq!(live_rows[0].values.get("tombstoned_at"), Some(&TypedValue::Null));
+    }
+
+    /// §10.C4 — A cycle whose only activity was deletions does not report as a
+    /// no-op.
+    ///
+    /// The empty-dirty-set early return is what made this silent: a deletions-
+    /// only cycle returned `from_cursor` verbatim, indistinguishable from an idle
+    /// cycle. The cycle must now show its work.
+    #[test]
+    fn deletions_only_cycle_is_not_reported_as_a_no_op() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_sqlite_storage(&schema);
+
+        for _ in 0..3 {
+            source.row_store()
+                .insert("items", item_row(Uuid::new_v4(), 0b0101))
+                .expect("insert");
+        }
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Deletions and nothing else.
+        let deleted = source.row_store()
+            .delete("items", &StoragePredicate::IsTrue)
+            .expect("delete all");
+        assert_eq!(deleted, 3);
+
+        session.drain_channels();
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+
+        assert!(
+            !outcome.rescanned_tables.is_empty(),
+            "A deletions-only cycle must report the work it did, not look idle"
+        );
+        assert_eq!(
+            outcome.cursor.rows_written, 3,
+            "All three deletions must be counted, got {}",
+            outcome.cursor.rows_written
+        );
+        assert_eq!(
+            destination.row_store().count("items", None).expect("count"), 0,
+            "Destination must be emptied"
+        );
+    }
+
+    /// §10.C5 — A change shaped like the PostgreSQL backend's predicate update
+    /// and delete — no values AND no row_key — still resolves.
+    ///
+    /// The live-server legs of the PostgreSQL suite are gated on
+    /// PERSISTENCEKIT_PG_URL and skip when it is unset, so they cannot establish
+    /// that this shape resolves. This test feeds the exact emission shape
+    /// (`postgres.rs` predicate update `values: None`, `row_key: None`) through
+    /// the session on a backend that is always present, so the code path
+    /// PostgreSQL takes is covered on every run.
+    #[test]
+    fn postgres_shaped_change_without_values_or_row_key_resolves() {
+        let schema = synthetic_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        let row_id = Uuid::new_v4();
+        source.row_store()
+            .upsert("items", item_row(row_id, 0b0001), &["id".to_string()])
+            .expect("upsert");
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // Mutate the source, then hand the session the PostgreSQL-shaped change
+        // rather than the InMemory one (InMemory populates values, which would
+        // exercise the row-dirt path instead of the one under test).
+        let predicate =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(row_id));
+        let mut set_values = BTreeMap::new();
+        set_values.insert("adjective_bitmap".to_string(), TypedValue::Bitmap(0b1010));
+        source.row_store()
+            .update("items", set_values, &predicate)
+            .expect("update");
+
+        session.dirty_set.accumulate(&TableChange {
+            table: "items".into(),
+            event: StorageEvent::Update,
+            row_key: None,
+            values: None,
+            hlc: None,
+            origin: crate::observer::ChangeOrigin::Local,
+            changed_columns: None,
+        });
+
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert_eq!(outcome.rescanned_tables, vec!["items".to_string()]);
+
+        let rows = destination.row_store()
+            .query("items", Some(&predicate), &[], None, None)
+            .expect("query");
+        assert_eq!(
+            rows[0].values.get("adjective_bitmap"),
+            Some(&TypedValue::Bitmap(0b1010)),
+            "A change with neither values nor row_key must still carry the update across"
+        );
+    }
+
+    /// §10.C6 — The audit watermark does not advance past an unresolved cycle.
+    ///
+    /// A table with no declared primary key can be neither named nor
+    /// reconciled. The cycle must refuse it out loud: report it, copy no audit
+    /// events, and leave the watermark where it was so the next cycle re-reads
+    /// the same range. Advancing it is what would make the miss permanent.
+    #[test]
+    fn watermark_does_not_advance_past_an_unresolved_cycle() {
+        let schema = pk_less_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+        let estate_id = source.configuration().estate_id;
+
+        // An audit event that a resolved cycle WOULD carry the watermark to.
+        source.audit_log()
+            .append(tests_helpers::make_audit_event(estate_id, Uuid::new_v4(), 9_000))
+            .expect("append audit event");
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        let incoming = HLC::new(1_000, 0, 1);
+        let from_cursor = ReplicationCursor {
+            hlc_watermark: Some(incoming),
+            rows_written: 0,
+            audit_events_written: 0,
+            blobs_written: 0,
+        };
+
+        // A value-less change on the primary-key-less table: unresolvable at
+        // both granularities.
+        session.dirty_set.accumulate(&TableChange {
+            table: "keyless".into(),
+            event: StorageEvent::Update,
+            row_key: None,
+            values: None,
+            hlc: None,
+            origin: crate::observer::ChangeOrigin::Local,
+            changed_columns: None,
+        });
+        assert_eq!(
+            session.dirty_set.pending_unresolvable_tables(),
+            vec!["keyless".to_string()],
+            "A change on a PK-less table must be recorded as unresolvable, not dropped"
+        );
+
+        let outcome = session.sync(&source, &destination, from_cursor).expect("sync");
+
+        assert!(!outcome.is_complete(), "The cycle must report itself incomplete");
+        assert_eq!(
+            outcome.unresolved_tables,
+            vec!["keyless".to_string()],
+            "The refusal must name the table"
+        );
+        assert_eq!(
+            outcome.cursor.hlc_watermark,
+            Some(incoming),
+            "The watermark must be unmoved, got {:?}",
+            outcome.cursor.hlc_watermark
+        );
+        assert_eq!(
+            outcome.cursor.audit_events_written, 0,
+            "An incomplete cycle must copy no audit events — they move with the watermark"
+        );
+        assert!(
+            destination.audit_log().iterate(None, None, usize::MAX).expect("iterate").is_empty(),
+            "No audit event may reach the destination on an incomplete cycle"
+        );
+    }
+
+    /// §10.C8 — The re-scan reconciliation is safe across DIFFERENT backend
+    /// types: a durable SQLite source replicating into an InMemory destination.
+    ///
+    /// Every other test in this block runs SQLite→SQLite or InMemory→InMemory, so
+    /// both ends decode through the same reader and their primary-key encodings
+    /// necessarily agree. A cross-backend pair does not have that guarantee: the
+    /// source is read through `source.row_store()` and the destination through
+    /// `txn.row_store()`, and a value can round-trip into a different
+    /// `TypedValue` variant between the two.
+    ///
+    /// The two decoders DO agree for this pair and these column types — this test
+    /// passes with the reconcile pass on either side of the upserts, which was
+    /// checked explicitly. So it is not a guard on the pass ordering.
+    ///
+    /// What it is: the only test that reaches the re-scan reconciliation's
+    /// SUCCESS path across a cross-backend pair and asserts that a row absent
+    /// from the source is deleted at the destination. Other tests do pair
+    /// SQLite with InMemory (§10.4, §10.9, §10.10, §10.B4, §10.B5), but they
+    /// either abort mid-sync or exercise the blob path, so none of them covers
+    /// this. That was the gap.
+    #[test]
+    fn rescan_reconciliation_is_safe_across_different_backend_types() {
+        let schema = synthetic_schema();
+        let source = make_sqlite_storage(&schema);
+        let destination = make_storage(&schema); // InMemory — a DIFFERENT backend type
+
+        let kept_id = Uuid::new_v4();
+        let doomed_id = Uuid::new_v4();
+        source.row_store().insert("items", item_row(kept_id, 0b0001)).expect("insert kept");
+        source.row_store().insert("items", item_row(doomed_id, 0b0101)).expect("insert doomed");
+        let full_cursor = replication::flush(&source, &destination, &schema).expect("flush");
+        assert_eq!(destination.row_store().count("items", None).expect("count"), 2);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // One value-less update and one value-less delete, both on the durable
+        // source — so the table is re-scanned and reconciled against a
+        // destination of a different backend type.
+        let kept_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(kept_id));
+        let mut set_values = BTreeMap::new();
+        set_values.insert("adjective_bitmap".to_string(), TypedValue::Bitmap(0b1111));
+        source.row_store().update("items", set_values, &kept_pred).expect("update");
+        let doomed_pred =
+            StoragePredicate::Eq(Column::new("items", "id"), TypedValue::Uuid(doomed_id));
+        source.row_store().delete("items", &doomed_pred).expect("delete");
+
+        session.drain_channels();
+        let outcome = session.sync(&source, &destination, full_cursor).expect("sync");
+        assert!(outcome.is_complete());
+
+        // The destination must end up matching the source EXACTLY: the surviving
+        // row present and updated, the deleted row gone, and — the property that
+        // catches a reordering — the table not emptied.
+        let all = destination.row_store()
+            .query("items", None, &[], None, None)
+            .expect("query all");
+        assert_eq!(
+            all.len(), 1,
+            "Destination must hold exactly the surviving row, got {}",
+            all.len()
+        );
+        assert_eq!(all[0].values.get("id"), Some(&TypedValue::Uuid(kept_id)));
+        assert_eq!(
+            all[0].values.get("adjective_bitmap"),
+            Some(&TypedValue::Bitmap(0b1111)),
+            "The surviving row must carry the updated value"
+        );
+    }
+
+    /// §10.C7 — An unresolvable change withholds the watermark without vetoing
+    /// the rest of the cycle: resolvable row work still propagates.
+    #[test]
+    fn unresolvable_change_still_lets_resolvable_work_through() {
+        let schema = pk_less_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        let session = IncrementalReplicationSession::start(&source, &schema);
+
+        // One resolvable insert on the keyed table…
+        source.row_store()
+            .upsert("items", item_row(Uuid::new_v4(), 0b0101), &["id".to_string()])
+            .expect("upsert");
+        session.drain_channels();
+        assert_eq!(session.dirty_set.count(), 1);
+        // …alongside one unresolvable change on the keyless table.
+        session.dirty_set.accumulate(&TableChange {
+            table: "keyless".into(),
+            event: StorageEvent::Delete,
+            row_key: None,
+            values: None,
+            hlc: None,
+            origin: crate::observer::ChangeOrigin::Local,
+            changed_columns: None,
+        });
+
+        let incoming = HLC::new(1_000, 0, 1);
+        let outcome = session
+            .sync(
+                &source,
+                &destination,
+                ReplicationCursor {
+                    hlc_watermark: Some(incoming),
+                    rows_written: 0,
+                    audit_events_written: 0,
+                    blobs_written: 0,
+                },
+            )
+            .expect("sync");
+
+        assert!(!outcome.is_complete());
+        assert_eq!(outcome.cursor.hlc_watermark, Some(incoming), "Watermark withheld");
+        assert_eq!(
+            destination.row_store().count("items", None).expect("count"), 1,
+            "Resolvable row work must still reach the destination"
+        );
     }
 }
 

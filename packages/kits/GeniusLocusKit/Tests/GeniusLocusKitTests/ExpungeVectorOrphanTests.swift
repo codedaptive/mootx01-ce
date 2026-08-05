@@ -125,7 +125,7 @@ struct ExpungeVectorOrphanTests {
         #expect(foundBefore, "drawer must be recalled via corpus lane before expunge")
 
         // Expunge.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "privacy delete test", confirmation: true
         ))
 
@@ -170,7 +170,7 @@ struct ExpungeVectorOrphanTests {
                 "corpus must recall chunks for drawer '\(drawer.id)' before expunge; got \(chunksBefore.count) chunk(s)")
 
         // Expunge via GLK (triggers cross-kit vector delete).
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "corpus index verification", confirmation: true
         ))
 
@@ -233,7 +233,7 @@ struct ExpungeVectorOrphanTests {
 
         // Expunge must THROW crossKitVectorDeleteFailed, not succeed silently.
         let thrown = await #expect(throws: VerbError.self) {
-            try await kit.expunge(handle, ExpungeFrame(
+            _ = try await kit.expunge(handle, ExpungeFrame(
                 rowID: drawer.id,
                 reason: "fail-closed probe",
                 confirmation: true
@@ -262,7 +262,7 @@ struct ExpungeVectorOrphanTests {
         let drawer = try await kit.capture(handle, captureFrame(content: "locusonly expunge test"))
 
         // Must not throw — no corpus/vectorStore registered, cross-kit step is a no-op.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "locusOnly test", confirmation: true
         ))
 
@@ -299,7 +299,7 @@ struct ExpungeVectorOrphanTests {
         let drawer = try await kit.capture(handle, captureFrame(content: content), mode: .impatient)
 
         // Run the full expunge.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "audit ordering test", confirmation: true
         ))
 
@@ -374,7 +374,7 @@ struct ExpungeVectorOrphanTests {
 
         // Expunge must throw crossKitVectorDeleteFailed.
         let thrown = await #expect(throws: VerbError.self) {
-            try await kit.expunge(handle, ExpungeFrame(
+            _ = try await kit.expunge(handle, ExpungeFrame(
                 rowID: drawer.id,
                 reason: "orphan audit probe",
                 confirmation: true
@@ -429,7 +429,7 @@ struct ExpungeVectorOrphanTests {
 
         // Expunge with confirmation=false must throw at the boundary.
         await #expect(throws: VerbError.self) {
-            try await kit.expunge(handle, ExpungeFrame(
+            _ = try await kit.expunge(handle, ExpungeFrame(
                 rowID: drawer.id, reason: "validation test", confirmation: false
             ))
         }
@@ -489,7 +489,7 @@ struct ExpungeVectorOrphanTests {
         #expect(before.contains { $0.itemID == drawer.id },
                 "lane entry keyed by the source id must exist before expunge")
 
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "distillation lane scrub test", confirmation: true))
 
         let after = try await vectorStore.findNearest(
@@ -510,7 +510,7 @@ struct ExpungeVectorOrphanTests {
         let drawer = try await kit.capture(
             handle, captureFrame(content: "plain undistilled polonium note"), mode: .impatient)
 
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "undistilled lane no-op test", confirmation: true))
 
         let estate = try await kit.estate(for: handle)
@@ -550,7 +550,7 @@ struct ExpungeVectorOrphanTests {
         #expect(before.contains { $0.itemID == v2.id })
 
         // Expunge the head — the cascade covers the whole lineage.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: v2.id, reason: "lineage lane scrub test", confirmation: true))
 
         let after = try await vectorStore.findNearest(

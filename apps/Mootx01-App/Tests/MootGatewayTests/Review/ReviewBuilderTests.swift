@@ -43,7 +43,7 @@ struct ReviewBuilderTests {
     func reportCarriesWindow(kind: ReviewKind) async {
         let now = Self.instant(for: kind)
         let report = await Self.builder(kind).build(
-            now: now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         #expect(report.kind == kind)
         #expect(report.generatedAt == now)
         #expect(report.window == Self.schedule.window(for: kind, now: now))
@@ -54,7 +54,7 @@ struct ReviewBuilderTests {
         func ids(_ kind: ReviewKind) async -> [String] {
             await Self.builder(kind).build(
                 now: Self.instant(for: kind),
-                reader: StubReviewReader(responses: ReviewFixtures.populated)
+                reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured)
             ).sections.map(\.id)
         }
         #expect(await ids(.dashboard) == ["momentum", "keystones", "conflicts"])
@@ -68,7 +68,7 @@ struct ReviewBuilderTests {
     func titlesAreLocalizationKeys(kind: ReviewKind) async {
         let report = await Self.builder(kind).build(
             now: Self.instant(for: kind),
-            reader: StubReviewReader(responses: ReviewFixtures.populated))
+            reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         for section in report.sections {
             #expect(section.title.hasPrefix("review.section."))
         }
@@ -81,7 +81,7 @@ struct ReviewBuilderTests {
     func provenanceOnEveryItem(kind: ReviewKind) async {
         let report = await Self.builder(kind).build(
             now: Self.instant(for: kind),
-            reader: StubReviewReader(responses: ReviewFixtures.populated))
+            reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         #expect(report.itemCount > 0)
         for section in report.sections {
             for item in section.items {
@@ -98,7 +98,7 @@ struct ReviewBuilderTests {
     func noticePresenceMatchesEmptiness(kind: ReviewKind) async {
         let report = await Self.builder(kind).build(
             now: Self.instant(for: kind),
-            reader: StubReviewReader(responses: ReviewFixtures.populated))
+            reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         for section in report.sections {
             if section.items.isEmpty {
                 #expect(section.notice != nil)
@@ -113,9 +113,9 @@ struct ReviewBuilderTests {
     func deterministic(kind: ReviewKind) async throws {
         let now = Self.instant(for: kind)
         let first = await Self.builder(kind).build(
-            now: now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         let second = await Self.builder(kind).build(
-            now: now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         #expect(first == second)
         let encoder = ReviewReport.makeEncoder()
         let firstBytes = try encoder.encode(first)
@@ -125,7 +125,7 @@ struct ReviewBuilderTests {
 
     @Test("builders call read verbs only", arguments: ReviewKind.allCases)
     func readOnly(kind: ReviewKind) async {
-        let reader = StubReviewReader(responses: ReviewFixtures.populated)
+        let reader = StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured)
         _ = await Self.builder(kind).build(now: Self.instant(for: kind), reader: reader)
         let called = await reader.calls
         #expect(!called.isEmpty)
@@ -191,7 +191,7 @@ struct ReviewBuilderTests {
     @Test("dashboard ranks momentum, keystones, and conflicts from live captures")
     func dashboardContent() async throws {
         let report = await Self.builder(.dashboard).build(
-            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         let momentum = try #require(report.sections.first { $0.id == "momentum" })
         // Five rows in the fixture; the trailing `hint:` line is not an item.
         #expect(momentum.items.count == 5)
@@ -218,7 +218,7 @@ struct ReviewBuilderTests {
     @Test("morning reads the journal, recent context, and only unreviewed findings")
     func morningContent() async throws {
         let report = await Self.builder(.morning).build(
-            now: Self.morningNow, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: Self.morningNow, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         let journal = try #require(report.sections.first { $0.id == "journal" })
         #expect(journal.items.count == 3)
         #expect(journal.items[0].occurredAt
@@ -240,7 +240,7 @@ struct ReviewBuilderTests {
         // `now` is 2026-07-13; the journal fixture's newest entry is 2026-07-23,
         // so every entry falls outside this window.
         let report = await Self.builder(.morning).build(
-            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         let journal = try #require(report.sections.first { $0.id == "journal" })
         #expect(journal.items.isEmpty)
         let notice = try #require(journal.notice)
@@ -253,7 +253,7 @@ struct ReviewBuilderTests {
     @Test("end of day reports changes, today's facts only, and attention")
     func endOfDayContent() async throws {
         let report = await Self.builder(.endOfDay).build(
-            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         let changes = try #require(report.sections.first { $0.id == "changes" })
         #expect(changes.items.count == 3)
 
@@ -279,7 +279,7 @@ struct ReviewBuilderTests {
 
     @Test("weekly keeps only fading rooms and reports drift over the week")
     func weeklyContent() async throws {
-        let reader = StubReviewReader(responses: ReviewFixtures.populated)
+        let reader = StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured)
         let report = await Self.builder(.weekly).build(now: Self.now, reader: reader)
 
         // Two of the five fixture rows have negative momentum.
@@ -308,7 +308,7 @@ struct ReviewBuilderTests {
     @Test("the duplicate facet ships as a named gap, never as a near-miss mapping")
     func weeklyDuplicateGap() async throws {
         let report = await Self.builder(.weekly).build(
-            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            now: Self.now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
         let duplicates = try #require(report.sections.first { $0.id == "duplicates" })
         #expect(duplicates.items.isEmpty)
         let notice = try #require(duplicates.notice)
@@ -319,7 +319,7 @@ struct ReviewBuilderTests {
 
     @Test("weekly calls the drift lens with the window start as its split instant")
     func weeklyDriftArgument() async throws {
-        let reader = StubReviewReader(responses: ReviewFixtures.populated)
+        let reader = StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured)
         _ = await Self.builder(.weekly).build(now: Self.now, reader: reader)
         let calls = await reader.calls
         let arguments = await reader.callArguments
@@ -345,7 +345,7 @@ struct ReviewBuilderTests {
     func weeklyReadsContradictionOnce() async {
         // The lens is the most expensive read in the weekly review (tunnel walk
         // plus KG scan); its response feeds both "contradicted" and "retire-ready".
-        let reader = StubReviewReader(responses: ReviewFixtures.populated)
+        let reader = StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured)
         _ = await Self.builder(.weekly).build(now: Self.now, reader: reader)
         let calls = await reader.calls
         #expect(calls.filter { $0 == "moot_lens_contradiction" }.count == 1)
@@ -366,7 +366,7 @@ struct ReviewBuilderTests {
                 DDDD4444-4444-4444-8444-444444444444  object=[the first reading]  source=  filed=2026-07-04T05:46:42Z
             """
         let report = await Self.builder(.weekly).build(
-            now: Self.now, reader: StubReviewReader(responses: responses))
+            now: Self.now, reader: StubReviewReader(responses: responses, structured: ReviewFixtures.populatedStructured))
         let contradicted = try #require(report.sections.first { $0.id == "contradicted" })
         #expect(contradicted.items.count == 1)
         #expect(contradicted.items[0].subjectID == "CCCC3333-3333-4333-8333-333333333333")
@@ -386,7 +386,7 @@ struct ReviewBuilderTests {
             33333333-3333-4333-8333-333333333333  [aria] grammar_is [a_verb_applied_to_a_noun_[optionally_constrained]]  filed=2026-07-13T09:00:00Z  source=mootx01
             """
         let report = await Self.builder(.endOfDay).build(
-            now: Self.now, reader: StubReviewReader(responses: responses))
+            now: Self.now, reader: StubReviewReader(responses: responses, structured: ReviewFixtures.populatedStructured))
         let decisions = try #require(report.sections.first { $0.id == "decisions" })
         #expect(decisions.items.count == 1)
         #expect(decisions.items[0].title == "aria")
@@ -401,7 +401,7 @@ struct ReviewBuilderTests {
         var responses = ReviewFixtures.populated
         responses[.drift] = ReviewFixtures.emptyDrift
         let report = await Self.builder(.weekly).build(
-            now: Self.now, reader: StubReviewReader(responses: responses))
+            now: Self.now, reader: StubReviewReader(responses: responses, structured: ReviewFixtures.populatedStructured))
         let drift = try #require(report.sections.first { $0.id == "drift" })
         #expect(drift.items.isEmpty)
         #expect(drift.notice?.contains("drift: before=0 after=0") == true)

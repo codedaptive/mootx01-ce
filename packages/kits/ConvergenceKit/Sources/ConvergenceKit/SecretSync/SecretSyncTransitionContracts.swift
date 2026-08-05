@@ -363,6 +363,7 @@ public struct SecretTransitionCommit:
     public let recoveryEnvelopeDigest: SecretRecordDigest?
     public let purgeRequirementDigests: [SecretRecordDigest]
     public let purgeReceiptDigests: [SecretRecordDigest]
+    public let recoveryAuthorizationDigest: SecretRecordDigest?
     public let signerCredentialID: DeviceCredentialID
     public let signature: Data
 
@@ -379,6 +380,7 @@ public struct SecretTransitionCommit:
         recoveryEnvelopeDigest: SecretRecordDigest?,
         purgeRequirementDigests: [SecretRecordDigest],
         purgeReceiptDigests: [SecretRecordDigest],
+        recoveryAuthorizationDigest: SecretRecordDigest?,
         signerCredentialID: DeviceCredentialID,
         signature: Data
     ) throws {
@@ -418,6 +420,7 @@ public struct SecretTransitionCommit:
             field: "purgeReceiptDigests",
             allowEmpty: true
         )
+        self.recoveryAuthorizationDigest = recoveryAuthorizationDigest
         self.signerCredentialID = signerCredentialID
         self.signature = signature
     }
@@ -494,6 +497,14 @@ public struct SecretTransitionCommit:
                 )
             )
         }
+        if let recoveryAuthorizationDigest {
+            fields.append(
+                SecretSyncCanonicalField(
+                    tag: 13,
+                    value: recoveryAuthorizationDigest.bytes
+                )
+            )
+        }
         return fields
     }
 
@@ -510,6 +521,7 @@ public struct SecretTransitionCommit:
         case recoveryEnvelopeDigest
         case purgeRequirementDigests
         case purgeReceiptDigests
+        case recoveryAuthorizationDigest
         case signerCredentialID
         case signature
     }
@@ -559,6 +571,10 @@ public struct SecretTransitionCommit:
                 [SecretRecordDigest].self,
                 forKey: .purgeReceiptDigests
             ),
+            recoveryAuthorizationDigest: container.decodeIfPresent(
+                SecretRecordDigest.self,
+                forKey: .recoveryAuthorizationDigest
+            ),
             signerCredentialID: container.decode(
                 DeviceCredentialID.self,
                 forKey: .signerCredentialID
@@ -582,6 +598,7 @@ public struct SecretControlRecords:
     public let recoveryEnvelope: RecoveryEnvelope?
     public let purgeRequirements: [PurgeRequirement]
     public let purgeReceipts: [SignedPurgeReceipt]
+    public let recoveryAuthorization: FullLossRecoveryAuthorization?
 
     public init(
         state: SecretTransitionState,
@@ -590,7 +607,8 @@ public struct SecretControlRecords:
         recipientEnvelopes: [RecipientKeyEnvelope],
         recoveryEnvelope: RecoveryEnvelope?,
         purgeRequirements: [PurgeRequirement],
-        purgeReceipts: [SignedPurgeReceipt]
+        purgeReceipts: [SignedPurgeReceipt],
+        recoveryAuthorization: FullLossRecoveryAuthorization?
     ) throws {
         self.state = state
         self.signedPolicy = signedPolicy
@@ -613,6 +631,7 @@ public struct SecretControlRecords:
             field: "purgeReceipts",
             allowEmpty: true
         )
+        self.recoveryAuthorization = recoveryAuthorization
     }
 
     public var canonicalDomain: SecretSyncCanonicalDomain {
@@ -660,6 +679,14 @@ public struct SecretControlRecords:
                 )
             )
         }
+        if let recoveryAuthorization {
+            fields.append(
+                SecretSyncCanonicalField(
+                    tag: 8,
+                    value: recoveryAuthorization.recordDigest.bytes
+                )
+            )
+        }
         return fields
     }
 
@@ -671,6 +698,7 @@ public struct SecretControlRecords:
         case recoveryEnvelope
         case purgeRequirements
         case purgeReceipts
+        case recoveryAuthorization
     }
 
     public init(from decoder: Decoder) throws {
@@ -700,6 +728,10 @@ public struct SecretControlRecords:
             purgeReceipts: container.decode(
                 [SignedPurgeReceipt].self,
                 forKey: .purgeReceipts
+            ),
+            recoveryAuthorization: container.decodeIfPresent(
+                FullLossRecoveryAuthorization.self,
+                forKey: .recoveryAuthorization
             )
         )
     }
@@ -712,7 +744,8 @@ public struct SecretControlRecords:
             recipientEnvelopes: recipientEnvelopes,
             recoveryEnvelope: recoveryEnvelope,
             purgeRequirements: purgeRequirements,
-            purgeReceipts: purgeReceipts
+            purgeReceipts: purgeReceipts,
+            recoveryAuthorization: recoveryAuthorization
         )
     }
 }
@@ -851,6 +884,14 @@ public enum SecretPolicyValidationError: Error, Sendable, Equatable {
     case policyMismatch
     case recipientSetMismatch
     case recoveryMismatch
+    case recoveryAuthorizationUnexpected
+    case recoveryAuthorizationMismatch
+    case fullLossRecoveryCurrentAuthorityMissing
+    case fullLossRecoveryChallengeExpired
+    case fullLossRecoveryProofRejected
+    case fullLossRecoveryCandidateMismatch
+    case fullLossRecoveryTrustMismatch
+    case fullLossRecoveryPurgeMismatch
     case incompletePurgeReceipts
     case purgeCoverageMismatch
     case stagedStateRequired
@@ -872,14 +913,14 @@ public enum SecretPolicyValidator {
             throw SecretPolicyValidationError.enrollmentChallengeMismatch
         }
         guard
-            candidate.enrollmentProof.authorityCredentialID
-                == authorityCredential.credentialID,
+            let authority = candidate.enrollmentProof.trustedDeviceAuthority,
+            authority.credentialID == authorityCredential.credentialID,
             authorityCredential.status == .active
         else {
             throw SecretPolicyValidationError.enrollmentAuthorityMismatch
         }
         guard try signatureVerifier.verify(
-            signature: candidate.enrollmentProof.authoritySignature,
+            signature: authority.signature,
             canonicalBytes: candidate.enrollmentSigningBytes(),
             signingPublicKey: authorityCredential.signingPublicKey
         ) else {
@@ -974,6 +1015,12 @@ public enum SecretPolicyValidator {
         digester: any SecretSyncDigesting,
         signatureVerifier: any SecretSignatureVerifying
     ) throws -> SecretControlSnapshot {
+        guard
+            stagedRecords.recoveryAuthorization == nil,
+            commit.recoveryAuthorizationDigest == nil
+        else {
+            throw SecretPolicyValidationError.recoveryAuthorizationUnexpected
+        }
         try validateMonotonicTransition(
             currentHead: currentSnapshot?.commit,
             candidate: commit,
@@ -1050,6 +1097,338 @@ public enum SecretPolicyValidator {
         )
     }
 
+    /// Admits one break-glass transition only when the current recovery
+    /// authority, both fresh replacement keys, the exact candidate graph, and
+    /// every old-device revocation agree on one atomic transcript.
+    public static func validateFullLossRecoveryTransition(
+        currentSnapshot: SecretControlSnapshot,
+        preparedTransition: RecoveryPreparedTransition,
+        knownCompetingChildDigests: [SecretRecordDigest],
+        externalFreshness: SecretBootstrapFreshnessCommitment,
+        appNamespace: String,
+        estateID: UUID,
+        nowMilliseconds: UInt64,
+        digester: any SecretSyncDigesting,
+        signatureVerifier: any SecretSignatureVerifying,
+        recoveryVerifier: any FullLossRecoveryProofVerifying
+    ) throws -> SecretControlSnapshot {
+        let entry = preparedTransition.entry
+        let records = entry.records
+        let commit = entry.commit
+        guard let authorization = records.recoveryAuthorization,
+              let currentRecovery = currentSnapshot.records.signedPolicy.policy
+                .recoveryRecipient else {
+            throw SecretPolicyValidationError
+                .fullLossRecoveryCurrentAuthorityMissing
+        }
+        let intent = authorization.intent
+
+        try validateMonotonicTransition(
+            currentHead: currentSnapshot.commit,
+            candidate: commit,
+            knownCompetingChildDigests: knownCompetingChildDigests
+        )
+        // Full-loss recovery proves the independently observed current head;
+        // the candidate does not become fresh until its CAS succeeds.
+        try validateBootstrapFreshness(
+            localCommit: currentSnapshot.commit,
+            against: externalFreshness
+        )
+        guard intent.challenge.isValid(atMilliseconds: nowMilliseconds) else {
+            throw SecretPolicyValidationError.fullLossRecoveryChallengeExpired
+        }
+        guard
+            intent.appNamespace == appNamespace,
+            intent.estateID == estateID,
+            intent.scopeID == currentSnapshot.commit.scopeID,
+            intent.currentCommitDigest == currentSnapshot.commit.recordDigest,
+            intent.currentPolicyDigest == currentSnapshot.commit.policyDigest,
+            intent.currentPolicyEpoch == currentSnapshot.commit.policyEpoch,
+            intent.currentGenerationID == currentSnapshot.commit.generationID,
+            intent.currentRecoveryRecipient == currentRecovery,
+            intent.candidatePolicyEpoch == commit.policyEpoch,
+            intent.candidateGenerationID == commit.generationID,
+            intent.candidateSignedPolicyDigest == commit.policyDigest,
+            intent.recoveryEnvelopeDigest == commit.recoveryEnvelopeDigest,
+            commit.recoveryAuthorizationDigest == authorization.recordDigest
+        else {
+            throw SecretPolicyValidationError.fullLossRecoveryCandidateMismatch
+        }
+
+        try validateContentAddresses(
+            records: records,
+            commit: commit,
+            digester: digester
+        )
+        guard try recoveryVerifier.verifyRecoveryAuthorization(
+            signature: authorization.signature,
+            canonicalBytes: authorization.signingBytes(),
+            signingPublicKey: currentRecovery.authorizationSigningPublicKey
+        ) else {
+            throw SecretPolicyValidationError.fullLossRecoveryProofRejected
+        }
+        guard try recoveryVerifier.verifyReplacementSigningPossession(
+            proof: intent.signingPossessionProof,
+            canonicalBytes: intent.signingPossessionChallengeBytes(),
+            signingPublicKey: intent.replacementSigningPublicKey
+        ) else {
+            throw SecretPolicyValidationError.fullLossRecoveryProofRejected
+        }
+        guard try recoveryVerifier.verifyReplacementAgreementPossession(
+            proof: intent.agreementPossessionProof,
+            canonicalBytes: intent.agreementPossessionChallengeBytes(),
+            agreementPublicKey: intent.replacementAgreementPublicKey
+        ) else {
+            throw SecretPolicyValidationError.fullLossRecoveryProofRejected
+        }
+
+        var credentialsByID: [
+            DeviceCredentialID: TrustedDeviceCredential
+        ] = [:]
+        for credential in entry.credentials {
+            guard credentialsByID.updateValue(
+                credential,
+                forKey: credential.credentialID
+            ) == nil else {
+                throw SecretPolicyValidationError.duplicateTrustedCredential
+            }
+        }
+        let currentTrust = try validateTrustBindings(
+            currentSnapshot.trustedDeviceRecords,
+            expectedDigests: currentSnapshot.records.signedPolicy.policy
+                .trustedDeviceRecordDigests,
+            at: currentSnapshot.commit.policyEpoch,
+            credentialsByID: credentialsByID,
+            digester: digester
+        )
+        let candidateTrust = try validateTrustBindings(
+            entry.trustRecords,
+            expectedDigests: records.signedPolicy.policy
+                .trustedDeviceRecordDigests,
+            at: commit.policyEpoch,
+            credentialsByID: credentialsByID,
+            digester: digester
+        )
+        try validateTrustMonotonicity(
+            current: currentTrust,
+            candidate: candidateTrust
+        )
+        try validateFullLossRecoveryTrust(
+            intent: intent,
+            currentTrust: currentTrust,
+            candidateTrust: candidateTrust,
+            credentialsByID: credentialsByID,
+            commit: commit
+        )
+        try validateFullLossRecoveryReferences(
+            currentSnapshot: currentSnapshot,
+            records: records,
+            commit: commit,
+            intent: intent
+        )
+
+        guard let replacement = credentialsByID[
+            intent.replacementCredentialID
+        ] else {
+            throw SecretPolicyValidationError.fullLossRecoveryTrustMismatch
+        }
+        guard try signatureVerifier.verify(
+            signature: records.signedPolicy.signature,
+            canonicalBytes: records.signedPolicy.policy.canonicalBytes(),
+            signingPublicKey: replacement.signingPublicKey
+        ), try signatureVerifier.verify(
+            signature: commit.signature,
+            canonicalBytes: commit.signingBytes(),
+            signingPublicKey: replacement.signingPublicKey
+        ) else {
+            throw SecretPolicyValidationError.signatureRejected
+        }
+
+        return try SecretControlSnapshot(
+            commit: commit,
+            records: records.committedCopy(),
+            trustedDeviceRecords: entry.trustRecords
+        )
+    }
+
+    private static func validateFullLossRecoveryTrust(
+        intent: GlobalRecoveryTransitionIntent,
+        currentTrust: [DeviceCredentialID: DeviceTrustRecord],
+        candidateTrust: [DeviceCredentialID: DeviceTrustRecord],
+        credentialsByID: [DeviceCredentialID: TrustedDeviceCredential],
+        commit: SecretTransitionCommit
+    ) throws {
+        let replacementID = intent.replacementCredentialID
+        let newIDs = Set(candidateTrust.keys).subtracting(currentTrust.keys)
+        let priorCredentials = credentialsByID.values.filter {
+            $0.credentialID != replacementID
+        }
+        let priorDeviceIDs = Set(priorCredentials.map(\.deviceID))
+        let priorKeyIdentifiers = Set(
+            priorCredentials.flatMap {
+                [
+                    $0.signingPublicKey.keyIdentifier,
+                    $0.keyAgreementPublicKey.keyIdentifier,
+                ]
+            }
+                + [
+                    intent.currentRecoveryRecipient.keyAgreementPublicKey
+                        .keyIdentifier,
+                    intent.currentRecoveryRecipient
+                        .authorizationSigningPublicKey.keyIdentifier,
+                ]
+        )
+        let priorPublicKeyBytes = Set(
+            priorCredentials.flatMap {
+                [
+                    $0.signingPublicKey.publicKeyBytes,
+                    $0.keyAgreementPublicKey.publicKeyBytes,
+                ]
+            }
+                + [
+                    intent.currentRecoveryRecipient.keyAgreementPublicKey
+                        .publicKeyBytes,
+                    intent.currentRecoveryRecipient
+                        .authorizationSigningPublicKey.publicKeyBytes,
+                ]
+        )
+        let replacementKeyIdentifiers = [
+            intent.replacementSigningPublicKey.keyIdentifier,
+            intent.replacementAgreementPublicKey.keyIdentifier,
+            intent.replacementRecoveryRecipient.keyAgreementPublicKey
+                .keyIdentifier,
+            intent.replacementRecoveryRecipient.authorizationSigningPublicKey
+                .keyIdentifier,
+        ]
+        let replacementPublicKeyBytes = [
+            intent.replacementSigningPublicKey.publicKeyBytes,
+            intent.replacementAgreementPublicKey.publicKeyBytes,
+            intent.replacementRecoveryRecipient.keyAgreementPublicKey
+                .publicKeyBytes,
+            intent.replacementRecoveryRecipient.authorizationSigningPublicKey
+                .publicKeyBytes,
+        ]
+        // Every cryptographic role receives independent material. Comparing
+        // both identifiers and encoded keys prevents a renamed key from
+        // crossing device, agreement, authorization, or recovery roles.
+        let replacementKeyIdentifierSet = Set(replacementKeyIdentifiers)
+        let replacementPublicKeyByteSet = Set(replacementPublicKeyBytes)
+        guard
+            newIDs == Set([replacementID]),
+            Set(credentialsByID.keys) == Set(candidateTrust.keys),
+            let replacement = credentialsByID[replacementID],
+            replacement.status == .active,
+            replacement.deviceID == intent.replacementDeviceID,
+            !priorDeviceIDs.contains(replacement.deviceID),
+            replacement.signingPublicKey == intent.replacementSigningPublicKey,
+            replacement.keyAgreementPublicKey
+                == intent.replacementAgreementPublicKey,
+            replacementKeyIdentifierSet.count
+                == replacementKeyIdentifiers.count,
+            replacementPublicKeyByteSet.count
+                == replacementPublicKeyBytes.count,
+            priorKeyIdentifiers.isDisjoint(with: replacementKeyIdentifierSet),
+            priorPublicKeyBytes.isDisjoint(with: replacementPublicKeyByteSet),
+            replacement.enrollmentProof.challengeID
+                == intent.challenge.challengeID,
+            replacement.enrollmentProof.challengeBytes
+                == intent.challenge.nonce,
+            replacement.enrollmentProof.signingProofBytes
+                == intent.signingPossessionProof,
+            replacement.enrollmentProof.keyAgreementProofBytes
+                == intent.agreementPossessionProof,
+            replacement.enrollmentProof.globalRecoveryAuthority
+                == GlobalRecoveryEnrollmentAuthority(
+                    requestID: intent.challenge.requestID,
+                    recoveryRecipientID: intent.currentRecoveryRecipient
+                        .recoveryRecipientID
+                ),
+            let replacementTrust = candidateTrust[replacementID],
+            replacementTrust.trustState == .trusted,
+            replacementTrust.effectivePolicyEpoch == commit.policyEpoch,
+            currentTrust.keys.allSatisfy({
+                candidateTrust[$0]?.trustState == .revoked
+            }),
+            candidateTrust.values.filter({ $0.trustState == .trusted }).count
+                == 1
+        else {
+            throw SecretPolicyValidationError.fullLossRecoveryTrustMismatch
+        }
+    }
+
+    private static func validateFullLossRecoveryReferences(
+        currentSnapshot: SecretControlSnapshot,
+        records: SecretControlRecords,
+        commit: SecretTransitionCommit,
+        intent: GlobalRecoveryTransitionIntent
+    ) throws {
+        let policy = records.signedPolicy.policy
+        guard
+            records.state == .staged,
+            policy.epoch == commit.policyEpoch,
+            policy.predecessorPolicyDigest
+                == currentSnapshot.commit.policyDigest,
+            policy.scopeSnapshot.scopeID == commit.scopeID,
+            policy.scopeSnapshot.snapshotDigest == commit.scopeSnapshotDigest,
+            policy.generationID == commit.generationID,
+            policy.signerCredentialID == intent.replacementCredentialID,
+            commit.signerCredentialID == intent.replacementCredentialID,
+            policy.authorizedRecipientCredentialIDs
+                == [intent.replacementCredentialID],
+            policy.recoveryRecipient == intent.replacementRecoveryRecipient,
+            intent.replacementRecoveryRecipient.recoveryRecipientID
+                != intent.currentRecoveryRecipient.recoveryRecipientID,
+            records.recipientEnvelopes.count == 1,
+            records.recipientEnvelopes.first?.recipientCredentialID
+                == intent.replacementCredentialID,
+            records.recipientEnvelopes.map(\.recordDigest)
+                == commit.recipientEnvelopeDigests,
+            let recoveryEnvelope = records.recoveryEnvelope,
+            recoveryEnvelope.recordDigest == commit.recoveryEnvelopeDigest,
+            recoveryEnvelope.recoveryRecipientID
+                == intent.replacementRecoveryRecipient.recoveryRecipientID,
+            recoveryEnvelope.scopeID == commit.scopeID,
+            recoveryEnvelope.scopeSnapshotDigest == commit.scopeSnapshotDigest,
+            recoveryEnvelope.policyEpoch == commit.policyEpoch,
+            recoveryEnvelope.policyDigest == commit.policyDigest,
+            recoveryEnvelope.generationID == commit.generationID,
+            records.sealedPayload.recordDigest == commit.sealedPayloadDigest,
+            records.sealedPayload.scopeID == commit.scopeID,
+            records.sealedPayload.scopeSnapshotDigest
+                == commit.scopeSnapshotDigest,
+            records.sealedPayload.policyEpoch == commit.policyEpoch,
+            records.sealedPayload.policyDigest == commit.policyDigest,
+            records.sealedPayload.generationID == commit.generationID
+        else {
+            throw SecretPolicyValidationError.fullLossRecoveryCandidateMismatch
+        }
+
+        let oldRecipients = Set(
+            currentSnapshot.records.signedPolicy.policy
+                .authorizedRecipientCredentialIDs
+        )
+        let targets = Set(records.purgeRequirements.map(\.targetCredentialID))
+        guard
+            records.purgeReceipts.isEmpty,
+            commit.purgeReceiptDigests.isEmpty,
+            targets == oldRecipients,
+            records.purgeRequirements.count == oldRecipients.count,
+            records.purgeRequirements.map(\.recordDigest)
+                == commit.purgeRequirementDigests,
+            records.purgeRequirements.allSatisfy({ requirement in
+                requirement.scopeID == commit.scopeID
+                    && requirement.policyEpoch == commit.policyEpoch
+                    && requirement.policyDigest == commit.policyDigest
+                    && requirement.supersededGenerationID
+                        == currentSnapshot.commit.generationID
+                    && requirement.replacementGenerationID
+                        == commit.generationID
+            })
+        else {
+            throw SecretPolicyValidationError.fullLossRecoveryPurgeMismatch
+        }
+    }
+
     private static func validateContentAddresses(
         records: SecretControlRecords,
         commit: SecretTransitionCommit,
@@ -1102,6 +1481,14 @@ public enum SecretPolicyValidator {
                 receipt,
                 expected: receipt.recordDigest,
                 domain: .purgeReceipt,
+                digester: digester
+            )
+        }
+        if let authorization = records.recoveryAuthorization {
+            try requireDigest(
+                authorization,
+                expected: authorization.recordDigest,
+                domain: .fullLossRecoveryAuthorization,
                 digester: digester
             )
         }
@@ -1350,6 +1737,11 @@ public enum SecretPolicyValidator {
             throw SecretPolicyValidationError.referenceMismatch(
                 field: "recipientEnvelopeDigests"
             )
+        }
+        guard records.recoveryAuthorization?.recordDigest
+                == commit.recoveryAuthorizationDigest
+        else {
+            throw SecretPolicyValidationError.recoveryAuthorizationMismatch
         }
         for envelope in records.recipientEnvelopes {
             try validateRecipientTrust(

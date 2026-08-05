@@ -24,8 +24,12 @@
 use locus_kit::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State, Trust};
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+use locus_kit::estate::Estate;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+use locus_kit::frames::CaptureFrame;
 use locus_kit::error::LocusKitError;
 use locus_kit::kg_fact::KGFact;
 use locus_kit::manifest::ManifestKey;
@@ -553,29 +557,30 @@ fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
     );
 }
 
-/// Gate-reject conformance: when a lineage sibling's state machine forbids the
-/// tombstone transition (S-3: Accepted → Tombstoned is forbidden), the
-/// content blob AND all four representation columns MUST be zeroed
-/// unconditionally. The sibling's state is preserved. Mirrors Swift
-/// `DrawerStore.expungeGated` lines 1411–1424 (gate-reject branch).
+/// Gate-reject conformance (MXE-EZ): when a lineage sibling's state machine
+/// forbids the tombstone transition (S-3: Accepted → Tombstoned is
+/// forbidden), that sibling is left byte-identical — content verbatim,
+/// representation columns intact, state unchanged. A refused gate is a
+/// refusal, not a partial apply. Mirrors the Swift
+/// `DrawerStore.expungeGated` gate-reject branch.
 ///
 /// Scenario:
 ///   D1 — Trust=Canonical, promoted to Accepted. Representation columns
-///        populated to confirm they are NULLed by the scrub.
+///        populated to confirm they SURVIVE the refusal untouched.
 ///   D2 — Active, same lineage. D1 is Accepted (g_state_cluster = 3 which
 ///        is NOT < 3), so find_active_predecessor does not find it — D1 is
 ///        NOT superseded when D2 is added.
 ///   expunge_gated(D2) → D2 tombstoned; sibling loop processes D1 → gate
-///        rejects (S-3) → gate-reject branch scrubs D1 content + representation.
+///        rejects (S-3) → D1 is preserved verbatim.
 #[test]
-fn expunge_gate_rejected_sibling_content_and_representation_zeroed() {
+fn expunge_gate_rejected_sibling_left_byte_identical() {
     let db = TempDb::new();
     let store = open_sqlite(db.path());
     let lineage = Uuid::new_v4();
 
     // D1: Trust=Canonical (bits 18-23) so S-1 allows promote to Accepted.
-    // Representation columns populated so the gate-reject scrub can be
-    // verified to NULL them.
+    // Representation columns populated so their survival through the
+    // gate refusal can be verified byte-identical below.
     let mut d1 = sample_drawer("d1-gate-reject-accepted", "w", "r", "accepted-sibling-content");
     d1.lineage_id = lineage;
     d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
@@ -611,42 +616,215 @@ fn expunge_gate_rejected_sibling_content_and_representation_zeroed() {
         "D1 must remain Accepted after D2 is added (Accepted is not an active predecessor)"
     );
 
+    // Capture D1's full pre-expunge shape for byte-identity comparison.
+    let d1_before = store.get_drawer(&d1.id).unwrap().unwrap();
+
     // Expunge D2. The sibling loop processes D1. The gate rejects
-    // Accepted → Tombstoned (S-3). The gate-reject branch must scrub D1's
-    // content and all four representation columns.
+    // Accepted → Tombstoned (S-3). The refusal must leave D1
+    // byte-identical: no content write, no state write, no
+    // representation clear.
     store
         .expunge_gated(&d2.id, "test", None, NOW + 300, true)
         .unwrap();
+
+    // D2 itself is scrubbed and tombstoned as before.
+    let d2_after = store.get_drawer(&d2.id).unwrap().unwrap();
+    assert_eq!(
+        d2_after.adjective_bitmap & 0x3F,
+        State::Tombstoned.raw_value(),
+        "the expunge target itself must still be tombstoned"
+    );
+    assert_eq!(d2_after.content, "");
 
     let d1_after = store.get_drawer(&d1.id).unwrap().unwrap();
     // State unchanged — the gate rejected the transition.
     assert_eq!(
         d1_after.adjective_bitmap & 0x3F,
         State::Accepted.raw_value(),
-        "D1 state must remain Accepted after gate-reject scrub"
+        "D1 state must remain Accepted after gate refusal"
     );
-    // Content unconditionally zeroed (destruction contract: secfix/ws2-coredelete).
+    // Content survives verbatim. This also proves D1 was NOT recorded
+    // in the erasure ledger: the read-time ErasureOverlay nulls content
+    // for any ledgered id, so a ledger record alone would fail this.
     assert_eq!(
-        d1_after.content, "",
-        "gate-rejected sibling content must be zeroed"
+        d1_after.content, "accepted-sibling-content",
+        "gate-refused sibling content must survive verbatim"
     );
-    // Four representation columns NULLed (SPEC_DISTILLATION_STORAGE §2; Wave-1 parity).
+    // Bitmaps unchanged.
+    assert_eq!(
+        d1_after.adjective_bitmap, d1_before.adjective_bitmap,
+        "adjective bitmap must be untouched on refusal"
+    );
+    assert_eq!(
+        d1_after.operational_bitmap, d1_before.operational_bitmap,
+        "operational bitmap must be untouched on refusal"
+    );
+    // All four representation columns intact.
+    assert_eq!(
+        d1_after.distilled.as_deref(),
+        Some("accepted-sibling-distilled-text"),
+        "distilled must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.distilled_pipeline_version.as_deref(),
+        Some("p1"),
+        "distilled_pipeline_version must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.distilled_token_count,
+        Some(7),
+        "distilled_token_count must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.distilled_at,
+        Some(NOW),
+        "distilled_at must survive the refusal"
+    );
     assert!(
-        d1_after.distilled.is_none(),
-        "distilled must be NULL after gate-reject scrub"
+        d1_after.tombstoned_at.is_none(),
+        "refused sibling must not be tombstone-stamped"
     );
+}
+
+/// The caller can tell the expunge was partial: the outcome carries the
+/// refused sibling ids in walk order. Twin of Swift
+/// `expungeOutcomeReportsRefusedSiblings`.
+#[test]
+fn expunge_outcome_reports_refused_siblings() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let lineage = Uuid::new_v4();
+
+    let mut d1 = sample_drawer("d1-outcome-accepted", "w", "r", "accepted-content");
+    d1.lineage_id = lineage;
+    d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
+    store.add_drawer(&d1, NOW).unwrap();
+    store
+        .mutate_state(&d1.id, State::Accepted, RowVerb::Promote, "alice", None, NOW + 100)
+        .unwrap();
+
+    let mut d2 = sample_drawer("d2-outcome-head", "w", "r", "head-content");
+    d2.lineage_id = lineage;
+    store.add_drawer(&d2, NOW + 200).unwrap();
+
+    let outcome = store
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .unwrap();
+    assert_eq!(
+        outcome.refused_sibling_ids,
+        vec![d1.id.clone()],
+        "the refused accepted sibling must be reported to the caller"
+    );
+}
+
+/// A lineage with no accepted members: every member is scrubbed and
+/// tombstoned, and the outcome reports zero refusals. Twin of Swift
+/// `expungeOutcomeEmptyForCleanLineage`.
+#[test]
+fn expunge_outcome_empty_for_clean_lineage() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let lineage = Uuid::new_v4();
+
+    let mut d1 = sample_drawer("d1-clean-predecessor", "w", "r", "predecessor-content");
+    d1.lineage_id = lineage;
+    store.add_drawer(&d1, NOW).unwrap();
+    let mut d2 = sample_drawer("d2-clean-head", "w", "r", "head-content");
+    d2.lineage_id = lineage;
+    store.add_drawer(&d2, NOW + 100).unwrap();
+
+    let outcome = store
+        .expunge_gated(&d2.id, "test", None, NOW + 200, true)
+        .unwrap();
     assert!(
-        d1_after.distilled_pipeline_version.is_none(),
-        "distilled_pipeline_version must be NULL after gate-reject scrub"
+        outcome.refused_sibling_ids.is_empty(),
+        "no refusals in a lineage without accepted members"
     );
-    assert!(
-        d1_after.distilled_token_count.is_none(),
-        "distilled_token_count must be NULL after gate-reject scrub"
+
+    // Gate-admitted members are still scrubbed and tombstoned as before.
+    let d1_after = store.get_drawer(&d1.id).unwrap().unwrap();
+    assert_eq!(d1_after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
+    assert_eq!(d1_after.content, "");
+    let d2_after = store.get_drawer(&d2.id).unwrap().unwrap();
+    assert_eq!(d2_after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
+    assert_eq!(d2_after.content, "");
+}
+
+/// The reachability case from Codex finding 06cce9cc4, end to end:
+/// lineage membership is selected solely by matching lineageID, and a
+/// capture accepts a caller-supplied lineage id (VaultKit maps a vault
+/// note's frontmatter `moot_id` straight into `CaptureFrame.lineage_id` —
+/// finding de1284c73). An attacker can therefore create their own row
+/// inside a protected accepted row's lineage and then expunge it, walking
+/// the shared lineage. The accepted row must survive byte-identical.
+/// Twin of Swift `attackerLineageJoinCannotScrubAcceptedRow`.
+#[test]
+fn attacker_lineage_join_cannot_scrub_accepted_row() {
+    let db = TempDb::new();
+    let store = Arc::new(open_sqlite(db.path()));
+    let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
+    let lineage = Uuid::new_v4();
+
+    // The protected row: added and promoted to accepted legitimately
+    // (trust=canonical at bits 18-23 satisfies S-1).
+    let mut protected = sample_drawer(
+        "protected-accepted-row",
+        "w",
+        "r",
+        "protected-audit-grade-content",
     );
-    assert!(
-        d1_after.distilled_at.is_none(),
-        "distilled_at must be NULL after gate-reject scrub"
+    protected.lineage_id = lineage;
+    protected.adjective_bitmap = Trust::Canonical.raw_value() << 18;
+    store.add_drawer(&protected, NOW).unwrap();
+    store
+        .mutate_state(
+            &protected.id,
+            State::Accepted,
+            RowVerb::Promote,
+            "owner",
+            None,
+            NOW + 100,
+        )
+        .unwrap();
+    let before = store.get_drawer(&protected.id).unwrap().unwrap();
+    assert_eq!(before.adjective_bitmap & 0x3F, State::Accepted.raw_value());
+
+    // The attacker's row: an ordinary capture that names the protected
+    // row's lineage id — the moot_id path.
+    let mut frame = CaptureFrame::new(
+        "attacker-controlled note",
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("004"),
+        "attacker",
+        "test-v1",
     );
+    frame.lineage_id = Some(lineage);
+    let attacker_row = estate.capture(frame, NOW + 200).unwrap();
+
+    // Expunging the attacker's own row walks the shared lineage.
+    estate
+        .expunge(&attacker_row.id, "attacker-initiated expunge", true, NOW + 300, true)
+        .unwrap();
+
+    // The attacker's row is gone…
+    let attacker_after = store.get_drawer(&attacker_row.id).unwrap().unwrap();
+    assert_eq!(
+        attacker_after.adjective_bitmap & 0x3F,
+        State::Tombstoned.raw_value()
+    );
+    assert_eq!(attacker_after.content, "");
+
+    // …and the protected accepted row is byte-identical.
+    let after = store.get_drawer(&protected.id).unwrap().unwrap();
+    assert_eq!(
+        after.content, "protected-audit-grade-content",
+        "the protected accepted row must survive an attacker-initiated lineage expunge"
+    );
+    assert_eq!(after.adjective_bitmap & 0x3F, State::Accepted.raw_value());
+    assert_eq!(after.adjective_bitmap, before.adjective_bitmap);
+    assert_eq!(after.operational_bitmap, before.operational_bitmap);
+    assert!(after.tombstoned_at.is_none());
 }
 
 // ---------------------------------------------------------------------------

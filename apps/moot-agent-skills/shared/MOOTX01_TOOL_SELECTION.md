@@ -33,7 +33,7 @@ LLM context tokens.
 
 ## Writing
 
-- `moot_file_memory` - file a durable memory with content and location.
+- `moot_file_memory` - file a durable memory with content, a one-sentence subject (≤120 chars, written for the next AI that scans it), and location.
 - `moot_move_memory` - reanchor a memory to a different location or wing.
 - `moot_file_fact` - store a stable subject-predicate-object assertion.
 - `moot_write_journal` - record session continuity and handoff notes.

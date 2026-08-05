@@ -311,7 +311,7 @@ impl DrawerStore for PostgresDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
     fn set_distilled_representation(
@@ -329,6 +329,43 @@ impl DrawerStore for PostgresDrawerStore {
             token_count,
             generated_at,
         )
+    }
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        self.0.set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            changed_by,
+            reason,
+        )
+    }
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.0.count_missing_subject(pipeline_version)
+    }
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.0.count_subject_debt()
+    }
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.subject_debt_batch(limit)
+    }
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.0.count_subject_debt_including(pipelines)
+    }
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.subject_debt_batch_including(limit, pipelines)
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_undistilled(pipeline_version)

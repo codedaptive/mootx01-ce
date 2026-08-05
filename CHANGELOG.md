@@ -5,6 +5,49 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-11 — 2026-08-05
+
+Third internal beta cut for 1.1, and the first to carry the Enterprise-side
+security remediation. 203 commits since beta-05. No CHANGELOG entries were
+written for beta-06 through beta-10, so this covers that whole span.
+
+- **Security remediation.** 38 findings closed and recorded in
+  `docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-08-04.md`,
+  with every citation naming a Community Edition revision. Highlights: dense
+  lens rows no longer leak restricted memory subjects; typed conflict reports
+  and proposals respect KG fact sensitivity; subject summaries no longer bypass
+  per-row encryption; row crypto covers non-drawer content tables; a rejected
+  audit gate leaves accepted siblings intact and a partial expunge is reported
+  as partial at every layer; inbound URL schemes cannot mutate the estate
+  without explicit consent; `near:` pivot applies provenance redaction; DST
+  edges cannot extend restricted grants past local midnight.
+- **SecretSync v1 (new).** `ConvergenceKitAppleSecurity` ships as a library
+  product: CryptoKit providers for AES-GCM, HPKE envelopes, P-256 signatures
+  and SHA-256 digests, behind a closed algorithm registry, with recovery
+  custody, mnemonic derivation, rotation and break-glass paths. 88 tests.
+- **Deterministic Contradiction Projection.** The v0.1 contract is now
+  published in `docs/reference/SUBSTRATEML_SPEC.md` §5.27–5.29: the dimension
+  registry, canonical serialization and identity bytes, reason codes, time
+  semantics, outcome precedence, the controlled-decision grammar, and the
+  F01–F22 fixture ledger.
+- **Storage.** RandomIndexing provider counts move to a row-per-term table,
+  removing the single-blob write that crossed SQLite's 1 GB bind ceiling on
+  large vocabularies. Basis blobs persist in parts.
+- **Upgrade.** `mootx01 upgrade --version <tag>` pins a specific release, so a
+  candidate build can actually be installed; `--check` distinguishes "current"
+  from "ahead of the feed". The migration circuit-breaker token advances with
+  behaviour changes, so an estate parked by an earlier build unparks on a fixed
+  one. A key-lookup miss on an encrypted estate now names the derived Keychain
+  account and the path it came from.
+- **Plugin.** The MCP server key is `memory`, surfacing tools as
+  `plugin:mootx01:memory`.
+- **Build.** One shared Rust target directory per checkout replaces the
+  per-workspace default, and `.gitignore` gained Apple credential patterns.
+
+Known issues: `MootGatewayTests` has 13 failing tests in the miner and
+round-trip lanes (records fail to file), and one `LoopbackHTTP` wire-contract
+test races on a cold build. Both predate this cut.
+
 ## 1.1.0-beta-05 — 2026-07-30
 
 Second internal beta cut for 1.1. Stamps the sensitivity-inheritance and

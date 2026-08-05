@@ -391,6 +391,23 @@ pub struct ExpungeIntegritySweepResult {
     pub per_row_errors: Vec<String>,
 }
 
+/// Outcome of one composed expunge verb call (SPEC B-8b, MXE-FA).
+///
+/// The storage layer refuses `accepted → tombstoned` lineage siblings (S-3)
+/// and preserves them byte-identical. This type carries that refusal to the
+/// verb's caller: an expunge that refused a sibling is not a success, and a
+/// layer that summarises it as one is the defect. Twin of the Swift
+/// `ExpungeVerbOutcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpungeVerbOutcome {
+    /// IDs of lineage members the audit gate refused to tombstone (accepted
+    /// rows, S-3), in walk order. Empty means the expunge covered the full
+    /// lineage — content scrubbed, vectors deleted, erasure ledger recorded
+    /// for every member. Non-empty means those members keep their content
+    /// AND their vectors, remain recallable, and were never ledgered.
+    pub refused_sibling_ids: Vec<String>,
+}
+
 /// The outcome of a verb dispatch. Rust needs a typed error where Swift
 /// uses untyped `throws` over two domains: `estate(for:)` throwing
 /// `GeniusLocusKitError.estateNotOpen` (outside the per-verb do/catch), and
@@ -413,6 +430,13 @@ pub enum VerbDispatchError {
     /// A verb-surface failure (boundary guard, underlying estate failure,
     /// or not-supported), parity of the Swift `VerbError`.
     Verb(VerbError),
+    /// `add_kg_fact` was given a non-empty `source_drawer_id` that names no
+    /// drawer in the addressed estate. A fact inherits its source drawer's
+    /// sensitivity and provenance, so an unresolvable anchor would file at
+    /// the Normal default and silently disclose material the source drawer
+    /// restricts. Parity of Swift
+    /// `GeniusLocusKitError.sourceDrawerNotFound`.
+    SourceDrawerNotFound { drawer_id: String },
 }
 
 impl From<VerbError> for VerbDispatchError {
@@ -715,6 +739,22 @@ pub struct ContradictionHuntReport {
     pub deduplicated: usize,
 }
 
+/// # Adding a per-estate registry
+///
+/// Every `HashMap<EstateHandle, …>` field below is a PER-ESTATE REGISTRY, and
+/// a handle is stable across reopens of the same estate (`handle.rs`). A
+/// registry that `close` does not remove therefore survives into the next open
+/// of that estate and resolves to state the caller never re-registered.
+///
+/// A new registry needs TWO things beyond its declaration:
+///   1. a removal in `close`, of the form `self.<field>.remove(handle);`
+///      (or `self.<field>.borrow_mut().remove(handle);` for a `RefCell` map),
+///      teardown-ordered if the value owns a worker, a lease, or a connection;
+///   2. nothing else — `tests/estate_close_completeness.rs` reads this file and
+///      fails if a declared registry has no matching removal in the `close`
+///      body. It will catch you, but it cannot fix you.
+///
+/// The Swift twin carries the same note on its own declaration block.
 pub struct EstateCoordinator {
     registry: HashMap<EstateHandle, Estate>,
     pub(crate) branches: HashMap<crate::branches::BranchId, crate::branches::EstateBranch>,
@@ -725,6 +765,12 @@ pub struct EstateCoordinator {
     /// Per-estate CorpusKit handles. Optional; activates BM25 lane in recall_scored.
     /// Mirrors Swift actor's `corpusKits: [EstateHandle: Corpus]`.
     pub(crate) corpus_kits: HashMap<EstateHandle, Arc<CorpusContentEngine>>,
+    /// Subject-backfill rider registry (PR-09, DARK LANE): the pluggable
+    /// producer that writes subjects for subject-debt rows. No producer
+    /// ships in Rust until a model exists (the SIMD/tagger dark-lane
+    /// precedent); tests inject stubs. While empty for a handle, the
+    /// subject_backfill drain lane does not render and the sweep refuses.
+    pub(crate) subject_producers: HashMap<EstateHandle, Arc<dyn SubjectProducer>>,
     /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
     /// `pub(crate)` so `intake.rs` can access it without routing through a public
@@ -907,6 +953,43 @@ impl Default for EstateCoordinator {
 /// report surfaces all of them with no wire reshape. The list is built from
 /// the drains that actually exist — no speculative drain machinery. Mirrors
 /// Swift `DrainStatus`.
+/// A subject producer (PR-09): turns drawer content into a one-sentence
+/// AI-facing subject. The Rust lane is DARK — no implementation ships
+/// until a model exists; tests inject stubs. The producer's pipeline
+/// version is stored as provenance on every subject it writes and is
+/// the regeneration lever. Mirrors Swift `SubjectProducer`.
+pub trait SubjectProducer: Send + Sync {
+    /// Provenance tier written to `subject_pipeline_version`
+    /// (e.g. `locus_kit::drawer_store::SUBJECT_PIPELINE_MINILLM_V1`).
+    fn pipeline_version(&self) -> &str;
+    /// Produce a subject for `content`. The sweep validates the result
+    /// against `locus_kit::subject_register` before writing;
+    /// inadmissible output is counted and skipped, never stored.
+    fn subject_for_content(&self, content: &str) -> Result<String, String>;
+
+    /// The pipeline tiers this producer is allowed to REGENERATE, in
+    /// addition to NULL rows (PR-10). Trust ladder by construction: a
+    /// producer lists only tiers BELOW itself — never ai-v1, never its
+    /// own tier. Default: empty (NULL-only, the PR-09 behavior).
+    fn regenerates_pipelines(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// One subject-backfill sweep's outcome. Counts are per-call except
+/// `remaining_debt`, the estate-wide presence debt AFTER the sweep.
+/// Mirrors Swift `SubjectBackfillReport`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubjectBackfillReport {
+    /// Subjects written this sweep.
+    pub written: usize,
+    /// Producer outputs rejected by the register contract (skipped; the
+    /// rows remain debt and re-enumerate next sweep).
+    pub skipped_inadmissible: usize,
+    /// Estate-wide subject debt after the sweep.
+    pub remaining_debt: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrainStatus {
     /// Stable identifier for the drain (e.g. `"corpus_encode"`). Lets a status
@@ -928,6 +1011,16 @@ impl DrainStatus {
     /// on it.
     pub const CORPUS_ENCODE_NAME: &'static str = "corpus_encode";
 
+    /// Canonical name of the subject-backfill drain lane (PR-09). The
+    /// lane renders ONLY while a subject producer is registered for the
+    /// estate — an always-present eligibility-count lane would hold the
+    /// benchmarker's encode barrier open on healthy estates. When a
+    /// rider first ships enabled, the benchmarker's non-gating denylist
+    /// must gain this name in the same mission. The Rust lane is DARK in
+    /// PR-09: no producer ships; tests inject stubs. Twin of Swift
+    /// `DrainStatus.subjectBackfillName`.
+    pub const SUBJECT_BACKFILL_NAME: &'static str = "subject_backfill";
+
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
     pub fn is_draining(&self) -> bool {
@@ -938,16 +1031,15 @@ impl DrainStatus {
     /// detached `mootx01 drain` finisher may exit and release the encode
     /// DrainLease.
     ///
-    /// Deliberately ignores every drain except "corpus_encode"
-    /// (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3): the "distillation" entry
-    /// counts rows that only a `moot_distill` sweep or the hourly standing
-    /// signal can distill — system-provisioned drawers never transit the
-    /// encode queue, so the drain-stage rider never fires for them and the
-    /// entry does not settle under the drain command. A finisher keyed on ALL
-    /// drains would poll to its full max wait holding the encode lease,
-    /// wedging the next serve session's encode queue. The T5 finisher's
-    /// contract is the encode queue and its lease — nothing else. Mirrors
-    /// Swift `DrainStatus.encodeSettled`.
+    /// Deliberately ignores every drain except "corpus_encode" — the T5
+    /// finisher's CONTRACT is the encode queue and its DrainLease, nothing
+    /// else (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3 established the gate).
+    /// Since DISTILL_SEED_STALL routed the wing-seed hints through the encode
+    /// stream, the "distillation" entry also settles under a normal drain
+    /// (every enqueued drawer distills via the drain-stage rider before its
+    /// job replies); the gate stays encode-only anyway so the finisher's
+    /// lease tenure is bounded by its own queue, not by any other lane's
+    /// accounting. Mirrors Swift `DrainStatus.encodeSettled`.
     pub fn encode_settled(statuses: &[DrainStatus]) -> bool {
         !statuses
             .iter()
@@ -965,6 +1057,7 @@ impl EstateCoordinator {
             grant_stores: HashMap::new(),
             scope_vaults: HashMap::new(),
             corpus_kits: HashMap::new(),
+            subject_producers: HashMap::new(),
             vector_stores: HashMap::new(),
             mount_states: HashMap::new(),
             audit_logs: HashMap::new(),
@@ -1405,9 +1498,13 @@ impl EstateCoordinator {
     }
 
     /// Remove an estate from the registry. The handle becomes stale;
-    /// subsequent `estate_for` lookups return `EstateNotOpen`. Also
-    /// drops the grant store, scope vault, and any registered corpus/vector
-    /// handles for that estate.
+    /// subsequent `estate_for` lookups return `EstateNotOpen`.
+    ///
+    /// Drops EVERY per-estate registry entry for the handle, not a subset:
+    /// handles are stable across reopens, so anything left behind resolves on
+    /// the next open of the same estate as state the caller never registered.
+    /// `tests/estate_close_completeness.rs` enforces that this stays complete
+    /// as registries are added.
     pub fn close(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
         if self.registry.remove(handle).is_none() {
             return Err(GeniusLocusKitError::EstateNotOpen {
@@ -1425,13 +1522,27 @@ impl EstateCoordinator {
         }
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
+        // Drop the subject-backfill rider (PR-09). A producer is registered
+        // against a handle, and handles are stable across reopens of the same
+        // estate (`handle.rs` — `estate_uuid` comes from the manifest, so
+        // reopening yields an EQUAL handle). Leaving the entry here would let a
+        // reopened estate resolve to a producer that was never re-registered:
+        // `drain_statuses` would render the `subject_backfill` lane as live and
+        // `subject_backfill_sweep` — which authorises on map presence alone —
+        // would hand full drawer content to it. Dropping the entry returns the
+        // lane to its dark default, which is what a freshly-opened estate must
+        // see.
+        self.subject_producers.remove(handle);
         // Drop the audit log and matrix tier with the estate — a closed handle
         // must not resolve to a live log or a stale recall tier (GLK-03 parity).
         self.audit_logs.remove(handle);
         self.matrix_tiers.remove(handle);
         // Drop the graph cache and preference store with the estate — a closed
-        // handle must not resolve to a stale recall accelerator. Parity of Swift
-        // `close` which drops `graphCaches[handle]` / `preferenceStores[handle]`.
+        // handle must not resolve to a stale recall accelerator. Both are pure
+        // score lookups registered by the caller (`register_graph_cache` /
+        // `register_preference_store`); nothing re-mints them lazily, so a
+        // reopened estate correctly scores their columns at 0.0 until the
+        // caller registers again.
         self.graph_caches.remove(handle);
         self.preference_stores.remove(handle);
         // Drop the node topology provider (w5-nodetree-native). A closed handle
@@ -1790,7 +1901,117 @@ impl EstateCoordinator {
             )),
         });
 
+        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // subject producer is registered (rider-gated). `pending` is the
+        // NULL-only presence debt (`count_subject_debt`), a row-level
+        // eligibility count like the distillation lane's; `in_flight` is
+        // 0 — sweeps are synchronous bounded batches, never a queue.
+        // Mirrors the Swift drainStatuses entry.
+        if let Some(producer) = self.subject_producers.get(handle) {
+            let debt = estate
+                .count_subject_debt_including(&producer.regenerates_pipelines())
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("count_subject_debt: {e:?}"),
+                })?;
+            statuses.push(DrainStatus {
+                name: DrainStatus::SUBJECT_BACKFILL_NAME.to_string(),
+                pending: debt,
+                in_flight: 0,
+                detail: Some(format!("pipeline: {}", producer.pipeline_version())),
+            });
+        }
+
         Ok(statuses)
+    }
+
+    /// Register (or replace) the subject producer for `handle` (PR-09).
+    /// The subject_backfill drain lane renders from the next
+    /// `drain_statuses` call on; `subject_backfill_sweep` becomes
+    /// runnable. DARK-LANE default: nothing calls this in production
+    /// Rust until a model exists; tests inject stubs. Mirrors Swift
+    /// `registerSubjectProducer`.
+    pub fn register_subject_producer(
+        &mut self,
+        handle: &EstateHandle,
+        producer: Arc<dyn SubjectProducer>,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        self.subject_producers.insert(handle.clone(), producer);
+        Ok(())
+    }
+
+    /// The registered producer's pipeline version, or None while the
+    /// lane is dark. Mirrors Swift `subjectProducerPipeline(for:)`.
+    pub fn subject_producer_pipeline(&self, handle: &EstateHandle) -> Option<String> {
+        self.subject_producers
+            .get(handle)
+            .map(|p| p.pipeline_version().to_string())
+    }
+
+    /// Run ONE bounded subject-backfill sweep (PR-09): enumerate up to
+    /// `batch_limit` subject-debt rows (deterministic filedAt-then-id
+    /// order), produce + validate + write each, and report. Settled-work
+    /// skip is structural — written rows leave the debt predicate, so
+    /// reruns never revisit them. Refuses while the lane is dark (no
+    /// producer): the interactive consent-gated backfill is the only
+    /// subject path until a rider exists. Mirrors Swift
+    /// `subjectBackfillSweep`.
+    pub fn subject_backfill_sweep(
+        &self,
+        handle: &EstateHandle,
+        batch_limit: usize,
+        now: i64,
+    ) -> Result<SubjectBackfillReport, GeniusLocusKitError> {
+        let Some(producer) = self.subject_producers.get(handle) else {
+            return Err(GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: "subject_backfill_sweep: no subject producer registered — \
+                         the rider lane is dark until a model registers; use the \
+                         interactive backfill (missing_subject → setSubject)"
+                    .to_string(),
+            });
+        };
+        let estate = self.estate_for(handle)?;
+        let batch = estate
+            .subject_debt_batch_including(batch_limit, &producer.regenerates_pipelines())
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("subject_debt_batch: {e:?}"),
+            })?;
+        let mut written = 0usize;
+        let mut skipped = 0usize;
+        for drawer in &batch {
+            let candidate = producer.subject_for_content(&drawer.content).map_err(|e| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("subject producer: {e}"),
+                }
+            })?;
+            if !locus_kit::subject_register::violations(&candidate).is_empty() {
+                // Inadmissible output is skipped, never stored — the row
+                // stays debt and re-enumerates next sweep.
+                skipped += 1;
+                continue;
+            }
+            estate
+                .set_subject_representation(
+                    &drawer.id,
+                    &candidate,
+                    producer.pipeline_version(),
+                    now,
+                )
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("set_subject_representation: {e:?}"),
+                })?;
+            written += 1;
+        }
+        let remaining = estate
+            .count_subject_debt_including(&producer.regenerates_pipelines())
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("count_subject_debt: {e:?}"),
+            })?;
+        Ok(SubjectBackfillReport {
+            written,
+            skipped_inadmissible: skipped,
+            remaining_debt: remaining,
+        })
     }
 
     /// Set the encode SPEED (drain QoS) for the estate's corpus drain, mapping
@@ -2607,16 +2828,81 @@ impl EstateCoordinator {
     /// Returns `VerbDispatchError` for stale handles. Individual item
     /// failures (row vanished mid-sweep) are skipped; VectorStore absence
     /// is non-fatal (the lane is simply dark).
+    /// Distill a SINGLE item into its on-row representation (§7.2) — the
+    /// one write seam every distillation caller shares.
+    ///
+    /// Writes the four representation columns on the source drawer row in
+    /// one atomic UPDATE, then replaces the item's
+    /// `distillation-features-v1` lane entry when a non-zero structural
+    /// fingerprint was computed. VectorStore absence is non-fatal: the
+    /// columns are still written (the lane is simply dark, matching the
+    /// estate's semantic-tier wiring).
+    ///
+    /// A FREE function, not a method: the drain-stage `on_encoded` callback
+    /// is a `'static` closure that cannot borrow the coordinator, so every
+    /// dependency is passed explicitly. That is what lets the rider, the
+    /// seeding path (`seed_default_wings`), and `distill_items_sweep` all
+    /// traverse this same call tree instead of keeping private copies of
+    /// the transform.
+    ///
+    /// Callers own the dense-over-distillate recompose (Stream F) that
+    /// follows a successful write — it needs the Corpus, which not every
+    /// caller has.
+    ///
+    /// `now` is passed in, never read here. Returns true when the columns
+    /// were written (false when the content is empty or the row vanished).
+    ///
+    /// Mirrors Swift `GeniusLocusKit.distillItem(handle:drawerID:content:distillFn:now:)`.
+    pub(crate) fn distill_item(
+        estate: &Estate,
+        vector_store: Option<&std::sync::Arc<VectorStore>>,
+        drawer_id: &str,
+        content: &str,
+        now: i64,
+    ) -> bool {
+        use crate::brain::distillation_cycle::{render_distillation, DISTILLATION_LANE_MODEL_ID};
+        use substrate_ml::token_compaction;
+
+        if content.is_empty() {
+            return false;
+        }
+        let (rendering, fingerprint) = render_distillation(drawer_id, content);
+
+        // Write 1 of 2 (§7.2): the four representation columns, atomically.
+        let token_count = token_compaction::estimate_token_count(&rendering);
+        match estate.set_distilled_representation(
+            drawer_id,
+            &rendering,
+            token_compaction::DISTILLATION_PIPELINE_VERSION,
+            token_count,
+            now,
+        ) {
+            Ok(1) => {}
+            // Row vanished mid-flight or the write failed: no columns, no
+            // lane entry — the next sweep recovers it.
+            _ => return false,
+        }
+
+        // Write 2 of 2 (§7.2/§8): the lane entry, keyed by the SOURCE drawer
+        // id. add_vector upserts on (itemID, modelID) — the §8
+        // replace-on-regeneration semantic. A zero fingerprint (no extracted
+        // features) writes no entry; columns and lane are independently
+        // valid (§7.5). add_vector failure is non-fatal — only the Hamming
+        // NN lane is affected.
+        if fingerprint != substrate_types::fingerprint256::Fingerprint256::ZERO {
+            if let Some(vs) = vector_store {
+                let _ = vs.add_vector(drawer_id, &fingerprint, DISTILLATION_LANE_MODEL_ID, "1", now);
+            }
+        }
+        true
+    }
+
     pub fn distill_items_sweep(
         &self,
         handle: &EstateHandle,
         now: i64,
         limit: Option<usize>,
     ) -> Result<usize, VerbDispatchError> {
-        use crate::brain::distillation_cycle::{
-            compaction_rendering, item_is_distillable, DISTILLATION_LANE_MODEL_ID,
-        };
-        use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
         use substrate_ml::token_compaction;
 
         let estate = self.estate_for_verb(handle)?;
@@ -2677,70 +2963,18 @@ impl EstateCoordinator {
                 continue;
             }
 
-            // Sentence segmentation via the canonical cross-leg delimiter
-            // algorithm (eidetic_lib::segmenter::sentences) — the same
-            // segmenter the Swift path and the corpus Chunker use.
-            let sentences: Vec<String> = eidetic_lib::segmenter::sentences(&drawer.content);
-
-            let (rendering, fingerprint) = if item_is_distillable(sentences.len()) {
-                // Matrix path (§7.4).
-                let input = DistillationInput::new(
-                    sentences,
-                    None,
-                    drawer.id.clone(),
-                    vec![drawer.id.clone()],
-                );
-                let output = DistillationPipeline::run(
-                    &input,
-                    DistillationPipeline::default_extractor,
-                    true,
-                );
-                let rendering = if output.distilled_text.is_empty() {
-                    // Degenerate matrix: fall back to the short-item
-                    // transform so §13.1 population holds.
-                    compaction_rendering(&drawer.content)
-                } else {
-                    output.distilled_text
-                };
-                (rendering, output.feature_fingerprint)
-            } else {
-                // Short-item path (§7.5).
-                (
-                    compaction_rendering(&drawer.content),
-                    DistillationPipeline::query_fingerprint(
-                        &drawer.content,
-                        DistillationPipeline::default_extractor,
-                    ),
-                )
-            };
-
-            // Write 1 of 2 (§7.2): the four columns, atomically.
-            let token_count = token_compaction::estimate_token_count(&rendering);
-            match estate.set_distilled_representation(
+            // Render + both writes through the shared seam (§7.2/§7.4/§7.5)
+            // — the same call tree the drain-stage rider and the seeding
+            // path take. A false return means the row vanished mid-sweep or
+            // the write failed: skip it.
+            if !Self::distill_item(
+                estate,
+                vector_store_opt.as_ref(),
                 &drawer.id,
-                &rendering,
-                token_compaction::DISTILLATION_PIPELINE_VERSION,
-                token_count,
+                &drawer.content,
                 now,
             ) {
-                Ok(1) => {}
-                _ => continue, // row vanished mid-sweep or write failed: skip
-            }
-
-            // Write 2 of 2 (§7.2/§8): the lane entry, keyed by the SOURCE
-            // drawer id. Upsert-replace; zero fingerprint writes nothing.
-            if fingerprint != substrate_types::fingerprint256::Fingerprint256::ZERO {
-                if let Some(vs) = &vector_store_opt {
-                    // add_vector failure is non-fatal — the columns are
-                    // written; only the Hamming NN lane is affected.
-                    let _ = vs.add_vector(
-                        &drawer.id,
-                        &fingerprint,
-                        DISTILLATION_LANE_MODEL_ID,
-                        "1",
-                        now,
-                    );
-                }
+                continue;
             }
 
             produced += 1;
@@ -3205,6 +3439,10 @@ impl EstateCoordinator {
             if level > config.vague_level_cap {
                 continue;
             }
+            // Fold-in v2 is a fresh derived row: same subject rule as the
+            // new-cluster path — never born as debt (PR-02). Computed before
+            // `rendering` moves into the constructor.
+            let v2_subject_line = crate::brain::consolidation_cycle::vague_subject(&rendering);
             let mut v2 = locus_kit::drawer::Drawer::new(
                 uuid::Uuid::new_v4().to_string(),
                 rendering,
@@ -3214,6 +3452,9 @@ impl EstateCoordinator {
                 vague_item.embedding_model_id.clone(),
             );
             v2.lineage_id = vague_item.lineage_id;
+            v2.subject = Some(v2_subject_line);
+            v2.subject_pipeline_version = Some(crate::brain::consolidation_cycle::CONSOLIDATION_SUBJECT_PIPELINE.to_string());
+            v2.subject_at = Some(now);
             v2.operational_bitmap = DrawerFeatureFlags::IS_VAGUE
                 | (((level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
             // Sensitivity inheritance (§D.1 monotone ceiling): fold-in v2 carries the MAX
@@ -3302,6 +3543,11 @@ impl EstateCoordinator {
                 };
             let vague_bitmap: i64 = DrawerFeatureFlags::IS_VAGUE
                 | (((product_level as i64) & 0b11) << DrawerFeatureFlags::VAGUE_LEVEL_SHIFT);
+            // Derived writers emit their own subject at creation (PR-02): a
+            // vague item must never be born as subject debt. Computed before
+            // `rendering` moves into the constructor. Mirrors Swift
+            // vagueSubject/consolidationSubjectPipeline.
+            let vague_subject_line = crate::brain::consolidation_cycle::vague_subject(&rendering);
             let mut vague = locus_kit::drawer::Drawer::new(
                 uuid::Uuid::new_v4().to_string(),
                 rendering,
@@ -3311,6 +3557,9 @@ impl EstateCoordinator {
                 constituents[0].embedding_model_id.clone(),
             );
             vague.operational_bitmap = vague_bitmap;
+            vague.subject = Some(vague_subject_line);
+            vague.subject_pipeline_version = Some(crate::brain::consolidation_cycle::CONSOLIDATION_SUBJECT_PIPELINE.to_string());
+            vague.subject_at = Some(now);
             // Sensitivity inheritance (§D.1): the new vague drawer carries the MAX adjective
             // and provenance sensitivity over all constituents — cookbook §2.3 bits 6–11
             // (adjective) and §2.5 bits 30–35 (provenance at capture). Source tier flows to
@@ -3525,13 +3774,34 @@ impl EstateCoordinator {
         config: &crate::brain::consolidation_cycle::ConsolidationConfig,
     ) -> Result<crate::brain::consolidation_cycle::ConsolidationSweepReport, VerbDispatchError>
     {
-        self.expunge(
+        let outcome = self.expunge(
             handle,
             vague_drawer_id,
             "wave-2 defrag: cluster drift exceeded the D10 threshold",
             true,
             now,
         )?;
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling is
+        // not a success. This path returns a ConsolidationSweepReport, which
+        // cannot represent a partial cascade, so a refusal must surface as an
+        // error rather than be summarised away. Vague items are
+        // machine-generated and their lineage should never contain an
+        // accepted row; if one does (a user accepted a vague revision), the
+        // gate preserves it and defrag stops before re-consolidating. Twin
+        // of the Swift `defragVagueItem` guard.
+        if !outcome.refused_sibling_ids.is_empty() {
+            return Err(VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "expunge".to_string(),
+                reason: format!(
+                    "defrag expunge of vague drawer {} was partial: {} accepted \
+                     lineage sibling(s) refused by the audit gate and preserved ({}); \
+                     the vague cascade cannot complete",
+                    vague_drawer_id,
+                    outcome.refused_sibling_ids.len(),
+                    outcome.refused_sibling_ids.join(", ")
+                ),
+            }));
+        }
         self.consolidation_sweep_report(handle, now, config, None)
     }
 
@@ -3806,6 +4076,393 @@ impl EstateCoordinator {
         })
     }
 
+    /// Run one typed sweep and file a PROPOSED `contradicts` tunnel for
+    /// every proven finding that survives the dedup contract (DCP M5 —
+    /// mirrors Swift `proposeConflictTunnels(in:)`).
+    ///
+    /// Dedup contract (F14/F15): any live (active or proposed)
+    /// contradicts tunnel between the pair suppresses; a WITHDRAWN
+    /// typed proposal suppresses only the SAME rule@version (rejection
+    /// durable, F14) — a registry version bump files a NEW instance
+    /// (F15); a withdrawn LEXICAL (hunter) tunnel does not suppress a
+    /// typed proof. `now` is epoch milliseconds.
+    ///
+    /// Sensitivity ceiling: a proven finding whose endpoint sensitivity
+    /// ceiling exceeds Elevated is never proposed — the same policy, the
+    /// same raw-value comparison, and the same position ahead of the dedup
+    /// check that the lexical hunter applies before it screens a pair.
+    /// Ceiling skips are counted apart from dedup suppressions so the
+    /// gate's activity is visible in the report.
+    pub fn propose_conflict_tunnels(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<crate::brain::conflict_projection_sweep::ConflictTunnelProposalReport, VerbDispatchError>
+    {
+        use crate::brain::conflict_projection_sweep::{pair_key, ConflictTunnelProposalReport};
+        use locus_kit::frames::TunnelCaptureFrame;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+
+        const LABEL_PREFIX: &str = "dcp: ";
+
+        let sweep = self.conflict_projection_sweep(handle)?;
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("propose_conflict_tunnels", "", e))
+        };
+
+        let mut live_pairs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut withdrawn_typed_labels: std::collections::HashMap<
+            String,
+            Vec<String>,
+        > = std::collections::HashMap::new();
+        for tunnel in estate.all_tunnels().map_err(remap_err)? {
+            if tunnel.kind != TunnelKind::Contradicts {
+                continue;
+            }
+            let (Some(s), Some(t)) =
+                (tunnel.source_drawer_id.as_ref(), tunnel.target_drawer_id.as_ref())
+            else {
+                continue;
+            };
+            let pair = pair_key(s, t);
+            match tunnel.lifecycle() {
+                TunnelLifecycle::Active | TunnelLifecycle::Proposed => {
+                    live_pairs.insert(pair);
+                }
+                TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => {
+                    if tunnel.label.starts_with(LABEL_PREFIX) {
+                        withdrawn_typed_labels.entry(pair).or_default().push(tunnel.label.clone());
+                    }
+                }
+            }
+        }
+
+        let all_drawers = estate.all_drawers().map_err(remap_err)?;
+        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
+        let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        let mut proposed = Vec::new();
+        let mut suppressed = 0usize;
+        let mut ceiling_skipped = 0usize;
+        for finding in &sweep.proven {
+            let outcome = &finding.outcome;
+            if outcome.source_drawer_ids.len() != 2 {
+                continue;
+            }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            //
+            // Compare the RAW ceiling, never a decoded tier: `from_raw`
+            // coerces every unrecognised raw — scale-gapped intermediates
+            // and beyond-spec values alike — to Normal, so a decode-based
+            // check would wave through exactly the rows this gate exists to
+            // stop. The sweep already computed this ceiling as the MAX
+            // endpoint sensitivity, and it fails closed on an unresolvable
+            // endpoint.
+            if finding.sensitivity_ceiling_raw
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                ceiling_skipped += 1;
+                continue;
+            }
+            let (a, b) = (&outcome.source_drawer_ids[0], &outcome.source_drawer_ids[1]);
+            let pair = pair_key(a, b);
+            let renewal_key =
+                format!("{LABEL_PREFIX}{}@{}", outcome.rule_id, outcome.rule_version);
+            let label = format!("{renewal_key} result={}", outcome.result_id);
+            if live_pairs.contains(&pair) {
+                suppressed += 1;
+                continue;
+            }
+            if withdrawn_typed_labels
+                .get(&pair)
+                .is_some_and(|labels| labels.iter().any(|l| l.starts_with(&renewal_key)))
+            {
+                // F14: exact repeat of a rejected proof stays rejected;
+                // a different rule VERSION misses this prefix (F15).
+                suppressed += 1;
+                continue;
+            }
+            // Endpoint coordinates from the node tree — skip rather than
+            // file fabricated coordinates (hunter posture).
+            let (Some(da), Some(db)) =
+                (drawers_by_id.get(a.as_str()), drawers_by_id.get(b.as_str()))
+            else {
+                continue;
+            };
+            let (Some((a_wing, a_room)), Some((b_wing, b_room))) = (
+                node_names.get(&da.parent_node_id),
+                node_names.get(&db.parent_node_id),
+            ) else {
+                continue;
+            };
+            let mut frame = TunnelCaptureFrame::new(
+                a_wing.clone(),
+                a_room.clone(),
+                b_wing.clone(),
+                b_room.clone(),
+                label,
+                "conflict-projection",
+            );
+            frame.source_drawer_id = Some(a.clone());
+            frame.target_drawer_id = Some(b.clone());
+            frame.kind = TunnelKind::Contradicts;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = TunnelLifecycle::Proposed;
+            let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+            live_pairs.insert(pair);
+            proposed.push(tunnel.id);
+        }
+        Ok(ConflictTunnelProposalReport {
+            sweep,
+            proposed_tunnel_ids: proposed,
+            suppressed,
+            ceiling_skipped,
+        })
+    }
+
+    /// File the ACTIVE `supersedes` tunnels for a meeting-capture
+    /// report's `Replaces decision` references (F22 — mirrors Swift
+    /// `fileSupersessions(in:report:now:)`): the replaced fact's source
+    /// drawer is superseded by the replacing fact's source drawer.
+    /// Returns (filed tunnel ids, unresolved replaced-fact ids).
+    pub fn file_supersessions(
+        &self,
+        handle: &EstateHandle,
+        report: &crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport,
+        now: i64,
+    ) -> Result<(Vec<String>, Vec<String>), VerbDispatchError> {
+        use locus_kit::frames::TunnelCaptureFrame;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+        use substrate_ml::meeting_decision_extractor::MEETING_DECISION_EXTRACTOR_ID;
+
+        if report.replaces_by_fact_id.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("file_supersessions", "", e))
+        };
+        let facts_by_id: std::collections::HashMap<String, locus_kit::kg_fact::KGFact> = estate
+            .all_kg_facts_including_retired()
+            .map_err(remap_err)?
+            .into_iter()
+            .map(|f| (f.id.clone(), f))
+            .collect();
+        let all_drawers = estate.all_drawers().map_err(remap_err)?;
+        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
+        let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        let mut filed = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut refs: Vec<(&String, &String)> = report.replaces_by_fact_id.iter().collect();
+        refs.sort();
+        for (fact_id, replaced_fact_id) in refs {
+            let (Some(new_fact), Some(old_fact)) =
+                (facts_by_id.get(fact_id), facts_by_id.get(replaced_fact_id))
+            else {
+                unresolved.push(replaced_fact_id.clone());
+                continue;
+            };
+            let (Some(nd), Some(od)) = (
+                drawers_by_id.get(new_fact.source_drawer_id.as_str()),
+                drawers_by_id.get(old_fact.source_drawer_id.as_str()),
+            ) else {
+                unresolved.push(replaced_fact_id.clone());
+                continue;
+            };
+            let (Some((n_wing, n_room)), Some((o_wing, o_room))) = (
+                node_names.get(&nd.parent_node_id),
+                node_names.get(&od.parent_node_id),
+            ) else {
+                unresolved.push(replaced_fact_id.clone());
+                continue;
+            };
+            // Source = the SUPERSEDING drawer, target = the superseded
+            // one. ACTIVE because the controlled grammar's Replaces line
+            // IS the acceptance.
+            let mut frame = TunnelCaptureFrame::new(
+                n_wing.clone(),
+                n_room.clone(),
+                o_wing.clone(),
+                o_room.clone(),
+                format!("{MEETING_DECISION_EXTRACTOR_ID}: replaces {replaced_fact_id}"),
+                "conflict-projection",
+            );
+            frame.source_drawer_id = Some(new_fact.source_drawer_id.clone());
+            frame.target_drawer_id = Some(old_fact.source_drawer_id.clone());
+            frame.kind = TunnelKind::Supersedes;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = TunnelLifecycle::Active;
+            let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+            filed.push(tunnel.id);
+        }
+        Ok((filed, unresolved))
+    }
+
+    /// Deterministic KGFact id for an extracted decision (replay-safe).
+    /// Mirrors Swift `GeniusLocusKit.meetingDecisionFactID`.
+    pub fn meeting_decision_fact_id(
+        source_drawer_id: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> String {
+        use substrate_ml::meeting_decision_extractor::MEETING_DECISION_EXTRACTOR_ID;
+        let input = format!(
+            "{MEETING_DECISION_EXTRACTOR_ID}|{source_drawer_id}|{subject}|{predicate}|{object}"
+        );
+        substrate_kernel::sha256::hash(input.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// Parse `transcript` under the v0.1 registry and file each accepted
+    /// decision as an ACTIVE KGFact anchored to `source_drawer_id` (DCP
+    /// M6 filing seam — mirrors Swift `captureMeetingDecisions(in:)`).
+    ///
+    /// Filing posture: extracted facts file ACTIVE — the controlled
+    /// register is strict enough that an accepted line IS an assertion,
+    /// and the M0 §2 proof floor requires both facts active; what stays
+    /// PROPOSED downstream is the contradicts tunnel (M5), not the fact.
+    /// Replay safety: deterministic ids + a pre-insert existence check,
+    /// so re-extracting the same transcript skips already-filed ids.
+    /// `now` is the filing instant in epoch milliseconds (the LocusKit
+    /// Rust clock).
+    pub fn capture_meeting_decisions(
+        &self,
+        handle: &EstateHandle,
+        transcript: &str,
+        source_drawer_id: &str,
+        now: i64,
+    ) -> Result<crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport, VerbDispatchError>
+    {
+        use crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport;
+        use locus_kit::kg_fact::KGFact;
+        use substrate_ml::conflict_projection::ConflictRuleRegistry;
+        use substrate_ml::meeting_decision_extractor::extract;
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("capture_meeting_decisions", "", e))
+        };
+        let extraction = extract(transcript, &ConflictRuleRegistry::v01());
+
+        // Existing-id set for replay dedup (retired included — a
+        // withdrawn decision must not silently refile).
+        let existing: std::collections::HashSet<String> = estate
+            .all_kg_facts_including_retired()
+            .map_err(remap_err)?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+
+        let mut filed = Vec::new();
+        let mut skipped = Vec::new();
+        let mut replaces = std::collections::HashMap::new();
+        for decision in &extraction.decisions {
+            let id = Self::meeting_decision_fact_id(
+                source_drawer_id,
+                &decision.entity,
+                &decision.dimension,
+                &decision.raw_value,
+            );
+            if let Some(replaced) = &decision.replaces_id {
+                replaces.insert(id.clone(), replaced.clone());
+            }
+            if existing.contains(&id) {
+                skipped.push(id);
+                continue;
+            }
+            // Routed through the coordinator verb rather than writing the
+            // store directly so a decision inherits its transcript drawer's
+            // sensitivity and provenance on the same code path every other
+            // fact uses — a decision extracted from a Secret transcript is
+            // itself Secret. A source_drawer_id naming no drawer fails here.
+            self.add_kg_fact_with_id_and_origin(
+                handle,
+                &id,
+                &decision.entity,
+                // The rule's canonical dimension spelling, so projection's
+                // dimension_key(predicate) round-trips.
+                &decision.dimension,
+                &decision.raw_value,
+                source_drawer_id,
+                &locus_kit::kg_fact::KGFactOrigin::default(),
+                now,
+            )?;
+            filed.push(id);
+        }
+        Ok(MeetingDecisionCaptureReport {
+            extraction,
+            filed_fact_ids: filed,
+            skipped_existing_ids: skipped,
+            replaces_by_fact_id: replaces,
+        })
+    }
+
+    /// Run one typed conflict-projection sweep over `handle` (DCP M3 —
+    /// the proving lane; the lexical hunter above proposes). Pure read:
+    /// no tunnel proposals, no writes. Mirrors Swift
+    /// `GeniusLocusKit.conflictProjectionSweep(in:)`.
+    pub fn conflict_projection_sweep(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<crate::brain::conflict_projection_sweep::ConflictProjectionSweepReport, VerbDispatchError>
+    {
+        use crate::brain::conflict_projection_sweep::{pair_key, run_sweep, SWEEP_DEFAULT_BUCKET_CAP};
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
+        use substrate_ml::conflict_projection::ConflictRuleRegistry;
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("conflict_projection_sweep", "", e))
+        };
+        let facts = estate.all_kg_facts().map_err(remap_err)?;
+
+        // One drawer walk for both per-drawer inputs: validity instants
+        // and sensitivity ceilings. LocusKit's Rust clock is
+        // epoch-millisecond; the sweep core's identity domain is whole
+        // seconds (KI-003) — the division happens HERE, at the seam.
+        let mut event_time_seconds = std::collections::HashMap::new();
+        let mut sensitivity_raw = std::collections::HashMap::new();
+        for drawer in estate.all_drawers().map_err(remap_err)? {
+            event_time_seconds.insert(drawer.id.clone(), drawer.event_time.div_euclid(1000));
+            sensitivity_raw
+                .insert(drawer.id.clone(), drawer.adjective_sensitivity().raw_value());
+        }
+
+        // Accepted supersession: an ACTIVE supersedes tunnel between the
+        // two source drawers (review-accept sets lifecycle Active).
+        let mut accepted_pairs = std::collections::HashSet::new();
+        for tunnel in estate.all_tunnels().map_err(remap_err)? {
+            if tunnel.kind == TunnelKind::Supersedes
+                && tunnel.lifecycle() == TunnelLifecycle::Active
+            {
+                if let (Some(s), Some(t)) =
+                    (tunnel.source_drawer_id.as_ref(), tunnel.target_drawer_id.as_ref())
+                {
+                    accepted_pairs.insert(pair_key(s, t));
+                }
+            }
+        }
+
+        Ok(run_sweep(
+            &facts,
+            &event_time_seconds,
+            &sensitivity_raw,
+            &accepted_pairs,
+            &ConflictRuleRegistry::v01(),
+            SWEEP_DEFAULT_BUCKET_CAP,
+        ))
+    }
+
     // MARK: - mutate
 
     /// Apply a named mutation to a drawer. Delegates to `Estate::mutate`,
@@ -3884,6 +4541,17 @@ impl EstateCoordinator {
     ///
     /// Direct LocusKit callers (bypassing GLK) use `estate.expunge` with the
     /// default `seal_audit: true` and are unaffected by this change.
+    ///
+    /// **Partial outcome (SPEC B-8b, MXE-FA):** the storage expunge refuses
+    /// `accepted → tombstoned` lineage siblings (S-3) and preserves them
+    /// byte-identical. The returned `ExpungeVerbOutcome` names those refused
+    /// members; step 2 deletes vectors ONLY for members that were actually
+    /// scrubbed, so a refused sibling keeps both its content and its vector
+    /// (deleting the vector of a surviving row would make it readable by id
+    /// but invisible to search — a third inconsistent state). An expunge
+    /// that refused a sibling is not a success, and a caller that
+    /// summarises it as one is the defect. Twin of the Swift
+    /// `VerbSurface.expunge`.
     pub fn expunge(
         &self,
         handle: &EstateHandle,
@@ -3891,7 +4559,7 @@ impl EstateCoordinator {
         reason: &str,
         confirmation: bool,
         now: i64,
-    ) -> Result<(), VerbDispatchError> {
+    ) -> Result<ExpungeVerbOutcome, VerbDispatchError> {
         if !confirmation {
             return Err(VerbError::ExpungeNotConfirmed {
                 row_id: row_id.to_string(),
@@ -3922,11 +4590,14 @@ impl EstateCoordinator {
             });
 
         // Step 1 — LocusKit storage expunge with deferred audit seal.
-        // The gate-produced AuditEvent is returned unsealed; we hold it until
-        // step 2 confirms the cross-kit delete succeeded (§B-2a ordering).
-        let unsealed_event = estate
+        // The full ExpungeOutcome comes back: the gate-produced AuditEvent
+        // (held unsealed until step 2 confirms the cross-kit delete, §B-2a)
+        // plus the gate-refused sibling ids (SPEC B-8b).
+        let storage_outcome = estate
             .expunge(row_id, reason, confirmation, now, false)
             .map_err(|e| remap("expunge", &uuid_to_str(&handle.estate_uuid), e))?;
+        let unsealed_event = storage_outcome.event;
+        let refused_sibling_ids = storage_outcome.refused_sibling_ids;
 
         // Step 2 — Cross-kit vector delete (fail-closed; must not be silent).
         //
@@ -3956,10 +4627,20 @@ impl EstateCoordinator {
             // head plus every predecessor in one pass. An empty result
             // (no lineageID or row not found) falls back to [row_id] to
             // guarantee the head row is always processed.
+            //
+            // Scrub scope (SPEC B-8b, MXE-FA): vectors are deleted ONLY for
+            // members the storage expunge actually scrubbed — the chain
+            // minus the gate-refused siblings. A refused sibling's content
+            // survives byte-identical, so its vector must survive too;
+            // deleting it would leave the row readable by id but invisible
+            // to search.
             let ids_to_delete: Vec<String> = match estate.lineage_chain(row_id) {
                 Ok(chain) if !chain.is_empty() => chain,
                 _ => vec![row_id.to_string()],
-            };
+            }
+            .into_iter()
+            .filter(|id| !refused_sibling_ids.contains(id))
+            .collect();
 
             let step2_result: Result<(), VerbDispatchError> = (|| {
                 for delete_id in &ids_to_delete {
@@ -4133,12 +4814,17 @@ impl EstateCoordinator {
         }
 
         // Step 3 — Seal success audit. Both storage and cross-kit delete
-        // succeeded; the audit now correctly records a complete expunge.
+        // succeeded for every gate-admitted member; the audit records what
+        // was actually erased. Refused siblings were never scrubbed, never
+        // vector-deleted, and never ledgered — the returned outcome is the
+        // caller's only honest summary (SPEC B-8b).
         estate
             .seal_expunge_audit(&unsealed_event)
             .map_err(|e| remap("expunge", &uuid_to_str(&handle.estate_uuid), e))?;
 
-        Ok(())
+        Ok(ExpungeVerbOutcome {
+            refused_sibling_ids,
+        })
     }
 
     // MARK: - run_expunge_integrity_sweep
@@ -4602,15 +5288,107 @@ impl EstateCoordinator {
         source_drawer_id: &str,
         now: i64,
     ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
-        let estate = self.estate_for_verb(handle)?;
-        let fact = locus_kit::kg_fact::KGFact::new(
-            Uuid::new_v4().to_string(),
-            subject.to_string(),
-            predicate.to_string(),
-            object.to_string(),
-            source_drawer_id.to_string(),
+        self.add_kg_fact_with_origin(
+            handle,
+            subject,
+            predicate,
+            object,
+            source_drawer_id,
+            &locus_kit::kg_fact::KGFactOrigin::default(),
             now,
-        );
+        )
+    }
+
+    /// File a KGFact that records where it came from — the filing host, or
+    /// the foreign palace key and record id of an imported triple.
+    ///
+    /// Swift spells this as defaulted parameters on `captureKGFact`; Rust
+    /// has no default arguments, so `add_kg_fact` above is the empty-origin
+    /// entry point and delegates here. One implementation, two spellings.
+    ///
+    /// `source_drawer_id` is a **local** drawer id or `""` — a foreign
+    /// palace key belongs in `origin.foreign_source_key`, never here.
+    pub fn add_kg_fact_with_origin(
+        &self,
+        handle: &EstateHandle,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_drawer_id: &str,
+        origin: &locus_kit::kg_fact::KGFactOrigin,
+        now: i64,
+    ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
+        self.add_kg_fact_with_id_and_origin(
+            handle,
+            &Uuid::new_v4().to_string(),
+            subject,
+            predicate,
+            object,
+            source_drawer_id,
+            origin,
+            now,
+        )
+    }
+
+    /// File a KGFact under a caller-supplied id.
+    ///
+    /// Callers that derive a deterministic id — the meeting-decision seam
+    /// derives one from source drawer + subject + predicate + object so a
+    /// re-run recognises what it already filed — need to name the row rather
+    /// than take a fresh UUID. Swift spells this as a defaulted `id:`
+    /// parameter on `captureKGFact`; this is the same single implementation
+    /// reached without default arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_kg_fact_with_id_and_origin(
+        &self,
+        handle: &EstateHandle,
+        id: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_drawer_id: &str,
+        origin: &locus_kit::kg_fact::KGFactOrigin,
+        now: i64,
+    ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // A fact drawn from a drawer is as sensitive as the drawer it came
+        // from, so it inherits that drawer's adjective and provenance bitmaps
+        // verbatim. Loading by id deliberately bypasses the recall sensitivity
+        // ceiling: the bitmaps are being copied onto the fact, not disclosed,
+        // and a Restricted/Secret source is exactly the case that must be
+        // carried through. An unresolvable anchor fails the write rather than
+        // filing at the Normal default — that default would disclose material
+        // the source drawer restricts.
+        let (adjective_bitmap, provenance_bitmap) = if source_drawer_id.is_empty() {
+            (0, 0)
+        } else {
+            let found = estate
+                .get_drawers(&[source_drawer_id])
+                .map_err(|e| VerbDispatchError::from(remap("add_kg_fact", "", e)))?;
+            match found.first() {
+                Some(d) => (d.adjective_bitmap, d.provenance),
+                None => {
+                    return Err(VerbDispatchError::SourceDrawerNotFound {
+                        drawer_id: source_drawer_id.to_string(),
+                    })
+                }
+            }
+        };
+        let fact = locus_kit::kg_fact::KGFact {
+            added_by: origin.added_by.clone(),
+            foreign_source_key: origin.foreign_source_key.clone(),
+            foreign_record_id: origin.foreign_record_id.clone(),
+            adjective_bitmap,
+            provenance_bitmap,
+            ..locus_kit::kg_fact::KGFact::new(
+                id.to_string(),
+                subject.to_string(),
+                predicate.to_string(),
+                object.to_string(),
+                source_drawer_id.to_string(),
+                now,
+            )
+        };
         estate.add_kg_fact(&fact).map_err(|e| VerbDispatchError::from(remap("add_kg_fact", "", e)))?;
         Ok(fact)
     }
@@ -6442,8 +7220,21 @@ impl EstateCoordinator {
     ///
     /// Mirrors Swift `GeniusLocusKit.seedDefaultWings(for:now:)`.
     ///
+    /// **Encode routing (DISTILL_SEED_STALL):** when a Corpus is registered,
+    /// hint drawers are enqueued onto the Corpus encode stream — the same
+    /// change-reference path a `Regular` capture rides — so the drain-stage
+    /// distillation fires for them and the "distillation" drain lane can reach
+    /// zero. The enqueue predicate is representation-eligibility (bit 19
+    /// `has_current_representation` clear, or a stale pipeline version) over
+    /// the `AI_Charter_Hint` room only: an already-encoded-and-distilled hint
+    /// is never re-enqueued, so re-opening an estate stays a no-op — no
+    /// spurious encode work per open. (Deliberately does NOT key on
+    /// `hint_added_by`, which is provenance-only.)
+    ///
     /// - `handle`: An open estate handle in the coordinator's registry.
-    /// - `now`:    Write timestamp (epoch seconds) for any hints seeded.
+    /// - `now`:    Write timestamp (epoch MILLISECONDS) for any hints seeded.
+    ///             Milliseconds is what the store and HLC boundary consume;
+    ///             seconds here stamp every seeded hint drawer as 1970.
     ///             Pass `SystemTime::now()` from serve entry points (acceptable
     ///             at an app boundary). Pass a fixed value in tests for determinism.
     /// - Returns: `Ok(())` on success, or a `GeniusLocusKitError` if the estate
@@ -6472,7 +7263,7 @@ impl EstateCoordinator {
         // (Drawer no longer stores wing/room — node-tree integrity).
         let node_names = build_node_name_map(self.node_stores.get(handle), &existing_drawers);
         let seeded_wings: std::collections::HashSet<String> = existing_drawers
-            .into_iter()
+            .iter()
             .filter(|d| {
                 node_names.get(&d.parent_node_id)
                     .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
@@ -6513,8 +7304,75 @@ impl EstateCoordinator {
             seeded_count += 1;
         }
 
-        // Suppress unused-variable warning in release builds where log is a no-op.
+        // Encode routing (DISTILL_SEED_STALL): index + distill hint drawers
+        // that still owe a representation, INLINE through the encode path —
+        // the same index/distill/recompose transform a queued drawer receives
+        // at drain, without touching the queue. Inline (not enqueued) on
+        // purpose: seeding returns with the estate SETTLED — hints
+        // BM25/vector indexed, distilled (bit 19 set), and the young fallback
+        // basis converged via the post-ingest settle — so nothing races the
+        // first user capture and no drain worker or lease is required at
+        // open. Runs AFTER the seeding loop so it covers both the hints
+        // seeded just now and hints seeded by an earlier open that predates
+        // this routing (their bit 19 is clear — the one-time backfill).
+        // Skipped entirely when no Corpus is registered (LocusOnly / bare
+        // open before wiring): a corpus-less estate has no semantic lane;
+        // those hints are picked up by reindex/sweep once a corpus exists.
+        // Twin of the Swift block in `seedDefaultWings`.
+        let mut settled_hints = 0usize;
+        if let Some(corpus) = self.corpus_for(handle) {
+            // Re-scan when the loop seeded new hints (they are not in the
+            // first scan); otherwise reuse it.
+            let drawers = if seeded_count > 0 {
+                estate
+                    .all_drawers()
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("seed_default_wings: all_drawers (post-seed) failed: {e:?}"),
+                    })?
+            } else {
+                existing_drawers
+            };
+            let node_names = build_node_name_map(self.node_stores.get(handle), &drawers);
+            for hint in drawers.iter().filter(|d| {
+                node_names
+                    .get(&d.parent_node_id)
+                    .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
+                    .unwrap_or(false)
+                    && !d.content.is_empty()
+                    && (!d.has_current_representation()
+                        || d.distilled_pipeline_version.as_deref()
+                            != Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION))
+            }) {
+                // Index (BM25 + vector lanes) through the engine's direct
+                // path; the post-ingest settle inside index_content keeps the
+                // young basis covering the growing corpus.
+                corpus
+                    .index_content(&hint.id, hint.filed_at)
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!(
+                            "seed_default_wings: corpus index_content failed for '{}': {e:?}",
+                            hint.id
+                        ),
+                    })?;
+                // Drain-stage transform, inline: the same shared seam the
+                // queue's on_encoded rider calls, with the seeding `now`
+                // threaded for determinism.
+                if Self::distill_item(
+                    estate,
+                    self.vector_stores.get(handle),
+                    &hint.id,
+                    &hint.content,
+                    now,
+                ) {
+                    let _ = corpus.recompose_dense_vector(&hint.id, now);
+                }
+                settled_hints += 1;
+            }
+        }
+
+        // Suppress unused-variable warnings in release builds where log is a no-op.
         let _ = seeded_count;
+        let _ = settled_hints;
 
         Ok(())
     }
@@ -6834,13 +7692,6 @@ impl EstateCoordinator {
                         let vector_store_for_callback =
                             self.vector_stores.get(&handle).cloned();
                         corpus.set_on_encoded(move |drawer_ids| {
-                            use crate::brain::distillation_cycle::{
-                                compaction_rendering, item_is_distillable,
-                                DISTILLATION_LANE_MODEL_ID,
-                            };
-                            use substrate_ml::distillation_pipeline::{
-                                DistillationInput, DistillationPipeline,
-                            };
                             use substrate_ml::token_compaction;
 
                             // (1) Room-rollup — always best-effort.
@@ -6877,64 +7728,16 @@ impl EstateCoordinator {
                                     continue;
                                 }
 
-                                // Distillation: same matrix / short-item logic
-                                // as distill_items_sweep.
-                                let sentences: Vec<String> =
-                                    eidetic_lib::segmenter::sentences(&drawer.content);
-                                let (rendering, fingerprint) =
-                                    if item_is_distillable(sentences.len()) {
-                                        let input = DistillationInput::new(
-                                            sentences,
-                                            None,
-                                            drawer.id.clone(),
-                                            vec![drawer.id.clone()],
-                                        );
-                                        let output = DistillationPipeline::run(
-                                            &input,
-                                            DistillationPipeline::default_extractor,
-                                            true,
-                                        );
-                                        let r = if output.distilled_text.is_empty() {
-                                            compaction_rendering(&drawer.content)
-                                        } else {
-                                            output.distilled_text
-                                        };
-                                        (r, output.feature_fingerprint)
-                                    } else {
-                                        (
-                                            compaction_rendering(&drawer.content),
-                                            DistillationPipeline::query_fingerprint(
-                                                &drawer.content,
-                                                DistillationPipeline::default_extractor,
-                                            ),
-                                        )
-                                    };
-
-                                // Write 1 of 2 (§7.2): the four distillation columns.
-                                let token_count =
-                                    token_compaction::estimate_token_count(&rendering);
-                                let wrote = estate.set_distilled_representation(
+                                // Distillation through the shared seam — the
+                                // same call tree `distill_items_sweep` and the
+                                // seeding path take.
+                                if EstateCoordinator::distill_item(
+                                    &estate,
+                                    vector_store_for_callback.as_ref(),
                                     &drawer.id,
-                                    &rendering,
-                                    token_compaction::DISTILLATION_PIPELINE_VERSION,
-                                    token_count,
+                                    &drawer.content,
                                     now_ms,
-                                );
-                                if let Ok(1) = wrote {
-                                    // Write 2 of 2 (§7.2/§8): fingerprint lane.
-                                    if fingerprint
-                                        != substrate_types::fingerprint256::Fingerprint256::ZERO
-                                    {
-                                        if let Some(vs) = &vector_store_for_callback {
-                                            let _ = vs.add_vector(
-                                                &drawer.id,
-                                                &fingerprint,
-                                                DISTILLATION_LANE_MODEL_ID,
-                                                "1",
-                                                now_ms,
-                                            );
-                                        }
-                                    }
+                                ) {
                                     // (3) Dense-over-distillate (Stream F): recompose
                                     // the dense float vector from the new distillate.
                                     // The idempotence gate keys on content digest (not
@@ -6961,15 +7764,17 @@ impl EstateCoordinator {
         // Step 2c: Seed the seven default wings (the default-wing policy) — AFTER wiring,
         // so each hint drawer is stamped with the corpus's normal model id rather
         // than the "estate-provision" sentinel (matches the serve open path and the
-        // Swift provision order). Hints are filed row-only (seed_wing does not
-        // enqueue); their vectors are produced by the next full-corpus reindex,
-        // not by training a basis on the 7 hints alone. Seeding failure closes the
-        // estate (no half-provisioned zombie). Provision-time wall clock (epoch
-        // seconds) at the app boundary — the engine interior never reads the clock.
+        // Swift provision order), and `seed_default_wings` enqueues each hint onto
+        // the Corpus encode stream so the drain-stage distillation fires for hints
+        // exactly as for user content (DISTILL_SEED_STALL). Seeding failure closes
+        // the estate (no half-provisioned zombie). Provision-time wall clock (epoch
+        // MILLISECONDS) at the app boundary — the engine interior never reads the
+        // clock. Milliseconds is what the store and HLC boundary consume; seconds
+        // here would stamp every default-wing hint drawer in every estate as 1970.
         {
             let seed_now: i64 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
+                .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             if let Err(e) = self.seed_default_wings(&handle, seed_now) {
                 let _ = self.close(&handle);
@@ -9164,6 +9969,378 @@ mod tests {
         assert!(tunnels.is_empty());
     }
 
+    // DCP M3 estate seam — mirrors Swift `estateSweepProvesThenSupersedes`:
+    // two captured drawers, two active facts on one coordinate with
+    // exclusive values → proven: 1; then an ACTIVE supersedes tunnel
+    // between the source drawers converts the pair to
+    // HistoricalSuccession (F06 end-to-end).
+    #[test]
+    fn conflict_sweep_proves_then_supersedes() {
+        use locus_kit::kg_fact::KGFact;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
+
+        let (coord, h) = open_one();
+        let estate = coord.estate_for(&h).expect("estate");
+        let a = coord.capture(&h, cap_frame("Employer claim one."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("Employer claim two."), NOW).unwrap();
+        estate
+            .add_kg_fact(&KGFact::new(
+                "fact-a".into(),
+                "Sarah Chen C0".into(),
+                "Employer".into(),
+                "Acme Robotics".into(),
+                a.id.clone(),
+                NOW,
+            ))
+            .unwrap();
+        estate
+            .add_kg_fact(&KGFact::new(
+                "fact-b".into(),
+                "Sarah Chen C0".into(),
+                "Employer".into(),
+                "Beta Corp".into(),
+                b.id.clone(),
+                NOW,
+            ))
+            .unwrap();
+
+        let first = coord.conflict_projection_sweep(&h).expect("sweep");
+        assert_eq!(first.diagnostics.scanned, 2);
+        assert_eq!(first.diagnostics.projected, 2);
+        assert_eq!(first.pairs_evaluated, 1);
+        assert_eq!(first.counts.proven_contradiction, 1);
+
+        let mut frame = tunnel_frame("study", "study", "supersession accepted in review");
+        frame.source_drawer_id = Some(a.id.clone());
+        frame.target_drawer_id = Some(b.id.clone());
+        frame.kind = TunnelKind::Supersedes;
+        frame.lifecycle = TunnelLifecycle::Active;
+        estate.capture_tunnel(frame, NOW).unwrap();
+
+        let second = coord.conflict_projection_sweep(&h).expect("sweep");
+        assert_eq!(second.counts.proven_contradiction, 0);
+        assert_eq!(second.counts.historical_succession, 1);
+    }
+
+    // DCP M6 filing seam — mirrors Swift MeetingDecisionCaptureTests:
+    // golden deterministic fact id, active filing + replay skip, the
+    // replaces-reference carry, and the F21 precursor (two conflicting
+    // controlled transcripts prove through the typed sweep).
+    #[test]
+    fn meeting_decisions_file_and_prove() {
+        let (coord, h) = open_one();
+
+        // Golden deterministic fact id (pinned in both ports).
+        assert_eq!(
+            EstateCoordinator::meeting_decision_fact_id(
+                "drawer-t1",
+                "project-phoenix",
+                "decision:launch_date",
+                "2026-09-15"
+            ),
+            "a4adaa374550adaeb5fdd72c6648f983567217fc1f6ad2b1b39dc30a8b6d89ac"
+        );
+
+        let a = coord.capture(&h, cap_frame("Monday planning meeting."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("Thursday follow-up meeting."), NOW).unwrap();
+
+        let transcript_a = "Attendees: the platform group.\n\
+                            Decision: project-phoenix.launch_date = 2026-09-15\n\
+                            Decision: they.launch_date = 2026-10-01";
+        let first = coord
+            .capture_meeting_decisions(&h, transcript_a, &a.id, NOW)
+            .expect("capture decisions");
+        assert_eq!(first.filed_fact_ids.len(), 1);
+        assert!(first.skipped_existing_ids.is_empty());
+        assert_eq!(first.extraction.rejected.len(), 1);
+
+        // Replay skips instead of erroring or duplicating.
+        let replay = coord
+            .capture_meeting_decisions(&h, transcript_a, &a.id, NOW)
+            .expect("replay");
+        assert!(replay.filed_fact_ids.is_empty());
+        assert_eq!(replay.skipped_existing_ids, first.filed_fact_ids);
+
+        // Replaces reference carried, keyed by the filed fact id.
+        let rep = coord
+            .capture_meeting_decisions(
+                &h,
+                "Replaces decision abc-123: project-altair.launch_date = 2026-11-01",
+                &a.id,
+                NOW,
+            )
+            .expect("replaces");
+        let rep_id = rep.filed_fact_ids[0].clone();
+        assert_eq!(rep.replaces_by_fact_id.get(&rep_id).map(String::as_str), Some("abc-123"));
+
+        // F21 precursor: the conflicting second transcript proves
+        // through the typed sweep.
+        coord
+            .capture_meeting_decisions(
+                &h,
+                "Decision: project-phoenix.launch_date = 2026-10-01",
+                &b.id,
+                NOW,
+            )
+            .expect("conflicting transcript");
+        let report = coord.conflict_projection_sweep(&h).expect("sweep");
+        assert_eq!(report.counts.proven_contradiction, 1);
+        assert_eq!(report.proven[0].outcome.key, "decision:project-phoenix");
+    }
+
+    // The Elevated sensitivity ceiling on typed proposals (Codex
+    // a21d636037ac81918d5c1b791b6fe210). Mirrors the Swift
+    // ConflictTunnelLifecycleTests ceiling cases: restricted, secret and
+    // mixed pairs are PROVEN by the sweep but never proposed and never
+    // persisted; a normal+elevated pair still proposes, so the gate does
+    // not over-filter the tier it is supposed to admit.
+    #[test]
+    fn conflict_proposal_respects_sensitivity_ceiling() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::kg_fact::KGFact;
+        use locus_kit::tunnel_operational::TunnelKind;
+
+        // Plant two conflicting employer claims whose source drawers carry
+        // the given sensitivities, run one proposal pass, and report both
+        // the pass result and how many contradicts tunnels actually reached
+        // the estate. Same event time on both drawers → validity overlap →
+        // the pair genuinely proves, which is what makes the gate the only
+        // thing that can stop the write.
+        let propose_for_pair = |sa: AdjectiveSensitivity, sb: AdjectiveSensitivity| {
+            let (coord, h) = open_one();
+            let estate = coord.estate_for(&h).expect("estate");
+            let mut frame_a = cap_frame("Employer claim one.");
+            frame_a.sensitivity = sa;
+            let mut frame_b = cap_frame("Employer claim two.");
+            frame_b.sensitivity = sb;
+            let a = coord.capture(&h, frame_a, NOW).unwrap();
+            let b = coord.capture(&h, frame_b, NOW).unwrap();
+            estate
+                .add_kg_fact(&KGFact::new(
+                    "fact-a".into(),
+                    "Sarah Chen C0".into(),
+                    "Employer".into(),
+                    "Acme Robotics".into(),
+                    a.id.clone(),
+                    NOW,
+                ))
+                .unwrap();
+            estate
+                .add_kg_fact(&KGFact::new(
+                    "fact-b".into(),
+                    "Sarah Chen C0".into(),
+                    "Employer".into(),
+                    "Beta Corp".into(),
+                    b.id.clone(),
+                    NOW,
+                ))
+                .unwrap();
+            let report = coord.propose_conflict_tunnels(&h, NOW).expect("propose");
+            let persisted = estate
+                .all_tunnels()
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.kind == TunnelKind::Contradicts)
+                .count();
+            (report, persisted)
+        };
+
+        // Restricted + restricted: proven, never proposed, and counted as a
+        // ceiling skip rather than folded into the dedup tally.
+        let (restricted, restricted_persisted) = propose_for_pair(
+            AdjectiveSensitivity::Restricted,
+            AdjectiveSensitivity::Restricted,
+        );
+        assert_eq!(restricted.sweep.counts.proven_contradiction, 1);
+        assert!(restricted.proposed_tunnel_ids.is_empty());
+        assert_eq!(restricted.ceiling_skipped, 1);
+        assert_eq!(restricted.suppressed, 0);
+        assert_eq!(
+            restricted_persisted, 0,
+            "no tunnel may be written for a finding above the ceiling"
+        );
+
+        // Secret is not a special case — it is the same raw comparison.
+        let (secret, secret_persisted) =
+            propose_for_pair(AdjectiveSensitivity::Secret, AdjectiveSensitivity::Secret);
+        assert_eq!(secret.sweep.counts.proven_contradiction, 1);
+        assert!(secret.proposed_tunnel_ids.is_empty());
+        assert_eq!(secret.ceiling_skipped, 1);
+        assert_eq!(secret.suppressed, 0);
+        assert_eq!(secret_persisted, 0);
+
+        // MAX rule: one normal endpoint does not rescue a restricted one.
+        let (mixed, mixed_persisted) = propose_for_pair(
+            AdjectiveSensitivity::Normal,
+            AdjectiveSensitivity::Restricted,
+        );
+        assert_eq!(mixed.sweep.counts.proven_contradiction, 1);
+        assert!(mixed.proposed_tunnel_ids.is_empty());
+        assert_eq!(mixed.ceiling_skipped, 1);
+        assert_eq!(mixed_persisted, 0);
+
+        // Elevated is INSIDE the mineable Normal tier (normal + elevated),
+        // so this pair must still propose exactly one tunnel.
+        let (elevated, elevated_persisted) =
+            propose_for_pair(AdjectiveSensitivity::Normal, AdjectiveSensitivity::Elevated);
+        assert_eq!(elevated.sweep.counts.proven_contradiction, 1);
+        assert_eq!(elevated.proposed_tunnel_ids.len(), 1);
+        assert_eq!(elevated.ceiling_skipped, 0);
+        assert_eq!(elevated.suppressed, 0);
+        assert_eq!(elevated_persisted, 1);
+    }
+
+    // DCP M5 — tunnel lifecycle. Mirrors Swift
+    // ConflictTunnelLifecycleTests: F21 (one proposed tunnel from two
+    // conflicting controlled transcripts, live-pair suppression on the
+    // second pass), F14 (withdrawn typed rejection at the same
+    // rule@version stays rejected), F15 (older-version rejection files
+    // a new instance), lexical-rejection independence, and F22
+    // (explicit replacement → supersedes tunnel → HistoricalSuccession,
+    // proposals stop; unknown replaced ids report unresolved).
+    #[test]
+    fn conflict_tunnel_lifecycle_f21_f14_f15_f22() {
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+
+        // --- F21 + live suppression ---
+        let (coord, h) = open_one();
+        let a = coord.capture(&h, cap_frame("Monday meeting."), NOW).unwrap();
+        let b = coord.capture(&h, cap_frame("Thursday meeting."), NOW).unwrap();
+        coord
+            .capture_meeting_decisions(
+                &h, "Decision: project-phoenix.launch_date = 2026-09-15", &a.id, NOW)
+            .unwrap();
+        coord
+            .capture_meeting_decisions(
+                &h, "Decision: project-phoenix.launch_date = 2026-10-01", &b.id, NOW)
+            .unwrap();
+        let first = coord.propose_conflict_tunnels(&h, NOW).expect("propose");
+        assert_eq!(first.sweep.counts.proven_contradiction, 1);
+        assert_eq!(first.proposed_tunnel_ids.len(), 1, "F21: one proposed tunnel");
+        assert_eq!(first.suppressed, 0);
+        let estate = coord.estate_for(&h).unwrap();
+        let tunnels: Vec<_> = estate
+            .all_tunnels()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == TunnelKind::Contradicts)
+            .collect();
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].lifecycle(), TunnelLifecycle::Proposed);
+        assert!(tunnels[0].label.starts_with("dcp: dim.decision.launch_date@1"));
+        let second = coord.propose_conflict_tunnels(&h, NOW).expect("propose again");
+        assert!(second.proposed_tunnel_ids.is_empty());
+        assert_eq!(second.suppressed, 1);
+
+        // --- F14: same-version withdrawn rejection suppresses ---
+        let (coord2, h2) = open_one();
+        let a2 = coord2.capture(&h2, cap_frame("Meeting A."), NOW).unwrap();
+        let b2 = coord2.capture(&h2, cap_frame("Meeting B."), NOW).unwrap();
+        coord2
+            .capture_meeting_decisions(
+                &h2, "Decision: project-phoenix.launch_date = 2026-09-15", &a2.id, NOW)
+            .unwrap();
+        coord2
+            .capture_meeting_decisions(
+                &h2, "Decision: project-phoenix.launch_date = 2026-10-01", &b2.id, NOW)
+            .unwrap();
+        let plant = |label: &str, lifecycle: TunnelLifecycle| {
+            let estate2 = coord2.estate_for(&h2).unwrap();
+            let mut frame =
+                tunnel_frame("study", "study", label);
+            frame.source_drawer_id = Some(a2.id.clone());
+            frame.target_drawer_id = Some(b2.id.clone());
+            frame.kind = TunnelKind::Contradicts;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = lifecycle;
+            estate2.capture_tunnel(frame, NOW).unwrap();
+        };
+        plant("dcp: dim.decision.launch_date@1 result=old", TunnelLifecycle::Withdrawn);
+        let f14 = coord2.propose_conflict_tunnels(&h2, NOW).expect("propose");
+        assert!(f14.proposed_tunnel_ids.is_empty(), "F14: exact repeat stays rejected");
+        assert_eq!(f14.suppressed, 1);
+
+        // --- F15: older-version rejection renews / lexical independence ---
+        let (coord3, h3) = open_one();
+        let a3 = coord3.capture(&h3, cap_frame("Meeting A."), NOW).unwrap();
+        let b3 = coord3.capture(&h3, cap_frame("Meeting B."), NOW).unwrap();
+        coord3
+            .capture_meeting_decisions(
+                &h3, "Decision: project-phoenix.launch_date = 2026-09-15", &a3.id, NOW)
+            .unwrap();
+        coord3
+            .capture_meeting_decisions(
+                &h3, "Decision: project-phoenix.launch_date = 2026-10-01", &b3.id, NOW)
+            .unwrap();
+        {
+            let estate3 = coord3.estate_for(&h3).unwrap();
+            let mut frame =
+                tunnel_frame("study", "study", "dcp: dim.decision.launch_date@0 result=ancient");
+            frame.source_drawer_id = Some(a3.id.clone());
+            frame.target_drawer_id = Some(b3.id.clone());
+            frame.kind = TunnelKind::Contradicts;
+            frame.origin_class = TunnelOriginClass::Derived;
+            frame.lifecycle = TunnelLifecycle::Withdrawn;
+            estate3.capture_tunnel(frame, NOW).unwrap();
+            let mut lexical =
+                tunnel_frame("study", "study", "hunter: numeric_divergence score=0.9");
+            lexical.source_drawer_id = Some(a3.id.clone());
+            lexical.target_drawer_id = Some(b3.id.clone());
+            lexical.kind = TunnelKind::Contradicts;
+            lexical.origin_class = TunnelOriginClass::Derived;
+            lexical.lifecycle = TunnelLifecycle::Withdrawn;
+            estate3.capture_tunnel(lexical, NOW).unwrap();
+        }
+        let f15 = coord3.propose_conflict_tunnels(&h3, NOW).expect("propose");
+        assert_eq!(
+            f15.proposed_tunnel_ids.len(),
+            1,
+            "F15: version bump + rejected lexical guess must not suppress a typed proof"
+        );
+
+        // --- F22: explicit replacement → historical, proposals stop ---
+        let (coord4, h4) = open_one();
+        let a4 = coord4.capture(&h4, cap_frame("Monday meeting."), NOW).unwrap();
+        let b4 = coord4.capture(&h4, cap_frame("Thursday meeting."), NOW).unwrap();
+        let first4 = coord4
+            .capture_meeting_decisions(
+                &h4, "Decision: project-phoenix.launch_date = 2026-09-15", &a4.id, NOW)
+            .unwrap();
+        let original_fact_id = first4.filed_fact_ids[0].clone();
+        let second4 = coord4
+            .capture_meeting_decisions(
+                &h4,
+                &format!(
+                    "Replaces decision {original_fact_id}: project-phoenix.launch_date = 2026-10-01"
+                ),
+                &b4.id,
+                NOW,
+            )
+            .unwrap();
+        let (filed, unresolved) =
+            coord4.file_supersessions(&h4, &second4, NOW).expect("supersessions");
+        assert_eq!(filed.len(), 1, "F22: one supersedes tunnel filed");
+        assert!(unresolved.is_empty());
+        let sweep = coord4.conflict_projection_sweep(&h4).expect("sweep");
+        assert_eq!(sweep.counts.proven_contradiction, 0);
+        assert_eq!(sweep.counts.historical_succession, 1);
+        let proposals = coord4.propose_conflict_tunnels(&h4, NOW).expect("propose");
+        assert!(proposals.proposed_tunnel_ids.is_empty());
+        // Unknown replaced-fact id reports unresolved, files nothing.
+        let ghost = coord4
+            .capture_meeting_decisions(
+                &h4,
+                "Replaces decision no-such-fact: project-altair.launch_date = 2026-12-01",
+                &b4.id,
+                NOW,
+            )
+            .unwrap();
+        let (ghost_filed, ghost_unresolved) =
+            coord4.file_supersessions(&h4, &ghost, NOW).expect("ghost");
+        assert!(ghost_filed.is_empty());
+        assert_eq!(ghost_unresolved, vec!["no-such-fact".to_string()]);
+    }
+
     // CO-9: a verb on a closed handle surfaces EstateNotOpen, not an empty
     // result — parity of the Swift stale-handle case.
     #[test]
@@ -10213,10 +11390,16 @@ mod tests {
     #[test]
     fn ft1_fact_timeline_shows_retired_fact() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft1 = coord
+            .capture(&h, cap_frame("ft1 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         // File a fact: Earth orbits Sun.
         let fact = coord
-            .add_kg_fact(&h, "Earth", "orbits", "Sun", "drawer-ft1", NOW)
+            .add_kg_fact(&h, "Earth", "orbits", "Sun", &src_ft1.id, NOW)
             .expect("add_kg_fact should succeed");
 
         // Before retirement: both paths show the fact.
@@ -10275,12 +11458,18 @@ mod tests {
     #[test]
     fn ft2_fact_timeline_entity_filter() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft2 = coord
+            .capture(&h, cap_frame("ft2 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         let alice = coord
-            .add_kg_fact(&h, "alice", "worksAt", "ACME", "drawer-ft2", NOW)
+            .add_kg_fact(&h, "alice", "worksAt", "ACME", &src_ft2.id, NOW)
             .expect("add alice fact");
         let bob = coord
-            .add_kg_fact(&h, "bob", "worksAt", "ACME", "drawer-ft2", NOW + 1)
+            .add_kg_fact(&h, "bob", "worksAt", "ACME", &src_ft2.id, NOW + 1)
             .expect("add bob fact");
 
         let filtered = coord
@@ -10297,7 +11486,7 @@ mod tests {
         // entity, so `"Voss".contains("voss")` was false and any capitalised
         // entity filtered to zero — exactly the field-reported regression.
         let voss = coord
-            .add_kg_fact(&h, "Voss", "commands", "East Spire", "drawer-ft2", NOW + 2)
+            .add_kg_fact(&h, "Voss", "commands", "East Spire", &src_ft2.id, NOW + 2)
             .expect("add Voss fact");
         for needle in ["voss", "VOSS", "Voss", "spire", "EAST SPIRE"] {
             let hit = coord
@@ -10319,15 +11508,21 @@ mod tests {
     #[test]
     fn ft3_fact_timeline_is_time_ordered() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft3 = coord
+            .capture(&h, cap_frame("ft3 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         let f1 = coord
-            .add_kg_fact(&h, "A", "rel", "B", "drawer-ft3", NOW)
+            .add_kg_fact(&h, "A", "rel", "B", &src_ft3.id, NOW)
             .expect("fact 1");
         let f2 = coord
-            .add_kg_fact(&h, "B", "rel", "C", "drawer-ft3", NOW + 10)
+            .add_kg_fact(&h, "B", "rel", "C", &src_ft3.id, NOW + 10)
             .expect("fact 2");
         let f3 = coord
-            .add_kg_fact(&h, "C", "rel", "D", "drawer-ft3", NOW + 20)
+            .add_kg_fact(&h, "C", "rel", "D", &src_ft3.id, NOW + 20)
             .expect("fact 3");
 
         let timeline = coord
@@ -10352,12 +11547,18 @@ mod tests {
     #[test]
     fn ft4_recall_kg_facts_active_only_regression() {
         let (coord, h) = open_one();
+        // The anchor must be a drawer that exists: a fact inherits its
+        // source drawer's sensitivity, so an id resolving to nothing fails
+        // the write.
+        let src_ft4 = coord
+            .capture(&h, cap_frame("ft4 anchor"), NOW)
+            .expect("capture anchor drawer");
 
         let active1 = coord
-            .add_kg_fact(&h, "Mars", "has_moon", "Phobos", "drawer-ft4", NOW)
+            .add_kg_fact(&h, "Mars", "has_moon", "Phobos", &src_ft4.id, NOW)
             .expect("active fact 1");
         let to_retire = coord
-            .add_kg_fact(&h, "Pluto", "classifiedAs", "planet", "drawer-ft4", NOW + 1)
+            .add_kg_fact(&h, "Pluto", "classifiedAs", "planet", &src_ft4.id, NOW + 1)
             .expect("fact to retire");
 
         // Baseline: both are active.

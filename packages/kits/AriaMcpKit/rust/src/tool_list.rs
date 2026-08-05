@@ -271,10 +271,11 @@ create, str_replace, insert, delete, rename.",
 fn file_memory_tool() -> serde_json::Value {
     json!({
         "name": "moot_file_memory",
-        "description": "File a memory into the estate. Requires content and a location path (wing/room or room).",
+        "description": "File a memory into the estate. Requires content, a one-sentence subject, and a location path (wing/room or room).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "content": string_schema("Verbatim content to file."),
+                "subject": string_schema("REQUIRED. One sentence (≤120 chars) stating what this memory asserts. Write it for the NEXT AI that will scan it in a result list — telegraphic register, entities and claims front-loaded, no narrative framing. It is returned in recall rows, never searched. Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""),
                 "location": string_schema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
                 "wing": string_schema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                 "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
@@ -283,7 +284,7 @@ fn file_memory_tool() -> serde_json::Value {
                 "event_time": string_schema("Optional ISO8601 event timestamp to attach. Omit for capture time; null is invalid."),
                 "impatient": boolean_schema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens on the encode drain. Omit to use the default; null is invalid.")
             }),
-            json!(["content", "location"])
+            json!(["content", "subject", "location"])
         )))
     })
 }
@@ -291,10 +292,11 @@ fn file_memory_tool() -> serde_json::Value {
 fn memory_search_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_search",
-        "description": "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) — a relative-gap confidence estimate of how clearly the top result separates from the rest, with a saturation discount when the semantic lane is dark. Low discrimination on small estates is expected for broad or associative searches; prefer moot_recall_precise for precision retrieval.",
+        "description": "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "query": string_schema("Natural-language search query."),
+                "query": string_schema("Natural-language search query. Provide query OR near — exactly one."),
+                "near": string_schema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
                 "limit": integer_schema("Max results to return (default 20). Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
@@ -302,19 +304,21 @@ fn memory_search_tool() -> serde_json::Value {
                 "scoring": string_schema("Scoring mode: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
             }),
-            json!(["query"])
-        )))
+            json!([])
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
 fn memory_list_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_list",
-        "description": "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results.",
+        "description": "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results. filter:missing_subject enumerates subject-debt rows (id-only, no preview) for interactive backfill via moot_update_memory mutation=setSubject.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "wing": string_schema("Wing name to list (required). Example: \"Agentic Memory\", \"CodexSecurity\"."),
-                "room": string_schema("Optional room name to narrow within the wing. Omit to list all rooms in the wing.")
+                "room": string_schema("Optional room name to narrow within the wing. Omit to list all rooms in the wing."),
+                "filter": string_schema("Optional filter: missing_subject — only live drawers with no subject line, listed id-only (the subject-debt backfill enumerator). Omit to list all drawers with previews. null is invalid.")
             }),
             json!(["wing"])
         )))
@@ -327,22 +331,30 @@ fn memory_get_tool() -> serde_json::Value {
         "description": "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "id": string_schema("Memory row identifier (drawer UUID).")
+                "id": string_schema("Memory row identifier (drawer UUID). Provide id or ids."),
+                "ids": {
+                    "type": "array",
+                    "description": "Batch form: array of drawer UUIDs. With depth:subject or depth:distilled this is the one-call winnow — judge a shortlist without hauling full text. Gated/absent rows come back as 'not found: <id>' lines.",
+                    "items": { "type": "string", "description": "Memory row identifier (drawer UUID)." }
+                },
+                "depth": string_schema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid.")
             }),
-            json!(["id"])
-        )))
+            json!([])
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
 fn update_memory_tool() -> serde_json::Value {
     json!({
         "name": "moot_update_memory",
-        "description": "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public, correctExportability(private) revokes public status.",
+        "description": "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public, correctExportability(private) revokes public status. Subject mutation: setSubject writes or replaces the memory's one-sentence subject line (pass the text in the `subject` argument) — the backfill/correction path for subject-debt rows found via moot_memory_list filter:missing_subject.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "id": string_schema("UUID of the memory to update."),
-                "mutation": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private)."),
-                "note": string_schema("Optional note to attach to the mutation.")
+                "mutation": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private), setSubject."),
+                "note": string_schema("Optional note to attach to the mutation."),
+                "subject": string_schema("Required for mutation=setSubject, ignored otherwise: one sentence (≤120 chars) in the AI-facing register — telegraphic, entities and claims front-loaded. Returned in recall rows, never searched.")
             }),
             json!(["id", "mutation"])
         )))
@@ -713,16 +725,24 @@ fn federated_search_tool() -> serde_json::Value {
 fn list_lenses_tool() -> serde_json::Value {
     json!({
         "name": "moot_list_lenses",
-        "description": "List all available cognition lenses and recipes with descriptions and required capabilities.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+        "description": "List all available cognition lenses and recipes. Terse by default (name + one-liner per tool); pass verbose:true for full descriptions and required arguments.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "verbose": boolean_schema("Full catalogue with complete descriptions and required args. Omit for the terse default; null is invalid.")
+            }),
+            json!([]))))
     })
 }
 
 fn list_recipes_catalog_tool() -> serde_json::Value {
     json!({
         "name": "moot_list_recipes",
-        "description": "Browse the full recipe catalog: name, version, description, and required capabilities for every entry.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+        "description": "Browse the recipe catalog in order. Terse by default (name, version, one-liner); pass verbose:true for full descriptions and required capabilities.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "verbose": boolean_schema("Full catalogue with complete descriptions and capabilities. Omit for the terse default; null is invalid.")
+            }),
+            json!([]))))
     })
 }
 
@@ -781,7 +801,7 @@ fn run_migration_tool() -> serde_json::Value {
 fn recall_precise_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_precise",
-        "description": "Precise recall: coarse-grab a generous candidate pool then re-rank by a named reduction composition (the ablation selector) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns the same shape as moot_memory_search including a discrimination signal. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
+        "description": "Precise recall: coarse-grab a generous candidate pool then re-rank by a named reduction composition (the ablation selector) to surface the exact answer above near-duplicates. Lifts found@1/MRR without dropping found@10. Returns dense rows in the same shape as moot_memory_search; a discrimination line appears only when the signal is low/medium. Use when you need a specific known-token answer — exact names, numbers, identifiers — especially on small estates where semantic/associative modes produce low discrimination. This is the recommended mode when the discrimination signal from moot_memory_search or moot_recall_shaped is low.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("The search query text — drives BM25 + vector recall and the precision re-rank."),
@@ -792,7 +812,8 @@ fn recall_precise_tool() -> serde_json::Value {
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!(["query"])
-        )))
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
@@ -836,10 +857,11 @@ fn recall_shaped_tool() -> serde_json::Value {
         .collect();
     json!({
         "name": "moot_recall_shaped",
-        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Returns the same shape as moot_memory_search including a discrimination signal. Use for fuzzy/semantic association and exploration; note that associative/conceptual presets rely on fusion lanes that produce narrower relative score gaps on small estates, so low discrimination from shaped recall on a small estate is expected — switch to moot_recall_precise for precision."),
+        "description": format!("Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: {roster}. Accepts near:<uuid> instead of query to fan out from an anchor memory under the chosen preset. Returns dense rows in the same shape as moot_memory_search; a discrimination line appears only when the signal is low/medium (expected for associative/conceptual presets on small estates — switch to moot_recall_precise for precision)."),
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "query": string_schema("The search query text — drives BM25 + vector recall."),
+                "query": string_schema("The search query text — drives BM25 + vector recall. Provide query OR near — exactly one."),
+                "near": string_schema("UUID of an anchor memory — returns the memories most similar to it under the preset (the anchor itself is excluded). Alternative to query; pass exactly one of the two."),
                 "preset": {
                     "type": "string",
                     "description": "The RecallShape preset to apply (how to steer the fusion). One of the roster names. balanced (or an omitted preset) is the unsteered default. Unknown names are rejected.",
@@ -849,8 +871,9 @@ fn recall_shaped_tool() -> serde_json::Value {
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
-            json!(["query"])
-        )))
+            json!([])
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
@@ -1501,6 +1524,39 @@ pub fn with_teachme(mut schema: serde_json::Value) -> serde_json::Value {
         );
     }
     schema
+}
+
+/// The shared `outputSchema` for the recall family (`moot_memory_search`,
+/// `moot_memory_get`, `moot_recall_shaped`, `moot_recall_precise`): one
+/// `results` array carrying the typed twin of each rendered row.
+///
+/// ONE schema for all four tools, field names pinned across ports — the
+/// Swift twin is `ToolProjection.recallResultsOutputSchema()` and the
+/// cross-port test asserts structural equality. The text block stays the
+/// human-readable rendering; `structuredContent` conforming to this schema
+/// is its typed twin, subject to every redaction the text applies (see the
+/// Blast Radius Report MXE-SS, rules R1-R9).
+fn recall_results_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "description": "One entry per drawer row the text block renders — same admissible set, same order, same 50-row cap. Redaction parity: provenance-gated rows carry the same redaction markers as the text block in subject and content; rows the text renders opaquely carry id and the '(no subject)' marker only.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": string_schema("Drawer UUID — the address."),
+                        "room": string_schema("Resolved room display name. Absent when the row is opaque."),
+                        "content": string_schema("Drawer content for this tool's tier: verbatim body (search/shaped/precise and get depth:full), distillate or fallback body (get depth:distilled). Carries the redaction marker for provenance-gated rows. Absent at get depth:subject and for opaque rows."),
+                        "subject": string_schema("The subject slot exactly as the text renders it: stored subject, '(no subject)', or the redaction marker. Absent at get depth:full when the drawer has no subject.")
+                    },
+                    "required": ["id"]
+                }
+            }
+        },
+        "required": ["results"]
+    })
 }
 
 fn object_schema(properties: serde_json::Value, required: serde_json::Value) -> serde_json::Value {

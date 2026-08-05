@@ -463,3 +463,211 @@ fn real_mempalace_imports_with_the_expected_store_counts() {
         assert!(n.frontmatter.contains_key("filed_at"), "{} missing filed_at", n.stable_source_key);
     }
 }
+
+// MARK: - Import bounds (the palace root is untrusted input)
+//
+// The Swift twins live in `Tests/VaultKitTests/MemPalaceChromaAdapterTests.swift`
+// under the same names and assert the same limits, observed values, and
+// default constants. Both ports must reject the same fixture with an
+// equivalent error; divergent caps would mean an import that succeeds in
+// one port and fails in the other.
+
+use vault_kit::mem_palace_chroma_adapter::{
+    MemPalaceImportBudget, MemPalaceImportLimits, MAX_IMPORT_ROWS, MAX_MATERIALIZED_BYTES,
+    MAX_SQLITE_VM_STEPS, MAX_TUNNELS_JSON_BYTES, SQLITE_PROGRESS_GRAIN,
+};
+
+/// Copy the fixture palace into a fresh temp directory so a test can
+/// oversize or corrupt one store without touching the shared fixture that
+/// every other test in both ports asserts against.
+fn temporary_palace_copy() -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("mempalace-bounds-{}", uuid::Uuid::new_v4()));
+    let src = std::path::Path::new(FIXTURE_PALACE);
+    std::fs::create_dir_all(root.join("palace")).expect("create palace dir");
+    std::fs::copy(
+        src.join("palace/chroma.sqlite3"),
+        root.join("palace/chroma.sqlite3"),
+    )
+    .expect("copy chroma");
+    std::fs::copy(
+        src.join("knowledge_graph.sqlite3"),
+        root.join("knowledge_graph.sqlite3"),
+    )
+    .expect("copy kg");
+    std::fs::copy(src.join("tunnels.json"), root.join("tunnels.json")).expect("copy tunnels");
+    root
+}
+
+/// The message of the error a bounded import produced.
+fn limit_error_message(result: Result<Vec<NoteIR>, vault_kit::VaultKitError>) -> String {
+    match result {
+        Ok(_) => panic!("expected the import limit to reject this palace"),
+        Err(e) => e.to_string(),
+    }
+}
+
+#[test]
+fn oversized_tunnels_json_is_rejected_before_the_file_is_read() {
+    let root = temporary_palace_copy();
+    // Deliberately MALFORMED as well as oversized. If the size check did not
+    // precede the read, this would fail with the JSON decode error instead
+    // of the limit — which is exactly what pre-fix code does. That is what
+    // makes this a regression test for the unbounded read rather than a test
+    // that some rejection happens.
+    std::fs::write(root.join("tunnels.json"), "x".repeat(4096)).expect("write oversized tunnels");
+
+    let adapter = MemPalaceChromaAdapter {
+        limits: MemPalaceImportLimits {
+            max_tunnels_json_bytes: 1024,
+            ..MemPalaceImportLimits::default()
+        },
+        ..MemPalaceChromaAdapter::new()
+    };
+    let message = limit_error_message(adapter.to_ir(&root));
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(message.contains("max_tunnels_json_bytes"), "{message}");
+    assert!(message.contains("4096"), "must name the OBSERVED value: {message}");
+    assert!(message.contains("1024"), "must name the LIMIT: {message}");
+    // The proof the file was never parsed: no decode diagnostic.
+    assert!(!message.contains("malformed"), "{message}");
+}
+
+#[test]
+fn row_count_over_the_cap_is_rejected_naming_the_limit() {
+    // The fixture's drawers scan alone returns more than three rows.
+    let adapter = MemPalaceChromaAdapter {
+        limits: MemPalaceImportLimits {
+            max_import_rows: 3,
+            ..MemPalaceImportLimits::default()
+        },
+        ..MemPalaceChromaAdapter::new()
+    };
+    let message = limit_error_message(adapter.to_ir(std::path::Path::new(FIXTURE_PALACE)));
+    assert!(message.contains("max_import_rows"), "{message}");
+    assert!(message.contains('3'), "must name the limit: {message}");
+    assert!(message.contains("SQLite rows"), "{message}");
+}
+
+#[test]
+fn materialized_byte_total_over_the_cap_is_rejected_naming_the_limit() {
+    let adapter = MemPalaceChromaAdapter {
+        limits: MemPalaceImportLimits {
+            max_materialized_bytes: 16,
+            ..MemPalaceImportLimits::default()
+        },
+        ..MemPalaceChromaAdapter::new()
+    };
+    let message = limit_error_message(adapter.to_ir(std::path::Path::new(FIXTURE_PALACE)));
+    assert!(message.contains("max_materialized_bytes"), "{message}");
+    assert!(message.contains("16"), "{message}");
+}
+
+#[test]
+fn sqlite_progress_guard_abandons_a_query_past_the_step_budget() {
+    // Grain 1 fires the handler every virtual-machine instruction, so a
+    // one-step budget trips on the first statement rather than depending on
+    // how much work the fixture happens to need.
+    let adapter = MemPalaceChromaAdapter {
+        limits: MemPalaceImportLimits {
+            max_sqlite_vm_steps: 1,
+            sqlite_progress_grain: 1,
+            ..MemPalaceImportLimits::default()
+        },
+        ..MemPalaceChromaAdapter::new()
+    };
+    let message = limit_error_message(adapter.to_ir(std::path::Path::new(FIXTURE_PALACE)));
+    assert!(message.contains("max_sqlite_vm_steps"), "{message}");
+    // The named limit, not SQLite's bare "interrupted" diagnostic.
+    assert!(message.contains("virtual-machine steps"), "{message}");
+}
+
+#[test]
+fn fixture_palace_imports_identically_under_the_shipping_defaults() {
+    // The caps must be invisible to real input: same 11 notes, same order,
+    // same keys the unbounded expectation asserts.
+    let notes = MemPalaceChromaAdapter::new()
+        .to_ir(std::path::Path::new(FIXTURE_PALACE))
+        .expect("default limits must not reject the fixture palace");
+    assert_eq!(notes.len(), 11);
+    assert_eq!(
+        notes
+            .iter()
+            .map(|n| n.stable_source_key.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "aaaa000011112222",
+            "bbbb000011112222",
+            "closet_clarity_0004",
+            "closet_entities_0005",
+            "diary_fulcrum_0002",
+            "drawer_alpha_0001",
+            "drawer_min_0003",
+            "fleet",
+            "skippy",
+            "t_fleet_works_with_skippy_0001",
+            "t_minimal_0002",
+        ]
+    );
+}
+
+#[test]
+fn shipping_limit_defaults_are_the_documented_values_identical_to_swift() {
+    // Asserted literally in BOTH ports. Changing a default here must change
+    // it in `Tests/VaultKitTests/MemPalaceChromaAdapterTests.swift` in the
+    // same commit.
+    let limits = MemPalaceImportLimits::default();
+    assert_eq!(limits.max_tunnels_json_bytes, 67_108_864);
+    assert_eq!(limits.max_import_rows, 20_000_000);
+    assert_eq!(limits.max_materialized_bytes, 1_073_741_824);
+    assert_eq!(limits.max_sqlite_vm_steps, 1_000_000_000);
+    assert_eq!(limits.sqlite_progress_grain, 1_000_000);
+    // The struct defaults and the public constants are one source of truth.
+    assert_eq!(MAX_TUNNELS_JSON_BYTES, 67_108_864);
+    assert_eq!(MAX_IMPORT_ROWS, 20_000_000);
+    assert_eq!(MAX_MATERIALIZED_BYTES, 1_073_741_824);
+    assert_eq!(MAX_SQLITE_VM_STEPS, 1_000_000_000);
+    assert_eq!(SQLITE_PROGRESS_GRAIN, 1_000_000);
+}
+
+#[test]
+fn budget_names_the_limit_and_the_observed_value_for_an_oversized_tunnels_file() {
+    // The budget's own contract, independent of any palace on disk: the
+    // message must carry BOTH numbers so an operator can act on it.
+    let mut budget = MemPalaceImportBudget::new(MemPalaceImportLimits {
+        max_tunnels_json_bytes: 100,
+        ..MemPalaceImportLimits::default()
+    });
+    let err = budget
+        .charge_tunnels_file(4096, std::path::Path::new("/tmp/tunnels.json"))
+        .expect_err("must reject");
+    let message = err.to_string();
+    assert!(message.contains("4096"), "{message}");
+    assert!(message.contains("100"), "{message}");
+    assert!(message.contains("was not read"), "{message}");
+}
+
+#[test]
+fn raising_the_limit_above_the_file_restores_the_pre_fix_code_path() {
+    // The runnable proof that the size check is what changes the outcome,
+    // and therefore that the oversized test above is a real regression test.
+    // With the cap raised ABOVE the same oversized-and-malformed file, the
+    // read proceeds and the JSON decode fails — exactly what pre-fix code
+    // did for every file size, because no size check existed. The test above
+    // asserts that message is ABSENT; this one asserts it is present once
+    // the bound is lifted. Same fixture, same file, opposite outcomes.
+    let root = temporary_palace_copy();
+    std::fs::write(root.join("tunnels.json"), "x".repeat(4096)).expect("write oversized tunnels");
+    let adapter = MemPalaceChromaAdapter {
+        limits: MemPalaceImportLimits {
+            max_tunnels_json_bytes: 1_000_000,
+            ..MemPalaceImportLimits::default()
+        },
+        ..MemPalaceChromaAdapter::new()
+    };
+    let message = limit_error_message(adapter.to_ir(&root));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(message.contains("malformed"), "{message}");
+    assert!(!message.contains("max_tunnels_json_bytes"), "{message}");
+}
+

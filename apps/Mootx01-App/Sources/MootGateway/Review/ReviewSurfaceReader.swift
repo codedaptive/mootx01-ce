@@ -30,12 +30,18 @@ import MootIntentKit  // MootToolCalling
 public struct ReviewToolResponse: Sendable, Equatable {
     /// Concatenated text of the response's content blocks.
     public let text: String
+    /// The response's `structuredContent` block, when the tool emitted one.
+    /// Only the recall family does; every other review surface answers in
+    /// text alone and leaves this nil. The drawers parse reads THIS — entity
+    /// data never comes from the display text (see StructuredRecallResults).
+    public let structured: JSONValue?
     /// True when the substrate or the ARIA surface refused the call. Builders
     /// turn a refusal into a section notice — they never throw and never retry.
     public let isError: Bool
 
-    public init(text: String, isError: Bool) {
+    public init(text: String, structured: JSONValue? = nil, isError: Bool) {
         self.text = text
+        self.structured = structured
         self.isError = isError
     }
 }
@@ -65,7 +71,11 @@ public struct MootToolCallingReviewReader: ReviewSurfaceReading {
 
     public func call(_ surface: ReviewSurface, arguments: [String: JSONValue]) async -> ReviewToolResponse {
         let result = await caller.callTool(surface.rawValue, arguments: arguments)
-        return ReviewToolResponse(text: result.text, isError: result.isError)
+        return ReviewToolResponse(
+            text: result.text,
+            structured: result.structured,
+            isError: result.isError
+        )
     }
 }
 

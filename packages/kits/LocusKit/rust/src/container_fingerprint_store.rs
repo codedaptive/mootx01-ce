@@ -338,6 +338,31 @@ impl ContainerFingerprintStore {
         active_drawers: &[Drawer],
         now: i64,
     ) -> Result<ContainerFingerprint, LocusKitError> {
+        self.rebuild_room_from(wing, room, active_drawers, now)
+    }
+
+    /// `rebuild_room` over any borrowing iterator of drawers.
+    ///
+    /// The fold only ever reads three bitmap fields per drawer, so it needs
+    /// nothing more than a shared reference. Taking `IntoIterator<Item = &Drawer>`
+    /// lets [`rebuild_all`](Self::rebuild_all) — which has already grouped the
+    /// active set into `Vec<&Drawer>` buckets and therefore owns no drawers of
+    /// its own — fold its borrows directly instead of cloning each room's
+    /// drawers into a temporary `Vec<Drawer>` first.
+    ///
+    /// [`rebuild_room`](Self::rebuild_room) keeps its `&[Drawer]` signature so
+    /// the Rust and Swift ports expose the same public shape
+    /// (`ContainerFingerprintStore.rebuildRoom(wing:room:activeDrawers:now:)`).
+    fn rebuild_room_from<'a, I>(
+        &self,
+        wing: &str,
+        room: &str,
+        active_drawers: I,
+        now: i64,
+    ) -> Result<ContainerFingerprint, LocusKitError>
+    where
+        I: IntoIterator<Item = &'a Drawer>,
+    {
         let mut acc = ContainerFingerprint::ZERO;
         for d in active_drawers {
             acc = acc.merging(ContainerFingerprint::new_with_and(
@@ -419,8 +444,10 @@ impl ContainerFingerprintStore {
         }
         for (wing, rooms) in &by_container {
             for (room, drawers) in rooms {
-                let owned: Vec<Drawer> = drawers.iter().map(|d| (*d).clone()).collect();
-                self.rebuild_room(wing, room, &owned, now)?;
+                // Fold the grouped borrows directly. `by_container` holds
+                // `&Drawer` into `active_drawers`, which the caller owns for
+                // the whole call, so the fold needs no copy of its own.
+                self.rebuild_room_from(wing, room, drawers.iter().copied(), now)?;
             }
             self.roll_up_wing(wing, now)?;
         }

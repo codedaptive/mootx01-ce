@@ -8,7 +8,7 @@
 //   A) Durable dirty table: write (table, pk) to a separate SQLite table on
 //      each observer event; drain it on sync; delete drained rows.
 //   B) In-memory accumulation + watermark: accumulate (table, pkValues) in
-//      an actor-isolated set while the session is alive; re-scan missing rows
+//      an actor-isolated set while the session is alive; re-scan those rows
 //      from the source on sync; persist only the HLC watermark in the cursor.
 //
 //   We chose (B) for three reasons:
@@ -21,11 +21,60 @@
 //      dirty rows from the dirty-set, not all rows; re-reading them from the
 //      source on each sync run is O(dirty count) regardless.
 //
+//   TWO GRANULARITIES OF DIRT — why (B) alone is not enough:
+//
+//   Approach (B) can only name a row when the observer event carries that
+//   row's primary-key values. The durable backends do not always supply them:
+//   SQLite emits `values: nil` for predicate `updateRows` and `deleteRows` in
+//   both ports, and the Rust PostgreSQL backend emits neither `values` nor
+//   `rowKey` for either verb. Nothing else in the change identifies the row —
+//   `TableChange.hlc` is nil at every emission site, no schema-wide
+//   modified-at column exists, and `rowKey` is a UUID derived from only the
+//   FIRST primary-key column (hashed for non-UUID TEXT keys), so it is not
+//   invertible and does not identify a row under a composite key.
+//
+//   So the session tracks dirt at two granularities:
+//     ROW dirt   — the change carried its primary-key values. Re-scan exactly
+//                  that row; absent in the source means "delete at the
+//                  destination", present means "upsert".
+//     TABLE dirt — the change did not. The row cannot be named, but the TABLE
+//                  can, so the whole table is re-scanned and reconciled: every
+//                  source row is upserted, and every destination row whose
+//                  primary key is absent from the source is deleted. The
+//                  deletion half is what carries an expunge, a tombstone, or
+//                  an erasure across; without it a value-less delete would
+//                  vanish. It is the row-level form of the rule the
+//                  full-snapshot path already applies to blobs
+//                  (StorageReplicator §3d, SECFIX-WS2-PK F5): a replica that
+//                  holds keys the source does not is divergence.
+//
+//   A change the session cannot resolve at EITHER granularity — a table that
+//   declares no primary key, so there is no column set to reconcile on — does
+//   not vanish either. It marks the cycle INCOMPLETE (see the watermark
+//   contract below). An observed change always produces propagation or a
+//   surfaced refusal; it is never silently dropped.
+//
+//   MIRROR ASSUMPTION: table-granularity dirt reconciles the destination
+//   against the source, so this module's declared model — destination mirrors
+//   source — is load-bearing. A destination fanned in from several sources
+//   would lose the other sources' rows. That model is already assumed by the
+//   restart semantics below and by the blob reconciliation in the snapshot
+//   path.
+//
 //   RESTART SEMANTICS: if the process restarts, the in-memory dirty-set is
 //   lost. The caller handles this by falling back to a full snapshot when the
 //   session cannot be resumed (e.g. on first open, or when the dirty-set is
 //   not available after a crash). This is correct: a full snapshot is always
 //   a valid substitute for an accumulated incremental run.
+//
+// WATERMARK CONTRACT:
+//   The audit watermark advances only for a cycle that resolved every change
+//   it observed. A cycle carrying an unresolvable change copies no audit
+//   events and returns the incoming watermark unchanged, so the next cycle
+//   re-reads the same audit range. Advancing the watermark past work that was
+//   not done is what would make a missed row permanent: the destination would
+//   record that it had replicated a deletion it never received, and only a
+//   forced full snapshot could repair it.
 //
 // FAIL-LOUD CONTRACT:
 //   A StorageError.corruptStoredValue encountered during a dirty-row read
@@ -125,6 +174,35 @@ struct DirtyKey: Sendable, Hashable, Comparable {
     }
 }
 
+// MARK: - DirtyDrain
+
+/// One atomic drain of the dirty-set, at all three resolutions the session
+/// tracks. Draining is all-or-nothing: a caller can never take the keys and
+/// leave the table-granularity dirt behind, which is what would let a
+/// value-less change fall out of the cycle unnoticed.
+struct DirtyDrain: Sendable {
+    /// Rows the session could name, because their change carried its
+    /// primary-key values.
+    let keys: [DirtyKey]
+
+    /// Tables carrying at least one change the session could NOT name, but
+    /// CAN re-scan. Each is re-read in full and reconciled against the
+    /// destination during the sync run.
+    let rescanTables: [String]
+
+    /// Tables carrying a change the session can neither name nor re-scan,
+    /// because the table declares no primary key and reconciliation has no
+    /// column set to compare on. A cycle carrying any of these is INCOMPLETE.
+    let unresolvableTables: [String]
+
+    /// True only when the session observed nothing at all. Changes the session
+    /// could not key are NOT nothing, and must never collapse into this
+    /// signal — that collapse is the whole of the silence.
+    var isEmpty: Bool {
+        keys.isEmpty && rescanTables.isEmpty && unresolvableTables.isEmpty
+    }
+}
+
 // MARK: - DirtySet
 
 /// Actor that accumulates dirty (table, pk) pairs from a StorageObserver
@@ -135,6 +213,14 @@ struct DirtyKey: Sendable, Hashable, Comparable {
 /// is needed — the actor serialises all access.
 public actor DirtySet {
     private var entries: Set<DirtyKey> = []
+
+    /// Tables with an observed change whose row could not be identified.
+    /// See `DirtyDrain.rescanTables`.
+    private var rescanTables: Set<String> = []
+
+    /// Tables with an observed change that can be neither identified nor
+    /// reconciled. See `DirtyDrain.unresolvableTables`.
+    private var unresolvableTables: Set<String> = []
 
     // The primary-key column names per table, populated from the schema at
     // session start. Used to extract PK values from the TableChange values dict.
@@ -152,28 +238,51 @@ public actor DirtySet {
 
     /// Record a change for replication. Called from the observer consumer task.
     ///
-    /// Inserts, updates, and deletes all add the same DirtyKey (table + PK
-    /// values). At sync time the re-scan determines intent: if the row is
-    /// absent in the source, the sync path issues a delete on the destination;
-    /// if present, it issues an upsert.
+    /// BINDING INVARIANT: a change this method observes is never treated as no
+    /// change. It resolves to one of three outcomes, and the two fallbacks are
+    /// the reason updates and deletes reach the replica at all:
     ///
-    /// If the TableChange's values dict does not contain all primary-key
-    /// columns for the table, the change is logged and skipped. This protects
-    /// against malformed changes from buggy backends; a conforming backend
-    /// always emits the PK columns in the values dict.
+    /// 1. **Row dirt.** The change carried every primary-key column, so the
+    ///    exact row is recorded. Inserts, updates, and deletes all add the same
+    ///    DirtyKey; at sync time the re-scan determines intent — absent in the
+    ///    source means delete at the destination, present means upsert.
+    /// 2. **Table dirt.** `values` is absent, or present but missing a
+    ///    primary-key column, so the row cannot be named. The TABLE is recorded
+    ///    for a whole-table re-scan instead. This is the path every predicate
+    ///    `update` and `delete` on a durable backend takes: SQLite emits
+    ///    `values: nil` for both verbs in both ports, and Rust PostgreSQL emits
+    ///    neither `values` nor `rowKey`. Dropping them here would silently
+    ///    discard every update and delete on a durable backend — expunge,
+    ///    tombstoning, withdrawal, and erasure included — so they are kept.
+    /// 3. **Unresolvable.** The table declares no primary key, so there is no
+    ///    column set to reconcile source against destination on. Recorded as
+    ///    unresolvable, which holds the audit watermark back for the cycle
+    ///    rather than letting it advance past work that was not done.
+    ///
+    /// A change for a table absent from this session's schema is still ignored:
+    /// that table is not ours to replicate, which is a scope judgement, not a
+    /// failure to resolve.
     func accumulate(_ change: TableChange) {
         guard let pkCols = primaryKeys[change.table] else {
-            // Change for a table not in our schema — ignore.
+            // Change for a table not in our schema — not ours to replicate.
             return
         }
-        // Extract PK column values from the change's values dict.
-        // TableChange.values carries the full row on insert/update;
-        // on delete it carries the identifying values used to find the row.
-        guard let values = change.values else {
-            // No values dict — cannot identify the row. Log and skip.
-            log.warning(
-                "incrementalReplication: change on '\(change.table)' with nil values; cannot extract PK, skipping"
+        guard !pkCols.isEmpty else {
+            // No declared primary key: neither naming nor reconciliation is
+            // possible. Surface it rather than swallowing it.
+            log.error(
+                "incrementalReplication: change on '\(change.table)' cannot be resolved — the table declares no primary key; cycle will be reported incomplete"
             )
+            unresolvableTables.insert(change.table)
+            return
+        }
+        // TableChange.values carries the full row on insert/upsert; the durable
+        // backends leave it nil on predicate update and delete.
+        guard let values = change.values else {
+            log.info(
+                "incrementalReplication: change on '\(change.table)' carries no values; marking the whole table for re-scan"
+            )
+            rescanTables.insert(change.table)
             return
         }
         var pkValues: [String: TypedValue] = [:]
@@ -181,9 +290,12 @@ public actor DirtySet {
             if let v = values[col] {
                 pkValues[col] = v
             } else {
-                log.warning(
-                    "incrementalReplication: change on '\(change.table)' missing PK column '\(col)'; skipping"
+                // Values present but not carrying the full key — same remedy as
+                // no values at all: the row is unnameable, the table is not.
+                log.info(
+                    "incrementalReplication: change on '\(change.table)' is missing PK column '\(col)'; marking the whole table for re-scan"
                 )
+                rescanTables.insert(change.table)
                 return
             }
         }
@@ -191,11 +303,18 @@ public actor DirtySet {
         entries.insert(key)
     }
 
-    /// Drain all accumulated dirty keys and return them sorted for deterministic
-    /// sync ordering. The dirty-set is cleared atomically.
-    func drain() -> [DirtyKey] {
-        let drained = entries.sorted()
+    /// Drain everything accumulated since the last drain, sorted for
+    /// deterministic sync ordering. All three sets are cleared atomically —
+    /// see `DirtyDrain`.
+    func drain() -> DirtyDrain {
+        let drained = DirtyDrain(
+            keys: entries.sorted(),
+            rescanTables: rescanTables.sorted(),
+            unresolvableTables: unresolvableTables.sorted()
+        )
         entries.removeAll()
+        rescanTables.removeAll()
+        unresolvableTables.removeAll()
         return drained
     }
 
@@ -211,14 +330,86 @@ public actor DirtySet {
     /// a key already in the set means a newer observer event dirtied the same row
     /// after the drain; that newer event subsumes the restored one, and retrying
     /// with it is safe and sufficient.
-    func restore(_ keys: [DirtyKey]) {
-        for key in keys {
+    ///
+    /// All three resolutions are restored together. Restoring only the keys
+    /// would drop the table-granularity dirt on a failed run, which is the same
+    /// silent loss this session exists to prevent — just moved to the retry path.
+    func restore(_ drained: DirtyDrain) {
+        for key in drained.keys {
             entries.insert(key)
         }
+        rescanTables.formUnion(drained.rescanTables)
+        unresolvableTables.formUnion(drained.unresolvableTables)
     }
 
-    /// Current count — for logging and tests.
+    /// Count of individually-named dirty rows — for logging and tests. Table-
+    /// granularity dirt is deliberately NOT counted here: one entry stands for
+    /// an unknown number of rows, so folding it into this number would make the
+    /// count mean two different things. Use `pendingRescanTables()` for that.
     func count() -> Int { entries.count }
+
+    /// Tables awaiting a whole-table re-scan, sorted — for logging and tests.
+    func pendingRescanTables() -> [String] { rescanTables.sorted() }
+
+    /// Tables carrying a change that can be neither named nor reconciled,
+    /// sorted — for logging and tests.
+    func pendingUnresolvableTables() -> [String] { unresolvableTables.sorted() }
+}
+
+// MARK: - IncrementalSyncOutcome
+
+/// The result of one incremental sync cycle: the cursor to persist, plus what
+/// the cycle had to do to resolve what it observed.
+///
+/// The cursor alone cannot carry this. `ReplicationCursor` is the DURABLE
+/// watermark a caller stores and passes back on the next run; cycle resolution
+/// is a report about a single run and has no meaning once persisted. Keeping
+/// them apart also means a caller that only wants the watermark keeps reading
+/// `.cursor` and is unaffected by anything here.
+///
+/// A caller that ignores `unresolvedTables` still cannot lose data silently:
+/// the watermark in `cursor` did not advance for an incomplete cycle, so the
+/// next run re-reads the same audit range.
+public struct IncrementalSyncOutcome: Sendable, Equatable {
+
+    /// The watermark to persist and pass to the next `sync` call.
+    ///
+    /// For an incomplete cycle this carries the INCOMING watermark unchanged —
+    /// see `unresolvedTables`.
+    public let cursor: ReplicationCursor
+
+    /// Tables this cycle re-scanned in full because it observed a change it
+    /// could not attribute to a row (sorted).
+    ///
+    /// Non-empty is normal, not an error: every predicate update and delete on
+    /// a durable backend arrives without values and lands here. It is reported
+    /// because a whole-table re-scan costs O(table), not O(dirty rows), and a
+    /// caller watching replication cost needs to see when that happens.
+    public let rescannedTables: [String]
+
+    /// Tables carrying a change this cycle could resolve at NO granularity —
+    /// the table declares no primary key, so it can be neither named nor
+    /// reconciled (sorted).
+    ///
+    /// Non-empty means the cycle is INCOMPLETE: no audit events were copied and
+    /// `cursor.hlcWatermark` is the incoming watermark, unmoved. Row work that
+    /// COULD be resolved was still propagated — an unresolvable change withholds
+    /// the watermark, it does not veto the rest of the cycle.
+    public let unresolvedTables: [String]
+
+    /// Whether every observed change was resolved. False means the audit
+    /// watermark deliberately did not advance.
+    public var isComplete: Bool { unresolvedTables.isEmpty }
+
+    public init(
+        cursor: ReplicationCursor,
+        rescannedTables: [String] = [],
+        unresolvedTables: [String] = []
+    ) {
+        self.cursor = cursor
+        self.rescannedTables = rescannedTables
+        self.unresolvedTables = unresolvedTables
+    }
 }
 
 // MARK: - IncrementalReplicationSession
@@ -347,7 +538,21 @@ public final class IncrementalReplicationSession: Sendable {
     /// produce the same upsert order and the result is idempotent.
     ///
     /// AUDIT EVENTS: only audit events with HLC > `fromCursor.hlcWatermark`
-    /// are copied, to avoid re-sending events already in the destination.
+    /// are copied, to avoid re-sending events already in the destination. An
+    /// INCOMPLETE cycle copies none at all — see the watermark contract below.
+    ///
+    /// TABLE-GRANULARITY DIRT: a change that arrived without primary-key values
+    /// marks its whole table for re-scan (see `DirtySet.accumulate`). Every
+    /// source row in such a table is upserted, and every destination row whose
+    /// primary key is absent from the source is deleted. That deletion pass is
+    /// what carries a value-less delete — an expunge, a tombstone, an erasure —
+    /// across to the replica.
+    ///
+    /// WATERMARK: advances only for a cycle that resolved every change it
+    /// observed. If any observed change was unresolvable, no audit events are
+    /// copied and the returned cursor carries `fromCursor`'s watermark
+    /// unchanged, so the next cycle re-reads the same range. Row work that
+    /// could be resolved still propagates.
     ///
     /// - Parameters:
     ///   - source: The source storage to read dirty rows from.
@@ -355,7 +560,8 @@ public final class IncrementalReplicationSession: Sendable {
     ///   - fromCursor: The watermark from the previous sync run. Only rows
     ///     dirtied since this run are replicated. Pass a zero-watermark cursor
     ///     for the first incremental sync.
-    /// - Returns: A new `ReplicationCursor` with the updated watermark.
+    /// - Returns: An `IncrementalSyncOutcome` carrying the cursor to persist
+    ///   and this cycle's resolution report.
     /// - Throws: `ReplicationError` if a storage operation fails. Any error
     ///   during dirty-row reads or destination writes surfaces immediately;
     ///   no partial commit is made.
@@ -363,7 +569,7 @@ public final class IncrementalReplicationSession: Sendable {
         from source: any Storage,
         to destination: any Storage,
         fromCursor: ReplicationCursor
-    ) async throws -> ReplicationCursor {
+    ) async throws -> IncrementalSyncOutcome {
 
         // Schema gate: both backends must be at the same schema version.
         let srcVersion = try await source.currentSchemaVersion(for: schema.kitID)
@@ -385,14 +591,31 @@ public final class IncrementalReplicationSession: Sendable {
         // error rethrows — never deferred to a detached Task, which would race an
         // immediate retry (drain-before-restore) and reproduce the lost-keys bug
         // nondeterministically.
-        let dirtyKeys = await dirtySet.drain()
+        let drained = await dirtySet.drain()
+        let dirtyKeys = drained.keys
         let dirtyBlobs = await blobDirtySet.drain()
 
-        if dirtyKeys.isEmpty && dirtyBlobs.isEmpty {
-            log.debug("incrementalReplication: dirty-set empty, nothing to sync")
-            return fromCursor
+        // The early return fires ONLY when nothing at all was observed. It may
+        // never stand in for "changes were observed but could not be keyed":
+        // that equivalence is what would make a deletions-only cycle
+        // indistinguishable from an idle one.
+        if drained.isEmpty && dirtyBlobs.isEmpty {
+            log.debug("incrementalReplication: no observed changes, nothing to sync")
+            return IncrementalSyncOutcome(cursor: fromCursor)
         }
-        log.info("incrementalReplication: syncing \(dirtyKeys.count) dirty rows, \(dirtyBlobs.count) dirty blobs")
+
+        // A cycle is complete when every observed change resolved to either a
+        // named row or a re-scannable table. Unresolvable changes withhold the
+        // watermark (see the watermark contract in the type doc).
+        let cycleResolved = drained.unresolvableTables.isEmpty
+        if !cycleResolved {
+            log.error(
+                "incrementalReplication: cycle INCOMPLETE — unresolvable changes on \(drained.unresolvableTables.joined(separator: ", ")); audit watermark held at its incoming value and no audit events copied"
+            )
+        }
+        log.info(
+            "incrementalReplication: syncing \(dirtyKeys.count) dirty rows, \(drained.rescanTables.count) re-scan tables, \(dirtyBlobs.count) dirty blobs"
+        )
 
         // RETRY-PRESERVATION guard: restore drained keys/blobs on any error path.
         // The restore is AWAITED before the error propagates (do/catch below),
@@ -418,9 +641,11 @@ public final class IncrementalReplicationSession: Sendable {
         let payload = try await snapshotDirtyRows(
             source: source,
             dirtyKeys: dirtyKeys,
+            rescanTables: drained.rescanTables,
             dirtyBlobs: dirtyBlobs,
             tableIndex: tableIndex,
-            afterWatermark: fromCursor.hlcWatermark
+            afterWatermark: fromCursor.hlcWatermark,
+            copyAuditEvents: cycleResolved
         )
 
         // Write destination inside a serializable transaction.
@@ -431,7 +656,73 @@ public final class IncrementalReplicationSession: Sendable {
             var deletesWritten = 0
             var maxHLC: HLC? = fromCursor.hlcWatermark
 
-            // 1. Row upserts and deletes.
+            // 1. Reconcile every wholly-dirty table: delete destination rows
+            // whose primary key is absent from the source. This is the half a
+            // value-less change cannot express — which rows went away. Without
+            // it an expunge, tombstone, or erasure would leave the removed
+            // content live at the destination.
+            //
+            // Same rule the full-snapshot path applies to blobs
+            // (StorageReplicator §3d, SECFIX-WS2-PK F5): keys the destination
+            // holds and the source does not are divergence.
+            //
+            // ORDER IS DELIBERATE: this pass runs BEFORE the upserts in step 2.
+            //
+            // Both sides are encoded through DirtyKey, but they are READ through
+            // different decoders — the source via `source.rowStore`, the
+            // destination via `txn.rowStore` — and those coincide only when both
+            // ends are the same backend type. The decoders in this repo do agree
+            // for the primary-key column types the tests cover (verified
+            // SQLite→InMemory, §10.C8), so this ordering is not fixing an
+            // observed bug. It removes the DEPENDENCE on that agreement, which
+            // nothing enforces.
+            //
+            // Why the order decides the blast radius: if a future backend pair
+            // ever decoded a PK value into a different TypedValue case, every
+            // destination row would look absent from the source. Deleting first
+            // makes that delete-then-reinsert churn and the destination still
+            // ends up matching the source exactly. Deleting AFTER the upserts
+            // would instead delete the rows just written and leave the table
+            // empty. Correct under both agreement and divergence is worth more
+            // than correct under agreement alone.
+            for rescan in payload.tableRescans {
+                let destinationRows = try await txn.rowStore.query(
+                    table: rescan.table,
+                    where: nil,
+                    orderBy: [],
+                    limit: nil,
+                    offset: nil
+                )
+                for row in destinationRows {
+                    guard let pkValues = Self.extractPKValues(
+                        from: row.values, columns: rescan.primaryKey
+                    ) else {
+                        // A destination row missing a declared PK column cannot
+                        // be compared, and guessing would risk deleting a row
+                        // the source still holds. Fail loud (§15).
+                        throw ReplicationError.storageFailure(
+                            detail: "incremental re-scan of '\(rescan.table)': destination row is " +
+                                "missing a primary-key column; cannot reconcile against the source"
+                        )
+                    }
+                    let encoded = DirtyKey(table: rescan.table, pkValues: pkValues).pkEncoded
+                    guard !rescan.sourcePKEncodings.contains(encoded) else { continue }
+                    // Note: on an append-only table the backend rejects DELETE
+                    // by contract and this throws. That is unreachable in
+                    // practice — an append-only table also rejects the UPDATE
+                    // and DELETE that are the only sources of value-less
+                    // changes — and a loud failure is the right answer if it
+                    // ever is reached. A silent skip here would be exactly the
+                    // quiet exemption this session exists to remove.
+                    _ = try await txn.rowStore.delete(
+                        table: rescan.table,
+                        where: pkPredicate(for: pkValues, table: rescan.table)
+                    )
+                    deletesWritten += 1
+                }
+            }
+
+            // 2. Row upserts and per-key deletes.
             for op in payload.rowOps {
                 switch op {
                 case .upsert(let tableName, let primaryKey, let values):
@@ -458,7 +749,7 @@ public final class IncrementalReplicationSession: Sendable {
                 }
             }
 
-            // 2. Audit events newer than the previous watermark.
+            // 3. Audit events newer than the previous watermark.
             let newEvents = payload.auditEvents
             if !newEvents.isEmpty {
                 try await txn.auditLog.appendBatch(newEvents)
@@ -471,7 +762,7 @@ public final class IncrementalReplicationSession: Sendable {
                 }
             }
 
-            // 3. Blob puts and deletes from the dirty blob set.
+            // 4. Blob puts and deletes from the dirty blob set.
             // put() is idempotent on key; delete() is a no-op if the key is absent.
             var blobPutsWritten = 0
             var blobDeletesWritten = 0
@@ -502,16 +793,25 @@ public final class IncrementalReplicationSession: Sendable {
         // Transaction committed successfully — the catch below never fires past
         // this point, so the drained keys/blobs are consumed for good.
         } catch {
-            await dirtySet.restore(dirtyKeys)
+            await dirtySet.restore(drained)
             await blobDirtySet.restore(dirtyBlobs)
             throw error
         }
 
-        return ReplicationCursor(
-            hlcWatermark: result.hlcWatermark,
-            rowsWritten: result.rowsWritten + result.deletesWritten,
-            auditEventsWritten: result.auditEventsWritten,
-            blobsWritten: result.blobOpsWritten
+        // WATERMARK GATE: an incomplete cycle keeps the incoming watermark.
+        // `result.hlcWatermark` starts at `fromCursor.hlcWatermark` and only
+        // ever grows, so pinning it back here is the whole of the gate.
+        let watermark = cycleResolved ? result.hlcWatermark : fromCursor.hlcWatermark
+
+        return IncrementalSyncOutcome(
+            cursor: ReplicationCursor(
+                hlcWatermark: watermark,
+                rowsWritten: result.rowsWritten + result.deletesWritten,
+                auditEventsWritten: result.auditEventsWritten,
+                blobsWritten: result.blobOpsWritten
+            ),
+            rescannedTables: drained.rescanTables,
+            unresolvedTables: drained.unresolvableTables
         )
     }
 
@@ -519,17 +819,79 @@ public final class IncrementalReplicationSession: Sendable {
 
     /// Snapshot dirty rows and blob operations from the source into a Sendable payload.
     /// Errors during read surface immediately (fail-loud) — no row or blob is skipped.
+    ///
+    /// - Parameters:
+    ///   - rescanTables: Tables to read in FULL because a change on them could
+    ///     not be attributed to a row. Every source row is staged for upsert and
+    ///     the table's source primary-key set is captured so the caller can
+    ///     delete destination rows the source no longer has.
+    ///   - copyAuditEvents: False for an incomplete cycle. Audit events and the
+    ///     watermark move together: copying events for a cycle whose watermark
+    ///     is held back would re-copy the same events on the next run, so an
+    ///     incomplete cycle copies none.
     private func snapshotDirtyRows(
         source: any Storage,
         dirtyKeys: [DirtyKey],
+        rescanTables: [String],
         dirtyBlobs: [(key: BlobKey, event: BlobEvent, bytes: Data?)],
         tableIndex: [String: TableDeclaration],
-        afterWatermark: HLC?
+        afterWatermark: HLC?,
+        copyAuditEvents: Bool
     ) async throws -> IncrementalPayload {
 
         var rowOps: [RowOp] = []
+        var tableRescans: [TableRescan] = []
 
-        for key in dirtyKeys {
+        // Whole-table re-scan first, so per-key work on the same table can be
+        // skipped below: a table being read in full already covers every row in
+        // it, and re-querying those rows one at a time would be pure waste.
+        let rescanSet = Set(rescanTables)
+        for table in rescanTables {
+            guard let tableDecl = tableIndex[table] else {
+                // Table left the schema between the observer event and the
+                // re-scan. Nothing to reconcile against.
+                log.warning("incrementalReplication: re-scan table '\(table)' not in schema, skipping")
+                continue
+            }
+            let generatedColumnNames = Set(tableDecl.generatedColumns.map(\.name))
+
+            // Unbounded read: correctness first. A value-less change names no
+            // row, so the only sound lower bound on what to re-read is the
+            // whole table. This is why `IncrementalSyncOutcome.rescannedTables`
+            // reports which tables paid that cost.
+            let sourceRows = try await source.rowStore.query(
+                table: table, where: nil, orderBy: [], limit: nil, offset: nil
+            )
+
+            var sourcePKEncodings: Set<String> = []
+            for row in sourceRows {
+                guard let pkValues = Self.extractPKValues(
+                    from: row.values, columns: tableDecl.primaryKey
+                ) else {
+                    // A source row missing a declared PK column would make the
+                    // reconciliation set incomplete, and an incomplete source
+                    // set deletes destination rows that should have survived.
+                    throw ReplicationError.storageFailure(
+                        detail: "incremental re-scan of '\(table)': source row is missing a " +
+                            "primary-key column; the re-scan set would be incomplete"
+                    )
+                }
+                sourcePKEncodings.insert(DirtyKey(table: table, pkValues: pkValues).pkEncoded)
+                let filteredValues = row.values.filter { !generatedColumnNames.contains($0.key) }
+                rowOps.append(.upsert(
+                    table: table,
+                    primaryKey: tableDecl.primaryKey,
+                    values: filteredValues
+                ))
+            }
+            tableRescans.append(TableRescan(
+                table: table,
+                primaryKey: tableDecl.primaryKey,
+                sourcePKEncodings: sourcePKEncodings
+            ))
+        }
+
+        for key in dirtyKeys where !rescanSet.contains(key.table) {
             guard let tableDecl = tableIndex[key.table] else {
                 // Table no longer in schema (schema changed under us). Skip.
                 log.warning("incrementalReplication: dirty key table '\(key.table)' not in schema, skipping")
@@ -573,11 +935,12 @@ public final class IncrementalReplicationSession: Sendable {
         // Events at or before the watermark were already delivered in a previous
         // sync run, so we skip them. On the first sync (afterWatermark == nil)
         // all events are fetched.
-        let auditEvents = try await source.auditLog.iterate(
-            after: afterWatermark,
-            rowID: nil,
-            limit: Int.max
-        )
+        //
+        // An incomplete cycle copies none: its watermark stays where it was, so
+        // copying events now would append them again on the next run.
+        let auditEvents = copyAuditEvents
+            ? try await source.auditLog.iterate(after: afterWatermark, rowID: nil, limit: Int.max)
+            : []
 
         // Blob operations from the dirty blob set.
         // For `put` events the payload carries the bytes captured at observe time
@@ -603,7 +966,33 @@ public final class IncrementalReplicationSession: Sendable {
             }
         }
 
-        return IncrementalPayload(rowOps: rowOps, auditEvents: auditEvents, blobOps: blobOps)
+        return IncrementalPayload(
+            rowOps: rowOps,
+            tableRescans: tableRescans,
+            auditEvents: auditEvents,
+            blobOps: blobOps
+        )
+    }
+
+    // MARK: - Primary-key helpers
+
+    /// Pull the declared primary-key columns out of a row's values.
+    ///
+    /// Returns nil when any declared PK column is absent — the caller must
+    /// treat that as a failure rather than reconciling on a partial key, since
+    /// a partial key cannot distinguish two rows and would license deleting the
+    /// wrong one. Static because it is called from inside the destination
+    /// transaction's `@Sendable` closure and touches no session state.
+    private static func extractPKValues(
+        from values: [String: TypedValue],
+        columns: [String]
+    ) -> [String: TypedValue]? {
+        var out: [String: TypedValue] = [:]
+        for col in columns {
+            guard let v = values[col] else { return nil }
+            out[col] = v
+        }
+        return out
     }
 
     // MARK: - Predicate builder
@@ -639,9 +1028,25 @@ private enum BlobOp: Sendable {
     case delete(key: BlobKey)
 }
 
-/// Sendable payload holding dirty-row operations, new audit events, and dirty blob operations.
+/// One wholly-dirty table: the source's complete primary-key set for it, so the
+/// destination can be reconciled against the source inside the sync transaction.
+///
+/// Only the ENCODED keys are carried, not the rows — the upserts are already in
+/// `IncrementalPayload.rowOps`, and all this pass needs is set membership.
+private struct TableRescan: Sendable {
+    let table: String
+    let primaryKey: [String]
+    /// `DirtyKey.pkEncoded` for every row present in the source at snapshot
+    /// time. A destination row whose encoding is absent from this set was
+    /// removed at the source and is deleted at the destination.
+    let sourcePKEncodings: Set<String>
+}
+
+/// Sendable payload holding dirty-row operations, whole-table reconciliations,
+/// new audit events, and dirty blob operations.
 private struct IncrementalPayload: Sendable {
     let rowOps: [RowOp]
+    let tableRescans: [TableRescan]
     let auditEvents: [AuditEvent]
     let blobOps: [BlobOp]
 }

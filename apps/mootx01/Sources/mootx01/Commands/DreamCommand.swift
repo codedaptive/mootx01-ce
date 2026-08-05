@@ -222,6 +222,26 @@ struct DreamCommand: AsyncParsableCommand {
                 "\(report.candidatesConsidered) candidate(s) considered, " +
                 "\(report.suppressedDuplicates) suppressed for estate '\(estateName)'"
             )
+            // Subject backfill dispatch (rider-default ruling, 2026-08-02):
+            // dreaming pays subject debt when a producer is registered (the
+            // serve layer registers the Apple rider by default). One bounded
+            // batch per cycle; settled-skip converges across cycles. No
+            // rider → silent skip; a sweep error is non-fatal like the
+            // cycle error above.
+            if await kit.subjectProducerPipeline(for: handle) != nil {
+                do {
+                    let debt = try await kit.estate(for: handle).countSubjectDebt()
+                    if debt > 0 {
+                        let sweep = try await kit.subjectBackfillSweep(
+                            handle, batchLimit: 32, now: cycleNow)
+                        Logging.stderr.log(
+                            "mootx01 dream: subject backfill — \(sweep.written) written, "
+                            + "\(sweep.skippedInadmissible) skipped, \(sweep.remainingDebt) remaining")
+                    }
+                } catch {
+                    Logging.stderr.log("mootx01 dream warning: subject backfill error: \(error) — continuing")
+                }
+            }
         } catch {
             // A cycle error is non-fatal at the command level: the dreaming queue
             // was drained (or partially drained), which is forward progress even if

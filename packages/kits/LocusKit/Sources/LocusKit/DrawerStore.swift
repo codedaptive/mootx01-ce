@@ -549,7 +549,11 @@ public actor DrawerStore {
         "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
         "wikidataQidsSecondary",
-        "distilled_pipeline_version", "distilled_token_count", "distilled_at"
+        "distilled_pipeline_version", "distilled_token_count", "distilled_at",
+        // Subject trio (PR-01): the subject IS structured-tier data — it
+        // exists precisely so candidate rows can be judged without
+        // hydrating content, so the structured projection carries it.
+        "subject", "subject_pipeline_version", "subject_at"
     ]
 
     /// Batch by-id load at a chosen hydration level — the dense-first candidate
@@ -1183,24 +1187,50 @@ public actor DrawerStore {
         }
     }
 
-    /// Lineage-wide expunge: tombstone the target drawer AND every
-    /// version sharing its lineageID. For each version: set state to
-    /// Tombstoned with dreaming_recalc_required (bit 26), zero the
-    /// content blob, stamp tombstonedAt, and record the drawer id in
-    /// the erasure ledger. Already-tombstoned siblings
-    /// have their content re-zeroed and erasure ledger entry ensured
-    /// but are not re-gated.
+    /// Result of a lineage-wide gated expunge (`expungeGated`).
+    ///
+    /// `refusedSiblingIDs` lists the lineage members whose
+    /// `accepted → tombstoned` transition the `AuditGate` refused
+    /// (S-3: audit-grade rows survive intact), in walk order. A
+    /// refused sibling was left byte-identical — content, state,
+    /// audit trail, and erasure-ledger absence — so a non-empty list
+    /// means the expunge was partial and the caller must not assume
+    /// the whole lineage was erased.
+    public struct ExpungeOutcome: Sendable {
+        /// The target drawer's gate-produced audit event when
+        /// `sealAudit` was false (returned for deferred sealing);
+        /// nil when the event was sealed atomically inside the
+        /// transaction.
+        public let auditEvent: AuditEvent?
+        /// IDs of lineage siblings the gate refused to tombstone,
+        /// in walk order. Empty means the expunge covered the full
+        /// lineage.
+        public let refusedSiblingIDs: [String]
+    }
+
+    /// Lineage-wide expunge: tombstone the target drawer and every
+    /// version sharing its lineageID whose state transition the gate
+    /// admits. For each admitted member: set state to Tombstoned with
+    /// dreaming_recalc_required (bit 26), zero the content blob, stamp
+    /// tombstonedAt, and record the drawer id in the erasure ledger.
+    /// Already-tombstoned siblings have their content re-zeroed and
+    /// erasure ledger entry ensured but are not re-gated.
     ///
     /// Routes the target drawer through `AuditGate.admit` (the primary
-    /// audit event). Lineage siblings are scrubbed and gated
-    /// individually. The gate's verb-state-consistency check refuses
-    /// `accepted → tombstoned` (S-3: audit-grade rows survive intact).
+    /// audit event). Lineage siblings are gated individually. The
+    /// gate's transition table refuses `accepted → tombstoned` (S-3:
+    /// audit-grade rows survive intact), and a refused sibling is left
+    /// byte-identical — no content write, no state write, no audit
+    /// append, no erasure-ledger record. Refused sibling ids are
+    /// carried in `ExpungeOutcome.refusedSiblingIDs` so the caller can
+    /// detect a partial expunge; the walk continues over the remaining
+    /// members.
     ///
     /// When `sealAudit` is `true` (default), the audit event for the
-    /// target drawer is appended atomically inside the transaction.
-    /// When `false`, the event is returned for deferred sealing by
-    /// the GLK orchestration path (§B-2a). Returns nil when
-    /// `sealAudit` is true.
+    /// target drawer is appended atomically inside the transaction and
+    /// the outcome's `auditEvent` is nil. When `false`, the event is
+    /// carried in the outcome for deferred sealing by the GLK
+    /// orchestration path (§B-2a).
     ///
     /// Optionally accepts `commitmentKey` / `commitmentKeyVersion` to
     /// compute a keyed commitment (HMAC-SHA256) over the target
@@ -1215,7 +1245,7 @@ public actor DrawerStore {
         sealAudit: Bool = true,
         commitmentKey: [UInt8]? = nil,
         commitmentKeyVersion: Int = 0
-    ) async throws -> AuditEvent? {
+    ) async throws -> ExpungeOutcome {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
 
@@ -1226,8 +1256,10 @@ public actor DrawerStore {
         let vocab = vocabulary
 
         // Resolve the full lineage chain before entering the
-        // transaction. All members — active, superseded, tombstoned —
-        // are in scope for content scrub.
+        // transaction. Every member is walked; members whose tombstone
+        // transition the gate admits are scrubbed, and accepted members
+        // (refused per S-3) are left untouched and reported in the
+        // outcome.
         let lineageIds = try await lineageChain(for: drawerId)
 
         // Pre-stamp HLC values for each sibling outside the Sendable
@@ -1257,7 +1289,7 @@ public actor DrawerStore {
         let flagsSlot = FieldSlot(column: .adjective, shift: 24, width: 3,
                                   label: "flags")
 
-        let capturedEvent: AuditEvent = try await storage.transaction(isolation: .serializable) { txn in
+        let (capturedEvent, refusedSiblingIds): (AuditEvent, [String]) = try await storage.transaction(isolation: .serializable) { txn in
             // ── Step 1: gate and scrub the target drawer ──
             let rows = try await txn.rowStore.query(
                 table: "drawers",
@@ -1375,11 +1407,13 @@ public actor DrawerStore {
                 erasedHlc: stamp
             )
 
-            // ── Step 2: scrub every lineage sibling ──
+            // ── Step 2: walk every lineage sibling ──
             // Siblings are predecessors (superseded versions) and any
             // other members of the lineage chain. Already-tombstoned
             // siblings have content re-zeroed as a defense-in-depth
-            // measure but are not re-gated.
+            // measure but are not re-gated. Siblings the gate refuses
+            // are left untouched and collected for the outcome.
+            var refused: [String] = []
             for (idx, siblingId) in siblingIds.enumerated() {
                 let sibRows = try await txn.rowStore.query(
                     table: "drawers",
@@ -1459,29 +1493,28 @@ public actor DrawerStore {
                             try await txn.auditLog.append(sibEventWithReason)
                         }
                     } else {
-                        // Gate rejected the state transition (e.g., accepted →
-                        // tombstoned is S-3 forbidden). Content scrub is unconditional
-                        // and independent of the state machine: even when the state
-                        // cannot transition, the verbatim content MUST be zeroed.
-                        // Leaving content intact when the gate fails is a destruction-
-                        // contract violation (secfix/ws2-coredelete). The scrub covers
-                        // the content-derived distilled representation and the
-                        // has_current_representation bit (cookbook §2.4.1).
-                        let sibClearedOpRej = sibOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
-                        _ = try await txn.rowStore.update(
-                            table: "drawers",
-                            values: Self.withClearedRepresentation([
-                                "content": .text(""),
-                                "operationalBitmap": .bitmap(sibClearedOpRej),
-                            ]),
-                            where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
-                        )
-                        try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
+                        // Gate rejected the state transition (accepted →
+                        // tombstoned is S-3 forbidden: accepted rows are
+                        // audit-grade and survive intact). A refused gate is
+                        // a refusal, not a partial apply: the sibling is left
+                        // byte-identical — no content write, no state write,
+                        // no audit append, and no erasure-ledger record (the
+                        // ErasureOverlay nulls ledgered rows at read time, so
+                        // a ledger record alone would still suppress the
+                        // row). The refusal is carried to the caller via
+                        // ExpungeOutcome.refusedSiblingIDs; the walk
+                        // continues over the remaining lineage members.
+                        refused.append(siblingId)
+                        continue
                     }
                 }
 
-                // Record sibling in the erasure ledger. duplicateKey is
-                // expected if the sibling was previously expunged.
+                // Record the scrubbed sibling in the erasure ledger.
+                // Gate-refused siblings never reach this point (they
+                // `continue` above) — a ledger record would suppress
+                // their content at read time via the ErasureOverlay.
+                // duplicateKey is expected if the sibling was
+                // previously expunged.
                 do {
                     try await ErasureLedgerOps.recordErasure(
                         rowStore: txn.rowStore,
@@ -1496,10 +1529,13 @@ public actor DrawerStore {
             if sealAudit {
                 try await txn.auditLog.append(event)
             }
-            return event
+            return (event, refused)
         }
 
-        return sealAudit ? nil : capturedEvent
+        return ExpungeOutcome(
+            auditEvent: sealAudit ? nil : capturedEvent,
+            refusedSiblingIDs: refusedSiblingIds
+        )
     }
 
     /// Seal a previously prepared expunge audit event.
@@ -3583,7 +3619,14 @@ public actor DrawerStore {
             "distilled": d.distilled.map { TypedValue.text($0) } ?? .null,
             "distilled_pipeline_version": d.distilledPipelineVersion.map { TypedValue.text($0) } ?? .null,
             "distilled_token_count": d.distilledTokenCount.map { TypedValue.int($0) } ?? .null,
-            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null
+            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null,
+            // Subject trio (PR-01): same capture-path contract as the
+            // distilled quad — a fresh capture MAY carry a subject (the
+            // filing AI provides it at file time); backfill and the model
+            // rider populate the rest via setSubjectRepresentation.
+            "subject": d.subject.map { TypedValue.text($0) } ?? .null,
+            "subject_pipeline_version": d.subjectPipelineVersion.map { TypedValue.text($0) } ?? .null,
+            "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null
         ]
     }
 
@@ -3682,6 +3725,9 @@ public actor DrawerStore {
             "predicate": .text(f.predicate),
             "object": .text(f.object),
             "sourceDrawerID": .text(f.sourceDrawerID),
+            "addedBy": .text(f.addedBy),
+            "foreignSourceKey": .text(f.foreignSourceKey),
+            "foreignRecordID": .text(f.foreignRecordID),
             "adjectiveBitmap": .bitmap(f.adjectiveBitmap),
             "operationalBitmap": .bitmap(f.operationalBitmap),
             "provenanceBitmap": .bitmap(f.provenanceBitmap),
@@ -3799,7 +3845,12 @@ public actor DrawerStore {
             distilled: optString(row["distilled"]),
             distilledPipelineVersion: optString(row["distilled_pipeline_version"]),
             distilledTokenCount: optInt64(row["distilled_token_count"]),
-            distilledAt: optDate(row["distilled_at"])
+            distilledAt: optDate(row["distilled_at"]),
+            // Subject trio (PR-01). NULL on any row not yet subjected;
+            // decodes to nil — the backfill-eligibility signal.
+            subject: optString(row["subject"]),
+            subjectPipelineVersion: optString(row["subject_pipeline_version"]),
+            subjectAt: optDate(row["subject_at"])
         )
     }
 
@@ -3961,6 +4012,9 @@ public actor DrawerStore {
             predicate: string(row["predicate"]),
             object: string(row["object"]),
             sourceDrawerID: string(row["sourceDrawerID"]),
+            addedBy: string(row["addedBy"]),
+            foreignSourceKey: string(row["foreignSourceKey"]),
+            foreignRecordID: string(row["foreignRecordID"]),
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
@@ -4776,16 +4830,20 @@ public actor DrawerStore {
 
     // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
 
-    /// The four representation columns, all NULL — merged into every UPDATE
-    /// whose values touch `content`, so a representation can never outlive
+    /// Every content-derived column, all NULL — merged into every UPDATE
+    /// whose values touch `content`, so derived text can never outlive
     /// the content it renders (the §7.3 NULL-on-edit regeneration trigger
-    /// and the erasure scrub: distilled text is content-derived, so zeroing
-    /// content must scrub it in the same statement).
+    /// and the erasure scrub: distilled text and the subject line are both
+    /// content-derived, so zeroing content must scrub them in the same
+    /// statement). Covers the distilled quad and the subject trio (PR-01).
     private static let clearedRepresentationValues: [String: TypedValue] = [
         "distilled": .null,
         "distilled_pipeline_version": .null,
         "distilled_token_count": .null,
         "distilled_at": .null,
+        "subject": .null,
+        "subject_pipeline_version": .null,
+        "subject_at": .null,
     ]
 
     /// Merge the representation-clearing NULLs into a content-writing
@@ -4858,6 +4916,257 @@ public actor DrawerStore {
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
         }
+    }
+
+    /// Write the subject line of one drawer — all three columns in ONE
+    /// atomic UPDATE (PR-01; same invariant family as the distilled quad:
+    /// NULL together or populated together) PLUS a sealed `"setSubject"`
+    /// custody audit event, committed together in one transaction (Codex
+    /// cc90c5dcecb081918c159788e1ffb3d6): the column write and the audit
+    /// append succeed or fail together. No supersession cascade, no
+    /// lifecycle or lineage field touched, and no content digest/revision
+    /// bump (the subject is returned, never indexed, so no index job is
+    /// emitted).
+    ///
+    /// The custody event is constructed directly on the existing
+    /// `AuditEvent` shape (the `"expungeOrphan"` precedent: a custom verb
+    /// string is preserved verbatim in the substrate trail; GLK's
+    /// AuditBridge collapses unknown verbs to `.mutate`). Bitmaps and
+    /// anchor are unchanged, so before == after on every value field —
+    /// the row records WHO changed the subject, WHEN, and WHY. The prior
+    /// subject text is deliberately NOT preserved: the audit shape
+    /// carries no text values, subject is derived from `content`, and
+    /// content has its own audit trail — custody row + content trail
+    /// reconstructs the picture.
+    ///
+    /// Enforces the subject LENGTH CONTRACT at the storage boundary: the
+    /// AI-facing register caps the sentence at 120 characters so contact-
+    /// sheet rows keep near-uniform context cost. Enforced here — the
+    /// last common gate under every producer (filing AI, backfill AI,
+    /// model rider) — so no producer can quietly inflate the row budget.
+    ///
+    /// Mirrors Rust `set_subject_representation` (twin parity; audit
+    /// fields match field-for-field). Parity note (eventID): the Rust
+    /// port computes `event_id` via `audit_gate::content_id`
+    /// (deterministic SHA-256); this initializer uses the `AuditEvent`
+    /// default (random UUID) — the same accepted divergence documented at
+    /// `sealExpungeOrphanAudit`.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The drawer row id (`Drawer.id`).
+    ///   - subject: The one-sentence AI-facing subject (≤ 120 characters).
+    ///   - pipelineVersion: Producer contract/provenance tier ("ai-v1",
+    ///     "minillm-v1").
+    ///   - at: Generation instant (deterministic clock — passed in, never
+    ///     read here).
+    ///   - changedBy: Audit actor. `nil` (the default, used by the
+    ///     backfill path through `Estate.setSubjectRepresentation`)
+    ///     resolves to the manifest owner, or "estate" when empty —
+    ///     the same resolution Rust's `Estate::changed_by_or_estate`
+    ///     applies at its seam.
+    ///   - reason: The caller's audit note. `nil` when none was supplied —
+    ///     the audit row is still sealed (absent reason ≠ absent row).
+    /// - Returns: Count of rows updated (0 = drawer not found, in which
+    ///   case no audit event is sealed; 1 = success).
+    public func setSubjectRepresentation(
+        drawerId: String,
+        subject: String,
+        pipelineVersion: String,
+        at generatedAt: Date,
+        changedBy: String? = nil,
+        reason: String? = nil
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(subject, label: "subject")
+        try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
+        guard subject.count <= Self.subjectLengthContract else {
+            throw LocusKitError.invalidContent(
+                "subject exceeds the \(Self.subjectLengthContract)-character length contract "
+                + "(\(subject.count) characters); the AI-facing register requires one capped sentence")
+        }
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let actor: String
+        if let changedBy, !changedBy.isEmpty {
+            actor = changedBy
+        } else {
+            let owner = (try? await readManifest().ownerIdentifier) ?? ""
+            actor = owner.isEmpty ? "estate" : owner
+        }
+        let nowMillis = Int64(generatedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        return try await storage.transaction(isolation: .serializable) { txn in
+            // Read the current row inside the transaction for the custody
+            // event's value fields. An absent row preserves the historical
+            // contract: 0, no audit row, no error.
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            guard let row = rows.first else { return 0 }
+            let bitmaps = (
+                adjective: Self.int64(row["adjectiveBitmap"]),
+                operational: Self.int64(row["operationalBitmap"]),
+                provenance: Self.int64(row["provenance"])
+            )
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let event = AuditEvent(
+                estateUuid: estate,
+                rowId: rowUuid,
+                hlc: stamp,
+                verb: "setSubject",
+                beforeBitmaps: bitmaps,
+                afterBitmaps: bitmaps,
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: actor,
+                reason: reason)
+            let updated = try await txn.rowStore.update(
+                table: "drawers",
+                values: [
+                    "subject": .text(subject),
+                    "subject_pipeline_version": .text(pipelineVersion),
+                    "subject_at": .timestamp(generatedAt),
+                ],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+            if updated > 0 {
+                // Blanket fingerprint rule: every `drawers` write refreshes
+                // content_fingerprint in the same transaction.
+                try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
+                try await txn.auditLog.append(event)
+            }
+            return updated
+        }
+    }
+
+    /// The subject length contract (characters). One capped sentence in
+    /// the AI-facing register — the bound that keeps every contact-sheet
+    /// row's context cost near-uniform. Shared by both legs (Rust
+    /// `SUBJECT_LENGTH_CONTRACT`).
+    public static let subjectLengthContract = 120
+
+    /// Pipeline-version tag for subjects authored by a calling AI at the
+    /// capture/mutate boundary (as opposed to the future miniLLM producer,
+    /// `minillm-v1`). Stored in `subject_pipeline_version` as provenance
+    /// and as the regeneration lever (SPEC B-19). Shared by both legs
+    /// (Rust `SUBJECT_PIPELINE_AI_V1`).
+    public static let subjectPipelineAIV1 = "ai-v1"
+
+    /// Count of active drawers still awaiting a subject line — the
+    /// backfill-eligibility predicate as an aggregate (PR-01): not
+    /// tombstoned, non-empty content, and subject absent OR produced
+    /// under a different pipeline contract. Feeds the estate-status
+    /// subject-debt counter and the (future) subject drain lane; measured
+    /// off the rows themselves. Projected to `id` only, so no text column
+    /// is materialized. Uses `isNull(subject)` directly — the subject
+    /// trio carries no presence bit in v1 (the operational feature-flag
+    /// region is full; see PR01_SUBJECT_QUAD_BLAST_RADIUS.md), and this
+    /// count runs at status cadence, not in recall.
+    ///
+    /// Pipeline-version tag for subjects produced by the on-device
+    /// miniLLM rider (PR-10's producer; the Rust lane stays dark until a
+    /// model exists). The provenance tiers stored in
+    /// `subject_pipeline_version`:
+    ///   ai-v1            — the filing/backfill AI (capture + setSubject)
+    ///   minillm-v1       — the model rider
+    ///   consolidation-v1 — the deterministic vague-tier writer
+    ///   seed-v1          — structural charter-hint seeds
+    /// A version differing from a requested producer contract marks the
+    /// row a REGENERATION candidate (`countMissingSubject`) — the
+    /// migration lever. Twin: Rust `SUBJECT_PIPELINE_MINILLM_V1`.
+    public static let subjectPipelineMiniLLMV1 = "minillm-v1"
+
+    /// The subject-debt predicate, optionally widened by regeneration
+    /// tiers (PR-10): subject NULL, or produced under one of
+    /// `includingPipelines` (the tiers BELOW the requesting producer on
+    /// the trust ladder — the Apple rider lists the deterministic tiers
+    /// consolidation-v1/seed-v1 and never ai-v1, so the filing AI
+    /// outranks the fallback model STRUCTURALLY: its rows are simply
+    /// never enumerated for regeneration).
+    private static func subjectDebtPredicate(includingPipelines pipelines: [String]) -> StoragePredicate {
+        var subjectClauses: [StoragePredicate] = [
+            .isNull(Column(table: "drawers", name: "subject"))
+        ]
+        for pipeline in pipelines {
+            subjectClauses.append(
+                .eq(Column(table: "drawers", name: "subject_pipeline_version"),
+                    .text(pipeline)))
+        }
+        return .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(Column(table: "drawers", name: "content"), .text("")),
+            .or(subjectClauses),
+        ])
+    }
+
+    /// Presence debt, NULL-only (PR-09): live rows with non-empty content
+    /// and NO subject at all — the subject-backfill drain lane's
+    /// `pending` and the strict complement of what any producer has
+    /// settled. Distinct from `countMissingSubject(pipelineVersion:)`,
+    /// which adds producer-version mismatches (regeneration debt).
+    /// Projected to `id` only. Mirrors Rust `count_subject_debt`.
+    public func countSubjectDebt() async throws -> Int {
+        try await countSubjectDebt(includingPipelines: [])
+    }
+
+    /// Tier-aware debt count (PR-10): NULL rows plus rows produced under
+    /// any of `includingPipelines`. Mirrors Rust
+    /// `count_subject_debt_including`.
+    public func countSubjectDebt(includingPipelines pipelines: [String]) async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        return rows.count
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09): up to `limit`
+    /// subject-debt rows in deterministic filedAt-then-id order, fully
+    /// hydrated so the producer can read `content`. Settled-work skip is
+    /// structural — a row whose subject was written no longer matches
+    /// the predicate, so reruns never revisit it. Mirrors Rust
+    /// `subject_debt_batch`.
+    public func subjectDebtBatch(limit: Int) async throws -> [Drawer] {
+        try await subjectDebtBatch(limit: limit, includingPipelines: [])
+    }
+
+    /// Tier-aware sweep enumerator (PR-10). NULL rows plus rows produced
+    /// under any of `includingPipelines` — a written minillm-v1 subject
+    /// leaves the predicate (the producer's own tier is never in its
+    /// list), so settled-skip still holds. Mirrors Rust
+    /// `subject_debt_batch_including`.
+    public func subjectDebtBatch(
+        limit: Int, includingPipelines pipelines: [String]
+    ) async throws -> [Drawer] {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
+            ],
+            limit: limit, offset: nil, columns: nil
+        )
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "subjectDebtBatch")
+    }
+
+    /// Mirrors Rust `count_missing_subject`.
+    public func countMissingSubject(pipelineVersion: String) async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .neq(Column(table: "drawers", name: "content"), .text("")),
+                .or([
+                    .isNull(Column(table: "drawers", name: "subject")),
+                    .neq(Column(table: "drawers", name: "subject_pipeline_version"),
+                         .text(pipelineVersion)),
+                ]),
+            ]),
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        return rows.count
     }
 
     /// Count of active drawers still awaiting distillation — the §7.1

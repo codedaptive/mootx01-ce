@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use aria_mcp::{
     dispatch::{dispatch_tool, dispatch_tool_with_vault_flag},
     estate_registry::EstateRegistry,
-    jsonrpc::{JSONRPCErrorCode, JsonValue},
+    jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
     tool_list::{build_tool_list, build_tool_list_with_flags, build_tool_list_with_vault_flag, vault_enabled},
 };
@@ -68,7 +68,7 @@ fn seed_in_source(
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::estate_types::LatticeAnchor;
     use locus_kit::frames::CaptureFrame;
-    let frame = CaptureFrame::new(
+    let mut frame = CaptureFrame::new(
         content,
         CaptureChannel::Typed,
         room,
@@ -76,6 +76,9 @@ fn seed_in_source(
         "aria-mcp-tests",
         "default",
     );
+    // Subject = capped content so PR-03 dense-row replies carry the text
+    // these tests assert on (dense rows show subjects, never content).
+    frame.subject = Some(content.chars().take(120).collect());
     let now = aria_mcp::dispatch::wall_now();
     let coord = registry.coord.lock().unwrap();
     coord
@@ -85,7 +88,10 @@ fn seed_in_source(
 
 /// File a memory into the default estate and return its id.
 fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> String {
-    let a = args!["content" => content, "location" => location];
+    // Subject is required at the file_memory boundary (PR-02); the capped
+    // content prefix is a good-enough test subject.
+    let subject: String = content.chars().take(120).collect();
+    let a = args!["content" => content, "subject" => subject.as_str(), "location" => location];
     let result = dispatch_tool("moot_file_memory", &a, registry, &SurfacedRecallLedger::new()).expect("file_memory must succeed");
     assert!(is_success(&result), "file_memory should succeed; got: {result:?}");
     let text = content_text(&result);
@@ -1050,6 +1056,7 @@ fn file_memory_with_kind_code_persists_content_kind_code() {
         "moot_file_memory",
         &args![
             "content" => "fn main() { println!(\"hello\"); }",
+        "subject" => "fn main() { println!(\"hello\"); }",
             "location" => "code/snippet",
             "kind" => "code"
         ],
@@ -1087,6 +1094,7 @@ fn file_memory_with_sensitivity_restricted_persists_restricted() {
         "moot_file_memory",
         &args![
             "content" => "top-secret plan details",
+        "subject" => "top-secret plan details",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -1124,6 +1132,7 @@ fn file_memory_unknown_kind_returns_invalid_params() {
         "moot_file_memory",
         &args![
             "content" => "some content",
+        "subject" => "some content",
             "location" => "test/room",
             "kind" => "notAKind"
         ],
@@ -1140,6 +1149,7 @@ fn file_memory_unknown_sensitivity_returns_invalid_params() {
         "moot_file_memory",
         &args![
             "content" => "some content",
+        "subject" => "some content",
             "location" => "test/room",
             "sensitivity" => "topSecret"
         ],
@@ -1167,6 +1177,7 @@ fn file_memory_sets_capture_channel_to_actuator() {
         "moot_file_memory",
         &args![
             "content" => "channel verification content",
+        "subject" => "channel verification content",
             "location" => "channel/test"
         ],
         &registry,
@@ -1568,8 +1579,24 @@ fn memory_get_found_returns_full_content_verbatim() {
         text.contains(&id),
         "response must echo the memory id; got: {text}"
     );
+    // The sensitivity-gate advisory is appended after the content block
+    // whenever no grant is live, which is this dispatcher's state — it
+    // depends on grant state alone, never on estate contents, so it is
+    // present on every reply here. Strip that one trailing line before
+    // asserting the content is the final block; what is under test is that
+    // the content itself is not truncated. Mirrors Swift
+    // `MemoryGetTests.foundReturnsFullContentVerbatim`.
+    let advisory = text
+        .lines()
+        .next_back()
+        .expect("reply must not be empty");
     assert!(
-        text.ends_with("verbatim content for memory-get test"),
+        advisory.starts_with("sensitivity_advisory: "),
+        "with no grant live the reply must end with the sensitivity-gate advisory; got: {text}"
+    );
+    let body = text[..text.len() - advisory.len()].trim_end_matches('\n');
+    assert!(
+        body.ends_with("verbatim content for memory-get test"),
         "response must include the exact verbatim content as the final block; got: {text}"
     );
 }
@@ -1708,6 +1735,207 @@ fn memory_get_provenance_secret_drawer_is_reported_not_found() {
     );
 }
 
+// ── near: anchor pivot — provenance-sensitivity redaction boundary ──────────
+//
+// The by-id door (memory_get, above) and the pivot door (near:) must agree.
+// `moot_memory_search` deliberately surfaces a gated row's ID with a redacted
+// body, so the UUID needed to pivot is obtainable in ordinary use; if the
+// pivot did not gate, the caller could hand that UUID back as `near:` and
+// receive the protected body's content-derived neighbors. These cases cover
+// both tools that accept `near:` — moot_memory_search and moot_recall_shaped.
+//
+// Every case asserts the SAME not-found message an absent id produces. A
+// distinct message or error code would turn the fix into an existence oracle
+// for redacted rows, which is the same class of defect the gate closes.
+
+/// Dispatch `near:` against both tools that accept it and return the error
+/// each produced. Keeping this in one helper is what makes "both doors agree"
+/// checkable in a single assertion per property.
+fn near_pivot_errors(registry: &EstateRegistry, anchor: &str) -> Vec<(&'static str, JSONRPCError)> {
+    let search = dispatch_tool(
+        "moot_memory_search",
+        &args!["near" => anchor],
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("near: on a gated or absent anchor must be reported not-found");
+    let shaped = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["near" => anchor, "preset" => "balanced"],
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("near: on a gated or absent anchor must be reported not-found");
+    vec![("moot_memory_search", search), ("moot_recall_shaped", shaped)]
+}
+
+#[test]
+fn near_anchor_provenance_secret_is_reported_not_found() {
+    // The regression case for Codex finding 3a1cf92490a481918c3a2837effe341f:
+    // before the gate, the Secret body became the recall query verbatim.
+    let registry = EstateRegistry::new_inmemory_bare();
+    let secret = "provenance-secret body must not become a near: recall query";
+    let id = file_one_memory_with_provenance_sensitivity(
+        &registry,
+        secret,
+        "vault",
+        locus_kit::provenance::Sensitivity::Secret,
+    );
+
+    for (tool, err) in near_pivot_errors(&registry, &id) {
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("near: anchor memory not found: {id}"),
+            "{tool} must use the standard near: not-found shape"
+        );
+        assert!(
+            !err.message.contains(secret),
+            "{tool} must not leak the withheld body; got: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn near_anchor_provenance_restricted_is_reported_not_found() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let restricted = "provenance-restricted body must not become a near: recall query";
+    let id = file_one_memory_with_provenance_sensitivity(
+        &registry,
+        restricted,
+        "vault",
+        locus_kit::provenance::Sensitivity::Restricted,
+    );
+
+    for (tool, err) in near_pivot_errors(&registry, &id) {
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("near: anchor memory not found: {id}"),
+            "{tool} must use the standard near: not-found shape"
+        );
+        assert!(
+            !err.message.contains(restricted),
+            "{tool} must not leak the withheld body; got: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn near_anchor_gated_message_is_byte_identical_to_absent_id_message() {
+    // Indistinguishability — the property the gate exists to protect. If a
+    // gated anchor produced any different message or code than an absent id,
+    // `near:` would become an existence oracle for redacted rows, which is the
+    // same defect class as the leak it replaces.
+    let registry = EstateRegistry::new_inmemory_bare();
+
+    for tier in [
+        locus_kit::provenance::Sensitivity::Restricted,
+        locus_kit::provenance::Sensitivity::Secret,
+    ] {
+        let id = file_one_memory_with_provenance_sensitivity(
+            &registry,
+            "gated body for the oracle check",
+            "vault",
+            tier,
+        );
+        // A UUID that was never filed. Comparing against the gated id
+        // substituted in leaves the SHAPE as the only possible difference.
+        let absent = "00000000-0000-4000-8000-00000000dead";
+
+        let gated = near_pivot_errors(&registry, &id);
+        let missing = near_pivot_errors(&registry, absent);
+        for ((tool, g), (_, m)) in gated.into_iter().zip(missing.into_iter()) {
+            assert_eq!(g.code, m.code, "{tool}/{tier:?}: error code must match");
+            assert_eq!(
+                g.message,
+                m.message.replace(absent, &id),
+                "{tool}/{tier:?}: gated message must be byte-identical to the absent-id message"
+            );
+        }
+    }
+}
+
+#[test]
+fn near_anchor_provenance_normal_and_elevated_still_pivot() {
+    // The other half: a gate, not a wall. Provenance Normal and Elevated are
+    // BELOW the redaction boundary and must still pivot, or the fix would have
+    // closed the near: door on ordinary rows. Mirrors the intent of
+    // memory_get's provenance_normal_and_elevated tests.
+    for tier in [
+        locus_kit::provenance::Sensitivity::Normal,
+        locus_kit::provenance::Sensitivity::Elevated,
+    ] {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let id = file_one_memory_with_provenance_sensitivity(
+            &registry,
+            "open provenance anchor body pivots normally",
+            "lab",
+            tier,
+        );
+
+        let search = dispatch_tool(
+            "moot_memory_search",
+            &args!["near" => id.as_str()],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .unwrap_or_else(|e| panic!("provenance {tier:?} must still pivot via search; got: {e:?}"));
+        assert!(is_success(&search), "provenance {tier:?} search pivot: {search:?}");
+
+        let shaped = dispatch_tool(
+            "moot_recall_shaped",
+            &args!["near" => id.as_str(), "preset" => "balanced"],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .unwrap_or_else(|e| panic!("provenance {tier:?} must still pivot via shaped; got: {e:?}"));
+        assert!(is_success(&shaped), "provenance {tier:?} shaped pivot: {shaped:?}");
+    }
+}
+
+#[test]
+fn near_anchor_adjective_gated_behaviour_is_unchanged() {
+    // The adjective axis (bits 6-11) was already gated by the default
+    // RecallFrame before this mission, and stays gated the same way after it.
+    // Pinning it here proves the provenance check was added ALONGSIDE the
+    // frame gate rather than replacing it.
+    let registry = EstateRegistry::new_inmemory_bare();
+    let body = "adjective-secret anchor body";
+    let id = {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        let mut frame = CaptureFrame::new(
+            body,
+            CaptureChannel::Typed,
+            "vault",
+            LatticeAnchor::udc("004"),
+            "aria-mcp-tests",
+            "default",
+        );
+        frame.sensitivity = locus_kit::adjectives::AdjectiveSensitivity::Secret;
+        let now = aria_mcp::dispatch::wall_now();
+        let coord = registry.coord.lock().unwrap();
+        coord
+            .capture(&registry.default.handle, frame, now)
+            .expect("adjective-secret capture must succeed")
+            .id
+            .clone()
+    };
+
+    for (tool, err) in near_pivot_errors(&registry, &id) {
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("near: anchor memory not found: {id}"),
+            "{tool}: adjective-gated anchors keep the same not-found shape"
+        );
+    }
+}
+
 #[test]
 fn memory_get_omitted_estate_id_hits_default_estate() {
     let registry = EstateRegistry::new_inmemory_bare();
@@ -1837,6 +2065,99 @@ fn erase_memory_with_confirmed_true_succeeds() {
     assert!(is_success(&result), "erase with confirmed:true must succeed; got: {result:?}");
     let text = content_text(&result);
     assert!(text.contains(&id), "success text must include id; got: {text}");
+    // A single-row lineage has nothing for the gate to refuse — the
+    // historical response shape must be byte-identical (SPEC B-8b).
+    assert_eq!(
+        text,
+        format!("erased memory {id}"),
+        "a full expunge must keep the exact historical response shape"
+    );
+}
+
+/// A lineage expunge that the audit gate refused for an accepted sibling
+/// must NOT respond "erased memory <id>" — the response names the partial
+/// outcome, the refused count, and the surviving ids (SPEC B-8b, MXE-FA).
+/// A caller acting on this sentence is making a privacy decision on it.
+/// Mirrors Swift `ErasePartialResponseTests`.
+#[test]
+fn erase_memory_partial_lineage_response_names_refused_count() {
+    use locus_kit::adjectives::Trust;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::{CaptureFrame, MutationKind};
+
+    let registry = EstateRegistry::new_inmemory();
+    let now = aria_mcp::dispatch::wall_now();
+
+    // D1: captured, promoted to Accepted (S-1 requires trust ≥ canonical;
+    // the accepted state is what the gate protects from tombstoning, S-3).
+    // D2: same lineage, still active — the expunge target. D1 is accepted
+    // BEFORE D2 is captured so the capture does not supersede it.
+    let (d1_id, d2_id) = {
+        let coord = registry.coord.lock().unwrap();
+        let d1 = coord
+            .capture(
+                &registry.default.handle,
+                CaptureFrame::new(
+                    "accepted iridium fact held for audit",
+                    CaptureChannel::Typed,
+                    "aria-erase-partial-tests",
+                    LatticeAnchor::udc("004"),
+                    "aria-mcp-tests",
+                    "default",
+                ),
+                now,
+            )
+            .expect("capture d1");
+        coord
+            .mutate(
+                &registry.default.handle,
+                &d1.id,
+                MutationKind::CorrectTrust(Trust::Canonical),
+                None,
+            )
+            .expect("correct trust to canonical");
+        coord
+            .mutate(&registry.default.handle, &d1.id, MutationKind::Accept, None)
+            .expect("promote d1 to accepted");
+
+        let mut d2_frame = CaptureFrame::new(
+            "active iridium draft in the same lineage",
+            CaptureChannel::Typed,
+            "aria-erase-partial-tests",
+            LatticeAnchor::udc("004"),
+            "aria-mcp-tests",
+            "default",
+        );
+        d2_frame.lineage_id = Some(d1.lineage_id);
+        let d2 = coord
+            .capture(&registry.default.handle, d2_frame, now + 100)
+            .expect("capture d2");
+        (d1.id, d2.id)
+    };
+
+    let result = dispatch_tool(
+        "moot_erase_memory",
+        &args!["id" => d2_id.as_str(), "reason" => "partial response shape test", "confirmed" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("erase_memory must not throw");
+    // A partial expunge is a completed operation with a partial outcome,
+    // not a tool error.
+    assert!(is_success(&result), "partial erase must not be isError; got: {result:?}");
+    let text = content_text(&result);
+    assert_ne!(
+        text,
+        format!("erased memory {d2_id}"),
+        "a partial lineage expunge must NOT claim a plain success"
+    );
+    assert!(text.contains("partial"), "response must say the expunge was partial; got: {text}");
+    assert!(text.contains("1 "), "response must name the refused count; got: {text}");
+    assert!(
+        text.contains(&d1_id),
+        "response must name the refused sibling id so the caller can act on it; got: {text}"
+    );
 }
 
 #[test]
@@ -1916,6 +2237,7 @@ fn move_memory_with_wing_reanchors_to_target_wing() {
         "moot_file_memory",
         &args![
             "content" => "cross-wing-rust-test unique zeta omega unique-payload",
+        "subject" => "cross-wing-rust-test unique zeta omega unique-payload",
             "location" => "origin-room",
             "wing" => "OriginWing"
         ],
@@ -2006,6 +2328,7 @@ fn search_with_results_does_not_emit_no_results_hint() {
         "moot_file_memory",
         &args![
             "content" => "rust-hint-test unique alpha bravo charlie unique-payload",
+        "subject" => "rust-hint-test unique alpha bravo charlie unique-payload",
             "location" => "hint-test-room"
         ],
         &registry,
@@ -2490,9 +2813,38 @@ fn file_fact_round_trips_through_coordinator() {
 #[test]
 fn fact_search_exact_fields_reject_substring_and_source_collisions() {
     let registry = EstateRegistry::new_inmemory();
+    // source_id must name a drawer that exists in this estate — a fact inherits
+    // its source drawer's sensitivity, so an unresolvable anchor fails the
+    // write, so the two distinct sources this test needs are two real drawers.
+    // The substring-collision case this test guards lives on subject_exact
+    // ("ev-1" vs "ev-10"), which is unaffected.
+    let mut source_ids: Vec<String> = Vec::new();
+    for label in ["calendar-source", "other-source"] {
+        let filed = dispatch_tool(
+            "moot_file_memory",
+            &args![
+                "content" => format!("fixture drawer {label}"),
+                "location" => format!("fixtures/{label}"),
+                "subject" => format!("fixture anchor drawer {label}")
+            ],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("file memory");
+        assert!(is_success(&filed), "moot_file_memory must succeed: {filed:?}");
+        // The body opens with "filed memory <drawer-id>".
+        let text = content_text(&filed);
+        let first_line = text.lines().next().unwrap_or("");
+        let id = first_line
+            .trim_start_matches("filed memory ")
+            .trim()
+            .to_string();
+        assert!(!id.is_empty(), "could not read drawer id from: {text}");
+        source_ids.push(id);
+    }
     for (subject, source) in [
-        ("calendar.event.ev-1", "miner:calendar"),
-        ("calendar.event.ev-10", "miner:other"),
+        ("calendar.event.ev-1", source_ids[0].as_str()),
+        ("calendar.event.ev-10", source_ids[1].as_str()),
     ] {
         let filed = dispatch_tool(
             "moot_file_fact",
@@ -2513,7 +2865,7 @@ fn fact_search_exact_fields_reject_substring_and_source_collisions() {
         &args![
             "subject_exact" => "calendar.event.ev-1",
             "predicate_exact" => "scheduled",
-            "source_id_exact" => "miner:calendar"
+            "source_id_exact" => source_ids[0].as_str()
         ],
         &registry,
         &SurfacedRecallLedger::new(),
@@ -5093,6 +5445,96 @@ fn lens_keystones_over_estate_succeeds() {
     );
 }
 
+// PR-05 Part B golden: trust_synthesis dense-row output byte-matches dense_row::render.
+// Mirrors Swift `trustSynthesisDenseRowsMatchRenderer` in LensToolsTests.swift.
+#[test]
+fn trust_synthesis_dense_row_matches_renderer() {
+    let registry = EstateRegistry::new_inmemory();
+    let id = file_one_memory(&registry, "golden trust memory — PR-05 rust golden", "study");
+    // Fetch the drawer from the store to compute the expected dense row.
+    let drawer = stored_drawer(&registry, &id);
+    let expected_row = aria_mcp::dense_row::render(&drawer);
+    let result = dispatch_tool(
+        "moot_lens_trust_synthesis",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_lens_trust_synthesis must succeed");
+    assert!(is_success(&result), "trust_synthesis must succeed; got: {result:?}");
+    let body = content_text(&result);
+    // The dense row is emitted with a two-space prefix per Swift format parity.
+    assert!(
+        body.contains(&format!("  {expected_row}")),
+        "trust_synthesis body must contain the dense row byte-for-byte; got: {body}"
+    );
+}
+
+// PR-05 Part B golden: moot_lens_successors dense-row output byte-matches dense_row::render.
+// Uses a direct tunnel between two captured drawers so the successor is guaranteed
+// to be a real DrawerStore entry — get_drawer finds it and renders it hydrated.
+// Mirrors Swift successors dense-row contract (progressive-recall rule).
+#[test]
+fn successors_dense_row_matches_renderer() {
+    use locus_kit::tunnel::Tunnel;
+    use locus_kit::tunnel_operational::TunnelKind;
+    let registry = EstateRegistry::new_inmemory();
+    // File source and target drawers into the default wing ("Agentic Memory").
+    let src_id = file_one_memory(
+        &registry,
+        "successor golden source — PR-05",
+        "succ-golden-src",
+    );
+    let tgt_id = file_one_memory(
+        &registry,
+        "successor golden target — PR-05",
+        "succ-golden-tgt",
+    );
+    // Add a tunnel src → tgt directly via the store (same pattern as
+    // the contradiction gateway test at lens_contradiction_hidden_endpoint_is_redacted).
+    let mut tunnel = Tunnel::new(
+        format!("succ-golden-tunnel-{src_id}"),
+        "Agentic Memory".to_string(),
+        "succ-golden-src".to_string(),
+        "Agentic Memory".to_string(),
+        "succ-golden-tgt".to_string(),
+        "successor-golden-test".to_string(),
+        "pr05-golden".to_string(),
+        aria_mcp::dispatch::wall_now(),
+    );
+    tunnel.kind = TunnelKind::References;
+    tunnel.source_drawer_id = Some(src_id.clone());
+    tunnel.target_drawer_id = Some(tgt_id.clone());
+    registry
+        .default
+        .store
+        .add_tunnel(&tunnel)
+        .expect("add_tunnel must succeed");
+    // Fetch target drawer from the DrawerStore for expected dense row computation.
+    let tgt_drawer = stored_drawer(&registry, &tgt_id);
+    let expected_row = aria_mcp::dense_row::render(&tgt_drawer);
+    // Call successors — target must appear as the successor of source.
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_lens_successors must succeed");
+    assert!(is_success(&result), "successors must succeed; got: {result:?}");
+    let body = content_text(&result);
+    // The target drawer ID must appear as part of a dense row (progressive-recall rule).
+    assert!(
+        body.contains(&tgt_id),
+        "successors body must contain target drawer id; got: {body}"
+    );
+    // The full dense row must appear byte-for-byte.
+    assert!(
+        body.contains(&expected_row),
+        "successors body must contain the target's dense row byte-for-byte; got: {body}"
+    );
+}
+
 #[test]
 fn lens_associations_over_captured_drawers_succeeds() {
     // moot_lens_associations — AR_FCA_CAPABILITY_001.
@@ -5169,18 +5611,32 @@ fn lens_with_unknown_estate_returns_invalid_params() {
 
 #[test]
 fn list_recipes_catalog_returns_full_catalog() {
+    // PR-04: terse by default; verbose:true restores the full per-recipe
+    // block with the version: field.
     let registry = EstateRegistry::new_inmemory();
-    let result = dispatch_tool("moot_list_recipes", &args![], &registry, &SurfacedRecallLedger::new())
+    let terse = dispatch_tool("moot_list_recipes", &args![], &registry, &SurfacedRecallLedger::new())
         .expect("moot_list_recipes must succeed");
-    assert!(is_success(&result), "moot_list_recipes must be isError:false; got: {result:?}");
-    let text = content_text(&result);
+    assert!(is_success(&terse), "moot_list_recipes must be isError:false; got: {terse:?}");
+    let terse_text = content_text(&terse);
     assert!(
-        text.starts_with("moot_list_recipes:"),
-        "result must start with 'moot_list_recipes: N recipe(s)'; got: {text}"
+        terse_text.starts_with("moot_list_recipes:"),
+        "result must start with 'moot_list_recipes: N recipe(s)'; got: {terse_text}"
     );
     assert!(
-        text.contains("version:"),
-        "catalog entries must include version field; got: {text}"
+        terse_text.contains("(terse — pass verbose:true"),
+        "terse default must advertise the verbose flag; got: {terse_text}"
+    );
+    let verbose = dispatch_tool(
+        "moot_list_recipes",
+        &args!["verbose" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("verbose moot_list_recipes must succeed");
+    assert!(
+        content_text(&verbose).contains("version:"),
+        "verbose catalog entries must include version field; got: {}",
+        content_text(&verbose)
     );
 }
 
@@ -5702,6 +6158,7 @@ fn file_memory_with_event_time_is_accepted() {
         "moot_file_memory",
         &args![
             "content" => "back-dated event content",
+        "subject" => "back-dated event content",
             "location" => "temporal/test",
             "event_time" => "2020-01-01T00:00:00Z"
         ],
@@ -5746,6 +6203,7 @@ fn file_memory_with_invalid_event_time_returns_invalid_params() {
         "moot_file_memory",
         &args![
             "content" => "some content",
+        "subject" => "some content",
             "location" => "test/room",
             "event_time" => "not-a-date"
         ],
@@ -6036,6 +6494,7 @@ fn estate_map_surfaces_hint_room_as_normal_room_count() {
     // HINT_ROOM == "AI_Charter_Hint" — same room hint drawers are seeded into.
     let a = args![
         "content" => "The AI's own observations, inferences, decisions, session learnings.",
+        "subject" => "The AI's own observations, inferences, decisions, session learnings.",
         "location" => "AI_Charter_Hint"
     ];
     let file_result = dispatch_tool("moot_file_memory", &a, &registry, &ledger)
@@ -6078,6 +6537,7 @@ fn estate_map_does_not_reference_old_charter_room_name() {
     // File a hint-style memory so there is at least one drawer in the estate.
     let a = args![
         "content" => "Wing role description",
+        "subject" => "Wing role description",
         "location" => "AI_Charter_Hint"
     ];
     dispatch_tool("moot_file_memory", &a, &registry, &ledger)
@@ -6940,9 +7400,13 @@ fn lens_contradiction_hides_secret_fact_source() {
     .expect("lens_contradiction must succeed");
     assert!(is_success(&result));
     let text = content_text(&result);
+    // Facts inherit their source drawer's sensitivity, so a fact drawn from a
+    // Secret drawer is itself Secret and is dropped by the lens's disclosure
+    // ceiling before rendering. Withholding the fact outright is strictly
+    // stronger than masking its source= token.
     assert!(
-        text.contains("source=<hidden>"),
-        "secret fact source must be redacted; got: {text}"
+        !text.contains("Project Aardvark"),
+        "facts derived from a Secret drawer must be withheld; got: {text}"
     );
     assert!(
         !text.contains(&secret_source),
@@ -7034,6 +7498,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
         "moot_file_memory",
         &args![
             "content" => "unlock-marker-restricted classified briefing",
+            "subject" => "unlock-marker-restricted classified briefing",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -7060,7 +7525,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
         content_text(&before)
     );
 
-    sensitivity_ledger.grant_restricted(aria_mcp::dispatch::wall_now(), 0);
+    sensitivity_ledger.grant_restricted(aria_mcp::dispatch::wall_now());
     let after = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
@@ -7086,6 +7551,7 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
         "moot_file_memory",
         &args![
             "content" => "unlock-get-marker restricted content body",
+            "subject" => "unlock-get-marker restricted content body",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -7110,7 +7576,7 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
     );
     assert!(before.is_err(), "without a grant, moot_memory_get must report not-found for a restricted drawer");
 
-    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    sensitivity_ledger.grant_restricted(wall_now());
     let after = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id],
         &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
@@ -7130,6 +7596,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
         "moot_file_memory",
         &args![
             "content" => "audit-search-marker restricted content",
+            "subject" => "audit-search-marker restricted content",
             "location" => "vault/plans",
             "sensitivity" => "restricted"
         ],
@@ -7138,7 +7605,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
     ).expect("file_memory must succeed");
 
     let sensitivity_ledger = SensitivityGrantLedger::new();
-    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    sensitivity_ledger.grant_restricted(wall_now());
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-search-marker"],
         &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
@@ -7163,13 +7630,13 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     let registry = EstateRegistry::new_inmemory();
     dispatch_tool(
         "moot_file_memory",
-        &args!["content" => "audit-normal-marker ordinary content", "location" => "vault/plans"],
+        &args!["content" => "audit-normal-marker ordinary content", "subject" => "audit-normal-marker ordinary content", "location" => "vault/plans"],
         &registry,
         &SurfacedRecallLedger::new(),
     ).expect("file_memory must succeed");
 
     let sensitivity_ledger = SensitivityGrantLedger::new();
-    sensitivity_ledger.grant_restricted(wall_now(), 0);
+    sensitivity_ledger.grant_restricted(wall_now());
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-normal-marker"],
         &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
@@ -7989,4 +8456,389 @@ fn recall_distilled_description_contains_ack_token() {
     let desc = tool["description"].as_str().unwrap_or("");
     assert!(desc.contains("recall_distilled/v2"),
         "description must document the current ack token; got: {desc:?}");
+}
+
+// ---------------------------------------------------------------------------
+// DCP M4 — typed conflict-projection section (mirrors Swift
+// ConflictProjectionSectionTests): moot_lens_contradiction appends the
+// evaluator-backed section; F13 restricted redaction; secret ceiling
+// counted but silent.
+// ---------------------------------------------------------------------------
+
+/// Capture a drawer at `sensitivity` and file one employer claim from it.
+fn plant_typed_claim(
+    registry: &EstateRegistry,
+    content: &str,
+    employer: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    use locus_kit::kg_fact::KGFact;
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "conflict-section-tests",
+        LatticeAnchor::udc("000"),
+        "conflict-section-tests",
+        "test-model-v1",
+    );
+    frame.subject = Some(content.chars().take(120).collect());
+    frame.sensitivity = sensitivity;
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, 1_690_000_000_000)
+        .expect("capture must succeed");
+    let estate = coord.estate_for(&registry.default.handle).expect("estate");
+    estate
+        .add_kg_fact(&KGFact::new(
+            format!("fact-{employer}"),
+            "Sarah Chen C0".to_string(),
+            "employer".to_string(),
+            employer.to_string(),
+            drawer.id,
+            1_700_000_000_000,
+        ))
+        .expect("add_kg_fact must succeed");
+}
+
+/// Normal+normal pair: the lens appends the full typed section.
+#[test]
+fn lens_appends_full_typed_section() {
+    let registry = EstateRegistry::new_inmemory();
+    plant_typed_claim(&registry, "Claim one.", "Acme Robotics",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    plant_typed_claim(&registry, "Claim two.", "Beta Corp",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    let result = dispatch_tool(
+        "moot_lens_contradiction", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("lens must succeed");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    // Legacy view intact (additive contract).
+    assert!(text.contains("conflicting_facts: 1 subject+predicate pair(s)"), "got: {text}");
+    // Typed section.
+    assert!(text.contains("proven: 1"), "got: {text}");
+    assert!(text.contains("historical: 0"), "got: {text}");
+    assert!(text.contains("compatible: 0"), "got: {text}");
+    assert!(text.contains("unknown_or_invalid: 0"), "got: {text}");
+    assert!(text.contains("coverage: 2/2"), "got: {text}");
+    // The lens has no lexical lane — no candidates line.
+    assert!(!text.contains("candidates:"), "got: {text}");
+    assert!(text.contains("  PROVEN "), "got: {text}");
+    assert!(text.contains("    rule: dim.person.employer@1"), "got: {text}");
+    assert!(text.contains("    coordinate: person:sarah chen c0|employer"), "got: {text}");
+    assert!(text.contains(" vs "), "got: {text}");
+    assert!(
+        text.contains("    time: t:pt:1690000000 | t:pt:1690000000"),
+        "temporal bases must be epoch SECONDS (KI-003); got: {text}"
+    );
+    assert!(
+        text.contains("    reasons: same_coordinate, validity_overlap, values_exclusive"),
+        "got: {text}"
+    );
+}
+
+/// F13 — restricted+normal pair: counted, but the block collapses to the
+/// coordinate-digest line. No source ids, no value digests, no dense rows.
+#[test]
+fn f13_restricted_pair_is_redacted() {
+    let registry = EstateRegistry::new_inmemory();
+    plant_typed_claim(&registry, "Public claim.", "Acme Robotics",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    plant_typed_claim(&registry, "Restricted claim.", "Beta Corp",
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted);
+    let result = dispatch_tool(
+        "moot_lens_contradiction", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("lens must succeed");
+    let text = content_text(&result);
+    assert!(text.contains("proven: 1"), "got: {text}");
+    assert!(text.contains("a conflicting claim exists at "), "got: {text}");
+    assert!(text.contains("[restricted]"), "got: {text}");
+    assert!(!text.contains("  PROVEN "), "got: {text}");
+    assert!(!text.contains("    rule: "), "got: {text}");
+    assert!(!text.contains("    values: "), "got: {text}");
+}
+
+/// Secret ceiling: counted in `proven: N`, no block at all.
+#[test]
+fn secret_ceiling_is_counted_but_silent() {
+    let registry = EstateRegistry::new_inmemory();
+    plant_typed_claim(&registry, "Public claim.", "Acme Robotics",
+        locus_kit::adjectives::AdjectiveSensitivity::Normal);
+    plant_typed_claim(&registry, "Secret claim.", "Beta Corp",
+        locus_kit::adjectives::AdjectiveSensitivity::Secret);
+    let result = dispatch_tool(
+        "moot_lens_contradiction", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("lens must succeed");
+    let text = content_text(&result);
+    assert!(text.contains("proven: 1"), "got: {text}");
+    assert!(!text.contains("  PROVEN "), "got: {text}");
+    assert!(!text.contains("[restricted]"), "got: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// 12b. MXE-DM — stale-tunnel endpoints render unhydrated (Codex 9352f983)
+//
+// A tunnel inherits its endpoints' adjective sensitivity ONCE, at capture
+// (estate_verbs.rs:767-785). CorrectSensitivity later rewrites only the
+// drawer's adjective bitmap and never reclassifies existing tunnels
+// (estate_verbs.rs:2670-2692). So a Normal tunnel can outlive its endpoint's
+// Normal status and keep pointing at a now-Restricted drawer. Every graph
+// lens arm that hydrates an id off that graph must refuse to render the
+// subject — while still emitting the id and its ranking value, so result
+// counts and rankings are unchanged and the gate is not itself an oracle.
+// ---------------------------------------------------------------------------
+
+/// The canary lives in the SUBJECT, not the content: `dense_row::render`
+/// renders `subject`, so a canary in the body would prove nothing.
+const DM_CANARY: &str = "dm stale-edge target SUBJECTCANARY";
+
+/// Build the stale-edge state: two Normal drawers linked while BOTH are
+/// Normal (so the tunnel inherits Normal), then the target corrected to
+/// `sens` — which leaves the tunnel's own classification stale.
+/// Returns (source id, target id).
+fn dm_stale_edge(
+    registry: &EstateRegistry,
+    sens: locus_kit::adjectives::AdjectiveSensitivity,
+) -> (String, String) {
+    let src = file_one_memory(registry, "dm stale-edge source memory", "dm-src");
+    let tgt = file_one_memory(registry, DM_CANARY, "dm-tgt");
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => src.as_str(), "to_id" => tgt.as_str(), "kind" => "elaborates"],
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("link_memories must not throw");
+    assert!(is_success(&link), "link_memories must succeed; got: {link:?}");
+    {
+        let coord = registry.coord.lock().unwrap();
+        coord
+            .mutate(
+                &registry.default.handle,
+                &tgt,
+                locus_kit::frames::MutationKind::CorrectSensitivity(sens),
+                None,
+            )
+            .expect("CorrectSensitivity must succeed");
+    }
+    (src, tgt)
+}
+
+/// Every assertion the gated behaviour owes us, in one place: the id is
+/// still present (so counts and rankings are untouched), the ranking
+/// annotation survives, and the subject is gone.
+fn assert_gated_but_present(body: &str, tgt: &str, ranking_marker: &str) {
+    assert!(
+        body.contains(tgt),
+        "gated endpoint must STILL APPEAR by id — dropping it would change \
+         result counts and make the gate an oracle; got: {body}"
+    );
+    assert!(
+        body.contains(ranking_marker),
+        "gated endpoint must keep its ranking value ({ranking_marker}); got: {body}"
+    );
+    assert!(
+        !body.contains("SUBJECTCANARY"),
+        "gated endpoint must NOT render its subject; got: {body}"
+    );
+    assert!(
+        body.contains(&aria_mcp::dense_row::render_unhydrated(tgt)),
+        "gated endpoint must render the unhydrated row byte-for-byte; got: {body}"
+    );
+}
+
+#[test]
+fn dm_successors_stale_restricted_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "weight=");
+}
+
+#[test]
+fn dm_successors_stale_secret_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Secret,
+    );
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "weight=");
+}
+
+#[test]
+fn dm_free_association_stale_restricted_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let result = dispatch_tool(
+        "moot_lens_free_association",
+        &args!["wing" => "Agentic Memory", "seedDrawerID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("free_association must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "activation=");
+}
+
+#[test]
+fn dm_keystones_stale_restricted_endpoint_renders_unhydrated() {
+    let registry = EstateRegistry::new_inmemory();
+    // topK 50: the seeded charter graph outranks a fresh two-node edge, and
+    // the default topK of 5 would truncate the target away — the assertion
+    // would then pass without ever exercising the gate.
+    let (_src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let result = dispatch_tool(
+        "moot_lens_keystones",
+        &args!["wing" => "Agentic Memory", "topK" => 50],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("keystones must succeed");
+    assert_gated_but_present(&content_text(&result), &tgt, "centrality=");
+}
+
+/// The gate must not become a wall: a Normal endpoint reached over the same
+/// stale-edge fixture still hydrates completely, subject and all.
+#[test]
+fn dm_normal_endpoint_still_hydrates_fully() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Normal,
+    );
+    let expected = aria_mcp::dense_row::render(&stored_drawer(&registry, &tgt));
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let body = content_text(&result);
+    assert!(
+        body.contains("SUBJECTCANARY"),
+        "a Normal endpoint must still render its subject; got: {body}"
+    );
+    assert!(
+        body.contains(&expected),
+        "a Normal endpoint must render the full dense row byte-for-byte; got: {body}"
+    );
+}
+
+/// Elevated is inside the ceiling (Normal tier) and must hydrate too — the
+/// gate is `> elevated`, not `!= normal`.
+#[test]
+fn dm_elevated_endpoint_still_hydrates_fully() {
+    let registry = EstateRegistry::new_inmemory();
+    let (src, _tgt) = dm_stale_edge(
+        &registry,
+        locus_kit::adjectives::AdjectiveSensitivity::Elevated,
+    );
+    let result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let body = content_text(&result);
+    assert!(
+        body.contains("SUBJECTCANARY"),
+        "an Elevated endpoint is within the ceiling and must still render its \
+         subject; got: {body}"
+    );
+}
+
+/// INDISTINGUISHABILITY (Perkins A3). A gated endpoint and an endpoint that
+/// does not exist at all must be rendered by the SAME code path, so the reply
+/// cannot be used as an existence oracle: an attacker who can link an id must
+/// not be able to tell "this drawer exists but is restricted" from "no such
+/// drawer". Both cases reach `render_unhydrated`, so the two rows must be
+/// byte-identical once the id itself is substituted.
+///
+/// MXE-NQ established this property for the near: anchor surface; this is the
+/// lens-arm equivalent, which that mission's test did not cover.
+#[test]
+fn dm_gated_endpoint_is_indistinguishable_from_absent_endpoint() {
+    use locus_kit::tunnel::Tunnel;
+    use locus_kit::tunnel_operational::TunnelKind;
+
+    // Arm A: a real drawer, restricted after the edge was created.
+    let reg_gated = EstateRegistry::new_inmemory();
+    let (src_g, tgt_g) = dm_stale_edge(
+        &reg_gated,
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+    );
+    let gated_result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src_g.as_str()],
+        &reg_gated,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let gated_body = content_text(&gated_result);
+
+    // Arm B: an edge pointing at an id that was never a drawer.
+    let reg_absent = EstateRegistry::new_inmemory();
+    let src_a = file_one_memory(&reg_absent, "dm stale-edge source memory", "dm-src");
+    let absent_id = "00000000-0000-4000-8000-00000000dead".to_string();
+    let mut tunnel = Tunnel::new(
+        format!("dm-absent-tunnel-{src_a}"),
+        "Agentic Memory".to_string(),
+        "dm-src".to_string(),
+        "Agentic Memory".to_string(),
+        "dm-nowhere".to_string(),
+        "elaborates".to_string(),
+        "dm-tests".to_string(),
+        aria_mcp::dispatch::wall_now(),
+    );
+    tunnel.kind = TunnelKind::Elaborates;
+    tunnel.source_drawer_id = Some(src_a.clone());
+    tunnel.target_drawer_id = Some(absent_id.clone());
+    reg_absent
+        .default
+        .store
+        .add_tunnel(&tunnel)
+        .expect("add_tunnel must succeed");
+    let absent_result = dispatch_tool(
+        "moot_lens_successors",
+        &args!["wing" => "Agentic Memory", "anchorID" => src_a.as_str()],
+        &reg_absent,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("successors must succeed");
+    let absent_body = content_text(&absent_result);
+
+    // Substitute each target id out; what remains must match exactly —
+    // same row shape, same absence markers, same weight, same result count.
+    assert_eq!(
+        gated_body.replace(&tgt_g, "<TARGET>"),
+        absent_body.replace(&absent_id, "<TARGET>"),
+        "a gated endpoint must be indistinguishable from an absent one — \
+         any difference is an existence oracle.\ngated:  {gated_body}\nabsent: {absent_body}"
+    );
 }

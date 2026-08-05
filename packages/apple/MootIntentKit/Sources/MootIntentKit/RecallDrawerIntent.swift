@@ -16,11 +16,12 @@ import AriaMCP   // JSONValue, for building tool arguments
 // to promote an existing private drawer. Both ports are live; `filter:exportable`
 // returns correctly populated results after either write path is used.
 //
-// Return type: the intent returns a typed [DrawerEntity] value (parsed from
-// the moot_memory_search response lines via MootToolCalling.parseDrawerLines)
-// plus the full response text as dialog. Shortcuts can chain the entities
-// into a next step (act-on-drawer); Siri reads the dialog. One tool call
-// feeds both — the parse is gateway-layer, no extra ARIA round-trip.
+// Return type: the intent returns a typed [DrawerEntity] value (decoded from
+// the moot_memory_search response's structuredContent block via
+// StructuredRecallResults) plus the full response text as dialog. Shortcuts
+// can chain the entities into a next step (act-on-drawer); Siri reads the
+// dialog. One tool call feeds both — text and structured rows travel in the
+// same response, no extra ARIA round-trip.
 
 public struct RecallDrawerIntent: MootEstateIntent {
 
@@ -70,13 +71,13 @@ public struct RecallDrawerIntent: MootEstateIntent {
         return .result(value: drawers, dialog: IntentDialog(stringLiteral: result.text))
     }
 
-    /// The typed-result composition perform() delegates to: parse the
-    /// moot_memory_search response into DrawerEntity values. Split out so the
-    /// headless package tests can exercise it (perform() needs the App
-    /// Intents runtime).
+    /// The typed-result composition perform() delegates to: decode the
+    /// moot_memory_search response's structured rows into DrawerEntity
+    /// values. Split out so the headless package tests can exercise it
+    /// (perform() needs the App Intents runtime).
     public static func entities(from result: IntentCallResult) -> [DrawerEntity] {
         guard !result.isError else { return [] }
-        return DrawerLineParser.parse(result.text)
+        return StructuredRecallResults.entities(from: result.structured)
     }
 
     @MainActor

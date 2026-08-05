@@ -189,6 +189,7 @@ struct EstateStatusSyncTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("label test content"),
+                "subject": .string("label test content"),
                 "location": .string("label/room")
             ])
         )
@@ -222,6 +223,7 @@ struct EstateStatusSyncTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("believed-count test fixture"),
+                "subject": .string("believed-count test fixture"),
                 "location": .string("test/room")
             ])
         )

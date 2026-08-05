@@ -2,14 +2,15 @@
 // (PERF_W1_DRAIN_RIDER_2026-07-28): the T5 detached-drainer exit check must
 // key on the ENCODE drain only.
 //
-// The "distillation" drain entry counts rows that only a `moot_distill`
-// sweep or the hourly standing signal can distill — system-provisioned
-// drawers (wing seeds, AI_Charter_Hint) never transit the encode queue, so
-// the drain-stage rider never fires for them and the entry does not settle
-// under the `mootx01 drain` command. A finisher polling until ALL drains
-// idle therefore never exits, holds the encode DrainLease to its full max
-// wait, and wedges the next serve session's encode queue (pending > 0,
-// in_flight = 0, indefinitely).
+// The "distillation" drain entry counts rows by the eligibility predicate;
+// rows that never transit the encode queue (a bare capture on a corpus-less
+// estate, or an estate-wide pipeline-version bump) can only be distilled by
+// a `moot_distill` sweep or the hourly standing signal, so the entry can be
+// non-idle with no encode work outstanding. A finisher polling until ALL
+// drains idle could then hold the encode DrainLease to its full max wait,
+// wedging the next serve session's encode queue — so the T5 gate keys on
+// the encode drain alone. (The wing-seed hints themselves ride the encode
+// stream since DISTILL_SEED_STALL and settle under a normal drain.)
 //
 // Gate under test: `DrainStatus::encode_settled` — true iff the
 // "corpus_encode" drain is idle or absent, regardless of every other drain.
@@ -86,7 +87,7 @@ fn live_estate_with_undistilled_rows_opens_t5_gate() {
         .open(store, OwnerCredentials::new("owner-t5-gate-tests"), 0, 100)
         .expect("open estate");
 
-    // A bare capture is the same shape as Finding 3's system drawers: the row
+    // A bare capture on a corpus-less estate is the Finding 3 shape: the row
     // exists but never transits the encode queue, so only a sweep can distill
     // it and the distillation entry stays non-idle.
     let frame = CaptureFrame::new(

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.23.0
+version: 1.32.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-08-04
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -166,6 +166,7 @@ public struct ProjectedTool: Sendable, Equatable {
     public let description: String
     public let inputSchema: JSONValue
     public let provenance: ToolProvenance
+    public let outputSchema: JSONValue?  // MXE-SS: nil for text-only tools (key omitted on the wire); the recall family declares the shared recall-results schema
 }
 public enum ToolProjection {
     public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
@@ -173,8 +174,18 @@ public enum ToolProjection {
     public static func memoryToolEnabled(environment: [String: String]) -> Bool  // opt-in memory_20250818 adapter (MOOTX01_MEMORY_TOOL=1); default OFF
     public static var memoryToolEnabled: Bool
     public static func federationTool() -> ProjectedTool
+    static func recallResultsOutputSchema() -> JSONValue  // the ONE schema the recall family shares; Rust twin: tool_list.rs::recall_results_output_schema()
 }
 ```
+
+`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`, and
+`moot_recall_precise` declare `recallResultsOutputSchema()` and return
+`structuredContent` (`{"results": [{id, room, content, subject}]}`) on every
+success alongside the unchanged text block, via
+`ToolDispatcher.structuredTextResult` (Rust
+`interface_tools::structured_text_result`). Redaction parity is a SPEC
+invariant (ARIA_MCP_SPEC § 11 "Structured recall results"): the structured
+block withholds exactly what the text block withholds.
 
 #### Five-tier AI-client interface (`.interface` provenance, 22 five-tier tools)
 
@@ -190,8 +201,10 @@ All interface tools accept an optional `estateID` (UUID string) to address a
 registered non-default estate and an optional `teachme` (boolean) to request a
 usage guide instead of executing. Infrastructure fields (`latticeAnchor`,
 `embeddingModelID`, `addedBy`, `channel`) are server-owned and never exposed
-to AI clients. Required caller fields: `content` + `location` for
-`moot_file_memory`; `query` for `moot_memory_search`; `id` for
+to AI clients. Required caller fields: `content` + `subject` + `location` for
+`moot_file_memory` (the subject is one sentence ≤120 chars in the AI-facing
+register — telegraphic, entities and claims front-loaded; returned in recall
+rows, never searched — LocusKit SPEC § 14); `query` for `moot_memory_search`; `id` for
 `moot_memory_get` (drawer UUID — no `query`, this tool fetches an exact row,
 not a ranked set); `subject`, `predicate`,
 `object` for `moot_file_fact`; `entry` for `moot_write_journal` (note: `entry`,
@@ -212,6 +225,13 @@ for semantic knobs such as `estateID`, `teachme`, `filter`, `limit`, `scoring`,
 `ordering`, `sensitivity`, `exportability`, `kind`, `impatient`, `agent`, and
 similar optional primitive fields. This keeps AI clients from forcing the server
 to guess whether `null` meant "default", "unset", or a bug in the caller.
+
+`moot_update_memory` accepts `mutation=setSubject` with a dedicated `subject`
+argument (same register and 120-char contract as capture) — the
+backfill/correction write path for subject-debt rows. `moot_memory_list`
+accepts an optional `filter=missing_subject` — the subject-debt enumerator:
+only live drawers with no subject line, listed id-only (no content preview),
+sized for a consent-gated interactive backfill walk.
 
 `moot_file_memory` also accepts an optional `classificationScheme` (string,
 default `"udc"`) that identifies the classification scheme of the supplied
@@ -369,6 +389,17 @@ the 23 reasoning-lens tools below.
   `moot_lens_associations`, `moot_lens_concepts`,
   `moot_lens_apriori`, `moot_lens_moment`, `moot_lens_rhythm`,
   `moot_lens_precedence`, `moot_lens_complexity`
+
+**Lens evidence addresses.** Every lens finding that names memories cites
+them as dense rows (the PR-03 five-field form), so each finding is a
+hydratable address: seven memory-listing lens arms (`keystones`,
+`free_association`, `cohesion`, `contradiction`, `trust_synthesis`,
+`partial_cue`, `successors`) render their cited memories through the shared
+dense-row renderer byte-identically in both ports. `moot_lens_concepts`
+lists up to 20 member drawer ids per concept (extent cap, Swift
+`lensExtentIDCap` ↔ Rust `LENS_EXTENT_ID_CAP`), and
+`moot_lens_associations` carries `exemplarDrawerIDs` (cap 5) on each rule
+so a rule's evidence is directly fetchable via `moot_memory_get`.
 
 `moot_lens_contradiction` reports two lifecycle tiers on its contradicts-tunnel
 output: confirmed (active) edges, and PROPOSED edges flagged
@@ -545,6 +576,28 @@ table and would lie about reward-pipeline depth. The read failure does not
 break the rest of the status response (the other fields are still returned).
 Both ports identical (`runEstateStatus`, `run_estate_status`).
 
+**Drawer-derived aggregates — the sensitivity ceiling:** every value in the
+`moot_estate_status` body that is computed from a drawer set is computed from
+the *sensitivity-filtered* set — restricted and secret rows contribute to none
+of them. That is `memories: N active (M total)`, `subjects: N/M (K missing)`,
+and `wings:`. The predicate is `AdjectiveSensitivity.isBulkExportable` (Swift)
+/ `AdjectiveSensitivity::is_bulk_exportable` (Rust): true for `normal` and
+`elevated`, false for `restricted` and `secret`. It matches the ceiling
+`moot_estate_map` applies to its per-location counts and the one
+`moot_memory_list` applies before enumerating, so the subject-debt counter and
+the `filter:missing_subject` enumerator it directs the AI at report one
+population. `moot_estate_status` carries no sensitivity-grant plumbing, so
+every caller is an ungranted one and these counts never rise with a grant.
+
+The remaining fields count no drawer set and are therefore unfiltered:
+`kg facts:` (KGFact rows, whose sensitivity axis is their own), `trace_rows:`
+(recall-trace rows), `sync:`, `fdc_recalculation*`,
+`shared_content_migration:`, `version_skew:`, `update_available:`.
+
+An aggregate added to this response inherits the ceiling: derive it from the
+filtered set, or its magnitude discloses the size of a population the caller
+cannot see. Both ports identical.
+
 ### Version-skew advisory (the connection-ownership contract §5)
 
 Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
@@ -667,6 +720,13 @@ Coaching triggers (see SPEC §12 for the full table):
 `moot_confirm_migration` — disqualified branch;
 `moot_link_memories` — IDs not found;
 any lens tool — zero results.
+
+`moot_erase_memory` response contract (MXE-FA): full erasure returns
+`erased memory <id>`; a lineage expunge the audit gate refused for accepted
+siblings returns `partially erased memory <id>: <N> accepted lineage
+sibling(s) refused erasure and remain readable: <ids>` (`isError: false` —
+completed operation, partial outcome; SPEC § Partial-erase honesty). Both
+ports emit the same text; the teachme guide documents both shapes.
 
 ### Dispatch — `ToolDispatcher`
 
@@ -1145,6 +1205,99 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.32.0 -- 2026-08-04
+
+- **Structured recall results (MXE-SS).** `ProjectedTool` gains an
+  optional `outputSchema` (nil → key omitted from the `tools/list` entry;
+  text-only tool entries byte-identical to before). The recall family
+  (`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`,
+  `moot_recall_precise`) declares the shared
+  `recallResultsOutputSchema()` (Rust
+  `tool_list.rs::recall_results_output_schema()`) and returns
+  `structuredContent` alongside the unchanged text block through the new
+  `structuredTextResult` envelope helper. Redaction parity per
+  ARIA_MCP_SPEC 1.28.0 § 11.
+
+### 1.31.0 -- 2026-08-04
+
+- **`moot_erase_memory` partial-response contract (MXE-FA).** Documents
+  the two response shapes: `erased memory <id>` (full) and
+  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
+  erasure and remain readable: <ids>` (partial, `isError: false`). Backed
+  by GLK's new `ExpungeVerbOutcome` return
+  (GENIUSLOCUSKIT_INTERFACE 1.28.0). Teachme guides updated in both ports.
+
+### 1.30.0 -- 2026-08-03
+Observable output change on `moot_estate_status`: the `memories: N active
+(M total)` and `subjects: N/M (K missing)` numbers now exclude restricted and
+secret rows, as `wings:` already did. On an estate holding such rows both lines
+report smaller numbers than before; on an estate without them nothing changes.
+Field keys, field order, line count, and response shape are unchanged, so
+consumers that read the body by prefix need no change — no in-repo consumer
+parses these integers. Documents the drawer-aggregate ceiling and the
+unfiltered non-drawer fields in the `moot_estate_status` section above.
+Behavioural contract: `ARIA_MCP_SPEC.md` 1.26.0.
+
+### 1.29.0 -- 2026-08-03
+Observable output change on `moot_memory_search` and `moot_memory_get`: the
+trailing `sensitivity_advisory:` line is now emitted whenever no sensitivity
+grant is live, independent of what the estate contains. It previously also
+required the estate to hold at least one `restricted`/`secret` row, which made
+its presence an existence oracle for those rows. Both strings are reworded and
+are byte-identical across the Swift and Rust ports; search and get keep distinct
+phrasings. The `sensitivity_advisory: ` line prefix is unchanged, so consumers
+that strip or detect the line by prefix (e.g. `MootSpotlightRecord.parse`) need
+no change. Behavioural contract and the contents-independence invariant:
+`ARIA_MCP_SPEC.md` 1.25.0.
+
+### 1.28.0 -- 2026-08-03
+
+- Typed conflict projection section (DCP M4): the three contradiction
+  surfaces render the evaluator-backed section via one shared renderer
+  (Swift `RecipeTools.conflictProjectionSection` ↔ Rust
+  `conflict_projection_section`); GLK sweep verbs
+  `conflictProjectionSweep` ↔ `conflict_projection_sweep`.
+
+### 1.27.0 -- 2026-08-02
+
+- Lens evidence addresses (PR-05): memory-listing lens findings cite
+  memories as dense rows via the shared renderer (7 arms: keystones,
+  free_association, cohesion, contradiction, trust_synthesis,
+  partial_cue, successors); moot_lens_concepts lists member drawer ids
+  capped at 20 (`lensExtentIDCap` ↔ `LENS_EXTENT_ID_CAP`);
+  moot_lens_associations carries `exemplarDrawerIDs` (cap 5) per rule.
+  Byte-identical across ports, golden-tested against the renderer.
+
+### 1.26.0 -- 2026-08-02
+
+- PR-04 utility tier: documented the estate-status `subjects: N/M
+  (K missing)` line, the reserved `subject_backfill` drain-lane name
+  (Swift `ToolDispatcher.subjectBackfillLaneName` ↔ Rust
+  `SUBJECT_BACKFILL_LANE_NAME`), and the `verbose` flag on
+  moot_list_lenses / moot_list_recipes (terse default). Estate-status
+  teachme carries the consent-gated backfill standing behavior.
+
+### 1.25.0 -- 2026-08-02
+
+- Dense-row reply surface (PR-03): documented the five-field dense row
+  as the default hit/citation shape across the recall family, the
+  deviation-only narration contract, the `near:` anchor pivot on
+  moot_memory_search + moot_recall_shaped (query no longer
+  schema-required — exactly-one enforced at runtime), and
+  moot_memory_get `ids:`/`depth:` (subject|distilled|full). Teachme
+  guides for the recall family rewritten in both ports. Cross-port
+  byte-identical goldens: DenseRowGoldenTests.swift ↔
+  dense_row_golden.rs.
+
+### 1.24.0 -- 2026-08-02
+
+- Subject surface (progressive recall PR-02): documented the required
+  `subject` argument on `moot_file_memory` (AI-facing register, 120-char
+  contract), `moot_update_memory` `mutation=setSubject` + `subject`
+  argument, and `moot_memory_list` `filter=missing_subject` (id-only
+  subject-debt enumerator). Teachme guides for all three verbs updated in
+  both ports.
 
 ### 1.23.0 -- 2026-07-20
 

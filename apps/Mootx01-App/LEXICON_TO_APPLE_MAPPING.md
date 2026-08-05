@@ -43,9 +43,9 @@ Noun is always **Drawer**. Flow: who may invoke (caller-driven / Brain-emitted /
 
 | Verb | Flow | Dir | `moot_*` tool | App Intent shell | Apple reach | x-callback | Caller? |
 |---|---|---|---|---|---|---|---|
-| **capture** | caller | WRITE | `moot_file_memory` | `CaptureDrawerIntent` | Share Sheet · Shortcuts · Siri · Action Button | `…/capture?content=&location=&sensitivity=` | ✅ |
+| **capture** | caller | WRITE | `moot_file_memory` | `CaptureDrawerIntent` | Share Sheet · Shortcuts · Siri · Action Button | — rejected (mutates the estate; App Intents only) | ✅ |
 | **recall** | caller | READ | `moot_memory_search` | `RecallDrawerIntent` | Siri · Spotlight · Shortcuts · Action Button | `…/recall?query=&filter=` | ✅ |
-| **reanchor** | caller | STRUCT | `moot_move_memory` | `ReanchorDrawerIntent` | Shortcuts | `…/reanchor?id=&destination=` | ✅ |
+| **reanchor** | caller | STRUCT | `moot_move_memory` | `ReanchorDrawerIntent` | Shortcuts | — rejected (mutates the estate; App Intents only) | ✅ |
 | **mutate** | caller | WRITE | `moot_update_memory` | `MutateDrawerIntent` | Shortcuts | `…/mutate?id=&mutation=` | ✅ |
 | **withdraw** | caller | WRITE | `moot_withdraw_memory` | `WithdrawDrawerIntent` | Shortcuts | `…/withdraw?id=` | ✅ |
 | **expunge** | caller | WRITE | `moot_erase_memory` | `ExpungeDrawerIntent` | Shortcuts (guarded) | `…/expunge?id=&reason=&confirmed=` | ✅ |
@@ -78,10 +78,11 @@ memory between steps and index it.
 | `room` | `room` (`@Property`) + subtitle | Structural coordinate; recall can group by it. |
 | `adjectiveBitmap` → state/trust/sensitivity/exportability | read-only context | Set by capture; surfaced, not user-edited on the entity. |
 
-**DrawerEntity recall is now wired via gateway-layer text parse.** `moot_memory_search`
-response lines carry the format `<uuid>  [<room>]  <content preview>`.
-`MootToolCalling.parseDrawerLines` (in MootIntentKit) extracts typed `DrawerEntity` values from
-those lines at the gateway layer — no new ARIA tool needed.
+**DrawerEntity recall is wired via structured recall results.** `moot_memory_search`
+replies carry a `structuredContent` block of typed `{id, room, content, subject}` rows
+(declared by the tool's `outputSchema`). `StructuredRecallResults` (in MootIntentKit) decodes
+typed `DrawerEntity` values from that block at the gateway layer — entity data never comes
+from the display text, whose interpolated drawer content is caller-controlled.
 
 - `DrawerEntityQuery.entities(for:)` resolves by running a recall with the UUID as the query
   and exact-id filtering; best-effort but no fabrication.
@@ -90,8 +91,8 @@ those lines at the gateway layer — no new ARIA tool needed.
   dialog — Shortcuts chains the entities into a next step; Siri reads the dialog. One
   `moot_memory_search` call feeds both (composition: `RecallDrawerIntent.entities(from:)`).
 
-Content in `DrawerEntity` is a 120-char preview from the search response; full-body content is
-not returned in the search path.
+Content in `DrawerEntity` is the drawer body from the structured recall row; restricted and
+secret drawers carry the server's redaction marker instead of the body.
 
 ---
 
@@ -135,7 +136,7 @@ write paths.
 | A2 | ARIA_MCP server on device | **live (app-hosted) / seam (daemon)** | `Sources/MootGateway/Transport/GatewayTransport.swift` (`HTTPTransport` loopback client + `InProcessTransport`) and `Sources/MootGateway/LANServer/` — `MootLANServer` (NWListener) serves the app's OWN estate to LAN MCP clients over credentialed HTTP/JSON-RPC, bridging to the in-process dispatcher; it advertises `_mootx01._tcp` and `LANDaemonBrowser` discovers peers. Remote callers are bearer-authed, read-only, and public-only (`LANRequestGate`). The STANDALONE-daemon leg stays seam: the daemon advertising itself is an engine-lane parity mission. |
 | A3 | Consume other estates (client) | **v1.1** | `Sources/MootGateway/MCPClient/MootEstateClient.swift` — fold-in via capture is real (`foldIn`); outbound federation deferred to v1.1 by Bob's ruling; `fetch` throws `outboundFederationNotInThisVersion` as an explicit guard. |
 | A4 | App Intents | **pending registration** | `packages/apple/MootIntentKit/Sources/MootIntentKit/CaptureDrawerIntent.swift` + `RecallDrawerIntent.swift` + other verb intents — implementation is live and tested; `Mootx01Shortcuts.updateAppShortcutParameters()` called at every app launch (App/Mootx01App.swift). System Siri/Spotlight activation requires the Xcode app bundle build (xcodegen → xcodebuild). |
-| A5 | Callback URL | **pending registration** | `packages/apple/MootIntentKit/Sources/MootIntentKit/MootURLRouter.swift` — routing logic and security hardening are complete and tested; `CFBundleURLTypes` for `mootx01://` is declared in `project.yml` (the xcodegen spec). URL-scheme registration activates when xcodegen regenerates the project and the app bundle is built. |
+| A5 | Callback URL | **pending registration** | `packages/apple/MootIntentKit/Sources/MootIntentKit/MootURLRouter.swift` — a READ-ONLY surface: the verb allowlist admits `recall` only; mutating verbs (capture, reanchor) are rejected because an inbound URL carries no trustworthy caller identity — mutations go through the consented App Intents path. Routing and hardening are tested; `CFBundleURLTypes` for `mootx01://` is declared in `project.yml` (the xcodegen spec). URL-scheme registration activates when xcodegen regenerates the project and the app bundle is built. |
 | A6 | Shortcuts library | **pending registration** | `packages/apple/MootIntentKit/Sources/MootIntentKit/MootShortcutsProvider.swift` (all six intents) + `App/Mootx01Shortcuts.swift` (the app-target `AppShortcutsProvider`, capture + recall). Both donate via `updateAppShortcutParameters()` at launch. Phrases appear in the Shortcuts app once the xcodegen-derived app bundle is built and installed. |
 
 The authoritative adapter state is `Sources/MootGateway/AdapterStatus.swift` (`GatewayEdges.adapters`),

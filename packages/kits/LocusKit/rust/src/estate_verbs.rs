@@ -49,6 +49,7 @@ use crate::default_wings::{
 };
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
+use crate::drawer_store::{SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::estate_types::LatticeAnchor;
@@ -241,6 +242,19 @@ impl Estate {
                 "embeddingModelID must not be empty".to_string(),
             ));
         }
+        // Subject length contract (SPEC B-18) checked at the frame boundary
+        // so the error surfaces before any row exists. Empty-string subjects
+        // are rejected the same way — a caller with no subject passes None
+        // (subject debt, B-21), never "". Mirrors Swift capture().
+        if let Some(ref subject) = frame.subject {
+            let n = subject.chars().count();
+            if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+                return Err(LocusKitError::InvalidContent(format!(
+                    "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
+                     omit it entirely to file as subject debt"
+                )));
+            }
+        }
 
         // Operational bitmap assembly (cookbook §2.4 v0.6 layout):
         //   bits 0–5   capture_channel (contiguous raw 0..5)
@@ -356,6 +370,15 @@ impl Estate {
         // eagerly: CaptureFrame.event_time is Option (legitimately optional
         // input frame), but Drawer.event_time is non-optional — fold here.
         drawer.event_time = frame.event_time.unwrap_or(now);
+        // Subject trio at birth (SPEC § 14). The producer at the capture
+        // boundary is the calling AI, so the pipeline version is ai-v1; a
+        // None frame subject leaves the whole trio NULL (debt, B-21).
+        // Mirrors the Swift capture() translation.
+        if let Some(subject) = frame.subject {
+            drawer.subject = Some(subject);
+            drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
+            drawer.subject_at = Some(now);
+        }
 
         // add_drawer atomically maintains the per-container OR aggregate
         // (spec § 11.5 Option B): coverage is now structurally guaranteed
@@ -449,6 +472,17 @@ impl Estate {
                     "embeddingModelID must not be empty".to_string(),
                 ));
             }
+            // Same subject contract as capture() (SPEC B-18): 1–120 chars
+            // when present; None files as subject debt (B-21).
+            if let Some(ref subject) = frame.subject {
+                let n = subject.chars().count();
+                if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+                    return Err(LocusKitError::InvalidContent(format!(
+                        "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
+                         omit it entirely to file as subject debt"
+                    )));
+                }
+            }
 
             // Bitmap assembly (same layout as capture verb, spec §§ 5.6 / 2.3 / 2.5).
             let op_bitmap = bit_field::write_field(
@@ -521,6 +555,12 @@ impl Estate {
             drawer.udc_facets = frame.lattice_anchor.udc_facets;
             drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
             drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
+            // Subject trio at birth — identical translation to capture().
+            if let Some(subject) = frame.subject {
+                drawer.subject = Some(subject);
+                drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
+                drawer.subject_at = Some(now);
+            }
             drawer.event_time = frame.event_time.unwrap_or(now);
 
             // Store drawer. Unlike capture, rollup_merkle_roots is deliberately omitted —
@@ -555,6 +595,11 @@ impl Estate {
     /// - `added_by`: `HINT_ADDED_BY` ("estate-provision") — honest provenance only
     /// - `embedding_model_id`: the caller-supplied model id (normal embedding)
     /// - `lattice_anchor`: UDC "001" (Knowledge class — spec I-5)
+    ///
+    /// `seed_wing` performs the covered ROW write only; the GLK caller
+    /// enqueues the hint onto the Corpus encode stream
+    /// (`seed_default_wings`, DISTILL_SEED_STALL), which is what delivers
+    /// BM25/vector indexing and drain-stage distillation for the hints.
     ///
     /// Idempotent at the business level: re-seeding an already-seeded wing
     /// adds a second hint drawer, but the seven default wings are seeded
@@ -604,6 +649,19 @@ impl Estate {
         );
         drawer.udc_code = lattice_anchor.udc_code;
         drawer.udc_facets = lattice_anchor.udc_facets;
+        // Structural seeds emit their own subject (SPEC § 14): a hint drawer
+        // exists in EVERY estate, so a NULL subject here would be permanent,
+        // unpayable debt in every debt count. Deterministic — the wing name
+        // states exactly what the hint asserts. Distinct pipeline tag so a
+        // regeneration sweep can target seeds. Mirrors Swift seedWing.
+        drawer.subject = Some(
+            format!("Charter hint: how to use the {wing_name} wing.")
+                .chars()
+                .take(SUBJECT_LENGTH_CONTRACT)
+                .collect(),
+        );
+        drawer.subject_pipeline_version = Some("seed-v1".to_string());
+        drawer.subject_at = Some(now);
         // add_drawer maintains the container fingerprint OR aggregate
         // (spec § 11.5), identical to the capture path. No separate
         // fingerprint call needed — coverage is structurally guaranteed.
@@ -1370,6 +1428,65 @@ impl Estate {
         self.store.count_undistilled(pipeline_version)
     }
 
+    /// Write one drawer's subject line (PR-01). Estate-level pass-through
+    /// over `DrawerStore::set_subject_representation` — the seam the
+    /// filing surface, backfill, and the (future) subject rider write
+    /// through. Mirrors Swift `Estate.setSubjectRepresentation`.
+    pub fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+    ) -> Result<usize, LocusKitError> {
+        // This public seam keeps its 4-arg signature (callers: GLK
+        // coordinator + subject backfill). The custody event those writes
+        // seal carries the manifest owner (or "estate") as actor and no
+        // note — the backfill has no caller-supplied reason.
+        self.store.set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            &self.changed_by_or_estate(),
+            None,
+        )
+    }
+
+    /// Count of active drawers still awaiting a subject line (PR-01
+    /// backfill-eligibility aggregate — the estate-status subject-debt
+    /// counter's source). Estate-level pass-through over
+    /// `DrawerStore::count_missing_subject`. Mirrors Swift
+    /// `Estate.countMissingSubject`.
+    pub fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.store.count_missing_subject(pipeline_version)
+    }
+
+    /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
+    /// lane's `pending`. See `DrawerStore::count_subject_debt`.
+    pub fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.store.count_subject_debt()
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09). See
+    /// `DrawerStore::subject_debt_batch`.
+    pub fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.subject_debt_batch(limit)
+    }
+
+    /// Tier-aware variants (PR-10). See the DrawerStore twins.
+    pub fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.store.count_subject_debt_including(pipelines)
+    }
+
+    pub fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.subject_debt_batch_including(limit, pipelines)
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is
@@ -1759,6 +1876,15 @@ impl Estate {
     /// The `now` parameter is epoch seconds (same unit as `capture` and
     /// `withdraw`). Passing it explicitly makes the operation deterministic —
     /// callers use their own clock snapshot.
+    ///
+    /// Returns the full `ExpungeOutcome`: `event` is the gate-produced audit
+    /// event (sealed when `seal_audit` was true, unsealed otherwise) and
+    /// `refused_sibling_ids` names every lineage member the gate refused
+    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
+    /// refused a sibling is not a success, and a layer that summarises it as
+    /// one is the defect — every caller must consume the outcome and
+    /// propagate, or explicitly acknowledge, the refusal. Twin of the Swift
+    /// `Estate.expunge` / `expungeReturningUnsealedEvent` wrappers.
     pub fn expunge(
         &self,
         row_id: &str,
@@ -1766,7 +1892,7 @@ impl Estate {
         confirmation: bool,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         if !confirmation {
             return Err(LocusKitError::InvalidContent(
                 "expunge requires confirmation: true (destructive op)".to_string(),
@@ -1813,7 +1939,7 @@ impl Estate {
             }
         }
 
-        let result = self.store
+        let outcome = self.store
             .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)?;
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member — not just the room of the
@@ -1822,7 +1948,13 @@ impl Estate {
         for room_uuid in affected_room_ids {
             let _ = self.rollup_merkle_roots(room_uuid, now);
         }
-        Ok(result)
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
+        // is not a success, and a layer that summarises it as one is the
+        // defect. The outcome — event AND refused_sibling_ids — is returned
+        // whole so GLK can scope its cross-kit vector delete to the scrubbed
+        // members and report a partial expunge as partial. Twin of the Swift
+        // EstateVerbs wrappers.
+        Ok(outcome)
     }
 
     /// Return all drawer ids sharing the same lineage as `row_id`.
@@ -2278,18 +2410,23 @@ impl Estate {
         }
     }
 
-    /// Current time as epoch **seconds**. Used anywhere a store method takes
-    /// `now: i64`. The DrawerStore layer (both InMemory and SQLite) multiplies
-    /// the caller-supplied value by 1_000 before handing it to the HLC
-    /// generator (`hlc.rs`), so callers must supply seconds — not milliseconds.
-    /// Passing milliseconds here produces HLC physical_time values ~1_000×
-    /// too large (microsecond magnitudes instead of millisecond magnitudes),
-    /// causing mutate/reanchor audit rows to sort incorrectly against capture
-    /// and expunge rows on the same replica. (secfix/punt-g2 — HLC double-multiply)
-    fn now_secs() -> i64 {
+    /// Current time as epoch **milliseconds**. Used anywhere a store method
+    /// takes `now: i64`.
+    ///
+    /// Milliseconds is the unit the whole boundary consumes: `HLCGenerator::send`
+    /// (`hlc.rs`) stores the value directly as `last_physical`, and
+    /// `TypedValue::Timestamp` (`persistence_kit::sqlite`) serializes it with
+    /// `from_timestamp_millis`. Nothing multiplies on the way in — the store
+    /// passes the caller's value straight through.
+    ///
+    /// Passing seconds here backdates the event to 1970. That is not merely a
+    /// wrong date: audit consumers order by packed HLC, so once a restart clears
+    /// the in-memory generator, a seconds-valued mutation sorts *before* the
+    /// capture it modified.
+    fn now_ms() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0)
     }
 
@@ -2313,7 +2450,7 @@ impl Estate {
         &self,
         row_id: &str,
         kind: MutationKind,
-        _payload: Option<&str>,
+        payload: Option<&str>,
     ) -> Result<(), LocusKitError> {
         match kind {
             MutationKind::Confirm => {
@@ -2335,7 +2472,7 @@ impl Estate {
 
                 let changed_by = self.changed_by_or_estate();
                 // Store `now` is epoch-milliseconds (HLC physical_time).
-                let now = Self::now_secs();
+                let now = Self::now_ms();
 
                 self.store.mutate_provenance(
                     row_id,
@@ -2358,13 +2495,13 @@ impl Estate {
                 // anything else (e.g. Active, Accepted), so no extra guard is
                 // needed here.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Rejected,
                     RowVerb::Reject,
                     &changed_by,
-                    Some(_payload.unwrap_or("rejected via Estate.mutate")),
+                    Some(payload.unwrap_or("rejected via Estate.mutate")),
                     now,
                 )
             }
@@ -2375,13 +2512,13 @@ impl Estate {
                 })?;
                 // active/pending → contest → contested per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Contested,
                     RowVerb::Contest,
                     &changed_by,
-                    Some(_payload.unwrap_or("contested via Estate.mutate")),
+                    Some(payload.unwrap_or("contested via Estate.mutate")),
                     now,
                 )
             }
@@ -2402,13 +2539,13 @@ impl Estate {
                     )));
                 }
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Active,
                     RowVerb::ResolveContest,
                     &changed_by,
-                    Some(_payload.unwrap_or("resolved via Estate.mutate")),
+                    Some(payload.unwrap_or("resolved via Estate.mutate")),
                     now,
                 )
             }
@@ -2430,13 +2567,13 @@ impl Estate {
                 }
                 // active → promote → accepted per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Accepted,
                     RowVerb::Promote,
                     &changed_by,
-                    Some(_payload.unwrap_or("accepted via Estate.mutate")),
+                    Some(payload.unwrap_or("accepted via Estate.mutate")),
                     now,
                 )
             }
@@ -2447,13 +2584,13 @@ impl Estate {
                 })?;
                 // active/accepted → supersede → superseded per automaton §9.2.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Superseded,
                     RowVerb::Supersede,
                     &changed_by,
-                    Some(_payload.unwrap_or("superseded via Estate.mutate")),
+                    Some(payload.unwrap_or("superseded via Estate.mutate")),
                     now,
                 )
             }
@@ -2549,13 +2686,13 @@ impl Estate {
                 // revives); the lineage contradiction for superseded was caught
                 // above, so by here the transition is unconditionally legal.
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_state(
                     row_id,
                     State::Active,
                     RowVerb::Observe,
                     &changed_by,
-                    Some(_payload.unwrap_or("revived via Estate.mutate")),
+                    Some(payload.unwrap_or("revived via Estate.mutate")),
                     now,
                 )
             }
@@ -2575,12 +2712,12 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
                     &changed_by,
-                    Some(_payload.unwrap_or("sensitivity corrected via Estate.mutate")),
+                    Some(payload.unwrap_or("sensitivity corrected via Estate.mutate")),
                     now,
                 )
             }
@@ -2600,12 +2737,12 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
                     &changed_by,
-                    Some(_payload.unwrap_or("trust corrected via Estate.mutate")),
+                    Some(payload.unwrap_or("trust corrected via Estate.mutate")),
                     now,
                 )
             }
@@ -2631,14 +2768,45 @@ impl Estate {
                     6,
                 );
                 let changed_by = self.changed_by_or_estate();
-                let now = Self::now_secs();
+                let now = Self::now_ms();
                 self.store.mutate_adjective(
                     row_id,
                     new_adjective,
                     &changed_by,
-                    Some(_payload.unwrap_or("exportability corrected via Estate.mutate")),
+                    Some(payload.unwrap_or("exportability corrected via Estate.mutate")),
                     now,
                 )
+            }
+            MutationKind::SetSubject(subject) => {
+                if self.store.get_drawer(row_id)?.is_none() {
+                    return Err(LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    });
+                }
+                // Correction write path for the subject trio (SPEC § 14).
+                // No bitmap, no state transition, no container-fingerprint
+                // rollup — the store verb writes the three columns and
+                // seals the "setSubject" custody audit event in one
+                // transaction, and enforces the 1–120-char contract
+                // (B-18). The caller's `payload` is the audit note
+                // (reason), passed through verbatim — None when the
+                // caller supplied none; no synthesized default, so the
+                // audit row honestly records that no reason was given.
+                // The producer at this boundary is the calling AI, so
+                // the pipeline version is ai-v1. Mirrors Swift
+                // MutationKind.setSubject in EstateVerbs.swift.
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_ms();
+                self.store
+                    .set_subject_representation(
+                        row_id,
+                        &subject,
+                        SUBJECT_PIPELINE_AI_V1,
+                        now,
+                        &changed_by,
+                        payload,
+                    )
+                    .map(|_| ())
             }
         }
     }
@@ -2713,8 +2881,9 @@ impl Estate {
         } else {
             changed_by
         };
-        // Store expects epoch seconds (it multiplies by 1_000 before HLC).
-        let now = Self::now_secs();
+        // Store expects epoch milliseconds and passes the value straight to the
+        // HLC — the same contract `reanchor_anchor` relies on below.
+        let now = Self::now_ms();
         self.store.reanchor_gated(
             row_id,
             to_room,
@@ -2734,7 +2903,7 @@ impl Estate {
     /// identity and reason into the audit trail instead of inheriting
     /// `reanchor`'s generic "estate owner / reanchored via Estate.reanchor"
     /// attribution). Unlike the Swift port, `now` is generated internally
-    /// via `Self::now_secs()` rather than threaded in as a parameter — this
+    /// via `Self::now_ms()` rather than threaded in as a parameter — this
     /// mirrors `reanchor`'s own `now` handling exactly (same layer, same
     /// convention) rather than introducing a second `now`-unit contract for
     /// `reanchor_gated` in this file.
@@ -2750,9 +2919,9 @@ impl Estate {
                 id: row_id.to_string(),
             });
         }
-        // Store expects epoch seconds (it multiplies by 1_000 before HLC) —
-        // same contract `reanchor` relies on via `Self::now_secs()`.
-        let now = Self::now_secs();
+        // Store expects epoch milliseconds and passes the value straight to the
+        // HLC — same contract `reanchor` relies on via `Self::now_ms()`.
+        let now = Self::now_ms();
         self.store.reanchor_gated(
             row_id,
             None,
@@ -3142,7 +3311,7 @@ mod tests {
     fn make_estate() -> Estate {
         // InMemoryDrawerStore::new allocates InMemoryStorage internally —
         // backend identity is visible at the type, not the argument.
-        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000_000, None).unwrap());
         Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 
@@ -3400,7 +3569,7 @@ mod tests {
         // active row. Capture builds the aggregate incrementally; reopening the
         // estate over the same storage rebuilds it from the active drawer set.
         // Either way the room aggregate covers the captured drawer's bits.
-        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000_000, None).unwrap());
         let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
         let d = basic_capture(&estate, "alpha", "study");
 
@@ -5636,36 +5805,53 @@ mod tests {
         );
     }
 
-    // --- secfix/punt-g2: HLC double-multiply regression guard ---
+    // --- Timestamp-unit guards (Codex 0e9d4e43e8cc8191ac913a3fddcad48c) ---
     //
-    // DrawerStore convention: callers pass epoch SECONDS; the store
-    // multiplies by 1_000 before feeding HLC (so HLC physical_time is
-    // always in epoch-millisecond magnitude). The pre-fix `now_millis()`
-    // helper returned epoch milliseconds, causing the store to multiply
-    // again → HLC physical_time was ~1_000× too large (microsecond magnitude).
-    //
-    // now_secs() must return epoch seconds so the store produces the correct
-    // millisecond-magnitude physical_time in audit rows.
+    // The whole boundary is epoch MILLISECONDS: `HLCGenerator::send` stores
+    // `now` directly as `last_physical`, and `TypedValue::Timestamp` is a
+    // millisecond codec. Nothing multiplies on the way in. A verb that supplies
+    // seconds backdates its event to 1970 and breaks HLC audit ordering.
 
     #[test]
-    fn now_secs_returns_epoch_seconds_magnitude() {
-        // Epoch-seconds floor: 2023-01-01 UTC ≈ 1_672_531_200
-        // Epoch-seconds ceil:  2035-01-01 UTC ≈ 2_051_222_400
-        let now = Estate::now_secs();
+    fn now_ms_returns_epoch_millisecond_magnitude() {
+        // Epoch-milliseconds floor: 2023-01-01 UTC ≈ 1_672_531_200_000
+        // Epoch-milliseconds ceil:  2035-01-01 UTC ≈ 2_051_222_400_000
+        let now = Estate::now_ms();
         assert!(
-            now >= 1_672_531_200 && now < 2_051_222_400,
-            "now_secs() must return epoch seconds (magnitude ~1.7e9, got {now}); \
-             if this is ~1_000x too large the double-multiply is not fixed"
+            now >= 1_672_531_200_000 && now < 2_051_222_400_000,
+            "now_ms() must return epoch milliseconds (magnitude ~1.7e12, got {now}); \
+             a ~1_000x smaller value means the helper is still returning seconds"
         );
     }
 
     #[test]
     fn mutate_confirm_hlc_physical_time_is_millisecond_magnitude() {
-        // After mutate(Confirm), the audit event's HLC physical_time must be
-        // in epoch-millisecond range (~1.7e12). Pre-fix it was in microsecond
-        // range (~1.7e15) because now_millis() * 1000 was double-multiplied.
+        // RESTART-HONEST. `HLCGenerator::send` only adopts `now` when
+        // `now > last_physical`; otherwise it bumps the logical counter and
+        // *inherits* the previous physical time. So if a capture in this same
+        // process has already pushed `last_physical` to ~1.7e12, a
+        // seconds-valued mutation silently inherits the correct magnitude and
+        // the defect is invisible — which is exactly why the previous version
+        // of this test passed against the bug.
+        //
+        // Capturing at an early-1970 instant reproduces the condition a daemon
+        // restart creates: a generator whose `last_physical` is NOT already at
+        // millisecond magnitude. A seconds-valued mutation (~1.7e9) then
+        // exceeds it, is adopted as the physical time, and fails this assert.
         let estate = make_estate();
-        let drawer = basic_capture(&estate, "hlc-magnitude check", "study");
+        let frame = CaptureFrame::new(
+            "hlc-magnitude check",
+            CaptureChannel::Typed,
+            "study",
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        // 1970-01-12 in epoch ms — a valid instant well below both the
+        // seconds-magnitude (~1.7e9) and millisecond-magnitude (~1.7e12) values.
+        const EARLY_MS: i64 = 1_000_000;
+        let drawer = estate.capture(frame, EARLY_MS).unwrap();
+
         estate
             .mutate(&drawer.id, MutationKind::Confirm, None)
             .unwrap();
@@ -5678,13 +5864,20 @@ mod tests {
         assert_eq!(events.len(), 2, "expected capture + confirm audit events");
 
         let hlc = events[1].hlc;
-        // Epoch-milliseconds floor: 2023-01-01 UTC ≈ 1_672_531_200_000 ms
-        // Epoch-milliseconds ceil:  2035-01-01 UTC ≈ 2_051_222_400_000 ms
         assert!(
             hlc.physical_time >= 1_672_531_200_000 && hlc.physical_time < 2_051_222_400_000,
             "confirm audit HLC physical_time must be epoch milliseconds (~1.7e12, got {}); \
-             if ~1_000x too large the double-multiply is not fixed",
+             a ~1.7e9 value means the verb is still supplying seconds",
             hlc.physical_time
+        );
+
+        // Ordering: the mutation must sort AFTER the capture it modified.
+        // This is the consequence the unit bug actually produces in the audit log.
+        assert!(
+            events[1].hlc.physical_time > events[0].hlc.physical_time,
+            "mutation (physical {}) must sort after the capture it modified (physical {})",
+            events[1].hlc.physical_time,
+            events[0].hlc.physical_time
         );
     }
 }

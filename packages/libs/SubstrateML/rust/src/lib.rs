@@ -18,6 +18,8 @@ pub mod calibration;
 pub mod community_detection;
 pub mod composite_distance;
 pub mod conflict_cue;
+pub mod conflict_projection;
+pub mod meeting_decision_extractor;
 pub mod eigenvalue_centrality;
 pub mod feature_extractors;
 pub mod fft;

@@ -14,11 +14,18 @@ a release asset.
 | Client traffic | Bridge behavior |
 |---|---|
 | `initialize` and other request methods | Forward to the current primary |
-| MCP notifications | Forward best-effort to both backends |
+| MCP notifications (valid envelope, no `id`) | Forward best-effort to both backends |
+| Unreadable frame (not valid JSON) | Reject at the bridge: return `parseError` (`-32700`) with a null `id`; forward to neither backend |
+| Valid JSON that is not a JSON-RPC envelope | Reject at the bridge: return `invalidRequest` (`-32600`) with a null `id`; forward to neither backend |
 | `tools/list` | Return the primary's tools plus `bridge_set_primary` and `bridge_status` |
 | Configured query tool | Call the primary only and return its response |
 | Configured write tool | Return the primary response, then translate and mirror the write to the secondary |
 | Unclassified primary tool | Call the primary only |
+
+A frame the bridge cannot read is a frame the backends never see. Forwarding one
+as a notification would leave the backend's own parse-error response sitting
+unread on its stdout, and the next request would read that stale error instead of
+its own result — leaving the session skewed by one response until restart.
 
 The bridge does not merge query results from both backends. “Union” means that
 classified writes can be maintained in both stores while one selected backend

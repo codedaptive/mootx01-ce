@@ -7,7 +7,10 @@
 //! juggling is needed. Parity with the Swift transport is at the JSON-RPC wire.
 //!
 //! Hardening tests (added for ARIA HTTP P4 hardening) cover:
-//!   - ConcurrencyGate: acquire/release balance, shed on full queue
+//!   - ConcurrencyGate: acquire/release balance, shed on full queue, drain when
+//!     queued waiters exceed max_concurrent, and the concurrency cap under
+//!     contention (every blocking assertion timeout-bounded — see
+//!     GATE_WAIT_BUDGET)
 //!   - record_latency_ns: bucket routing and total accumulation (tested
 //!     indirectly via the global atomics; serve_once updates them)
 //!   - GLOBAL_RPC_COUNTER: increments on each dispatched call
@@ -372,30 +375,25 @@ fn concurrency_gate_balanced_acquire_release() {
     assert_eq!(gate.current_depth(), 0);
 }
 
-/// ConcurrencyGate: with maxQueued=0, a second concurrent try_acquire
+/// ConcurrencyGate: with maxQueued=0, an acquire past the depth cap
 /// must return false (shed immediately).
 ///
-/// The first slot is held by calling try_acquire without releasing; the
-/// second call must fail because maxConcurrent=1 and maxQueued=0 means
-/// the total allowed depth is exactly 1.
+/// Shape: hold every running slot, then prove the next `try_acquire` is
+/// rejected on the non-blocking depth check rather than parking.
+///
+/// A second `try_acquire` on a gate of maxConcurrent=1/maxQueued=0 while the
+/// sole slot is held would legitimately BLOCK — depth 2 exceeds the cap, so
+/// the caller belongs in the queue, and a single-threaded test cannot then
+/// release it. That is a property of the gate's contract, not a defect, and it
+/// is why this test exercises the shed branch on a 2/0 gate where the third
+/// acquire is rejected by `try_enqueue` without ever reaching the Condvar.
+/// The blocking-then-draining path IS covered — see
+/// `gate_drains_when_waiters_exceed_max_concurrent`, which spawns real waiter
+/// threads and bounds every wait with `recv_timeout`.
 #[test]
 fn concurrency_gate_zero_queue_sheds_on_second() {
     let gate = ConcurrencyGate::new(1, 0);
     assert!(gate.try_acquire(), "first acquire must succeed");
-    // With maxConcurrent=1 and maxQueued=0, a second try_acquire should
-    // return false immediately (queue-full branch).
-    // However, because the gate uses a Condvar, a second try_acquire
-    // would block waiting for the first to release (depth=1 == maxConcurrent).
-    // We can only test the shed branch when depth > maxConcurrent + maxQueued.
-    // depth=1, maxConcurrent=1, maxQueued=0 → 1 > 1 is false so it parks.
-    // To test the shed path we need depth 2 with maxConcurrent+maxQueued=1:
-    // set maxConcurrent=1, maxQueued=0, then do a try_acquire from another
-    // thread while the gate is at depth 1. But that would deadlock in the
-    // single-threaded test context.
-    //
-    // Instead, test with a gate that already has depth 2 by using
-    // max_concurrent=2, max_queued=0 and acquiring twice, then checking the
-    // third is rejected — which does NOT block because 3 > 2+0=2.
     gate.release();  // restore to depth 0
 
     let gate2 = ConcurrencyGate::new(2, 0);
@@ -472,12 +470,13 @@ fn saturation_try_enqueue_is_non_blocking() {
     // max_concurrent=1, max_queued=1 → total capacity 2.
     let gate = ConcurrencyGate::new(1, 1);
 
-    // Enqueue slot 1 and slot 2 — both non-blocking (just increment active).
+    // Enqueue slot 1 and slot 2 — both non-blocking (just increment `admitted`;
+    // neither takes a running permit, because wait_for_slot is never called).
     assert!(gate.try_enqueue(), "first enqueue must succeed");
     assert!(gate.try_enqueue(), "second enqueue must succeed (fills queue)");
     assert_eq!(gate.current_depth(), 2);
 
-    // Third enqueue: active=2 >= max_concurrent+max_queued=2, must return false
+    // Third enqueue: admitted=2 >= max_concurrent+max_queued=2, must return false
     // WITHOUT blocking. The fact that this returns at all proves no Condvar wait.
     let overflow = gate.try_enqueue();
     assert!(!overflow, "overflow enqueue must return false immediately");
@@ -534,6 +533,178 @@ fn queue_drain_after_slot_frees() {
     b_thread.join().expect("B thread must not panic");
     assert!(slot_granted.load(Ordering::Relaxed), "B must have been granted its slot");
     assert_eq!(gate.current_depth(), 0, "gate depth must be 0 after both released");
+}
+
+/// Every blocking assertion below is bounded by this budget. A regression must
+/// FAIL the suite, never hang CI: with the pre-fix single-counter gate the
+/// waiters park forever, so an unbounded `join()` would wedge the test runner
+/// instead of reporting a failure. 5 s is far above the microseconds these
+/// hand-offs actually take, while still failing fast.
+const GATE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drain regression: waiters in EXCESS of `max_concurrent` must all proceed
+/// once the running slots release.
+///
+/// This is the reported deadlock (Codex 6c7fcb2977308191860790a16adede76) in
+/// its minimal form. `max_concurrent = 2`, `max_queued = 8`: fill both running
+/// slots, admit 3 more connections, park all 3 in `wait_for_slot`, then release
+/// both running slots.
+///
+/// Against the pre-fix gate — one counter serving as both depth and admission —
+/// the counter reads 5, the two releases take it to 3, and `3 > 2` is still
+/// true, so no waiter ever wakes and all three `recv_timeout` calls time out.
+/// With running and admitted separated, `running` falls to 0 and the waiters
+/// drain: two take slots immediately, the third takes one as those complete.
+#[test]
+fn gate_drains_when_waiters_exceed_max_concurrent() {
+    use aria_mcp::http_server::ConcurrencyGate;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    // 3 waiters against 2 running slots — the excess is what wedged the gate.
+    const WAITERS: usize = 3;
+
+    let gate = ConcurrencyGate::new(2, 8);
+
+    // Occupy both running slots (non-blocking: the slots are free).
+    assert!(gate.try_acquire(), "first running slot must be granted");
+    assert!(gate.try_acquire(), "second running slot must be granted");
+
+    let (tx, rx) = mpsc::channel::<usize>();
+
+    for id in 0..WAITERS {
+        // Admit on this thread so the depth is deterministic before any
+        // waiter thread starts — mirrors the accept loop enqueueing and the
+        // worker thread waiting.
+        assert!(gate.try_enqueue(), "waiter {id} must be admitted into the queue");
+        let gate_c = Arc::clone(&gate);
+        let tx_c = tx.clone();
+        std::thread::spawn(move || {
+            gate_c.wait_for_slot();
+            // Report BEFORE releasing: the signal means "got past the gate",
+            // not "finished".
+            let _ = tx_c.send(id);
+            gate_c.release();
+        });
+    }
+    // Drop the original sender so the channel closes if every waiter thread
+    // dies; recv_timeout then returns Disconnected instead of waiting out the
+    // full budget.
+    drop(tx);
+
+    assert_eq!(
+        gate.current_depth(),
+        2 + WAITERS,
+        "depth must count the 2 running plus all {WAITERS} queued waiters"
+    );
+
+    // Give the waiter threads time to reach wait_for_slot and park. Without
+    // this the assertion below could pass simply because they had not started.
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        rx.try_recv().is_err(),
+        "no waiter may pass the gate while both running slots are held"
+    );
+
+    // Free both running slots. This is the moment the pre-fix gate failed to
+    // drain.
+    gate.release();
+    gate.release();
+
+    let mut proceeded = Vec::new();
+    for _ in 0..WAITERS {
+        match rx.recv_timeout(GATE_WAIT_BUDGET) {
+            Ok(id) => proceeded.push(id),
+            Err(e) => panic!(
+                "gate failed to drain: only {} of {WAITERS} waiters were granted a slot \
+                 within {GATE_WAIT_BUDGET:?} ({e:?}). This is the deadlock the \
+                 two-quantity gate exists to prevent.",
+                proceeded.len()
+            ),
+        }
+    }
+    proceeded.sort_unstable();
+    assert_eq!(
+        proceeded,
+        (0..WAITERS).collect::<Vec<_>>(),
+        "every queued waiter must be granted a slot exactly once"
+    );
+
+    // All five connections released → depth back to 0. The waiters release
+    // just after reporting, so poll briefly rather than racing them.
+    let deadline = Instant::now() + GATE_WAIT_BUDGET;
+    while gate.current_depth() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(gate.current_depth(), 0, "gate depth must return to 0");
+}
+
+/// Cap regression: the fix must not trade a deadlock for an unbounded gate.
+///
+/// Admit many more connections than `max_concurrent` and record the peak number
+/// of threads simultaneously past `wait_for_slot`. That peak must never exceed
+/// `max_concurrent`. `wait_for_slot` takes its `running` permit while still
+/// holding the gate lock, so two waiters woken by the same `notify_all` cannot
+/// both pass the cap; this test is what would catch a regression to a
+/// check-then-increment split across the lock boundary.
+#[test]
+fn gate_concurrency_cap_holds_under_contention() {
+    use aria_mcp::http_server::ConcurrencyGate;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const MAX_CONCURRENT: usize = 4;
+    // 24 admitted against 4 slots — six full rounds of hand-off, enough
+    // contention for a broken cap to show up while keeping the test sub-second.
+    const ADMITTED: usize = 24;
+
+    let gate = ConcurrencyGate::new(MAX_CONCURRENT, ADMITTED);
+    let running_now = Arc::new(AtomicUsize::new(0));
+    let peak_running = Arc::new(AtomicUsize::new(0));
+    let (tx, rx) = mpsc::channel::<()>();
+
+    for _ in 0..ADMITTED {
+        assert!(gate.try_enqueue(), "all {ADMITTED} connections must be admitted");
+        let gate_c = Arc::clone(&gate);
+        let now_c = Arc::clone(&running_now);
+        let peak_c = Arc::clone(&peak_running);
+        let tx_c = tx.clone();
+        std::thread::spawn(move || {
+            gate_c.wait_for_slot();
+            let inside = now_c.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_c.fetch_max(inside, Ordering::SeqCst);
+            // Hold the slot briefly so occupancy genuinely overlaps; without a
+            // dwell each thread could enter and leave before the next arrives
+            // and the peak would read 1 no matter what the gate did.
+            std::thread::sleep(Duration::from_millis(5));
+            now_c.fetch_sub(1, Ordering::SeqCst);
+            gate_c.release();
+            let _ = tx_c.send(());
+        });
+    }
+    drop(tx);
+
+    for i in 0..ADMITTED {
+        rx.recv_timeout(GATE_WAIT_BUDGET).unwrap_or_else(|e| {
+            panic!("only {i} of {ADMITTED} connections completed within {GATE_WAIT_BUDGET:?} ({e:?})")
+        });
+    }
+
+    let peak = peak_running.load(Ordering::SeqCst);
+    assert!(
+        peak <= MAX_CONCURRENT,
+        "peak simultaneous running connections was {peak}, which exceeds max_concurrent={MAX_CONCURRENT}"
+    );
+    // A peak of 1 would mean the threads never actually overlapped, so the
+    // upper-bound assertion above would have proved nothing.
+    assert!(
+        peak > 1,
+        "test did not create real contention (peak={peak}); the cap assertion is vacuous"
+    );
+    assert_eq!(gate.current_depth(), 0, "gate depth must return to 0");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

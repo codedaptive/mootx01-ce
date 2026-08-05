@@ -179,15 +179,30 @@ struct ToolProjectionTests {
         #expect(required.contains("confirmed"), "moot_erase_memory must require confirmed=true")
     }
 
-    /// `moot_memory_search` must require `query`.
-    @Test func testMemorySearchRequiresQuery() {
+    /// `moot_memory_search` accepts query OR near (PR-03 anchor pivot), so
+    /// neither is schema-required; the runtime enforces exactly-one. The
+    /// schema must advertise BOTH properties.
+    @Test func testMemorySearchAdvertisesQueryAndNear() {
         guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_memory_search" }) else {
             Issue.record("moot_memory_search not found")
             return
         }
         let required = tool.inputSchema.objectValue?["required"]?
             .arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(required.contains("query"), "moot_memory_search must require query")
+        #expect(!required.contains("query"),
+                "query must not be schema-required (query OR near, runtime-enforced)")
+        let properties = tool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]
+        #expect(properties["query"] != nil, "query property must be advertised")
+        #expect(properties["near"] != nil, "near property must be advertised")
+    }
+
+    /// Rider-default policy fn (2026-08-02 ruling): on unless the env
+    /// carries the literal "0".
+    @Test func testSubjectRiderEnabledDefaultsOn() {
+        #expect(ToolProjection.subjectRiderEnabled(environment: [:]))
+        #expect(ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": "1"]))
+        #expect(!ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": "0"]))
+        #expect(ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": ""]))
     }
 
     /// `estateID` must be optional (in properties, not in required) on every

@@ -274,9 +274,14 @@ struct PreciseRecallTests {
             let config = EstateConfiguration(estateID: estateID, backend: .sqlite(url: url))
             let storage = try SQLiteStorage(configuration: config)
             let kit = GeniusLocusKit()
+            // In-memory identity key store so this file-backed estate's signing
+            // key stays out of the Keychain (test-loop key-residue fix). The defer
+            // above deletes the .sqlite file but cannot dispose Keychain items, so
+            // the default store would orphan one entry per run.
             let handle = try await kit.open(
                 storage: storage,
-                owner: OwnerCredentials(ownerIdentifier: "precise-trace-test"))
+                owner: OwnerCredentials(ownerIdentifier: "precise-trace-test"),
+                identityKeyStore: InMemoryEstateIdentityKeyStore())
 
             // Shared corpus + vector store — same seeding discipline as
             // makeSeededEstate, ensuring the .unionBest coarse grab has real

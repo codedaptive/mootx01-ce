@@ -143,6 +143,7 @@ pub mod fingerprint256_adapters;
 pub mod forbidden_combination_validator;
 pub mod frames;
 pub mod kg_fact;
+pub mod kg_fact_identity_backfill;
 pub mod kg_fact_operational;
 pub mod learned_reference;
 #[cfg(test)]
@@ -160,6 +161,7 @@ pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;
 pub mod source_catalog_entry;
+pub mod subject_register;
 pub mod summaries;
 pub mod telemetry;
 pub mod node;

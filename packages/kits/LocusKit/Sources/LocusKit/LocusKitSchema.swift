@@ -83,7 +83,20 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v11 adds `operationalAND INT64 NOT NULL
+    /// Current schema version. v13 adds the kg_facts identity trio
+    /// (`addedBy`, `foreignSourceKey`, `foreignRecordID`, all TEXT NOT
+    /// NULL DEFAULT '') — the columns MXE-KH declared on the table but
+    /// shipped without a ladder entry, so populated v12 estates never
+    /// gained them on open. The `mootx01 upgrade` backfill
+    /// (KGFactIdentityBackfill) moves misfiled pre-existing
+    /// `sourceDrawerID` values into them after this migration runs.
+    /// v12 adds the subject trio to `drawers`
+    /// (`subject`, `subject_pipeline_version`, `subject_at`, all
+    /// nullable) — the one-sentence AI-facing summary that progressive
+    /// recall returns in the dense row. Nullable columns with no
+    /// backfill: NULL `subject` IS the backfill-eligibility predicate,
+    /// so existing rows are simply "subject debt" until a producer
+    /// fills them. v11 adds `operationalAND INT64 NOT NULL
     /// DEFAULT -1` to `container_fingerprints`. The AND aggregate is the
     /// per-container AND (not OR) of every active drawer's
     /// `operationalBitmap`; its AND-identity default (-1, all bits set)
@@ -101,8 +114,9 @@ public enum LocusKitSchema {
     /// content_hash BLOB nullable to drawers (NT-L3). v6 added order_key
     /// REAL nullable to tunnels (NT-L5). v5 added erasure_ledger (NT-L4).
     /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
-    /// (NT-L1). v2 added keys.ext. No estate data has shipped.
-    public static let version = 11
+    /// (NT-L1). v2 added keys.ext. Populated estates exist; every
+    /// schema change from v13 on ships a ladder entry.
+    public static let version = 13
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -176,11 +190,43 @@ public enum LocusKitSchema {
                 // falsely satisfy any AND-check before the first rebuildAll. The
                 // table is derived and always recomputed at estate open, so the
                 // default value is corrected on the next open without a backfill
-                // migration. No estate data has shipped, but the migration is
-                // correct and harmless for in-development estates.
+                // migration.
                 Migration(fromVersion: 10, toVersion: 11, operations: [
                     .addColumn(table: "container_fingerprints",
                                column: .bitmap("operationalAND", default: Int64(-1)))
+                ]),
+                // v11 → v12: add the subject trio to drawers (progressive
+                // recall dense row). All three nullable, no backfill —
+                // NULL `subject` is the backfill-eligibility predicate,
+                // so pre-v12 rows surface as subject debt via
+                // `countMissingSubject` rather than requiring a data
+                // migration. Without the addColumns, a pre-v12 estate
+                // hits "no such column" on every drawer read after the
+                // daemon binary upgrades (same failure mode the v8 → v9
+                // migration exists to prevent).
+                Migration(fromVersion: 11, toVersion: 12, operations: [
+                    .addColumn(table: "drawers", column: .text("subject", nullable: true)),
+                    .addColumn(table: "drawers", column: .text("subject_pipeline_version", nullable: true)),
+                    .addColumn(table: "drawers", column: .timestamp("subject_at", nullable: true)),
+                ]),
+                // v12 → v13: add the kg_facts identity trio (MXE-KH declared
+                // these on `kgFactsTable` but shipped no ladder entry, so a
+                // populated v12 estate never gained them and every write to
+                // them — including the `mootx01 upgrade` backfill — would
+                // fail with "no such column"). NOT NULL DEFAULT '' matches
+                // the declaration contract: a locally-filed, unanchored fact
+                // writes the same shape it always did. The DATA move (pre-KH
+                // sourceDrawerID values into their correct columns) is
+                // deliberately NOT a schema operation — it needs the
+                // drawers/lineage evidence and per-class counting that live
+                // in KGFactIdentityBackfill, run only by `mootx01 upgrade`.
+                Migration(fromVersion: 12, toVersion: 13, operations: [
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "addedBy", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "foreignSourceKey", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "foreignRecordID", type: .text, nullable: false, defaultValue: .text(""))),
                 ]),
             ]
         )
@@ -213,9 +259,9 @@ public enum LocusKitSchema {
             // world. Declared nullable so a row written before this
             // column existed (or a raw insert that omits it) does not
             // violate a NOT NULL constraint; drawerFromRow backfills a
-            // NULL/absent eventTime to that row's filedAt. New columns
-            // land in the v1 declaration with no migration ladder, per
-            // this file's design note — no estate data has shipped.
+            // NULL/absent eventTime to that row's filedAt. This column
+            // predates the migration-ladder discipline; columns added
+            // from v13 on ship a ladder entry (populated estates exist).
             .timestamp("eventTime", nullable: true),
             .text("embeddingModelID"),
             .timestamp("tombstonedAt", nullable: true),
@@ -282,7 +328,25 @@ public enum LocusKitSchema {
             .text("distilled_pipeline_version", nullable: true),
             .int("distilled_token_count", nullable: true),
             // TEXT ISO8601 per the fleet date rule (timestamp column type).
-            .timestamp("distilled_at", nullable: true)
+            .timestamp("distilled_at", nullable: true),
+            // Subject trio (progressive recall PR-01): the one-sentence
+            // AI-facing summary of this drawer's content. Same lifecycle
+            // contract as the distilled quad above — the three columns are
+            // NULL together or populated together (one atomic UPDATE via
+            // DrawerStore.setSubjectRepresentation); every write that
+            // touches `content` NULLs all three in the same statement
+            // (regeneration trigger + erasure scrub). NULL `subject` is
+            // the backfill-eligibility predicate. The subject is RETURNED
+            // on recall rows, never indexed or searched (design ruling:
+            // ranking math is content-only), so it is excluded from the
+            // content digest/revision that feed the index pipeline.
+            // `subject_pipeline_version` carries the producer provenance
+            // tier ("ai-v1" filing/backfill AI; "minillm-v1" model rider).
+            // No token-count column: the subject is length-contracted
+            // (~120 chars) at every producer boundary.
+            .text("subject", nullable: true),
+            .text("subject_pipeline_version", nullable: true),
+            .timestamp("subject_at", nullable: true)
         ],
         primaryKey: ["id"],
         generatedColumns: [
@@ -483,6 +547,15 @@ public enum LocusKitSchema {
             .text("predicate"),
             .text("object"),
             .text("sourceDrawerID"),
+            // Provenance columns that are deliberately NOT sourceDrawerID:
+            // the filing host identity, and the foreign palace's own key and
+            // record id for imported facts. sourceDrawerID carries a local
+            // drawer id or "" and nothing else. All three default to "" so a
+            // locally-filed, unanchored fact writes the same shape it always
+            // did. The palace re-import dedup signature reads foreignSourceKey.
+            .text("addedBy"),
+            .text("foreignSourceKey"),
+            .text("foreignRecordID"),
             .bitmap("adjectiveBitmap"),
             .bitmap("operationalBitmap"),
             .bitmap("provenanceBitmap"),

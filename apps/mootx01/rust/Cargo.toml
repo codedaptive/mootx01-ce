@@ -16,7 +16,7 @@
 
 [package]
 name = "mootx01-cli"
-version = "1.1.0-beta-10"
+version = "1.1.0-beta-11"
 edition = "2021"
 rust-version = "1.75"
 description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
@@ -64,11 +64,18 @@ uuid = { version = "1", features = ["v4"] }
 # of hard deletion, so a destructive confirmation still leaves a recovery
 # window. Swift's macOS leg uses FileManager.trashItem for the same contract.
 trash = "5.2.3"
+# locus-kit + vault-kit: the `mootx01 upgrade` kg_facts identity backfill
+# (MXE-MI). locus-kit owns the backfill (kg_fact_identity_backfill) and the
+# schema ladder that adds the identity columns; vault-kit supplies the
+# DrawerMapping stable-source-key resolver, injected at this app layer
+# because locus-kit sits below vault-kit and must not depend on it. Both
+# crates are already in the product graph via aria-mcp; naming them directly
+# keeps the upgrade wiring honest and removable (same rationale as
+# persistence-kit above). locus-kit also serves the installer reuse
+# integration gate in this crate's tests.
+locus-kit = { path = "../../../packages/kits/LocusKit/rust" }
+vault-kit = { path = "../../../packages/kits/VaultKit/rust" }
 
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.
 tempfile = "3"
-# Installer reuse integration gate: open the repaired estate through the real
-# LocusKit SQLite store and prove a Drawer capture succeeds. Dev-only; the
-# production installer continues to depend only on PersistenceKit for repair.
-locus-kit = { path = "../../../packages/kits/LocusKit/rust" }

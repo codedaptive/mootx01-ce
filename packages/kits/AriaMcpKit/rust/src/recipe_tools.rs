@@ -90,7 +90,157 @@ use crate::dispatch::{
     optional_string, require_string, text_result, LIMIT_HARD_CEILING,
 };
 use crate::estate_registry::EstateRegistry;
+use crate::interface_tools::{
+    opaque_structured_row, structured_recall_row, structured_text_result, StructuredRow,
+};
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+
+/// Render the typed conflict-projection sweep as the ADDITIVE report
+/// section every contradiction surface appends (DCP M4, M0 §7):
+/// moot_hunt_contradictions, moot_dream, and moot_lens_contradiction
+/// all route through this one renderer so the lines never drift.
+///
+/// Redaction (M0 §8, ceiling = MAX endpoint sensitivity, no grant
+/// plumbing in v0.1 — same fixed posture as the lexical hunter):
+/// ceiling ≤ elevated (raw 16) → full block incl. dense rows;
+/// restricted (raw 32) → one line naming only the coordinate DIGEST;
+/// secret (raw 48) → counted in `proven: N`, no block at all.
+///
+/// `lexical_candidates` is the borderline count from the lexical hunter
+/// (the `candidates:` relabel); None on surfaces with no lexical lane
+/// (the lens). Mirrors Swift `RecipeTools.renderConflictProjection`.
+pub(crate) fn conflict_projection_section(
+    coord: &genius_locus_kit::coordinator::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    lexical_candidates: Option<usize>,
+) -> Vec<String> {
+    let sweep = match coord.conflict_projection_sweep(handle) {
+        Ok(sweep) => sweep,
+        Err(e) => {
+            return vec![format!(
+                "(typed conflict projection unavailable: {})",
+                crate::interface_tools::describe_verb_dispatch_error(&e)
+            )]
+        }
+    };
+    let restricted_raw = locus_kit::adjectives::AdjectiveSensitivity::Restricted.raw_value();
+    let secret_raw = locus_kit::adjectives::AdjectiveSensitivity::Secret.raw_value();
+
+    // Dense rows only for fully visible findings (structured-tier by-id
+    // fetch, same tier as memory_get).
+    let visible_ids: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        sweep
+            .proven
+            .iter()
+            .filter(|f| f.sensitivity_ceiling_raw < restricted_raw)
+            .flat_map(|f| f.outcome.source_drawer_ids.iter())
+            .filter(|id| seen.insert((*id).clone()))
+            .cloned()
+            .collect()
+    };
+    let dense_by_id: BTreeMap<String, String> = if visible_ids.is_empty() {
+        BTreeMap::new()
+    } else {
+        match coord.estate_for(handle) {
+            Ok(locus_estate) => {
+                let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+                frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+                locus_estate
+                    .get_drawers_matching_frame(&visible_ids, &frame)
+                    .map(|f| {
+                        f.admissible
+                            .into_iter()
+                            .map(|d| {
+                                let row = crate::dense_row::render(&d);
+                                (d.id.clone(), row)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            Err(_) => BTreeMap::new(),
+        }
+    };
+
+    let mut lines: Vec<String> = vec![
+        format!("proven: {}", sweep.counts.proven_contradiction),
+        format!("historical: {}", sweep.counts.historical_succession),
+        format!("compatible: {}", sweep.counts.compatible_plurality),
+    ];
+    if let Some(candidates) = lexical_candidates {
+        lines.push(format!("candidates: {candidates}"));
+    }
+    // Unparsed facts and unjudgeable pairs share the line: both are
+    // "the typed lane saw it and refused to guess".
+    lines.push(format!(
+        "unknown_or_invalid: {}",
+        sweep.counts.unknown_or_invalid + sweep.diagnostics.unparsed
+    ));
+    lines.push(format!(
+        "coverage: {}/{}",
+        sweep.diagnostics.projected, sweep.diagnostics.scanned
+    ));
+    if sweep.truncated_buckets > 0 {
+        // Deviation-only line (M0 §7): silence means no bucket hit its cap.
+        lines.push(format!("truncated_buckets: {}", sweep.truncated_buckets));
+    }
+    for finding in &sweep.proven {
+        if finding.sensitivity_ceiling_raw >= secret_raw {
+            continue;
+        }
+        let outcome = &finding.outcome;
+        if finding.sensitivity_ceiling_raw >= restricted_raw {
+            lines.push(format!(
+                "  a conflicting claim exists at {} [restricted]",
+                outcome.coordinate_digest()
+            ));
+            continue;
+        }
+        lines.push(format!("  PROVEN {}", outcome.result_id));
+        lines.push(format!("    rule: {}@{}", outcome.rule_id, outcome.rule_version));
+        lines.push(format!("    coordinate: {}|{}", outcome.key, outcome.dimension));
+        lines.push(format!("    values: {}", outcome.value_digests.join(" vs ")));
+        lines.push(format!("    time: {}", outcome.temporal_bases.join(" | ")));
+        lines.push(format!(
+            "    reasons: {}",
+            outcome
+                .reasons
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        for id in &outcome.source_drawer_ids {
+            lines.push(format!(
+                "    {}",
+                dense_by_id
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{id} · - · - · - · -"))
+            ));
+        }
+    }
+    for finding in &sweep.historical {
+        if finding.sensitivity_ceiling_raw >= restricted_raw {
+            continue;
+        }
+        let outcome = &finding.outcome;
+        lines.push(format!(
+            "  HISTORICAL {} {}|{} ({})",
+            outcome.result_id,
+            outcome.key,
+            outcome.dimension,
+            outcome
+                .reasons
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines
+}
 
 /// Recipe tool names — mirrors Swift `RecipeTools` static constants.
 const LIST_LENSES: &str = "moot_list_lenses";
@@ -192,8 +342,8 @@ pub fn dispatch(
     }
 
     match name {
-        LIST_LENSES => Ok(run_list_recipes()),
-        LIST_RECIPES_CATALOG => Ok(run_list_recipes_catalog()),
+        LIST_LENSES => run_list_recipes(args),
+        LIST_RECIPES_CATALOG => run_list_recipes_catalog(args),
         SYNTHESIZE => run_grounded_synthesis_tool(args, registry),
         RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
         CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
@@ -217,7 +367,30 @@ pub fn dispatch(
 // moot_list_lenses
 // ---------------------------------------------------------------------------
 
-fn run_list_recipes() -> serde_json::Value {
+/// Decode the shared `verbose` flag for the two catalogue tools (PR-04).
+/// Absent → false (terse default); present-but-non-bool → invalidParams.
+fn decode_verbose(args: &BTreeMap<String, JsonValue>) -> Result<bool, JSONRPCError> {
+    match args.get("verbose") {
+        None => Ok(false),
+        Some(v) => v.as_bool().ok_or_else(|| JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "verbose must be a boolean; omit it for the terse default".to_string(),
+        )),
+    }
+}
+
+/// First sentence of a tool description, for the terse catalogue rows
+/// (PR-04). Deterministic and byte-identical to the Swift twin: cut at
+/// the first ". " boundary, keeping the period.
+pub fn one_liner(description: &str) -> String {
+    match description.find(". ") {
+        Some(idx) => format!("{}.", &description[..idx]),
+        None => description.to_string(),
+    }
+}
+
+fn run_list_recipes(args: &BTreeMap<String, JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+    let verbose = decode_verbose(args)?;
     // Mirrors Swift runListRecipes: project the 27 cognition tools (4 Tier-6
     // recipe tools + 23 lens tools) from the tool surface, showing name,
     // description, and required args for each. NOT a catalog dump — the tool
@@ -251,36 +424,57 @@ fn run_list_recipes() -> serde_json::Value {
         cognition_tools.len()
     )];
 
-    for tool in &cognition_tools {
-        let name = tool["name"].as_str().unwrap_or("?");
-        let desc = tool["description"].as_str().unwrap_or("");
-        let required: Vec<&str> = tool["inputSchema"]["required"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        let req_text = if required.is_empty() {
-            "none".to_string()
-        } else {
-            required.join(", ")
-        };
+    if verbose {
+        for tool in &cognition_tools {
+            let name = tool["name"].as_str().unwrap_or("?");
+            let desc = tool["description"].as_str().unwrap_or("");
+            let required: Vec<&str> = tool["inputSchema"]["required"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let req_text = if required.is_empty() {
+                "none".to_string()
+            } else {
+                required.join(", ")
+            };
+            lines.push(String::new());
+            lines.push(name.to_string());
+            lines.push(format!("  {desc}"));
+            lines.push(format!("  Required: {req_text}."));
+        }
         lines.push(String::new());
-        lines.push(name.to_string());
-        lines.push(format!("  {desc}"));
-        lines.push(format!("  Required: {req_text}."));
+    } else {
+        // Terse default (PR-04): one row per tool — name and first
+        // sentence. The always-verbose ~8.8KB catalogue reply ends;
+        // pass verbose:true for full descriptions + required args.
+        // Mirrors Swift runListRecipes.
+        for tool in &cognition_tools {
+            let name = tool["name"].as_str().unwrap_or("?");
+            let desc = tool["description"].as_str().unwrap_or("");
+            lines.push(format!("{name} — {}", one_liner(desc)));
+        }
+        lines.push("(terse — pass verbose:true for full descriptions and required args)".to_string());
     }
-
-    lines.push(String::new());
     lines.push("Call any tool with teachme:true for a full usage guide.".to_string());
-    text_result(&lines.join("\n"))
+    Ok(text_result(&lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
 // moot_list_recipes — full catalog browse (format mirrors Swift runListRecipesCatalog)
 // ---------------------------------------------------------------------------
 
-fn run_list_recipes_catalog() -> serde_json::Value {
+fn run_list_recipes_catalog(args: &BTreeMap<String, JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+    let verbose = decode_verbose(args)?;
     let catalog = recipe_catalog();
     let mut lines = vec![format!("moot_list_recipes: {} recipe(s)", catalog.len())];
+    if !verbose {
+        // Terse default (PR-04). Mirrors Swift runListRecipesCatalog.
+        for d in &catalog {
+            lines.push(format!("{} {} — {}", d.name, d.version, one_liner(&d.description)));
+        }
+        lines.push("(terse — pass verbose:true for versions, capabilities, and full descriptions)".to_string());
+        return Ok(text_result(&lines.join("\n")));
+    }
     for d in &catalog {
         let caps: Vec<&str> = d
             .required_capabilities
@@ -300,7 +494,7 @@ fn run_list_recipes_catalog() -> serde_json::Value {
             }
         ));
     }
-    text_result(&lines.join("\n"))
+    Ok(text_result(&lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
@@ -401,32 +595,22 @@ fn run_vague_recall_tool(
             )
         })?;
 
-    let parent_ids: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        out.vague_hits.iter().chain(out.constituents.iter())
-            .filter(|d| seen.insert(d.parent_node_id.clone()))
-            .map(|d| d.parent_node_id.clone())
-            .collect()
-    };
-    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
-    let room = |parent: &str| -> String {
-        node_names.get(parent)
-            .map(|(w, r)| format!("{w}/{r}"))
-            .unwrap_or_else(|| if parent.is_empty() { "?".to_string() } else { parent.to_string() })
-    };
-
+    // Dense-row reply (PR-03): both the vague hits and the hydrated
+    // originals travel as dense rows — the AI winnows on subjects and
+    // pinpoints via moot_memory_get depth:distilled/full. The vague hits
+    // keep a [vague L<n>] tier marker. Mirrors Swift runVagueRecall.
     let mut lines: Vec<String> = vec![format!(
         "found {} vague summary(ies), {} hydrated original(s)",
         out.vague_hits.len(), out.constituents.len())];
     for hit in &out.vague_hits {
         lines.push(format!(
-            "{}  [{}]  [vague L{}]  {}",
-            hit.id, room(&hit.parent_node_id), hit.vague_level(), hit.content));
+            "{}  [vague L{}]",
+            crate::dense_row::render(hit), hit.vague_level()));
     }
     if !out.constituents.is_empty() {
         lines.push("originals:".to_string());
         for c in &out.constituents {
-            lines.push(format!("{}  [{}]  {}", c.id, room(&c.parent_node_id), c.content));
+            lines.push(crate::dense_row::render(c));
         }
     }
     if out.vague_hits.is_empty() {
@@ -522,6 +706,10 @@ fn run_precise_recall_tool(
     let satisfied = neuron_kit::containment_satisfied(&query, &candidate_contents);
 
     if has_distinctive && !satisfied {
+        // Containment gate fired — zero results with not_found. The
+        // structured block is the empty results array: the tool declares an
+        // outputSchema, so every success reply carries the typed twin,
+        // including the deliberate zero-result shape.
         let lines = vec![
             "found 0 memory(s)".to_string(),
             crate::recall_discrimination::result_line(
@@ -529,7 +717,7 @@ fn run_precise_recall_tool(
             )
             .to_string(),
         ];
-        return Ok(text_result(&lines.join("\n")));
+        return Ok(structured_text_result(&lines.join("\n"), &[]));
     }
 
     // Part 1b — discrimination computed over composition precision scores
@@ -538,15 +726,41 @@ fn run_precise_recall_tool(
     let precise_scores: Vec<f64> = matches.iter().map(|m| m.score).collect();
     let discrimination = crate::recall_discrimination::classify(&precise_scores);
 
-    // m.room is the resolved room display name, populated by from_hit
-    // using the node_names map built above.
+    // Dense-row reply (PR-03): same row shape as moot_memory_search.
+    // Drawer lookups come from the already-loaded all_drawers set.
+    // Mirrors Swift runPreciseRecall.
+    // Structured twin (MXE-SS): rows are built in the SAME loop as the text
+    // lines. m.content is PRE-redaction (it fed the containment gate above);
+    // structured_recall_row's provenance switch decides whether it enters
+    // the structured block. An id the text renders opaquely stays exactly
+    // as opaque in the structured block.
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
+    let mut results: Vec<StructuredRow> = Vec::new();
     for m in matches.iter().take(50) {
-        let preview: String = m.content.chars().take(120).collect();
-        let room = if m.room.is_empty() { "?" } else { &m.room };
-        lines.push(format!("{}  [{}]  {}", m.id, room, preview));
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                results.push(structured_recall_row(
+                    &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
+            }
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
     }
-    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    // Deviation-only narration (PR-03): line only on low/medium; the
+    // zero-result containment-gate path above keeps its explicit
+    // not_found line (that IS a deviation).
+    if matches!(
+        discrimination,
+        crate::recall_discrimination::DiscriminationLevel::Low
+            | crate::recall_discrimination::DiscriminationLevel::Medium
+    ) {
+        lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    }
     if !has_distinctive {
         // Coaching hint: query has no distinctive tokens (numbers or proper nouns),
         // so exact containment cannot be verified. Results may include near-duplicates
@@ -557,7 +771,7 @@ fn run_precise_recall_tool(
                 .to_string(),
         );
     }
-    Ok(text_result(&lines.join("\n")))
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +794,65 @@ fn run_shaped_recall_tool(
 ) -> Result<serde_json::Value, JSONRPCError> {
     use locus_kit::filter::Filter;
     let estate = registry.resolve_direct(args)?;
-    let query = require_string(args, "query")?;
+    // Anchor pivot (PR-03): near:<uuid> as an alternative to query:, same
+    // contract as moot_memory_search — the anchor's content runs through
+    // the SAME shaped pipeline (preset/filter/limit inherited); the anchor
+    // row is excluded from the reply; a gated anchor reads as not-found
+    // (default containment gate for adjective sensitivity bits 6–11, plus an
+    // explicit `Drawer::sensitivity()` check for provenance sensitivity bits
+    // 30–35, which the frame does not cover; no grant lift — oracle-free,
+    // byte-identical to an absent id). Mirrors Swift runShapedRecall.
+    let query_arg = optional_string(args, "query")?.map(|s| s.to_string());
+    let near_arg = optional_string(args, "near")?.map(|s| s.to_string());
+    let (query, anchor_id): (String, Option<String>) = match (query_arg, near_arg) {
+        (None, None) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "Provide either query (text search) or near (UUID of an anchor memory — \
+                 returns the memories most similar to it under the preset)."
+                    .to_string(),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "query and near are mutually exclusive — pass exactly one.".to_string(),
+            ));
+        }
+        (Some(q), None) => (q, None),
+        (None, Some(anchor)) => {
+            let coord = estate.coord.lock().unwrap();
+            let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
+                JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
+            })?;
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+            let fetched = locus_estate
+                .get_drawers_matching_frame(&[anchor.clone()], &frame)
+                .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}")))?;
+            drop(coord);
+            // The provenance reject runs BEFORE the empty-content check, so a
+            // gated row and an empty row collapse into the one not-found
+            // shape. Ordering discipline and defence in depth: this fetch
+            // requests a single id, so `admissible` holds at most one drawer
+            // and either order yields the same error today. Should this ever
+            // resolve a set, provenance-first is the order that cannot leak.
+            let anchor_drawer = fetched
+                .admissible
+                .into_iter()
+                .find(|d| !matches!(
+                    d.sensitivity(),
+                    locus_kit::provenance::Sensitivity::Restricted
+                        | locus_kit::provenance::Sensitivity::Secret
+                ))
+                .filter(|d| !d.content.is_empty())
+                .ok_or_else(|| JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("near: anchor memory not found: {anchor}"),
+                ))?;
+            (anchor_drawer.content, Some(anchor))
+        }
+    };
     // Clamp to [1, 500]: reject negative/zero, cap absurdly-large values.
     // DoS prevention at the MCP boundary before the substrate is touched.
     // Parity: Swift runShapedRecall uses ToolDispatcher.clampLimit.
@@ -632,14 +904,42 @@ fn run_shaped_recall_tool(
 
     // m.room is the resolved room display name, populated by from_hit
     // using the node_names map built above.
-    let mut lines = vec![format!("found {} memory(s)", out.matches.len())];
-    for m in out.matches.iter().take(50) {
-        let preview: String = m.content.chars().take(120).collect();
-        let room = if m.room.is_empty() { "?" } else { &m.room };
-        lines.push(format!("{}  [{}]  {}", m.id, room, preview));
+    // Dense-row reply (PR-03): same row shape as moot_memory_search;
+    // anchor excluded when near: pivoted. Drawer lookups come from the
+    // already-loaded all_drawers set. Mirrors Swift runShapedRecall.
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+    let shown: Vec<_> = out.matches.iter()
+        .filter(|m| anchor_id.as_deref().map(|a| m.id != a).unwrap_or(true))
+        .collect();
+    let mut lines = vec![format!("found {} memory(s)", shown.len())];
+    // Structured twin (MXE-SS): rows built in the SAME loop as the text
+    // lines. m.content is PRE-redaction; structured_recall_row's provenance
+    // switch decides whether it enters the structured block. An id the text
+    // renders opaquely stays exactly as opaque in the structured block.
+    let mut results: Vec<StructuredRow> = Vec::new();
+    for m in shown.iter().take(50) {
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                results.push(structured_recall_row(
+                    &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
+            }
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
     }
-    lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
-    Ok(text_result(&lines.join("\n")))
+    // Deviation-only narration (PR-03): line only on low/medium.
+    if matches!(
+        discrimination,
+        crate::recall_discrimination::DiscriminationLevel::Low
+            | crate::recall_discrimination::DiscriminationLevel::Medium
+    ) {
+        lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    }
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1304,39 @@ fn run_dream_tool(
             "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel.",
         );
     }
+    // Step 4 — subject backfill dispatch (rider-default ruling,
+    // 2026-08-02): dreaming pays subject debt when a producer is
+    // registered. The Rust lane is DARK (no producer ships), so this is
+    // a guarded no-op in production Rust today — the wiring exists so
+    // the two ports dispatch identically the day a model lands.
+    // Mirrors Swift runDream step 4. Reuses the coordinator guard taken
+    // at the top of this function — re-locking here would self-deadlock.
+    {
+        if coord.subject_producer_pipeline(&estate.handle).is_some() {
+            let debt = coord
+                .estate_for(&estate.handle)
+                .ok()
+                .and_then(|e| e.count_subject_debt().ok())
+                .unwrap_or(0);
+            if debt > 0 {
+                match coord.subject_backfill_sweep(&estate.handle, 32, now_epoch_ms) {
+                    Ok(sweep) => body.push_str(&format!(
+                        "\nsubjectsBackfilled: {} (skipped: {}, remaining: {})",
+                        sweep.written, sweep.skipped_inadmissible, sweep.remaining_debt
+                    )),
+                    Err(e) => body.push_str(&format!(
+                        "\n(subject backfill error: {e:?} — continuing)"
+                    )),
+                }
+            }
+        }
+    }
+    // DCP M4 — the typed proving lane's additive section (M0 §7).
+    body.push('\n');
+    body.push_str(
+        &conflict_projection_section(&coord, &estate.handle, Some(hunt.borderline.len()))
+            .join("\n"),
+    );
     Ok(text_result(&body))
 }
 
@@ -1091,6 +1424,12 @@ fn run_hunt_contradictions_tool(
                 .to_string(),
         );
     }
+    // DCP M4 — the typed proving lane's additive section (M0 §7).
+    lines.extend(conflict_projection_section(
+        &coord,
+        &estate.handle,
+        Some(report.borderline.len()),
+    ));
     Ok(text_result(&lines.join("\n")))
 }
 
@@ -1283,53 +1622,67 @@ fn run_recall_distilled_tool(
             )
         })?;
 
-    // Resolve room display names via the node tree, matching
-    // run_memory_search's resolution path.
-    let node_ids: Vec<String> = out.matches.iter().map(|m| m.parent_node_id.clone()).collect();
-    let node_names = coord.resolve_drawer_node_names(&estate.handle, &node_ids);
+    // Dense-row reply (PR-03): dense row THEN the distilled text — this
+    // verb is the "confirm on distilled" tier, so the text stays, but the
+    // [distilled] header tag and per-hit tokens:/source: metadata lines are
+    // gone (deviation-only: distilled service is the NORM here; only the
+    // fallback deviation gets a marker). Drawer lookups for the dense rows
+    // ride the same structured-tier by-id fetch as memory_get. Mirrors
+    // Swift runRecallDistilled.
+    let dense_by_id: BTreeMap<String, String> = {
+        let ids: Vec<String> = out.matches.iter().take(50).map(|m| m.id.clone()).collect();
+        if ids.is_empty() {
+            BTreeMap::new()
+        } else {
+            match coord.estate_for(&estate.handle) {
+                Ok(locus_estate) => {
+                    let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+                    frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+                    locus_estate
+                        .get_drawers_matching_frame(&ids, &frame)
+                        .map(|f| f.admissible.into_iter()
+                            .map(|d| { let row = crate::dense_row::render(&d); (d.id.clone(), row) })
+                            .collect())
+                        .unwrap_or_default()
+                }
+                Err(_) => BTreeMap::new(),
+            }
+        }
+    };
 
     let header = if echo_query {
-        format!("found {} memory(s) [distilled] for: {}", out.matches.len(), query)
+        format!("found {} memory(s) for: {}", out.matches.len(), query)
     } else {
-        format!("found {} memory(s) [distilled]", out.matches.len())
+        format!("found {} memory(s)", out.matches.len())
     };
     let mut lines = vec![header];
     let mut any_fallback = false;
     for m in out.matches.iter().take(50) {
-        let room = node_names
-            .get(&m.parent_node_id)
-            .map(|(_, room)| room.clone())
-            .unwrap_or_else(|| {
-                if m.parent_node_id.is_empty() { "?".to_string() } else { m.parent_node_id.clone() }
-            });
-        lines.push(format!("{}  [{}]  {}", m.id, room, m.text));
-        // Per-hit metadata: token count (§6 budgeting) and the §10.2
-        // served-from marker so clients can distinguish "distilled
-        // representation" from "fallback".
+        lines.push(dense_by_id.get(&m.id).cloned()
+            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
         if m.served_from_content {
             any_fallback = true;
-            lines.push("    tokens: — | source: content (not yet distilled)".to_string());
-        } else {
-            let tokens = m.token_count.map(|t| t.to_string()).unwrap_or_else(|| "—".to_string());
-            lines.push(format!("    tokens: {tokens} | source: distilled"));
+            // Fallback marker on fallback hits ONLY (§10.2): the text below
+            // is verbatim content, not a distillate.
+            lines.push("source: content (not yet distilled)".to_string());
         }
+        lines.push(m.text.clone());
     }
-    // Discrimination signal — DistilledDiscriminationLevel (classifies exact-search
-    // geometry over originals). Wire prefix matches moot_memory_search phrasing;
-    // wording unified with the recall_discrimination main ladder.
-    let discrimination_line = match out.discrimination {
-        cognition_kit::DistilledDiscriminationLevel::Single =>
-            "discrimination: n/a — single/zero results.",
-        cognition_kit::DistilledDiscriminationLevel::High =>
-            "discrimination: high — clear top result.",
-        cognition_kit::DistilledDiscriminationLevel::Medium =>
-            "discrimination: medium — partial separation.",
-        cognition_kit::DistilledDiscriminationLevel::Low =>
-            "discrimination: low — top results are within epsilon; treat as effectively unranked. \
+    // Deviation-only narration (PR-03): discrimination line only on
+    // low/medium; clear and single/zero stay silent.
+    match out.discrimination {
+        cognition_kit::DistilledDiscriminationLevel::Medium => {
+            lines.push("discrimination: medium — partial separation.".to_string());
+        }
+        cognition_kit::DistilledDiscriminationLevel::Low => {
+            lines.push(
+                "discrimination: low — top results are within epsilon; treat as effectively unranked. \
              Prefer moot_recall_precise / moot_memory_search (ordering: byRelevanceDesc) for \
-             precision, or widen the query.",
-    };
-    lines.push(discrimination_line.to_owned());
+             precision, or widen the query.".to_string());
+        }
+        cognition_kit::DistilledDiscriminationLevel::High
+        | cognition_kit::DistilledDiscriminationLevel::Single => {}
+    }
     if any_fallback {
         // SPEC §10.3 fallback notice: results still return, served from
         // content, with a hint to populate the representations.

@@ -5,6 +5,7 @@ import CorpusKit
 import CorpusKitProviders
 import LocusKit
 import PersistenceKit
+import SubstrateML
 import VectorKit
 
 // EstateLifecycle.swift — Composition-aware estate provisioning and lifecycle.
@@ -223,12 +224,12 @@ public extension GeniusLocusKit {
         // already exists so calling it again on a pre-seeded estate is a safe no-op.
         //
         // The Corpus is now wired (step 2b), so each hint drawer is stamped with the
-        // corpus's normal model id — NOT the old "estate-provision" sentinel. Hints
-        // are filed row-only (LocusKit `seedWing` does not enqueue): their semantic
-        // vectors are produced by the next full-corpus reindex, alongside user
-        // content, rather than training a basis on the 7 hints alone. This is the
-        // intended wing organization behaviour — normal drawers, embedded under the normal
-        // model at reindex.
+        // corpus's normal model id — NOT the old "estate-provision" sentinel — and
+        // `seedDefaultWings` enqueues each newly-seeded hint onto the Corpus encode
+        // stream (the same change-reference path a `.regular` capture rides), so
+        // the drain-stage distillation rider fires for hints exactly as it does
+        // for user content: hints are BM25/vector indexed and distilled at drain,
+        // and the "distillation" drain lane can reach zero (DISTILL_SEED_STALL).
         //
         // Failure policy: wing seeding is part of provision — if seeding fails
         // the estate is considered partially provisioned. The estate is closed
@@ -277,6 +278,18 @@ public extension GeniusLocusKit {
     /// The method delegates per-wing filing to `LocusKit.Estate.seedWing`, which
     /// inserts unconditionally (not idempotent by itself). The outer check here
     /// provides the idempotency boundary.
+    ///
+    /// **Encode routing (DISTILL_SEED_STALL):** when a Corpus is registered,
+    /// hint drawers are indexed and distilled INLINE through the encode path —
+    /// the same index/distill/recompose transform a queued drawer receives at
+    /// drain — so seeding returns with the estate settled and the
+    /// "distillation" drain lane able to reach zero. The predicate is
+    /// representation-eligibility (bit 19 `hasCurrentRepresentation` clear, or
+    /// a stale pipeline version) over the `AI_Charter_Hint` room only: a hint
+    /// that has already been indexed and distilled is never re-processed, so
+    /// re-opening an estate stays a no-op — no spurious encode work per open.
+    /// (The predicate deliberately does NOT key on `hintAddedBy`, which is
+    /// provenance-only.)
     ///
     /// - Parameters:
     ///   - handle: An open estate handle in the coordinator's registry.
@@ -329,6 +342,55 @@ public extension GeniusLocusKit {
                 now: now
             )
             seededCount += 1
+        }
+
+        // Encode routing (DISTILL_SEED_STALL): index + distill hint drawers
+        // that still owe a representation, INLINE through the encode path —
+        // the same index/distill/recompose transform a queued drawer receives
+        // at drain, without touching the queue. Inline (not enqueued) on
+        // purpose: seeding returns with the estate SETTLED — hints
+        // BM25/vector indexed, distilled (bit 19 set), and the young fallback
+        // basis converged via the post-ingest settle — so nothing races the
+        // first user capture and no drain worker/lease is required at open.
+        // Runs AFTER the seeding loop so it covers both the hints seeded just
+        // now and hints seeded by an earlier open that predates this routing
+        // (their bit 19 is clear — the one-time backfill). Skipped entirely
+        // when no Corpus is registered (.locusOnly / bare open before
+        // wiring): a corpus-less estate has no semantic lane; those hints are
+        // picked up by reindex/sweep once a corpus exists.
+        if let corpus = corpusKits[handle] {
+            // Re-scan when the loop seeded new hints (they are not in
+            // `existing`); otherwise reuse the scan from the idempotence check.
+            let drawers = seededCount > 0 ? try await locusEstate.allDrawers() : existing
+            let nodeIds = Array(Set(drawers.map(\.parentNodeId)))
+            let nodeNames = try await locusEstate.resolveNodeNames(parentNodeIds: nodeIds)
+            let distillFn = distillFunction(for: handle)
+            var settled = 0
+            for hint in drawers
+            where nodeNames[hint.parentNodeId]?.room == LocusKit.hintRoom
+                && !hint.content.isEmpty
+                && (!hint.hasCurrentRepresentation
+                    || hint.distilledPipelineVersion != DistillationPipelineVersion.current) {
+                // Index (BM25 + vector lanes) through the engine's direct
+                // path; the post-ingest settle inside indexContent keeps the
+                // young basis covering the growing corpus.
+                _ = try await corpus.indexContent(id: hint.id, now: hint.filedAt)
+                // Drain-stage transform, inline: same distill + dense
+                // recompose the queue's onEncoded rider performs, with the
+                // seeding `now` threaded for determinism.
+                let didDistill = try await distillItem(
+                    handle: handle, drawerID: hint.id, content: hint.content,
+                    distillFn: distillFn, now: now)
+                if didDistill {
+                    _ = try? await corpus.recomposeDenseVector(id: hint.id, now: now)
+                }
+                settled += 1
+            }
+            if settled > 0 {
+                Self.lifecycleLog.info(
+                    "seedDefaultWings: indexed + distilled \(settled, privacy: .public) hint drawer(s) inline"
+                )
+            }
         }
 
         if seededCount > 0 {

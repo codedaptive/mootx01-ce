@@ -82,16 +82,47 @@ enum ReviewFixtures {
             843C301F-23A0-4F23-BC1D-A5090842CBD3  object=[ACCEPTED 2026-07-05 single tree develop]  source=599ED465-7C48-4567-8382-0D8E2396081D  filed=2026-07-09T20:53:30Z
         """
 
-    /// `moot_memory_search` — live capture, three rows kept plus the two footer
-    /// lines the surface appends (both must be skipped by DrawerLineParser).
+    /// `moot_memory_search` — NOT live-captured: transcribed from the code that
+    /// formats it (DenseRow.render: `uuid · subject · fdc:<code> · qid:<QID> ·
+    /// <iso>`) plus the two footer lines, after the PR-03 dense-row migration
+    /// replaced the earlier `<uuid>  [<room>]  <content>` listing. The text
+    /// feeds only section notices — review items derive from
+    /// `memorySearchStructured` below.
     static let memorySearch = """
         found 7 memory(s)
-        DFA470F5-4D6C-48E6-AF8C-56E535F1DD43  [fab5-w2]  W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary
-        591F3E67-878E-4373-A6FC-3406B26E38D8  [fab5-w2]  W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note.
-        A743A822-2FAD-4958-97A9-81CB1EB2201F  [fab5-w2]  W2-INTERFACE FAB5-H1: MootWorker protocol, three worker APIs, fallback semantics.
+        DFA470F5-4D6C-48E6-AF8C-56E535F1DD43 · W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary · fdc:D2 · qid:Q00 · 2026-07-23T18:04:11Z
+        591F3E67-878E-4373-A6FC-3406B26E38D8 · W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note. · fdc:D2 · qid:Q00 · 2026-07-23T18:05:02Z
+        A743A822-2FAD-4958-97A9-81CB1EB2201F · W2-INTERFACE FAB5-H1: MootWorker protocol, three worker APIs, fallback semantics. · fdc:D2 · qid:Q00 · 2026-07-23T18:06:40Z
         discrimination: medium — partial separation.
         recall_provenance: dense_lane:active degraded_stages:none
         """
+
+    /// The structured twin of `memorySearch` — the `structuredContent` block
+    /// the recall family carries beside the text (shape from
+    /// ToolDispatch.structuredTextResult / structuredRecallRow).
+    /// `ReviewLineParsing.drawers` decodes items from THESE rows.
+    static let memorySearchStructured: JSONValue = .object([
+        "results": .array([
+            .object([
+                "id": .string("DFA470F5-4D6C-48E6-AF8C-56E535F1DD43"),
+                "room": .string("fab5-w2"),
+                "content": .string("W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary"),
+                "subject": .string("W2-INTERFACE FAB5-I1: WorkPacketKit Schema + Persistence — Interface Summary"),
+            ]),
+            .object([
+                "id": .string("591F3E67-878E-4373-A6FC-3406B26E38D8"),
+                "room": .string("fab5-w2"),
+                "content": .string("W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note."),
+                "subject": .string("W2-INTERFACE FAB5-L1: iPadOS Enablement — defect list and second-pass note."),
+            ]),
+            .object([
+                "id": .string("A743A822-2FAD-4958-97A9-81CB1EB2201F"),
+                "room": .string("fab5-w2"),
+                "content": .string("W2-INTERFACE FAB5-H1: MootWorker protocol, three worker APIs, fallback semantics."),
+                "subject": .string("W2-INTERFACE FAB5-H1: MootWorker protocol, three worker APIs, fallback semantics."),
+            ]),
+        ])
+    ])
 
     /// `moot_read_journal` (last_n 3) — live capture; entry text shortened, the
     /// `[<iso>]  ` stamp prefix is exactly as emitted.
@@ -138,6 +169,12 @@ enum ReviewFixtures {
 
     // MARK: Response tables
 
+    /// Structured blocks per surface, for the populated maps. Only the recall
+    /// family carries one; every other surface answers in text alone.
+    static let populatedStructured: [ReviewSurface: JSONValue] = [
+        .memorySearch: memorySearchStructured
+    ]
+
     /// Every surface answering with live-captured content.
     static let populated: [ReviewSurface: String] = [
         .themeWeather: themeWeather,
@@ -175,20 +212,26 @@ actor StubReviewReader: ReviewSurfaceReading {
     private(set) var callArguments: [[String: JSONValue]] = []
 
     private let responses: [ReviewSurface: String]
+    private let structured: [ReviewSurface: JSONValue]
     private let failing: Set<ReviewSurface>
     private let refusalText: String
 
     /// - Parameters:
     ///   - responses: text to return per surface. A surface with no entry returns
     ///     the empty string, which builders must treat as "nothing parsed".
+    ///   - structured: structuredContent blocks per surface (recall family
+    ///     only). A surface with no entry answers with structured == nil, the
+    ///     shape every text-only tool produces.
     ///   - failing: surfaces that answer with `isError: true`.
     ///   - refusalText: the message failing surfaces return.
     init(
         responses: [ReviewSurface: String],
+        structured: [ReviewSurface: JSONValue] = [:],
         failing: Set<ReviewSurface> = [],
         refusalText: String = "estate is not open"
     ) {
         self.responses = responses
+        self.structured = structured
         self.failing = failing
         self.refusalText = refusalText
     }
@@ -199,6 +242,9 @@ actor StubReviewReader: ReviewSurfaceReading {
         if failing.contains(surface) {
             return ReviewToolResponse(text: refusalText, isError: true)
         }
-        return ReviewToolResponse(text: responses[surface] ?? "", isError: false)
+        return ReviewToolResponse(
+            text: responses[surface] ?? "",
+            structured: structured[surface],
+            isError: false)
     }
 }

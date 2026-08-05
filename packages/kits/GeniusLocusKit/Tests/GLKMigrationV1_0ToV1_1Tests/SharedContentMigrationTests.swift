@@ -89,7 +89,12 @@ struct SharedContentMigrationTests {
         let owner = OwnerCredentials(ownerIdentifier: "scm-owner")
         let (storage, url) = try scratchStorage()
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        // In-memory identity key store: keep this file-backed estate's signing
+        // key out of the Keychain (test-loop key-residue fix). File deletion does
+        // not dispose Keychain items, so the default store would orphan one entry.
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         var drawerIDs: [String] = []
         for content in drawerContents {
@@ -188,7 +193,12 @@ struct SharedContentMigrationTests {
         let (storage, url) = try scratchStorage()
         defer { try? FileManager.default.removeItem(at: url) }
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        // In-memory identity key store: keep this file-backed estate's signing
+        // key out of the Keychain (test-loop key-residue fix). File deletion does
+        // not dispose Keychain items, so the default store would orphan one entry.
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         let report = try await kit.runSharedContentMigration(handle: handle, now: now)
         #expect(report.state == .complete)

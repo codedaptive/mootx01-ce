@@ -161,6 +161,7 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
 
         let a = args![
             "content" => "persistent content for round-trip test",
+        "subject" => "persistent content for round-trip test",
             "location" => "persistence-room"
         ];
         let result =

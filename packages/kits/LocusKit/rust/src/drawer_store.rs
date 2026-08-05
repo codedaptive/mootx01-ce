@@ -113,6 +113,50 @@ use substrate_types::fingerprint256::Fingerprint256;
 /// store, including minimal fakes, must implement them. Production backends —
 /// the LP-1E `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
 /// `DrawerStoreCore`) — override every method.
+/// The subject length contract (characters). One capped sentence in the
+/// AI-facing register — the bound that keeps every contact-sheet row's
+/// context cost near-uniform. Twin of Swift
+/// `DrawerStore.subjectLengthContract`.
+pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
+
+/// Pipeline-version tag for subjects authored by a calling AI at the
+/// capture/mutate boundary (as opposed to the future miniLLM producer,
+/// `minillm-v1`). Stored in `subject_pipeline_version` as provenance and
+/// as the regeneration lever (SPEC B-19). Twin of Swift
+/// `DrawerStore.subjectPipelineAIV1`.
+pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
+
+/// Pipeline-version tag for subjects produced by the on-device miniLLM
+/// rider (PR-10's producer; the Rust lane stays DARK until a model
+/// exists — seam compiled, gated off). Provenance tiers stored in
+/// `subject_pipeline_version`: ai-v1 (filing/backfill AI), minillm-v1
+/// (model rider), consolidation-v1 (deterministic vague writer),
+/// seed-v1 (structural seeds). A version differing from a requested
+/// producer contract marks the row a REGENERATION candidate
+/// (`count_missing_subject`) — the migration lever. Twin of Swift
+/// `DrawerStore.subjectPipelineMiniLLMV1`.
+pub const SUBJECT_PIPELINE_MINILLM_V1: &str = "minillm-v1";
+
+/// Result of a lineage-wide gated expunge (`expunge_gated`). Twin of
+/// Swift `DrawerStore.ExpungeOutcome`.
+///
+/// `refused_sibling_ids` lists the lineage members whose
+/// `accepted → tombstoned` transition the audit gate refused (S-3:
+/// audit-grade rows survive intact), in walk order. A refused sibling
+/// was left byte-identical — content, state, audit trail, and
+/// erasure-ledger absence — so a non-empty list means the expunge was
+/// partial and the caller must not assume the whole lineage was erased.
+#[derive(Debug, Clone)]
+pub struct ExpungeOutcome {
+    /// The target drawer's gate-produced audit event. When
+    /// `seal_audit` was true it has already been appended; when false
+    /// it is carried here for deferred sealing (§B-2a).
+    pub event: substrate_lib::verbs::AuditEvent,
+    /// IDs of lineage siblings the gate refused to tombstone, in walk
+    /// order. Empty means the expunge covered the full lineage.
+    pub refused_sibling_ids: Vec<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------
@@ -590,21 +634,29 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Expunge a drawer and all its lineage siblings: tombstone the state,
-    /// synchronously zero the content blob, and stamp `tombstonedAt` — all in
-    /// one transaction. Cookbook §10.5 storage-layer postconditions. Aggregates
-    /// untouched per §9.5.1. The cross-kit RAG vector delete is GLK's
-    /// orchestration responsibility.
+    /// Expunge a drawer and the lineage siblings whose tombstone transition
+    /// the gate admits: tombstone the state, synchronously zero the content
+    /// blob, and stamp `tombstonedAt` — all in one transaction. Cookbook
+    /// §10.5 storage-layer postconditions. Aggregates untouched per §9.5.1.
+    /// The cross-kit RAG vector delete is GLK's orchestration responsibility.
+    ///
+    /// A sibling the gate refuses (S-3: `accepted → tombstoned` is
+    /// forbidden — audit-grade rows survive intact) is left byte-identical:
+    /// no content write, no state write, no audit append, no erasure-ledger
+    /// record. Refused ids are carried in the returned
+    /// `ExpungeOutcome::refused_sibling_ids` so the caller can detect a
+    /// partial expunge; the walk continues over the remaining members.
     ///
     /// When `seal_audit` is `true` (the default for direct LocusKit callers),
     /// the gate-produced audit event is appended to the audit log inside this
     /// call — preserving the historical atomic single-call contract.
     ///
     /// When `seal_audit` is `false` (used by the GLK orchestration path), the
-    /// audit event is produced and returned but NOT appended. The caller is
-    /// responsible for calling `seal_expunge_audit` after the cross-kit vector
-    /// delete succeeds, or `seal_expunge_orphan_audit` if it fails — satisfying
-    /// the §B-2a ordering invariant without producing a false-success audit.
+    /// audit event is produced and carried in the outcome but NOT appended.
+    /// The caller is responsible for calling `seal_expunge_audit` after the
+    /// cross-kit vector delete succeeds, or `seal_expunge_orphan_audit` if it
+    /// fails — satisfying the §B-2a ordering invariant without producing a
+    /// false-success audit.
     fn expunge_gated(
         &self,
         _drawer_id: &str,
@@ -612,7 +664,7 @@ pub trait DrawerStore: Send + Sync {
         _reason: Option<&str>,
         _now: i64,
         _seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<ExpungeOutcome, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "expunge_gated not implemented for this DrawerStore impl".to_string(),
         ))
@@ -653,6 +705,93 @@ pub trait DrawerStore: Send + Sync {
     fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "count_undistilled not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
+
+    /// Write the subject line of one drawer — all three subject columns
+    /// in ONE atomic UPDATE (PR-01; same invariant family as the
+    /// distilled quad: NULL together or populated together) PLUS a sealed
+    /// `"setSubject"` custody audit event, committed together in one
+    /// transaction (Codex cc90c5dcecb081918c159788e1ffb3d6): the column
+    /// write and the audit append succeed or fail together. `changed_by`
+    /// is the audit actor; `reason` is the caller's note (None when none
+    /// was supplied — the audit row is still sealed). Enforces the
+    /// SUBJECT_LENGTH_CONTRACT at the storage boundary. `generated_at` is
+    /// epoch millis (deterministic clock — passed in, never read here).
+    ///
+    /// Returns the count of rows updated (0 = drawer not found, in which
+    /// case no audit event is sealed; 1 = success). Mirrors Swift
+    /// `DrawerStore.setSubjectRepresentation`.
+    fn set_subject_representation(
+        &self,
+        _drawer_id: &str,
+        _subject: &str,
+        _pipeline_version: &str,
+        _generated_at: i64,
+        _changed_by: &str,
+        _reason: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_subject_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Count of active drawers still awaiting a subject line — the PR-01
+    /// backfill-eligibility predicate as an aggregate (not tombstoned,
+    /// non-empty content, `subject` NULL or stale pipeline version).
+    /// Feeds the estate-status subject-debt counter. Mirrors Swift
+    /// `countMissingSubject`.
+    fn count_missing_subject(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_missing_subject not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Presence debt, NULL-only (PR-09): live rows with non-empty content
+    /// and NO subject at all — the subject-backfill drain lane's
+    /// `pending`. Distinct from `count_missing_subject`, which adds
+    /// producer-version mismatches (regeneration debt). Mirrors Swift
+    /// `countSubjectDebt`.
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_subject_debt not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09): up to `limit`
+    /// subject-debt rows (same predicate as `count_subject_debt`) in
+    /// deterministic (filedAt ASC, id ASC) order, fully hydrated so the
+    /// producer can read `content`. Settled-work skip is structural — a
+    /// row whose subject was written no longer matches the predicate.
+    /// Mirrors Swift `subjectDebtBatch(limit:)`.
+    fn subject_debt_batch(&self, _limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "subject_debt_batch not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Tier-aware debt count (PR-10): NULL rows plus rows produced under
+    /// any of `pipelines` (the tiers BELOW the requesting producer on
+    /// the trust ladder). Mirrors Swift
+    /// `countSubjectDebt(includingPipelines:)`.
+    fn count_subject_debt_including(&self, _pipelines: &[String]) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_subject_debt_including not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Tier-aware sweep enumerator (PR-10). A producer's own tier is
+    /// never in its list, so settled-skip still holds. Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:)`.
+    fn subject_debt_batch_including(
+        &self,
+        _limit: usize,
+        _pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "subject_debt_batch_including not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2051,7 +2190,7 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<ExpungeOutcome, LocusKitError> {
         self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
     fn set_distilled_representation(
@@ -2072,6 +2211,43 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_undistilled(pipeline_version)
+    }
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        self.as_ref().set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            changed_by,
+            reason,
+        )
+    }
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().count_missing_subject(pipeline_version)
+    }
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_subject_debt()
+    }
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().subject_debt_batch(limit)
+    }
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.as_ref().count_subject_debt_including(pipelines)
+    }
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().subject_debt_batch_including(limit, pipelines)
     }
     fn seal_expunge_audit(
         &self,

@@ -25,7 +25,7 @@
 //! an entry already in `deny` (see its doc comment). `revoke` strips both
 //! namespace prefixes and leaves everything else.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::merge::MergeError;
@@ -208,7 +208,13 @@ pub fn grant(settings_path: &Path) -> Result<usize, MergeError> {
 /// not yet triaged) still lands in `Ask`, the safe middle — but
 /// `explicitly_classified_tools` lets a test catch that omission instead of
 /// shipping it silently.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+///
+/// The variant order is deliberate and load-bearing: it ascends by how much
+/// the tier RESTRICTS, so the derived `Ord` gives `Allow < Ask < Deny` and
+/// `grant_tiered` can resolve a disagreement between a tool's two namespace
+/// entries with `.max()` — most restrictive wins. Reordering the variants
+/// would silently invert that rule.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Tier {
     Allow,
     Ask,
@@ -231,11 +237,36 @@ pub fn classify(tool: &str) -> Tier {
 
 /// Merge every tool into its tier: `permissions.allow` / `.ask` / `.deny`
 /// (the install DEFAULT). A tool the user already placed in ANY tier is
-/// left exactly where it is. Writes BOTH namespace prefixes per tool — an
-/// install that only ever wrote `PREFIX` gets its missing `PLUGIN_PREFIX`
-/// twin backfilled here at `classify`'s CURRENT default tier, not copied
-/// from whatever tier the `PREFIX` sibling happens to sit in. Returns
-/// (allow, ask, deny) counts added (both namespaces combined).
+/// left exactly where it is — this function only ever ADDS, never moves an
+/// entry that already exists. Writes BOTH namespace prefixes per tool.
+///
+/// **A placement under either namespace binds its twin.** `PREFIX` and
+/// `PLUGIN_PREFIX` are two addresses for one capability, not two
+/// capabilities. So an install that only ever wrote `PREFIX` gets its
+/// missing `PLUGIN_PREFIX` twin added at the SIBLING'S tier, not at
+/// `classify`'s default. Where the two namespaces disagree, the MOST
+/// RESTRICTIVE tier found wins for the newly added entry only:
+/// `Deny` > `Ask` > `Allow`. Only when neither namespace carries the tool
+/// at all does `classify` decide.
+///
+/// Backfilling at the classifier default instead would bypass a user's
+/// `deny`: someone who denies `mcp__mootx01__moot_memory_get` would get
+/// `mcp__plugin_mootx01_mootx01__moot_memory_get` added to `allow` on the
+/// next install or upgrade, because that exact string is "genuinely
+/// absent". A user cannot place an entry for a namespace they have never
+/// seen.
+///
+/// The sibling's tier is read from the settings file as it stands on
+/// entry, which at every production call site is AFTER `migrate_tiers` has
+/// run (`commands::install` and `commands::upgrade` run the two passes in
+/// that order, as do the Swift twins), so inheritance reads a tier that
+/// has already converged on the current default. The lookup is computed
+/// once per tool, before either namespace entry is pushed, so the order in
+/// which this run writes the two prefixes cannot change the result.
+///
+/// Mirrors Swift `PermissionsWriter.mergeTiered` (Swift leads), including
+/// the conflict rule. Returns (allow, ask, deny) counts added (both
+/// namespaces combined).
 pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), MergeError> {
     let mut root = read_settings(settings_path)?;
     let obj = root.as_object_mut().expect("root object");
@@ -261,12 +292,20 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
         }
     }
 
-    // The user's existing placement (any tier) wins over our default.
-    let existing: std::collections::HashSet<String> = ["allow", "ask", "deny"]
-        .iter()
-        .flat_map(|k| perms[*k].as_array().unwrap().iter())
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+    // The user's existing placement (any tier) wins over our default — and
+    // WHERE each existing entry sits is load-bearing, not merely whether it
+    // exists, because an absent entry inherits its twin's tier. An entry
+    // cannot legitimately appear in more than one tier (this function never
+    // duplicates); if it somehow does, the first tier found wins, matching
+    // `migrate_tiers`' reverse index.
+    let mut existing_tier: HashMap<String, Tier> = HashMap::new();
+    for (tier, key) in [(Tier::Allow, "allow"), (Tier::Ask, "ask"), (Tier::Deny, "deny")] {
+        for v in perms[key].as_array().unwrap() {
+            if let Some(s) = v.as_str() {
+                existing_tier.entry(s.to_string()).or_insert(tier);
+            }
+        }
+    }
 
     let list = aria_mcp::tool_list::build_tool_list();
     let names: Vec<String> = list
@@ -282,10 +321,21 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
 
     let mut added = (0usize, 0usize, 0usize);
     for name in names {
-        let tier = classify(&name);
+        // Computed from the pre-existing state, once per tool and before
+        // either entry is pushed. Scanning every prefix rather than only
+        // "the other one" is equivalent here and stays correct if a third
+        // namespace is ever added: a prefix whose entry is absent
+        // contributes nothing, and one whose entry is present is exactly a
+        // sibling to inherit from. `max()` is most-restrictive-wins — see
+        // `Tier`'s variant-order note.
+        let inherited = ALL_PREFIXES
+            .iter()
+            .filter_map(|p| existing_tier.get(&format!("{p}{name}")).copied())
+            .max();
+        let tier = inherited.unwrap_or_else(|| classify(&name));
         for prefix in ALL_PREFIXES {
             let entry = format!("{prefix}{name}");
-            if existing.contains(&entry) {
+            if existing_tier.contains_key(&entry) {
                 continue;
             }
             let (key, slot) = match tier {
@@ -684,6 +734,182 @@ mod tests {
         assert!(allow.contains(&"mcp__plugin_mootx01_mootx01__moot_memory_search"));
         assert!(deny.contains(&"mcp__mootx01__moot_erase_memory"));
         assert!(deny.contains(&"mcp__plugin_mootx01_mootx01__moot_erase_memory"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // A placement under either namespace binds its twin.
+    //
+    // Codex finding 2d36552ac03c8191867d26bb6ae32376: matching entries by
+    // exact string and backfilling each prefix independently would let a
+    // user who denies a tool under the namespace they can see get the other
+    // namespace's twin added to `allow` on the next install or upgrade.
+    // These pin the rule that prevents it, mirroring the Swift suite case for case
+    // (Swift leads). `moot_memory_search` is the subject throughout: it is
+    // a real tool on the live surface and classifies `Allow`, so a user
+    // `deny` on it is maximally visible if inheritance fails.
+    // -----------------------------------------------------------------
+
+    const DIRECT_SEARCH: &str = "mcp__mootx01__moot_memory_search";
+    const PLUGIN_SEARCH: &str = "mcp__plugin_mootx01_mootx01__moot_memory_search";
+
+    /// Seed a settings.json with `seed`, run `grant_tiered`, and return the
+    /// three resulting tier lists. Every inheritance test has the same
+    /// shape — place one entry by hand, merge, inspect where the twin
+    /// landed — so the plumbing lives here rather than six times over.
+    fn seed_and_grant(tag: &str, seed: serde_json::Value) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let dir = tmp(tag);
+        let p = dir.join("settings.json");
+        std::fs::write(&p, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+        grant_tiered(&p).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let list = |k: &str| -> Vec<String> {
+            v["permissions"][k]
+                .as_array()
+                .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        };
+        let out = (list("allow"), list("ask"), list("deny"));
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn grant_tiered_deny_under_direct_namespace_binds_absent_plugin_twin() {
+        // The user denied the tool under the only namespace they have ever
+        // seen. Backfilling the plugin twin at the classifier default would
+        // put the SAME capability in `allow` — the bypass under test.
+        let (allow, _ask, deny) = seed_and_grant(
+            "grant-tiered-deny-binds-twin",
+            serde_json::json!({ "permissions": { "deny": [DIRECT_SEARCH] } }),
+        );
+        assert!(
+            deny.iter().any(|e| e == DIRECT_SEARCH),
+            "the user's deny must survive untouched"
+        );
+        assert!(
+            deny.iter().any(|e| e == PLUGIN_SEARCH),
+            "the absent plugin twin must inherit deny — a user cannot place an entry for a namespace they have never seen"
+        );
+        assert!(
+            !allow.iter().any(|e| e == PLUGIN_SEARCH),
+            "the denied capability must not reappear in allow under the sibling namespace"
+        );
+    }
+
+    #[test]
+    fn grant_tiered_ask_under_direct_namespace_binds_absent_plugin_twin() {
+        // Same shape, one tier looser: an `ask` the user set is still a
+        // decision about the capability, not about a string.
+        let (allow, ask, _deny) = seed_and_grant(
+            "grant-tiered-ask-binds-twin",
+            serde_json::json!({ "permissions": { "ask": [DIRECT_SEARCH] } }),
+        );
+        assert!(ask.iter().any(|e| e == DIRECT_SEARCH), "the user's ask must survive untouched");
+        assert!(ask.iter().any(|e| e == PLUGIN_SEARCH), "the absent plugin twin must inherit ask");
+        assert!(
+            !allow.iter().any(|e| e == PLUGIN_SEARCH),
+            "must not take classify's allow default"
+        );
+    }
+
+    #[test]
+    fn grant_tiered_plugin_deny_binds_absent_direct_twin() {
+        // The mirror image. Neither prefix is privileged — whichever one
+        // carries the user's decision is the one the other inherits from.
+        let (allow, _ask, deny) = seed_and_grant(
+            "grant-tiered-plugin-deny-binds-twin",
+            serde_json::json!({ "permissions": { "deny": [PLUGIN_SEARCH] } }),
+        );
+        assert!(deny.iter().any(|e| e == PLUGIN_SEARCH), "the user's deny must survive untouched");
+        assert!(deny.iter().any(|e| e == DIRECT_SEARCH), "the absent direct twin must inherit deny");
+        assert!(
+            !allow.iter().any(|e| e == DIRECT_SEARCH),
+            "must not take classify's allow default"
+        );
+    }
+
+    #[test]
+    fn grant_tiered_never_moves_disagreeing_siblings() {
+        // One namespace allowed, the other denied. With both entries present
+        // there is nothing left to add for this tool, so the observable
+        // guarantee is that grant_tiered MOVES NEITHER — inheritance decides
+        // the tier of new entries only and is never a licence to re-tier an
+        // existing one (that is migrate_tiers' job, and deny is sacred
+        // there). The most-restrictive tie-break itself is unreachable while
+        // there are exactly two namespaces: a disagreement implies both
+        // entries exist, so no entry is added to apply it to. It is
+        // defensive, and becomes observable only if a third prefix is added.
+        let (allow, ask, deny) = seed_and_grant(
+            "grant-tiered-disagreeing-siblings",
+            serde_json::json!({
+                "permissions": { "allow": [DIRECT_SEARCH], "deny": [PLUGIN_SEARCH] }
+            }),
+        );
+        assert!(allow.iter().any(|e| e == DIRECT_SEARCH), "the user's allow must stay put");
+        assert!(deny.iter().any(|e| e == PLUGIN_SEARCH), "the user's deny must stay put");
+        assert!(
+            !deny.iter().any(|e| e == DIRECT_SEARCH),
+            "the allowed entry must not be duplicated into deny"
+        );
+        assert!(
+            !allow.iter().any(|e| e == PLUGIN_SEARCH),
+            "the denied entry must not be duplicated into allow"
+        );
+        assert!(!ask.iter().any(|e| e == DIRECT_SEARCH || e == PLUGIN_SEARCH));
+    }
+
+    #[test]
+    fn grant_tiered_falls_back_to_classify_when_no_sibling_exists() {
+        // The unchanged path: inheritance only fires when a sibling exists.
+        // A settings file carrying an unrelated tool must not perturb how
+        // any other tool is tiered.
+        let (allow, ask, deny) = seed_and_grant(
+            "grant-tiered-no-sibling",
+            serde_json::json!({ "permissions": { "deny": ["mcp__mootx01__moot_estate_ping"] } }),
+        );
+        for prefix in ALL_PREFIXES {
+            assert!(
+                deny.iter().any(|e| e == &format!("{prefix}moot_erase_memory")),
+                "destructive default unchanged under {prefix}"
+            );
+            assert!(
+                ask.iter().any(|e| e == &format!("{prefix}moot_withdraw_memory")),
+                "mutation default unchanged under {prefix}"
+            );
+            assert!(
+                allow.iter().any(|e| e == &format!("{prefix}moot_memory_search")),
+                "read default unchanged under {prefix}"
+            );
+        }
+        // The unrelated tool's own inheritance still applies to ITS twin.
+        assert!(deny.iter().any(|e| e == "mcp__plugin_mootx01_mootx01__moot_estate_ping"));
+    }
+
+    #[test]
+    fn grant_tiered_inheritance_is_idempotent() {
+        let dir = tmp("grant-tiered-inherit-idempotent");
+        let p = dir.join("settings.json");
+        std::fs::write(
+            &p,
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "permissions": { "deny": [DIRECT_SEARCH] } }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        grant_tiered(&p).unwrap();
+        let first = std::fs::read_to_string(&p).unwrap();
+
+        let second_added = grant_tiered(&p).unwrap();
+        assert_eq!(second_added, (0, 0, 0), "a second run must add nothing");
+        assert_eq!(
+            first,
+            std::fs::read_to_string(&p).unwrap(),
+            "settings.json must be byte-identical across runs"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

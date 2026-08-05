@@ -17,8 +17,9 @@ import MootIntentKit
 //
 // Context selection is the caller's: pass `context` and the worker cites exactly
 // those drawers. Pass none and it recalls `query` through `moot_memory_search`
-// (a read verb) and cites what came back — parsed by `DrawerLineParser`, the
-// intent layer's own parser for that response shape.
+// (a read verb) and cites what came back — decoded from the response's
+// structuredContent block by `StructuredRecallResults`, the intent layer's
+// typed decoder for recall results.
 
 // MARK: - Context / reference type
 
@@ -246,9 +247,10 @@ public struct HandoffWorker: MootWorker {
             "limit": .integer(Int64(input.limit)),
         ])
         guard !result.isError else { return [] }
-        // DrawerLineParser owns the `<uuid>  [room]  content` response shape for
-        // the intent layer; reusing it keeps one parser for one format.
-        return DrawerLineParser.parse(result.text).prefix(max(0, input.limit)).map { drawer in
+        // Citations come from the reply's structuredContent rows — typed data,
+        // never a parse of the display text, which interpolates drawer content
+        // verbatim and is therefore forgeable (see StructuredRecallResults).
+        return StructuredRecallResults.entities(from: result.structured).prefix(max(0, input.limit)).map { drawer in
             HandoffContextItem(
                 subjectID: drawer.id,
                 source: "moot_memory_search",

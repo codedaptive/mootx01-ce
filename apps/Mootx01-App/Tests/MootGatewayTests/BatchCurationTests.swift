@@ -49,11 +49,13 @@ private actor PartialReviveCaller: MootToolCalling {
 @Suite("Batch curation (M-MXA-2R)", .serialized)
 struct BatchCurationTests {
 
-    /// Capture N fixture drawers, returning their ids.
+    /// Capture N fixture drawers, returning their ids. `subject` is mandatory
+    /// on moot_file_memory (PR-02 capture contract).
     private func captureFixtures(_ bridge: MootBridge, count: Int) async throws -> [String] {
         for i in 0..<count {
             _ = await bridge.callToolFull("moot_file_memory", arguments: [
                 "content": .string("batch fixture drawer \(i) badger"),
+                "subject": .string("Batch fixture drawer \(i) exercises curation with the badger token."),
                 "location": .string("batch-tests"),
                 "impatient": .bool(true),
             ])
@@ -62,7 +64,7 @@ struct BatchCurationTests {
             "query": .string("badger"),
             "limit": .integer(Int64(count + 5)),
         ])
-        let ids = MootBridge.parseDrawerLines(search.text).map(\.id)
+        let ids = StructuredRecallResults.entities(from: search.structured).map(\.id)
         try #require(ids.count == count)
         return ids
     }

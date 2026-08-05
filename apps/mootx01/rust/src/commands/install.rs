@@ -1263,11 +1263,11 @@ mod tests {
         let rewritten: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(plugin_dir.join(".mcp.json")).unwrap()).unwrap();
         assert_eq!(
-            rewritten["mcpServers"]["mootx01"]["type"], "http",
+            rewritten["mcpServers"][clients::PLUGIN_SERVER_NAME]["type"], "http",
             "the stale stdio manifest must have converged to the current HTTP-shaped entry; got: {rewritten}"
         );
         assert!(
-            rewritten["mcpServers"]["mootx01"]["command"].is_null(),
+            rewritten["mcpServers"][clients::PLUGIN_SERVER_NAME]["command"].is_null(),
             "the stale bare `command: mootx01` placeholder must be gone; got: {rewritten}"
         );
 

@@ -74,6 +74,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("origin document corpus material reference"),
+                "subject": .string("origin document corpus material reference"),
                 "location": .string("source-docs"),
                 "wing": .string("Source Corpus"),
             ]))
@@ -103,6 +104,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("peregrine falcon dive speed urban nesting adaptation"),
+                "subject": .string("peregrine falcon dive speed urban nesting adaptation"),
                 "location": .string("wildlife"),
             ]))
         let fileObj = try #require(fileResult.objectValue)
@@ -309,6 +311,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("arctic fox camouflage snow winter survival"),
+                "subject": .string("arctic fox camouflage snow winter survival"),
                 "location": .string("wildlife"),
             ]))
 
@@ -331,6 +334,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("bald eagle nest riverine habitat territory"),
+                "subject": .string("bald eagle nest riverine habitat territory"),
                 "location": .string("wildlife"),
             ]))
 
@@ -356,6 +360,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("grey wolf pack hierarchy social structure"),
+                "subject": .string("grey wolf pack hierarchy social structure"),
                 "location": .string("wildlife"),
             ]))
 
@@ -381,6 +386,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("black bear foraging berry season omnivore"),
+                "subject": .string("black bear foraging berry season omnivore"),
                 "location": .string("wildlife"),
             ]))
 
@@ -405,6 +411,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("mountain lion cougar puma altitude range stealth"),
+                "subject": .string("mountain lion cougar puma altitude range stealth"),
                 "location": .string("wildlife"),
             ]))
 
@@ -431,6 +438,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("wolverine boreal forest solitary wide range"),
+                "subject": .string("wolverine boreal forest solitary wide range"),
                 "location": .string("wildlife"),
             ]))
 
@@ -455,6 +463,7 @@ struct WingsSurfaceTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content": .string("snowy owl arctic tundra silent flight prey"),
+                "subject": .string("snowy owl arctic tundra silent flight prey"),
                 "location": .string("wildlife"),
             ]))
 

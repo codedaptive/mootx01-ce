@@ -45,7 +45,10 @@ struct SensitivityUnlockIntegrationTests {
         let frame = CaptureFrame(
             content: content, channel: .typed, room: room,
             latticeAnchor: .udc("004"), addedBy: "aria-mcp-tests",
-            embeddingModelID: "test-model-v1", sensitivity: sensitivity
+            embeddingModelID: "test-model-v1", sensitivity: sensitivity,
+            // Subject = capped content so granted rows surface the text
+            // these tests assert on in dense-row replies.
+            subject: String(content.prefix(120))
         )
         return try await kit.capture(handle, frame)
     }

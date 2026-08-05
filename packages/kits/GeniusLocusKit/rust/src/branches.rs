@@ -233,6 +233,11 @@ impl EstateBranch {
         // is not reset to branch-promotion time for historical ingests.
         // event_time is epoch seconds in both Drawer and CaptureFrame.
         frame.event_time = Some(row.event_time);
+        // Subject carries over: promotion copies identical content, so the
+        // source drawer's subject stays true. The capture verb restamps
+        // pipeline/at (a carried subject re-enters as a fresh assertion);
+        // a source without one stays debt. Mirrors Swift EstateBranch.
+        frame.subject = row.subject.clone();
         // Feature flags: isKeystone, isLockedZone, hasLinks etc. affect
         // wing boundary enforcement — must survive branch round-trips.
         frame.feature_flags = row.feature_flags();

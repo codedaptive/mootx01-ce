@@ -20,6 +20,13 @@ set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
+# This check deliberately builds from scratch, and `cargo clean` erases the
+# WHOLE target directory. The repo otherwise shares one target directory per
+# checkout, so inheriting it here would wipe every other workspace's artifacts.
+# Pin the harness to its own target/ so the clean stays local — and so the
+# `rust/target/release/...` lookups further down resolve.
+export CARGO_TARGET_DIR="$HERE/rust/target"
+
 echo "=== cleaning Rust harness ==="
 (cd rust && cargo clean) > /dev/null
 

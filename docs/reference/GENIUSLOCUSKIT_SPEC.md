@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.17.0
+version: 1.22.0
 status: accepted-1.1-target
-date: 2026-07-30
+date: 2026-08-04
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -330,10 +330,14 @@ deferred audit seal):**
 audit sealed only after ALL steps complete (§B-2a audit-seal ordering
 invariant):
 
-Step 1 (LocusKit storage, `estate.expunge(sealAudit: false)`): validates the
-confirmation flag and S-3 state gate, tombstones the drawer row, and zeroes
-the content blob — atomically. The gate produces an `AuditEvent` (substrate
-truth) but does NOT append it to the audit log yet.
+Step 1 (LocusKit storage; Swift `estate.expungeReturningUnsealedEvent(...)`,
+Rust `estate.expunge(..., seal_audit: false)`): validates the confirmation
+flag and S-3 state gate, tombstones the gate-admitted lineage members, and
+zeroes their content blobs — atomically. The gate produces an `AuditEvent`
+(substrate truth) but does NOT append it to the audit log yet. The call
+returns the full `ExpungeOutcome` (LOCUSKIT_SPEC B-8b): the unsealed event
+plus `refusedSiblingIDs` — the accepted lineage members the gate refused and
+preserved byte-identical.
 
 Step 2 (GLK orchestration, derived-state delete): when a `Corpus` is registered
 for the estate, call `Corpus.remove(sourceID: rowID)` to purge Drawer-keyed BM25,
@@ -343,6 +347,12 @@ lane/model ownership. A broad `destroyAllVectors` call is forbidden here.
 Canonical content was already zeroed by LocusKit in step 1; CorpusKit has no
 verbatim copy to scrub. With no Corpus or vector lane (`.locusOnly`), step 2 is
 a no-op.
+
+**Scrub scope (MXE-FA):** the step-2 fan-out covers the lineage chain MINUS
+the gate-refused siblings — vectors are deleted only for members the storage
+expunge actually scrubbed. A refused sibling's content survives, so its
+vector must survive with it; deleting it would produce a third inconsistent
+state (a row readable by id but invisible to search).
 
 Step 3 (audit seal):
 - **On success (steps 1+2 both complete):** GLK calls
@@ -360,9 +370,20 @@ The `"tombstone"` and `"expungeOrphan"` substrate verb strings both map to
 Consumers needing to distinguish a clean expunge from a partial one must read
 the substrate audit trail directly (the verb string is preserved there as-is).
 
-Direct LocusKit callers (bypassing GLK) use `estate.expunge(sealAudit: true,
-default)` and retain the historical single-step atomic contract — the audit
-is sealed inside `estate.expunge`, as before.
+**Partial outcome (MXE-FA):** the verb returns `ExpungeVerbOutcome`
+(`refusedSiblingIDs` / `refused_sibling_ids`; Swift not `@discardableResult`,
+Rust `Result<ExpungeVerbOutcome, VerbDispatchError>`). Binding invariant: **no
+layer reports success for an expunge that refused a sibling.** ARIA's
+`moot_erase_memory` reports a partial expunge as partial, naming the refused
+count and ids (ARIA_MCP_SPEC). GLK-internal consumers that cannot represent
+partiality in their return shape (`defragVagueItem` / `defrag_vague_item`)
+raise `VerbError.underlyingEstateFailure` instead of summarising the partial
+cascade as success.
+
+Direct LocusKit callers (bypassing GLK) use Swift `estate.expunge(...)` /
+Rust `estate.expunge(..., seal_audit: true)` and retain the historical
+single-call atomic contract — the audit is sealed inside the call, as before
+— receiving the same `ExpungeOutcome`.
 
 Both Swift and Rust ports implement this contract. Orphan-seal failures are
 propagated: in Swift, a `sealExpungeOrphanAudit` failure is logged at `.fault`
@@ -1894,6 +1915,81 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.22.0 -- 2026-08-04
+
+- **B-2a partial-expunge honesty (MXE-FA).** Step 1 is documented as
+  returning the full `ExpungeOutcome` (unsealed event + refused sibling
+  ids); step 2's vector fan-out is scoped to actually-scrubbed members
+  (refused accepted siblings keep content AND vectors); the verb returns
+  the new `ExpungeVerbOutcome`, and the binding invariant is recorded: no
+  layer reports success for an expunge that refused a sibling.
+  `defragVagueItem` / `defrag_vague_item` raise
+  `.underlyingEstateFailure` on a partial vague cascade. Stale
+  `sealAudit:` phrasing on the Swift step-1/direct-caller paths corrected
+  to the shipped two-method surface.
+
+### 1.21.0 -- 2026-08-03
+
+Deterministic Contradiction Projection (DCP M2-M6). The Brain layer
+gains the typed proving lane over KGFacts: projection (active facts on
+registered dimensions become ConflictSignatures; exclusions counted,
+never dropped), the in-memory (key, dimension) coordinate index with a
+per-bucket cap and truncation diagnostics, the pure sweep
+(project → index → evaluate; accepted ACTIVE supersedes tunnels convert
+overlap to HistoricalSuccession), typed tunnel proposals (proven
+findings file PROPOSED contradicts tunnels labeled
+`dcp: <rule>@<version>`; live pairs suppress; a withdrawn typed
+rejection is durable per rule@version — a version bump files a new
+instance; withdrawn lexical guesses never suppress typed proofs), the
+controlled meeting-decision filing seam (dcp-meeting-v1 grammar,
+replay-safe deterministic fact ids, ACTIVE filing posture), and
+Replaces-reference supersession filing. Everything is a pure
+read except the explicitly write-labeled proposal/filing verbs.
+
+### 1.20.0 -- 2026-08-02
+
+Rider-default ruling: the Apple subject rider is ON BY DEFAULT at the
+HOST layer — `mootx01 serve` auto-registers the miniLLM producer unless
+`MOOTX01_SUBJECT_RIDER=0` (`mootx01 install --subject-rider-off`);
+model unavailability logs and continues. Kit semantics are unchanged
+(GLK never auto-registers at open). Dreaming DISPATCHES the backfill:
+every dreaming trigger (moot_dream verb both ports; the mootx01 dream
+command) runs one bounded subject sweep after its cycle when a producer
+is registered and debt is non-zero. The benchmarker's encode-barrier
+denylist gains `subject_backfill` accordingly.
+
+### 1.19.0 -- 2026-08-02
+
+Apple miniLLM subject rider (progressive recall PR-10) — the sanctioned
+miniLLM feature's first landing, single-function by doctrine (subjects
+only). `MiniLLMSubjectProducer` runs on the first-party on-device
+Foundation Models surface (Apple-first, migrate-when-able), gated by
+`canImport` + availability; output post-passed and admitted ONLY
+through the SubjectRegister gate (a misbehaving model degrades to
+no-op). Enablement is user-settable via `enableAppleSubjectRider(for:)`
+(the tagger precedent — never silently mandatory; nothing
+auto-registers, pinned by the dark-default tests). Trust ladder:
+`SubjectProducer.regeneratesPipelines` (default empty) — the Apple
+rider regenerates only consolidation-v1/seed-v1; ai-v1 rows are never
+overwritten. Rust: `regenerates_pipelines` trait default; lane still
+dark. Verified live on-device where the model is present (conditional
+test).
+
+### 1.18.0 -- 2026-08-02
+
+Subject-backfill rider seam (progressive recall PR-09; SIBLING lane to
+distillation — the lane-name reservation pre-decided the shape, flagged
+for review). The coordinator carries a per-estate `SubjectProducer`
+registry; `subjectBackfillSweep` runs bounded deterministic batches
+(produce → SubjectRegister-validate → setSubjectRepresentation),
+refuses while no producer is registered, and skips inadmissible output
+without storing it. The `subject_backfill` drain lane renders ONLY
+while a rider is registered (barrier safety; the benchmarker non-gating
+denylist gains the name in the mission that first enables a rider). The
+Rust lane is DARK: seam compiled, no producer ships, gate pinned by
+test. No producer ships in Swift either — the Apple miniLLM producer is
+the PR-10 rider.
 
 ### 1.17.0 -- 2026-07-30
 

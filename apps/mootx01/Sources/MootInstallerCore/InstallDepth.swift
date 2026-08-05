@@ -546,8 +546,14 @@ public enum DepthInstaller {
     }
 
     /// Inject
-    /// `env.MOOTX01_VAULT=0` into the `mcpServers.mootx01` entry of an MCP
-    /// config JSON file — but ONLY when that entry is command/stdio-shaped
+    /// `env.MOOTX01_VAULT=0` into the `mcpServers.<pluginServerName>` entry
+    /// of a plugin package's MCP manifest — this runs only over the files
+    /// `installPlugin` materialises, so the key is the plugin-package key
+    /// (`MCPClients.pluginServerName`), never the direct-entry
+    /// `MCPClients.serverName`. The two differ deliberately; see
+    /// `ClientConfig.swift`.
+    ///
+    /// The patch applies ONLY when that entry is command/stdio-shaped
     /// (carries a `command` key: the proxy-bridge fallback for a host whose
     /// schema cannot express HTTP). An HTTP-shaped entry (`type`/`url`, no
     /// `command`) is left untouched: the resident daemon is the actual MCP
@@ -573,7 +579,7 @@ public enum DepthInstaller {
         guard let data = contents.data(using: .utf8),
               var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               var servers = root["mcpServers"] as? [String: Any],
-              var server = servers["mootx01"] as? [String: Any]
+              var server = servers[MCPClients.pluginServerName] as? [String: Any]
         else { return contents }
 
         // HTTP-shaped entry (no `command` key) — client-side env is inert;
@@ -585,7 +591,7 @@ public enum DepthInstaller {
         var env = server["env"] as? [String: Any] ?? [:]
         env["MOOTX01_VAULT"] = "0"
         server["env"] = env
-        servers["mootx01"] = server
+        servers[MCPClients.pluginServerName] = server
         root["mcpServers"] = servers
 
         guard let patched = try? JSONSerialization.data(

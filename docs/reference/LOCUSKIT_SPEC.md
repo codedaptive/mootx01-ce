@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.10.0
+version: 1.18.0
 status: active
-date: 2026-07-20
+date: 2026-08-04
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -332,12 +332,16 @@ conformance holds.
 sensitivity / exportability / trust untouched, and writes the mutation plus
 its audit row atomically.
 
-**B-8a (expunge sealAudit parameter — deferred audit seal for GLK orchestration):**
-`Estate.expunge(rowID:reason:confirmation:now:sealAudit:)` accepts an optional
-`sealAudit: Bool = true` parameter (Rust: `seal_audit: bool`). When `true` (the
-default for direct LocusKit callers), the gate-produced `AuditEvent` is appended
+**B-8a (deferred audit seal for GLK orchestration):**
+Swift splits the seal decision across two named methods —
+`Estate.expunge(rowID:reason:confirmation:now:)` seals inside the call, and
+`Estate.expungeReturningUnsealedEvent(rowID:reason:confirmation:now:)` defers
+the seal (the former `sealAudit:` parameter was removed from the public
+surface by secfix/ws2-coredelete). Rust keeps a single
+`Estate::expunge(..., seal_audit: bool)`. When sealing inside the call (the
+path for direct LocusKit callers), the gate-produced `AuditEvent` is appended
 to the substrate audit log inside the call, preserving the historical single-call
-atomic contract. When `false` (used by the GLK orchestration path), the
+atomic contract. On the deferred path (used by the GLK orchestration), the
 storage mutation (tombstone, content zeroed, bitmaps written) commits atomically,
 but the audit event is returned unsealed. The caller is responsible for calling
 one of two sealing methods after determining step-2 success or failure:
@@ -366,7 +370,32 @@ Both `"tombstone"` and `"expungeOrphan"` substrate verb strings map to
 so downstream consumers see the storage-level expunge in both cases. The raw verb
 string is preserved in the substrate audit trail for forensic inspection.
 
-Direct callers (not via GLK) use `sealAudit: true` and are unaffected.
+Direct callers (not via GLK) use the sealing path and are unaffected.
+
+**B-8b (lineage walk on expunge — a refused gate preserves the row):**
+`DrawerStore.expungeGated` / `expunge_gated` walks the target's full lineage
+chain (all rows sharing its `lineageID`). Members whose `tombstone` transition
+the `AuditGate` admits are scrubbed and tombstoned; already-tombstoned members
+have their content re-zeroed as defense in depth. A member the gate **refuses**
+— `accepted → tombstoned` is forbidden by S-3 (accepted rows are audit-grade
+and survive intact) — is left **byte-identical**: no content write, no state
+write, no representation clear, no audit append, and **no erasure-ledger
+record** (the read-time `ErasureOverlay` nulls content for any ledgered id, so
+a ledger record alone would suppress the row). A refused gate is a refusal,
+not a partial apply. The walk continues over the remaining members, and the
+refusal is surfaced, not swallowed: the verb returns an `ExpungeOutcome`
+(Swift: `auditEvent: AuditEvent?` + `refusedSiblingIDs: [String]`; Rust:
+`event` + `refused_sibling_ids: Vec<String>`, walk order) so the caller can
+detect a partial expunge. The Estate wrappers propagate the outcome whole
+(MXE-FA): Swift `Estate.expunge` and `expungeReturningUnsealedEvent` return
+`DrawerStore.ExpungeOutcome` (no `@discardableResult`), and Rust
+`Estate::expunge` returns `ExpungeOutcome`. The binding invariant at every
+consuming layer: **an expunge that refused a sibling is not a success, and a
+layer that summarises it as one is the defect.** GLK scopes its cross-kit
+vector delete to the members that were actually scrubbed and returns the
+refusal through its own `ExpungeVerbOutcome`; ARIA reports a partial expunge
+as partial, naming the refused count and ids (GENIUSLOCUSKIT_SPEC §B-2a,
+ARIA_MCP_SPEC `moot_erase_memory`).
 
 **B-9 (HLC-keyed forward-fold reconstruction):** `bitmapState(rowID:asOf:)`
 reconstructs a row's three bitmaps at a specific HLC (hybrid logical clock)
@@ -950,9 +979,162 @@ exclusively by GLK in this cascade path; they are not intended for general direc
 Direct callers that need only belief-state withdrawal use `Estate.withdraw` / the
 normal verb surface.
 
+## § 14 — Subject representation behavioral contracts
+
+The subject is a one-sentence, AI-facing summary of a drawer's content —
+the assertion field of the progressive-recall dense row (UUID · subject ·
+FDC code · WikiQID · event_time). Schema v12 stores it as three nullable
+`drawers` columns (`subject`, `subject_pipeline_version`, `subject_at`)
+that are written and cleared together, mirroring the distilled quad's
+NULL-together lifecycle.
+
+- **B-17 (returned, never searched):** the subject is presentation data.
+  No index, no generated column, no bitmap bit, no recall filter, and no
+  container-fingerprint rollup may reference it. It exists so a consuming
+  AI can decide which rows are worth pursuing — it is never an input to
+  ranking or matching math.
+- **B-18 (length contract):** `setSubjectRepresentation` /
+  `set_subject_representation` reject an empty subject or one longer than
+  120 characters (`DrawerStore.subjectLengthContract` ↔
+  `SUBJECT_LENGTH_CONTRACT`; both ports count characters, not bytes). The
+  cap keeps the dense row's per-row cost near-uniform.
+- **B-19 (atomic set):** the trio is populated by ONE UPDATE statement.
+  `subject_pipeline_version` records producer provenance (e.g. `ai-v1`,
+  `minillm-v1`) and is the regeneration lever; `subject_at` is the
+  generation instant, passed in as a parameter (I-6 determinism — never
+  read from a clock inside the store).
+- **B-20 (content-write invalidation):** every write that changes or
+  erases `content` NULLs the trio in the same statement it NULLs the
+  distilled quad — a subject must never describe content that no longer
+  exists. Erasure paths (`expungeGated`) scrub it; dataset-content
+  updates clear it for regeneration.
+- **B-21 (NULL is the debt marker):** NULL `subject` on a live,
+  non-empty-content drawer means "subject debt" — eligible for backfill.
+  `countMissingSubject(pipelineVersion:)` / `count_missing_subject`
+  report the debt as NULL-subject rows plus rows whose
+  `subject_pipeline_version` differs from the requested producer. There
+  is no presence bit: the operational feature-flag region (bits 12–23)
+  is fully assigned, and the NULL predicate is already exact.
+- **B-26 (custody event):** every subject write seals a `"setSubject"`
+  audit event — actor, HLC timestamp, and the caller's note as `reason`
+  (absent when no note was supplied; an absent reason is never an absent
+  row) — in the SAME transaction as the trio UPDATE: the column write and
+  the audit append succeed or fail together. Bitmaps and lattice anchor
+  are unchanged, so the event carries before == after on every value
+  field. The prior subject text is deliberately not preserved: the audit
+  event shape carries no text values, the subject is derived from
+  `content`, and content carries its own audit trail — the custody row
+  plus the content trail reconstructs the history. A write that matches
+  no row (unknown id) seals nothing. (MXE-SK, Codex
+  cc90c5dcecb081918c159788e1ffb3d6.)
+
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-08-04
+
+- New invariant **B-26 (custody event)**: `setSubjectRepresentation` /
+  `set_subject_representation` seal a `"setSubject"` audit event (actor,
+  timestamp, caller's note as `reason`) in the same transaction as the
+  trio UPDATE — column write and audit append succeed or fail together.
+  Documents why the prior subject text is not carried on the event
+  (shape has no text values; subject is content-derived; content is
+  separately audited). Closes Codex finding
+  cc90c5dcecb081918c159788e1ffb3d6 (MXE-SK).
+
+### 1.17.0 -- 2026-08-04
+
+- **Schema v13: the kg_facts identity trio gains a migration ladder entry
+  (MXE-MI).** MXE-KH declared `addedBy` / `foreignSourceKey` /
+  `foreignRecordID` on the `kg_facts` table but shipped no ladder entry, so
+  populated v12 estates never gained the columns on open. v13 adds the
+  three `.addColumn` operations (TEXT NOT NULL DEFAULT `''`) in both ports.
+- **`KGFactIdentityBackfill` (Swift) / `kg_fact_identity_backfill` (Rust).**
+  A deterministic, idempotent, re-runnable backfill that moves pre-KH
+  `sourceDrawerID` values into the column each belongs in. Four evidence
+  rules — local drawer id (`drawers.id` resolution; row kept, MXE-KH
+  sensitivity inheritance retro-applied to all-zero-bitmap rows), host
+  identity (closed compiled-in set → `addedBy`), foreign palace key
+  (injected lineage resolver against `drawers.lineageID` →
+  `foreignSourceKey`), triple id (`temporal:*` subject co-import evidence →
+  `foreignRecordID`). A value moves only when EXACTLY ONE rule matches;
+  anything else is left in place and counted in the returned per-class
+  report. Run only by `mootx01 upgrade` (the sole migration vehicle); the
+  foreign-key resolver is injected by the app layer because LocusKit does
+  not depend on VaultKit.
+
+### 1.16.0 -- 2026-08-04
+
+- **B-8b propagation (MXE-FA):** the Estate wrappers no longer collapse
+  `ExpungeOutcome` to a bare audit event. Swift `Estate.expunge` and
+  `expungeReturningUnsealedEvent` return `DrawerStore.ExpungeOutcome`
+  (`@discardableResult` removed); Rust `Estate::expunge` returns
+  `ExpungeOutcome`. Binding invariant recorded: no layer reports success
+  for an expunge that refused a sibling. B-8a reworded to describe the
+  shipped two-method Swift seal surface (stale `sealAudit:` parameter
+  claim corrected).
+
+### 1.15.0 -- 2026-08-04
+
+- New **B-8b**: the expunge lineage walk preserves gate-refused (accepted,
+  S-3) siblings byte-identical — no content/state/audit/erasure-ledger
+  writes — and reports them via the new `ExpungeOutcome` return of
+  `expungeGated` / `expunge_gated` so a partial expunge is detectable
+  (MXE-EZ; Codex finding 06cce9cc4).
+
+### 1.14.0 -- 2026-08-03
+
+- **`sourceDrawerID` holds a local drawer id or nothing (MXE-KH).** The
+  field had accumulated three kinds of value that are not drawer ids: the
+  MCP host identity, a foreign palace's stable source key, and a palace
+  triple's own id. Each now has its own `KGFact` field — `addedBy`,
+  `foreignSourceKey`, `foreignRecordID` — and three matching `TEXT NOT NULL`
+  columns on `kg_facts` in both ports. The binding invariant is that
+  `sourceDrawerID` contains a local drawer id or the empty string, nothing
+  else.
+- **Rust accepts the empty `sourceDrawerID` sentinel.** `add_kg_fact` no
+  longer rejects `""` via `validate_non_empty`, aligning it with Swift's
+  `addKGFact`, which has always documented `""` as "not anchored to a
+  specific drawer". Sourceless facts are supported in both ports.
+
+### 1.13.0 -- 2026-08-02
+
+Regeneration tiers (progressive recall PR-10). § 14 addition B-25: the
+tier-aware debt predicate (subject NULL OR pipeline ∈ a producer's
+regeneration list) enforces the trust ladder BY CONSTRUCTION — a
+producer lists only tiers below itself, so ai-v1 rows are never
+enumerated for the model rider and a producer's own tier is its settled
+work. `countSubjectDebt(includingPipelines:)` /
+`subjectDebtBatch(limit:includingPipelines:)` with Rust twins
+`count_subject_debt_including` / `subject_debt_batch_including`;
+zero-arg forms unchanged (NULL-only).
+
+### 1.12.0 -- 2026-08-02
+
+Subject pipeline harness (progressive recall PR-09). § 14 additions:
+B-22 (presence debt vs regeneration debt: `countSubjectDebt` is the
+NULL-only lane observable; `countMissingSubject(pipelineVersion:)`
+remains the producer-contract regeneration count), B-23 (the sweep
+enumerator `subjectDebtBatch(limit:)` is deterministic — filedAt ASC,
+id ASC — and settled-work skip is structural), B-24 (the AI-facing
+register is ONE shared testable gate, `SubjectRegister`: 1–120 chars,
+single-line, trimmed, narrative-frame prefix lint; conformance pins
+verdicts on both legs and NEVER model output text). Provenance tiers
+documented at the pipeline-version constants (ai-v1, minillm-v1,
+consolidation-v1, seed-v1).
+
+### 1.11.0 -- 2026-08-02
+
+Added § 14 — Subject representation behavioral contracts (progressive
+recall PR-01). Five new clauses: B-17 (subject is returned, never
+searched/indexed/mathed), B-18 (120-character length contract, both
+ports counting characters), B-19 (atomic trio set with pipeline-version
+provenance), B-20 (content-write invalidation — the trio NULLs with the
+distilled quad), B-21 (NULL subject = backfill debt; no presence bit —
+`countMissingSubject` counts NULL + producer-version mismatch). Schema
+v12 adds the three nullable `drawers` columns with a v11 → v12
+addColumn migration.
 
 ### 1.10.0 -- 2026-07-20
 

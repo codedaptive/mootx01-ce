@@ -29,6 +29,20 @@ public struct CaptureDrawerIntent: MootEstateIntent {
     @Parameter(title: "Content")
     public var content: String
 
+    /// One sentence (≤120 chars) stating what this memory asserts. Maps to
+    /// moot_file_memory `subject` — the field the dense recall row renders,
+    /// which is why the tool requires it.
+    ///
+    /// A Shortcut author is the best subject source this package has: they
+    /// know what the automation is capturing and why, so they can write the
+    /// assertion rather than an extract of it. Optional with a nil default —
+    /// matching the `wing` / `eventTime` precedent below — so every Shortcut
+    /// built before this parameter existed keeps working; when it is absent
+    /// `perform()` derives one from `content`. The TOOL argument is never
+    /// optional: the substrate always receives a subject.
+    @Parameter(title: "Subject")
+    public var subject: String?
+
     /// Subject-matter location hint. Maps to moot_file_memory `location`
     /// (the drawer's room).
     @Parameter(title: "Location", default: "memories")
@@ -70,6 +84,7 @@ public struct CaptureDrawerIntent: MootEstateIntent {
         sensitivity: SensitivityAppEnum = .normal,
         wing: String? = nil,
         eventTime: Date? = nil,
+        subject: String? = nil,
         caller: (any MootToolCalling)? = nil
     ) {
         self.content = content
@@ -77,14 +92,23 @@ public struct CaptureDrawerIntent: MootEstateIntent {
         self.sensitivity = sensitivity
         self.wing = wing
         self.eventTime = eventTime
+        self.subject = subject
         self.caller = caller
     }
 
     @MainActor
     public func perform() async throws -> some IntentResult & ProvidesDialog {
         let c = try await resolvedCaller()
+        // A Shortcut that fills in the Subject parameter states the assertion
+        // itself; one that leaves it empty gets a subject derived from the
+        // content's leading sentence. The derivation is the weaker of the two
+        // (an extract, not an assertion) — the improvement path for any
+        // automation that matters is to set the Subject parameter, not to make
+        // the derivation smarter.
+        let resolvedSubject = CaptureSubject.resolve(supplied: subject, body: content)
         var arguments: [String: JSONValue] = [
             "content": .string(content),
+            "subject": .string(resolvedSubject),
             "location": .string(location),
             "sensitivity": .string(sensitivity.rawValue),
         ]

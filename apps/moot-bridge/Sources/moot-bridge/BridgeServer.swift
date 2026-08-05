@@ -33,7 +33,18 @@ import Foundation
 //      which backend serves reads and whose response is returned, effective on
 //      the very next call.
 //
-//   6. notifications (no id) — forwarded to BOTH backends, no response awaited.
+//   6. notifications — a VALID JSON-RPC envelope with no id is forwarded to BOTH
+//      backends, no response awaited.
+//
+//   7. unreadable frames — a line that is not valid JSON, or that is valid JSON
+//      but not a JSON-RPC envelope, is REJECTED here: the client receives a
+//      JSON-RPC error (parseError -32700 / invalidRequest -32600, null id) and
+//      NO backend ever sees the line. The bridge is the boundary; a frame it
+//      cannot read is a frame the backends should never receive. Forwarding one
+//      as a notification would leave the backend's own parseError response
+//      unread on its stdout, and the next sendAndReceive would consume that
+//      stale error instead of its own result — skewing every response from then
+//      on until the process restarts.
 //
 // SAFETY (dual-write rule): a WRITE fan-out re-issues the write to BOTH backends.
 // That is the whole point of the bridge — the AI's memory lands in MemPalace AND
@@ -47,6 +58,27 @@ import Foundation
 enum BridgeCallType: Equatable {
     case write
     case query
+}
+
+/// What the bridge decides to do with one raw client line, decided BEFORE any
+/// backend transport is touched.
+///
+/// There are THREE outcomes here, not two. Asking only "does it have an id?"
+/// collapses a genuine id-less notification together with a frame that could not
+/// be read at all, and routes both down the notification path — which is exactly
+/// how a single malformed line desynchronizes a whole session.
+enum FrameDisposition: Equatable {
+    /// A valid JSON-RPC envelope carrying an `id`. Served on the request path
+    /// with the client's id preserved. `method` and `id` are carried alongside
+    /// the parsed value because the classifier has already proved both present,
+    /// so no downstream site needs to re-check or supply a fallback.
+    case request(parsed: JSONValue, method: String, id: JSONValue)
+    /// A valid JSON-RPC envelope with no `id`: a real notification. Forwarded to
+    /// both backends; no response is owed to the client.
+    case notification
+    /// Unreadable, or readable but not a JSON-RPC envelope. Answered at the
+    /// bridge with a JSON-RPC error and forwarded to NO backend.
+    case reject(code: Int, message: String)
 }
 
 /// A handle to one configured backend: its live transport, its name, and its
@@ -110,42 +142,92 @@ final class BridgeServer {
     }
 
     /// Handles one client message end to end.
+    ///
+    /// The three-way split is the whole point: reject / notify / request. A frame
+    /// the bridge cannot read is answered here and forwarded nowhere, so a
+    /// backend never has to reply to garbage the bridge would then fail to read
+    /// back off its stdout.
     private func handleClientMessage(_ line: Data, clientOut: FileHandle) async throws {
-        let parsed = try? JSONDecoder().decode(JSONValue.self, from: line)
-        let method = parsed?["method"]?.stringValue
-        let idValue = parsed?["id"]
-        let hasID = idValue != nil
+        switch Self.classifyFrame(line) {
+        case .reject(let code, let message):
+            // Rejected at the boundary: the client gets a JSON-RPC error and NO
+            // backend sees the line. Draining a backend's stdout after the fact
+            // would race legitimate traffic and would still have let the
+            // malformed frame through, so the refusal happens before any write.
+            writeProtocolError(code: code, message: message, to: clientOut)
 
-        // A notification (no id) gets no response. Forward to BOTH backends so a
-        // backend that relies on, e.g., `notifications/initialized` stays in sync.
-        guard hasID else {
+        case .notification:
+            // A real notification: valid envelope, no id, so no response is owed.
+            // Forward to BOTH backends so a backend that relies on, e.g.,
+            // `notifications/initialized` stays in sync.
             let primaryTransport = primary.transport
             let secondaryTransport = secondary.transport
             try? await primaryTransport.sendNotification(line)
             try? await secondaryTransport.sendNotification(line)
-            return
-        }
 
-        switch method {
-        case "tools/list":
-            try await handleToolsList(line: line, clientID: idValue, clientOut: clientOut)
-        case "tools/call":
-            let toolName = parsed?["params"]?["name"]?.stringValue ?? ""
-            if toolName == Self.setPrimaryToolName {
-                try await handleSetPrimary(parsed: parsed, clientID: idValue, clientOut: clientOut)
-            } else if toolName == Self.statusToolName {
-                try await handleStatus(clientID: idValue, clientOut: clientOut)
-            } else {
-                try await handleToolCall(line: line, parsed: parsed, toolName: toolName,
-                                         method: method, clientOut: clientOut)
+        case .request(let parsed, let method, let idValue):
+            switch method {
+            case "tools/list":
+                try await handleToolsList(line: line, clientOut: clientOut)
+            case "tools/call":
+                let toolName = parsed["params"]?["name"]?.stringValue ?? ""
+                if toolName == Self.setPrimaryToolName {
+                    try await handleSetPrimary(parsed: parsed, clientID: idValue, clientOut: clientOut)
+                } else if toolName == Self.statusToolName {
+                    try await handleStatus(clientID: idValue, clientOut: clientOut)
+                } else {
+                    try await handleToolCall(line: line, parsed: parsed, toolName: toolName,
+                                             clientOut: clientOut)
+                }
+            default:
+                // initialize and any other id-bearing method: forward to primary
+                // verbatim, return its response. (Both backends are already
+                // initialized at startup; re-forwarding initialize to the primary
+                // is harmless and keeps the client's view consistent.)
+                try await forwardToPrimary(line: line, method: method, clientOut: clientOut)
             }
-        default:
-            // initialize and any other id-bearing method: forward to primary
-            // verbatim, return its response. (Both backends are already
-            // initialized at startup; re-forwarding initialize to the primary is
-            // harmless and keeps the client's view consistent.)
-            try await forwardToPrimary(line: line, method: method, clientOut: clientOut)
         }
+    }
+
+    // MARK: - Frame classification (the boundary)
+
+    /// JSON-RPC 2.0 code for a frame that is not valid JSON at all.
+    static let parseErrorCode = -32700
+    /// JSON-RPC 2.0 code for valid JSON that is not a valid JSON-RPC envelope.
+    static let invalidRequestCode = -32600
+
+    /// Classifies one raw client line into the bridge's three frame dispositions.
+    ///
+    /// The envelope test mirrors `JSONRPCRequest.decode` in AriaMcpKit
+    /// (JSONRPC.swift:68-79) exactly — an object, `jsonrpc` equal to the string
+    /// `"2.0"`, and a string `method`. Failing the JSON parse is `parseError`;
+    /// parsing but failing the envelope test is `invalidRequest`. The backends
+    /// draw the same line, so a frame refused here receives the same answer it
+    /// would have received had it been forwarded, minus the desynchronization.
+    /// Collapsing the two codes into one would tell a client "bad JSON" when the
+    /// JSON was fine and only the envelope was wrong.
+    ///
+    /// `id` is deliberately tested for PRESENCE, not for non-null: JSON-RPC 2.0
+    /// permits an id to be a string, a number, or null, and an explicit
+    /// `"id": null` is a request, not a notification.
+    ///
+    /// Exposed as `static` for direct unit testing without a live BridgeServer.
+    static func classifyFrame(_ line: Data) -> FrameDisposition {
+        guard let parsed = try? JSONDecoder().decode(JSONValue.self, from: line) else {
+            return .reject(code: parseErrorCode,
+                           message: "Parse error: client frame is not valid JSON")
+        }
+        // A non-object (bare array, string, number, bool, null) fails every
+        // subscript below, but the object test is written out so the envelope
+        // contract is legible rather than implied by JSONValue's subscript.
+        guard parsed.objectValue != nil,
+              parsed["jsonrpc"]?.stringValue == "2.0",
+              let method = parsed["method"]?.stringValue else {
+            return .reject(code: invalidRequestCode,
+                           message: "Invalid Request: malformed JSON-RPC envelope")
+        }
+        guard let id = parsed["id"] else { return .notification }
+        return .request(parsed: parsed, method: method, id: id)
     }
 
     // MARK: - tools/list (inject bridge-owned tools)
@@ -153,7 +235,10 @@ final class BridgeServer {
     /// Forwards tools/list to the primary, then injects the two bridge-owned tools
     /// into the returned tool array before relaying to the client. The client
     /// thus sees the primary's real tools PLUS bridge_set_primary and bridge_status.
-    private func handleToolsList(line: Data, clientID: JSONValue?, clientOut: FileHandle) async throws {
+    ///
+    /// The client's id needs no parameter here: the primary's own response
+    /// already carries it, and the splice edits only `result.tools`.
+    private func handleToolsList(line: Data, clientOut: FileHandle) async throws {
         let primaryBackend = primary
         let start = DispatchTime.now()
         let response = try await primaryBackend.transport.sendAndReceive(line)
@@ -183,8 +268,8 @@ final class BridgeServer {
     /// Handles a backend tools/call: forward to the primary (response returned to
     /// the client), and — only for WRITE-classified calls — translate and fan the
     /// call out to the secondary too.
-    private func handleToolCall(line: Data, parsed: JSONValue?, toolName: String,
-                                method: String?, clientOut: FileHandle) async throws {
+    private func handleToolCall(line: Data, parsed: JSONValue, toolName: String,
+                                clientOut: FileHandle) async throws {
         let primaryBackend = primary
         let secondaryBackend = secondary
 
@@ -239,12 +324,12 @@ final class BridgeServer {
 
     /// Forwards an arbitrary id-bearing method (e.g. initialize) to the primary
     /// verbatim and relays its response to the client.
-    private func forwardToPrimary(line: Data, method: String?, clientOut: FileHandle) async throws {
+    private func forwardToPrimary(line: Data, method: String, clientOut: FileHandle) async throws {
         let primaryBackend = primary
         let start = DispatchTime.now()
         let response = try await primaryBackend.transport.sendAndReceive(line)
         await stats.recordLatency(Self.elapsedSeconds(since: start),
-                                  label: "\(primaryBackend.name).\(method ?? "?")")
+                                  label: "\(primaryBackend.name).\(method)")
         writeLine(response, to: clientOut)
     }
 
@@ -258,9 +343,9 @@ final class BridgeServer {
     /// primary). Responds with a confirmation result. An unknown backend name is
     /// returned as a tool-result error (isError: true) rather than a JSON-RPC
     /// protocol error, so the client gets a clean, actionable message.
-    private func handleSetPrimary(parsed: JSONValue?, clientID: JSONValue?,
+    private func handleSetPrimary(parsed: JSONValue, clientID: JSONValue,
                                   clientOut: FileHandle) async throws {
-        let requested = parsed?["params"]?["arguments"]?["backend"]?.stringValue
+        let requested = parsed["params"]?["arguments"]?["backend"]?.stringValue
         guard let requested else {
             writeToolError(clientID: clientID,
                            message: "bridge_set_primary requires a `backend` string argument",
@@ -283,7 +368,7 @@ final class BridgeServer {
 
     /// Handles bridge_status. Reports the current primary, the secondary, and a
     /// per-backend latency + failure-count summary from the stats actor.
-    private func handleStatus(clientID: JSONValue?, clientOut: FileHandle) async throws {
+    private func handleStatus(clientID: JSONValue, clientOut: FileHandle) async throws {
         let snap = await stats.snapshot()
         var lines: [String] = []
         lines.append("primary:   \(primary.name)")
@@ -412,10 +497,10 @@ final class BridgeServer {
     // MARK: - Response writers
 
     /// Writes a successful tool result whose single text block is `text`.
-    private func writeToolText(clientID: JSONValue?, text: String, to clientOut: FileHandle) {
+    private func writeToolText(clientID: JSONValue, text: String, to clientOut: FileHandle) {
         let envelope = JSONValue.object([
             "jsonrpc": .string("2.0"),
-            "id": clientID ?? .null,
+            "id": clientID,
             "result": .object([
                 "content": .array([
                     .object(["type": .string("text"), "text": .string(text)]),
@@ -429,15 +514,42 @@ final class BridgeServer {
     /// Writes a tool result flagged `isError: true` with the given message. Used
     /// for bridge-tool misuse (bad/unknown backend name) so the client gets a clean
     /// actionable message rather than a JSON-RPC protocol error.
-    private func writeToolError(clientID: JSONValue?, message: String, to clientOut: FileHandle) {
+    private func writeToolError(clientID: JSONValue, message: String, to clientOut: FileHandle) {
         let envelope = JSONValue.object([
             "jsonrpc": .string("2.0"),
-            "id": clientID ?? .null,
+            "id": clientID,
             "result": .object([
                 "content": .array([
                     .object(["type": .string("text"), "text": .string(message)]),
                 ]),
                 "isError": .bool(true),
+            ]),
+        ])
+        if let data = try? JSONEncoder().encode(envelope) { writeLine(data, to: clientOut) }
+    }
+
+    /// Writes a JSON-RPC PROTOCOL error to the client — an `error` member, not an
+    /// `isError` tool result. Used only for frames the bridge refuses at the
+    /// boundary; nothing is sent to any backend on this path.
+    ///
+    /// The id is null because a refused frame has no id the bridge can trust: it
+    /// either failed to parse, or failed the envelope test, so any `id` bytes
+    /// inside it are not a JSON-RPC id. JSON-RPC 2.0 prescribes a null id for
+    /// exactly this case, and AriaMcpKit's StdioServer answers the same way
+    /// (Server.swift:349-379) — the bridge and the backends must give a client
+    /// the same answer, or the client sees two different protocols depending on
+    /// how far its frame happened to travel.
+    ///
+    /// This is distinct from `writeToolError`, which reports bridge-TOOL misuse
+    /// as a successful call carrying `isError: true`. A frame that is not a valid
+    /// JSON-RPC message never reached a tool, so it cannot be reported as one.
+    private func writeProtocolError(code: Int, message: String, to clientOut: FileHandle) {
+        let envelope = JSONValue.object([
+            "jsonrpc": .string("2.0"),
+            "id": .null,
+            "error": .object([
+                "code": .number(Double(code)),
+                "message": .string(message),
             ]),
         ])
         if let data = try? JSONEncoder().encode(envelope) { writeLine(data, to: clientOut) }

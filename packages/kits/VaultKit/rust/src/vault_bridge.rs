@@ -392,7 +392,7 @@ impl<'a> VaultBridge<'a> {
             if !qualified.is_empty() {
                 let frames: Vec<CaptureFrame> = qualified.iter().map(|(_, f, _, _)| f.clone()).collect();
                 let drawers = self.coordinator
-                    .capture_batch(handle, frames, now / 1000)
+                    .capture_batch(handle, frames, now)
                     .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
                 for ((note, frame, is_update, classified), drawer) in qualified.iter().zip(drawers.iter()) {
                     let tunnels = self.mapping.apply_note_post_capture(
@@ -491,7 +491,7 @@ impl<'a> VaultBridge<'a> {
                     .enqueue_change_batch(&jobs)
                     .map_err(|e| VaultKitError::VerbError(format!("enqueue_change_batch failed: {e:?}")))?;
                 self.coordinator
-                    .rollup_after_reindex(handle, now / 1000)
+                    .rollup_after_reindex(handle, now)
                     .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;
             }
         }
@@ -519,9 +519,10 @@ impl<'a> VaultBridge<'a> {
     /// class and its own wing/room — is constructed here and written via
     /// `Estate::add_diary_entry` directly.
     ///
-    /// `filed_at` carries the caller-supplied `now` converted from the
-    /// bridge's milliseconds to the diary's epoch-seconds convention, so the
-    /// receipt is deterministic and queryable by time.
+    /// `filed_at` carries the caller-supplied `now` unconverted — it is epoch
+    /// milliseconds on both sides of this call, which is what the diary's
+    /// `TypedValue::Timestamp` codec and the HLC boundary consume. The receipt
+    /// is deterministic and queryable by time.
     fn write_receipt(
         &self,
         entry_text: &str,
@@ -542,7 +543,7 @@ impl<'a> VaultBridge<'a> {
             "vault-receipt".to_string(),
             "wing_vaultkit".to_string(),
             "receipts".to_string(),
-            now / 1000,
+            now,
             // Receipts carry no embedding; the storage layer requires a
             // non-empty model id (same convention as the dreaming daemon).
             "no-embedding".to_string(),

@@ -1,8 +1,8 @@
 ---
 title: Installer Interface
 status: active
-version: 1.0.3
-date: 2026-06-15
+version: 1.1.0
+date: 2026-08-03
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -135,10 +135,37 @@ public struct MCPClient: Sendable, Equatable {
 }
 
 public enum MCPClients {
-    public static let serverName: String          // "mootx01"
+    public static let serverName: String           // "mootx01" — DIRECT entries
+    public static let pluginServerName: String     // "memory"  — PLUGIN packages
     public static let supported: [MCPClient]       // claude-desktop, claude-code,
                                                    // cursor, cline, continue
 }
+```
+
+The two server-name keys are deliberately distinct and are not
+interchangeable.
+
+`serverName` is the key for a **direct** (non-plugin) MCP entry — the
+one the installer merges into a client's own config file.
+
+`pluginServerName` is the key inside a generated **plugin package**'s
+MCP manifest. The host namespaces a plugin's servers under the plugin
+id, so a plugin entry surfaces to the user as `plugin:mootx01:memory`.
+A direct entry carries no such namespace, which is why it keeps
+`mootx01` — and why the plugin-ownership hook can still distinguish a
+competing direct entry from the plugin's own.
+
+Code that reads a **generated plugin package** must use
+`pluginServerName`; code that reads or writes a **client's own config**
+must use `serverName`. The generated packages are the authority for
+`pluginServerName`'s value; the constant mirrors them, and
+`PluginPackageShapeTests` fails if the mirror drifts.
+
+The Rust port carries the same pair in `core::clients`:
+
+```rust
+pub const SERVER_NAME: &str = "mootx01";         // DIRECT entries
+pub const PLUGIN_SERVER_NAME: &str = "memory";   // PLUGIN packages
 ```
 
 ### `MCPServerEntry`, `MCPServerEntryBuilder`
@@ -292,6 +319,9 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-08-03
+Added `MCPClients.pluginServerName` (Swift) and `core::clients::PLUGIN_SERVER_NAME` (Rust) to the documented surface, and scoped `serverName` / `SERVER_NAME` to DIRECT (non-plugin) entries. The plugin package's MCP server key became `memory` at `7f64973aa` so plugin tools surface as `plugin:mootx01:memory`; direct entries deliberately keep `mootx01`. Both keys are now named constants rather than scattered literals, and the two are not interchangeable. Minor bump: additive surface, no existing signature changed.
 
 ### 1.0.3 -- 2026-06-15
 Corrected the moot-mgr platform claim again: the Rust `moot-mgr` now ships on **Windows as well as Linux**, not "headless Linux" only. Its admin control channel was reworked from a Unix-domain-socket-only transport to a cross-platform local socket (UDS chmod 0600 on Linux/macOS, named pipe with owner-only ACL on Windows) via the `interprocess` crate, satisfying the platform law (Rust targets Windows AND Linux). The Windows release archive now bundles `moot-mgr.exe`.

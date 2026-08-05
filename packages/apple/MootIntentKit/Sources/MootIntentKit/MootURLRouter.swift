@@ -16,11 +16,22 @@ import AriaMCP   // JSONValue
 //
 // Security: two hardening layers are active.
 //
-// 1. Verb allowlist: only non-destructive verbs (capture, recall, reanchor)
-//    are permitted over x-callback-url. Destructive verbs (expunge, withdraw,
-//    mutate) are rejected with .notHandled. A crafted URL containing a
-//    destructive verb could otherwise drive an irreversible erase from any
-//    app that can compose a URL — the allowlist removes that surface.
+// 1. Verb allowlist: the URL surface is READ-ONLY. Only `recall` is
+//    permitted over x-callback-url. Every verb that mutates persistent
+//    estate state — capture and reanchor as much as expunge, withdraw, and
+//    mutate — is rejected with .notHandled before the substrate is touched.
+//
+//    The invariant, binding on anyone extending this allowlist: an inbound
+//    URL carries NO trustworthy caller identity on any platform — any local
+//    process, any <iframe src="mootx01://…">, any link a user clicks can
+//    compose one — so no verb that causes a persistent estate mutation may
+//    be admitted here without an explicit, per-invocation user confirmation
+//    that names the operation and shows the content or target. No such
+//    confirmation surface exists on this path; the consented route for
+//    mutations is App Intents (CaptureDrawerIntent, ReanchorDrawerIntent —
+//    both requiresLocalDeviceAuthentication). Do not add an origin/caller
+//    check instead: it cannot be made trustworthy and would only look like
+//    validation.
 //
 // 2. Callback-scheme allowlist: the host MUST pass the set of URL schemes
 //    it considers safe when constructing this router. The router only builds
@@ -35,10 +46,16 @@ public struct MootURLRouter: Sendable {
     public static let scheme = "mootx01"
     public static let host = "x-callback-url"
 
-    // Non-destructive verbs that x-callback-url is permitted to invoke.
-    // Destructive verbs (expunge, withdraw, mutate) are not in this list:
-    // a crafted URL must not drive an irreversible erase.
-    private static let allowedVerbs: Set<String> = ["capture", "recall", "reanchor"]
+    // Read-only verbs that x-callback-url is permitted to invoke. Nothing
+    // that writes, moves, or erases estate state belongs here — see the
+    // security header for the invariant an extension must meet.
+    private static let allowedVerbs: Set<String> = ["recall"]
+
+    // Mutating verbs the router knows by name, so their rejection can say
+    // WHY and point the caller at the consented path. Kept separate from
+    // the generic unknown-verb branch purely for the rejection message;
+    // membership here grants nothing.
+    private static let mutatingVerbs: Set<String> = ["capture", "reanchor"]
 
     // URL schemes the router may use when constructing a return URL.
     // The host configures this at init time; an empty set means the router
@@ -51,9 +68,7 @@ public struct MootURLRouter: Sendable {
     // Kept in this router (rather than importing LexiconMap from MootGateway)
     // so MootIntentKit has no dependency on the app target.
     private static let verbToTool: [String: String] = [
-        "capture":  "moot_file_memory",
-        "recall":   "moot_memory_search",
-        "reanchor": "moot_move_memory",
+        "recall": "moot_memory_search",
     ]
 
     /// - Parameter permittedCallbackSchemes: URL schemes the router may use
@@ -73,7 +88,7 @@ public struct MootURLRouter: Sendable {
         /// callback scheme was not in the permitted-schemes allowlist.
         case routed(returnURL: URL?, resultText: String, isError: Bool)
         /// The URL did not match the gateway's scheme/host/verb grammar, or
-        /// the verb was not in the non-destructive allowlist.
+        /// the verb was not in the read-only allowlist.
         case notHandled(reason: String)
     }
 
@@ -89,7 +104,15 @@ public struct MootURLRouter: Sendable {
         // The verb is the first path segment: /capture, /recall, …
         let verb = url.path.split(separator: "/").first.map(String.init) ?? ""
 
-        // Verb allowlist: reject destructive verbs before touching the substrate.
+        // Mutating verbs are named first so the rejection explains itself:
+        // this surface is unauthenticated, so estate mutations require the
+        // consented App Intents path instead.
+        guard !Self.mutatingVerbs.contains(verb) else {
+            return .notHandled(reason: "verb mutates the estate and is not permitted "
+                + "over x-callback-url: \(verb) — use the corresponding App Intent")
+        }
+        // Verb allowlist: everything not read-only is rejected before
+        // touching the substrate.
         guard Self.allowedVerbs.contains(verb) else {
             return .notHandled(reason: "verb not permitted over x-callback-url: \(verb)")
         }

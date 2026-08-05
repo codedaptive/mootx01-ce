@@ -373,6 +373,240 @@ public enum CKRecordMapping {
     }
 }
 
+// MARK: - SecretSync v1 transport mapping
+
+public extension CKRecordMapping {
+    private static var secretSyncCanonicalBytesKey: String { "ss_canonical_bytes" }
+    private static var secretSyncRecordDigestKey: String { "ss_record_digest" }
+    private static var secretSyncScopeIDKey: String { "ss_scope_id" }
+    private static var secretSyncPolicyEpochKey: String { "ss_policy_epoch" }
+    private static var secretSyncHeadCommitDigestKey: String { "ss_head_commit_digest" }
+    private static var secretSyncPolicyDigestKey: String { "ss_policy_digest" }
+
+    /// Map a validated immutable value to its content-addressed CloudKit record.
+    static func secretSyncRecord(
+        _ value: SecretSyncCloudKitImmutableRecord
+    ) throws -> CKRecord {
+        let zoneID = SecretSyncCloudKitZones.zoneID(for: value.type)
+        let recordID = CKRecord.ID(
+            recordName: value.digest.bytes.secretSyncLowercaseHex,
+            zoneID: zoneID
+        )
+        let record = CKRecord(recordType: value.type.rawValue, recordID: recordID)
+        // These are opaque canonical/ciphertext bytes, never decomposed into
+        // searchable CloudKit fields. The digest is repeated only to make a
+        // closed identity check possible before canonical validation.
+        record[secretSyncCanonicalBytesKey] = value.canonicalBytes as NSData
+        record[secretSyncRecordDigestKey] = value.digest.bytes as NSData
+        return record
+    }
+
+    /// Decode and fully validate one immutable SecretSync CloudKit record.
+    static func decodeSecretSyncImmutableRecord(
+        _ record: CKRecord,
+        digester: any SecretSyncDigesting
+    ) throws -> SecretSyncCloudKitImmutableRecord {
+        guard let type = SecretSyncCloudKitRecordType(rawValue: record.recordType),
+              type.isImmutable else {
+            throw SecretSyncCloudKitError.unsupportedRecordType
+        }
+        try validateSecretSyncImmutableTransportShape(record, type: type)
+        guard let canonicalBytes = record[secretSyncCanonicalBytesKey] as? Data,
+              let digestBytes = record[secretSyncRecordDigestKey] as? Data else {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+        let digest: SecretRecordDigest
+        do {
+            digest = try SecretRecordDigest(bytes: digestBytes)
+        } catch {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+        guard record.recordID.recordName == digestBytes.secretSyncLowercaseHex else {
+            throw SecretSyncCloudKitError.invalidRecordIdentity
+        }
+        return try SecretSyncCloudKitImmutableRecord(
+            type: type,
+            digest: digest,
+            canonicalBytes: canonicalBytes,
+            digester: digester
+        )
+    }
+
+    /// Accept a content-addressed retry only when the existing and retry
+    /// records have exactly the same type, identity, digest, and canonical
+    /// bytes. A same-name/different-bytes collision always fails closed.
+    static func validateSecretSyncImmutableIdempotency(
+        existing: CKRecord,
+        retry: CKRecord,
+        digester: any SecretSyncDigesting
+    ) throws {
+        let existingValue = try decodeSecretSyncImmutableRecord(existing, digester: digester)
+        let retryValue = try decodeSecretSyncImmutableRecord(retry, digester: digester)
+        guard existing.recordID == retry.recordID,
+              existingValue == retryValue else {
+            throw SecretSyncCloudKitError.immutableCollision
+        }
+    }
+
+    /// Construct the initial mutable scope head. Subsequent updates must use
+    /// `applyingSecretSyncScopeHead(_:to:)` with a fetched record.
+    static func secretSyncScopeHeadRecord(
+        _ value: SecretSyncCloudKitScopeHead
+    ) throws -> CKRecord {
+        let scopeBytes = secretSyncUUIDBytes(value.scopeID.rawValue)
+        let recordID = CKRecord.ID(
+            recordName: scopeBytes.secretSyncLowercaseHex,
+            zoneID: SecretSyncCloudKitZones.controlZoneID
+        )
+        let record = CKRecord(
+            recordType: SecretSyncCloudKitRecordType.scopeHead.rawValue,
+            recordID: recordID
+        )
+        try writeSecretSyncScopeHead(value, to: record)
+        return record
+    }
+
+    /// Decode the fixed-width mutable scope-head fields without treating their
+    /// presence as authorization or freshness proof.
+    static func decodeSecretSyncScopeHead(
+        _ record: CKRecord
+    ) throws -> SecretSyncCloudKitScopeHead {
+        try validateSecretSyncScopeHeadTransportShape(record)
+        guard let scopeBytes = record[secretSyncScopeIDKey] as? Data,
+              let scopeUUID = secretSyncUUID(from: scopeBytes),
+              let epochBytes = record[secretSyncPolicyEpochKey] as? Data,
+              let policyEpoch = secretSyncUInt64(from: epochBytes),
+              let headBytes = record[secretSyncHeadCommitDigestKey] as? Data,
+              let policyBytes = record[secretSyncPolicyDigestKey] as? Data else {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+        guard record.recordID.recordName == scopeBytes.secretSyncLowercaseHex else {
+            throw SecretSyncCloudKitError.invalidRecordIdentity
+        }
+        do {
+            return try SecretSyncCloudKitScopeHead(
+                scopeID: SecretScopeID(scopeUUID),
+                policyEpoch: policyEpoch,
+                headCommitDigest: SecretRecordDigest(bytes: headBytes),
+                policyDigest: SecretRecordDigest(bytes: policyBytes)
+            )
+        } catch {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+    }
+
+    /// Apply a validated head update to the fetched record instance, preserving
+    /// CloudKit system fields and its server change tag for compare-and-swap.
+    static func applyingSecretSyncScopeHead(
+        _ value: SecretSyncCloudKitScopeHead,
+        to fetchedRecord: CKRecord
+    ) throws -> CKRecord {
+        let current = try decodeSecretSyncScopeHead(fetchedRecord)
+        guard current.scopeID == value.scopeID else {
+            throw SecretSyncCloudKitError.invalidRecordIdentity
+        }
+        try writeSecretSyncScopeHead(value, to: fetchedRecord)
+        return fetchedRecord
+    }
+
+    internal static func validateSecretSyncRecordForWrite(
+        _ record: CKRecord,
+        digester: any SecretSyncDigesting
+    ) throws
+        -> SecretSyncCloudKitRecordType
+    {
+        guard let type = SecretSyncCloudKitRecordType(rawValue: record.recordType) else {
+            throw SecretSyncCloudKitError.unsupportedRecordType
+        }
+        if type == .scopeHead {
+            _ = try decodeSecretSyncScopeHead(record)
+        } else {
+            // Raw CKRecord callers cannot bypass content addressing: admission
+            // re-runs the injected digest and exact canonical schema checks.
+            _ = try decodeSecretSyncImmutableRecord(record, digester: digester)
+        }
+        return type
+    }
+
+    private static func validateSecretSyncImmutableTransportShape(
+        _ record: CKRecord,
+        type: SecretSyncCloudKitRecordType
+    ) throws {
+        let allowed = Set([secretSyncCanonicalBytesKey, secretSyncRecordDigestKey])
+        guard record.recordID.zoneID == SecretSyncCloudKitZones.zoneID(for: type),
+              let digest = record[secretSyncRecordDigestKey] as? Data,
+              digest.count == SecretRecordDigest.byteCount else {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+        guard record.recordID.recordName == digest.secretSyncLowercaseHex else {
+            throw SecretSyncCloudKitError.invalidRecordIdentity
+        }
+        guard Set(record.allKeys()) == allowed,
+              record.encryptedValues.allKeys().isEmpty,
+              record[secretSyncCanonicalBytesKey] is Data else {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+    }
+
+    private static func validateSecretSyncScopeHeadTransportShape(_ record: CKRecord) throws {
+        let allowed = Set([
+            secretSyncScopeIDKey,
+            secretSyncPolicyEpochKey,
+            secretSyncHeadCommitDigestKey,
+            secretSyncPolicyDigestKey,
+        ])
+        guard record.recordType == SecretSyncCloudKitRecordType.scopeHead.rawValue,
+              record.recordID.zoneID == SecretSyncCloudKitZones.controlZoneID,
+              Set(record.allKeys()) == allowed,
+              record.encryptedValues.allKeys().isEmpty else {
+            throw SecretSyncCloudKitError.invalidFieldSchema
+        }
+    }
+
+    private static func writeSecretSyncScopeHead(
+        _ value: SecretSyncCloudKitScopeHead,
+        to record: CKRecord
+    ) throws {
+        let scopeBytes = secretSyncUUIDBytes(value.scopeID.rawValue)
+        guard record.recordType == SecretSyncCloudKitRecordType.scopeHead.rawValue,
+              record.recordID.zoneID == SecretSyncCloudKitZones.controlZoneID,
+              record.recordID.recordName == scopeBytes.secretSyncLowercaseHex else {
+            throw SecretSyncCloudKitError.invalidRecordIdentity
+        }
+        record[secretSyncScopeIDKey] = scopeBytes as NSData
+        record[secretSyncPolicyEpochKey] = secretSyncUInt64Bytes(value.policyEpoch) as NSData
+        record[secretSyncHeadCommitDigestKey] = value.headCommitDigest.bytes as NSData
+        record[secretSyncPolicyDigestKey] = value.policyDigest.bytes as NSData
+    }
+
+    private static func secretSyncUUIDBytes(_ value: UUID) -> Data {
+        var raw = value.uuid
+        return withUnsafeBytes(of: &raw) { Data($0) }
+    }
+
+    private static func secretSyncUUID(from bytes: Data) -> UUID? {
+        guard bytes.count == 16 else { return nil }
+        let value = [UInt8](bytes)
+        return UUID(uuid: (
+            value[0], value[1], value[2], value[3],
+            value[4], value[5], value[6], value[7],
+            value[8], value[9], value[10], value[11],
+            value[12], value[13], value[14], value[15]
+        ))
+    }
+
+    private static func secretSyncUInt64Bytes(_ value: UInt64) -> Data {
+        Data((0..<8).map { offset in
+            UInt8(truncatingIfNeeded: value >> UInt64((7 - offset) * 8))
+        })
+    }
+
+    private static func secretSyncUInt64(from bytes: Data) -> UInt64? {
+        guard bytes.count == 8 else { return nil }
+        return bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+}
+
 /// Sync metadata extracted from the `moot_sync_*` fields of a CKRecord.
 /// Carried separately from `values` so `values` remains clean
 /// (no `moot_sync_*` keys) while the engine retains the metadata needed

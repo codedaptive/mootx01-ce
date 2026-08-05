@@ -83,7 +83,7 @@ use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::node::Node;
 use crate::node_store::T_NODES;
-use crate::drawer_store::DrawerStore;
+use crate::drawer_store::{DrawerStore, SUBJECT_LENGTH_CONTRACT};
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
@@ -159,6 +159,12 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "distilled_pipeline_version",
     "distilled_token_count",
     "distilled_at",
+    // Subject trio (PR-01): the subject IS structured-tier data — it
+    // exists precisely so candidate rows can be judged without hydrating
+    // content, so the structured projection carries all three.
+    "subject",
+    "subject_pipeline_version",
+    "subject_at",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1949,12 +1955,14 @@ impl DrawerStore for DrawerStoreCore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
 
-        // Resolve the full lineage chain. All members — active,
-        // superseded, tombstoned — are in scope for content scrub.
+        // Resolve the full lineage chain. Every member is walked;
+        // members whose tombstone transition the gate admits are
+        // scrubbed, and accepted members (refused per S-3) are left
+        // untouched and reported in the outcome.
         let lineage_ids = self.lineage_chain(drawer_id)?;
 
         // Read all three bitmaps so we can construct BitmapFields and
@@ -2113,7 +2121,10 @@ impl DrawerStore for DrawerStoreCore {
             }
         }
 
-        // ── Scrub every lineage sibling ──
+        // ── Walk every lineage sibling ──
+        // Siblings the gate admits are scrubbed; siblings the gate
+        // refuses are left untouched and collected for the outcome.
+        let mut refused_sibling_ids: Vec<String> = Vec::new();
         for sibling_id in &lineage_ids {
             if sibling_id == drawer_id {
                 continue;
@@ -2246,39 +2257,28 @@ impl DrawerStore for DrawerStoreCore {
                             .append(pk_audit_event_from(&sib_event));
                     }
                 } else {
-                    // Gate rejected the state transition (e.g., a sibling
-                    // whose state cannot legally advance to tombstoned via
-                    // S-3). Content scrub is unconditional and independent
-                    // of the state machine: even when the state cannot
-                    // transition, the verbatim content MUST be zeroed.
-                    // Leaving content intact when the gate fails is a
-                    // destruction-contract violation (secfix/ws2-coredelete).
-                    // The scrub covers the content-derived representation too
-                    // (SPEC_DISTILLATION_STORAGE §2; Wave-1 parity fix).
-                    //
-                    // Mirrors Swift DrawerStore.expungeGated lines 1411–1424:
-                    //   values: Self.withClearedRepresentation(["content": .text("")])
-                    //   followed by refreshContentFingerprint.
-                    let mut vals = BTreeMap::new();
-                    vals.insert("content".to_string(), TypedValue::Text(String::new()));
-                    insert_cleared_representation(&mut vals);
-                    if let Ok(fp) = self.recomputed_fingerprint(sibling_id, |d| {
-                        d.content = String::new();
-                    }) {
-                        vals.insert("content_fingerprint".to_string(), fp);
-                    }
-                    let _ = row_store.update(
-                        T_DRAWERS,
-                        vals,
-                        &StoragePredicate::Eq(
-                            Column::new(T_DRAWERS, "id"),
-                            TypedValue::Text(sibling_id.to_string()),
-                        ),
-                    );
+                    // Gate rejected the state transition (accepted →
+                    // tombstoned is S-3 forbidden: accepted rows are
+                    // audit-grade and survive intact). A refused gate is
+                    // a refusal, not a partial apply: the sibling is left
+                    // byte-identical — no content write, no state write,
+                    // no audit append, and no erasure-ledger record (the
+                    // ErasureOverlay nulls ledgered rows at read time, so
+                    // a ledger record alone would still suppress the row).
+                    // The refusal is carried to the caller via
+                    // ExpungeOutcome::refused_sibling_ids; the walk
+                    // continues over the remaining lineage members.
+                    // Mirrors the Swift DrawerStore.expungeGated
+                    // gate-reject branch.
+                    refused_sibling_ids.push(sibling_id.to_string());
+                    continue;
                 }
             }
 
-            // Record sibling in the erasure ledger.
+            // Record the scrubbed sibling in the erasure ledger.
+            // Gate-refused siblings never reach this point (they
+            // `continue` above) — a ledger record would suppress their
+            // content at read time via the ErasureOverlay.
             let mut sib_ledger = BTreeMap::new();
             sib_ledger.insert(
                 "drawer_id".to_string(),
@@ -2299,7 +2299,10 @@ impl DrawerStore for DrawerStoreCore {
             reason: reason.map(|s| s.to_string()),
             ..event
         };
-        Ok(event)
+        Ok(crate::drawer_store::ExpungeOutcome {
+            event,
+            refused_sibling_ids,
+        })
     }
 
     fn seal_expunge_audit(
@@ -2552,6 +2555,235 @@ impl DrawerStore for DrawerStoreCore {
             .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
             .map_err(map_storage_err)?;
         Ok(rows.len())
+    }
+
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "drawerId must not be empty".to_string(),
+            ));
+        }
+        if subject.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "subject must not be empty".to_string(),
+            ));
+        }
+        if pipeline_version.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "pipelineVersion must not be empty".to_string(),
+            ));
+        }
+        if changed_by.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "changedBy must not be empty".to_string(),
+            ));
+        }
+        // Length contract enforced at the storage boundary — the last
+        // common gate under every producer (filing AI, backfill AI, model
+        // rider), so no producer can quietly inflate contact-sheet rows.
+        // Character count (not bytes) to match Swift `String.count`.
+        let char_count = subject.chars().count();
+        if char_count > SUBJECT_LENGTH_CONTRACT {
+            return Err(LocusKitError::InvalidContent(format!(
+                "subject exceeds the {SUBJECT_LENGTH_CONTRACT}-character length contract \
+                 ({char_count} characters); the AI-facing register requires one capped sentence"
+            )));
+        }
+        // One UPDATE of the three columns plus a sealed custody event,
+        // committed together in one transaction (Codex
+        // cc90c5dcecb081918c159788e1ffb3d6): a subject change that
+        // persists without its audit row is the defect this closes.
+        // Unlike the distilled quad there is NO presence bit
+        // (feature-flag region is full; see
+        // PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
+        // rollup — the rollup exists because recall FILTERS on bit 19,
+        // and nothing filters on subject presence.
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        // Read the current row once for the custody event's value fields.
+        // An absent row preserves the historical contract: Ok(0), no
+        // audit row, no error.
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else {
+            return Ok(0);
+        };
+        let bitmaps = (
+            i64_value_of(row.get("adjectiveBitmap")),
+            i64_value_of(row.get("operationalBitmap")),
+            i64_value_of(row.get("provenance")),
+        );
+        let anchor =
+            substrate_lib::verbs::LatticeAnchor::udc(&string_value_of(row.get("udcCode")));
+        let stamp = self.hlc.lock().unwrap().send(generated_at);
+        // Custody event on the existing AuditEvent shape, constructed
+        // directly rather than through `audit_gate::admit` — the gate
+        // validates bitmap FieldWrites and setSubject touches no bitmap.
+        // The custom verb string follows the "expungeOrphan" precedent:
+        // the substrate trail preserves it verbatim so consumers can
+        // identify subject changes, while GLK's AuditBridge collapses
+        // unknown verbs to `.mutate` (safe default). Bitmaps and anchor
+        // are unchanged, so before == after on every value field; the
+        // row records WHO changed the subject, WHEN, and WHY. The prior
+        // subject text is deliberately NOT preserved: the audit shape
+        // carries no text values, subject is derived from `content`,
+        // and content has its own audit trail — custody row + content
+        // trail reconstructs the picture.
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                &stamp,
+                "setSubject",
+                bitmaps,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            hlc: stamp,
+            verb: "setSubject".to_string(),
+            before_bitmaps: Some(bitmaps),
+            after_bitmaps: bitmaps,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: changed_by.to_string(),
+            // The caller's note; None when none was supplied (the audit
+            // row still exists — an absent reason is not an absent row).
+            reason: reason.map(|s| s.to_string()),
+        };
+        let mut values = BTreeMap::new();
+        values.insert(
+            "subject".to_string(),
+            TypedValue::Text(subject.to_string()),
+        );
+        values.insert(
+            "subject_pipeline_version".to_string(),
+            TypedValue::Text(pipeline_version.to_string()),
+        );
+        values.insert(
+            "subject_at".to_string(),
+            TypedValue::Timestamp(generated_at),
+        );
+        // Fold the recomputed content_fingerprint into the SAME update —
+        // the blanket rule for every `drawers` write in this file (see
+        // `recomputed_fingerprint`).
+        let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| {
+            d.subject = Some(subject.to_string());
+            d.subject_pipeline_version = Some(pipeline_version.to_string());
+            d.subject_at = Some(generated_at);
+        })?;
+        values.insert("content_fingerprint".to_string(), fingerprint_value);
+        let audit_row = pk_audit_event_from(&event);
+        // Column write + audit append succeed or fail together. The
+        // closure returns StorageResult<()>; errors are converted to
+        // LocusKitError by map_storage_err on the outer transaction() call.
+        let mut updated: usize = 0;
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                updated = txn.row_store().update(T_DRAWERS, values.clone(), &id_pred)?;
+                // The row can vanish between the read above and this
+                // transaction; a 0-row update seals no custody event.
+                if updated > 0 {
+                    txn.audit_log().append(audit_row.clone())?;
+                }
+                Ok(())
+            })
+            .map_err(map_storage_err)?;
+        Ok(updated)
+    }
+
+    /// Count of active drawers still awaiting a subject line (PR-01
+    /// backfill-eligibility aggregate): not tombstoned, non-empty
+    /// content, and subject absent OR produced under a different
+    /// pipeline contract. Uses `IsNull(subject)` directly — the subject
+    /// trio carries no presence bit in v1, and this count runs at status
+    /// cadence, not in recall. Projected to `id` only.
+    ///
+    /// Mirrors Swift `DrawerStore.countMissingSubject`.
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::Or(vec![
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+                StoragePredicate::Neq(
+                    Column::new(T_DRAWERS, "subject_pipeline_version"),
+                    TypedValue::Text(pipeline_version.to_string()),
+                ),
+            ]),
+        ]);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
+    }
+
+    /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
+    /// lane's `pending`. Mirrors Swift `countSubjectDebt`.
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.count_subject_debt_including(&[])
+    }
+
+    /// Tier-aware debt count (PR-10). Mirrors Swift
+    /// `countSubjectDebt(includingPipelines:)`.
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = subject_debt_predicate(pipelines);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
+    }
+
+    /// The subject-backfill sweep enumerator (PR-09). Deterministic
+    /// (filedAt ASC, id ASC) order; full rows so the producer can read
+    /// `content`; corrupt rows skip-and-log like every corpus scan.
+    /// Mirrors Swift `subjectDebtBatch(limit:)`.
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.subject_debt_batch_including(limit, &[])
+    }
+
+    /// Tier-aware sweep enumerator (PR-10). Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:)`.
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let predicate = subject_debt_predicate(pipelines);
+        let (rows, _skipped) = self
+            .storage
+            .row_store()
+            .query_skip_corrupt(
+                T_DRAWERS,
+                Some(&predicate),
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
+                Some(limit),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        decode_rows_skip_corrupt(&rows, "subject_debt_batch")
     }
 
     /// Zero the `content` column for every row in the `drawers` table.
@@ -3217,7 +3449,11 @@ impl DrawerStore for DrawerStoreCore {
         validate_non_empty(&fact.subject, "subject")?;
         validate_non_empty(&fact.predicate, "predicate")?;
         validate_non_empty(&fact.object, "object")?;
-        validate_non_empty(&fact.source_drawer_id, "sourceDrawerID")?;
+        // source_drawer_id = "" is the "not anchored to a specific drawer"
+        // sentinel, used by the MCP surface for freestanding triples and by
+        // palace import for facts whose anchor lives in the foreign estate.
+        // Non-empty values are admitted as-is. Matches Swift
+        // `DrawerStore.addKGFact`, which has never rejected the empty value.
         self.storage
             .row_store()
             .insert(T_KG_FACTS, kg_fact_values(fact))
@@ -4575,8 +4811,41 @@ impl DrawerStore for DrawerStoreCore {
         // mirroring Swift `Estate.open`/`create`'s
         // `containerFP.rebuildAll(activeDrawers:)`. Tombstoned drawers are
         // excluded — they are not part of the active set the OR must cover.
+        //
+        // ## Why the projected (no-blob) scan, and why it is still a FULL scan
+        //
+        // The scan is deliberately unbounded and unfiltered at the storage
+        // tier: the aggregate is only sound to prune against if it covers
+        // EVERY active row (§ 11.5). A limit, a sample, or a deferred
+        // background rebuild would open a window where pruning runs against an
+        // incomplete OR — a correctness regression, not a speed-up. Do not
+        // "optimise" this into a bounded read.
+        //
+        // What narrows is the COLUMN set, not the row set. The fold below
+        // reads exactly five fields — `tombstoned_at` (this filter),
+        // `parent_node_id` (container grouping), and the three bitmaps
+        // (`adjective_bitmap`, `operational_bitmap`, `provenance`) — so the
+        // `content` blob is pure waste here. `all_drawers_bounded_projected`
+        // issues a genuine projected SELECT over `DRAWER_STRUCTURED_COLUMNS`
+        // (every drawer column except the `content` and `distilled` text
+        // payloads), so the blob is never read off disk; `drawer_from_row`
+        // decodes the absent column to `""`. With `limit = None` the row set
+        // and the `(filedAt ASC, id ASC)` order are exactly those of
+        // `all_drawers()`, so the fingerprints are byte-identical to a
+        // full-row read while open-time cost stays proportional to the row
+        // COUNT rather than to total content — the property Codex finding
+        // 8cde7730c1fc8191b4d0b45fc571f930 is about. A content-bearing read
+        // here makes every subsequent open of a large, imported, or synced
+        // estate more expensive, silently, as the estate grows.
+        //
+        // The structured projection rather than a bespoke five-column one:
+        // `drawer_from_row` mints a fresh random `Uuid::new_v4()` when
+        // `lineageID` is absent, which would burn entropy per row and break the
+        // deterministic-engine rule for no gain — the rebuild never reads
+        // `lineage_id`. Every other structured column is a small integer or
+        // short text field; the blob was the whole cost.
         let active: Vec<Drawer> = self
-            .all_drawers()?
+            .all_drawers_bounded_projected(None)?
             .into_iter()
             .filter(|d| d.tombstoned_at.is_none())
             .collect();
@@ -5224,7 +5493,7 @@ impl DrawerStore for InMemoryDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
     fn set_distilled_representation(
@@ -5245,6 +5514,43 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_undistilled(pipeline_version)
+    }
+    fn set_subject_representation(
+        &self,
+        drawer_id: &str,
+        subject: &str,
+        pipeline_version: &str,
+        generated_at: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        self.inner.set_subject_representation(
+            drawer_id,
+            subject,
+            pipeline_version,
+            generated_at,
+            changed_by,
+            reason,
+        )
+    }
+    fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_subject_debt()
+    }
+    fn subject_debt_batch(&self, limit: usize) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.subject_debt_batch(limit)
+    }
+    fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
+        self.inner.count_subject_debt_including(pipelines)
+    }
+    fn subject_debt_batch_including(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.subject_debt_batch_including(limit, pipelines)
+    }
+    fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.inner.count_missing_subject(pipeline_version)
     }
     fn seal_expunge_audit(
         &self,
@@ -5671,11 +5977,17 @@ impl DrawerStore for InMemoryDrawerStore {
 /// representation columns and content in one statement. Mirrors Swift
 /// `DrawerStore.withClearedRepresentation`.
 pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedValue>) {
+    // Covers every content-derived column: the distilled quad AND the
+    // subject trio (PR-01) — derived text must not outlive the content it
+    // renders, so both clear in the same content-touching statement.
     for column in [
         "distilled",
         "distilled_pipeline_version",
         "distilled_token_count",
         "distilled_at",
+        "subject",
+        "subject_pipeline_version",
+        "subject_at",
     ] {
         values
             .entry(column.to_string())
@@ -5796,6 +6108,30 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
     m.insert(
         "distilled_at".to_string(),
         d.distilled_at
+            .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
+    );
+    // Subject trio (PR-01): same capture-path contract as the distilled
+    // quad — a fresh capture MAY carry a subject (the filing AI provides
+    // it at file time); backfill and the model rider populate the rest via
+    // set_subject_representation. Mirrors Swift drawerValues.
+    m.insert(
+        "subject".to_string(),
+        d.subject
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "subject_pipeline_version".to_string(),
+        d.subject_pipeline_version
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "subject_at".to_string(),
+        d.subject_at
             .map(TypedValue::Timestamp)
             .unwrap_or(TypedValue::Null),
     );
@@ -5959,6 +6295,18 @@ fn kg_fact_values(f: &KGFact) -> BTreeMap<String, TypedValue> {
     m.insert(
         "sourceDrawerID".to_string(),
         TypedValue::Text(f.source_drawer_id.clone()),
+    );
+    m.insert(
+        "addedBy".to_string(),
+        TypedValue::Text(f.added_by.clone()),
+    );
+    m.insert(
+        "foreignSourceKey".to_string(),
+        TypedValue::Text(f.foreign_source_key.clone()),
+    );
+    m.insert(
+        "foreignRecordID".to_string(),
+        TypedValue::Text(f.foreign_record_id.clone()),
     );
     m.insert(
         "adjectiveBitmap".to_string(),
@@ -6230,6 +6578,11 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         distilled_pipeline_version: opt_string_value_of(row.get("distilled_pipeline_version")),
         distilled_token_count: opt_int_value_of(row.get("distilled_token_count")),
         distilled_at: opt_int_value_of(row.get("distilled_at")),
+        // Subject trio (PR-01). NULL on any row not yet subjected;
+        // decodes to None — the backfill-eligibility signal.
+        subject: opt_string_value_of(row.get("subject")),
+        subject_pipeline_version: opt_string_value_of(row.get("subject_pipeline_version")),
+        subject_at: opt_int_value_of(row.get("subject_at")),
     })
 }
 
@@ -6257,6 +6610,31 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
 ///
 /// The log line is written to stderr so it appears in the process log without
 /// requiring a tracing/logging dependency in PersistenceKit's crate.
+/// The subject-debt predicate, optionally widened by regeneration tiers
+/// (PR-10): subject NULL, or produced under one of `pipelines` (the tiers
+/// BELOW the requesting producer on the trust ladder — the Apple rider
+/// lists the deterministic tiers and never ai-v1, so the filing AI
+/// outranks the fallback model STRUCTURALLY). Twin of Swift
+/// `DrawerStore.subjectDebtPredicate(includingPipelines:)`.
+fn subject_debt_predicate(pipelines: &[String]) -> StoragePredicate {
+    let mut subject_clauses: Vec<StoragePredicate> =
+        vec![StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject"))];
+    for pipeline in pipelines {
+        subject_clauses.push(StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "subject_pipeline_version"),
+            TypedValue::Text(pipeline.clone()),
+        ));
+    }
+    StoragePredicate::And(vec![
+        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "content"),
+            TypedValue::Text(String::new()),
+        ),
+        StoragePredicate::Or(subject_clauses),
+    ])
+}
+
 fn decode_rows_skip_corrupt(rows: &[StorageRow], scan: &str) -> Result<Vec<Drawer>, LocusKitError> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -6518,6 +6896,9 @@ fn kg_fact_from_row(row: &StorageRow) -> KGFact {
         predicate: string_value_of(row.get("predicate")),
         object: string_value_of(row.get("object")),
         source_drawer_id: string_value_of(row.get("sourceDrawerID")),
+        added_by: string_value_of(row.get("addedBy")),
+        foreign_source_key: string_value_of(row.get("foreignSourceKey")),
+        foreign_record_id: string_value_of(row.get("foreignRecordID")),
         adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
         provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),
@@ -8888,6 +9269,186 @@ mod tests {
         assert!(
             !found,
             "rolled-back insert must leave no orphaned drawer row in storage"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // setSubject custody atomicity (Codex cc90c5dcecb081918c159788e1ffb3d6)
+    // -------------------------------------------------------------------
+
+    /// AuditLog wrapper that refuses to append `"setSubject"` events and
+    /// delegates everything else, so the gated capture's genesis event
+    /// still seals and the fixture drawer can be added normally. Forces
+    /// the failure at the production append site INSIDE the transaction,
+    /// proving the column write rolls back with it.
+    struct SetSubjectAppendRefusingAuditLog {
+        inner: Arc<dyn persistence_kit::audit_log::AuditLog>,
+    }
+
+    impl persistence_kit::audit_log::AuditLog for SetSubjectAppendRefusingAuditLog {
+        fn append(&self, event: PkAuditEvent) -> persistence_kit::error::StorageResult<()> {
+            if event.verb == "setSubject" {
+                return Err(persistence_kit::error::StorageError::BackendUnavailable {
+                    reason: "injected setSubject audit-append failure".to_string(),
+                });
+            }
+            self.inner.append(event)
+        }
+        fn append_batch(
+            &self,
+            events: Vec<PkAuditEvent>,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner.append_batch(events)
+        }
+        fn iterate(
+            &self,
+            after: Option<substrate_types::hlc::HLC>,
+            row_id: Option<persistence_kit::types::RowKey>,
+            limit: usize,
+        ) -> persistence_kit::error::StorageResult<Vec<PkAuditEvent>> {
+            self.inner.iterate(after, row_id, limit)
+        }
+        fn events_for_row(
+            &self,
+            row_id: persistence_kit::types::RowKey,
+        ) -> persistence_kit::error::StorageResult<Vec<PkAuditEvent>> {
+            self.inner.events_for_row(row_id)
+        }
+        fn row_ids_with_audit_verbs(
+            &self,
+            row_ids: &[persistence_kit::types::RowKey],
+            verbs: &[&str],
+        ) -> persistence_kit::error::StorageResult<
+            std::collections::HashSet<persistence_kit::types::RowKey>,
+        > {
+            self.inner.row_ids_with_audit_verbs(row_ids, verbs)
+        }
+        fn count(&self) -> persistence_kit::error::StorageResult<usize> {
+            self.inner.count()
+        }
+    }
+
+    /// Storage wrapper over a real InMemoryStorage whose `audit_log()`
+    /// (both direct and transactional) refuses `"setSubject"` appends.
+    struct SetSubjectAuditFailingStorage {
+        inner: Arc<InMemoryStorage>,
+    }
+
+    impl SetSubjectAuditFailingStorage {
+        fn failing_log(
+            log: Arc<dyn persistence_kit::audit_log::AuditLog>,
+        ) -> Arc<dyn persistence_kit::audit_log::AuditLog> {
+            Arc::new(SetSubjectAppendRefusingAuditLog { inner: log })
+        }
+    }
+
+    /// Transaction view handed to the block: same row/blob stores as the
+    /// real transaction, failing audit log.
+    struct FailingTxnView<'a> {
+        inner: &'a dyn persistence_kit::storage::StorageTransaction,
+    }
+
+    impl persistence_kit::storage::StorageTransaction for FailingTxnView<'_> {
+        fn row_store(&self) -> Arc<dyn persistence_kit::row_store::RowStore> {
+            self.inner.row_store()
+        }
+        fn blob_store(&self) -> Arc<dyn persistence_kit::blob_store::BlobStore> {
+            self.inner.blob_store()
+        }
+        fn audit_log(&self) -> Arc<dyn persistence_kit::audit_log::AuditLog> {
+            SetSubjectAuditFailingStorage::failing_log(self.inner.audit_log())
+        }
+    }
+
+    impl Storage for SetSubjectAuditFailingStorage {
+        fn configuration(&self) -> &persistence_kit::storage::EstateConfiguration {
+            self.inner.configuration()
+        }
+        fn row_store(&self) -> Arc<dyn persistence_kit::row_store::RowStore> {
+            Storage::row_store(&*self.inner)
+        }
+        fn blob_store(&self) -> Arc<dyn persistence_kit::blob_store::BlobStore> {
+            Storage::blob_store(&*self.inner)
+        }
+        fn audit_log(&self) -> Arc<dyn persistence_kit::audit_log::AuditLog> {
+            Self::failing_log(Storage::audit_log(&*self.inner))
+        }
+        fn observer(&self) -> Arc<dyn persistence_kit::observer::StorageObserver> {
+            self.inner.observer()
+        }
+        fn open(
+            &self,
+            schema: &persistence_kit::schema::SchemaDeclaration,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner.open(schema)
+        }
+        fn close(&self) -> persistence_kit::error::StorageResult<()> {
+            self.inner.close()
+        }
+        fn current_schema_version(&self) -> persistence_kit::error::StorageResult<i32> {
+            self.inner.current_schema_version()
+        }
+        fn migrate(
+            &self,
+            schema: &persistence_kit::schema::SchemaDeclaration,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner.migrate(schema)
+        }
+        fn transaction(
+            &self,
+            isolation: IsolationLevel,
+            block: &mut dyn FnMut(
+                &dyn persistence_kit::storage::StorageTransaction,
+            ) -> persistence_kit::error::StorageResult<()>,
+        ) -> persistence_kit::error::StorageResult<()> {
+            self.inner
+                .transaction(isolation, &mut |txn| block(&FailingTxnView { inner: txn }))
+        }
+    }
+
+    /// Atomicity invariant (MXE-SK): a forced failure of the custody
+    /// audit append leaves the subject columns unchanged — the column
+    /// write and the audit append succeed or fail together.
+    #[test]
+    fn set_subject_failed_audit_append_rolls_back_subject_write() {
+        let storage = Arc::new(SetSubjectAuditFailingStorage {
+            inner: Arc::new(InMemoryStorage::with_estate(Uuid::new_v4())),
+        });
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        let id = tid("atomicity-subject");
+        let mut d = Drawer::new(
+            &id,
+            "Content whose subject write must roll back.",
+            "test-parent",
+            "bilby",
+            NOW,
+            "test-v1",
+        );
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+
+        let err = store.set_subject_representation(
+            &id,
+            "Subject that must not persist.",
+            "ai-v1",
+            NOW + 100,
+            "test-actor",
+            Some("note that must not persist"),
+        );
+        assert!(err.is_err(), "injected audit failure must surface as Err");
+
+        // The subject trio must be unchanged (rolled back with the append).
+        let after = store.get_drawer(&id).unwrap().unwrap();
+        assert!(after.subject.is_none(), "subject column must roll back");
+        assert!(after.subject_pipeline_version.is_none());
+        assert!(after.subject_at.is_none());
+
+        // And no setSubject custody event may exist.
+        let events = store.audit_events_for_row(&id).unwrap();
+        assert!(
+            events.iter().all(|e| e.verb != "setSubject"),
+            "no setSubject custody event may survive the rollback"
         );
     }
 }

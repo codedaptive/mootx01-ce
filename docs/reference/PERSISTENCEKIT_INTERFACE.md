@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-07-20
-version: 1.11.0
+date: 2026-08-03
+version: 1.14.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -950,8 +950,10 @@ struct inside `IncrementalReplicationSession.swift`.
 |---|---|---|
 | `ReplicationCursor` | `ReplicationCursor` | Watermark after flush/hydrate: `hlcWatermark`/`hlc_watermark` (HLC?/Option<HLC>), `rowsWritten`/`rows_written` (Int/usize), `auditEventsWritten`/`audit_events_written` (Int/usize), `blobsWritten`/`blobs_written` (Int/usize). |
 | `ReplicationError` | `ReplicationError` | Closed error enum: `schemaMismatch`/`SchemaMismatch`, `storageFailure`/`StorageFailure`. |
-| `DirtySet` | `DirtySet` | Observer-fed dirty-row accumulator. Swift: `public actor DirtySet` (actor serializes access). Rust: `pub struct DirtySet` with `Mutex<BTreeSet<DirtyKey>>` (owned-state struct, no async runtime). Observable behaviour is identical: accumulate on change notification, drain before each sync run. |
-| `IncrementalReplicationSession` | `IncrementalReplicationSession` | Session-oriented incremental replication: wires `StorageObserver` subscriptions to dirty-set accumulators and runs sync passes. Swift: `public final class IncrementalReplicationSession: Sendable`. Rust: `pub struct IncrementalReplicationSession`. |
+| `DirtySet` | `DirtySet` | Observer-fed dirty accumulator. Swift: `public actor DirtySet` (actor serializes access). Rust: `pub struct DirtySet` with `Mutex`-guarded sets (owned-state struct, no async runtime). Observable behaviour is identical: accumulate on change notification, drain before each sync run. **Tracks dirt at three resolutions**, because the durable backends do not always emit primary-key values: rows it can name; tables it cannot name but can re-scan (a `TableChange` with absent or PK-incomplete `values` marks its whole table); and tables that declare no primary key, which can be neither named nor reconciled. A value-less change is NEVER discarded. Inspection: `count()` (named rows only), `pendingRescanTables()` / `pending_rescan_tables`, `pendingUnresolvableTables()` / `pending_unresolvable_tables`. |
+| `DirtyDrain` | `DirtyDrain` | One atomic drain of all three resolutions — `keys`, `rescanTables`/`rescan_tables`, `unresolvableTables`/`unresolvable_tables`, plus `isEmpty`/`is_empty`. Returned by `DirtySet.drain()` and accepted by `DirtySet.restore(_:)`; draining or restoring a subset is not expressible, so table-granularity dirt cannot be lost on a retry. Swift: internal `struct DirtyDrain: Sendable`. Rust: `pub struct DirtyDrain`. |
+| `IncrementalReplicationSession` | `IncrementalReplicationSession` | Session-oriented incremental replication: wires `StorageObserver` subscriptions to dirty-set accumulators and runs sync passes. Swift: `public final class IncrementalReplicationSession: Sendable`. Rust: `pub struct IncrementalReplicationSession`. `sync` returns `IncrementalSyncOutcome`, not a bare `ReplicationCursor`. A table marked for re-scan is read in full: every source row is upserted and every destination row whose primary key is absent from the source is deleted — the row-level form of the blob reconciliation in the full-snapshot path (§3d, SECFIX-WS2-PK F5). The early return fires only when nothing at all was observed, never for changes that could not be keyed. |
+| `IncrementalSyncOutcome` | `IncrementalSyncOutcome` | Result of one incremental cycle: `cursor` (the `ReplicationCursor` to persist), `rescannedTables`/`rescanned_tables` (tables read in full this cycle), `unresolvedTables`/`unresolved_tables` (tables carrying a change resolvable at no granularity), and `isComplete`/`is_complete()`. A non-empty unresolved list means the cycle was INCOMPLETE: no audit events were copied and `cursor.hlcWatermark` carries the INCOMING watermark unchanged, so the next cycle re-reads the same range. Resolvable row work still propagates. **`unresolvable` and `unresolved` are not synonyms and the difference is deliberate:** `DirtySet.pendingUnresolvableTables` / `pending_unresolvable_tables` names a property of the TABLE — it declares no primary key, so it can *never* be reconciled — while `unresolvedTables` / `unresolved_tables` here names a property of the CYCLE: what this run failed to resolve. Declared in the session's own source file on both ports, not alongside `ReplicationCursor`: the cursor is the durable watermark, cycle resolution is a per-run report. Swift: `public struct IncrementalSyncOutcome: Sendable, Equatable`. Rust: `pub struct IncrementalSyncOutcome`. |
 | `BlobDirtySet` (Swift) | `BlobDirtyAccumulator` (Rust) | Blob-change dirty accumulator. The name differs by port convention; the contract is identical: accumulate `BlobChange` notifications, drain to get the (key, bytes) set to sync. |
 | `EstateCacheConfig` | `EstateCacheConfig` | Cache layer config: `enabled`, byte ceiling, sensitivity threshold (clamped ≤ 2). |
 | `CachingRowStore` | `CachingRowStore` | Decorating `RowStore` with InMemory hot tier and LRU eviction (SPEC I-11/I-12). Present and as-of reads key separately (SPEC B-16). Accepts an optional `ParentChainProvider` callback for Merkle-aggregate chain invalidation (SPEC B-17). Swift: `init(backing:config:parentChainProvider:)` with `parentChainProvider` defaulting to `nil`. Rust: `new(backing, config)` (no callback) or `with_parent_chain(backing, config, provider)`. |
@@ -1040,13 +1042,33 @@ encryption seam at the storage layer:
 
 | Path | Swift | Rust | Notes |
 |---|---|---|---|
-| Write (insert) | `encryptedForWrite` → encrypt `content` → stamp `keyID` | `encrypted_for_write` → encrypt `content` → stamp `keyID` | Only for `mode != .plaintext` and rows with a `content` column |
-| Read (query / query_projected) | `decryptedForRead` → decrypt `content` | `decrypted_for_read` → decrypt `content` | Only when `keyID` matches estate key identifier |
-| Upsert guard | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Rejects plaintext `content` on encrypting estate; encryption seam is not wired to upsert |
-| Update guard | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Same guard; all current callers update non-content columns |
+| Write (insert / upsert / update) | `encryptedForWrite` → encrypt protected columns → stamp `keyID` | `encrypted_for_write` → encrypt protected columns → stamp `keyID` | Every write verb seals. Only for `mode != .plaintext` and tables declaring protected columns |
+| Read (query / query_projected) | `decryptedForRead` → decrypt protected columns | `decrypted_for_read` → decrypt protected columns | Only when `keyID` matches estate key identifier |
+| Write-boundary guard (all verbs) | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Runs beneath the seam on insert, upsert and update. Rejects non-empty TEXT in a protected column on an encrypting estate regardless of `keyID` — ciphertext is a blob, so text means the seam did not run. Blob, null/absent and empty text (erasure scrub) are accepted |
 
-Column names intercepted: `"content"` and `"keyID"`. Plaintext mode is a
-no-op on every path. Cross-port compatibility applies to Mode 2
+Interception is by **(table, column) pair**, never by column name alone. The
+protected columns are `"content"`, `"distilled"` and `"subject"` on the
+`drawers` table; `"keyID"` is the key-identifier column the seam stamps on
+every row it seals. A table absent from the map passes through untouched in
+both directions and never receives a `keyID` stamp.
+
+A table joins the map only when it BOTH carries content or content-derived
+text AND declares a `keyID` column — the seam stamps `keyID` on write, so a
+mapped table without that column would produce a write naming a column that
+does not exist. `drawers` is currently the only table in the schema declaring
+`keyID`, which makes the map maximal rather than merely current. Two shapes
+are deliberately outside it: `kg_facts.subject` (the subject term of an S-P-O
+triple, indexed for equality, on a table with no `keyID`) and dataset tables
+`ds_<uuid>` (caller-supplied column names, no `keyID` — a boundary, not
+protection: such a column is written in the clear on an encrypting estate).
+
+That pair is not an inventory of every content-bearing column in the estate.
+`corpus_documents.text` and `.dense_text` hold document body text on the same
+physical database through the same seam and are content-derived, but the table
+declares no `keyID`, so they are at rest in the clear. That is an open gap
+awaiting a schema change rather than a deliberate exemption, and it is tracked
+as its own mission; Mode 2 is not an end-to-end at-rest content guarantee until
+it closes. Plaintext mode is a no-op on every path. Cross-port compatibility applies to Mode 2
 (RowEncryption) only: a Mode 2 content value encrypted by the Swift backend
 is decryptable by the Rust backend because both use AES-GCM-256 with the same
 `[nonce][tag][ciphertext]` envelope layout and the same key bytes from
@@ -1499,6 +1521,49 @@ fn perform_maintenance(
 ```
 
 ## Changelog
+
+### 1.14.0 -- 2026-08-03
+Corrected the intercepted-column contract (MXE-RW). The at-rest wiring
+section said "Column names intercepted: `content` and `keyID`" — wording that
+predated `distilled`, `subject` and the (table, column) map, and that
+described interception by column name alone, which the seam has not done
+since the table filter landed. It now names the protected columns per table,
+states that interception is by (table, column) pair, and records the
+inclusion rule: a table joins the map when it BOTH carries content or
+content-derived text AND declares a `keyID` column, since the seam stamps
+`keyID` on every row it seals. `kg_facts.subject` and dataset tables
+`ds_<uuid>` are named as the two shapes deliberately outside the map, and the
+dataset case is stated as a boundary rather than protection. The section also
+now records that those two are not an inventory of every content-bearing
+column: `corpus_documents.text` / `.dense_text` are content-derived text on a
+table with no `keyID` and are at rest in the clear, an open gap tracked
+separately, so Mode 2 is not an end-to-end at-rest content guarantee until it
+closes. No signature or behavioural change.
+
+### 1.13.0 -- 2026-08-03
+At-rest encryption wiring table corrected (MXE-PW): the seam runs on
+insert, upsert AND update in both ports and both backends, and the
+write-boundary guard rejects non-empty text in a protected column
+regardless of keyID. The previous table stated the seam was "not wired to
+upsert" and that update callers only touched non-content columns; both
+were false.
+
+### 1.12.0 -- 2026-08-03
+MXE-IR (Codex finding `74e3b7f7e6288191ba31644e4fa4b43b`): incremental
+replication no longer discards observed changes it cannot attribute to a row.
+`DirtySet` now tracks dirt at three resolutions and `DirtySet.drain` returns
+`DirtyDrain` rather than `[DirtyKey]` / `Vec<DirtyKey>`;
+`DirtySet.restore` takes the same type. `IncrementalReplicationSession.sync`
+returns the new `IncrementalSyncOutcome` instead of a bare `ReplicationCursor`,
+carrying the cycle's re-scanned and unresolved tables alongside it. The audit
+watermark advances only for a cycle that resolved every observed change.
+`ReplicationCursor` and `ReplicationError` are unchanged. Breaking for callers
+of `sync`, `DirtySet.drain`, and `DirtySet.restore` (MINOR under this
+document's numbering, which tracks surface additions; the session had no
+in-repo production consumers at the time of the change). The
+`IncrementalSyncOutcome` row states explicitly that `unresolvable` (a table that
+can never be reconciled) and `unresolved` (what one cycle failed to resolve) are
+distinct terms, not synonyms.
 
 ### 1.11.0 -- 2026-07-20
 Shared-content 1.1 P5: added the storage maintenance surface (§ 12) —

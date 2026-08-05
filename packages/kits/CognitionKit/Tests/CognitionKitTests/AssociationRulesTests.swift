@@ -257,3 +257,110 @@ extension AssociationRulesTests {
         }
     }
 }
+
+// MARK: - PR-05 exemplar property tests
+
+extension AssociationRulesTests {
+
+    // CK-AR-6: exemplarDrawerIDs carry genuine drawer addresses satisfying
+    // both sides of the rule.
+    //
+    // Two groups of drawers with completely disjoint kind+channel profiles:
+    //   Group A — kind=code, channel=typed  → labels "kind:code", "channel:typed"
+    //   Group B — kind=prose, channel=voiced → labels "kind:prose", "channel:voiced"
+    //
+    // Rules like "kind:code → channel:typed" can only be satisfied by Group A
+    // drawers. Verifying that every exemplar of such a rule has the
+    // corresponding categorical properties is the property-test equivalent of
+    // "exemplars satisfy BOTH labels of the rule".
+    @Test("exemplarDrawerIDs satisfy both rule labels and respect the cap")
+    func exemplarDrawerIDsSatisfyBothLabels() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Capture 4 drawers in each group. The two groups have disjoint
+        // kind+channel label pairs so cross-group rules cannot fire, and the
+        // within-group rules are guaranteed by the label co-occurrence.
+        var groupAIDs: Set<String> = []
+        var groupBIDs: Set<String> = []
+        for i in 0..<4 {
+            let frameA = CaptureFrame(
+                content: "group-a content \(i)",
+                channel: .typed,
+                room: "alpha",
+                latticeAnchor: .udc("000"),
+                addedBy: "ar-test",
+                embeddingModelID: "test-v1",
+                kind: .code)
+            let a = try await kit.capture(handle, frameA)
+            groupAIDs.insert(a.id)
+
+            let frameB = CaptureFrame(
+                content: "group-b content \(i)",
+                channel: .voiced,
+                room: "beta",
+                latticeAnchor: .udc("000"),
+                addedBy: "ar-test",
+                embeddingModelID: "test-v1",
+                kind: .prose)
+            let b = try await kit.capture(handle, frameB)
+            groupBIDs.insert(b.id)
+        }
+
+        let input = AssociationRules.Input(
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
+        let out = try await AssociationRules().run(input: input, estate: handle, kit: kit)
+        #expect(!out.rules.isEmpty,
+                "8 drawers with co-occurring labels must produce at least one rule")
+
+        // Recall all drawers so we can verify exemplar categorical properties.
+        let recalled = try await kit.recall(
+            handle, LocusKit.RecallFrame(filterChain: [.unconfirmed]))
+        let byID = Dictionary(uniqueKeysWithValues: recalled.map { ($0.id, $0) })
+        let allCapturedIDs = groupAIDs.union(groupBIDs)
+
+        var rulesWithExemplars = 0
+        for rule in out.rules where !rule.exemplarDrawerIDs.isEmpty {
+            rulesWithExemplars += 1
+
+            // Cap invariant: never more than the declared constant.
+            #expect(rule.exemplarDrawerIDs.count <= associationExemplarCap,
+                    "exemplar count must not exceed associationExemplarCap")
+
+            for id in rule.exemplarDrawerIDs {
+                // Every exemplar must be a real captured drawer address.
+                #expect(allCapturedIDs.contains(id),
+                        "exemplar \(id) must belong to the captured drawer set")
+                let drawer = try #require(byID[id],
+                    "exemplar id \(id) must be present in the recalled drawer set")
+
+                // For kind labels (predictable label strings): the exemplar must
+                // carry the kind implied by the label — satisfying the rule's
+                // antecedent or consequent, whichever named this kind.
+                if rule.antecedent == "kind:code" || rule.consequent == "kind:code" {
+                    #expect(drawer.contentKind == .code,
+                        "exemplar for a 'kind:code' rule must have contentKind==.code")
+                }
+                if rule.antecedent == "kind:prose" || rule.consequent == "kind:prose" {
+                    #expect(drawer.contentKind == .prose,
+                        "exemplar for a 'kind:prose' rule must have contentKind==.prose")
+                }
+
+                // For channel labels: same property check.
+                if rule.antecedent == "channel:typed" || rule.consequent == "channel:typed" {
+                    #expect(drawer.captureChannel == .typed,
+                        "exemplar for a 'channel:typed' rule must have captureChannel==.typed")
+                }
+                if rule.antecedent == "channel:voiced" || rule.consequent == "channel:voiced" {
+                    #expect(drawer.captureChannel == .voiced,
+                        "exemplar for a 'channel:voiced' rule must have captureChannel==.voiced")
+                }
+            }
+        }
+
+        // At least one rule must carry exemplar addresses; an empty exemplar
+        // set across all rules means the recipe's exemplar path was never exercised.
+        #expect(rulesWithExemplars > 0,
+                "at least one mined rule must carry exemplar drawer IDs")
+    }
+}

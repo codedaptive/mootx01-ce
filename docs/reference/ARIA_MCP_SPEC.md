@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.19.0
+version: 1.28.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-08-04
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -154,6 +154,63 @@ One federation tool (`moot_federated_search`) sits above the interface tier. It 
 a grant-authorized federated read across all locally-open estates the requester is
 authorized for.
 
+### Structured recall results (MXE-SS)
+
+The recall family — `moot_memory_search`, `moot_memory_get`,
+`moot_recall_shaped`, and `moot_recall_precise` — declares an `outputSchema`
+on its tool descriptors and returns `structuredContent` on every successful
+`tools/call` result, alongside (never instead of) the text block. This is
+the MCP-sanctioned structured-result mechanism; the text block keeps its
+exact prior bytes, so text-reading consumers are unaffected.
+
+Contract, both ports (one shared schema, identical field names):
+
+- `structuredContent` is `{"results": [...]}` — one entry per drawer row
+  the text block renders: same admissible set, same order, same 50-row cap.
+  Each entry carries `id` (required), and `room`, `content`, `subject` when
+  the text's tier carries their analog.
+- **Redaction parity is an invariant.** Whatever the text block withholds,
+  the structured block withholds identically: a provenance-restricted or
+  provenance-secret row carries the dense-row redaction marker in `subject`
+  AND `content`, never the body; an id the text renders opaquely
+  (unhydrated/gated) carries `id` plus the `(no subject)` marker only —
+  no room, no content; a row `moot_memory_get` reports not-found appears in
+  neither block. A structured field MUST never carry content the text
+  block redacted.
+- `moot_memory_get` depth tiers mirror the text: `content` is absent at
+  `depth:subject`, carries the distillate (or the fallback body) at
+  `depth:distilled`, and the verbatim body at `depth:full`; at full-record
+  depth `subject` is present only when the drawer carries one, matching
+  the record's omitted subject line.
+- Out of scope by design: `moot_recall_vague` (annotated two-tier reply),
+  `moot_recall_distilled` (ACK-gated v2 contract), `moot_memory_list`
+  (structural enumeration), `moot_federated_search` (federation redaction
+  posture is its own contract), and lens/citation surfaces.
+
+Conformance: `StructuredRecallResultTests` (Swift) ↔
+`structured_recall_tests.rs` (Rust) pin the shared schema's field names
+cross-port and prove the redaction-parity tests fail against a naive
+implementation that copies unredacted values.
+
+### Partial-erase honesty (`moot_erase_memory`, MXE-FA)
+
+Erasure walks the target's full lineage, and the substrate audit gate refuses
+to tombstone accepted rows (LOCUSKIT_SPEC B-8b) — those siblings keep their
+content, their vectors, and stay recallable. The tool's response must match
+what happened:
+
+- **Full erasure** (no refusals): `erased memory <id>` — byte-identical to
+  the historical shape.
+- **Partial erasure** (gate refused accepted siblings):
+  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
+  erasure and remain readable: <ids>` — a normal text result
+  (`isError: false`; the operation completed, with a partial outcome).
+
+Binding invariant: a caller acting on this sentence is making a privacy
+decision on it, so the response never claims a plain success for an expunge
+that refused a sibling. Both ports emit the same text. The erasure ledger
+records only what was actually erased.
+
 ### Contradiction hunter surface
 
 Three tools plus one lens expose the content-driven contradiction hunter
@@ -260,7 +317,15 @@ provenance respectively. Three tabular-dataset tools (`moot_file_dataset`,
 `moot_dataset_query`, `moot_dataset_stats`, MX-TAB-7) carry `.interface`
 provenance — always visible, never vault-gated. Total: 71 tools vault-on,
 65 vault-off (30 interface: 22 five-tier + 4 maintenance + 1 monitoring + 3
-dataset; 1 federation; 35 recipe/lens; 5 vault). For the full enumeration see
+dataset; 1 federation; 35 recipe/lens; 5 vault). Lens findings that name
+memories MUST cite them as dense rows through the shared renderer (evidence
+addresses, PR-05): the seven memory-listing arms (keystones,
+free_association, cohesion, contradiction, trust_synthesis, partial_cue,
+successors) are golden-tested byte-identical across ports;
+moot_lens_concepts lists member drawer ids capped at 20 and
+moot_lens_associations carries exemplar drawer ids capped at 5, so every
+lens claim is hydratable via moot_memory_get without a fresh search. For
+the full enumeration see
 ARIA_MCP_INTERFACE.md §2.
 
 ### Conformance contract
@@ -294,7 +359,7 @@ protocol:
   — Call moot_list_lenses to see available cognition tools.
   — Add teachme:true to any tool to learn it before using it.
   — Watch for hint: lines in responses — they contain coaching for better results.
-  — File memories: moot_file_memory (content + location required).
+  — File memories: moot_file_memory (content + subject + location required).
   — Search memories: moot_memory_search (query required).
   — Write journal entries: moot_write_journal after meaningful sessions.
   — Store structured facts: moot_file_fact (subject + predicate + object).
@@ -862,22 +927,176 @@ mootx01 lock
 accepted. Both commands require the resident daemon (`mootx01 serve --http auto`)
 to be running.
 
-### Redaction advisory in moot_memory_search / moot_memory_get output
+### Sensitivity-gate advisory in moot_memory_search / moot_memory_get output
 
-When no sensitivity grant is active and the estate has at least one row tagged
-`restricted` or `secret`, both `moot_memory_search` and `moot_memory_get` append a
-trailing `sensitivity_advisory:` line to their output text:
+When no sensitivity grant is active, both `moot_memory_search` and
+`moot_memory_get` append a trailing `sensitivity_advisory:` line to their output
+text. Search and get carry distinct phrasings; each is byte-identical across the
+Swift and Rust ports.
+
+`moot_memory_search`:
 
 ```
-sensitivity_advisory: results may be hidden by sensitivity tier — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
+sensitivity_advisory: a sensitivity tier gate is in effect — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
 ```
 
-The advisory is absent when a grant IS active (rows are already visible and no
-guidance is needed). It is also absent when the estate has no sensitive rows at all.
-The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector cost,
-no recall-trace rows written — `origin: internal` per B-10a).
+`moot_memory_get`:
+
+```
+sensitivity_advisory: a sensitivity tier gate is in effect on this estate — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
+```
+
+The advisory is absent when a grant IS active — the ceiling is lifted, the rows
+are already visible, and no guidance applies. Presence depends on grant state and
+on nothing else.
+
+**Invariant — the advisory MUST NOT be conditioned on estate contents.** A
+condition such as "the estate holds at least one `restricted` or `secret` row"
+turns advisory presence into a disclosure channel for exactly the rows the
+sensitivity gate protects, readable by any caller holding no grant. Determining
+that condition also requires an explicit sensitivity filter, which per
+`BitmapEvaluator` suppresses the default `sensitivityAtMost(elevated)` ceiling —
+the gate defeats itself to answer the question. Emitting on grant state alone
+discloses nothing: the caller is the party that did not unlock, so the grant
+state is already theirs. Conformance for this invariant is two estates that
+differ only in whether sensitive rows exist, asserted to produce identical
+advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.28.0 -- 2026-08-04
+
+- **Structured recall results (MXE-SS).** New § 11 subsection: the recall
+  family (`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`,
+  `moot_recall_precise`) declares an `outputSchema` and returns
+  `structuredContent` (`results[]` of `id`/`room`/`content`/`subject`)
+  alongside a byte-identical text block, with redaction parity as an
+  invariant: no structured field ever carries what the text withheld.
+  Both ports, one shared schema. No consumer changed (that is MXE-DF).
+
+### 1.27.0 -- 2026-08-04
+
+- **Partial-erase honesty (MXE-FA).** New § documenting the
+  `moot_erase_memory` response contract: full erasure keeps
+  `erased memory <id>` byte-identical; a lineage expunge the audit gate
+  refused for accepted siblings responds
+  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
+  erasure and remain readable: <ids>` (`isError: false`). No response ever
+  claims a plain success for an expunge that refused a sibling. Both ports;
+  teachme guides document both shapes.
+
+### 1.26.0 -- 2026-08-03
+Every drawer-derived aggregate in the `moot_estate_status` response now reads
+the sensitivity-filtered set. `subjects: N/M (K missing)` and
+`memories: N active (M total)` previously counted the raw cluster-A and
+non-tombstoned sets, so an ungranted caller learned how many live rows were
+hidden from it and how many of those carried content and a subject — on a
+surface whose neighbouring `wings:` line was already filtered for exactly that
+reason, and whose sibling `moot_memory_list filter:missing_subject` enumerator
+already filtered before listing. The counter and that enumerator now describe
+one population. On an estate holding restricted/secret rows these numbers drop;
+that is the correction, not a regression. No sensitivity-grant plumbing is
+added — `moot_estate_status` has none, and a grant-lifted true count remains a
+feature request. Non-drawer aggregates on the same surface (`kg facts:`,
+`trace_rows:`, `sync:`, `fdc_recalculation*`, `shared_content_migration:`) are
+unchanged: they count no drawer set. Both ports, with the ceiling rule stated
+in-code so aggregates added later inherit it.
+
+### 1.25.0 -- 2026-08-03
+The sensitivity advisory on `moot_memory_search` and `moot_memory_get` is now
+emitted on grant state alone. Its previous second condition — an estate-contents
+check for `restricted`/`secret` rows — made advisory presence an estate-wide
+existence oracle for those rows, readable by a caller with no grant, and the
+check itself defeated the sensitivity ceiling to run (an explicit sensitivity
+filter suppresses `BitmapEvaluator`'s `sensitivityAtMost(elevated)` default).
+The probe is deleted in both ports rather than narrowed, which also removes its
+untraced `origin: internal` recall. Both advisory strings are reworded so they
+are true regardless of estate contents and no longer assert that results are
+being hidden; search and get keep distinct phrasings and each is byte-identical
+across ports. Advisory absence under a live grant is unchanged. Adds the
+contents-independence invariant above and its two-estate conformance test in
+both ports.
+
+### 1.24.0 -- 2026-08-03
+
+- Typed conflict projection (DCP M4). moot_hunt_contradictions,
+  moot_dream, and moot_lens_contradiction APPEND one shared additive
+  section: `proven:`, `historical:`, `compatible:`, `candidates:`
+  (lexical lane, hunt/dream only), `unknown_or_invalid:`,
+  `coverage: projected/scanned`, `truncated_buckets:` (deviation-only).
+  Per-proven block: result id, rule@version, coordinate, value digests,
+  temporal bases, reason codes, and the two source ids as dense rows.
+  Redaction ceiling = MAX endpoint sensitivity: restricted collapses to
+  a coordinate-digest line, secret is counted with no block. Every
+  existing line is unchanged; the lens's legacy grouped-objects view
+  remains decodable. Retrieval proposes; typed constraints prove.
+
+### 1.23.0 -- 2026-08-02
+
+- Lens evidence addresses (PR-05): lens findings that name memories cite
+  them as dense rows via the shared renderer (7 memory-listing arms,
+  golden-tested byte-identical both ports); concepts extent ids capped
+  at 20, association exemplar ids capped at 5 — every lens claim is
+  hydratable via moot_memory_get.
+
+### 1.22.0 -- 2026-08-02
+
+- Utility tier (progressive recall PR-04). moot_estate_status gains the
+  subject-debt counter line `subjects: N/M (K missing)` (presence debt
+  over the live cluster-A non-empty-content set) with a STANDING
+  BEHAVIOR contract in its teachme: when K > 0 the AI offers a
+  consent-gated interactive backfill (missing_subject walk →
+  setSubject), never a silent one. moot_drain_status reserves the
+  `subject_backfill` lane name (constants both ports; the PR-09/10
+  rider registers the live lane, and the benchmarker's non-gating
+  denylist must gain the name in that same mission). moot_list_lenses
+  and moot_list_recipes default to a terse catalogue (name +
+  first-sentence one-liner) with the full catalogue behind
+  `verbose: true`.
+
+### 1.21.0 -- 2026-08-02
+
+- Recall surface (progressive recall PR-03). The DEFAULT reply row for
+  every recall-family hit and citation is the DENSE ROW:
+  `uuid · subject · fdc:<code> · qid:<QID> · <event_time ISO8601>` —
+  adopted by moot_memory_search, moot_recall_precise, moot_recall_shaped,
+  moot_recall_vague (hits and originals), moot_recall_distilled (row then
+  distilled text), moot_federated_search, moot_memory_list, and
+  moot_connection_search/map citations. Absence markers are uniform and
+  fixed ("(no subject)", "-"); redaction markers replace the subject on
+  provenance restricted/secret rows. Narration is DEVIATION-ONLY: the
+  "found N memory(s)" header stays (fail-loud harness contract); the
+  [distilled] tag and per-hit tokens:/source: metadata lines are removed
+  ("source: content (not yet distilled)" appears on fallback hits ONLY);
+  the discrimination line appears only at effective low/medium; the
+  recall_provenance line appears only when the dense lane is dark or
+  stages degraded — absence means nominal.
+- Anchor pivot: moot_memory_search and moot_recall_shaped accept
+  `near:<uuid>` as an alternative to `query:` (exactly one required,
+  runtime-enforced) — the anchor's content re-queries the same scored
+  pipeline, the anchor is excluded from its own neighbors, and a gated
+  anchor reads as not-found (oracle-free, no grant lift).
+- Hydration depth: moot_memory_get gains `ids:[...]` batch and
+  `depth: subject|distilled|full` (default full — the single-id full
+  record keeps its original shape, now with a `subject:` line when
+  present). Batch gate failures render as per-row "not found:" lines.
+- BitmapOnly hydration now strips the distilled quad and subject trio in
+  BOTH ports (the Rust leg previously cleared only `content` — a
+  pre-existing parity divergence surfaced by the dense row on federated
+  bitmapOnly reads).
+
+### 1.20.0 -- 2026-08-02
+
+- Subject surface (progressive recall PR-02): `moot_file_memory` now REQUIRES
+  a `subject` argument (one sentence ≤120 chars, AI-facing register —
+  returned in recall rows, never searched; LocusKit SPEC § 14).
+  `moot_update_memory` gains `mutation=setSubject` with a dedicated `subject`
+  argument (the backfill/correction path). `moot_memory_list` gains
+  `filter=missing_subject` (id-only subject-debt enumerator). Intake verbs
+  (palace_import, vault_import, file_dataset, file_packet) deliberately file
+  NULL subjects — absence flows to the debt counter. The consolidation
+  vague-tier writer emits its own deterministic subject at creation
+  (pipeline `consolidation-v1`). Session protocol line updated.
 
 ### 1.19.0 -- 2026-07-20
 

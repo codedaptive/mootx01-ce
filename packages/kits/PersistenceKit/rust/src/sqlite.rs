@@ -135,8 +135,10 @@ fn iso8601(ms: i64) -> String {
 /// milliseconds, matching the sub-second precision the Swift port carries in its
 /// `Date`, so the two ports store byte-identical ISO-8601 for the same instant.
 /// (This reverses the earlier seconds-granularity port convention — formerly
-/// deferred to v1.1 as KI-003 — per the Swift/Rust bit-identity mandate; the
-/// unit was migrated everywhere at once, never partially.)
+/// deferred to v1.1 as KI-003 — per the Swift/Rust bit-identity mandate.)
+///
+/// Every caller must supply milliseconds. There is no conversion anywhere on
+/// the way in: this codec and `HLCGenerator::send` both take the value as given.
 fn parse_iso8601(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
@@ -1513,12 +1515,15 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
 // At-rest encryption helpers — mirrors SQLiteBackend's
 // encryptedForWrite / decryptedForRead / assertContentKeyIDInvariant.
 //
-// The seam intercepts exactly the "content" and "keyID" column names,
-// which in the LocusKit schema belong to the drawers table (the sole
-// content-bearing table). Interception by name matches the Swift design.
+// The seam intercepts by (table, column) PAIR, never by column name
+// alone, matching the Swift RowCrypto design. Which pairs those are, and
+// the rule that decides whether a newly added table joins them, is stated
+// once on `ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE` below. That declaration
+// is the authority; do not restate the membership rule here.
 //
 // Mode 1 (Plaintext) is a complete no-op: neither encrypt nor decrypt
-// is called and the values map passes through unchanged.
+// is called and the values map passes through unchanged. So is any
+// table absent from the protected map.
 //
 // Nonce discipline: production encryptions use a fresh OsRng nonce per
 // call (via AesGcmAeadProvider). Tests that need a deterministic nonce
@@ -1527,19 +1532,132 @@ impl crate::introspection::StorageIntrospection for SqliteStorage {
 // AES-GCM confidentiality and authenticity.
 // ─────────────────────────────────────────────────────────────────────
 
-/// The column names the encryption seam intercepts.
-/// All names match the Swift RowCrypto seam design verbatim.
-/// `distilled` is protected because it is content-DERIVED text
-/// (SPEC_DISTILLATION_STORAGE §2: a representation carries the same
-/// row-level protection class as the content it renders).
-pub(crate) const CONTENT_COL: &str = "content";
-pub(crate) const KEY_ID_COL:  &str = "keyID";
-pub(crate) const PROTECTED_COLS: &[&str] = &["content", "distilled"];
+/// The column carrying a row's key identifier. Present on every table
+/// that declares protected columns; absent elsewhere, which is exactly
+/// why the seam must not stamp it onto an unprotected table.
+pub(crate) const KEY_ID_COL: &str = "keyID";
 
-/// Encrypt the protected text columns ("content", "distilled") and stamp
-/// `keyID` when the estate uses per-row encryption (RowEncryption).
-/// Returns `values` unchanged for Plaintext mode or for rows that carry
-/// no protected text.
+/// The protected text columns, keyed by table.
+///
+/// # The inclusion rule — apply it to every table you add to the schema
+///
+/// A table belongs in this map when BOTH of the following hold. Neither
+/// alone is enough, and the second is the one that is easy to miss.
+///
+/// 1. **It declares a column that holds content, or text DERIVED from
+///    content.** Per SPEC_DISTILLATION_STORAGE §2, a representation carries
+///    the same row-level protection class as the content it renders — a
+///    subject summarises the body it was generated from, so leaving it
+///    plaintext on an encrypting estate discloses the substance of a sealed
+///    row. A column that records only *how* or *when* a value was produced
+///    is not content-derived and stays plaintext:
+///    `subject_pipeline_version`, `subject_at`, `distilled_pipeline_version`,
+///    `distilled_at`. Nor are the `content_hash` / `content_fingerprint`
+///    digests, which are computed over content rather than carrying it, and
+///    which index and deduplication read directly.
+///
+/// 2. **It declares a `keyID` column.** `encrypted_for_write` stamps `keyID`
+///    on every row it seals, so listing a table that has no such column
+///    produces a write naming a column that does not exist — the write fails
+///    outright rather than degrading. A content-bearing table that cannot
+///    carry `keyID` is therefore a schema question, not a map entry.
+///
+/// Today `drawers` is the only table in the schema that satisfies rule 2 at
+/// all: it is the sole declarer of `keyID` in either port. That makes this
+/// map *maximal*, not merely current — a second entry becomes possible only
+/// once some other table gains a `keyID` column, and whoever makes that
+/// schema change is the one who must come back here.
+///
+/// Two shapes are deliberately excluded under rule 2 and must stay excluded:
+///
+/// - `kg_facts` declares its own `subject` — the subject term of an S-P-O
+///   triple, not content-derived — on a table with no `keyID`, and indexes
+///   it for equality (`idx_kg_facts_subject`). Sealing it under a fresh
+///   nonce per write would make that index match nothing.
+/// - Dataset tables (`ds_<uuid>`) take their column names from the caller,
+///   so a dataset may legitimately carry a column named `content`. They have
+///   no `keyID` column and cannot be enumerated at compile time. Note this is
+///   a boundary, not protection: such a column is written in the clear on an
+///   encrypting estate. Dataset tables sit wholly outside Mode 2 whatever
+///   their columns are named.
+///
+/// That list is NOT an inventory of every content-bearing column in the
+/// estate. `corpus_documents.text` and `.dense_text` hold document body text
+/// on the same physical database, written through this same seam, and are
+/// content-derived by rule 1 — but the table declares no `keyID`, so rule 2
+/// excludes it and the text is at rest in the clear. That is an open gap
+/// awaiting a schema change, not a deliberate exemption, and it is queued as
+/// its own mission. Do not read "maximal" as "everything content-bearing is
+/// either sealed or deliberately spared".
+///
+/// Mirrors the Swift `rowCryptoProtectedColumnsByTable` verbatim — the two
+/// ports must agree or stored envelopes stop being byte-compatible.
+///
+/// Held as a slice rather than folded into the `match` in
+/// `protected_cols_for_table` so the coverage tests can iterate the map
+/// itself; a test that restates the map cannot fail when the map gains a
+/// wrong entry.
+pub(crate) const ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE: &[(&str, &[&str])] =
+    &[("drawers", &["content", "distilled", "subject"])];
+
+/// The protected text columns for `table`, or an empty slice when the
+/// table has none.
+///
+/// The name comparison is exact — no prefix rule, no wildcard, no fallback
+/// that protects anything — so a new content-bearing table joins the
+/// protected set only by being added to
+/// [`ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE`] deliberately. The empty slice
+/// for every other table is load-bearing: it is what keeps
+/// `kg_facts.subject` and every dataset column byte-identical to a pre-seam
+/// write.
+pub(crate) fn protected_cols_for_table(table: &str) -> &'static [&'static str] {
+    for (name, columns) in ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE {
+        if *name == table {
+            return columns;
+        }
+    }
+    &[]
+}
+
+/// True when an explicit column projection of `table` reads a protected
+/// column but omits `keyID`.
+///
+/// `decrypted_for_read` cannot open a sealed value without the row's key
+/// identifier, so such a projection would hand back ciphertext bytes
+/// where the caller expects text — silently, because `Blob` is a legal
+/// `TypedValue` that a decoder reads as an absent string. The projected
+/// query paths add `keyID` to the SELECT when this returns true, then
+/// remove it from the row they return, leaving the caller's projection
+/// contract unchanged.
+///
+/// False for an empty projection (that path falls back to `SELECT *`, so
+/// `keyID` already rides along) and false on non-encrypting estates,
+/// where nothing is sealed in the first place. Mirrors Swift's
+/// `rowCryptoProjectionNeedsKeyID`.
+pub(crate) fn projection_needs_key_id(
+    table: &str,
+    columns: &[&str],
+    config: &EstateEncryptionConfig,
+) -> bool {
+    if !config.uses_row_crypto() || columns.is_empty() {
+        return false;
+    }
+    if columns.contains(&KEY_ID_COL) {
+        return false;
+    }
+    let protected = protected_cols_for_table(table);
+    columns.iter().any(|c| protected.contains(c))
+}
+
+/// Encrypt `table`'s protected text columns and stamp `keyID` when the
+/// estate uses per-row encryption (RowEncryption). Returns `values`
+/// unchanged for Plaintext mode, for a table that declares no protected
+/// columns, or for rows that carry no protected text.
+///
+/// `table` is required and has no default. A defaulted table name would
+/// re-create the untargeted by-name interception this seam exists to
+/// remove; making the compiler enumerate the call sites is the control
+/// that keeps a new backend from silently sealing the wrong table.
 ///
 /// Empty-string text is passed through unsealed: the only empty-text
 /// write in the schema is the expunge/zeroization scrub (`content = ""`),
@@ -1551,6 +1669,7 @@ pub(crate) const PROTECTED_COLS: &[&str] = &["content", "distilled"];
 /// Mirrors Swift's `encryptedForWrite`.
 pub(crate) fn encrypted_for_write(
     values: BTreeMap<String, TypedValue>,
+    table: &str,
     config: &EstateEncryptionConfig,
     provider: &dyn AeadProvider,
 ) -> StorageResult<BTreeMap<String, TypedValue>> {
@@ -1568,7 +1687,7 @@ pub(crate) fn encrypted_for_write(
     };
     let mut out = values;
     let mut sealed_any = false;
-    for column in PROTECTED_COLS {
+    for column in protected_cols_for_table(table) {
         let plaintext = match out.get(*column) {
             Some(TypedValue::Text(t)) if !t.is_empty() => t.as_bytes().to_vec(),
             _ => continue,
@@ -1585,10 +1704,20 @@ pub(crate) fn encrypted_for_write(
     Ok(out)
 }
 
-/// Decrypt the `content` column when the row carries a non-null `keyID`
-/// that matches the estate's key identifier. Returns `values` unchanged
-/// for Plaintext mode, for rows with no/empty/mismatched keyID, or when
-/// the stored content is not a blob envelope.
+/// Decrypt `table`'s protected columns when the row carries a non-null
+/// `keyID` that matches the estate's key identifier. Returns `values`
+/// unchanged for Plaintext mode, for a table that declares no protected
+/// columns, for rows with no/empty/mismatched keyID, or when a stored
+/// value is not a blob envelope.
+///
+/// `table` is required and has no default, for the same reason it is on
+/// `encrypted_for_write`: read and write must agree on which columns are
+/// sealed, and only an explicit table name can guarantee that.
+///
+/// A plaintext value in a protected column passes through untouched —
+/// the `Blob` guard below skips it. That is what lets an estate written
+/// before a column joined the protected set keep reading correctly
+/// alongside newly sealed rows.
 ///
 /// Key mismatch (keyID present but different from this estate's id): pass
 /// through unchanged — the row was sealed under a different key we cannot
@@ -1597,6 +1726,7 @@ pub(crate) fn encrypted_for_write(
 /// Mirrors Swift's `decryptedForRead` on `SQLiteBackend`.
 pub(crate) fn decrypted_for_read(
     values: BTreeMap<String, TypedValue>,
+    table: &str,
     config: &EstateEncryptionConfig,
     provider: &dyn AeadProvider,
 ) -> StorageResult<BTreeMap<String, TypedValue>> {
@@ -1621,7 +1751,7 @@ pub(crate) fn decrypted_for_read(
     // Each protected column must be a blob envelope produced by
     // `encrypted_for_write`; non-blob values pass through unchanged.
     let mut out = values;
-    for column in PROTECTED_COLS {
+    for column in protected_cols_for_table(table) {
         let envelope = match out.get(*column) {
             Some(TypedValue::Blob(b)) => b.clone(),
             _ => continue,
@@ -1641,17 +1771,20 @@ pub(crate) fn decrypted_for_read(
 /// Structural enforcement of the content/keyID invariant.
 ///
 /// On an encrypting estate (mode 2/3), a content-bearing row must be stored
-/// as ciphertext (.blob) under a keyID. `encrypted_for_write` produces
-/// exactly that. A `.text` content value reaching `upsert` or `update`
-/// means the encryption seam did not run; persisting it would write
-/// plaintext with a null keyID — a row `decrypted_for_read` cannot resolve.
+/// as ciphertext (.blob). `encrypted_for_write` produces exactly that. A
+/// `.text` value in a protected column reaching the write boundary means the
+/// encryption seam did not run; persisting it would leave plaintext at rest.
 ///
-/// The upsert path is deliberately NOT wired with `encrypted_for_write`
-/// (matching Swift's design: in the LocusKit schema upsert is only ever
-/// called for non-content tables — manifest, container_fingerprints,
-/// node_bundles — none of which carry a `content` column). The guard here
-/// is the structural safety net: a content-bearing upsert on an encrypting
-/// estate throws rather than silently writing plaintext.
+/// The guard is the structural safety net beneath the seam, not a substitute
+/// for it. A write that ran `encrypted_for_write` arrives already sealed, so
+/// the guard is a no-op for it; the guard fires only for a path that reached
+/// the write boundary without sealing.
+///
+/// `table` selects which columns the guard covers. It is not decoration
+/// on the error message: a table with no protected columns cannot violate
+/// the invariant, and firing on one would reject legitimate writes to
+/// tables that merely reuse a protected column's name — `kg_facts.subject`
+/// being the case that forced the filter.
 ///
 /// Mode 1 (Plaintext) returns immediately: the guard is a no-op and the
 /// path is byte-identical to pre-encryption behavior.
@@ -1668,28 +1801,29 @@ pub(crate) fn assert_content_key_id_invariant(
     if !config.uses_row_crypto() {
         return Ok(());
     }
-    // Only fire if the row carries non-empty text in a protected column —
-    // .blob is already encrypted, .null / absent is not a protected-text
-    // row, and empty text is the erasure-scrub exemption (#76). Covers
-    // "content" and the content-derived "distilled"
-    // (SPEC_DISTILLATION_STORAGE §2).
-    let violating = PROTECTED_COLS.iter().find(|column| {
+    // Only fire if the row carries non-empty text in one of THIS table's
+    // protected columns — .blob is already encrypted, .null / absent is
+    // not a protected-text row, and empty text is the erasure-scrub
+    // exemption (#76). A table with no protected columns cannot violate
+    // the invariant, so the loop is empty and the guard returns Ok.
+    let violating = protected_cols_for_table(table).iter().find(|column| {
         matches!(values.get(**column), Some(TypedValue::Text(t)) if !t.is_empty())
     });
     if let Some(violating) = violating {
-        // A keyID is present only when the protected text is ciphertext
-        // (.blob); .text with no keyID is an unencrypted write the seam
-        // missed.
-        if let Some(TypedValue::Text(id)) = values.get(KEY_ID_COL) {
-            if !id.is_empty() {
-                return Ok(()); // keyID present — text is already encrypted
-            }
-        }
+        // The test is on the VALUE'S TYPE, never on the presence of a sibling
+        // keyID. Ciphertext is `Blob`, so non-empty `Text` in a protected
+        // column IS the unencrypted write — an accompanying keyID proves
+        // nothing about it. That pairing is exactly what a decrypt-then-copy
+        // path produces: `decrypted_for_read` hands back plaintext while
+        // retaining the source row's keyID, and a snapshot replication writes
+        // the pair straight through. Treating the keyID as proof of ciphertext
+        // is what let plaintext reach an encrypting estate's disk with no
+        // attacker involved.
         return Err(StorageError::ConstraintViolation {
             detail: format!(
                 "content/keyID invariant: table '{}' on an encrypting estate received \
-                 plaintext '{}' with no keyID; the encryption seam did not run, so \
-                 this row would be unreadable",
+                 plaintext '{}'; ciphertext is stored as a blob, so text in a \
+                 protected column means the encryption seam did not run",
                 table, violating
             ),
         });
@@ -1923,7 +2057,7 @@ impl RowStore for SqliteRowStore {
         // At-rest encryption seam (PAR-5-PK): encrypt the content column and
         // stamp the keyID before binding. No-op for Plaintext mode. Mirrors
         // Swift's `encryptedForWrite` call in `SQLiteBackend.insertRow`.
-        let values = encrypted_for_write(values, &self.encryption_config, self.aead_provider.as_ref())?;
+        let values = encrypted_for_write(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
         // Structural content/keyID invariant: after the seam, a content row on
         // an encrypting estate must carry a keyID. Correct encrypting inserts
         // become .blob + keyID here; the guard fires only if the seam failed.
@@ -1981,12 +2115,19 @@ impl RowStore for SqliteRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        // The at-rest encryption seam is NOT wired to upsert. In the LocusKit
-        // schema, upsert is only ever called for non-content tables (manifest,
-        // container_fingerprints, node_bundles) — none of which carry a
-        // `content` column. The invariant guard below is the structural safety
-        // net: a content-bearing upsert on an encrypting estate throws rather
-        // than silently writing plaintext. Mirrors Swift `upsertRow` design.
+        // At-rest encryption seam (PAR-5-PK): seal this table's protected
+        // columns and stamp the keyID before binding, exactly as `insert` and
+        // `update` do. A seam covering two of three write verbs WAS the
+        // defect — `replicate_snapshot` reads rows back as plaintext and
+        // upserts them into the destination, so upsert is a content write path
+        // in practice regardless of what the LocusKit schema's own call sites
+        // do. Sealing here (rather than in the replication layer) means the
+        // destination store seals with its own configured key by construction,
+        // so no key crosses a layer boundary. No-op for Plaintext mode and for
+        // tables that declare no protected columns.
+        let values = encrypted_for_write(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
+        // Structural safety net beneath the seam: after sealing, protected
+        // text can only remain if the seam could not run.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (CAND-047): validate the table name,
         // all value-map column names, and the conflict-column list before
@@ -2079,7 +2220,7 @@ impl RowStore for SqliteRowStore {
         // invariant guard then confirms the seam ran. Mirrors Swift
         // `updateRows`.
         let values =
-            encrypted_for_write(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            encrypted_for_write(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
         // SQL-identifier injection guard (CAND-047): validate the table name
         // and all caller-supplied SET column names before interpolating into SQL.
@@ -2247,7 +2388,7 @@ impl RowStore for SqliteRowStore {
             // At-rest decryption seam (PAR-5-PK): decrypt the content column
             // when the row carries a matching keyID. No-op for Plaintext mode.
             // Mirrors Swift's `decryptedForRead` call in `SQLiteBackend.queryRows`.
-            let values = decrypted_for_read(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            let values = decrypted_for_read(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -2280,8 +2421,19 @@ impl RowStore for SqliteRowStore {
         // Build an explicit column list so the omitted columns (notably the
         // content blob) are never read off disk — this is the I/O win the
         // no-blob recall path needs. Column names are validated and quoted identifiers.
+        // Key-identifier augmentation: `decrypted_for_read` cannot open a
+        // sealed value without the row's keyID, and a caller's projection has
+        // no reason to know that. When the projection reads a protected column
+        // on an encrypting estate but omits keyID, SELECT it anyway and strip
+        // it from the row below — the caller's projection contract is
+        // unchanged, and the seam gets what it needs. Without this a projected
+        // read returns ciphertext bytes silently, because Blob is a legal
+        // TypedValue that a decoder reads as an absent string.
+        let injected_key_id = projection_needs_key_id(table, columns, &self.encryption_config);
         let select_list = columns
             .iter()
+            .copied()
+            .chain(injected_key_id.then_some(KEY_ID_COL))
             .map(|c| format!("\"{c}\""))
             .collect::<Vec<_>>()
             .join(", ");
@@ -2343,10 +2495,15 @@ impl RowStore for SqliteRowStore {
                 let kit = table_column_type(guard.schema.as_ref(), table, name);
                 values.insert(name.clone(), read_value(vref, kit, table, name)?);
             }
-            // At-rest decryption seam: decrypt the content column when the
-            // row carries a matching keyID. No-op for Plaintext mode.
+            // At-rest decryption seam: decrypt this table's protected columns
+            // when the row carries a matching keyID. No-op for Plaintext mode.
             // Mirrors Swift's `decryptedForRead` call in `SQLiteBackend.queryRows`.
-            let values = decrypted_for_read(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            let mut values = decrypted_for_read(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
+            // Drop the keyID this query added on the caller's behalf, so a
+            // projected read returns exactly the columns that were asked for.
+            if injected_key_id {
+                values.remove(KEY_ID_COL);
+            }
             out.push(StorageRow::new(values));
         }
         Ok(out)
@@ -2488,7 +2645,7 @@ impl RowStore for SqliteRowStore {
             }
             // At-rest decryption seam: decrypt the content column when the
             // row carries a matching keyID. No-op for Plaintext mode.
-            let values = decrypted_for_read(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            let values = decrypted_for_read(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
             out.push(StorageRow::new(values));
         }
 
@@ -2527,8 +2684,19 @@ impl RowStore for SqliteRowStore {
             validate_sql_identifier(c)?;
         }
         let guard = self.inner.lock().unwrap();
+        // Key-identifier augmentation: `decrypted_for_read` cannot open a
+        // sealed value without the row's keyID, and a caller's projection has
+        // no reason to know that. When the projection reads a protected column
+        // on an encrypting estate but omits keyID, SELECT it anyway and strip
+        // it from the row below — the caller's projection contract is
+        // unchanged, and the seam gets what it needs. Without this a projected
+        // read returns ciphertext bytes silently, because Blob is a legal
+        // TypedValue that a decoder reads as an absent string.
+        let injected_key_id = projection_needs_key_id(table, columns, &self.encryption_config);
         let select_list = columns
             .iter()
+            .copied()
+            .chain(injected_key_id.then_some(KEY_ID_COL))
             .map(|c| format!("\"{c}\""))
             .collect::<Vec<_>>()
             .join(", ");
@@ -2610,10 +2778,15 @@ impl RowStore for SqliteRowStore {
                     Err(other) => return Err(other),
                 }
             }
-            // At-rest decryption seam: decrypt the content column when present
-            // and the row carries a matching keyID. No-op for Plaintext mode and
-            // for projected scans that omit the content column.
-            let values = decrypted_for_read(values, &self.encryption_config, self.aead_provider.as_ref())?;
+            // At-rest decryption seam: decrypt this table's protected columns
+            // when present and the row carries a matching keyID. No-op for
+            // Plaintext mode and for projected scans that omit them.
+            let mut values = decrypted_for_read(values, table, &self.encryption_config, self.aead_provider.as_ref())?;
+            // Drop the keyID this query added on the caller's behalf, so a
+            // projected read returns exactly the columns that were asked for.
+            if injected_key_id {
+                values.remove(KEY_ID_COL);
+            }
             out.push(StorageRow::new(values));
         }
 
@@ -3996,6 +4169,8 @@ mod at_rest_encryption_tests {
                 vec![
                     ColumnDeclaration::text("id"),
                     ColumnDeclaration::text("content"),
+                    // Content-derived summary; protected on drawers alongside content.
+                    ColumnDeclaration::text("subject").nullable(),
                     // keyID is nullable: NULL for plaintext rows, UUID string for encrypted rows.
                     ColumnDeclaration::text("keyID").nullable(),
                 ],
@@ -4434,27 +4609,88 @@ mod at_rest_encryption_tests {
 
     // ─── Test 7: Upsert guard — content-bearing upsert on encrypting estate ──
 
-    /// An upsert that carries a text `content` on an encrypting estate must
-    /// be rejected by the invariant guard (the encryption seam is not wired
-    /// to upsert). Mirrors Swift's `assertContentKeyIDInvariant` test.
+    /// An upsert that carries a text `content` on an encrypting estate is
+    /// SEALED, not rejected: the encryption seam runs on upsert exactly as it
+    /// does on insert and update, so the plaintext becomes ciphertext and the
+    /// row is stamped with the estate keyID before the guard runs.
+    ///
+    /// This assertion inverted when the seam was wired into upsert. It
+    /// previously expected an error, which was correct only while upsert was
+    /// the one write verb the seam did not cover. Mirrors Swift's
+    /// `contentUpsertOnEncryptingEstateIsSealed`.
     #[test]
-    fn upsert_content_without_keyid_is_rejected_on_encrypting_estate() {
+    fn upsert_content_on_encrypting_estate_is_sealed() {
+        let enc = EstateEncryptionConfig::row_encryption();
+        let estate_key_id = enc.key_identifier.clone().expect("key_identifier");
+        let storage = make_storage_with_encryption(enc);
+        let rs = Storage::row_store(&storage);
+
+        let secret = "plaintext via upsert";
+        let mut v = BTreeMap::new();
+        v.insert("id".into(), TypedValue::Text("d1".into()));
+        v.insert("content".into(), TypedValue::Text(secret.into()));
+        rs.upsert("drawers", v, &["id".to_string()])
+            .expect("upsert on an encrypting estate must seal, not fail");
+
+        // Read through the decrypt seam: text again, keyID stamped.
+        let rows = rs
+            .query(
+                "drawers",
+                Some(&StoragePredicate::Eq(
+                    crate::Column::new("drawers", "id"),
+                    TypedValue::Text("d1".into()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("content"),
+            Some(&TypedValue::Text(secret.into())),
+            "upsert must round-trip through the seal/decrypt seam"
+        );
+        assert_eq!(
+            rows[0].get("keyID"),
+            Some(&TypedValue::Text(estate_key_id)),
+            "upsert must stamp the estate key identifier"
+        );
+    }
+
+    /// The structured projection reads `subject` but does not ask for
+    /// `keyID` — the seam needs the key identifier to open the value, so
+    /// `query_projected` selects it and strips it back out. Without that,
+    /// `subject` comes back as raw ciphertext bytes and decodes as absent.
+    /// Mirrors Swift's `projectedReadDecryptsSubject`.
+    #[test]
+    fn projected_read_that_omits_key_id_still_decrypts_subject() {
         let enc = EstateEncryptionConfig::row_encryption();
         let storage = make_storage_with_encryption(enc);
         let rs = Storage::row_store(&storage);
 
         let mut v = BTreeMap::new();
         v.insert("id".into(), TypedValue::Text("d1".into()));
-        v.insert("content".into(), TypedValue::Text("plaintext via upsert".into()));
-        let result = rs.upsert("drawers", v, &["id".to_string()]);
-        assert!(
-            result.is_err(),
-            "upsert with plaintext content on an encrypting estate must fail the invariant guard"
+        v.insert("content".into(), TypedValue::Text("original body".into()));
+        v.insert(
+            "subject".into(),
+            TypedValue::Text("a summary of the body".into()),
         );
-        match result.unwrap_err() {
-            StorageError::ConstraintViolation { .. } => {}
-            other => panic!("expected ConstraintViolation, got {:?}", other),
-        }
+        rs.insert("drawers", v).expect("insert");
+
+        // The no-blob projection shape: subject rides it, keyID does not.
+        let rows = rs
+            .query_projected("drawers", &["id", "subject"], None, &[], None, None)
+            .expect("projected query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].values.get("subject"),
+            Some(&TypedValue::Text("a summary of the body".to_string()))
+        );
+        // The projection contract is unchanged: the borrowed keyID is gone
+        // and the omitted content column never appears.
+        assert!(rows[0].values.get("keyID").is_none());
+        assert!(rows[0].values.get("content").is_none());
     }
 }
 

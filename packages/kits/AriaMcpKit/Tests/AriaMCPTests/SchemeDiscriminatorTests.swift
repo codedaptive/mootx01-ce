@@ -59,6 +59,7 @@ struct SchemeDiscriminatorTests {
         let dispatcher = try await makeDispatcher()
         let response = try await fileMemory(dispatcher, arguments: [
             "content": .string("sensitive content row"),
+            "subject": .string("sensitive content row"),
             "location": .string("validation-tests"),
             "sensitivity": .string("elevated"),
         ], id: 100)
@@ -78,6 +79,7 @@ struct SchemeDiscriminatorTests {
         let dispatcher = try await makeDispatcher()
         let response = try await fileMemory(dispatcher, arguments: [
             "content": .string("func main() { }"),
+            "subject": .string("func main() { }"),
             "location": .string("validation-tests"),
             "kind": .string("code"),
         ], id: 101)
@@ -97,6 +99,7 @@ struct SchemeDiscriminatorTests {
         let dispatcher = try await makeDispatcher()
         let response = try await fileMemory(dispatcher, arguments: [
             "content": .string("minimal required args row"),
+            "subject": .string("minimal required args row"),
             "location": .string("validation-tests"),
         ], id: 102)
 
@@ -136,6 +139,7 @@ struct SchemeDiscriminatorTests {
         let dispatcher = try await makeDispatcher()
         let response = try await fileMemory(dispatcher, arguments: [
             "content": .string("some content without location"),
+            "subject": .string("some content without location"),
             // location intentionally omitted
         ], id: 104)
 

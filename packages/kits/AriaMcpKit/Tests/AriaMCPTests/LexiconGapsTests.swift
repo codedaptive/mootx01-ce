@@ -167,8 +167,44 @@ struct LexiconGapsTests {
     @Test("moot_fact_search exact fields do not accept substring or provenance collisions")
     func factSearchExactFields() async throws {
         let dispatcher = try await makeDispatcher()
-        for (subject, source) in [("calendar.event.ev-1", "miner:calendar"),
-                                  ("calendar.event.ev-10", "miner:other")] {
+        // source_id must name a drawer that exists in this estate — a fact
+        // inherits its source drawer's sensitivity, so an unresolvable anchor
+        // fails the write, so the two distinct sources this test needs are two
+        // real drawers. The substring-collision case the test guards lives on
+        // subject_exact ("ev-1" vs "ev-10"), which is unaffected.
+        var sourceIDs: [String] = []
+        for label in ["calendar-source", "other-source"] {
+            let filed = await dispatcher.handle(JSONRPCRequest(
+                id: .integer(0), method: "tools/call", params: .object([
+                    "name": .string("moot_file_memory"),
+                    "arguments": .object([
+                        "content": .string("fixture drawer \(label)"),
+                        "location": .string("fixtures/\(label)"),
+                        "subject": .string("fixture anchor drawer \(label)"),
+                    ]),
+                ])
+            ))
+            let response = try #require(filed)
+            guard case .result(let result) = response.payload else {
+                Issue.record("moot_file_memory failed: \(response.payload)")
+                return
+            }
+            let text = try #require(
+                result.objectValue?["content"]?.arrayValue?.first?
+                    .objectValue?["text"]?.stringValue
+            )
+            // The body opens with "filed memory <drawer-id>" and may carry
+            // further advisory lines, so read the id from the marker line
+            // rather than taking the last token in the whole payload.
+            let firstLine = String(text.split(separator: "\n").first ?? "")
+            let id = firstLine
+                .replacingOccurrences(of: "filed memory ", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            #expect(!id.isEmpty, "could not read drawer id from: \(text)")
+            sourceIDs.append(id)
+        }
+        for (subject, source) in [("calendar.event.ev-1", sourceIDs[0]),
+                                  ("calendar.event.ev-10", sourceIDs[1])] {
             _ = await dispatcher.handle(JSONRPCRequest(
                 id: .integer(0), method: "tools/call", params: .object([
                     "name": .string("moot_file_fact"),
@@ -187,7 +223,7 @@ struct LexiconGapsTests {
                 "arguments": .object([
                     "subject_exact": .string("calendar.event.ev-1"),
                     "predicate_exact": .string("scheduled"),
-                    "source_id_exact": .string("miner:calendar"),
+                    "source_id_exact": .string(sourceIDs[0]),
                 ]),
             ])
         ))

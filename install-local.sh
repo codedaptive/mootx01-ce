@@ -51,8 +51,17 @@ else
   echo "Building mootx01 + moot-mgr (Rust, release) ..."
   cargo build --release --locked --manifest-path "$ROOT/apps/mootx01/rust/Cargo.toml"
   cargo build --release --locked --manifest-path "$ROOT/apps/moot-mgr/rust/Cargo.toml"
-  place mootx01  "$ROOT/apps/mootx01/rust/target/release/mootx01"
-  place moot-mgr "$ROOT/apps/moot-mgr/rust/target/release/moot-mgr"
+  # Both crates write into one target directory when CARGO_TARGET_DIR is set
+  # (the Makefile and scripts/moot-test set it to $ROOT/.cargo-target). When it
+  # is not — a bare ./install-local.sh — cargo uses its per-workspace default,
+  # which puts each binary under its own crate's target/.
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    place mootx01  "$CARGO_TARGET_DIR/release/mootx01"
+    place moot-mgr "$CARGO_TARGET_DIR/release/moot-mgr"
+  else
+    place mootx01  "$ROOT/apps/mootx01/rust/target/release/mootx01"
+    place moot-mgr "$ROOT/apps/moot-mgr/rust/target/release/moot-mgr"
+  fi
 fi
 
 case ":$PATH:" in

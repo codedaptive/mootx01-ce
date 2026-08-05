@@ -78,7 +78,7 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         // column and stamp the keyID before binding. No-op for plaintext. The
         // structural invariant then confirms a content row carries a keyID, so
         // the seam cannot silently write unreadable plaintext content.
-        let values = try encryptedForWrite(values, config: backend.encryptionConfig)
+        let values = try encryptedForWrite(values, table: table, config: backend.encryptionConfig)
         try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         let placeholders = (1...cols.count).map { "$\($0)" }.joined(separator: ", ")
@@ -100,10 +100,15 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
         for name in conflictColumns { try validatePSQLIdentifier(name) }
-        // upsert is not wired to encrypt: in the LocusKit schema it is only
-        // called for non-content tables. The structural invariant guards
-        // against a future content-bearing upsert writing plaintext with a
-        // null keyID — it must extend the encryption seam first.
+        // At-rest encryption seam (Mode 2 / RowEncryption): seal this table's
+        // protected columns and stamp the keyID before binding, matching
+        // insert and update. The earlier design left upsert unwired on the
+        // assumption it only reached non-content tables; snapshot replication
+        // upserts drawer rows read back as plaintext, so that assumption was
+        // false and plaintext could reach an encrypting estate at rest.
+        let values = try encryptedForWrite(values, table: table, config: backend.encryptionConfig)
+        // Structural safety net beneath the seam: after sealing, protected
+        // text can only remain if the seam could not run.
         try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
         let cols = Array(values.keys).sorted()
         let placeholders = (1...cols.count).map { "$\($0)" }.joined(separator: ", ")
@@ -140,7 +145,7 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         // protected text and stamps keyID; it is a no-op for the
         // bitmap/timestamp updates and for the expunge scrub (empty text is
         // exempt). Mirrors the SQLite backend's updateRows wiring.
-        let values = try encryptedForWrite(values, config: backend.encryptionConfig)
+        let values = try encryptedForWrite(values, table: table, config: backend.encryptionConfig)
         // Structural content/keyID invariant (FUP-D): after the seam, a
         // protected-text update on an encrypting estate must carry a keyID.
         try assertContentKeyIDInvariant(values, table: table, config: backend.encryptionConfig)
@@ -220,14 +225,17 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         let _sql = sql
         let _bindings = bindings
         let _columns = columns
-        // Capture the encryption config for the @Sendable closure; the per-row
-        // decrypt seam reverses encryptedForWrite on read (no-op for plaintext).
+        // Capture the encryption config and the table for the @Sendable
+        // closure; the per-row decrypt seam reverses encryptedForWrite on
+        // read (no-op for plaintext) and selects its protected columns by
+        // table, so both values have to cross the closure boundary.
         let _encConfig = backend.encryptionConfig
+        let _table = table
         return try await withConnection { conn in
             let pgRows = try await conn.executeParameterized(_sql, bindings: _bindings, logger: Logger(label: "pg.row.query"))
             var out: [StorageRow] = []
             for try await row in pgRows {
-                let decoded = try decryptedForRead(decodeRow(row, columns: _columns), config: _encConfig)
+                let decoded = try decryptedForRead(decodeRow(row, columns: _columns), table: _table, config: _encConfig)
                 out.append(StorageRow(values: decoded))
             }
             return out

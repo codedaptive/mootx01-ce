@@ -53,6 +53,26 @@ public struct ProjectedTool: Sendable, Equatable {
     public let inputSchema: JSONValue
     /// Where this tool comes from.
     public let provenance: ToolProvenance
+    /// JSON Schema for the tool's `structuredContent` result payload,
+    /// advertised in `tools/list` as `outputSchema` (the MCP-sanctioned
+    /// structured-result mechanism). `nil` for text-only tools — the key
+    /// is then omitted from the wire entry entirely, so tools that never
+    /// declared a schema are byte-identical to before this field existed.
+    public let outputSchema: JSONValue?
+
+    public init(
+        name: String,
+        description: String,
+        inputSchema: JSONValue,
+        provenance: ToolProvenance,
+        outputSchema: JSONValue? = nil
+    ) {
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema
+        self.provenance = provenance
+        self.outputSchema = outputSchema
+    }
 }
 
 public enum ToolProjection {
@@ -94,6 +114,21 @@ public enum ToolProjection {
 
     public static var memoryToolEnabled: Bool {
         memoryToolEnabled(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// True when the Apple subject rider should auto-enable at serve
+    /// (rider-default ruling, 2026-08-02: ON by default). Any value of
+    /// `MOOTX01_SUBJECT_RIDER` other than the literal "0" — including
+    /// absent — means on; `mootx01 install --subject-rider-off` writes
+    /// the "0" into the daemon's launchd env (the MOOTX01_VAULT
+    /// pattern). The rider still requires the on-device model: the
+    /// serve layer tolerates unavailability and continues.
+    public static func subjectRiderEnabled(environment: [String: String]) -> Bool {
+        environment["MOOTX01_SUBJECT_RIDER"] != "0"
+    }
+
+    public static var subjectRiderEnabled: Bool {
+        subjectRiderEnabled(environment: ProcessInfo.processInfo.environment)
     }
 
     /// The complete advertised tool list.
@@ -152,7 +187,11 @@ public enum ToolProjection {
                 name: tool.name,
                 description: tool.description,
                 inputSchema: withTeachme(tool.inputSchema),
-                provenance: tool.provenance
+                provenance: tool.provenance,
+                // Carried through explicitly: this re-wrap constructs a NEW
+                // ProjectedTool, so omitting the field here would silently
+                // strip every declared output schema from tools/list.
+                outputSchema: tool.outputSchema
             )
         }
     }
@@ -171,10 +210,11 @@ public enum ToolProjection {
         [
             ProjectedTool(
                 name: "moot_file_memory",
-                description: "File a new memory into the estate. Provide the content and a location hint (free-form string describing subject matter). The server chooses structural coordinates and infrastructure fields.",
+                description: "File a new memory into the estate. Provide the content, a one-sentence subject, and a location hint (free-form string describing subject matter). The server chooses structural coordinates and infrastructure fields.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "content": stringSchema("The text content to remember."),
+                        "subject": stringSchema("REQUIRED. One sentence (≤120 chars) stating what this memory asserts. Write it for the NEXT AI that will scan it in a result list — telegraphic register, entities and claims front-loaded, no narrative framing. It is returned in recall rows, never searched. Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""),
                         "location": stringSchema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
                         "wing": stringSchema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                         "sensitivity": stringSchema("Optional sensitivity: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
@@ -183,16 +223,17 @@ public enum ToolProjection {
                         "event_time": stringSchema("Optional ISO8601 event time for historical ingestion. Omit for streaming capture (defaults to now); null is invalid."),
                         "impatient": booleanSchema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens in the background. Omit to use the default; null is invalid."),
                     ],
-                    required: ["content", "location"]
+                    required: ["content", "subject", "location"]
                 )),
                 provenance: .interface
             ),
             ProjectedTool(
                 name: "moot_memory_search",
-                description: "Search the estate for memories matching a query. Uses hybrid BM25+vector recall. Returns ranked memory rows with content and metadata. Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Each result includes a discrimination signal (high/medium/low) — a relative-gap confidence estimate of how clearly the top result separates from the rest, with a saturation discount when the semantic lane is dark. Low discrimination on small estates is expected for broad or associative searches; prefer moot_recall_precise for precision retrieval.",
+                description: "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
-                        "query": stringSchema("Natural-language search query."),
+                        "query": stringSchema("Natural-language search query. Provide query OR near — exactly one."),
+                        "near": stringSchema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
                         "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
                         "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained, pinned. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. \"pinned\" constrains to user-pinned drawers (rooms without a pinned drawer are pruned from the search). null is invalid."),
                         "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
@@ -201,17 +242,19 @@ public enum ToolProjection {
                         "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
                     ],
-                    required: ["query"]
+                    required: []
                 )),
-                provenance: .interface
+                provenance: .interface,
+                outputSchema: recallResultsOutputSchema()
             ),
             ProjectedTool(
                 name: "moot_memory_list",
-                description: "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results.",
+                description: "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results. filter:missing_subject enumerates subject-debt rows (id-only, no preview) for interactive backfill via moot_update_memory mutation=setSubject.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "wing": stringSchema("Wing name to list (required). Example: \"Agentic Memory\", \"CodexSecurity\"."),
                         "room": stringSchema("Optional room name to narrow within the wing. Omit to list all rooms in the wing."),
+                        "filter": stringSchema("Optional filter: missing_subject — only live drawers with no subject line, listed id-only (the subject-debt backfill enumerator). Omit to list all drawers with previews. null is invalid."),
                     ],
                     required: ["wing"]
                 )),
@@ -222,20 +265,24 @@ public enum ToolProjection {
                 description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
-                        "id": stringSchema("Memory row identifier (drawer UUID)."),
+                        "id": stringSchema("Memory row identifier (drawer UUID). Provide id or ids."),
+                        "ids": arraySchema("Batch form: array of drawer UUIDs. With depth:subject or depth:distilled this is the one-call winnow — judge a shortlist without hauling full text. Gated/absent rows come back as 'not found: <id>' lines.", itemDescription: "Memory row identifier (drawer UUID)."),
+                        "depth": stringSchema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid."),
                     ],
-                    required: ["id"]
+                    required: []
                 )),
-                provenance: .interface
+                provenance: .interface,
+                outputSchema: recallResultsOutputSchema()
             ),
             ProjectedTool(
                 name: "moot_update_memory",
-                description: "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public (visible to filter:exportable), correctExportability(private) revokes public status.",
+                description: "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public (visible to filter:exportable), correctExportability(private) revokes public status. Subject mutation: setSubject writes or replaces the memory's one-sentence subject line (pass the text in the `subject` argument) — the backfill/correction path for subject-debt rows found via moot_memory_list filter:missing_subject.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "id": stringSchema("Memory row identifier."),
-                        "mutation": stringSchema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private)."),
+                        "mutation": stringSchema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private), setSubject."),
                         "note": stringSchema("Optional free-text note recorded with the mutation."),
+                        "subject": stringSchema("Required for mutation=setSubject, ignored otherwise: one sentence (≤120 chars) in the AI-facing register — telegraphic, entities and claims front-loaded. Returned in recall rows, never searched."),
                     ],
                     required: ["id", "mutation"]
                 )),
@@ -591,6 +638,57 @@ public enum ToolProjection {
 
     // MARK: - Schema helpers
 
+    /// The shared `outputSchema` for the recall family (`moot_memory_search`,
+    /// `moot_memory_get`, `moot_recall_shaped`, `moot_recall_precise`): one
+    /// `results` array carrying the typed twin of each rendered row.
+    ///
+    /// ONE schema for all four tools, field names pinned across ports — the
+    /// Rust twin is `tool_list.rs::recall_results_output_schema()` and the
+    /// cross-port test asserts structural equality. The text block stays the
+    /// human-readable rendering; `structuredContent` conforming to this
+    /// schema is its typed twin, subject to every redaction the text applies
+    /// (see the Blast Radius Report MXE-SS, rules R1-R9).
+    static func recallResultsOutputSchema() -> JSONValue {
+        .object([
+            "type": .string("object"),
+            "properties": .object([
+                "results": .object([
+                    "type": .string("array"),
+                    "description": .string(
+                        "One entry per drawer row the text block renders — same "
+                        + "admissible set, same order, same 50-row cap. Redaction "
+                        + "parity: provenance-gated rows carry the same redaction "
+                        + "markers as the text block in subject and content; rows "
+                        + "the text renders opaquely carry id and the '(no subject)' "
+                        + "marker only."),
+                    "items": .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "id": stringSchema("Drawer UUID — the address."),
+                            "room": stringSchema(
+                                "Resolved room display name. Absent when the row "
+                                + "is opaque."),
+                            "content": stringSchema(
+                                "Drawer content for this tool's tier: verbatim body "
+                                + "(search/shaped/precise and get depth:full), "
+                                + "distillate or fallback body (get depth:distilled). "
+                                + "Carries the redaction marker for provenance-gated "
+                                + "rows. Absent at get depth:subject and for opaque "
+                                + "rows."),
+                            "subject": stringSchema(
+                                "The subject slot exactly as the text renders it: "
+                                + "stored subject, '(no subject)', or the redaction "
+                                + "marker. Absent at get depth:full when the drawer "
+                                + "has no subject."),
+                        ]),
+                        "required": .array([.string("id")]),
+                    ]),
+                ]),
+            ]),
+            "required": .array([.string("results")]),
+        ])
+    }
+
     /// Inject an optional `teachme` property into an object schema.
     /// Parallel to `withEstateID` — applied in `tools()` after all per-tool
     /// schemas are built. Callers pass `true` to receive a usage guide for
@@ -640,6 +738,18 @@ public enum ToolProjection {
         .object([
             "type": .string("string"),
             "description": .string(description),
+        ])
+    }
+
+    /// Array-of-strings schema (PR-03: the memory_get `ids` batch arg).
+    static func arraySchema(_ description: String, itemDescription: String) -> JSONValue {
+        .object([
+            "type": .string("array"),
+            "description": .string(description),
+            "items": .object([
+                "type": .string("string"),
+                "description": .string(itemDescription),
+            ]),
         ])
     }
 

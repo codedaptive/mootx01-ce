@@ -88,6 +88,18 @@ public extension Estate {
         guard !frame.embeddingModelID.isEmpty else {
             throw LocusKitError.invalidContent("embeddingModelID must not be empty")
         }
+        // Subject length contract (SPEC B-18) checked at the frame boundary
+        // so the error surfaces before any row exists. Empty-string subjects
+        // are rejected the same way — a caller that has no subject passes nil
+        // (subject debt, B-21), never "".
+        if let subject = frame.subject {
+            guard !subject.isEmpty, subject.count <= DrawerStore.subjectLengthContract else {
+                throw LocusKitError.invalidContent(
+                    "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                    + "(got \(subject.count)); omit it entirely to file as subject debt"
+                )
+            }
+        }
 
         // Operational bitmap assembly:
         //   bits 0–5   capture_channel (contiguous raw 0…5)
@@ -187,7 +199,13 @@ public extension Estate {
             udcCode: frame.latticeAnchor.udcCode,
             udcFacets: frame.latticeAnchor.udcFacets,
             wikidataQID: frame.latticeAnchor.wikidataQID,
-            wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
+            wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
+            // Subject trio at birth (SPEC § 14). The producer at the capture
+            // boundary is the calling AI, so the pipeline version is ai-v1;
+            // a nil frame subject leaves the whole trio NULL (debt, B-21).
+            subject: frame.subject,
+            subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
+            subjectAt: frame.subject == nil ? nil : now
         )
         // Route through the covered chokepoint so coverage is structurally
         // guaranteed (spec § 11.5 Option B). addDrawerCovered bundles
@@ -260,6 +278,16 @@ public extension Estate {
             }
             guard !frame.embeddingModelID.isEmpty else {
                 throw LocusKitError.invalidContent("embeddingModelID must not be empty")
+            }
+            // Same subject contract as capture() (SPEC B-18): 1–120 chars
+            // when present; nil files as subject debt (B-21).
+            if let subject = frame.subject {
+                guard !subject.isEmpty, subject.count <= DrawerStore.subjectLengthContract else {
+                    throw LocusKitError.invalidContent(
+                        "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                        + "(got \(subject.count)); omit it entirely to file as subject debt"
+                    )
+                }
             }
         }
 
@@ -351,7 +379,11 @@ public extension Estate {
                 udcCode: frame.latticeAnchor.udcCode,
                 udcFacets: frame.latticeAnchor.udcFacets,
                 wikidataQID: frame.latticeAnchor.wikidataQID,
-                wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
+                wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
+                // Subject trio at birth — identical translation to capture().
+                subject: frame.subject,
+                subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
+                subjectAt: frame.subject == nil ? nil : now
             )
             prepared.append(PreparedItem(drawer: drawer, wing: triple.wing, room: triple.room))
         }
@@ -1031,6 +1063,9 @@ public extension Estate {
     /// synchronously, leaves aggregates untouched (§9.5.1: already
     /// de-identified statistical roll-ups), and emits a sealed audit
     /// event so the fact-of-expunge is preserved (v0.35 I-6).
+    /// Lineage siblings whose tombstone transition the gate admits are
+    /// scrubbed alongside; accepted siblings are refused (S-3) and
+    /// left byte-identical.
     ///
     /// Cookbook preconditions: "None beyond row existing." The
     /// `confirmation: Bool` parameter is a caller-supplied safety
@@ -1066,13 +1101,21 @@ public extension Estate {
     /// that method is the only path that defers the seal. Removing `sealAudit`
     /// from this public surface prevents any caller from accidentally suppressing
     /// the audit event (secfix/ws2-coredelete).
-    @discardableResult
+    ///
+    /// Returns the full `DrawerStore.ExpungeOutcome`. `refusedSiblingIDs`
+    /// names every lineage member the gate refused (accepted rows, S-3);
+    /// `auditEvent` is nil on this path because the event was sealed inside
+    /// the transaction. The result is deliberately NOT `@discardableResult`:
+    /// an expunge that refused a sibling is not a success, and a layer that
+    /// summarises it as one is the defect (SPEC B-8b, MXE-FA). Every caller
+    /// must consume the outcome and propagate — or explicitly acknowledge —
+    /// the refusal.
     func expunge(
         rowID: RowID,
         reason: String,
         confirmation: Bool,
         now: Date = Date()
-    ) async throws -> AuditEvent? {
+    ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
             throw LocusKitError.invalidContent(
                 "expunge requires confirmation: true (destructive op)"
@@ -1083,16 +1126,17 @@ public extension Estate {
         }
         let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
 
-        // WS2-F2: expungeGated tombstones the full lineage chain, which
-        // may span multiple rooms (lineage members can migrate via reanchor).
-        // Collect all distinct parent room IDs for the lineage BEFORE
-        // expunge so they can all be rolled up after tombstoning.
+        // WS2-F2: expungeGated tombstones the gate-admitted members of
+        // the full lineage chain, which may span multiple rooms (lineage
+        // members can migrate via reanchor). Collect all distinct parent
+        // room IDs for the lineage BEFORE expunge so they can all be
+        // rolled up after tombstoning.
         let lineageIds = try await store.lineageChain(for: rowID)
         let idsToFetch = lineageIds.isEmpty ? [rowID] : lineageIds
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
         let affectedRoomIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
-        let result = try await store.expungeGated(
+        let outcome = try await store.expungeGated(
             drawerId: rowID,
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
@@ -1106,18 +1150,32 @@ public extension Estate {
         for roomNodeId in affectedRoomIds {
             try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
         }
-        return result
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
+        // is not a success, and a layer that summarises it as one is the
+        // defect. The outcome — including refusedSiblingIDs — is returned
+        // whole so no consumer above this boundary can mistake a partial
+        // expunge for a complete one.
+        return outcome
     }
 
-    /// Expunge a drawer and return the unsealed audit event for deferred sealing.
+    /// Expunge a drawer and return the full outcome with the unsealed audit
+    /// event for deferred sealing.
     ///
     /// This is the GeniusLocusKit-exclusive entry point for the two-step §B-2a
     /// expunge orchestration: GLK calls this (step 1), performs its cross-kit
     /// vector/corpus delete (step 2), then seals via `sealExpungeAudit(_:)` or
-    /// `sealExpungeOrphanAudit(rowID:successEvent:now:)` (step 3). The return
-    /// value is always non-nil when the gate succeeds; a nil return indicates an
-    /// internal contract violation and must not be silently swallowed — GLK uses
-    /// a force-unwrap (`!`) as a deliberate programmer-error trap.
+    /// `sealExpungeOrphanAudit(rowID:successEvent:now:)` (step 3). The
+    /// outcome's `auditEvent` is always non-nil when the gate succeeds; a nil
+    /// event indicates an internal contract violation and must not be silently
+    /// swallowed — GLK uses a force-unwrap (`!`) as a deliberate
+    /// programmer-error trap.
+    ///
+    /// `refusedSiblingIDs` names every lineage member the gate refused
+    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
+    /// refused a sibling is not a success, and a layer that summarises it as
+    /// one is the defect — GLK must scope its cross-kit vector delete to the
+    /// members that were actually scrubbed and must report the refusal to its
+    /// own callers.
     ///
     /// Separating this path from `expunge()` prevents arbitrary callers from
     /// suppressing the audit event. The `sealAudit:` parameter no longer exists
@@ -1127,7 +1185,7 @@ public extension Estate {
         reason: String,
         confirmation: Bool,
         now: Date = Date()
-    ) async throws -> AuditEvent? {
+    ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
             throw LocusKitError.invalidContent(
                 "expunge requires confirmation: true (destructive op)"
@@ -1146,7 +1204,7 @@ public extension Estate {
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
         let affectedRoomIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
-        let result = try await store.expungeGated(
+        let outcome = try await store.expungeGated(
             drawerId: rowID,
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
@@ -1158,7 +1216,11 @@ public extension Estate {
         for roomNodeId in affectedRoomIds {
             try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
         }
-        return result
+        // Invariant (SPEC B-8b, MXE-FA): the whole outcome flows up —
+        // unsealed event AND refusedSiblingIDs — so GLK can scope its
+        // cross-kit vector delete to the scrubbed members and report a
+        // partial expunge as partial. See expunge() above.
+        return outcome
     }
 
     /// Return all drawer ids sharing the same lineage as `rowID`.
@@ -1539,6 +1601,31 @@ public extension Estate {
                 changedBy: changedBy.isEmpty ? "estate" : changedBy,
                 reason: payload ?? "exportability corrected via Estate.mutate",
                 now: Date()
+            )
+
+        case .setSubject(let subject):
+            guard try await store.getDrawer(id: rowID) != nil else {
+                throw LocusKitError.drawerNotFound(id: rowID)
+            }
+            // Correction write path for the subject trio (SPEC § 14).
+            // No bitmap, no state transition, no container-fingerprint
+            // rollup — the store verb writes the three columns and seals
+            // the "setSubject" custody audit event in one transaction,
+            // and enforces the 1–120-char contract (B-18). The caller's
+            // `payload` is the audit note (reason), passed through
+            // verbatim — nil when the caller supplied none; no
+            // synthesized default, so the audit row honestly records
+            // that no reason was given. The producer at this boundary is
+            // the calling AI, so the pipeline version is ai-v1. Mirrors
+            // Rust MutationKind::SetSubject in estate_verbs.rs.
+            let subjectChangedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
+            _ = try await store.setSubjectRepresentation(
+                drawerId: rowID,
+                subject: subject,
+                pipelineVersion: DrawerStore.subjectPipelineAIV1,
+                at: Date(),
+                changedBy: subjectChangedBy.isEmpty ? "estate" : subjectChangedBy,
+                reason: payload
             )
         }
     }
@@ -2018,6 +2105,9 @@ public extension Estate {
     ///
     /// The hint memory is a NORMAL drawer: embedded using the caller-supplied
     /// embedding model, recallable like any other drawer, user-deletable.
+    /// (`seedWing` itself performs the covered ROW write only; the GLK caller
+    /// enqueues the hint onto the Corpus encode stream — `seedDefaultWings`,
+    /// DISTILL_SEED_STALL — which is what delivers the indexing/recallability.)
     ///
     /// Note: `capture(_:)` also supports an explicit wing via `CaptureFrame.wing`
     /// (wing organization follow-up). `seedWing` remains the estate-init path; per-drawer
@@ -2072,7 +2162,15 @@ public extension Estate {
             addedBy: addedBy,
             filedAt: now,
             embeddingModelID: embeddingModelID,
-            udcCode: hintUDCCode
+            udcCode: hintUDCCode,
+            // Structural seeds emit their own subject (SPEC § 14): a hint
+            // drawer exists in EVERY estate, so a NULL subject here would be
+            // permanent, unpayable debt in every debt count. Deterministic —
+            // the wing name states exactly what the hint asserts. Distinct
+            // pipeline tag so a regeneration sweep can target seeds.
+            subject: String("Charter hint: how to use the \(wingName) wing.".prefix(DrawerStore.subjectLengthContract)),
+            subjectPipelineVersion: "seed-v1",
+            subjectAt: now
         )
         // Route through the covered chokepoint so the container fingerprint
         // is maintained — same structural guarantee as ordinary capture.

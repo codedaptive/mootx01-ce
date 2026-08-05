@@ -644,6 +644,22 @@ internal struct MutationKindPayload: Sendable, Codable {
     // Exportability axis — DEBT-1 write path. Encodes the AdjectiveExportability
     // associated value as a string for JSON round-trip through the Brain scheduler.
     let exportability: String?
+    // Subject text for the setSubject mutation (progressive recall, SPEC § 14).
+    // Carried verbatim — unlike the axis cases above there is no enum to
+    // re-materialise, the string IS the payload. Optional so pre-subject
+    // envelopes decode with nil (wire compatibility).
+    let subject: String?
+
+    // Pre-subject memberwise convenience so the existing case arms stay
+    // four-argument; the setSubject arm passes subject explicitly.
+    init(tag: String, sensitivity: String?, trust: String?, exportability: String?,
+         subject: String? = nil) {
+        self.tag = tag
+        self.sensitivity = sensitivity
+        self.trust = trust
+        self.exportability = exportability
+        self.subject = subject
+    }
 
     static func encode(_ kind: MutationKind) -> MutationKindPayload {
         switch kind {
@@ -673,6 +689,11 @@ internal struct MutationKindPayload: Sendable, Codable {
             return MutationKindPayload(
                 tag: "correct_trust",
                 sensitivity: nil, trust: "\(t)", exportability: nil)
+        case .setSubject(let subject):
+            return MutationKindPayload(
+                tag: "set_subject",
+                sensitivity: nil, trust: nil, exportability: nil,
+                subject: subject)
         }
     }
 
@@ -704,6 +725,12 @@ internal struct MutationKindPayload: Sendable, Codable {
             return .correctExportability(exp)
         case "correct_trust":
             return .correctTrust(.proposed)
+        case "set_subject":
+            // The wire carries the subject verbatim; an absent string
+            // (malformed envelope) materialises as empty, which the store's
+            // 1–120-char contract rejects downstream rather than silently
+            // writing a blank subject.
+            return .setSubject(subject ?? "")
         default:
             return .confirm
         }

@@ -264,6 +264,12 @@ public extension CorpusContentEngine {
         if !result.encodedIDs.isEmpty, let callback = onEncoded {
             await callback(result.encodedIDs)
         }
+        // Post-ingest young-basis settle: fires only when nothing further is
+        // pending (this batch is committed above; it may still be in-flight
+        // until the reply below, which keeps the settle's embedding work
+        // inside drain-completion accounting — same rationale as the
+        // onEncoded ordering). See settleYoungBasisIfGrown.
+        try await settleYoungBasisIfGrown(now: result.batchNow, requireIdleInFlight: false)
         do {
             _ = try await queue.reply(batch: result.completions)
         } catch {

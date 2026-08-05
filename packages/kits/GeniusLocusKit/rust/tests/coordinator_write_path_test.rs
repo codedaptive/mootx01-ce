@@ -38,22 +38,49 @@ fn open_one() -> (EstateCoordinator, EstateHandle) {
     (coord, handle)
 }
 
+/// Capture a drawer to anchor KG facts to.
+///
+/// A fact inherits its source drawer's sensitivity, so `source_drawer_id` must
+/// name a drawer that exists — an id resolving to nothing fails the write.
+fn anchor_drawer(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+) -> locus_kit::drawer::Drawer {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    let frame = CaptureFrame::new(
+        "kg fact anchor",
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("0"),
+        "test-agent",
+        "test-embed-v1",
+    );
+    coord.capture(handle, frame, NOW).expect("capture anchor drawer")
+}
+
 // MARK: - add_kg_fact
 
 /// A newly added kg-fact appears in recall_kg_facts (raw state 0, RowState Cluster A).
 #[test]
 fn add_kg_fact_appears_in_recall() {
     let (coord, handle) = open_one();
+    let anchor = anchor_drawer(&coord, &handle);
     let fact = coord
-        .add_kg_fact(&handle, "Alice", "knows", "Bob", "src-1", NOW)
+        .add_kg_fact(&handle, "Alice", "knows", "Bob", &anchor.id, NOW)
         .expect("add_kg_fact");
     assert!(!fact.id.is_empty(), "id must be a non-empty UUID string");
     assert_eq!(fact.subject, "Alice");
     assert_eq!(fact.predicate, "knows");
     assert_eq!(fact.object, "Bob");
-    assert_eq!(fact.source_drawer_id, "src-1");
+    assert_eq!(fact.source_drawer_id, anchor.id);
     assert_eq!(fact.filed_at, NOW);
-    assert_eq!(fact.adjective_bitmap, 0, "new fact state is Active (0)");
+    // The fact inherits its source drawer's adjective bitmap verbatim.
+    assert_eq!(
+        fact.adjective_bitmap, anchor.adjective_bitmap,
+        "fact must carry the source drawer's adjective bitmap"
+    );
 
     let facts = coord.recall_kg_facts(&handle).expect("recall");
     assert_eq!(facts.len(), 1);
@@ -64,11 +91,12 @@ fn add_kg_fact_appears_in_recall() {
 #[test]
 fn add_kg_fact_ids_are_unique() {
     let (coord, handle) = open_one();
+    let src = anchor_drawer(&coord, &handle).id;
     let f1 = coord
-        .add_kg_fact(&handle, "A", "p", "B", "src", NOW)
+        .add_kg_fact(&handle, "A", "p", "B", &src, NOW)
         .expect("add 1");
     let f2 = coord
-        .add_kg_fact(&handle, "C", "q", "D", "src", NOW)
+        .add_kg_fact(&handle, "C", "q", "D", &src, NOW)
         .expect("add 2");
     assert_ne!(f1.id, f2.id);
 }
@@ -94,8 +122,9 @@ fn add_kg_fact_unknown_handle_returns_estate_not_open() {
 #[test]
 fn withdraw_kg_fact_excluded_from_active_recall() {
     let (coord, handle) = open_one();
+    let src = anchor_drawer(&coord, &handle).id;
     let fact = coord
-        .add_kg_fact(&handle, "A", "p", "B", "src", NOW)
+        .add_kg_fact(&handle, "A", "p", "B", &src, NOW)
         .expect("add");
     coord.withdraw_kg_fact(&handle, &fact.id, NOW).expect("withdraw");
 
@@ -316,13 +345,14 @@ fn diary_entries_unknown_handle_returns_estate_not_open() {
 #[test]
 fn write_path_full_round_trip() {
     let (coord, handle) = open_one();
+    let src = anchor_drawer(&coord, &handle).id;
 
     // Capture two facts.
     let f1 = coord
-        .add_kg_fact(&handle, "A", "p", "B", "src", NOW)
+        .add_kg_fact(&handle, "A", "p", "B", &src, NOW)
         .expect("add f1");
     let f2 = coord
-        .add_kg_fact(&handle, "C", "q", "D", "src", NOW)
+        .add_kg_fact(&handle, "C", "q", "D", &src, NOW)
         .expect("add f2");
 
     // Both appear in active recall.

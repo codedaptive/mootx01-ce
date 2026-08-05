@@ -80,6 +80,7 @@ struct FdcCaptureTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content":  .string(classifiable),
+                "subject":  .string(String(classifiable.prefix(120))),
                 "location": .string("science-room"),
             ])
         )
@@ -119,6 +120,7 @@ struct FdcCaptureTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content":  .string(noise),
+                "subject":  .string(String(noise.prefix(120))),
                 "location": .string("noise-room"),
             ])
         )
@@ -156,6 +158,7 @@ struct FdcCaptureTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content":  .string("some content"),
+                "subject":  .string("some content"),
                 "location": .string(""),  // empty room — estate rejects this
             ])
         )
@@ -210,6 +213,7 @@ struct FdcCaptureTests {
                 name: "moot_file_memory",
                 arguments: .object([
                     "content":  .string(content),
+                    "subject":  .string(String(content.prefix(120))),
                     "location": .string(location),
                 ])
             )
@@ -254,6 +258,7 @@ struct FdcCaptureTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content":  .string(classifiable),
+                "subject":  .string(String(classifiable.prefix(120))),
                 "location": .string("science-room"),
             ])
         )
@@ -349,6 +354,7 @@ struct FdcCaptureTests {
             name: "moot_file_memory",
             arguments: .object([
                 "content":  .string("node-tree integrity parentNodeId verification content"),
+                "subject":  .string("node-tree integrity parentNodeId verification content"),
                 "location": .string("test-room"),
             ])
         )

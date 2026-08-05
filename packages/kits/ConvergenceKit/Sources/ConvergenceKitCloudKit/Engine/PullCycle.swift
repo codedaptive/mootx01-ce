@@ -72,6 +72,7 @@ extension CloudKitStateActor {
             // rows, and therefore must never enter CKRecordMapping.decode().
             pulledRecords = result.modifiedRecords.filter {
                 $0.recordType != SlotRecordMapping.recordType
+                    && SecretSyncCloudKitRecordType(rawValue: $0.recordType) == nil
             }
 
             // CloudKitZoneChanges.deletedRecordIDs mirrors CKDatabase.RecordZoneChanges

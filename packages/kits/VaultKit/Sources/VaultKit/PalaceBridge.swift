@@ -53,8 +53,15 @@ public struct PalaceBridge: Sendable {
     private static let drawersCollection = "mempalace_drawers"
     private static let closetsCollection = "mempalace_closets"
 
-    public init(kit: GeniusLocusKit) {
+    /// The ceilings this bridge enforces on an untrusted palace root.
+    /// Identical defaults to `MemPalaceChromaAdapter.limits` — the two
+    /// entry points read the same palaces and must not disagree about
+    /// what is too large.
+    public var limits: MemPalaceImportLimits
+
+    public init(kit: GeniusLocusKit, limits: MemPalaceImportLimits = .default) {
         self.kit = kit
+        self.limits = limits
     }
 
     // MARK: - Public API
@@ -89,10 +96,22 @@ public struct PalaceBridge: Sendable {
         // existingTunnelSignatures snapshot. Without this, a re-import would not
         // find tunnels created by a prior import (their sourceWing comes from
         // the JSON, not from the drawer wing set).
+        //
+        // The palace root is UNTRUSTED input (see the trust-posture note
+        // at the top of MemPalaceChromaAdapter). One budget covers this
+        // whole import — the tunnels.json size check below and every
+        // SQLite read further down — so the row and byte ceilings are
+        // totals for the import rather than a fresh allowance per store.
+        let budget = MemPalaceImportBudget(limits: limits)
         let tunnelsURL = palaceRoot
             .appendingPathComponent(MemPalaceChromaAdapter.tunnelsRelativePath)
         var preloadedTunnelRecords: [MemPalaceChromaAdapter.TunnelRecord] = []
         if FileManager.default.fileExists(atPath: tunnelsURL.path) {
+            // Charged from the filesystem size BEFORE the file is opened,
+            // so an oversized tunnels.json is never read into memory.
+            try budget.chargeTunnelsFile(
+                byteCount: MemPalaceChromaAdapter.fileByteCount(at: tunnelsURL),
+                path: tunnelsURL.path)
             let data = try Data(contentsOf: tunnelsURL)
             do {
                 preloadedTunnelRecords = try JSONDecoder().decode(
@@ -145,7 +164,7 @@ public struct PalaceBridge: Sendable {
         let chromaPath = palaceRoot
             .appendingPathComponent(MemPalaceChromaAdapter.chromaRelativePath).path
         if FileManager.default.fileExists(atPath: chromaPath) {
-            let db = try SQLiteReadOnly(path: chromaPath)
+            let db = try SQLiteReadOnly(path: chromaPath, budget: budget)
             // Gather all chroma rows across both collections up front so the
             // progress callback can report a real total instead of 0. The
             // rows are materialized once (no double read).
@@ -247,7 +266,7 @@ public struct PalaceBridge: Sendable {
         let kgPath = palaceRoot
             .appendingPathComponent(MemPalaceChromaAdapter.knowledgeGraphRelativePath).path
         if FileManager.default.fileExists(atPath: kgPath) {
-            let db = try SQLiteReadOnly(path: kgPath)
+            let db = try SQLiteReadOnly(path: kgPath, budget: budget)
 
             // KG entities: each entity becomes a drawer in knowledge_graph/entities.
             for row in try db.query(
@@ -278,9 +297,18 @@ public struct PalaceBridge: Sendable {
             // re-import dedup guard (CAND-049) can run without a per-fact probe.
             // The signature uses ASCII Unit Separator (U+001F) as a delimiter —
             // see importKGTriple for the full rationale.
+            // The signature's fourth slot is the foreign palace key. Facts filed by
+            // this importer carry it in `foreignSourceKey`; facts already in the
+            // estate from an importer that predates that column carry the same
+            // value in `sourceDrawerID`. Reading the new field and falling back to
+            // the old one yields the identical string for both shapes, so a
+            // re-import still recognises everything it imported before. Reading
+            // only `foreignSourceKey` would miss every pre-existing row and
+            // duplicate all of them on the next import.
             let existingKGFacts = try await kit.recallKGFacts(handle)
             var existingKGSignatures: Set<String> = Set(existingKGFacts.map {
-                "\($0.subject)\u{1F}\($0.predicate)\u{1F}\($0.object)\u{1F}\($0.sourceDrawerID)"
+                let anchor = Self.dedupAnchor(for: $0)
+                return "\($0.subject)\u{1F}\($0.predicate)\u{1F}\($0.object)\u{1F}\(anchor)"
             })
 
             // KG triples: each triple becomes a KGFact. Temporal validity
@@ -713,12 +741,17 @@ public struct PalaceBridge: Sendable {
             return
         }
 
+        // sourceDrawerID is left empty: the palace key names a drawer in the
+        // *foreign* estate and resolves to nothing local, so it belongs in
+        // foreignSourceKey. The triple's own id goes to foreignRecordID.
         _ = try await kit.captureKGFact(
             handle,
             subject: subject,
             predicate: predicate,
             object: object,
-            sourceDrawerID: sourceDrawerID,
+            sourceDrawerID: "",
+            foreignSourceKey: sourceDrawerID,
+            foreignRecordID: id,
             now: now
         )
         // Register this signature so within-batch duplicates are also caught.
@@ -733,7 +766,9 @@ public struct PalaceBridge: Sendable {
                 subject: id,
                 predicate: "temporal:valid_from",
                 object: vf,
-                sourceDrawerID: sourceDrawerID,
+                sourceDrawerID: "",
+                foreignSourceKey: sourceDrawerID,
+                foreignRecordID: id,
                 now: now
             )
         }
@@ -743,7 +778,9 @@ public struct PalaceBridge: Sendable {
                 subject: id,
                 predicate: "temporal:valid_to",
                 object: vt,
-                sourceDrawerID: sourceDrawerID,
+                sourceDrawerID: "",
+                foreignSourceKey: sourceDrawerID,
+                foreignRecordID: id,
                 now: now
             )
         }
@@ -753,10 +790,28 @@ public struct PalaceBridge: Sendable {
                 subject: id,
                 predicate: "temporal:confidence",
                 object: String(conf),
-                sourceDrawerID: sourceDrawerID,
+                sourceDrawerID: "",
+                foreignSourceKey: sourceDrawerID,
+                foreignRecordID: id,
                 now: now
             )
         }
+    }
+
+    /// The value that occupies the fourth slot of a stored fact's CAND-049
+    /// signature.
+    ///
+    /// A fact this importer files carries the palace key in `foreignSourceKey`.
+    /// A fact already in the estate from an earlier importer carries that same
+    /// value in `sourceDrawerID`. Both placements must produce the identical
+    /// string, or a re-import fails to recognise what it imported before and
+    /// duplicates every row.
+    ///
+    /// A locally-filed fact has no foreign key and its `sourceDrawerID` is a
+    /// local drawer id (or empty) — returning it is what the importer has
+    /// always compared against, so local rows are unaffected.
+    static func dedupAnchor(for fact: KGFact) -> String {
+        fact.foreignSourceKey.isEmpty ? fact.sourceDrawerID : fact.foreignSourceKey
     }
 
     // MARK: - Snapshot helpers (mirrors VaultBridge private helpers)

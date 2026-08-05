@@ -89,13 +89,20 @@ struct ProviderCoverageCrashBoundaryTests {
             }
             // The fault fired AFTER RI's atomic commit and BEFORE PPMI
             // trained: exactly one basis row exists.
-            let riBlob = try #require(try await basisRow(storage, "random-indexing-v1"))
+            // The fault boundary itself: RI's basis row exists (committed).
+            _ = try #require(try await basisRow(storage, "random-indexing-v1"))
             #expect(try await basisRow(storage, "ppmi-v1") == nil)
 
-            // Resume: RI is skipped (its persisted basis is byte-identical
-            // afterwards), PPMI trains, and both cover everything.
+            // Resume: the TRAINING RESUME skips the committed RI provider
+            // (train's non-forced path never redoes committed work) and PPMI
+            // trains. RI's blob may legitimately CHANGE afterwards — the
+            // post-ingest young-basis settle (settleYoungBasisIfGrown)
+            // retrains a young basis whenever the indexed corpus grows, and
+            // the resume's ingest is exactly such growth. The crash-boundary
+            // contract is convergence, not byte-stability: both bases exist
+            // and both providers reach full coverage.
             try await docs(engine, 3)
-            #expect(try await basisRow(storage, "random-indexing-v1") == riBlob)
+            #expect(try await basisRow(storage, "random-indexing-v1") != nil)
             #expect(try await basisRow(storage, "ppmi-v1") != nil)
             #expect(try await engine.coveredCount(modelID: "random-indexing-v1") == 3)
             #expect(try await engine.coveredCount(modelID: "ppmi-v1") == 3)

@@ -31,7 +31,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use corpus_kit::corpus::EmbeddingModelConfig;
 use genius_locus_kit::{
-    coordinator::{EstateCoordinator, EstateKind, EstateProvisionParams, SyncMode},
+    coordinator::{EstateCoordinator, EstateKind, EstateLifetime, EstateProvisionParams, SyncMode},
     handle::EstateHandle,
 };
 use locus_kit::{
@@ -76,6 +76,7 @@ fn glk_params(name: &str) -> EstateProvisionParams {
         zoom_window_high: 999,
         framework_profile: "Test".to_string(),
         sync_mode: SyncMode::None,
+        lifetime: EstateLifetime::Durable,
     }
 }
 

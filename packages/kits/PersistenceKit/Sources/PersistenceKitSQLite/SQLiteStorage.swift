@@ -546,7 +546,7 @@ actor SQLiteBackend {
         for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2/3): encrypt the content column
         // and stamp the key identifier before binding. No-op for mode 1.
-        let values = try encryptedForWrite(values, config: encryptionConfig)
+        let values = try encryptedForWrite(values, table: table, config: encryptionConfig)
         // Structural content/keyID invariant (FUP-D): after the seam, a
         // content row on an encrypting estate must carry a keyID. A correct
         // encrypting insert has already become .blob + keyID here, so the
@@ -582,16 +582,15 @@ actor SQLiteBackend {
         return RowHandle(table: table, key: key)
     }
 
-    // The at-rest encryption seam (ENC-01) lives on insertRow/queryRows
-    // only. upsertRow is deliberately NOT wired: in the LocusKit schema it
-    // is only ever called for non-content tables (manifest,
-    // container_fingerprints, node_bundles), none of which carry a
-    // "content" column. The content/keyID invariant is enforced
-    // structurally (FUP-D): a content-bearing upsert on an encrypting
-    // estate throws rather than silently writing plaintext content with a
-    // null keyID (an unreadable row). A future content-upsert path must
-    // extend the encryption seam symmetrically with insertRow before this
-    // guard would let such a write through.
+    // The at-rest encryption seam (ENC-01) runs on every write verb —
+    // insertRow, upsertRow and updateRows — so no verb can place plaintext in
+    // a protected column on an encrypting estate. upsertRow was the last one
+    // wired: the earlier design assumed upsert only ever reached non-content
+    // tables (manifest, container_fingerprints, node_bundles), but snapshot
+    // replication upserts drawer rows it has just read back as plaintext, so
+    // upsert is a content write path in practice. Sealing here rather than in
+    // the replication layer keeps the destination's key inside the store that
+    // owns it.
     func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String], origin: ChangeOrigin = .local) throws -> RowHandle {
         // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
         // the table name, all value-map column names, and the conflict-column list
@@ -601,6 +600,15 @@ actor SQLiteBackend {
         try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
         for name in conflictColumns { try validateSQLIdentifier(name) }
+        // At-rest encryption seam (mode 2/3): seal this table's protected
+        // columns and stamp the key identifier before binding, matching
+        // insertRow and updateRows. No-op for mode 1 and for tables with no
+        // protected columns. Sealing cannot disturb the ON CONFLICT match:
+        // the only protected table is "drawers" and its conflict column is
+        // the primary key "id", which is never protected.
+        let values = try encryptedForWrite(values, table: table, config: encryptionConfig)
+        // Structural safety net beneath the seam: after sealing, protected
+        // text can only remain if the seam could not run.
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         let sortedKeys = values.keys.sorted()
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
@@ -629,6 +637,18 @@ actor SQLiteBackend {
         // The SQLite actor serializes writes so there is no interleaving between
         // this read and the upsert below. If the row exists, compute the column diff;
         // if not, treat as insert (all columns are new).
+        //
+        // On an encrypting estate this diff OVER-REPORTS protected columns, by
+        // design. fetchRowByConflictColumns is a raw SELECT that does not run
+        // decryptedForRead, so it returns stored ciphertext, and the seam above
+        // re-seals under a fresh AES-GCM nonce every call. Identical plaintext
+        // therefore compares unequal and the column is reported changed. That
+        // is conservative in the safe direction: changedColumns drives
+        // ConvergenceKit's field-level LWW column stamping, where an extra
+        // stamp is redundant work and a missing one would lose an update.
+        // Decrypting the pre-read to compare plaintext would add a decrypt per
+        // row on the replication hot path to save that redundancy — not worth
+        // it. This is a known trade, not an oversight.
         let existingRowForDiff = try? fetchRowByConflictColumns(
             table: table, values: values, conflictColumns: conflictColumns)
         _ = try stmt.step()
@@ -658,13 +678,14 @@ actor SQLiteBackend {
         for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2): UPDATE is a protected-text write
         // path since the distilled-representation columns landed (a
-        // distillation write is an UPDATE carrying "distilled" text —
+        // distillation write is an UPDATE carrying "distilled" text, and a
+        // subjecting write one carrying "subject" —
         // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals any non-empty
-        // protected text ("content"/"distilled") and stamps keyID; it is a
+        // text in a column protected for this table and stamps keyID; it is a
         // no-op for the bitmap/timestamp updates that were this path's only
         // traffic before, and for the expunge scrub (empty text is exempt so
         // erasure stays a plaintext-empty marker).
-        let values = try encryptedForWrite(values, config: encryptionConfig)
+        let values = try encryptedForWrite(values, table: table, config: encryptionConfig)
         // Structural content/keyID invariant (FUP-D): after the seam, a
         // protected-text update on an encrypting estate must carry a keyID.
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
@@ -768,12 +789,24 @@ actor SQLiteBackend {
         // protection if a name contains `"` — the quote can escape the
         // double-quote delimiter and alter the query. Reject any name that is
         // not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
+        //
+        // Key-identifier augmentation: `decryptedForRead` cannot open a
+        // sealed value without the row's keyID, and a caller's projection
+        // has no reason to know that. When the projection reads a protected
+        // column on an encrypting estate but omits keyID, SELECT it anyway
+        // and strip it from the row below — the caller's projection contract
+        // is unchanged, and the seam gets what it needs. Without this a
+        // projected read returns ciphertext bytes silently, because .blob is
+        // a legal TypedValue that a decoder reads as an absent string.
+        let injectedKeyID = rowCryptoProjectionNeedsKeyID(
+            table: table, columns: columns, config: encryptionConfig)
         let projection: String
         if let columns, !columns.isEmpty {
             for name in columns {
                 try validateSQLIdentifier(name)
             }
-            projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
+            let selected = injectedKeyID ? columns + [rowCryptoKeyIDColumn] : columns
+            projection = selected.map { "\"\($0)\"" }.joined(separator: ", ")
         } else {
             projection = "*"
         }
@@ -822,9 +855,14 @@ actor SQLiteBackend {
                 // row is unreadable rather than receiving a silently wrong value.
                 values[name] = try readColumn(stmt: stmt, index: i, schema: resolvedSchema, columnName: name, table: table)
             }
-            // At-rest decryption seam (mode 2/3): decrypt the content
-            // column when the row carries a key identifier. No-op for mode 1.
-            rows.append(StorageRow(values: try decryptedForRead(values, config: encryptionConfig)))
+            // At-rest decryption seam (mode 2/3): decrypt this table's
+            // protected columns when the row carries a key identifier.
+            // No-op for mode 1 and for tables with no protected columns.
+            var decoded = try decryptedForRead(values, table: table, config: encryptionConfig)
+            // Drop the keyID this query added on the caller's behalf, so a
+            // projected read returns exactly the columns that were asked for.
+            if injectedKeyID { decoded[rowCryptoKeyIDColumn] = nil }
+            rows.append(StorageRow(values: decoded))
         }
         return rows
     }
@@ -856,12 +894,24 @@ actor SQLiteBackend {
         // projected column names here, just as queryRows does for its projection
         // path. queryRowsSkipCorrupt shares the same SELECT construction, so the
         // same injection surface exists. Reject before SQL is built.
+        //
+        // Key-identifier augmentation: `decryptedForRead` cannot open a
+        // sealed value without the row's keyID, and a caller's projection
+        // has no reason to know that. When the projection reads a protected
+        // column on an encrypting estate but omits keyID, SELECT it anyway
+        // and strip it from the row below — the caller's projection contract
+        // is unchanged, and the seam gets what it needs. Without this a
+        // projected read returns ciphertext bytes silently, because .blob is
+        // a legal TypedValue that a decoder reads as an absent string.
+        let injectedKeyID = rowCryptoProjectionNeedsKeyID(
+            table: table, columns: columns, config: encryptionConfig)
         let projection: String
         if let columns, !columns.isEmpty {
             for name in columns {
                 try validateSQLIdentifier(name)
             }
-            projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
+            let selected = injectedKeyID ? columns + [rowCryptoKeyIDColumn] : columns
+            projection = selected.map { "\"\($0)\"" }.joined(separator: ", ")
         } else {
             projection = "*"
         }
@@ -924,9 +974,14 @@ actor SQLiteBackend {
                 }
             }
             if rowIsCorrupt { continue }
-            // At-rest decryption seam: decrypt content column when the row
-            // carries a key identifier. No-op for Plaintext mode.
-            rows.append(StorageRow(values: try decryptedForRead(values, config: encryptionConfig)))
+            // At-rest decryption seam: decrypt this table's protected columns
+            // when the row carries a key identifier. No-op for Plaintext mode
+            // and for tables with no protected columns.
+            var decoded = try decryptedForRead(values, table: table, config: encryptionConfig)
+            // Drop the keyID this query added on the caller's behalf, so a
+            // projected read returns exactly the columns that were asked for.
+            if injectedKeyID { decoded[rowCryptoKeyIDColumn] = nil }
+            rows.append(StorageRow(values: decoded))
         }
         return (rows, skipped)
     }
@@ -935,8 +990,11 @@ actor SQLiteBackend {
     // (`encryptedForWrite` / `decryptedForRead` / `assertContentKeyIDInvariant`)
     // lives in PersistenceKit core (RowCrypto.swift) so the SQLite and
     // PostgreSQL backends share one byte-compatible implementation. The call
-    // sites above (insertRow / upsertRow / updateRows / queryRows) invoke it
-    // with this backend's `encryptionConfig`.
+    // sites above (insertRow / upsertRow / updateRows / queryRows /
+    // queryRowsSkipCorrupt) invoke it with this backend's `encryptionConfig`
+    // and the table they are operating on — the seam selects protected
+    // columns per table, so the table name is a required argument, not a
+    // label for the error message.
 
     // MARK: - Introspection
 

@@ -91,7 +91,17 @@ pub struct AssociationRuleResult {
     pub lift: f64,
     pub conviction: f64,
     pub leverage: f64,
+    /// Drawer ids of up to `ASSOCIATION_EXEMPLAR_CAP` memories satisfying
+    /// BOTH sides of the rule, in the recall frame's deterministic order.
+    /// Follow-up addresses, not the full support set. Empty for
+    /// dataset-mode rules (rows are not drawers). Twin of Swift
+    /// `AssociationRuleResult.exemplarDrawerIDs`.
+    pub exemplar_drawer_ids: Vec<String>,
 }
+
+/// How many exemplar drawer ids ride on each mined rule. Twin of Swift
+/// `associationExemplarCap`.
+pub const ASSOCIATION_EXEMPLAR_CAP: usize = 5;
 
 /// Output of the AssociationRules recipe.
 #[derive(Debug, Clone, PartialEq)]
@@ -156,21 +166,40 @@ pub fn run_association_rules(
     // 4. Mine association rules.
     let raw_rules = mine_association_rules(&matrix, drawer_count as i64, thresholds);
 
-    // 5. Relabel Item field indices back to label strings.
+    // 5. Relabel Item field indices back to label strings, and attach
+    // exemplar drawer ids per rule. The engine aggregates rows into a
+    // matrix and cannot say WHICH drawers support a rule, but the recipe
+    // still holds the recalled set — one pass builds each drawer's label
+    // set, then each rule takes the first ASSOCIATION_EXEMPLAR_CAP drawers
+    // (recall order, deterministic) whose labels contain both sides.
+    // Twin of the Swift exemplar computation.
+    let drawer_label_sets: Vec<(String, std::collections::BTreeSet<String>)> = drawers
+        .iter()
+        .map(|d| (d.id.clone(), drawer_labels(d).into_iter().collect()))
+        .collect();
     let rules: Vec<AssociationRuleResult> = raw_rules
         .into_iter()
         .filter_map(|rule| {
             let ai = rule.antecedent.field as usize;
             let ci = rule.consequent.field as usize;
             if ai < labels.len() && ci < labels.len() {
+                let ant_label = &labels[ai];
+                let con_label = &labels[ci];
+                let exemplar_drawer_ids: Vec<String> = drawer_label_sets
+                    .iter()
+                    .filter(|(_, set)| set.contains(ant_label) && set.contains(con_label))
+                    .take(ASSOCIATION_EXEMPLAR_CAP)
+                    .map(|(id, _)| id.clone())
+                    .collect();
                 Some(AssociationRuleResult {
-                    antecedent: labels[ai].clone(),
-                    consequent: labels[ci].clone(),
+                    antecedent: ant_label.clone(),
+                    consequent: con_label.clone(),
                     support: rule.support,
                     confidence: rule.confidence,
                     lift: rule.lift,
                     conviction: rule.conviction,
                     leverage: rule.leverage,
+                    exemplar_drawer_ids,
                 })
             } else {
                 None
@@ -558,6 +587,93 @@ mod tests {
             !out.rules.is_empty(),
             "rules still mine over the kept (sorted-first-64) labels"
         );
+    }
+
+    // CK-AR-6: exemplar_drawer_ids carry genuine addresses satisfying both
+    // sides of the rule and respect ASSOCIATION_EXEMPLAR_CAP.
+    // Mirrors Swift CK-AR-6 (`AssociationRulesTests.swift`).
+    #[test]
+    fn exemplar_drawer_ids_satisfy_both_labels_and_respect_cap() {
+        let (coord, h) = coord_with_estate();
+        // Group A: code + typed (labels: room:alpha, kind:code, channel:typed)
+        let mut group_a_ids: std::collections::HashSet<String> = Default::default();
+        // Group B: prose + voiced (labels: room:beta, kind:prose, channel:voiced)
+        let mut group_b_ids: std::collections::HashSet<String> = Default::default();
+        for _ in 0..4 {
+            let da = coord
+                .capture(&h, {
+                    let mut f = CaptureFrame::new(
+                        "group-a content",
+                        CaptureChannel::Typed,
+                        "alpha",
+                        LatticeAnchor::udc("0"),
+                        "test",
+                        "test-v1",
+                    );
+                    f.kind = ContentKind::Code;
+                    f
+                }, NOW)
+                .unwrap();
+            group_a_ids.insert(da.id);
+            let db = coord
+                .capture(&h, {
+                    let mut f = CaptureFrame::new(
+                        "group-b content",
+                        CaptureChannel::Voiced,
+                        "beta",
+                        LatticeAnchor::udc("0"),
+                        "test",
+                        "test-v1",
+                    );
+                    f.kind = ContentKind::Prose;
+                    f
+                }, NOW)
+                .unwrap();
+            group_b_ids.insert(db.id);
+        }
+        let out =
+            run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
+        // Rules exist; at least one has exemplars.
+        assert!(!out.rules.is_empty(), "rules must be present after capture");
+        for rule in &out.rules {
+            // Cap invariant: never exceeds ASSOCIATION_EXEMPLAR_CAP.
+            assert!(
+                rule.exemplar_drawer_ids.len() <= ASSOCIATION_EXEMPLAR_CAP,
+                "exemplar list must not exceed ASSOCIATION_EXEMPLAR_CAP for rule {}→{}: got {}",
+                rule.antecedent,
+                rule.consequent,
+                rule.exemplar_drawer_ids.len()
+            );
+            // Address invariant: every exemplar id is one that was captured.
+            let all_captured: std::collections::HashSet<String> = group_a_ids
+                .iter()
+                .chain(group_b_ids.iter())
+                .cloned()
+                .collect();
+            for id in &rule.exemplar_drawer_ids {
+                assert!(
+                    all_captured.contains(id),
+                    "exemplar id {id} is not a captured address (rule {}→{})",
+                    rule.antecedent,
+                    rule.consequent
+                );
+            }
+        }
+        // Label-correspondence invariant: for any rule involving a group-A-only
+        // label (room:alpha, kind:code, channel:typed), exemplars must be group-A
+        // ids; for group-B labels, group-B ids. Check at least the room labels.
+        let group_a_room_rule = out
+            .rules
+            .iter()
+            .find(|r| r.antecedent == "room:alpha" || r.consequent == "room:alpha");
+        if let Some(rule) = group_a_room_rule {
+            for id in &rule.exemplar_drawer_ids {
+                assert!(
+                    group_a_ids.contains(id),
+                    "exemplar {id} for room:alpha rule must be a group-A drawer"
+                );
+            }
+        }
     }
 
     // ── AprioriRules recipe tests ─────────────────────────────────────────────

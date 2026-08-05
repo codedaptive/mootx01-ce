@@ -212,7 +212,7 @@ struct InstallDepthTests {
             ".mcp.json must be valid JSON"
         )
         let servers = mcp["mcpServers"] as? [String: Any]
-        let server = servers?["mootx01"] as? [String: Any]
+        let server = servers?[MCPClients.pluginServerName] as? [String: Any]
         #expect(server?["command"] == nil, "claude-code's plugin entry must remain HTTP-shaped")
         #expect(server?["env"] == nil,
                 "HTTP-shaped entries must never get a client-side env block — it is inert")
@@ -243,20 +243,20 @@ struct InstallDepthTests {
     @Test("injectVaultEnv still patches a command-shaped entry; skips an HTTP-shaped one")
     func injectVaultEnvShapeCheck() {
         let commandEntry = """
-        {"mcpServers":{"mootx01":{"command":"mootx01","args":["proxy"]}}}
+        {"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}
         """
         let patched = DepthInstaller.injectVaultEnv(in: commandEntry, rel: ".mcp.json")
         let patchedObj = try? JSONSerialization.jsonObject(with: Data(patched.utf8)) as? [String: Any]
-        let patchedServer = (patchedObj?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
+        let patchedServer = (patchedObj?["mcpServers"] as? [String: Any])?[MCPClients.pluginServerName] as? [String: Any]
         #expect((patchedServer?["env"] as? [String: Any])?["MOOTX01_VAULT"] as? String == "0",
                 "a command-shaped entry must still get MOOTX01_VAULT=0 injected")
 
         let httpEntry = """
-        {"mcpServers":{"mootx01":{"type":"http","url":"http://127.0.0.1:4242"}}}
+        {"mcpServers":{"memory":{"type":"http","url":"http://127.0.0.1:4242"}}}
         """
         let unchanged = DepthInstaller.injectVaultEnv(in: httpEntry, rel: ".mcp.json")
         let unchangedObj = try? JSONSerialization.jsonObject(with: Data(unchanged.utf8)) as? [String: Any]
-        let unchangedServer = (unchangedObj?["mcpServers"] as? [String: Any])?["mootx01"] as? [String: Any]
+        let unchangedServer = (unchangedObj?["mcpServers"] as? [String: Any])?[MCPClients.pluginServerName] as? [String: Any]
         #expect(unchangedServer?["env"] == nil, "an HTTP-shaped entry must never gain an env block")
     }
 
@@ -322,7 +322,7 @@ struct InstallDepthTests {
             try? JSONSerialization.jsonObject(with: mcpData) as? [String: Any]
         )
         let servers = mcp["mcpServers"] as? [String: Any]
-        let server = servers?["mootx01"] as? [String: Any]
+        let server = servers?[MCPClients.pluginServerName] as? [String: Any]
         #expect(server?["env"] == nil,
                 "vault-on must leave env absent (absent = vault-on)")
     }

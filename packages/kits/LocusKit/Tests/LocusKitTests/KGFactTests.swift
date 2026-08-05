@@ -73,6 +73,9 @@ struct KGFactTests {
             predicate: "pred",
             object: "obj",
             sourceDrawerID: "src-drawer",
+            addedBy: "mootx01",
+            foreignSourceKey: "drawer_alpha_0001",
+            foreignRecordID: "t_fleet_works_with_skippy_0001",
             adjectiveBitmap: 0x3000,
             operationalBitmap: 0x3211,
             provenanceBitmap: 0x1234,
@@ -83,6 +86,13 @@ struct KGFactTests {
         let data = try encoder.encode(original)
         let decoded = try decoder.decode(KGFact.self, from: data)
         #expect(decoded == original)
+        // The three provenance strings must survive the round-trip by name.
+        // The palace re-import dedup signature is built over foreignSourceKey,
+        // so a lossy encode would silently break import idempotence rather
+        // than fail loudly.
+        #expect(decoded.addedBy == "mootx01")
+        #expect(decoded.foreignSourceKey == "drawer_alpha_0001")
+        #expect(decoded.foreignRecordID == "t_fleet_works_with_skippy_0001")
     }
 
     // MARK: - KGExtractorClass — bits 0–3, contiguous

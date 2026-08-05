@@ -668,13 +668,12 @@ public struct ToolDispatcher: Sendable {
         source: EstateHandle, grant: Grant, drawers: [Drawer],
         estate: LocusKit.Estate
     ) async throws -> String {
-        let nodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: drawers.prefix(50).map(\.parentNodeId))
+        // Dense-row reply (PR-03): federated hits travel as dense rows like
+        // every other recall surface — subjects instead of content previews,
+        // which also tightens the cross-estate disclosure to assertions the
+        // source chose to write (plus lattice metadata).
         let header = "estate \(source.estateName) [\(source.estateUUID)] — grant \(grant.id), \(drawers.count) row(s)"
-        let lines = drawers.prefix(50).map { drawer in
-            let room = nodeNames[drawer.parentNodeId]?.room ?? ""
-            return "\(drawer.id)  [\(room)]  \(drawer.content.prefix(80))"
-        }
+        let lines = drawers.prefix(50).map { DenseRow.render($0) }
         return ([header] + lines).joined(separator: "\n")
     }
 
@@ -947,7 +946,7 @@ public struct ToolDispatcher: Sendable {
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
-                message: "Unsupported mutation kind: \(name). Accepted: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(private), correctExportability(public)"
+                message: "Unsupported mutation kind: \(name). Accepted: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(private), correctExportability(public), setSubject (with a `subject` argument)"
             )
         }
     }
@@ -980,6 +979,93 @@ public struct ToolDispatcher: Sendable {
             ]),
             "isError": .bool(true),
         ])
+    }
+
+    // MARK: - Structured recall results (MXE-SS)
+
+    /// One structured recall row — the typed twin of a rendered row, per the
+    /// recall family's `outputSchema` (`ToolProjection.recallResultsOutputSchema`).
+    /// Optional fields are OMITTED (never null) when the text analog is
+    /// absent: room/content on opaque rows, content at memory_get
+    /// depth:subject, subject at memory_get depth:full when the drawer
+    /// carries none.
+    struct StructuredRecallRow {
+        let id: String
+        var room: String? = nil
+        var content: String? = nil
+        var subject: String? = nil
+
+        var asJSONValue: JSONValue {
+            var object: [String: JSONValue] = ["id": .string(id)]
+            if let room { object["room"] = .string(room) }
+            if let content { object["content"] = .string(content) }
+            if let subject { object["subject"] = .string(subject) }
+            return .object(object)
+        }
+    }
+
+    /// MCP `tools/call` success result carrying BOTH the text block —
+    /// byte-identical to `textResult` — and its typed twin under
+    /// `structuredContent`, the MCP-sanctioned structured-result mechanism
+    /// the recall family's `outputSchema` declares. Every redaction the text
+    /// path applied must already be applied to `results` by the caller;
+    /// this helper only shapes the envelope. Wire-identical to Rust
+    /// `interface_tools::structured_text_result`.
+    static func structuredTextResult(
+        _ text: String, results: [StructuredRecallRow]
+    ) -> JSONValue {
+        .object([
+            "content": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string(text),
+                ])
+            ]),
+            "structuredContent": .object([
+                "results": .array(results.map { $0.asJSONValue })
+            ]),
+            "isError": .bool(false),
+        ])
+    }
+
+    /// Build the structured row for a drawer the text path renders as a
+    /// dense row. The subject slot mirrors `DenseRow.render`'s priority
+    /// exactly (redaction marker → stored subject → absence marker), and the
+    /// SAME provenance redaction extends to the content field: a
+    /// restricted/secret row's body never enters the structured block —
+    /// both fields carry the marker the text shows. Content values in hand
+    /// at the recipe call sites (`PreciseMatch.content`) are PRE-redaction,
+    /// so they must pass through this switch, never straight into a row.
+    static func structuredRecallRow(
+        id: String,
+        room: String?,
+        content: String?,
+        drawer: Drawer
+    ) -> StructuredRecallRow {
+        switch drawer.sensitivity {
+        case .restricted:
+            return StructuredRecallRow(
+                id: id, room: room,
+                content: content == nil ? nil : DenseRow.restrictedMarker,
+                subject: DenseRow.restrictedMarker)
+        case .secret:
+            return StructuredRecallRow(
+                id: id, room: room,
+                content: content == nil ? nil : DenseRow.secretMarker,
+                subject: DenseRow.secretMarker)
+        case .normal, .elevated:
+            return StructuredRecallRow(
+                id: id, room: room, content: content,
+                subject: drawer.subject ?? DenseRow.noSubjectMarker)
+        }
+    }
+
+    /// The structured twin of `DenseRow.renderUnhydrated` — id plus the
+    /// absence marker only. Room and content stay absent even when values
+    /// are in hand at the call site: an id the text renders opaquely (gated
+    /// or unhydrated) must be exactly as opaque in the structured block.
+    static func opaqueStructuredRow(id: String) -> StructuredRecallRow {
+        StructuredRecallRow(id: id, subject: DenseRow.noSubjectMarker)
     }
 
     private func describe(_ error: VerbError) -> String {
@@ -1255,6 +1341,30 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let content = try requireString(args, "content")
         let location = try requireString(args, "location")
+        // Subject is REQUIRED at this boundary (PR-02): the calling AI is the
+        // only party that knows what the content asserts, and a subject
+        // written at capture is the cheapest one the estate will ever get.
+        // The error is instructive rather than the generic missing-argument
+        // text because the fix is a register, not just a field.
+        guard let subject = args["subject"]?.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Missing required argument: subject. Provide one sentence "
+                    + "(≤\(DrawerStore.subjectLengthContract) chars) stating what this memory "
+                    + "asserts, written for the NEXT AI that will scan it — telegraphic, "
+                    + "entities and claims front-loaded, no narrative framing. "
+                    + "Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""
+            )
+        }
+        let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSubject.isEmpty, trimmedSubject.count <= DrawerStore.subjectLengthContract else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                    + "(got \(trimmedSubject.count)). One telegraphic sentence in the AI-facing "
+                    + "register — compress, don't truncate."
+            )
+        }
         let sensitivity = try decodeSensitivity(args["sensitivity"])
         let exportability = try decodeExportability(args["exportability"])
         let kind = try decodeContentKind(args["kind"])
@@ -1304,7 +1414,8 @@ extension ToolDispatcher {
             sourceType: .imported,
             eventTime: eventTime,
             exportability: exportability,
-            wing: wing
+            wing: wing,
+            subject: trimmedSubject
         )
         // Mode-aware capture: regular enqueues the encode job (background
         // semantic indexing); impatient encodes inline before returning.
@@ -1336,7 +1447,70 @@ extension ToolDispatcher {
     /// needed for the content preview; `.structured` would strip them).
     func runMemorySearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let query = try requireString(args, "query")
+        // Anchor pivot (PR-03): `near:<uuid>` is accepted as an ALTERNATIVE
+        // to `query:` — "find memories similar to this one". Exactly one of
+        // the two must be present. The anchor's verbatim content becomes the
+        // query text through the SAME scored pipeline (full fusion stack),
+        // so the fan-out inherits every shape/filter/limit unchanged; the
+        // anchor row itself is excluded from the reply.
+        let queryArg = try optionalString(args["query"], argument: "query")
+        let nearArg = try optionalString(args["near"], argument: "near")
+        let query: String
+        var anchorID: String? = nil
+        switch (queryArg, nearArg) {
+        case (nil, nil):
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Provide either query (text search) or near (UUID of an anchor "
+                    + "memory — returns the memories most similar to it)."
+            )
+        case (.some, .some):
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "query and near are mutually exclusive — pass exactly one."
+            )
+        case (.some(let q), nil):
+            query = q
+        case (nil, .some(let anchor)):
+            // Anchor fetch under the DEFAULT containment gate (no grant
+            // lift, deliberately) AND an explicit provenance check: the
+            // RecallFrame gate covers adjective sensitivity (bits 6-11)
+            // only, while `Drawer.sensitivity` decodes provenance
+            // sensitivity (bits 30-35). Both are needed — a
+            // provenance-Secret row with the default adjective-Normal
+            // passes the frame. Pivoting through a restricted/secret
+            // anchor's content would leak content-derived neighbors past
+            // the redaction boundary, so a gated anchor reads as
+            // not-found — the same oracle-free shape memory_get uses.
+            let estate = try await kit.estate(for: handle)
+            let fetched = try await estate.getDrawers(
+                ids: [anchor],
+                matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full),
+                hydrationLevel: .full)
+            // The provenance reject is evaluated BEFORE the empty-content
+            // check, so a gated row and an empty row collapse into the one
+            // not-found shape below, byte-identical to the message an absent
+            // id produces. Ordering discipline and defence in depth: this
+            // fetch requests a single id, so `admissible` holds at most one
+            // drawer and either order yields the same error today. Should
+            // this ever resolve a set, provenance-first is the order that
+            // cannot leak.
+            let admissibleAnchor = fetched.admissible.first { d in
+                switch d.sensitivity {
+                case .restricted, .secret: return false
+                case .normal, .elevated: return true
+                }
+            }
+            guard let anchorDrawer = admissibleAnchor,
+                  !anchorDrawer.content.isEmpty else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "near: anchor memory not found: \(anchor)"
+                )
+            }
+            query = anchorDrawer.content
+            anchorID = anchor
+        }
         // Clamp to [1, 500]: reject negative/zero limits (crash downstream range ops)
         // and cap absurdly-large values (DoS via unbounded substrate recall scan).
         // Parity: Rust run_memory_search uses clamp_limit with the same ceiling.
@@ -1437,11 +1611,15 @@ extension ToolDispatcher {
             origin: .external  // B-10a: ARIA boundary is external origin
         )
         let result = try await kit.recall(handle, request)
+        // Anchor exclusion (PR-03): a near: pivot must not hand the anchor
+        // back as its own top neighbor. Every consumer below (ledger,
+        // discrimination scores, rendering, count) works from this list.
+        let hits = anchorID.map { a in result.hits.filter { $0.id != a } } ?? result.hits
         // Record surfaced drawer ids in the session ledger so dereference verbs
         // can trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12
         // § session-ledger). Reuses the `now` hoisted at the top of this
         // function (one request, one wall-clock instant).
-        let surfacedIDs = result.hits.compactMap { $0.drawer?.id }
+        let surfacedIDs = hits.compactMap { $0.drawer?.id }
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
         }
@@ -1456,7 +1634,7 @@ extension ToolDispatcher {
         // emits (in that case no restricted/secret row could have been
         // admitted in the first place — the default ceiling excludes them).
         if sensitivityCeilingLifted {
-            for hit in result.hits {
+            for hit in hits {
                 guard let drawer = hit.drawer else { continue }
                 switch drawer.adjectiveSensitivity {
                 case .restricted, .secret:
@@ -1469,7 +1647,7 @@ extension ToolDispatcher {
         }
         // Compute discrimination before building the result lines so the signal
         // reflects the full ordered hit list, not just the displayed prefix.
-        let hitScores = result.hits.map { Double($0.score.final) }
+        let hitScores = hits.map { Double($0.score.final) }
         let discriminationLevel = RecallDiscrimination.classify(hitScores)
         // Dense-lane dark flag: true when the vector lane (Lane D) did not
         // contribute to this ranking. Used to cap the discrimination signal so
@@ -1477,107 +1655,84 @@ extension ToolDispatcher {
         // (which would violate the signal's trustworthiness contract).
         let denseLaneDark = result.denseLaneStatus != nil
 
-        // Drawer no longer carries stored wing/room. Resolve
-        // parentNodeIds to display names via the node tree for result formatting.
-        let estate = try await kit.estate(for: handle)
-        let hitNodeIds = result.hits.compactMap { $0.drawer?.parentNodeId }
-        let hitNodeNames = try await estate.resolveNodeNames(parentNodeIds: hitNodeIds)
-        var lines: [String] = ["found \(result.hits.count) memory(s)"]
-        for hit in result.hits.prefix(50) {
-            let room = hit.drawer.flatMap { hitNodeNames[$0.parentNodeId]?.room } ?? "?"
-            // Sensitivity-aware content preview (search-redaction parity fix,
-            // Wave 6): LocusKit stores provenance sensitivity in bits 30-35
-            // (Drawer.sensitivity, separate from the adjective-axis
-            // sensitivity moot_memory_get's containment gate checks). This
-            // was previously a Rust-only preview redaction (Rust
-            // run_memory_search) — Swift always showed the raw 120-char
-            // preview regardless of provenance sensitivity, a pre-existing
-            // port divergence. moot_memory_search can surface a Restricted/
-            // Secret row for relevance ranking without exposing its body; a
-            // raw content preview at the ARIA boundary would leak text the
-            // sensitivity designation marks as access-controlled.
-            //
-            // Normal and Elevated: the bulk-export tiers, safe to preview —
-            // proceed to the existing distilled-header / 120-char-preview
-            // formatting below, unchanged.
-            // Restricted and Secret: replace with a redacted placeholder,
-            // even for a `_distilled` row — the security control applies
-            // regardless of formatting path.
-            let preview: String
-            switch hit.drawer?.sensitivity {
-            case .restricted:
-                preview = "[sensitivity: restricted — content redacted]"
-            case .secret:
-                preview = "[sensitivity: secret — content access requires explicit grant]"
-            case .normal, .elevated, .none:
-                // Plain 120-char content preview. (The `_distilled`-room
-                // factoid formatting retired with the factoid tier —
-                // SPEC_DISTILLATION_STORAGE §11.3; distilled payloads are
-                // served by moot_recall_distilled, not by search previews.)
-                preview = hit.drawer.map { String($0.content.prefix(120)) } ?? "(not hydrated)"
+        // Dense-row reply (PR-03): UUID · subject · fdc · qid · event_time
+        // per hit — the address plus the assertion, no content hauling.
+        // Redaction (provenance sensitivity restricted/secret) replaces the
+        // subject field inside DenseRow.render — the body's access control
+        // must not be bypassable through its content-derived summary. The
+        // full text is one hop away via moot_memory_get depth:full.
+        var lines: [String] = ["found \(hits.count) memory(s)"]
+        // Structured twin (MXE-SS): room is resolved in ONE batched node-name
+        // read over the shown rows (the same resolution `fullRecordLines`
+        // uses per drawer) — disclosed in the BRR §Part 0 (2). Rows are built
+        // in the SAME loop as the text lines so the two blocks can never
+        // cover different sets.
+        let shownHits = Array(hits.prefix(50))
+        let searchEstate = try await kit.estate(for: handle)
+        let searchNodeNames = try await searchEstate.resolveNodeNames(
+            parentNodeIds: shownHits.compactMap { $0.drawer?.parentNodeId })
+        var results: [StructuredRecallRow] = []
+        for hit in shownHits {
+            if let drawer = hit.drawer {
+                lines.append(DenseRow.render(drawer))
+                results.append(Self.structuredRecallRow(
+                    id: drawer.id,
+                    room: searchNodeNames[drawer.parentNodeId]?.room,
+                    content: drawer.content,
+                    drawer: drawer))
+            } else {
+                lines.append(DenseRow.renderUnhydrated(id: hit.id))
+                results.append(Self.opaqueStructuredRow(id: hit.id))
             }
-            lines.append("\(hit.id)  [\(room)]  \(preview)")
             if explain {
                 for line in hit.explanation { lines.append("  \(line)") }
             }
         }
-        lines.append(RecallDiscrimination.resultLine(for: discriminationLevel, denseLaneDark: denseLaneDark))
-        // Recall provenance: surface the dense-lane status and any degraded stages
-        // so callers can distinguish retrieval quality.
-        //
-        // denseLaneStatus non-nil means the dense float vector lane (Lane D) did not
-        // contribute hits. Lane D uses the deterministic embedding provider (FNV-1a
-        // tokenization + FloatSimHash projection — permanent federation-grade vector,
-        // reproducible and model-free). Callers use this to detect when ranking came
-        // from structural/BM25 lanes only rather than the vector lane.
-        //
-        // The learned semantic vector (MiniLM/MPNet/Gemma) is an ADDITIVE v1.1
-        // on-device lane — it does not replace the deterministic lane; both coexist.
-        //
-        // degradedStages lists every pipeline stage that was skipped due to a recoverable
-        // error. An empty array means every attempted stage succeeded (happy path).
-        //
-        // Format: a single "recall_provenance:" status line, always present, never blank.
-        // This lets the LLM caller distinguish:
-        //   - vector+structural: denseLaneStatus nil, degradedStages empty
-        //     (deterministic Lane D + BM25/structural; capture surface, not learned meaning)
-        //   - structural-only or BM25-only fallback: denseLaneStatus set (Lane D dark)
-        //   - degraded: degradedStages non-empty
-        //   - unavailable: denseLaneStatus "dark:…" and degradedStages may overlap
-        let provenanceParts: [String]
-        if let darkReason = result.denseLaneStatus {
-            // Dense vector lane (Lane D) was dark — ranking came from structural/BM25
-            // lanes only. Surface the reason so the caller knows vector scoring did not
-            // contribute. The response must label embedding provenance honestly.
-            provenanceParts = ["dense_lane:\(darkReason)"]
-        } else {
-            // Lane D active: deterministic vector (FNV-1a + FloatSimHash) + structural/BM25 ranking.
-            provenanceParts = ["dense_lane:active"]
+        // Deviation-only narration (PR-03): the discrimination line appears
+        // ONLY when the EFFECTIVE signal is low or medium. A clear top
+        // result needs no commentary, and the single/zero "n/a" line is
+        // noise — the advisory paragraph lives in the tool description now.
+        // The dense-lane-dark cap is applied BEFORE the deviation check so a
+        // dark-capped high (→ medium + caveat) still surfaces.
+        let effectiveDiscrimination: DiscriminationLevel =
+            (denseLaneDark && discriminationLevel == .high) ? .medium : discriminationLevel
+        if effectiveDiscrimination == .low || effectiveDiscrimination == .medium {
+            lines.append(RecallDiscrimination.resultLine(for: discriminationLevel, denseLaneDark: denseLaneDark))
         }
-        let degradedPart: String
-        if result.degradedStages.isEmpty {
-            degradedPart = "degraded_stages:none"
-        } else {
-            degradedPart = "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
+        // Recall provenance — DEVIATION-ONLY (PR-03): the line appears only
+        // when something is off-nominal (dense lane dark, or degraded
+        // stages). The happy path ("dense_lane:active degraded_stages:none")
+        // is the norm and stating it every reply was pure noise; its absence
+        // now MEANS nominal. denseLaneStatus non-nil = the deterministic
+        // vector lane (Lane D, FNV-1a + FloatSimHash) did not contribute —
+        // ranking was structural/BM25 only. degradedStages lists pipeline
+        // stages skipped on recoverable errors. The response labels
+        // embedding provenance accurately whenever it deviates.
+        if result.denseLaneStatus != nil || !result.degradedStages.isEmpty {
+            let densePart = result.denseLaneStatus.map { "dense_lane:\($0)" } ?? "dense_lane:active"
+            let degradedPart = result.degradedStages.isEmpty
+                ? "degraded_stages:none"
+                : "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
+            lines.append("recall_provenance: \(densePart) \(degradedPart)")
         }
-        lines.append("recall_provenance: \((provenanceParts + [degradedPart]).joined(separator: " "))")
-        // redaction advisory stat.
-        // When no grant is active, check cheaply whether the estate holds any
-        // restricted or secret rows. If so, append an advisory so the AI client
-        // knows results may be incomplete and how to request access.
-        // Gated on `!sensitivityCeilingLifted` — when a grant IS live, the rows
-        // are already included and no advisory is appropriate.
-        // The stat uses a private `.internal` limit-1 scan (no trace rows, no
-        // BM25/vector cost) — a pure bitmap filter probe. See
-        // `estateHasSensitiveRows(handle:)`.
-        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
+        // Sensitivity-gate advisory — conditioned on GRANT STATE ALONE.
+        // When no grant is live the gate is in effect, so the client is told
+        // the gate exists and which commands lift it. The message asserts
+        // NOTHING about what this estate holds: any condition that consulted
+        // estate contents would make advisory presence a disclosure channel
+        // for exactly the restricted/secret rows the gate protects, to a
+        // caller with no grant. Emitting on grant state alone discloses
+        // nothing — the caller is the party that did not unlock, so they
+        // already know it. Gated on `!sensitivityCeilingLifted`: under a live
+        // grant those rows are already included and no advisory applies.
+        if !sensitivityCeilingLifted {
             lines.append(
-                "sensitivity_advisory: results may be hidden by sensitivity tier — " +
+                "sensitivity_advisory: a sensitivity tier gate is in effect — " +
                 "run `mootx01 unlock private` to include restricted memories, " +
                 "`mootx01 unlock secret` for secret memories."
             )
         }
-        return Self.textResult(lines.joined(separator: "\n"))
+        return Self.structuredTextResult(lines.joined(separator: "\n"), results: results)
     }
 
     /// `moot_memory_get` — fetch one memory drawer by id, in full.
@@ -1634,7 +1789,48 @@ extension ToolDispatcher {
     /// together or the conformance parity breaks.
     func runMemoryGet(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let rowID = try requireString(args, "id")
+        // Hydration depth (PR-03): one verb, three tiers.
+        //   subject   — dense row only (travel tier)
+        //   distilled — dense row + distilled rendering (confirm tier;
+        //               falls back to verbatim content with an explicit
+        //               "source: content (not yet distilled)" marker)
+        //   full      — the complete record incl. verbatim content
+        //               (terminal tier; the DEFAULT, preserving the
+        //               pre-PR-03 single-id reply byte-for-byte-ish shape)
+        // Batch `ids:[...]` makes the Case-2 winnow one call: pinpoint a
+        // shortlist at depth:subject/distilled without hauling full text.
+        let depthName = try optionalString(args["depth"], argument: "depth") ?? "full"
+        guard ["subject", "distilled", "full"].contains(depthName) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown depth: \(depthName). Valid: subject, distilled, full"
+            )
+        }
+        // `id` (single, the original arg) or `ids` (batch) — at least one.
+        // A single `id` is sugar for ids:[id]; the single-id + depth:full
+        // path renders the original full record and keeps the original
+        // thrown not-found, so existing callers observe no change.
+        var rowIDs: [String] = []
+        if let single = try optionalString(args["id"], argument: "id") {
+            rowIDs.append(single)
+        }
+        if case let .array(rawIDs)? = args["ids"] {
+            for raw in rawIDs {
+                guard let s = raw.stringValue else {
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "ids must be an array of memory UUID strings")
+                }
+                rowIDs.append(s)
+            }
+        }
+        guard !rowIDs.isEmpty else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Provide id (single memory UUID) or ids (array of UUIDs).")
+        }
+        let singleIDMode = rowIDs.count == 1
+        let rowID = rowIDs[0]
         let estate = try await kit.estate(for: handle)
 
         // sensitivity unlock: same grant-ceiling injection as
@@ -1653,36 +1849,103 @@ extension ToolDispatcher {
         }
         let frame = RecallFrame(filterChain: filterChain, hydrationLevel: .full)
         let filtered = try await estate.getDrawers(
-            ids: [rowID], matchingFrame: frame, hydrationLevel: .full)
-        guard let drawer = filtered.admissible.first else {
-            // Same message and error code whether the id is genuinely absent,
-            // tombstoned, or exists but failed the gate — see the containment
-            // note above. Mirrors moot_link_memories' "Memory not found" shape.
+            ids: rowIDs, matchingFrame: frame, hydrationLevel: .full)
+        // Provenance-sensitivity redaction boundary for by-id reads: the
+        // RecallFrame gate above checks adjective sensitivity (bits 6-11);
+        // Drawer.sensitivity decodes provenance sensitivity (bits 30-35),
+        // where Restricted/Secret content is access-controlled and must not
+        // be returned verbatim. Unconditional — the grant ledger lifts the
+        // adjective ceiling only. Gated rows use the standard not-found
+        // shape so by-id lookup is not an oracle for hidden rows.
+        // Mirrors Rust `run_memory_get` (conformance parity).
+        let admissibleByID = Dictionary(uniqueKeysWithValues: filtered.admissible.compactMap {
+            d -> (String, Drawer)? in
+            switch d.sensitivity {
+            case .restricted, .secret: return nil
+            case .normal, .elevated: return (d.id, d)
+            }
+        })
+        // Single-id compat: the original thrown not-found stays. In batch
+        // mode gate failures become per-row "not found:" lines instead —
+        // fail-loud without sinking the whole winnow call.
+        if singleIDMode, admissibleByID[rowID] == nil {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Memory not found: \(rowID)"
             )
         }
 
-        // Preserve moot_memory_search's provenance-sensitivity redaction
-        // boundary for the full-content by-id path. The default RecallFrame
-        // gate above only checks adjective sensitivity (bits 6-11);
-        // Drawer.sensitivity decodes provenance sensitivity (bits 30-35),
-        // where Restricted/Secret content is access-controlled and must not be
-        // returned verbatim. Unconditional — the grant ledger lifts the
-        // adjective ceiling only, exactly as runMemorySearch's redaction is
-        // unconditional. Use the standard not-found shape so by-id lookup does
-        // not become an oracle for rows hidden by this MCP disclosure gate.
-        // Mirrors Rust `run_memory_get` (conformance parity).
-        switch drawer.sensitivity {
-        case .restricted, .secret:
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "Memory not found: \(rowID)"
-            )
-        case .normal, .elevated:
-            break
+        // Batch / shallow-depth rendering (PR-03). depth:full + single id
+        // falls through to the original full record below.
+        if !singleIDMode || depthName != "full" {
+            var lines: [String] = []
+            // Structured twin (MXE-SS): one batched node-name read for room
+            // over the admissible rows. Not-found ids are omitted from the
+            // structured block — the text's "not found:" line is the signal,
+            // and the row has no drawer fields to carry.
+            let getNodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: rowIDs.compactMap { admissibleByID[$0]?.parentNodeId })
+            var results: [StructuredRecallRow] = []
+            for id in rowIDs {
+                guard let d = admissibleByID[id] else {
+                    lines.append("not found: \(id)")
+                    continue
+                }
+                if sensitivityCeilingLifted {
+                    switch d.adjectiveSensitivity {
+                    case .restricted, .secret:
+                        try? await kit.recordSensitivityReadUnderGrant(
+                            handle, tier: d.adjectiveSensitivity, drawerID: d.id, now: now)
+                    case .normal, .elevated:
+                        break
+                    }
+                }
+                let room = getNodeNames[d.parentNodeId]?.room
+                switch depthName {
+                case "subject":
+                    lines.append(DenseRow.render(d))
+                    // Content stays ABSENT at the travel tier — the text
+                    // carries no body here, and the structured block must
+                    // not defeat the depth knob's token economy.
+                    results.append(Self.structuredRecallRow(
+                        id: d.id, room: room, content: nil, drawer: d))
+                case "distilled":
+                    lines.append(DenseRow.render(d))
+                    if let distilled = d.distilled, !distilled.isEmpty {
+                        lines.append(distilled)
+                        results.append(Self.structuredRecallRow(
+                            id: d.id, room: room, content: distilled, drawer: d))
+                    } else {
+                        // Fallback marker on fallback hits ONLY (PR-03
+                        // deviation-only contract): its presence tells the
+                        // AI this row still owes a distillate and the text
+                        // below is verbatim content.
+                        lines.append("source: content (not yet distilled)")
+                        lines.append(d.content)
+                        results.append(Self.structuredRecallRow(
+                            id: d.id, room: room, content: d.content, drawer: d))
+                    }
+                default: // "full" in batch mode: repeat the full record shape
+                    lines.append(contentsOf: try await fullRecordLines(
+                        for: d, estate: estate))
+                    // Full-record tier: subject mirrors the text's deviation
+                    // tolerance — the record omits the subject line when the
+                    // drawer has none, so the field is omitted too (no
+                    // absence marker at this tier). Provenance-gated rows
+                    // cannot reach here (admissibleByID excludes them), so
+                    // the row is built directly, not via the marker switch.
+                    results.append(StructuredRecallRow(
+                        id: d.id, room: room, content: d.content,
+                        subject: d.subject))
+                }
+                lines.append("")
+            }
+            if lines.last == "" { lines.removeLast() }
+            return Self.structuredTextResult(
+                lines.joined(separator: "\n"), results: results)
         }
+
+        let drawer = admissibleByID[rowID]!
 
         // same read-under-grant audit recording as
         // runMemorySearch — see that function's comment for why this is
@@ -1698,6 +1961,43 @@ extension ToolDispatcher {
             }
         }
 
+        var lines = try await fullRecordLines(for: drawer, estate: estate)
+        // Sensitivity-gate advisory — same rule as runMemorySearch: grant
+        // state alone, never estate contents. It matters more here than in
+        // search, because this reply follows a SUCCESSFUL fetch of a visible
+        // row; a contents-dependent advisory would attach an estate-wide
+        // existence signal to that reply, which is precisely what this
+        // function's containment contract (see its doc comment: gated rows
+        // must be indistinguishable from absent ones) forbids.
+        if !sensitivityCeilingLifted {
+            lines.append(
+                "sensitivity_advisory: a sensitivity tier gate is in effect on this estate — " +
+                "run `mootx01 unlock private` to include restricted memories, " +
+                "`mootx01 unlock secret` for secret memories."
+            )
+        }
+        // Structured twin (MXE-SS) of the single-id full record. The node
+        // tree is consulted a second time here (fullRecordLines resolves
+        // internally but returns rendered lines); one extra by-id lookup on
+        // the in-memory node tree is preferred over widening
+        // fullRecordLines' signature. Subject is omitted when the drawer has
+        // none, mirroring the record's omitted subject line; provenance-
+        // gated rows cannot reach here (admissibleByID excludes them).
+        let getNodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: [drawer.parentNodeId])
+        let row = StructuredRecallRow(
+            id: drawer.id,
+            room: getNodeNames[drawer.parentNodeId]?.room,
+            content: drawer.content,
+            subject: drawer.subject)
+        return Self.structuredTextResult(
+            lines.joined(separator: "\n"), results: [row])
+    }
+
+    /// The full-record block for one drawer — the depth:full tier and the
+    /// original single-id moot_memory_get reply shape. Shared by the
+    /// single-id path and the batch depth:full path.
+    private func fullRecordLines(for drawer: Drawer, estate: Estate) async throws -> [String] {
         // Drawer no longer carries stored wing/room; resolve via
         // the node tree, same pattern as every other read tool in this file.
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
@@ -1711,7 +2011,8 @@ extension ToolDispatcher {
         // enforce.
         let allTunnels = try await estate.allTunnels()
         let linked = allTunnels.filter {
-            ($0.sourceDrawerId == rowID || $0.targetDrawerId == rowID) && $0.tombstonedAt == nil
+            ($0.sourceDrawerId == drawer.id || $0.targetDrawerId == drawer.id)
+                && $0.tombstonedAt == nil
                 && $0.lifecycle == .active
         }
 
@@ -1719,6 +2020,14 @@ extension ToolDispatcher {
         var lines: [String] = [
             "memory \(drawer.id)",
             "room: \(names.room)  wing: \(names.wing)",
+            // Subject line (PR-03): present only when the drawer carries
+            // one — the full record is deviation-tolerant, absence simply
+            // omits the line (the dense tiers show the absence marker).
+        ]
+        if let subject = drawer.subject {
+            lines.append("subject: \(subject)")
+        }
+        lines.append(contentsOf: [
             "filed_at: \(iso.string(from: drawer.filedAt))",
             "event_time: \(iso.string(from: drawer.eventTime))",
             "state: \(String(describing: drawer.state))",
@@ -1728,9 +2037,9 @@ extension ToolDispatcher {
             "confirmation: \(String(describing: drawer.confirmation))",
             "lineage: \(drawer.lineageID.uuidString)",
             "tunnels: \(linked.count)",
-        ]
+        ])
         for tunnel in linked.prefix(50) {
-            let outgoing = tunnel.sourceDrawerId == rowID
+            let outgoing = tunnel.sourceDrawerId == drawer.id
             let other = outgoing
                 ? (tunnel.targetDrawerId ?? "\(tunnel.targetWing)/\(tunnel.targetRoom)")
                 : (tunnel.sourceDrawerId ?? "\(tunnel.sourceWing)/\(tunnel.sourceRoom)")
@@ -1741,61 +2050,7 @@ extension ToolDispatcher {
         // tool exists to return.
         lines.append("content:")
         lines.append(drawer.content)
-        // redaction advisory stat  — same logic as
-        // runMemorySearch. When no grant is active, surface an advisory if the
-        // estate contains any restricted/secret rows not visible through the
-        // default gate. Consistent with search so the AI client receives the
-        // same hint from both tools.
-        if !sensitivityCeilingLifted, await estateHasSensitiveRows(handle: handle) {
-            lines.append(
-                "sensitivity_advisory: some memories may be hidden by sensitivity tier — " +
-                "run `mootx01 unlock private` to include restricted memories, " +
-                "`mootx01 unlock secret` for secret memories."
-            )
-        }
-        return Self.textResult(lines.joined(separator: "\n"))
-    }
-
-    /// Returns `true` if the estate has at least one row tagged restricted or secret.
-    ///
-    /// Used by `runMemorySearch` and `runMemoryGet` to decide whether to append a
-    /// sensitivity advisory. The advisory tells the AI client that results may be
-    /// incomplete and how to unlock the hidden tier.
-    ///
-    /// Implementation: two limit-1 `GLKRecallRequest` scans with explicit
-    /// `Filter.sensitivity(tier)` — these filters suppress the default
-    /// `sensitivityAtMost(.elevated)` gate (see `BitmapEvaluator.insertDefaults`),
-    /// so restricted/secret rows become visible for counting. Mode `.locusOnly` +
-    /// scoring `.raw` skips the BM25/vector pipeline; the scan is a pure bitmap
-    /// filter probe — cheap even for large estates.
-    ///
-    /// `origin: .internal` — must NOT write recall-trace rows (B-10a: only the
-    /// ARIA_MCP boundary sets `.external`). This is an internal diagnostic query.
-    private func estateHasSensitiveRows(handle: EstateHandle) async -> Bool {
-        for tier: AdjectiveSensitivity in [.restricted, .secret] {
-            // Limit 1: stop at first match — no need to count.
-            let frame = RecallFrame(
-                filterChain: [.sensitivity(tier)],
-                hydrationLevel: .structured, // No content body needed — existence check only.
-                limit: 1,
-                ordering: .byCaptureTimeDesc
-            )
-            let request = GLKRecallRequest(
-                frame: frame,
-                mode: .locusOnly,     // Skip BM25/vector — pure bitmap probe.
-                scoring: .raw,        // No matrix scoring needed.
-                limit: 1,
-                fallback: .allowDegraded,
-                queryText: nil,       // No text query — filter only.
-                origin: .internal     // Internal diagnostic — must not write trace rows (B-10a).
-            )
-            // A nil result (thrown error) is treated as no sensitive rows — fail-safe:
-            // don't surface the advisory when we can't confirm sensitive rows exist.
-            if let result = try? await kit.recall(handle, request), !result.hits.isEmpty {
-                return true
-            }
-        }
-        return false
+        return lines
     }
 
     /// Note that a drawer id was "used" (acted upon) by a dereference verb.
@@ -1829,7 +2084,32 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
         let mutationName = try requireString(args, "mutation")
-        let kind = try decodeMutationKind(mutationName)
+        let kind: MutationKind
+        if mutationName == "setSubject" {
+            // setSubject carries its payload in a dedicated `subject` arg
+            // (the `note` arg stays an audit annotation, as for every other
+            // mutation). Boundary-validated here so the caller gets the
+            // register guidance, not the bare store error.
+            guard let subject = args["subject"]?.stringValue else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "mutation=setSubject requires a `subject` argument: one sentence "
+                        + "(≤\(DrawerStore.subjectLengthContract) chars) in the AI-facing register — "
+                        + "telegraphic, entities and claims front-loaded."
+                )
+            }
+            let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.count <= DrawerStore.subjectLengthContract else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                        + "(got \(trimmed.count)). Compress, don't truncate."
+                )
+            }
+            kind = .setSubject(trimmed)
+        } else {
+            kind = try decodeMutationKind(mutationName)
+        }
         let payload = try optionalString(args["note"], argument: "note")
         // Note usage before the primary verb so reward marking is attempted even
         // if the primary verb fails (surfaced id was found, user tried to act on it).
@@ -1868,7 +2148,21 @@ extension ToolDispatcher {
                 "Set confirmed=true only after the owner has explicitly reviewed and approved the deletion."
             )
         }
-        try await kit.expunge(handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
+        let outcome = try await kit.expunge(
+            handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
+        // Honest reporting (SPEC B-8b, MXE-FA): a caller acting on this
+        // sentence is making a privacy decision on it. When the audit gate
+        // refused accepted lineage siblings, the expunge was partial — say
+        // so, name the count, and name the surviving ids. The full-success
+        // shape stays byte-identical to the historical response.
+        guard outcome.refusedSiblingIDs.isEmpty else {
+            let refused = outcome.refusedSiblingIDs
+            return Self.textResult(
+                "partially erased memory \(rowID): \(refused.count) accepted lineage "
+                + "sibling(s) refused erasure and remain readable: "
+                + refused.joined(separator: ", ")
+            )
+        }
         return Self.textResult("erased memory \(rowID)")
     }
 
@@ -2098,8 +2392,15 @@ extension ToolDispatcher {
                 && $0.lifecycle == .active
                 && $0.adjectiveSensitivity.isBulkExportable
         }
+        // Dense-row citations (PR-03): each drawer endpoint is cited as a
+        // dense row so the AI can judge the neighbor without another call.
+        // Room-level endpoints (no drawer id) keep the wing/room text.
+        let endpointIDs = outgoing.prefix(50).compactMap { $0.targetDrawerId }
+        let dense = try await RecipeTools.denseRowsByID(ids: endpointIDs, estate: estate)
         let lines = outgoing.prefix(50).map { t -> String in
-            "\(t.id)  → \(t.targetDrawerId ?? "\(t.targetWing)/\(t.targetRoom)")  [\(t.label)]"
+            let cite = t.targetDrawerId.map { dense[$0] ?? DenseRow.renderUnhydrated(id: $0) }
+                ?? "\(t.targetWing)/\(t.targetRoom)"
+            return "\(t.id)  [\(t.label)]  → \(cite)"
         }
         let header = "connections from \(fromID): \(outgoing.count)"
         return Self.textResult(([header] + lines).joined(separator: "\n"))
@@ -2122,8 +2423,13 @@ extension ToolDispatcher {
                 && $0.lifecycle == .active
                 && $0.adjectiveSensitivity.isBulkExportable
         }
+        // Dense-row citations (PR-03) — mirror of connection_search.
+        let endpointIDs = incoming.prefix(50).compactMap { $0.sourceDrawerId }
+        let dense = try await RecipeTools.denseRowsByID(ids: endpointIDs, estate: estate)
         let lines = incoming.prefix(50).map { t -> String in
-            "\(t.id)  \(t.sourceDrawerId ?? "\(t.sourceWing)/\(t.sourceRoom)") →  [\(t.label)]"
+            let cite = t.sourceDrawerId.map { dense[$0] ?? DenseRow.renderUnhydrated(id: $0) }
+                ?? "\(t.sourceWing)/\(t.sourceRoom)"
+            return "\(t.id)  [\(t.label)]  ← \(cite)"
         }
         let header = "connections to \(toID): \(incoming.count)"
         return Self.textResult(([header] + lines).joined(separator: "\n"))
@@ -2143,17 +2449,19 @@ extension ToolDispatcher {
         let subject = try requireString(args, "subject")
         let predicate = try requireString(args, "predicate")
         let object = try requireString(args, "object")
-        // source_id grounds the fact (provenance — KGFact: every fact traces back to
-        // a source). When the caller omits it, infer the source as the ingest
-        // channel that asserted it, so a fact is never stored unanchored.
+        // source_id anchors the fact to a drawer in this estate. It is a local
+        // drawer id or nothing — when the caller omits it the fact is filed
+        // sourceless, and a value naming no drawer fails the write. The filing
+        // binary's identity is provenance about the writer, not about the
+        // source, so it is stamped into `addedBy` rather than substituted here.
         let providedSource = try optionalString(args["source_id"], argument: "source_id") ?? ""
-        let sourceDrawerID = providedSource.isEmpty ? serverIdentity : providedSource
         let fact = try await kit.captureKGFact(
             handle,
             subject: subject,
             predicate: predicate,
             object: object,
-            sourceDrawerID: sourceDrawerID,
+            sourceDrawerID: providedSource,
+            addedBy: serverIdentity,
             now: now
         )
         return Self.textResult("filed fact \(fact.id): [\(subject)] \(predicate) [\(object)]")
@@ -2208,8 +2516,8 @@ extension ToolDispatcher {
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit, check whether it references an actual drawer row in the estate.
         // If it does AND is Restricted/Secret (outside the default sensitivity ceiling),
-        // hide the ID at the MCP boundary. Non-drawer provenance strings (server identity
-        // tags like "mootx01") are not found in the estate and pass through unchanged.
+        // hide the ID at the MCP boundary. sourceDrawerID holds a local drawer id or "",
+        // so the only non-matching value is the empty one, which names no drawer.
         // We use getDrawers(ids:matchingFrame:hydrationLevel:) which returns both the
         // admissible set and the full loadedIDs set — the difference is the blocked set.
         // Parity with Rust run_fact_search.
@@ -2236,11 +2544,15 @@ extension ToolDispatcher {
         let lines = emittedFacts.map { f -> String in
             let filed = formatter.string(from: f.filedAt)
             // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. Non-drawer provenance strings pass through.
+            // exists AND is Restricted/Secret. sourceDrawerID holds a local drawer
+            // id or "", so a sourceless fact renders an empty source=.
             let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
                 ? "source=<hidden>"
                 : "source=\(f.sourceDrawerID)"
-            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  \(sourceField)"
+            // addedBy names the binary that filed the row — provenance about the
+            // writer, distinct from which drawer the fact was drawn from. Never
+            // gated: it is not a drawer id and carries no drawer's sensitivity.
+            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  \(sourceField)  addedBy=\(f.addedBy)"
         }
         let header = query != nil
             ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
@@ -2366,9 +2678,9 @@ extension ToolDispatcher {
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit (capped at 200), check whether it references an actual drawer in
         // the estate. If it does AND is Restricted/Secret, hide the ID at the MCP boundary.
-        // Non-drawer provenance strings (server identity tags) are not in the estate and
-        // pass through unchanged. loadedIDs − admissible = the blocked (restricted/secret)
-        // drawer-reference set. Parity with Rust run_fact_timeline.
+        // sourceDrawerID holds a local drawer id or "", so the only non-matching value is
+        // the empty one, which names no drawer. loadedIDs − admissible = the blocked
+        // (restricted/secret) drawer-reference set. Parity with Rust run_fact_timeline.
         let emittedFacts = Array(facts.prefix(200))
         let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
         let estate = try await kit.estate(for: handle)
@@ -2391,7 +2703,8 @@ extension ToolDispatcher {
             let filed = formatter.string(from: f.filedAt)
             let lifecycleTag = Self.lifecycleTag(forAdjectiveBitmap: f.adjectiveBitmap)
             // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. Non-drawer provenance strings pass through.
+            // exists AND is Restricted/Secret. sourceDrawerID holds a local drawer
+            // id or "", so a sourceless fact renders an empty source=.
             let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
                 ? "source=<hidden>"
                 : "source=\(f.sourceDrawerID)"
@@ -2501,17 +2814,31 @@ extension ToolDispatcher {
             let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
             return RowState.cluster(ofRawState: stateRaw) == .some(.a)
         }
-        // Sensitivity ceiling (#50): exclude restricted/secret drawers from
-        // the wing listing and counts, matching the estate-map ceiling. Wing
-        // names derived from restricted/secret drawers can leak topic metadata.
+        // Sensitivity ceiling (#50): restricted/secret drawers contribute
+        // nothing to this surface — not the wing listing, and not any count.
+        // Wing names derived from restricted/secret drawers leak topic
+        // metadata; a count that moves with the restricted set is the same
+        // leak in scalar form, since this tool has no sensitivity-grant
+        // plumbing and every caller is an ungranted one. Matches the
+        // estate-map ceiling. `isBulkExportable` is true for .normal and
+        // .elevated, false for .restricted and .secret.
+        //
+        // EVERY drawer-derived aggregate below reads from `visible` or
+        // `visibleTotal`. An aggregate added here inherits that rule: derive
+        // it from a filtered set, or the next reader learns the size of a
+        // population they cannot see.
         let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
-        // "total" counts all non-erased rows (tombstone = erased permanently).
-        let total = drawers.filter { $0.tombstonedAt == nil }
+        // "total" counts all non-erased rows (tombstone = erased permanently),
+        // under the same ceiling — hence the wider cluster scope but the same
+        // sensitivity predicate as `visible`.
+        let visibleTotal = drawers.filter {
+            $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable
+        }
         // Resolve parentNodeIds to display names for wing listing. Drawer
         // no longer carries stored wing/room after node-tree migration.
-        let activeNodeNames = try await estate.resolveNodeNames(
+        let visibleNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: visible.map(\.parentNodeId))
-        let wings = Set(visible.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
+        let wings = Set(visible.compactMap { visibleNodeNames[$0.parentNodeId]?.wing }).sorted()
         let facts = try await kit.recallKGFacts(handle)
         // Trace row count — the reward pipeline's read log size. A read failure
         // must not break the whole status response, but it must NOT be reported
@@ -2540,9 +2867,25 @@ extension ToolDispatcher {
         } else {
             fdcRecalculationState = "stale"
         }
+        // Subject-debt counter (PR-04): presence debt over the live
+        // sensitivity-visible set — N subject-bearing / M eligible (non-empty
+        // content), K missing. It counts `visible`, not `active`, under the
+        // ceiling declared above: the debt an ungranted caller is being asked
+        // to pay is exactly the debt it is allowed to see, so this counter and
+        // the `moot_memory_list filter:missing_subject` enumerator it points
+        // the AI at describe one population. This is the every-load reminder
+        // that drives the consent-gated interactive backfill (the AI asks the
+        // user for time and permission before walking the enumerator →
+        // setSubject; standing behavior documented in the estate-status
+        // teachme). Presence debt only — pipeline-version regeneration debt
+        // stays the store verb countMissingSubject's concern.
+        let subjectEligible = visible.filter { !$0.content.isEmpty }
+        let subjectBearing = subjectEligible.filter { $0.subject != nil }
         var stats = [
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
-            "memories: \(active.count) active (\(total.count) total)",
+            "memories: \(visible.count) active (\(visibleTotal.count) total)",
+            "subjects: \(subjectBearing.count)/\(subjectEligible.count) "
+                + "(\(subjectEligible.count - subjectBearing.count) missing)",
             "wings: \(wings.joined(separator: ", "))",
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",
@@ -2642,6 +2985,21 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let wing = try requireString(args, "wing")
         let room = try optionalString(args["room"], argument: "room")
+        // Optional filter. `missing_subject` is the subject-debt backfill
+        // enumerator (PR-02): id-only rows of live drawers whose subject is
+        // NULL, so a consenting backfill session can walk them with
+        // moot_update_memory mutation=setSubject without hauling content.
+        let filterName = try optionalString(args["filter"], argument: "filter")
+        let missingSubjectOnly: Bool
+        switch filterName {
+        case nil: missingSubjectOnly = false
+        case "missing_subject": missingSubjectOnly = true
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown filter: \(filterName ?? ""). Accepted: missing_subject"
+            )
+        }
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
         // Filter to Cluster A (currently-believed) only (#9): withdrawn,
@@ -2656,25 +3014,33 @@ extension ToolDispatcher {
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: visible.map(\.parentNodeId))
 
-        var matches: [(id: String, room: String, preview: String)] = []
+        var matches: [(drawer: Drawer, room: String)] = []
         for d in visible {
+            if missingSubjectOnly, d.subject != nil { continue }
             let names = nodeNames[d.parentNodeId]
             let dWing = names?.wing ?? ""
             let dRoom = names?.room ?? ""
             guard dWing == wing else { continue }
             if let room, !room.isEmpty, dRoom != room { continue }
-            let preview = String(d.content.prefix(80))
-                .replacingOccurrences(of: "\n", with: " ")
-            matches.append((id: d.id, room: dRoom, preview: preview))
+            matches.append((drawer: d, room: dRoom))
         }
 
         let capped = matches.prefix(200)
-        var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")"]
+        let filterSuffix = missingSubjectOnly ? " [filter: missing_subject]" : ""
+        var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")\(filterSuffix)"]
         if matches.count > 200 {
             lines.append("(showing first 200 of \(matches.count))")
         }
         for m in capped {
-            lines.append("  \(m.id) [\(m.room)] \(m.preview)")
+            // Debt enumeration stays id-only by design (PR-02): the backfill
+            // walker fetches content per-row via moot_memory_get when it is
+            // ready to write a subject. Every other listing row is the
+            // dense row (PR-03) — address + assertion, no content preview.
+            if missingSubjectOnly {
+                lines.append("  \(m.drawer.id) [\(m.room)]")
+            } else {
+                lines.append("  \(DenseRow.render(m.drawer))")
+            }
         }
         return Self.textResult(lines.joined(separator: "\n"))
     }
@@ -2833,6 +3199,16 @@ extension ToolDispatcher {
     /// encoded-chunk count, so forward progress is visible). The report is a
     /// LIST so additional drains surface here automatically when they exist; an
     /// estate with no Corpus registered reports no drains.
+    /// Reserved lane name for the subject-backfill drain (PR-04). The
+    /// PR-09/10 rider registers a drain under THIS name; the generic
+    /// renderer below then carries it with no further dispatcher change.
+    /// Its `pending` will be a row-level ELIGIBILITY count (subject debt),
+    /// not queue depth — when the rider lands, the benchmarker's
+    /// `barrierNonGatingLanes` denylist must gain this name in the same
+    /// mission or the encode barrier hangs on healthy estates (the
+    /// distillation-lane precedent). Twin: Rust `SUBJECT_BACKFILL_LANE_NAME`.
+    static let subjectBackfillLaneName = "subject_backfill"
+
     func runDrainStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let drains = try await kit.drainStatuses(handle)

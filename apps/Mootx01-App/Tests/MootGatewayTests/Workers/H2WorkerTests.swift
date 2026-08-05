@@ -40,7 +40,7 @@ enum ReviewPrepFixtures {
     static func report(_ kind: ReviewKind = .morning, now: Date = morningNow) async -> ReviewReport {
         await ReviewBuilderFactory
             .builder(for: kind, configuration: ReviewConfiguration(), schedule: schedule)
-            .build(now: now, reader: StubReviewReader(responses: ReviewFixtures.populated))
+            .build(now: now, reader: StubReviewReader(responses: ReviewFixtures.populated, structured: ReviewFixtures.populatedStructured))
     }
 
     static func emptyReport(_ kind: ReviewKind = .morning, now: Date = morningNow) async -> ReviewReport {
@@ -400,12 +400,31 @@ struct CompareDisagreementPreservationTests {
 @Suite("HandoffWorker — drafts carry provenance references (FAB5-H2)")
 struct HandoffWorkerTests {
 
-    static let searchFixture = """
+    // The fixture mirrors a live reply: dense-row text plus the structured
+    // twin. resolveContext reads ONLY the structured rows.
+    static let searchFixtureText = """
         found 2 memory(s)
-        AAAAAAAA-0000-0000-0000-000000000001  [engineering]  The index rebuild takes 40 minutes.
-        BBBBBBBB-0000-0000-0000-000000000002  [engineering]  Cold reads dominate the first minute.
+        AAAAAAAA-0000-0000-0000-000000000001 · The index rebuild takes 40 minutes. · fdc:D2 · qid:Q00 · 2026-07-23T18:04:11Z
+        BBBBBBBB-0000-0000-0000-000000000002 · Cold reads dominate the first minute. · fdc:D2 · qid:Q00 · 2026-07-23T18:05:02Z
         recall_provenance: dense_lane:active degraded_stages:none
         """
+
+    static let searchFixtureStructured: JSONValue = .object([
+        "results": .array([
+            .object([
+                "id": .string("AAAAAAAA-0000-0000-0000-000000000001"),
+                "room": .string("engineering"),
+                "content": .string("The index rebuild takes 40 minutes."),
+                "subject": .string("The index rebuild takes 40 minutes."),
+            ]),
+            .object([
+                "id": .string("BBBBBBBB-0000-0000-0000-000000000002"),
+                "room": .string("engineering"),
+                "content": .string("Cold reads dominate the first minute."),
+                "subject": .string("Cold reads dominate the first minute."),
+            ]),
+        ])
+    ])
 
     @Test("a drafted body cites every reference it carries")
     func bodyCitesEveryReference() {
@@ -433,7 +452,7 @@ struct HandoffWorkerTests {
 
     @Test("recall-sourced context becomes citations with drawer ids")
     func recalledContextBecomesCitations() async {
-        let mock = MockCaller(fixture: Self.searchFixture)
+        let mock = MockCaller(fixture: Self.searchFixtureText, structured: Self.searchFixtureStructured)
         let references = await HandoffWorker.resolveContext(
             HandoffInput(objective: "index rebuild"), caller: mock)
 
@@ -446,7 +465,7 @@ struct HandoffWorkerTests {
 
     @Test("caller-selected context is used as given and suppresses recall")
     func callerSelectionWins() async {
-        let mock = MockCaller(fixture: Self.searchFixture)
+        let mock = MockCaller(fixture: Self.searchFixtureText, structured: Self.searchFixtureStructured)
         let selected = [HandoffContextItem(subjectID: "CCCCCCCC-0000-0000-0000-000000000003",
                                            source: "curated", excerpt: "hand-picked note")]
         let references = await HandoffWorker.resolveContext(
@@ -471,7 +490,7 @@ struct HandoffWorkerTests {
 
     @Test("fallback keeps the selected context as citations")
     func fallbackKeepsCitations() async {
-        let mock = MockCaller(fixture: Self.searchFixture)
+        let mock = MockCaller(fixture: Self.searchFixtureText, structured: Self.searchFixtureStructured)
         let selected = [HandoffContextItem(subjectID: "DDDDDDDD-0000-0000-0000-000000000004",
                                            source: "curated", excerpt: "note")]
         let draft = HandoffWorker().fallback(
@@ -493,7 +512,7 @@ struct HandoffWorkerTests {
 
     @Test("runSafe never calls a mutation verb")
     func runSafeNoMutation() async {
-        let mock = MockCaller(fixture: Self.searchFixture)
+        let mock = MockCaller(fixture: Self.searchFixtureText, structured: Self.searchFixtureStructured)
         _ = await HandoffWorker().runSafe(
             input: HandoffInput(objective: "index rebuild"), caller: mock)
         let called = await mock.calledTools

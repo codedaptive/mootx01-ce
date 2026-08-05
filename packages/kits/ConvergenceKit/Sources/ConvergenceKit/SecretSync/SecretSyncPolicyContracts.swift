@@ -79,15 +79,43 @@ public struct SecretScopeSnapshot:
 /// A recovery recipient is never inserted into the routine device credential
 /// audience and cannot be interpreted as a `DeviceCredentialID`.
 public struct RecoveryRecipientDescriptor: Sendable, Codable, Hashable {
+    public static let agreementAlgorithmIdentifier =
+        "mootx01.secret-recovery.hkdf-sha256-p256-agreement.v2"
+    public static let authorizationSigningAlgorithmIdentifier =
+        "mootx01.secret-recovery.hkdf-sha256-p256-ecdsa-sha256-authorization.v2"
+
     public let recoveryRecipientID: UUID
     public let keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor
+    public let authorizationSigningPublicKey: SigningPublicKeyDescriptor
 
     public init(
         recoveryRecipientID: UUID,
-        keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor
+        keyAgreementPublicKey: KeyAgreementPublicKeyDescriptor,
+        authorizationSigningPublicKey: SigningPublicKeyDescriptor
     ) throws {
+        guard
+            keyAgreementPublicKey.algorithmIdentifier
+                == Self.agreementAlgorithmIdentifier,
+            authorizationSigningPublicKey.algorithmIdentifier
+                == Self.authorizationSigningAlgorithmIdentifier,
+            keyAgreementPublicKey.publicKeyBytes.count == 65,
+            keyAgreementPublicKey.publicKeyBytes.first == 0x04,
+            authorizationSigningPublicKey.publicKeyBytes.count == 65,
+            authorizationSigningPublicKey.publicKeyBytes.first == 0x04
+        else {
+            throw SecretSyncContractError.invalidRecoveryDescriptor
+        }
+        guard
+            keyAgreementPublicKey.keyIdentifier
+                != authorizationSigningPublicKey.keyIdentifier,
+            keyAgreementPublicKey.publicKeyBytes
+                != authorizationSigningPublicKey.publicKeyBytes
+        else {
+            throw SecretSyncContractError.keyRoleReuse
+        }
         self.recoveryRecipientID = recoveryRecipientID
         self.keyAgreementPublicKey = keyAgreementPublicKey
+        self.authorizationSigningPublicKey = authorizationSigningPublicKey
     }
 
     func canonicalValue() throws -> Data {
@@ -98,7 +126,36 @@ public struct RecoveryRecipientDescriptor: Sendable, Codable, Hashable {
             ),
             keyAgreementPublicKey.keyIdentifier,
             keyAgreementPublicKey.publicKeyBytes,
+            SecretSyncCanonicalValue.string(
+                authorizationSigningPublicKey.algorithmIdentifier
+            ),
+            authorizationSigningPublicKey.keyIdentifier,
+            authorizationSigningPublicKey.publicKeyBytes,
         ])
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recoveryRecipientID
+        case keyAgreementPublicKey
+        case authorizationSigningPublicKey
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            recoveryRecipientID: container.decode(
+                UUID.self,
+                forKey: .recoveryRecipientID
+            ),
+            keyAgreementPublicKey: container.decode(
+                KeyAgreementPublicKeyDescriptor.self,
+                forKey: .keyAgreementPublicKey
+            ),
+            authorizationSigningPublicKey: container.decode(
+                SigningPublicKeyDescriptor.self,
+                forKey: .authorizationSigningPublicKey
+            )
+        )
     }
 }
 

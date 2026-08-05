@@ -729,15 +729,25 @@ impl DrawerMapping {
 
         // Security: moot_id lineage-hijack guard. Mirrors the path-identity
         // discriminator in build_note_frame — see that function for the full
-        // rationale. Fires when (1) the claimed UUID targets an existing lineage,
-        // (2) the note's vault path is FOREIGN to the claimed lineage (path does
-        // not match the export path recorded for that lineage; FNV fallback when
-        // no export path is recorded), AND (3) the incoming body DIFFERS (trimmed)
-        // from what the estate has for that lineage. Condition 3 allows sensitivity-
-        // only upgrades on unchanged content while blocking content-replacement
-        // attacks via a spoofed moot_id. Content is compared after trimming because
-        // the file parser may produce trailing whitespace the capture path strips.
+        // rationale and the guard's boundary. Fires when (1) the claimed UUID
+        // targets an existing lineage, (2) the note's vault path is FOREIGN to
+        // the claimed lineage (path does not match the export path recorded for
+        // that lineage; FNV fallback when no export path is recorded), AND
+        // (3) the incoming body DIFFERS (trimmed) from what the estate has for
+        // that lineage. Condition 3 allows sensitivity-only upgrades on
+        // unchanged content. Content is compared after trimming because the file
+        // parser may produce trailing whitespace the capture path strips.
         // Mirrors Swift DrawerMapping.importNote.
+        //
+        // Boundary, restated so it is not missed at this site: this rejects a
+        // content-replacing claim only from a FOREIGN path. A note at the
+        // claimed lineage's own expected export path is accepted as an update
+        // whatever its content — indistinguishable from the legitimate
+        // round-trip edit — so same-path spoofing is not covered here. The
+        // recorded key is recomputed from current estate state, not persisted
+        // provenance, and the vault tree (including
+        // `.moot/export-manifest.json`) is attacker-controlled input, not an
+        // authentication anchor.
         let fnv_lineage = Self::lineage_id(note.stable_source_key.as_str());
         if let Some(claimed_id) = frame.lineage_id {
             let content_differs = existing_content_by_lineage
@@ -1317,14 +1327,38 @@ impl DrawerMapping {
         }
         let (mut frame, classified) = self.make_capture_frame(note, &content);
 
-        // Security: moot_id lineage-hijack guard. Uses the path-identity
-        // discriminator: fires when (1) the claimed UUID targets an existing
-        // lineage, (2) the note's vault path is FOREIGN to the claimed lineage
-        // (path does not match the recorded export path; FNV fallback when no
-        // export path is recorded), AND (3) the incoming body DIFFERS (trimmed)
-        // from the estate's content for that lineage. Condition 3 allows
-        // sensitivity-only upgrades on unchanged content while blocking
-        // body-replacement attacks. Mirrors Swift DrawerMapping.buildNoteFrame.
+        // Security: moot_id lineage-hijack guard. A crafted `moot_id` in
+        // imported frontmatter can claim an existing in-estate lineage, causing
+        // an imported note to overwrite another note's content.
+        //
+        // WHAT THIS DEFENDS: a note arriving at a path OTHER than the claimed
+        // lineage's expected export path, with changed content, is refiled
+        // under its own FNV lineage; the claimed drawer is untouched.
+        //
+        // WHAT IT DOES NOT DEFEND: a note at the claimed lineage's OWN expected
+        // export path is accepted as an update regardless of content. That case
+        // is indistinguishable from the legitimate round-trip this feature
+        // exists to support (export → edit in Obsidian → re-import): both
+        // produce the identical artifact — a changed file at the exported path
+        // carrying the exported moot_id. Same-path spoofing is therefore NOT
+        // covered, and no discriminator over the file can cover it without
+        // breaking the round-trip. Both halves of this boundary are pinned by
+        // `rust/tests/lineage_guard.rs`.
+        //
+        // The recorded key compared below is RECOMPUTED from current estate
+        // wing/room/slug on every import (see VaultBridge::existing_drawer_state).
+        // It is not persisted or authenticated provenance. The vault tree is
+        // attacker-controlled input, and nothing inside it — including
+        // `.moot/export-manifest.json` — is an authentication anchor: whoever
+        // can plant a note can plant a manifest.
+        //
+        // Fires when (1) the claimed UUID targets an existing lineage, (2) the
+        // note's vault path is FOREIGN to the claimed lineage (path does not
+        // match the recorded export path; FNV fallback when no export path is
+        // recorded), AND (3) the incoming body DIFFERS (trimmed) from the
+        // estate's content for that lineage. Condition 3 allows sensitivity-only
+        // upgrades on unchanged content. Mirrors Swift
+        // DrawerMapping.buildNoteFrame.
         let fnv_lineage = Self::lineage_id(note.stable_source_key.as_str());
         if let Some(claimed_id) = frame.lineage_id {
             let content_differs = existing_content_by_lineage

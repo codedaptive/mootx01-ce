@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-30
-version: 1.22.0
+date: 2026-08-04
+version: 1.28.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.22.0: MXE-BB — circuit-breaker API (migrationParked, isParked, clearParked) on both ports.
 package: GeniusLocusKit
@@ -195,6 +195,7 @@ public actor GeniusLocusKit {
     public func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws
     public func withdraw(_ handle: EstateHandle, _ frame: WithdrawFrame) async throws
     public func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame, now: Date = Date()) async throws
+        -> ExpungeVerbOutcome
         // Throws: .expungeNotConfirmed | .crossKitVectorDeleteFailed (fail-closed, three-step).
         // §B-2a audit-seal ordering: success audit seals ONLY after Step 2
         // (cross-kit vector delete) succeeds. On Step-2 failure an
@@ -202,6 +203,22 @@ public actor GeniusLocusKit {
         // the audit is honest, never a false success. If the orphan-seal
         // also fails, the seal error is logged at .fault level (Swift) or
         // folded into the CrossKitVectorDeleteFailed.reason string (Rust).
+        //
+        // Partial outcome (SPEC B-8b, MXE-FA): the storage expunge refuses
+        // accepted lineage siblings (S-3) and preserves them byte-identical.
+        // Step 2 deletes vectors ONLY for members that were actually
+        // scrubbed (lineage chain minus refused ids) — a refused sibling
+        // keeps its content AND its vector. The returned outcome names the
+        // refused members; NOT @discardableResult: an expunge that refused
+        // a sibling is not a success, and a caller that summarises it as
+        // one is the defect. defragVagueItem / defrag_vague_item consume
+        // this and raise .underlyingEstateFailure on a partial cascade.
+        // Rust: EstateCoordinator::expunge(...) -> Result<ExpungeVerbOutcome, VerbDispatchError>.
+
+    // ExpungeVerbOutcome: partial-expunge honesty carrier (SPEC B-8b, MXE-FA).
+    public struct ExpungeVerbOutcome: Sendable, Equatable {       // Rust: genius_locus_kit::ExpungeVerbOutcome
+        public let refusedSiblingIDs: [String]                    // Rust: refused_sibling_ids: Vec<String>, walk order
+    }
 
     // Expunge integrity sweep (VerbSurface.swift) — SPEC B-2b:
     // Maintenance function (NOT a verb). Call AFTER all Corpus / VectorStore
@@ -236,14 +253,26 @@ public actor GeniusLocusKit {
 
     // KGFact verb surface (VerbSurface.swift):
     // captureKGFact files a triple into the estate; sourceDrawerID = "" is the
-    // unanchored-fact sentinel for agent-asserted triples. retireKGFact
+    // unanchored-fact sentinel for agent-asserted triples. A NON-EMPTY
+    // sourceDrawerID must name a drawer in this estate: the fact inherits that
+    // drawer's adjective and provenance bitmaps, and an id naming no drawer
+    // throws GeniusLocusKitError.sourceDrawerNotFound rather than filing at the
+    // Normal default. addedBy / foreignSourceKey / foreignRecordID carry the
+    // filing host and any foreign-palace origin. retireKGFact
     // transitions the row to State.withdrawn so it exits the active-recall filter.
     // recallKGFacts returns active facts only (state cluster < 7).
     // recallKGFactTimeline returns ALL facts — active and retired — for the
     //   full lifecycle history; optional entity filter narrows by subject/object
     //   substring (case-insensitive). Peer of Rust recall_kg_fact_timeline.
-    func captureKGFact(_ handle: EstateHandle, subject: String, predicate: String,
-                       object: String, sourceDrawerID: String, now: Date) async throws -> KGFact
+    func captureKGFact(_ handle: EstateHandle, id: String = UUID().uuidString,
+                       subject: String, predicate: String, object: String,
+                       sourceDrawerID: String = "", addedBy: String = "",
+                       foreignSourceKey: String = "", foreignRecordID: String = "",
+                       now: Date) async throws -> KGFact
+    // Rust peer (no default arguments): add_kg_fact is the empty-origin entry
+    // point, add_kg_fact_with_origin adds KGFactOrigin, and
+    // add_kg_fact_with_id_and_origin additionally names the row. One
+    // implementation reached through three spellings.
     func retireKGFact(_ handle: EstateHandle, rowID: String) async throws
     func recallKGFacts(_ handle: EstateHandle) async throws -> [KGFact]
     func recallKGFactTimeline(_ handle: EstateHandle, entity: String?) async throws -> [KGFact]
@@ -2084,6 +2113,74 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.28.0 -- 2026-08-04
+
+- **`expunge` returns `ExpungeVerbOutcome` (MXE-FA).** Swift
+  `GeniusLocusKit.expunge` returns the new public `ExpungeVerbOutcome`
+  (`refusedSiblingIDs: [String]`, not `@discardableResult`); Rust
+  `EstateCoordinator::expunge` returns
+  `Result<ExpungeVerbOutcome, VerbDispatchError>` (re-exported at crate
+  root). Step 2's cross-kit vector delete is scoped to the members the
+  storage expunge actually scrubbed — gate-refused accepted siblings keep
+  content AND vectors. `defragVagueItem` / `defrag_vague_item` raise
+  `.underlyingEstateFailure` when the vague-cascade expunge was partial.
+  Binding invariant (LOCUSKIT_SPEC B-8b): no layer reports success for an
+  expunge that refused a sibling.
+
+### 1.27.0 -- 2026-08-03
+
+- **`captureKGFact` inherits the source drawer's sensitivity (MXE-KH).** A
+  non-empty `sourceDrawerID` now loads that drawer and copies its adjective
+  and provenance bitmaps onto the fact, so a fact extracted from a Secret
+  drawer is itself Secret and is withheld by the fact-search disclosure
+  ceiling. An id naming no drawer throws the new
+  `GeniusLocusKitError.sourceDrawerNotFound` instead of filing at the Normal
+  default. An empty `sourceDrawerID` keeps today's zero-bitmap behaviour.
+- **New defaulted parameters** `id`, `addedBy`, `foreignSourceKey`, and
+  `foreignRecordID`. Rust reaches the same implementation through
+  `add_kg_fact`, `add_kg_fact_with_origin`, and
+  `add_kg_fact_with_id_and_origin`, and adds
+  `VerbDispatchError::SourceDrawerNotFound`.
+- **The meeting-decision seam routes through `captureKGFact`** in both ports
+  rather than writing the KG store directly, so decisions extracted from a
+  Secret transcript carry that transcript's sensitivity.
+
+### 1.26.0 -- 2026-08-03
+
+- DCP M2-M6 surfaces (Swift ↔ Rust): ConflictProjector.project ↔
+  brain::conflict_projection_pass::project; ConflictCoordinateIndex ↔
+  ConflictCoordinateIndex (bucket cap 64, truncation diagnostics);
+  conflictProjectionSweep ↔ conflict_projection_sweep;
+  proposeConflictTunnels ↔ propose_conflict_tunnels;
+  captureMeetingDecisions ↔ capture_meeting_decisions (+
+  meetingDecisionFactID ↔ meeting_decision_fact_id, golden-pinned);
+  fileSupersessions ↔ file_supersessions.
+
+### 1.25.0 -- 2026-08-02
+
+- Rider-default ruling: host-layer auto-enable documented
+  (`ToolProjection.subjectRiderEnabled(environment:)`, env
+  `MOOTX01_SUBJECT_RIDER`, install flag `--subject-rider-off`);
+  dreaming triggers append a `subjectsBackfilled:` line when a sweep
+  ran.
+
+### 1.24.0 -- 2026-08-02
+
+- PR-10: `MiniLLMSubjectProducer` (Apple-only, availability-gated),
+  `enableAppleSubjectRider(for:)`,
+  `SubjectProducer.regeneratesPipelines` ↔ `regenerates_pipelines`
+  (default empty); sweep and drain-lane pending are tier-aware.
+
+### 1.23.0 -- 2026-08-02
+
+- PR-09: new coordinator surface — `SubjectProducer` (protocol/trait),
+  `SubjectBackfillReport`, `registerSubjectProducer(_:for:)` ↔
+  `register_subject_producer`, `subjectProducerPipeline(for:)` ↔
+  `subject_producer_pipeline`, `subjectBackfillSweep(_:batchLimit:now:)`
+  ↔ `subject_backfill_sweep`, and the rider-gated `subject_backfill`
+  drain-lane row (`DrainStatus.subjectBackfillName` ↔
+  `SUBJECT_BACKFILL_NAME`).
 
 ### 1.22.0 -- 2026-07-30
 

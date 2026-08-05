@@ -118,6 +118,39 @@ import SQLite3
 // where Swift's `String(Double)` and Rust's `Display` could disagree
 // on edge cases (e.g. integral floats: "1.0" vs "1").
 //
+// ## Trust posture: the palace root is UNTRUSTED input
+//
+// A palace root is a directory handed to the importer from outside the
+// estate. "The user chose it" covers a palace they were given, not only
+// one they built — so its size and shape are an attacker-influenced
+// input, not a fact this code may assume. Every read below is therefore
+// bounded by `MemPalaceImportLimits` and accounted against one
+// `MemPalaceImportBudget` for the whole import: a maximum `tunnels.json`
+// size checked BEFORE the file is opened, a maximum row count, a maximum
+// total of materialized bytes, and a SQLite progress guard that abandons
+// a query which burns virtual-machine steps without returning rows.
+//
+// The palace is opened read-only and never written, so this adapter
+// cannot mutate it and does not write outside the estate. Availability
+// was the exposure these bounds close: before them the importer would
+// read an oversized `tunnels.json`, every SQLite row, and every `NoteIR`
+// into memory with no ceiling of any kind.
+//
+// One residual is worth knowing rather than assuming away: the queries
+// below run against an attacker-authored schema, so a palace that
+// defines `embeddings` / `collections` / `entities` / `triples` as VIEWS
+// executes its own SQL inside this connection. Read-only blocks writes
+// and no filesystem-reach function is enabled, which leaves SQLite's own
+// parser surface plus availability — and the step budget bounds the
+// availability half. `PRAGMA trusted_schema=OFF` would close the rest;
+// it is deliberately NOT set here because it changes how SQLite treats a
+// foreign file and a real palace has never needed it. Do not upgrade
+// this comment to "no confidentiality or integrity risk" without it.
+//
+// Every limit below fails with an error naming the limit AND the observed
+// value, because an import that dies on an unexplained cap is worse than
+// one that is slow.
+//
 // ## Why direct SQLite here (and not PersistenceKit)
 //
 // PersistenceKit's public surface is a `RowStore` over schemas the kit
@@ -128,6 +161,192 @@ import SQLite3
 // this adapter speaks the system SQLite C API directly — exactly as
 // PersistenceKitSQLite itself does — with `SQLITE_OPEN_READONLY` so the
 // palace can never be mutated.
+/// The ceilings one MemPalace import may not cross.
+///
+/// Every value is a named constant with a documented default, and every
+/// default is sized against a REAL palace (`~/.mempalace`, measured
+/// 2026-08-03) rather than invented: 50,381 embeddings across 506,204
+/// `embedding_metadata` rows, 40,700,592 bytes of metadata values,
+/// ~8,850,000 SQLite virtual-machine steps for the whole palace, and a
+/// 3,149-byte `tunnels.json`. Each constant below states its headroom
+/// over that measurement. Defaults that reject a real palace would be a
+/// broken feature rather than a control, so the headroom is deliberate.
+///
+/// The Rust port's `MemPalaceImportLimits` carries the identical values;
+/// divergent caps would mean an import that succeeds in one port and
+/// fails in the other.
+public struct MemPalaceImportLimits: Sendable, Equatable {
+
+    /// Maximum size of `tunnels.json`, checked BEFORE the file is read.
+    ///
+    /// Default 64 MiB against a measured 3,149 bytes — a 21,311x factor
+    /// that looks extreme only because MemPalace writes one record per
+    /// explicit cross-wing link, so the file is tiny in every real
+    /// palace. 64 MiB still admits roughly 130,000 tunnel records at
+    /// ~500 bytes each. The cap exists to reject a multi-gigabyte file
+    /// before it is opened, not to be tight.
+    public var maxTunnelsJSONBytes: Int
+
+    /// Maximum SQLite rows read across the WHOLE import (both chroma
+    /// collections plus both knowledge-graph tables), not per query.
+    ///
+    /// Default 20,000,000 against a measured 506,204 rows for the whole
+    /// palace — a 39.5x factor. A palace would need roughly 2,000,000
+    /// embeddings to reach it.
+    public var maxImportRows: Int
+
+    /// Maximum bytes of SQLite column text materialized across the whole
+    /// import.
+    ///
+    /// Default 1 GiB against a measured 40,700,592 bytes — a 26.4x
+    /// factor. This is the cap that actually bounds memory: the row
+    /// count alone does not, because one row may carry an arbitrarily
+    /// large text or blob value.
+    public var maxMaterializedBytes: Int
+
+    /// Maximum SQLite virtual-machine steps before a query is abandoned.
+    ///
+    /// Default 1,000,000,000 against a measured ~8,850,000 for the whole
+    /// palace — a 113x factor, roughly 30-60 seconds of work at the
+    /// measured throughput. This catches what the row and byte caps
+    /// cannot: a corrupt or hostile database whose query plan degenerates
+    /// (a missing index turning the metadata join into a nested loop) and
+    /// burns instructions WITHOUT returning rows, so neither the row
+    /// counter nor the byte counter ever advances.
+    public var maxSQLiteVMSteps: Int
+
+    /// SQLite virtual-machine steps between progress-handler callbacks.
+    ///
+    /// Default 1,000,000, which at the full step budget fires the handler
+    /// about a thousand times — frequent enough to abandon a pathological
+    /// query promptly, rare enough that the callback itself costs
+    /// nothing measurable.
+    public var sqliteProgressGrain: Int32
+
+    /// Construct a limit set. The defaults are the measured-and-justified
+    /// values documented on each property.
+    public init(
+        maxTunnelsJSONBytes: Int = 67_108_864,
+        maxImportRows: Int = 20_000_000,
+        maxMaterializedBytes: Int = 1_073_741_824,
+        maxSQLiteVMSteps: Int = 1_000_000_000,
+        sqliteProgressGrain: Int32 = 1_000_000
+    ) {
+        self.maxTunnelsJSONBytes = maxTunnelsJSONBytes
+        self.maxImportRows = maxImportRows
+        self.maxMaterializedBytes = maxMaterializedBytes
+        self.maxSQLiteVMSteps = maxSQLiteVMSteps
+        self.sqliteProgressGrain = sqliteProgressGrain
+    }
+
+    /// The shipping defaults.
+    public static let `default` = MemPalaceImportLimits()
+}
+
+/// The running totals for one import, charged as rows and bytes arrive.
+///
+/// A reference type on purpose: ONE budget is threaded through every read
+/// of a single palace — both chroma collections, `tunnels.json`, and both
+/// knowledge-graph tables — so `maxImportRows` and `maxMaterializedBytes`
+/// are real totals for the import rather than a per-query allowance that
+/// would silently multiply by the number of stores.
+public final class MemPalaceImportBudget {
+
+    /// The ceilings this budget enforces.
+    public let limits: MemPalaceImportLimits
+
+    /// Rows charged so far, across every store.
+    public private(set) var rowsRead = 0
+
+    /// Column-text bytes charged so far, across every store.
+    public private(set) var bytesMaterialized = 0
+
+    /// Progress-handler callbacks observed so far. Multiplied by the
+    /// grain this is the virtual-machine step count; it is a class
+    /// property rather than a local so the C progress callback (which
+    /// receives only an opaque pointer) can reach it.
+    fileprivate var progressTicks = 0
+
+    /// Set when the progress handler interrupted a query, so the caller
+    /// can report the step limit by name instead of SQLite's generic
+    /// "interrupted" diagnostic.
+    fileprivate var interruptedByStepLimit = false
+
+    /// Start a fresh budget. Defaults to the shipping limits.
+    public init(limits: MemPalaceImportLimits = .default) {
+        self.limits = limits
+    }
+
+    /// Charge one row and its column bytes, or throw naming the limit
+    /// that was crossed and the value observed when it was crossed.
+    func chargeRow(byteCount: Int) throws {
+        rowsRead += 1
+        if rowsRead > limits.maxImportRows {
+            throw VaultKitError.adapterError(
+                "MemPalace import limit exceeded: read \(rowsRead) SQLite rows, over the "
+                + "maxImportRows limit of \(limits.maxImportRows). The palace is larger than "
+                + "this importer will materialize; raise MemPalaceImportLimits.maxImportRows "
+                + "to import it.")
+        }
+        bytesMaterialized += byteCount
+        if bytesMaterialized > limits.maxMaterializedBytes {
+            throw VaultKitError.adapterError(
+                "MemPalace import limit exceeded: materialized \(bytesMaterialized) bytes of "
+                + "SQLite column text, over the maxMaterializedBytes limit of "
+                + "\(limits.maxMaterializedBytes). Raise "
+                + "MemPalaceImportLimits.maxMaterializedBytes to import this palace.")
+        }
+    }
+
+    /// Charge a whole file read against `maxTunnelsJSONBytes`. Called
+    /// with the size from the filesystem BEFORE the file is opened, so an
+    /// oversized file is never read into memory at all.
+    func chargeTunnelsFile(byteCount: Int, path: String) throws {
+        if byteCount > limits.maxTunnelsJSONBytes {
+            throw VaultKitError.adapterError(
+                "MemPalace import limit exceeded: tunnels.json at \(path) is \(byteCount) "
+                + "bytes, over the maxTunnelsJSONBytes limit of "
+                + "\(limits.maxTunnelsJSONBytes). The file was not read. Raise "
+                + "MemPalaceImportLimits.maxTunnelsJSONBytes to import this palace.")
+        }
+        bytesMaterialized += byteCount
+        if bytesMaterialized > limits.maxMaterializedBytes {
+            throw VaultKitError.adapterError(
+                "MemPalace import limit exceeded: materialized \(bytesMaterialized) bytes "
+                + "after reading tunnels.json at \(path), over the maxMaterializedBytes "
+                + "limit of \(limits.maxMaterializedBytes).")
+        }
+    }
+
+    /// The error for a query the progress handler interrupted, naming the
+    /// step limit rather than surfacing SQLite's generic diagnostic.
+    func stepLimitError() -> VaultKitError {
+        VaultKitError.adapterError(
+            "MemPalace import limit exceeded: a SQLite query ran past the maxSQLiteVMSteps "
+            + "limit of \(limits.maxSQLiteVMSteps) virtual-machine steps and was "
+            + "interrupted. The palace's database is degenerate or hostile — a query plan "
+            + "that burns steps without returning rows. Raise "
+            + "MemPalaceImportLimits.maxSQLiteVMSteps only if the palace is known good.")
+    }
+}
+
+/// The C progress callback. SQLite hands back only the opaque context
+/// pointer, so the budget rides through it unretained — the connection
+/// that installs this handler outlives every query it runs, and clears
+/// the handler before closing.
+private func memPalaceProgressHandler(_ context: UnsafeMutableRawPointer?) -> Int32 {
+    guard let context else { return 0 }
+    let budget = Unmanaged<MemPalaceImportBudget>.fromOpaque(context).takeUnretainedValue()
+    budget.progressTicks += 1
+    // Non-zero aborts the running statement with SQLITE_INTERRUPT.
+    if budget.progressTicks * Int(budget.limits.sqliteProgressGrain)
+        > budget.limits.maxSQLiteVMSteps {
+        budget.interruptedByStepLimit = true
+        return 1
+    }
+    return 0
+}
+
 public struct MemPalaceChromaAdapter: VaultAdapter {
 
     /// Name of the ChromaDB collection holding drawer chunks.
@@ -136,12 +355,20 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
     /// Name of the ChromaDB collection holding closet summaries.
     public var closetsCollection: String
 
+    /// The ceilings this adapter enforces on an untrusted palace root.
+    /// Configurable so a caller with a known-good oversized palace can
+    /// raise them deliberately, and so the limits are testable without
+    /// building a twenty-million-row fixture.
+    public var limits: MemPalaceImportLimits
+
     public init(
         drawersCollection: String = "mempalace_drawers",
-        closetsCollection: String = "mempalace_closets"
+        closetsCollection: String = "mempalace_closets",
+        limits: MemPalaceImportLimits = .default
     ) {
         self.drawersCollection = drawersCollection
         self.closetsCollection = closetsCollection
+        self.limits = limits
     }
 
     // MARK: - Palace layout (relative to the palace root)
@@ -176,11 +403,17 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
                 "MemPalace chroma store not found at \(chromaURL.path)")
         }
 
-        var notes = try chromaNotes(dbPath: chromaURL.path)
+        // ONE budget for the whole palace: the row and byte ceilings are
+        // totals for this import, not a fresh allowance per store.
+        let budget = MemPalaceImportBudget(limits: limits)
+
+        var notes = try chromaNotes(dbPath: chromaURL.path, budget: budget)
         notes += try Self.tunnelNotes(
-            jsonURL: vaultURL.appendingPathComponent(Self.tunnelsRelativePath))
+            jsonURL: vaultURL.appendingPathComponent(Self.tunnelsRelativePath),
+            budget: budget)
         notes += try Self.knowledgeGraphNotes(
-            dbPath: vaultURL.appendingPathComponent(Self.knowledgeGraphRelativePath).path)
+            dbPath: vaultURL.appendingPathComponent(Self.knowledgeGraphRelativePath).path,
+            budget: budget)
 
         // Deterministic order by stableSourceKey UTF-8 bytes — NOT Swift's
         // localized/canonical String `<` — so the sequence is identical to
@@ -203,8 +436,8 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
     // MARK: - Store 1: chroma.sqlite3
 
     /// Read both collections from the ChromaDB file into notes.
-    private func chromaNotes(dbPath: String) throws -> [NoteIR] {
-        let db = try SQLiteReadOnly(path: dbPath)
+    private func chromaNotes(dbPath: String, budget: MemPalaceImportBudget) throws -> [NoteIR] {
+        let db = try SQLiteReadOnly(path: dbPath, budget: budget)
         var notes: [NoteIR] = []
         for (collection, isCloset) in [(drawersCollection, false), (closetsCollection, true)] {
             // A palace may legitimately lack a collection (e.g. closets
@@ -243,10 +476,21 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
     /// numeric ones CAST to text by SQLite itself — see the adapter header
     /// for why that (and not host-language float formatting) is the
     /// cross-port determinism anchor.
+    ///
+    /// Rows are consumed through `forEachRow` and grouped as they arrive,
+    /// so this scan — the largest the adapter runs (447,955 rows /
+    /// 34,157,687 value-bytes on the measured real palace) — is
+    /// materialized ONCE. Reading it into an intermediate `[[String?]]`
+    /// first and regrouping afterwards would hold two full copies at
+    /// peak. The Rust port's cursor has always worked this way; this is
+    /// the Swift side matching it.
     static func metadataRows(
         db: SQLiteReadOnly, segmentID: String
     ) throws -> [(id: String, metadata: [String: String])] {
-        let rows = try db.query(
+        var out: [(id: String, metadata: [String: String])] = []
+        var currentID: String?
+        var currentMeta: [String: String] = [:]
+        try db.forEachRow(
             """
             SELECT e.embedding_id, m.key,
                    COALESCE(m.string_value,
@@ -259,12 +503,8 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
             ORDER BY e.id, m.key
             """,
             bindings: [segmentID]
-        )
-        var out: [(id: String, metadata: [String: String])] = []
-        var currentID: String?
-        var currentMeta: [String: String] = [:]
-        for row in rows {
-            guard let id = row[0], let key = row[1] else { continue }
+        ) { row in
+            guard let id = row[0], let key = row[1] else { return }
             if id != currentID {
                 if let finished = currentID { out.append((finished, currentMeta)) }
                 currentID = id
@@ -349,6 +589,17 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
 
     // MARK: - Store 2: tunnels.json
 
+    /// Size of a file on disk, or 0 when the attribute cannot be read.
+    ///
+    /// A file whose size is unreadable is charged as 0 rather than
+    /// rejected: the read that follows will fail on its own terms with a
+    /// filesystem error, and inventing a limit breach for a stat failure
+    /// would report the wrong cause.
+    static func fileByteCount(at url: URL) -> Int {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.intValue ?? 0
+    }
+
     /// One tunnel record as MemPalace `palace_graph.py` writes it.
     struct TunnelRecord: Decodable {
         struct Endpoint: Decodable {
@@ -365,8 +616,13 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
     /// Read `tunnels.json` into one note per tunnel. A missing file is the
     /// empty list (MemPalace semantics); a present-but-malformed file
     /// throws — silently dropping links would violate full fidelity.
-    static func tunnelNotes(jsonURL: URL) throws -> [NoteIR] {
+    /// The size is taken from the filesystem and charged to the budget
+    /// BEFORE the file is opened, so an oversized `tunnels.json` is
+    /// rejected without ever being read into memory.
+    static func tunnelNotes(jsonURL: URL, budget: MemPalaceImportBudget) throws -> [NoteIR] {
         guard FileManager.default.fileExists(atPath: jsonURL.path) else { return [] }
+        try budget.chargeTunnelsFile(
+            byteCount: Self.fileByteCount(at: jsonURL), path: jsonURL.path)
         let data = try Data(contentsOf: jsonURL)
         let records: [TunnelRecord]
         do {
@@ -420,9 +676,14 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
 
     /// Read the KG file into one note per entity and one per triple. A
     /// missing file is an empty KG (a palace whose KG was never built).
-    static func knowledgeGraphNotes(dbPath: String) throws -> [NoteIR] {
+    /// The file's size on disk is NOT charged: only the column text this
+    /// adapter actually materializes is, row by row, inside `query`. A
+    /// large SQLite file whose rows are never read costs no memory.
+    static func knowledgeGraphNotes(
+        dbPath: String, budget: MemPalaceImportBudget
+    ) throws -> [NoteIR] {
         guard FileManager.default.fileExists(atPath: dbPath) else { return [] }
-        let db = try SQLiteReadOnly(path: dbPath)
+        let db = try SQLiteReadOnly(path: dbPath, budget: budget)
         var notes: [NoteIR] = []
 
         for row in try db.query(
@@ -612,13 +873,27 @@ public struct MemPalaceChromaAdapter: VaultAdapter {
 ///
 /// Internal to VaultKit: this is adapter plumbing, not a storage API —
 /// estate persistence stays with PersistenceKit.
+///
+/// Every connection carries the import's `MemPalaceImportBudget` and
+/// installs a SQLite progress handler from it, so a query against an
+/// untrusted palace is abandoned rather than run to completion.
 final class SQLiteReadOnly {
 
     private var handle: OpaquePointer?
 
-    /// Open `path` read-only. Throws `VaultKitError.adapterError` with the
-    /// SQLite diagnostic when the file cannot be opened as a database.
-    init(path: String) throws {
+    /// The running totals every read on this connection is charged to.
+    let budget: MemPalaceImportBudget
+
+    /// Open `path` read-only, bounded by `budget`. Throws
+    /// `VaultKitError.adapterError` with the SQLite diagnostic when the
+    /// file cannot be opened as a database.
+    ///
+    /// `budget` defaults to a fresh one at the shipping limits so a
+    /// connection is never accidentally unbounded; callers importing a
+    /// whole palace pass a shared budget instead, making the row and byte
+    /// ceilings totals for the import.
+    init(path: String, budget: MemPalaceImportBudget = MemPalaceImportBudget()) throws {
+        self.budget = budget
         var db: OpaquePointer?
         let rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil)
         guard rc == SQLITE_OK, let db else {
@@ -627,17 +902,58 @@ final class SQLiteReadOnly {
             throw VaultKitError.adapterError("cannot open \(path) read-only: \(message)")
         }
         handle = db
+        // The budget is passed unretained: this connection holds a strong
+        // reference for its whole life and clears the handler in `deinit`
+        // before closing, so the pointer can never outlive the object.
+        sqlite3_progress_handler(
+            db,
+            budget.limits.sqliteProgressGrain,
+            memPalaceProgressHandler,
+            Unmanaged.passUnretained(budget).toOpaque())
     }
 
     deinit {
-        if let handle { sqlite3_close_v2(handle) }
+        if let handle {
+            // Clear before close so no callback can fire against a
+            // context pointer whose owner is going away.
+            sqlite3_progress_handler(handle, 0, nil, nil)
+            sqlite3_close_v2(handle)
+        }
     }
 
-    /// Run one SELECT with optional text bindings; every column of every
-    /// row is returned as optional text (`NULL` → nil).
+    /// Run one SELECT with optional text bindings, materializing every
+    /// row; each column comes back as optional text (`NULL` → nil).
+    ///
+    /// Bounded by the connection's budget exactly as `forEachRow` is —
+    /// this is a thin accumulator over it. Prefer `forEachRow` when the
+    /// caller can consume rows as they arrive; use this when it genuinely
+    /// needs the whole result at once.
     func query(_ sql: String, bindings: [String] = []) throws -> [[String?]] {
+        var rows: [[String?]] = []
+        try forEachRow(sql, bindings: bindings) { rows.append($0) }
+        return rows
+    }
+
+    /// Run one SELECT and hand each row to `body` as it is stepped, never
+    /// holding more than the current row.
+    ///
+    /// Every row is charged to the budget — one row against
+    /// `maxImportRows`, its column bytes against `maxMaterializedBytes` —
+    /// so a scan over an untrusted palace stops at the ceiling instead of
+    /// consuming memory without limit. A query the progress handler
+    /// interrupts is reported as the step limit by name rather than as
+    /// SQLite's generic "interrupted" diagnostic.
+    func forEachRow(
+        _ sql: String, bindings: [String] = [], _ body: ([String?]) throws -> Void
+    ) throws {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            // The progress handler runs during prepare as well as step —
+            // SQLite may interrupt while it is still planning the query, and
+            // a degenerate plan is exactly the case the step budget exists
+            // to catch. Name the limit here too, or the guard reports itself
+            // as a bare "interrupted".
+            if budget.interruptedByStepLimit { throw budget.stepLimitError() }
             throw VaultKitError.adapterError(
                 "prepare failed: \(String(cString: sqlite3_errmsg(handle)))")
         }
@@ -649,31 +965,40 @@ final class SQLiteReadOnly {
         for (index, value) in bindings.enumerated() {
             guard sqlite3_bind_text(stmt, Int32(index + 1), value, -1, transient) == SQLITE_OK
             else {
+                if budget.interruptedByStepLimit { throw budget.stepLimitError() }
                 throw VaultKitError.adapterError(
                     "bind failed: \(String(cString: sqlite3_errmsg(handle)))")
             }
         }
 
-        var rows: [[String?]] = []
         while true {
             let rc = sqlite3_step(stmt)
             if rc == SQLITE_DONE { break }
             guard rc == SQLITE_ROW else {
+                // The progress handler aborts a runaway statement with
+                // SQLITE_INTERRUPT; name the limit that did it rather
+                // than leaving the caller with "interrupted".
+                if budget.interruptedByStepLimit { throw budget.stepLimitError() }
                 throw VaultKitError.adapterError(
                     "step failed: \(String(cString: sqlite3_errmsg(handle)))")
             }
             let columnCount = sqlite3_column_count(stmt)
             var row: [String?] = []
             row.reserveCapacity(Int(columnCount))
+            var rowBytes = 0
             for column in 0..<columnCount {
                 if let text = sqlite3_column_text(stmt, column) {
+                    // sqlite3_column_bytes is the byte length of the value
+                    // just read as text — the honest memory cost of this
+                    // column, and cheaper than measuring the Swift String.
+                    rowBytes += Int(sqlite3_column_bytes(stmt, column))
                     row.append(String(cString: text))
                 } else {
                     row.append(nil)
                 }
             }
-            rows.append(row)
+            try budget.chargeRow(byteCount: rowBytes)
+            try body(row)
         }
-        return rows
     }
 }
