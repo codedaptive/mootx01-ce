@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.21.0
+version: 1.22.0
 status: accepted-1.1-target
-date: 2026-07-30
+date: 2026-08-04
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -330,10 +330,14 @@ deferred audit seal):**
 audit sealed only after ALL steps complete (§B-2a audit-seal ordering
 invariant):
 
-Step 1 (LocusKit storage, `estate.expunge(sealAudit: false)`): validates the
-confirmation flag and S-3 state gate, tombstones the drawer row, and zeroes
-the content blob — atomically. The gate produces an `AuditEvent` (substrate
-truth) but does NOT append it to the audit log yet.
+Step 1 (LocusKit storage; Swift `estate.expungeReturningUnsealedEvent(...)`,
+Rust `estate.expunge(..., seal_audit: false)`): validates the confirmation
+flag and S-3 state gate, tombstones the gate-admitted lineage members, and
+zeroes their content blobs — atomically. The gate produces an `AuditEvent`
+(substrate truth) but does NOT append it to the audit log yet. The call
+returns the full `ExpungeOutcome` (LOCUSKIT_SPEC B-8b): the unsealed event
+plus `refusedSiblingIDs` — the accepted lineage members the gate refused and
+preserved byte-identical.
 
 Step 2 (GLK orchestration, derived-state delete): when a `Corpus` is registered
 for the estate, call `Corpus.remove(sourceID: rowID)` to purge Drawer-keyed BM25,
@@ -343,6 +347,12 @@ lane/model ownership. A broad `destroyAllVectors` call is forbidden here.
 Canonical content was already zeroed by LocusKit in step 1; CorpusKit has no
 verbatim copy to scrub. With no Corpus or vector lane (`.locusOnly`), step 2 is
 a no-op.
+
+**Scrub scope (MXE-FA):** the step-2 fan-out covers the lineage chain MINUS
+the gate-refused siblings — vectors are deleted only for members the storage
+expunge actually scrubbed. A refused sibling's content survives, so its
+vector must survive with it; deleting it would produce a third inconsistent
+state (a row readable by id but invisible to search).
 
 Step 3 (audit seal):
 - **On success (steps 1+2 both complete):** GLK calls
@@ -360,9 +370,20 @@ The `"tombstone"` and `"expungeOrphan"` substrate verb strings both map to
 Consumers needing to distinguish a clean expunge from a partial one must read
 the substrate audit trail directly (the verb string is preserved there as-is).
 
-Direct LocusKit callers (bypassing GLK) use `estate.expunge(sealAudit: true,
-default)` and retain the historical single-step atomic contract — the audit
-is sealed inside `estate.expunge`, as before.
+**Partial outcome (MXE-FA):** the verb returns `ExpungeVerbOutcome`
+(`refusedSiblingIDs` / `refused_sibling_ids`; Swift not `@discardableResult`,
+Rust `Result<ExpungeVerbOutcome, VerbDispatchError>`). Binding invariant: **no
+layer reports success for an expunge that refused a sibling.** ARIA's
+`moot_erase_memory` reports a partial expunge as partial, naming the refused
+count and ids (ARIA_MCP_SPEC). GLK-internal consumers that cannot represent
+partiality in their return shape (`defragVagueItem` / `defrag_vague_item`)
+raise `VerbError.underlyingEstateFailure` instead of summarising the partial
+cascade as success.
+
+Direct LocusKit callers (bypassing GLK) use Swift `estate.expunge(...)` /
+Rust `estate.expunge(..., seal_audit: true)` and retain the historical
+single-call atomic contract — the audit is sealed inside the call, as before
+— receiving the same `ExpungeOutcome`.
 
 Both Swift and Rust ports implement this contract. Orphan-seal failures are
 propagated: in Swift, a `sealExpungeOrphanAudit` failure is logged at `.fault`
@@ -1894,6 +1915,19 @@ surface.
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.22.0 -- 2026-08-04
+
+- **B-2a partial-expunge honesty (MXE-FA).** Step 1 is documented as
+  returning the full `ExpungeOutcome` (unsealed event + refused sibling
+  ids); step 2's vector fan-out is scoped to actually-scrubbed members
+  (refused accepted siblings keep content AND vectors); the verb returns
+  the new `ExpungeVerbOutcome`, and the binding invariant is recorded: no
+  layer reports success for an expunge that refused a sibling.
+  `defragVagueItem` / `defrag_vague_item` raise
+  `.underlyingEstateFailure` on a partial vague cascade. Stale
+  `sealAudit:` phrasing on the Swift step-1/direct-caller paths corrected
+  to the shipped two-method surface.
 
 ### 1.21.0 -- 2026-08-03
 

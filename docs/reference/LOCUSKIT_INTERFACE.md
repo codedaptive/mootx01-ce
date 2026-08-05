@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.19.0
+version: 1.22.0
 status: active
 date: 2026-08-04
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -129,12 +129,27 @@ public actor Estate {
                            hydrationLevel: HydrationLevel) async throws -> FrameFilteredDrawers
     public func withdraw(rowID: RowID, reason: String? = nil) async throws
     public func mutate(rowID: RowID, kind: MutationKind, payload: String? = nil) async throws
-    // sealAudit: true (default) → audit sealed atomically inside this call (direct-caller contract).
-    // sealAudit: false → audit returned unsealed; caller seals via sealExpungeAudit/sealExpungeOrphanAudit.
-    // The GLK orchestration path (§B-2a) uses sealAudit:false to defer the seal until after the
-    // cross-kit vector delete, preventing a false-success audit on step-2 failure.
-    @discardableResult
-    public func expunge(rowID: RowID, reason: String, confirmation: Bool, now: Date = Date(), sealAudit: Bool = true) async throws -> AuditEvent?
+    // expunge seals the audit atomically inside the call (direct-caller contract);
+    // expungeReturningUnsealedEvent defers the seal — the GLK orchestration path (§B-2a)
+    // seals via sealExpungeAudit/sealExpungeOrphanAudit after the cross-kit vector delete,
+    // preventing a false-success audit on step-2 failure. (Rust keeps one
+    // Estate::expunge(..., seal_audit: bool) covering both paths.)
+    //
+    // Both wrappers return the full ExpungeOutcome (MXE-FA), deliberately NOT
+    // @discardableResult. Invariant (SPEC B-8b): an expunge that refused a sibling is not
+    // a success, and a layer that summarises it as one is the defect. On the sealing path
+    // auditEvent is nil (already sealed); on the deferred path it is always non-nil.
+    public func expunge(rowID: RowID, reason: String, confirmation: Bool, now: Date = Date()) async throws -> DrawerStore.ExpungeOutcome
+    func expungeReturningUnsealedEvent(rowID: RowID, reason: String, confirmation: Bool, now: Date = Date()) async throws -> DrawerStore.ExpungeOutcome
+    // The storage-layer verb behind expunge is DrawerStore.expungeGated (public; Rust trait
+    // DrawerStore::expunge_gated). It returns ExpungeOutcome rather than a bare event: the
+    // lineage walk preserves gate-refused (accepted, S-3) siblings byte-identical — no
+    // content/state/audit/erasure-ledger writes — and reports them so the caller can detect
+    // a partial expunge (SPEC B-8b).
+    public struct DrawerStore.ExpungeOutcome: Sendable {          // Rust: locus_kit::drawer_store::ExpungeOutcome
+        public let auditEvent: AuditEvent?                        // Rust: event: AuditEvent (always present)
+        public let refusedSiblingIDs: [String]                    // Rust: refused_sibling_ids: Vec<String>, walk order
+    }
     public func sealExpungeAudit(_ event: AuditEvent) async throws
     public func sealExpungeOrphanAudit(rowID: RowID, successEvent: AuditEvent, now: Date) async throws
     // sealExpungeOrphanAuditSynthetic: sweep path — constructs orphan event from current drawer
@@ -757,11 +772,19 @@ public actor DrawerStore {
     public func countRecallTraces() async throws -> Int
     /// Subject trio (progressive recall). Contract cap for `subject` length in characters.
     public static let subjectLengthContract = 120  // = Rust SUBJECT_LENGTH_CONTRACT
-    /// Writes subject + pipelineVersion + at in ONE atomic UPDATE. Rejects empty
-    /// or > subjectLengthContract subjects. Returns rows updated (0 = unknown id).
-    /// No bitmap write, no container-fingerprint rollup — nothing filters on subject.
+    /// Writes subject + pipelineVersion + at in ONE atomic UPDATE and seals a
+    /// "setSubject" custody audit event in the same transaction — the column
+    /// write and the audit append succeed or fail together. Rejects empty
+    /// or > subjectLengthContract subjects. Returns rows updated (0 = unknown
+    /// id, in which case no audit event is sealed). `changedBy` is the audit
+    /// actor (nil resolves to the manifest owner, or "estate"); `reason` is
+    /// the caller's note (nil ⇒ the event's reason is absent — the row still
+    /// seals). No bitmap write, no container-fingerprint rollup — nothing
+    /// filters on subject.
     public func setSubjectRepresentation(drawerId: String, subject: String,
-                                         pipelineVersion: String, at: Date) async throws -> Int
+                                         pipelineVersion: String, at: Date,
+                                         changedBy: String? = nil,
+                                         reason: String? = nil) async throws -> Int
     /// Subject debt: live, non-empty-content drawers whose subject is NULL or
     /// whose subject_pipeline_version differs from `pipelineVersion`.
     public func countMissingSubject(pipelineVersion: String) async throws -> Int
@@ -1415,7 +1438,20 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 
 ## Changelog
 
-### 1.19.0 -- 2026-08-04
+### 1.22.0 -- 2026-08-04
+
+- Audited subject write (MXE-SK, Codex cc90c5dcecb081918c159788e1ffb3d6):
+  `setSubjectRepresentation` gains `changedBy:` and `reason:` parameters
+  (defaulted, source-compatible) and now seals a `"setSubject"` custody
+  audit event in the same transaction as the trio UPDATE. Rust twin
+  `set_subject_representation` gains `changed_by: &str` and
+  `reason: Option<&str>` (trait + all backend impls). The `Estate`
+  passthrough keeps its 4-arg signature and supplies the manifest owner
+  (or "estate") as actor with no note. `Estate::mutate`'s
+  `SetSubject` arm now threads its mutate payload through as the audit
+  reason in both ports.
+
+### 1.21.0 -- 2026-08-04
 
 - **`KGFactIdentityBackfill` / `kg_fact_identity_backfill` (MXE-MI).** New
   public backfill entry, run only by `mootx01 upgrade`:
@@ -1457,6 +1493,26 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
   toVersion: 13)` adding the three identity columns (TEXT NOT NULL
   DEFAULT `''`) — the ladder entry MXE-KH's declaration-only change was
   missing.
+
+### 1.20.0 -- 2026-08-04
+
+- **Estate wrappers return `ExpungeOutcome` (MXE-FA).** Swift
+  `Estate.expunge` and `expungeReturningUnsealedEvent` return
+  `DrawerStore.ExpungeOutcome` instead of `AuditEvent?`
+  (`@discardableResult` removed so a refusal cannot be silently
+  discarded); Rust `Estate::expunge` returns `ExpungeOutcome` instead of
+  `AuditEvent`. The 1.19.0 note that `Estate.expunge` keeps its bare-event
+  contract is superseded. Also corrects the stale `sealAudit:` parameter
+  shown on the Swift signature — the shipped surface is the two-method
+  split (secfix/ws2-coredelete).
+
+### 1.19.0 -- 2026-08-04
+
+- `DrawerStore.expungeGated` / `DrawerStore::expunge_gated` now returns
+  `ExpungeOutcome` (Swift: `auditEvent` + `refusedSiblingIDs`; Rust: `event` +
+  `refused_sibling_ids`): gate-refused (accepted, S-3) lineage siblings are
+  preserved byte-identical and reported, making a partial expunge detectable
+  (SPEC B-8b; MXE-EZ). `Estate.expunge` signatures unchanged in both ports.
 
 ### 1.18.0 -- 2026-08-03
 

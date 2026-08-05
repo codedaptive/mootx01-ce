@@ -2148,7 +2148,21 @@ extension ToolDispatcher {
                 "Set confirmed=true only after the owner has explicitly reviewed and approved the deletion."
             )
         }
-        try await kit.expunge(handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
+        let outcome = try await kit.expunge(
+            handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
+        // Honest reporting (SPEC B-8b, MXE-FA): a caller acting on this
+        // sentence is making a privacy decision on it. When the audit gate
+        // refused accepted lineage siblings, the expunge was partial — say
+        // so, name the count, and name the surviving ids. The full-success
+        // shape stays byte-identical to the historical response.
+        guard outcome.refusedSiblingIDs.isEmpty else {
+            let refused = outcome.refusedSiblingIDs
+            return Self.textResult(
+                "partially erased memory \(rowID): \(refused.count) accepted lineage "
+                + "sibling(s) refused erasure and remain readable: "
+                + refused.joined(separator: ", ")
+            )
+        }
         return Self.textResult("erased memory \(rowID)")
     }
 

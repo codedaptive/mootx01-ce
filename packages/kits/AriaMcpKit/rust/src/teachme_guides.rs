@@ -257,9 +257,19 @@ Example:
 
 Response: \"erased memory <id>\"
 
+Partial response (lineage contains accepted rows):
+  \"partially erased memory <id>: <N> accepted lineage sibling(s) refused \
+erasure and remain readable: <ids>\"
+Erasure walks the target's full lineage, but the audit gate refuses to
+tombstone accepted rows — those siblings keep their content and stay
+recallable. Treat a partial response as a partial erasure: the named ids
+were NOT erased.
+
 Mistakes:
   — Omitting confirmed or sending confirmed:false returns isError:true.
-  — This action cannot be undone. Use moot_withdraw_memory for recoverable deletion.";
+  — This action cannot be undone. Use moot_withdraw_memory for recoverable deletion.
+  — Reading a partial response as success. The refused ids named in the
+    response still hold their content.";
 
 const GUIDE_CONFIRM_MEMORY: &str = "\
 moot_confirm_memory — mark a memory as user-confirmed

@@ -81,7 +81,7 @@ struct DatasetHandleLifecycleTests {
         #expect(rowsBefore.isEmpty, "table exists but should be empty before expunge")
 
         // GLK expunge: Step 2.5 drops the dataset table; Step 3 seals the tombstone.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "lifecycle-tests erase", confirmation: true
         ))
 
@@ -116,7 +116,7 @@ struct DatasetHandleLifecycleTests {
             latticeAnchor:     LatticeAnchor(udcCode: "004")
         )
 
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "audit test", confirmation: true
         ))
 
@@ -152,7 +152,7 @@ struct DatasetHandleLifecycleTests {
         let stored = try await kit.capture(handle, frame)
 
         // Expunge should succeed normally; no dataset cascade fires.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: stored.id, reason: "non-dataset expunge", confirmation: true
         ))
 
@@ -185,7 +185,7 @@ struct DatasetHandleLifecycleTests {
         )
 
         // Expunge should succeed even with no backing dataset table.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "no-table cascade", confirmation: true
         ))
     }

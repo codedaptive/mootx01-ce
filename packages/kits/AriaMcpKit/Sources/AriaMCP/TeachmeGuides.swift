@@ -288,6 +288,14 @@ enum TeachmeGuides {
         Response:
           erased memory abc-123
 
+        Partial response (lineage contains accepted rows):
+          partially erased memory abc-123: 1 accepted lineage sibling(s)
+          refused erasure and remain readable: def-456
+        Erasure walks the target's full lineage, but the audit gate refuses
+        to tombstone accepted rows — those siblings keep their content and
+        stay recallable. Treat a partial response as a partial erasure: the
+        named ids were NOT erased.
+
         Common mistakes:
           - Calling without confirmed=true. The call is refused immediately.
           - Using erase when withdraw would suffice. Erase is intended for
@@ -295,6 +303,8 @@ enum TeachmeGuides {
           - Erasing with a vague reason. The reason is the audit record.
           - Setting confirmed=true without owner review. The gate protects
             against prompt-injection attacks; do not bypass it.
+          - Reading a partial response as success. The refused ids named in
+            the response still hold their content.
         """
 
     private static let confirmMemoryGuide = """

@@ -626,10 +626,27 @@ extension GeniusLocusKit {
         now: Date,
         config: ConsolidationConfig = ConsolidationConfig()
     ) async throws -> ConsolidationSweepReport {
-        try await expunge(handle, ExpungeFrame(
+        let outcome = try await expunge(handle, ExpungeFrame(
             rowID: vagueDrawerID,
             reason: "wave-2 defrag: cluster drift exceeded the D10 threshold",
             confirmation: true), now: now)
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling is
+        // not a success. This path returns a ConsolidationSweepReport, which
+        // cannot represent a partial cascade, so a refusal must surface as an
+        // error rather than be summarised away. Vague items are
+        // machine-generated and their lineage should never contain an
+        // accepted row; if one does (a user accepted a vague revision), the
+        // gate preserves it and defrag stops before re-consolidating.
+        guard outcome.refusedSiblingIDs.isEmpty else {
+            throw VerbError.underlyingEstateFailure(
+                verb: "expunge",
+                reason: "defrag expunge of vague drawer \(vagueDrawerID) was partial: "
+                    + "\(outcome.refusedSiblingIDs.count) accepted lineage sibling(s) "
+                    + "refused by the audit gate and preserved "
+                    + "(\(outcome.refusedSiblingIDs.joined(separator: ", "))); "
+                    + "the vague cascade cannot complete"
+            )
+        }
         return try await consolidationSweepReport(
             handle: handle, distillFn: distillFn, now: now, config: config)
     }

@@ -1379,7 +1379,7 @@ struct VaultBridgeTests {
         // triggered the resurrection bug in the original transcript.
         let drawers = try await currentDrawers(kit, handle)
         let drawer = try #require(drawers.first)
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id,
             reason: "test-expunge",
             confirmation: true

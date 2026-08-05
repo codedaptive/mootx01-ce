@@ -1623,7 +1623,22 @@ fn run_erase_memory(
     // (§B-2a) threads it so the success-audit timestamp is deterministic downstream.
     let now = wall_now();
     match coord.expunge(&estate.handle, id, reason, confirmed, now) {
-        Ok(()) => Ok(text_result(&format!("erased memory {id}"))),
+        // Honest reporting (SPEC B-8b, MXE-FA): a caller acting on this
+        // sentence is making a privacy decision on it. When the audit gate
+        // refused accepted lineage siblings, the expunge was partial — say
+        // so, name the count, and name the surviving ids. The full-success
+        // shape stays byte-identical to the historical response. Mirrors
+        // Swift `runEraseMemory`.
+        Ok(outcome) if !outcome.refused_sibling_ids.is_empty() => {
+            let refused = &outcome.refused_sibling_ids;
+            Ok(text_result(&format!(
+                "partially erased memory {id}: {} accepted lineage sibling(s) \
+                 refused erasure and remain readable: {}",
+                refused.len(),
+                refused.join(", ")
+            )))
+        }
+        Ok(_) => Ok(text_result(&format!("erased memory {id}"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }
 }

@@ -1271,7 +1271,7 @@ struct RecallDirectorSafetyTests {
         )
 
         // Expunge the drawer — sets tombstonedAt in LocusKit; CorpusKit is unchanged.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id,
             reason: "test: verify tombstone exclusion from recall results",
             confirmation: true

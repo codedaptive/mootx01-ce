@@ -391,6 +391,23 @@ pub struct ExpungeIntegritySweepResult {
     pub per_row_errors: Vec<String>,
 }
 
+/// Outcome of one composed expunge verb call (SPEC B-8b, MXE-FA).
+///
+/// The storage layer refuses `accepted → tombstoned` lineage siblings (S-3)
+/// and preserves them byte-identical. This type carries that refusal to the
+/// verb's caller: an expunge that refused a sibling is not a success, and a
+/// layer that summarises it as one is the defect. Twin of the Swift
+/// `ExpungeVerbOutcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpungeVerbOutcome {
+    /// IDs of lineage members the audit gate refused to tombstone (accepted
+    /// rows, S-3), in walk order. Empty means the expunge covered the full
+    /// lineage — content scrubbed, vectors deleted, erasure ledger recorded
+    /// for every member. Non-empty means those members keep their content
+    /// AND their vectors, remain recallable, and were never ledgered.
+    pub refused_sibling_ids: Vec<String>,
+}
+
 /// The outcome of a verb dispatch. Rust needs a typed error where Swift
 /// uses untyped `throws` over two domains: `estate(for:)` throwing
 /// `GeniusLocusKitError.estateNotOpen` (outside the per-verb do/catch), and
@@ -3757,13 +3774,34 @@ impl EstateCoordinator {
         config: &crate::brain::consolidation_cycle::ConsolidationConfig,
     ) -> Result<crate::brain::consolidation_cycle::ConsolidationSweepReport, VerbDispatchError>
     {
-        self.expunge(
+        let outcome = self.expunge(
             handle,
             vague_drawer_id,
             "wave-2 defrag: cluster drift exceeded the D10 threshold",
             true,
             now,
         )?;
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling is
+        // not a success. This path returns a ConsolidationSweepReport, which
+        // cannot represent a partial cascade, so a refusal must surface as an
+        // error rather than be summarised away. Vague items are
+        // machine-generated and their lineage should never contain an
+        // accepted row; if one does (a user accepted a vague revision), the
+        // gate preserves it and defrag stops before re-consolidating. Twin
+        // of the Swift `defragVagueItem` guard.
+        if !outcome.refused_sibling_ids.is_empty() {
+            return Err(VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "expunge".to_string(),
+                reason: format!(
+                    "defrag expunge of vague drawer {} was partial: {} accepted \
+                     lineage sibling(s) refused by the audit gate and preserved ({}); \
+                     the vague cascade cannot complete",
+                    vague_drawer_id,
+                    outcome.refused_sibling_ids.len(),
+                    outcome.refused_sibling_ids.join(", ")
+                ),
+            }));
+        }
         self.consolidation_sweep_report(handle, now, config, None)
     }
 
@@ -4503,6 +4541,17 @@ impl EstateCoordinator {
     ///
     /// Direct LocusKit callers (bypassing GLK) use `estate.expunge` with the
     /// default `seal_audit: true` and are unaffected by this change.
+    ///
+    /// **Partial outcome (SPEC B-8b, MXE-FA):** the storage expunge refuses
+    /// `accepted → tombstoned` lineage siblings (S-3) and preserves them
+    /// byte-identical. The returned `ExpungeVerbOutcome` names those refused
+    /// members; step 2 deletes vectors ONLY for members that were actually
+    /// scrubbed, so a refused sibling keeps both its content and its vector
+    /// (deleting the vector of a surviving row would make it readable by id
+    /// but invisible to search — a third inconsistent state). An expunge
+    /// that refused a sibling is not a success, and a caller that
+    /// summarises it as one is the defect. Twin of the Swift
+    /// `VerbSurface.expunge`.
     pub fn expunge(
         &self,
         handle: &EstateHandle,
@@ -4510,7 +4559,7 @@ impl EstateCoordinator {
         reason: &str,
         confirmation: bool,
         now: i64,
-    ) -> Result<(), VerbDispatchError> {
+    ) -> Result<ExpungeVerbOutcome, VerbDispatchError> {
         if !confirmation {
             return Err(VerbError::ExpungeNotConfirmed {
                 row_id: row_id.to_string(),
@@ -4541,11 +4590,14 @@ impl EstateCoordinator {
             });
 
         // Step 1 — LocusKit storage expunge with deferred audit seal.
-        // The gate-produced AuditEvent is returned unsealed; we hold it until
-        // step 2 confirms the cross-kit delete succeeded (§B-2a ordering).
-        let unsealed_event = estate
+        // The full ExpungeOutcome comes back: the gate-produced AuditEvent
+        // (held unsealed until step 2 confirms the cross-kit delete, §B-2a)
+        // plus the gate-refused sibling ids (SPEC B-8b).
+        let storage_outcome = estate
             .expunge(row_id, reason, confirmation, now, false)
             .map_err(|e| remap("expunge", &uuid_to_str(&handle.estate_uuid), e))?;
+        let unsealed_event = storage_outcome.event;
+        let refused_sibling_ids = storage_outcome.refused_sibling_ids;
 
         // Step 2 — Cross-kit vector delete (fail-closed; must not be silent).
         //
@@ -4575,10 +4627,20 @@ impl EstateCoordinator {
             // head plus every predecessor in one pass. An empty result
             // (no lineageID or row not found) falls back to [row_id] to
             // guarantee the head row is always processed.
+            //
+            // Scrub scope (SPEC B-8b, MXE-FA): vectors are deleted ONLY for
+            // members the storage expunge actually scrubbed — the chain
+            // minus the gate-refused siblings. A refused sibling's content
+            // survives byte-identical, so its vector must survive too;
+            // deleting it would leave the row readable by id but invisible
+            // to search.
             let ids_to_delete: Vec<String> = match estate.lineage_chain(row_id) {
                 Ok(chain) if !chain.is_empty() => chain,
                 _ => vec![row_id.to_string()],
-            };
+            }
+            .into_iter()
+            .filter(|id| !refused_sibling_ids.contains(id))
+            .collect();
 
             let step2_result: Result<(), VerbDispatchError> = (|| {
                 for delete_id in &ids_to_delete {
@@ -4752,12 +4814,17 @@ impl EstateCoordinator {
         }
 
         // Step 3 — Seal success audit. Both storage and cross-kit delete
-        // succeeded; the audit now correctly records a complete expunge.
+        // succeeded for every gate-admitted member; the audit records what
+        // was actually erased. Refused siblings were never scrubbed, never
+        // vector-deleted, and never ledgered — the returned outcome is the
+        // caller's only honest summary (SPEC B-8b).
         estate
             .seal_expunge_audit(&unsealed_event)
             .map_err(|e| remap("expunge", &uuid_to_str(&handle.estate_uuid), e))?;
 
-        Ok(())
+        Ok(ExpungeVerbOutcome {
+            refused_sibling_ids,
+        })
     }
 
     // MARK: - run_expunge_integrity_sweep

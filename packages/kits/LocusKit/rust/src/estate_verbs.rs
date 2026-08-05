@@ -1876,6 +1876,15 @@ impl Estate {
     /// The `now` parameter is epoch seconds (same unit as `capture` and
     /// `withdraw`). Passing it explicitly makes the operation deterministic —
     /// callers use their own clock snapshot.
+    ///
+    /// Returns the full `ExpungeOutcome`: `event` is the gate-produced audit
+    /// event (sealed when `seal_audit` was true, unsealed otherwise) and
+    /// `refused_sibling_ids` names every lineage member the gate refused
+    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
+    /// refused a sibling is not a success, and a layer that summarises it as
+    /// one is the defect — every caller must consume the outcome and
+    /// propagate, or explicitly acknowledge, the refusal. Twin of the Swift
+    /// `Estate.expunge` / `expungeReturningUnsealedEvent` wrappers.
     pub fn expunge(
         &self,
         row_id: &str,
@@ -1883,7 +1892,7 @@ impl Estate {
         confirmation: bool,
         now: i64,
         seal_audit: bool,
-    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+    ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         if !confirmation {
             return Err(LocusKitError::InvalidContent(
                 "expunge requires confirmation: true (destructive op)".to_string(),
@@ -1939,13 +1948,13 @@ impl Estate {
         for room_uuid in affected_room_ids {
             let _ = self.rollup_merkle_roots(room_uuid, now);
         }
-        // outcome.refused_sibling_ids (gate-refused, preserved accepted
-        // members) is not surfaced through Estate::expunge — this wrapper
-        // keeps its AuditEvent contract so GLK's §B-2a seal path is
-        // unchanged; partial-expunge visibility at the Estate/ARIA
-        // surface is a separate product decision. Twin of the Swift
-        // EstateVerbs.expunge wrapper.
-        Ok(outcome.event)
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
+        // is not a success, and a layer that summarises it as one is the
+        // defect. The outcome — event AND refused_sibling_ids — is returned
+        // whole so GLK can scope its cross-kit vector delete to the scrubbed
+        // members and report a partial expunge as partial. Twin of the Swift
+        // EstateVerbs wrappers.
+        Ok(outcome)
     }
 
     /// Return all drawer ids sharing the same lineage as `row_id`.

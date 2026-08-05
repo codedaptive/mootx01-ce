@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.26.0
+version: 1.28.0
 status: accepted-1.1-target
-date: 2026-08-03
+date: 2026-08-04
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -153,6 +153,63 @@ to AI clients rather than the substrate's internal grammar vocabulary.
 One federation tool (`moot_federated_search`) sits above the interface tier. It performs
 a grant-authorized federated read across all locally-open estates the requester is
 authorized for.
+
+### Structured recall results (MXE-SS)
+
+The recall family — `moot_memory_search`, `moot_memory_get`,
+`moot_recall_shaped`, and `moot_recall_precise` — declares an `outputSchema`
+on its tool descriptors and returns `structuredContent` on every successful
+`tools/call` result, alongside (never instead of) the text block. This is
+the MCP-sanctioned structured-result mechanism; the text block keeps its
+exact prior bytes, so text-reading consumers are unaffected.
+
+Contract, both ports (one shared schema, identical field names):
+
+- `structuredContent` is `{"results": [...]}` — one entry per drawer row
+  the text block renders: same admissible set, same order, same 50-row cap.
+  Each entry carries `id` (required), and `room`, `content`, `subject` when
+  the text's tier carries their analog.
+- **Redaction parity is an invariant.** Whatever the text block withholds,
+  the structured block withholds identically: a provenance-restricted or
+  provenance-secret row carries the dense-row redaction marker in `subject`
+  AND `content`, never the body; an id the text renders opaquely
+  (unhydrated/gated) carries `id` plus the `(no subject)` marker only —
+  no room, no content; a row `moot_memory_get` reports not-found appears in
+  neither block. A structured field MUST never carry content the text
+  block redacted.
+- `moot_memory_get` depth tiers mirror the text: `content` is absent at
+  `depth:subject`, carries the distillate (or the fallback body) at
+  `depth:distilled`, and the verbatim body at `depth:full`; at full-record
+  depth `subject` is present only when the drawer carries one, matching
+  the record's omitted subject line.
+- Out of scope by design: `moot_recall_vague` (annotated two-tier reply),
+  `moot_recall_distilled` (ACK-gated v2 contract), `moot_memory_list`
+  (structural enumeration), `moot_federated_search` (federation redaction
+  posture is its own contract), and lens/citation surfaces.
+
+Conformance: `StructuredRecallResultTests` (Swift) ↔
+`structured_recall_tests.rs` (Rust) pin the shared schema's field names
+cross-port and prove the redaction-parity tests fail against a naive
+implementation that copies unredacted values.
+
+### Partial-erase honesty (`moot_erase_memory`, MXE-FA)
+
+Erasure walks the target's full lineage, and the substrate audit gate refuses
+to tombstone accepted rows (LOCUSKIT_SPEC B-8b) — those siblings keep their
+content, their vectors, and stay recallable. The tool's response must match
+what happened:
+
+- **Full erasure** (no refusals): `erased memory <id>` — byte-identical to
+  the historical shape.
+- **Partial erasure** (gate refused accepted siblings):
+  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
+  erasure and remain readable: <ids>` — a normal text result
+  (`isError: false`; the operation completed, with a partial outcome).
+
+Binding invariant: a caller acting on this sentence is making a privacy
+decision on it, so the response never claims a plain success for an expunge
+that refused a sibling. Both ports emit the same text. The erasure ledger
+records only what was actually erased.
 
 ### Contradiction hunter surface
 
@@ -906,6 +963,27 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.28.0 -- 2026-08-04
+
+- **Structured recall results (MXE-SS).** New § 11 subsection: the recall
+  family (`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`,
+  `moot_recall_precise`) declares an `outputSchema` and returns
+  `structuredContent` (`results[]` of `id`/`room`/`content`/`subject`)
+  alongside a byte-identical text block, with redaction parity as an
+  invariant: no structured field ever carries what the text withheld.
+  Both ports, one shared schema. No consumer changed (that is MXE-DF).
+
+### 1.27.0 -- 2026-08-04
+
+- **Partial-erase honesty (MXE-FA).** New § documenting the
+  `moot_erase_memory` response contract: full erasure keeps
+  `erased memory <id>` byte-identical; a lineage expunge the audit gate
+  refused for accepted siblings responds
+  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
+  erasure and remain readable: <ids>` (`isError: false`). No response ever
+  claims a plain success for an expunge that refused a sibling. Both ports;
+  teachme guides document both shapes.
 
 ### 1.26.0 -- 2026-08-03
 Every drawer-derived aggregate in the `moot_estate_status` response now reads

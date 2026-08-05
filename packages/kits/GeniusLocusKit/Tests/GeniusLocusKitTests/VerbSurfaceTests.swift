@@ -188,7 +188,7 @@ struct VerbSurfaceTests {
     func expungeWithoutConfirmationRaisesGuard() async throws {
         let (kit, handle) = try await openOneEstate()
         let thrown = await #expect(throws: VerbError.self) {
-            try await kit.expunge(handle, ExpungeFrame(rowID: "any", reason: "test", confirmation: false))
+            _ = try await kit.expunge(handle, ExpungeFrame(rowID: "any", reason: "test", confirmation: false))
         }
         if case .expungeNotConfirmed? = thrown {} else {
             Issue.record("expected .expungeNotConfirmed, got \(String(describing: thrown))")
@@ -203,7 +203,7 @@ struct VerbSurfaceTests {
     func expungeWithConfirmationTombstonesRow() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "expunge target"))
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: stored.id, reason: "verb tests", confirmation: true
         ))
         let activeRows = try await kit.recall(handle, recallAllActive())

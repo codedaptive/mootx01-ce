@@ -199,7 +199,7 @@ struct ExpungeIntegritySweepTests {
             handle, captureFrame(content: content), mode: .impatient)
 
         // Full expunge via GLK — seals the "tombstone" success audit.
-        try await kit.expunge(handle, ExpungeFrame(
+        _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: drawer.id, reason: "full expunge for noop test", confirmation: true))
 
         // Run the sweep. Must find nothing to remediate.

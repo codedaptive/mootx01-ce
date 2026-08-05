@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.30.0
+version: 1.32.0
 status: accepted-1.1-target
-date: 2026-08-03
+date: 2026-08-04
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -166,6 +166,7 @@ public struct ProjectedTool: Sendable, Equatable {
     public let description: String
     public let inputSchema: JSONValue
     public let provenance: ToolProvenance
+    public let outputSchema: JSONValue?  // MXE-SS: nil for text-only tools (key omitted on the wire); the recall family declares the shared recall-results schema
 }
 public enum ToolProjection {
     public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
@@ -173,8 +174,18 @@ public enum ToolProjection {
     public static func memoryToolEnabled(environment: [String: String]) -> Bool  // opt-in memory_20250818 adapter (MOOTX01_MEMORY_TOOL=1); default OFF
     public static var memoryToolEnabled: Bool
     public static func federationTool() -> ProjectedTool
+    static func recallResultsOutputSchema() -> JSONValue  // the ONE schema the recall family shares; Rust twin: tool_list.rs::recall_results_output_schema()
 }
 ```
+
+`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`, and
+`moot_recall_precise` declare `recallResultsOutputSchema()` and return
+`structuredContent` (`{"results": [{id, room, content, subject}]}`) on every
+success alongside the unchanged text block, via
+`ToolDispatcher.structuredTextResult` (Rust
+`interface_tools::structured_text_result`). Redaction parity is a SPEC
+invariant (ARIA_MCP_SPEC § 11 "Structured recall results"): the structured
+block withholds exactly what the text block withholds.
 
 #### Five-tier AI-client interface (`.interface` provenance, 22 five-tier tools)
 
@@ -710,6 +721,13 @@ Coaching triggers (see SPEC §12 for the full table):
 `moot_link_memories` — IDs not found;
 any lens tool — zero results.
 
+`moot_erase_memory` response contract (MXE-FA): full erasure returns
+`erased memory <id>`; a lineage expunge the audit gate refused for accepted
+siblings returns `partially erased memory <id>: <N> accepted lineage
+sibling(s) refused erasure and remain readable: <ids>` (`isError: false` —
+completed operation, partial outcome; SPEC § Partial-erase honesty). Both
+ports emit the same text; the teachme guide documents both shapes.
+
 ### Dispatch — `ToolDispatcher`
 
 Routes a `tools/call` against one or more locally-open GeniusLocusKit
@@ -1187,6 +1205,28 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.32.0 -- 2026-08-04
+
+- **Structured recall results (MXE-SS).** `ProjectedTool` gains an
+  optional `outputSchema` (nil → key omitted from the `tools/list` entry;
+  text-only tool entries byte-identical to before). The recall family
+  (`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`,
+  `moot_recall_precise`) declares the shared
+  `recallResultsOutputSchema()` (Rust
+  `tool_list.rs::recall_results_output_schema()`) and returns
+  `structuredContent` alongside the unchanged text block through the new
+  `structuredTextResult` envelope helper. Redaction parity per
+  ARIA_MCP_SPEC 1.28.0 § 11.
+
+### 1.31.0 -- 2026-08-04
+
+- **`moot_erase_memory` partial-response contract (MXE-FA).** Documents
+  the two response shapes: `erased memory <id>` (full) and
+  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
+  erasure and remain readable: <ids>` (partial, `isError: false`). Backed
+  by GLK's new `ExpungeVerbOutcome` return
+  (GENIUSLOCUSKIT_INTERFACE 1.28.0). Teachme guides updated in both ports.
 
 ### 1.30.0 -- 2026-08-03
 Observable output change on `moot_estate_status`: the `memories: N active

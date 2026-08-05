@@ -1101,13 +1101,21 @@ public extension Estate {
     /// that method is the only path that defers the seal. Removing `sealAudit`
     /// from this public surface prevents any caller from accidentally suppressing
     /// the audit event (secfix/ws2-coredelete).
-    @discardableResult
+    ///
+    /// Returns the full `DrawerStore.ExpungeOutcome`. `refusedSiblingIDs`
+    /// names every lineage member the gate refused (accepted rows, S-3);
+    /// `auditEvent` is nil on this path because the event was sealed inside
+    /// the transaction. The result is deliberately NOT `@discardableResult`:
+    /// an expunge that refused a sibling is not a success, and a layer that
+    /// summarises it as one is the defect (SPEC B-8b, MXE-FA). Every caller
+    /// must consume the outcome and propagate — or explicitly acknowledge —
+    /// the refusal.
     func expunge(
         rowID: RowID,
         reason: String,
         confirmation: Bool,
         now: Date = Date()
-    ) async throws -> AuditEvent? {
+    ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
             throw LocusKitError.invalidContent(
                 "expunge requires confirmation: true (destructive op)"
@@ -1142,22 +1150,32 @@ public extension Estate {
         for roomNodeId in affectedRoomIds {
             try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
         }
-        // outcome.refusedSiblingIDs (gate-refused, preserved accepted
-        // members) is not surfaced through Estate.expunge — this wrapper
-        // keeps its AuditEvent? contract; partial-expunge visibility at
-        // the Estate/ARIA surface is a separate product decision.
-        return outcome.auditEvent
+        // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
+        // is not a success, and a layer that summarises it as one is the
+        // defect. The outcome — including refusedSiblingIDs — is returned
+        // whole so no consumer above this boundary can mistake a partial
+        // expunge for a complete one.
+        return outcome
     }
 
-    /// Expunge a drawer and return the unsealed audit event for deferred sealing.
+    /// Expunge a drawer and return the full outcome with the unsealed audit
+    /// event for deferred sealing.
     ///
     /// This is the GeniusLocusKit-exclusive entry point for the two-step §B-2a
     /// expunge orchestration: GLK calls this (step 1), performs its cross-kit
     /// vector/corpus delete (step 2), then seals via `sealExpungeAudit(_:)` or
-    /// `sealExpungeOrphanAudit(rowID:successEvent:now:)` (step 3). The return
-    /// value is always non-nil when the gate succeeds; a nil return indicates an
-    /// internal contract violation and must not be silently swallowed — GLK uses
-    /// a force-unwrap (`!`) as a deliberate programmer-error trap.
+    /// `sealExpungeOrphanAudit(rowID:successEvent:now:)` (step 3). The
+    /// outcome's `auditEvent` is always non-nil when the gate succeeds; a nil
+    /// event indicates an internal contract violation and must not be silently
+    /// swallowed — GLK uses a force-unwrap (`!`) as a deliberate
+    /// programmer-error trap.
+    ///
+    /// `refusedSiblingIDs` names every lineage member the gate refused
+    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
+    /// refused a sibling is not a success, and a layer that summarises it as
+    /// one is the defect — GLK must scope its cross-kit vector delete to the
+    /// members that were actually scrubbed and must report the refusal to its
+    /// own callers.
     ///
     /// Separating this path from `expunge()` prevents arbitrary callers from
     /// suppressing the audit event. The `sealAudit:` parameter no longer exists
@@ -1167,7 +1185,7 @@ public extension Estate {
         reason: String,
         confirmation: Bool,
         now: Date = Date()
-    ) async throws -> AuditEvent? {
+    ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
             throw LocusKitError.invalidContent(
                 "expunge requires confirmation: true (destructive op)"
@@ -1198,10 +1216,11 @@ public extension Estate {
         for roomNodeId in affectedRoomIds {
             try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
         }
-        // outcome.refusedSiblingIDs is not surfaced through this wrapper
-        // (see expunge() above); GLK receives the unsealed AuditEvent
-        // exactly as before.
-        return outcome.auditEvent
+        // Invariant (SPEC B-8b, MXE-FA): the whole outcome flows up —
+        // unsealed event AND refusedSiblingIDs — so GLK can scope its
+        // cross-kit vector delete to the scrubbed members and report a
+        // partial expunge as partial. See expunge() above.
+        return outcome
     }
 
     /// Return all drawer ids sharing the same lineage as `rowID`.

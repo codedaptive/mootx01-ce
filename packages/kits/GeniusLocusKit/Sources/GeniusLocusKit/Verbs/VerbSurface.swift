@@ -46,6 +46,27 @@ public struct ExpungeIntegritySweepResult: Sendable, Equatable {
     public init() {}
 }
 
+/// Outcome of one composed expunge verb call (SPEC B-8b, MXE-FA).
+///
+/// The storage layer refuses `accepted → tombstoned` lineage siblings (S-3)
+/// and preserves them byte-identical. This type carries that refusal to the
+/// verb's caller: an expunge that refused a sibling is not a success, and a
+/// layer that summarises it as one is the defect. The expunge verb is
+/// deliberately not `@discardableResult` so no caller can drop this value
+/// without writing it out explicitly.
+public struct ExpungeVerbOutcome: Sendable, Equatable {
+    /// IDs of lineage members the audit gate refused to tombstone (accepted
+    /// rows, S-3), in walk order. Empty means the expunge covered the full
+    /// lineage — content scrubbed, vectors deleted, erasure ledger recorded
+    /// for every member. Non-empty means those members keep their content
+    /// AND their vectors, remain recallable, and were never ledgered.
+    public let refusedSiblingIDs: [String]
+
+    public init(refusedSiblingIDs: [String]) {
+        self.refusedSiblingIDs = refusedSiblingIDs
+    }
+}
+
 /// The unified nine-verb surface on `GeniusLocusKit`.
 ///
 /// Per the architecture spec §7.8 and the engineering cookbook §10,
@@ -705,7 +726,20 @@ public extension GeniusLocusKit {
     /// **`now` threading:** the same `Date` value flows through all three steps
     /// so HLC stamps are monotone and deterministic — `Date()` is never called
     /// inside the engine (spec I-6).
-    func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame, now: Date = Date()) async throws {
+    ///
+    /// **Partial outcome (SPEC B-8b, MXE-FA):** the storage expunge refuses
+    /// `accepted → tombstoned` lineage siblings (S-3) and preserves them
+    /// byte-identical. The returned `ExpungeVerbOutcome` names those refused
+    /// members; step 2 deletes vectors ONLY for members that were actually
+    /// scrubbed, so a refused sibling keeps both its content and its vector
+    /// (deleting the vector of a surviving row would make it readable by id
+    /// but invisible to search — a third inconsistent state). The result is
+    /// deliberately NOT `@discardableResult`: an expunge that refused a
+    /// sibling is not a success, and a caller that summarises it as one is
+    /// the defect.
+    func expunge(
+        _ handle: EstateHandle, _ frame: ExpungeFrame, now: Date = Date()
+    ) async throws -> ExpungeVerbOutcome {
         try requireMounted(handle, verb: "expunge")
         guard frame.confirmation else {
             throw VerbError.expungeNotConfirmed(rowID: frame.rowID)
@@ -734,22 +768,24 @@ public extension GeniusLocusKit {
         // seal in step 3 so the audit log only records success after the
         // cross-kit delete (§B-2a ordering). Storage failure remaps via remap
         // and aborts; the cross-kit step is never reached.
-        // expungeReturningUnsealedEvent always returns a non-nil event on
-        // success; nil would indicate a DrawerStore contract violation.
+        // expungeReturningUnsealedEvent returns the full ExpungeOutcome:
+        // the unsealed audit event plus the gate-refused sibling ids.
+        let storageOutcome: DrawerStore.ExpungeOutcome
         let unsealedEvent: AuditEvent
         do {
-            // Force-unwrap is a deliberate programmer-error trap:
-            // expungeReturningUnsealedEvent guarantees a non-nil return on
-            // success; nil means a contract violation in DrawerStore that must
-            // not be silently swallowed. The named method (not the former
-            // sealAudit: false parameter) is the only valid deferred-seal path
-            // (secfix/ws2-coredelete).
-            unsealedEvent = try await estate.expungeReturningUnsealedEvent(
+            storageOutcome = try await estate.expungeReturningUnsealedEvent(
                 rowID: frame.rowID,
                 reason: frame.reason,
                 confirmation: frame.confirmation,
                 now: now
-            )!
+            )
+            // Force-unwrap is a deliberate programmer-error trap:
+            // expungeReturningUnsealedEvent guarantees a non-nil auditEvent on
+            // success; nil means a contract violation in DrawerStore that must
+            // not be silently swallowed. The named method (not the former
+            // sealAudit: false parameter) is the only valid deferred-seal path
+            // (secfix/ws2-coredelete).
+            unsealedEvent = storageOutcome.auditEvent!
         } catch let e as LocusKitError {
             throw remap(verb: "expunge", estateID: handle.estateUUID.uuidString, error: e)
         } catch {
@@ -763,12 +799,15 @@ public extension GeniusLocusKit {
         // seal moves to step 3 so the audit log reflects the true outcome of the
         // full two-step delete.
         //
-        // Fan-out: delete vectors for ALL lineage versions, not just the head.
-        // The storage expunge (step 1) already walked the lineage chain and
-        // scrubbed content for every version. Here we mirror that walk for the
-        // cross-kit vector stores.
+        // Fan-out: delete vectors for every lineage member the storage
+        // expunge ACTUALLY scrubbed — the lineage chain minus the members the
+        // gate refused (SPEC B-8b, MXE-FA). A refused sibling's content
+        // survives byte-identical, so its vector must survive too; deleting
+        // it would leave the row readable by id but invisible to search.
         let lineageIds = try await estate.lineageChain(for: frame.rowID)
-        let idsToDelete = lineageIds.isEmpty ? [frame.rowID] : lineageIds
+        let refusedIds = Set(storageOutcome.refusedSiblingIDs)
+        let idsToDelete = (lineageIds.isEmpty ? [frame.rowID] : lineageIds)
+            .filter { !refusedIds.contains($0) }
         let corpus = corpusKits[handle]
         let vectorStore = vectorStores[handle]
 
@@ -945,10 +984,15 @@ public extension GeniusLocusKit {
         // Step 3 — Seal the success audit event.
         //
         // Both the storage expunge (step 1) and the cross-kit vector delete
-        // (step 2) succeeded. Seal the gate-produced "tombstone" event now so
-        // the audit log truthfully records a complete expunge. This ordering
-        // satisfies §B-2a: success audit only after the full two-step delete.
+        // (step 2) succeeded for every gate-admitted member. Seal the
+        // gate-produced "tombstone" event now so the audit log truthfully
+        // records what was actually erased. This ordering satisfies §B-2a:
+        // success audit only after the full two-step delete. Refused siblings
+        // were never scrubbed, never vector-deleted, and never ledgered —
+        // the returned outcome is the caller's only honest summary.
         try await estate.sealExpungeAudit(unsealedEvent)
+
+        return ExpungeVerbOutcome(refusedSiblingIDs: storageOutcome.refusedSiblingIDs)
     }
 
     // MARK: - Expunge integrity sweep

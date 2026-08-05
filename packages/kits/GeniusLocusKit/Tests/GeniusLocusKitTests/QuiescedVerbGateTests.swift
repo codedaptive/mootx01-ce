@@ -153,7 +153,7 @@ struct QuiescedVerbGateTests {
         // so even confirmation:false should produce estateQuiesced not expungeNotConfirmed.
         let frame = ExpungeFrame(rowID: UUID().uuidString, reason: "secfix-test", confirmation: true)
         await expectQuiescedError(from: handle) {
-            try await kit.expunge(handle, frame)
+            _ = try await kit.expunge(handle, frame)
         }
     }
 

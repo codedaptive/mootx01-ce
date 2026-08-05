@@ -240,7 +240,7 @@ struct MerkleRollupTests {
         let rootBefore = try await estate.nodeStore
             .getNode(id: roomNodeId)?.merkleRoot
 
-        try await estate.expunge(rowID: d1.id, reason: "test", confirmation: true)
+        _ = try await estate.expunge(rowID: d1.id, reason: "test", confirmation: true)
 
         let rootAfter = try await estate.nodeStore
             .getNode(id: roomNodeId)?.merkleRoot

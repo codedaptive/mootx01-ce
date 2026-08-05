@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-03
-version: 1.27.0
+date: 2026-08-04
+version: 1.28.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.22.0: MXE-BB — circuit-breaker API (migrationParked, isParked, clearParked) on both ports.
 package: GeniusLocusKit
@@ -195,6 +195,7 @@ public actor GeniusLocusKit {
     public func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws
     public func withdraw(_ handle: EstateHandle, _ frame: WithdrawFrame) async throws
     public func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame, now: Date = Date()) async throws
+        -> ExpungeVerbOutcome
         // Throws: .expungeNotConfirmed | .crossKitVectorDeleteFailed (fail-closed, three-step).
         // §B-2a audit-seal ordering: success audit seals ONLY after Step 2
         // (cross-kit vector delete) succeeds. On Step-2 failure an
@@ -202,6 +203,22 @@ public actor GeniusLocusKit {
         // the audit is honest, never a false success. If the orphan-seal
         // also fails, the seal error is logged at .fault level (Swift) or
         // folded into the CrossKitVectorDeleteFailed.reason string (Rust).
+        //
+        // Partial outcome (SPEC B-8b, MXE-FA): the storage expunge refuses
+        // accepted lineage siblings (S-3) and preserves them byte-identical.
+        // Step 2 deletes vectors ONLY for members that were actually
+        // scrubbed (lineage chain minus refused ids) — a refused sibling
+        // keeps its content AND its vector. The returned outcome names the
+        // refused members; NOT @discardableResult: an expunge that refused
+        // a sibling is not a success, and a caller that summarises it as
+        // one is the defect. defragVagueItem / defrag_vague_item consume
+        // this and raise .underlyingEstateFailure on a partial cascade.
+        // Rust: EstateCoordinator::expunge(...) -> Result<ExpungeVerbOutcome, VerbDispatchError>.
+
+    // ExpungeVerbOutcome: partial-expunge honesty carrier (SPEC B-8b, MXE-FA).
+    public struct ExpungeVerbOutcome: Sendable, Equatable {       // Rust: genius_locus_kit::ExpungeVerbOutcome
+        public let refusedSiblingIDs: [String]                    // Rust: refused_sibling_ids: Vec<String>, walk order
+    }
 
     // Expunge integrity sweep (VerbSurface.swift) — SPEC B-2b:
     // Maintenance function (NOT a verb). Call AFTER all Corpus / VectorStore
@@ -2096,6 +2113,20 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.28.0 -- 2026-08-04
+
+- **`expunge` returns `ExpungeVerbOutcome` (MXE-FA).** Swift
+  `GeniusLocusKit.expunge` returns the new public `ExpungeVerbOutcome`
+  (`refusedSiblingIDs: [String]`, not `@discardableResult`); Rust
+  `EstateCoordinator::expunge` returns
+  `Result<ExpungeVerbOutcome, VerbDispatchError>` (re-exported at crate
+  root). Step 2's cross-kit vector delete is scoped to the members the
+  storage expunge actually scrubbed — gate-refused accepted siblings keep
+  content AND vectors. `defragVagueItem` / `defrag_vague_item` raise
+  `.underlyingEstateFailure` when the vague-cascade expunge was partial.
+  Binding invariant (LOCUSKIT_SPEC B-8b): no layer reports success for an
+  expunge that refused a sibling.
 
 ### 1.27.0 -- 2026-08-03
 

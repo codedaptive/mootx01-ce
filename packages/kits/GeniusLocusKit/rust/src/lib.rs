@@ -140,7 +140,7 @@ pub use coordinator::{
     EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams, SyncMode,
     FederatedRecallResult, FederatedReadRefusalReason,
     SyncEngineEntry, format_sync_state_token,
-    ExpungeIntegritySweepResult, DrainStatus,
+    ExpungeIntegritySweepResult, ExpungeVerbOutcome, DrainStatus,
     SubjectProducer, SubjectBackfillReport,
     // dreaming-queue job payload. Public so the  drainer
     // (a downstream crate) and integration tests can decode queue.sqlite payloads.
