@@ -22,6 +22,9 @@
 SHELL := /bin/bash
 
 # ── Shared Rust target directory ──────────────────────────────────────────
+# VISIBLE, not dotted (Bob, 2026-08-04). This directory reaches tens of GB.
+# A hidden one is where cleanup silently fails, because nobody sees what
+# accumulated. If it is on disk it should show up in a plain `ls`.
 # This repo holds 30 independent Cargo workspaces. With cargo's default
 # per-workspace `target/`, every shared dependency is compiled and stored
 # once per workspace — the tree reached 31 GB of build output (measured
@@ -36,7 +39,7 @@ SHELL := /bin/bash
 # absolute and every `cd $$d && cargo ...` recipe below inherits it.
 # scripts/moot-test sets the same value independently — it is invoked as a
 # subprocess for discovery, so it does not inherit this export.
-export CARGO_TARGET_DIR := $(CURDIR)/.cargo-target
+export CARGO_TARGET_DIR := $(CURDIR)/cargo-target
 
 # ── Discovery ─────────────────────────────────────────────────────────────
 TEST_RUNNER := bash scripts/moot-test
@@ -333,7 +336,7 @@ clean:
 	done
 	@find . -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' -o -name '*.test' \) -print -delete
 	@# The shared Rust target directory is removed by path, not by name: the
-	@# ARTIFACT_DIRS sweep above matches `target`, which .cargo-target is not.
+	@# ARTIFACT_DIRS sweep above matches `target`, which cargo-target is not.
 	@if [ -d "$(CARGO_TARGET_DIR)" ]; then echo "$(CARGO_TARGET_DIR)"; rm -rf "$(CARGO_TARGET_DIR)"; fi
 	@echo "Clean complete."
 

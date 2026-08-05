@@ -65,7 +65,7 @@ Icon
 
 # The shared per-checkout Rust target directory (CARGO_TARGET_DIR, set by the
 # Makefile and scripts/moot-test). Replaces the 30 per-workspace target/ dirs.
-.cargo-target/
+cargo-target/
 
 # Cargo lockfiles are not tracked, any depth
 **/Cargo.lock

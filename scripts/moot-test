@@ -12,7 +12,7 @@ cd "$ROOT"
 #
 # The Makefile exports the same value; this script is invoked as a subprocess
 # for discovery, so it cannot inherit that export and must set its own.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/.cargo-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/cargo-target}"
 
 SWIFT_TEST_ARGS="${SWIFT_TEST_ARGS:-}"
 CARGO_TEST_ARGS="${CARGO_TEST_ARGS:-}"
