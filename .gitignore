@@ -147,3 +147,8 @@ AuthKey_*.p8
 *.pfx
 *.mobileprovision
 *.provisionprofile
+
+# Agent-system trees. Same class as .claude/ — internal agent content that must
+# never be published. Synced here from the docs repo; not CE deliverables.
+.agents/
+.codex/
