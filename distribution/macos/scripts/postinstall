@@ -31,6 +31,36 @@ STAGING="/Library/Application Support/com.codedaptive.mootx01/staging"
 INSTALL_DIR="$HOME/.mootx01"
 LOCAL_BIN="$HOME/.local/bin"
 
+# ── Path safety: never operate THROUGH a symlink ─────────────────────────────
+#
+# This script runs as ROOT and every destination path is derived from $HOME. If
+# a destination is a symlink, each root operation is redirected to wherever that
+# link points:
+#
+#   * `mkdir -p`, `ditto` and `ln -sf` become root-privileged WRITES to the link
+#     target — the stronger primitive, and why this is checked before file
+#     placement and not only before the chown.
+#   * `chown` without -h re-owns the link TARGET, handing an attacker-chosen
+#     root-owned path to REAL_USER.
+#
+# A local user who can prepare their home before an admin-authorized install
+# pre-creates ~/.local, ~/.local/bin or ~/.mootx01 as a symlink to a root-owned
+# path and gets it written to and re-owned. Reported against 508ac60f5, which
+# added the ~/.local chown without this guard: the staged SOURCES were already
+# symlink-checked, the DESTINATIONS were not.
+path_is_safe() {
+    # Safe means: does not exist yet, or exists as a REAL directory. A symlink
+    # is refused even when it currently points somewhere harmless — the target
+    # can be swapped after the check, so the link itself is the disqualifier.
+    if [ -L "$1" ]; then
+        return 1
+    fi
+    if [ -e "$1" ] && [ ! -d "$1" ]; then
+        return 1
+    fi
+    return 0
+}
+
 # ── Staging directory validation ─────────────────────────────────────────────
 # All checks run before ANY content is trusted. Any failure aborts the
 # file-placement block and skips ditto/chown/launch. exit 0 is still
@@ -98,6 +128,13 @@ fi
 
 # ── File placement (only if all staging checks passed) ───────────────────────
 
+INSTALL_DIR_OK=1
+if ! path_is_safe "$INSTALL_DIR"; then
+    echo "postinstall: SECURITY: $INSTALL_DIR is a symlink or not a directory — skipping file placement" >&2
+    INSTALL_DIR_OK=0
+    STAGING_OK=1
+fi
+
 if [ "$STAGING_OK" -eq 0 ]; then
     mkdir -p "$INSTALL_DIR" 2>/dev/null
 
@@ -124,9 +161,15 @@ if [ "$STAGING_OK" -eq 0 ]; then
 fi
 
 # ── Symlinks onto PATH ────────────────────────────────────────────────────────
-mkdir -p "$LOCAL_BIN" 2>/dev/null
-ln -sf "$INSTALL_DIR/bin/mootx01"  "$LOCAL_BIN/mootx01"  2>/dev/null
-ln -sf "$INSTALL_DIR/bin/moot-mgr" "$LOCAL_BIN/moot-mgr" 2>/dev/null
+LOCAL_BIN_OK=0
+if path_is_safe "$HOME/.local" && path_is_safe "$LOCAL_BIN"; then
+    LOCAL_BIN_OK=1
+    mkdir -p "$LOCAL_BIN" 2>/dev/null
+    ln -sf "$INSTALL_DIR/bin/mootx01"  "$LOCAL_BIN/mootx01"  2>/dev/null
+    ln -sf "$INSTALL_DIR/bin/moot-mgr" "$LOCAL_BIN/moot-mgr" 2>/dev/null
+else
+    echo "postinstall: SECURITY: ~/.local or ~/.local/bin is a symlink or not a directory — skipping PATH symlinks" >&2
+fi
 
 # ── Fix ownership ─────────────────────────────────────────────────────────────
 # pkgbuild runs postinstall as root, but these are user-owned files.
@@ -162,7 +205,9 @@ if [ -z "$REAL_USER" ]; then
     REAL_USER="$(stat -f '%Su' /dev/console 2>/dev/null)"
 fi
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
-    chown -R "$REAL_USER" "$INSTALL_DIR" 2>/dev/null
+    if [ "$INSTALL_DIR_OK" -eq 1 ]; then
+        chown -R "$REAL_USER" "$INSTALL_DIR" 2>/dev/null
+    fi
     # The PATH directory and its parent, NOT just the symlinks inside it.
     # `mkdir -p "$LOCAL_BIN"` above runs as root, so any component it had to
     # create — commonly both ~/.local and ~/.local/bin on a fresh Mac — is left
@@ -176,9 +221,17 @@ if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     # Deliberately NOT recursive: ~/.local is shared with pipx, cargo, codegraph
     # and others, and re-owning their files would be a far worse bug than the one
     # being fixed. Only the two directories themselves.
-    chown "$REAL_USER" "$HOME/.local" "$LOCAL_BIN" 2>/dev/null
-    chown -h "$REAL_USER" "$LOCAL_BIN/mootx01" 2>/dev/null
-    chown -h "$REAL_USER" "$LOCAL_BIN/moot-mgr" 2>/dev/null
+    #
+    # -h on all four, and only when the destinations passed path_is_safe above.
+    # -h is what makes this safe against a swap in the window between that check
+    # and this line: on a real directory it is an ordinary chown, and if the path
+    # has since become a symlink it re-owns the LINK rather than following it to
+    # a root-owned target. The check alone is a TOCTOU race; -h closes it.
+    if [ "$LOCAL_BIN_OK" -eq 1 ]; then
+        chown -h "$REAL_USER" "$HOME/.local" "$LOCAL_BIN" 2>/dev/null
+        chown -h "$REAL_USER" "$LOCAL_BIN/mootx01" 2>/dev/null
+        chown -h "$REAL_USER" "$LOCAL_BIN/moot-mgr" 2>/dev/null
+    fi
 fi
 
 # ── Restart resident services (upgrade path) ─────────────────────────────────
