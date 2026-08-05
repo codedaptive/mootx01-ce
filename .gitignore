@@ -136,3 +136,14 @@ docs/analysis/blast_radius/
 docs/missions/
 docs/agentic_output/
 docs/analysis/
+
+# Apple signing and authentication material — never commit (Codex review,
+# 2026-08-04). Entitlements, container IDs, bundle IDs and app-group IDs are
+# identifiers and ARE published; these authenticate and are not. Not a present
+# leak — these patterns exist so an accident cannot become one.
+AuthKey_*.p8
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
