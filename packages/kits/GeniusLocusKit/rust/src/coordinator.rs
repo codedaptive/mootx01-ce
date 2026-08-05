@@ -739,6 +739,28 @@ pub struct ContradictionHuntReport {
     pub deduplicated: usize,
 }
 
+/// Outcome of one `associate_sweep` pass.
+///
+/// Mirrors the Swift `AssociateSweepReport` shape. Fields use `usize` for
+/// non-negative counts, consistent with `ContradictionHuntReport`.
+///
+/// - `probed`: number of item IDs sampled from the VectorStore (the probe set).
+/// - `candidate_pairs`: unique proximity pairs found by the two-lane kNN scan
+///   before the settled-set filter (within-pass dedup only).
+/// - `written`: pairs written as new associations this pass.
+/// - `deduplicated`: pairs skipped because an active association already exists.
+#[derive(Debug, Clone)]
+pub struct AssociateSweepReport {
+    /// Number of item IDs probed (the recency-ordered probe set).
+    pub probed: usize,
+    /// Unique proximity-candidate pairs found by the two-lane kNN scan.
+    pub candidate_pairs: usize,
+    /// Pairs written as new associations this pass.
+    pub written: usize,
+    /// Pairs skipped because an active (non-tombstoned) association already existed.
+    pub deduplicated: usize,
+}
+
 /// # Adding a per-estate registry
 ///
 /// Every `HashMap<EstateHandle, …>` field below is a PER-ESTATE REGISTRY, and
@@ -5498,6 +5520,139 @@ impl EstateCoordinator {
     ) -> Result<Vec<locus_kit::association::Association>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         estate.all_associations().map_err(|e| remap("recall_associations", "", e).into())
+    }
+
+    // MARK: - associate_sweep
+
+    /// Run one bounded vector-similarity association sweep outside the standing-signal scheduler.
+    ///
+    /// Shape mirrors the accepted subject-sweep and hunt_contradictions patterns:
+    /// one implementation, two triggers — the resident `VectorSimilaritySignal`
+    /// cadence and this on-demand verb (dream step 3.5, benchmark protocol v2).
+    ///
+    /// Coverage:
+    ///   - `probe_limit: None` → ALL item IDs ("everything" coverage).
+    ///   - `probe_limit: Some(n)` → the `n` most-recently-filed item IDs.
+    ///
+    /// Determinism: probe order is `ORDER BY filed_at DESC, item_id ASC` — the
+    /// ORDER BY guaranteed by `VectorStore::recent_item_ids`. Same-seed estates
+    /// write the same association set on repeated calls, subject to the
+    /// INSERT-OR-IGNORE dedup guard in `add_association`.
+    ///
+    /// Dedup: all existing active (non-tombstoned) associations are loaded upfront
+    /// into a settled set before the scan runs. Tombstoned associations are
+    /// excluded — a re-sweep may recreate a deleted association.
+    ///
+    /// Returns `AssociateSweepReport` with probed/candidate_pairs/written/deduplicated counts.
+    /// Mirrors Swift `GeniusLocusKit.associateSweep(in:probeLimit:now:)`.
+    pub fn associate_sweep(
+        &self,
+        handle: &EstateHandle,
+        probe_limit: Option<usize>,
+        now: i64,
+    ) -> Result<AssociateSweepReport, VerbDispatchError> {
+        use crate::brain::signals::vector_similarity::proximity_scan_candidates;
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("associate_sweep", "", e))
+        };
+
+        // A missing VectorStore is not an error — the estate simply has no
+        // vector index yet. Return a zero report identical to the Swift no-op.
+        let vector_store = match self.vector_stores.get(handle) {
+            Some(store) => store,
+            None => {
+                return Ok(AssociateSweepReport {
+                    probed: 0,
+                    candidate_pairs: 0,
+                    written: 0,
+                    deduplicated: 0,
+                })
+            }
+        };
+
+        // Probe sample: recency-ordered item IDs bounded by probe_limit.
+        // usize::MAX exhausts the table (all items), correct for None coverage.
+        let limit = probe_limit.unwrap_or(usize::MAX);
+        let item_ids = vector_store.recent_item_ids(limit).unwrap_or_default();
+        if item_ids.is_empty() {
+            return Ok(AssociateSweepReport {
+                probed: 0,
+                candidate_pairs: 0,
+                written: 0,
+                deduplicated: 0,
+            });
+        }
+
+        // Durable settled set: load all ACTIVE (non-tombstoned) associations
+        // so the sweep does not duplicate existing edges.
+        let pair_key = |a: &str, b: &str| -> String {
+            if a < b { format!("{}||{}", a, b) } else { format!("{}||{}", b, a) }
+        };
+        let mut settled_set: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for assoc in estate.all_associations().map_err(remap_err)? {
+            if let (Some(a), Some(b)) = (
+                assoc.source_drawer_id.as_deref(),
+                assoc.target_drawer_id.as_deref(),
+            ) {
+                // Only active (non-tombstoned) associations enter the settled set.
+                // Tombstoned rows are excluded — a re-sweep may recreate them.
+                if assoc.tombstoned_at.is_none() {
+                    settled_set.insert(pair_key(a, b));
+                }
+            }
+        }
+
+        // Two-lane kNN scan via shared core.
+        // model_id default: "minilm-v6" — the drawer-keyed lane default, same as
+        // hunt_contradictions. Corpus lane 2 mined when a corpus is registered.
+        let model_id = "minilm-v6";
+        let corpus = self.corpus_kits.get(handle).map(Arc::as_ref);
+        let candidates = proximity_scan_candidates(
+            vector_store,
+            &item_ids,
+            model_id,
+            crate::brain::signals::vector_similarity::VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+            corpus,
+            crate::brain::signals::vector_similarity::VectorSimilaritySignal::NEIGHBOURS_PER_PROBE,
+        );
+
+        let mut written = 0usize;
+        let mut deduplicated = 0usize;
+        for (a, b, weight) in &candidates {
+            let key = pair_key(a.as_str(), b.as_str());
+            if settled_set.contains(&key) {
+                deduplicated += 1;
+            } else {
+                let frame = LocusAssociateFrame {
+                    a: a.clone(),
+                    b: b.clone(),
+                    weight: *weight,
+                };
+                match estate.associate(frame, now) {
+                    Ok(_) => {
+                        written += 1;
+                        // Update settled set in-place to prevent within-pass
+                        // re-attempts for the same pair from the other kNN direction.
+                        settled_set.insert(key);
+                    }
+                    Err(_) => {
+                        // Fail-soft: a single write failure (e.g. unknown drawer ID,
+                        // transient storage error) does not abort the sweep. The
+                        // INSERT-OR-IGNORE guard in add_association handles races.
+                    }
+                }
+            }
+        }
+
+        Ok(AssociateSweepReport {
+            probed: item_ids.len(),
+            candidate_pairs: candidates.len(),
+            written,
+            deduplicated,
+        })
     }
 
     // MARK: - recall_learned_references

@@ -54,9 +54,10 @@ impl VectorSimilaritySignal {
     /// `spec(...)`. Mirrors Swift's `defaultProbeLimit`.
     pub const DEFAULT_PROBE_LIMIT: usize = 50;
 
-    /// Neighbours requested per probe via find_nearest. Mirrors Swift's
-    /// neighboursPerProbe.
-    const NEIGHBOURS_PER_PROBE: usize = 5;
+    /// Neighbours requested per probe via find_nearest. Shared constant
+    /// used by `proximity_scan_candidates` and `associate_sweep`. Mirrors
+    /// Swift's `ProximityScanCore.neighboursPerProbe`.
+    pub(crate) const NEIGHBOURS_PER_PROBE: usize = 5;
 
     /// Build the production VectorSimilaritySignal spec.
     ///
@@ -126,10 +127,12 @@ impl VectorSimilaritySignal {
 
     /// Execute one proximity scan pass.
     ///
-    /// Samples up to `probe_limit` most recently filed item IDs via
-    /// `recent_item_ids`, retrieves each row's engram, calls `find_nearest`
-    /// to locate nearby rows, deduplicates pairs, optionally filters
-    /// already-persisted edges, and emits `AssociateFrames`.
+    /// The two-lane kNN scan is delegated to `proximity_scan_candidates`
+    /// (shared with `EstateCoordinator::associate_sweep`) so the scan logic
+    /// lives in exactly one place.
+    ///
+    /// If `edge_checker` is provided, pairs with a persisted active edge
+    /// are filtered out before emission (FINDING-3 optimization).
     fn proximity_pass(
         vector_store: &VectorStore,
         model_id: &str,
@@ -148,7 +151,7 @@ impl VectorSimilaritySignal {
         // neighbors search the whole estate, so two dormant old items never
         // pair unless one was probed while recent — widening `probe_limit`
         // is how callers relieve that constraint.
-        let drawer_ids = match vector_store.recent_item_ids(probe_limit) {
+        let item_ids = match vector_store.recent_item_ids(probe_limit) {
             Ok(ids) => ids,
             Err(e) => {
                 emissions.push(SignalEmission::Diagnostic(DiagnosticReport {
@@ -163,94 +166,17 @@ impl VectorSimilaritySignal {
             }
         };
 
-        let mut candidate_pairs: Vec<(String, String, f64)> = Vec::new();
-        // Canonical pair key: lexicographically smaller ID first so
-        // (A,B) and (B,A) map to the same set element. Both lanes below
-        // key on DRAWER ids, so they dedupe together.
-        let mut seen_pairs: HashSet<String> = HashSet::new();
-
-        // Lane 1 — drawer-keyed rows under the caller's `model_id`. Rows
-        // whose item is not in this lane fail `get_vector` and fall through.
-        for drawer_id in &drawer_ids {
-            let probe_engram = match vector_store.get_vector(drawer_id, model_id) {
-                Ok(Some(e)) => e,
-                _ => continue,
-            };
-
-            let matches = match vector_store.find_nearest(
-                &probe_engram,
-                model_id,
-                Self::NEIGHBOURS_PER_PROBE,
-            ) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            for m in matches {
-                if m.item_id == *drawer_id {
-                    continue; // skip self-match
-                }
-                if m.distance > proximity_threshold {
-                    continue;
-                }
-                // Lane F rename: VectorMatch.drawer_id → item_id (arch spec §4.1).
-                let (a, b) = if drawer_id.as_str() < m.item_id.as_str() {
-                    (drawer_id.clone(), m.item_id.clone())
-                } else {
-                    (m.item_id.clone(), drawer_id.clone())
-                };
-                let pair_key = format!("{}||{}", a, b);
-                if seen_pairs.insert(pair_key) {
-                    // Weight: 1.0 - distance/256. Identical vectors → 1.0.
-                    // ADMIN — entrance gate: weight is derived FREE from the
-                    // already-computed proximity-gate distance (no extra origin
-                    // work). It is carried on the AssociationFrame but is
-                    // VESTIGIAL past the `associate` verb, which has no weight
-                    // column to persist it into (see verbs.rs `associate`, the
-                    // drop site). Retained on purpose for a pre-2.0 gauntlet
-                    // experiment on whether weight improves recall. Mirrors
-                    // Swift `VectorSimilaritySignal`.
-                    let weight = 1.0 - (m.distance as f64 / 256.0);
-                    candidate_pairs.push((a, b, weight));
-                }
-            }
-        }
-
-        // Lane 2 — the corpus provider's rows. Shared-content 1.1: the
-        // engine keys every vector row by the DRAWER ID itself, so a hit's
-        // item_id is the owning drawer directly — no chunk→drawer remap and
-        // no same-drawer chunk collapse. Mirrors the Swift lane-2 block.
-        if let Some(corpus) = corpus {
-            let corpus_model_id = corpus.model_id();
-            for item_id in &drawer_ids {
-                let probe_engram = match vector_store.get_vector(item_id, &corpus_model_id) {
-                    Ok(Some(e)) => e,
-                    _ => continue,
-                };
-                let matches = match vector_store.find_nearest(
-                    &probe_engram,
-                    &corpus_model_id,
-                    Self::NEIGHBOURS_PER_PROBE,
-                ) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                for m in matches {
-                    if m.item_id == *item_id || m.distance > proximity_threshold {
-                        continue;
-                    }
-                    let (a, b) = if *item_id < m.item_id {
-                        (item_id.clone(), m.item_id.clone())
-                    } else {
-                        (m.item_id.clone(), item_id.clone())
-                    };
-                    let pair_key = format!("{}||{}", a, b);
-                    if seen_pairs.insert(pair_key) {
-                        candidate_pairs.push((a, b, 1.0 - (m.distance as f64 / 256.0)));
-                    }
-                }
-            }
-        }
+        // Two-lane kNN scan via shared core (also used by associate_sweep verb).
+        // proximity_scan_candidates applies within-pass symmetric pair dedup
+        // and returns unique (a, b, weight) candidates.
+        let candidate_pairs = proximity_scan_candidates(
+            vector_store,
+            &item_ids,
+            model_id,
+            proximity_threshold,
+            corpus,
+            Self::NEIGHBOURS_PER_PROBE,
+        );
 
         // FINDING-3: filter pairs that already have a persisted active edge
         // so VectorSimilaritySignal does not churn redundant Associate frames
@@ -288,4 +214,114 @@ impl VectorSimilaritySignal {
 
         emissions
     }
+}
+
+// MARK: - Shared proximity scan core
+
+/// Execute one two-lane kNN proximity scan over the given probe item IDs.
+///
+/// Shared core for `VectorSimilaritySignal::proximity_pass` (resident five-minute
+/// cadence) and `EstateCoordinator::associate_sweep` (on-demand verb). One
+/// implementation, two callers — mirrors the Swift `ProximityScanCore` pattern.
+///
+/// Returns candidate pairs `(a, b, weight)` with within-pass symmetric dedup
+/// applied (`a < b` lexicographically). Does NOT filter against existing
+/// associations — callers apply their own settled-set or edge-checker filter.
+///
+/// Two lanes are mined:
+///   - Lane 1: drawer-keyed rows under the caller's `model_id`.
+///   - Lane 2: drawer-keyed rows under the corpus provider's own model_id,
+///     when a corpus is supplied. Shared-content 1.1 keys every row by
+///     Drawer ID directly, so no chunk→drawer remap is needed.
+///
+/// Weight = 1.0 − (distance / 256). Identical vectors → 1.0.
+///
+/// ADMIN — weight is derived free from the already-computed proximity-gate
+/// Hamming distance. It is carried on the AssociationFrame but VESTIGIAL
+/// past the `associate` verb, which has no weight column to persist it into
+/// (see coordinator.rs `associate`, the drop site). Retained for a pre-2.0
+/// gauntlet experiment on whether weight improves recall. Mirrors Swift
+/// `ProximityScanCore.candidates`.
+pub(crate) fn proximity_scan_candidates(
+    vector_store: &VectorStore,
+    item_ids: &[String],
+    model_id: &str,
+    proximity_threshold: i32,
+    corpus: Option<&CorpusContentEngine>,
+    neighbours_per_probe: usize,
+) -> Vec<(String, String, f64)> {
+    let mut result: Vec<(String, String, f64)> = Vec::new();
+    // Canonical pair key: lexicographically smaller ID first so (A,B) and
+    // (B,A) map to the same set element. Both lanes key on DRAWER ids.
+    let mut seen_pairs: HashSet<String> = HashSet::new();
+
+    // Lane 1 — drawer-keyed rows under the caller's `model_id`. Rows whose
+    // item is not in this lane fail `get_vector` and fall through silently.
+    for item_id in item_ids {
+        let probe_engram = match vector_store.get_vector(item_id, model_id) {
+            Ok(Some(e)) => e,
+            _ => continue,
+        };
+
+        let matches = match vector_store.find_nearest(&probe_engram, model_id, neighbours_per_probe) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        for m in matches {
+            if m.item_id == *item_id {
+                continue; // skip self-match
+            }
+            if m.distance > proximity_threshold {
+                continue;
+            }
+            let (a, b) = if item_id.as_str() < m.item_id.as_str() {
+                (item_id.clone(), m.item_id.clone())
+            } else {
+                (m.item_id.clone(), item_id.clone())
+            };
+            let pair_key = format!("{}||{}", a, b);
+            if seen_pairs.insert(pair_key) {
+                let weight = 1.0 - (m.distance as f64 / 256.0);
+                result.push((a, b, weight));
+            }
+        }
+    }
+
+    // Lane 2 — the corpus provider's rows. Shared-content 1.1: the engine
+    // keys every vector row by DRAWER ID, so a hit's item_id is the owning
+    // drawer directly — no chunk→drawer remap. Mirrors the Swift Lane 2 block.
+    if let Some(corpus) = corpus {
+        let corpus_model_id = corpus.model_id();
+        for item_id in item_ids {
+            let probe_engram = match vector_store.get_vector(item_id, &corpus_model_id) {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let matches = match vector_store.find_nearest(
+                &probe_engram,
+                &corpus_model_id,
+                neighbours_per_probe,
+            ) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            for m in matches {
+                if m.item_id == *item_id || m.distance > proximity_threshold {
+                    continue;
+                }
+                let (a, b) = if *item_id < m.item_id {
+                    (item_id.clone(), m.item_id.clone())
+                } else {
+                    (m.item_id.clone(), item_id.clone())
+                };
+                let pair_key = format!("{}||{}", a, b);
+                if seen_pairs.insert(pair_key) {
+                    result.push((a, b, 1.0 - (m.distance as f64 / 256.0)));
+                }
+            }
+        }
+    }
+
+    result
 }
