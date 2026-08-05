@@ -40,6 +40,33 @@ Environment:
 USAGE
 }
 
+# Packages that require a newer Apple SDK than GitHub's runners carry.
+#
+# MootIntentKit declares `allowedExecutionTargets: IntentExecutionTargets` behind
+# `@available(anyAppleOS 27.0, *)`. That type is macOS-27-SDK-only and the
+# anyAppleOS availability form is still an experimental compiler feature in
+# Xcode 26.6 — the newest Xcode on any runner image GitHub offers (macos-26
+# carries 26.1-26.6; there is no macos-27). It compiles on a developer machine
+# with the 27 SDK and nowhere else.
+#
+# This surface is Apple-app-only. apps/mootx01 and apps/moot-mgr — the shipped
+# server and manager — have NO dependency on it, and release.yml builds only
+# those two, so no released artifact was ever affected. Mootx01-App is a
+# local-only compile; anyone wanting to build the Apple app can clone and build
+# on a machine with the beta SDK.
+#
+# MOOT_SKIP_APPLE_BETA=1 drops these roots. CI sets it; local runs do not, so a
+# developer keeps full coverage.
+APPLE_BETA_SDK_ROOTS='^(packages/apple/MootIntentKit|packages/apple/MootFoundationModelsKit|apps/Mootx01-App)$'
+
+drop_apple_beta_roots() {
+  if [[ "${MOOT_SKIP_APPLE_BETA:-}" == "1" ]]; then
+    grep -Ev "$APPLE_BETA_SDK_ROOTS" || true
+  else
+    cat
+  fi
+}
+
 find_manifests() {
   local manifest="$1"
   shift
@@ -57,8 +84,8 @@ find_manifests() {
 swift_roots() {
   local scope="${1:-unit}"
   case "$scope" in
-    unit) find_manifests Package.swift packages ;;
-    product) find_manifests Package.swift apps examples | awk '$0 !~ /^apps\/moot-math-benchmark(\/|$)/' ;;
+    unit) find_manifests Package.swift packages | drop_apple_beta_roots ;;
+    product) find_manifests Package.swift apps examples | awk '$0 !~ /^apps\/moot-math-benchmark(\/|$)/' | drop_apple_beta_roots ;;
     validation) find_manifests Package.swift docs/validation apps/moot-math-benchmark ;;
     all) { swift_roots unit; swift_roots product; swift_roots validation; } | sort -u ;;
     *) echo "unknown Swift scope: $scope" >&2; return 2 ;;

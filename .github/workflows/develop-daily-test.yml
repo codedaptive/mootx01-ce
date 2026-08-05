@@ -57,6 +57,11 @@ jobs:
     needs: gate
     if: ${{ needs.gate.outputs.moved == 'true' }}
     runs-on: macos-26
+    env:
+      # GitHub's newest runner Xcode is 26.6; the Apple-app surface needs the
+      # macOS 27 SDK. Those roots are local-compile-only and the shipped
+      # server does not depend on them. See scripts/moot-test.
+      MOOT_SKIP_APPLE_BETA: '1'
     # Full sweep runs well under an hour; cap it so a hung/deadlocked test
     # fails the run instead of holding a macOS runner for the 6h default.
     timeout-minutes: 90
