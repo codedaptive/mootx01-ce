@@ -130,11 +130,36 @@ ln -sf "$INSTALL_DIR/bin/moot-mgr" "$LOCAL_BIN/moot-mgr" 2>/dev/null
 
 # ── Fix ownership ─────────────────────────────────────────────────────────────
 # pkgbuild runs postinstall as root, but these are user-owned files.
-# Prefer the console user from /dev/console (not attacker-influenceable $USER).
-# Fall back to $SUDO_USER then $USER if /dev/console is unavailable.
-REAL_USER="$(stat -f '%Su' /dev/console 2>/dev/null)"
-if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
-    REAL_USER="${SUDO_USER:-${USER:-}}"
+#
+# The owner is derived from $HOME — the SAME value that decided where to write.
+# Everything above installs into "$HOME/.mootx01" and "$HOME/.local/bin", so the
+# user who owns $HOME is by definition the user who must own things inside it.
+# One source of truth, so the two cannot disagree.
+#
+# This replaced a /dev/console -> $SUDO_USER -> $USER chain (2026-08-05), which
+# was a SECOND, independent source of truth for the same fact. Any divergence
+# from $HOME produced mis-owned files, and it diverged in three real situations:
+#
+#   * Fast User Switching — two users logged in at once, and /dev/console does
+#     not reliably follow the active session.
+#   * Headless installs (installer -pkg, MDM) — nobody at the console, so it
+#     fell through to $SUDO_USER/$USER, which under sudo is root; the != root
+#     guard below then skipped the chown entirely and left everything root-owned.
+#   * `su` into another account — $USER and the real home disagree.
+#
+# $HOME's owner is also strictly less attacker-influenceable than $USER, which
+# was the stated reason for reading /dev/console in the first place: if $HOME
+# were attacker-controlled the script is already writing into an attacker-chosen
+# directory, and the chown target is the least of the problems.
+#
+# /dev/console is a fallback ONLY when $HOME's owner cannot be determined at all.
+# Deliberately NOT when the answer is "root": a root-owned $HOME means a genuine
+# root install, root is the correct owner, and the != root guard below then
+# correctly leaves ownership alone. Falling back on root would chown root's own
+# files to whoever happens to hold the console.
+REAL_USER="$(stat -f '%Su' "$HOME" 2>/dev/null)"
+if [ -z "$REAL_USER" ]; then
+    REAL_USER="$(stat -f '%Su' /dev/console 2>/dev/null)"
 fi
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     chown -R "$REAL_USER" "$INSTALL_DIR" 2>/dev/null
