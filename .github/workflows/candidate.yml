@@ -99,6 +99,11 @@ jobs:
       matrix:
         arch: [arm64, x86_64]
     runs-on: macos-26
+    env:
+      # GitHub's newest runner Xcode is 26.6; the Apple-app surface needs the
+      # macOS 27 SDK. Those roots are local-compile-only and the shipped
+      # server does not depend on them. See scripts/moot-test.
+      MOOT_SKIP_APPLE_BETA: '1'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
