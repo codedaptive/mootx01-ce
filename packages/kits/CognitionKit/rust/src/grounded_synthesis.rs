@@ -85,6 +85,15 @@ pub struct GroundedOutput {
 /// the GLK recall verb, NeuronKit `rerank`, and `synthesize`. `tuning`
 /// defaults via `RecallFrameTuning::default()` (k=60, λ=0.7, page 50); `now`
 /// is explicit per the Rust determinism convention.
+///
+/// `cue_terms` drives the lexical RRF lane: when non-empty, drawers are ranked
+/// by distinct-cue-term-match count before synthesis. Empty = input-order
+/// recency lane only (previous behaviour, bit-identical).
+///
+/// `cap` truncates the reranked result BEFORE synthesis so the synthesizer's
+/// work is bounded by the user limit, not the pool size. None = no truncation
+/// (previous behaviour). The cap is applied after reranking so the most
+/// cue-relevant drawers survive, not the most recent.
 pub fn run_grounded_synthesis(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
@@ -92,6 +101,8 @@ pub fn run_grounded_synthesis(
     tuning: RecallFrameTuning,
     now: i64,
     node_names: &std::collections::HashMap<String, (String, String)>,
+    cue_terms: &[String],
+    cap: Option<usize>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     // B-5: verify capabilities before any substrate touch. A capability gate
     // failure propagates as RecipeRunError::Recipe.
@@ -153,15 +164,49 @@ pub fn run_grounded_synthesis(
         })
         .collect();
 
-    // RRF/MMR rerank reorders rows; realign the metadata to the reranked
-    // order so synthesize's index-matched lookups stay correct.
-    let reranked = rerank(&rows, &tuning);
+    // RRF/MMR rerank with the cue-term lexical lane. When cue_terms is
+    // non-empty the lexical rank is sorted by distinct-cue-term-match count
+    // descending; when empty this is the previous input-order path, bit-identical.
+    // Realign metadata to the reranked order so synthesize's index-matched
+    // lookups stay correct.
+    //
+    // Lane weights are RECIPE-OWNED when a cue is present: grounding is this
+    // recipe's contract, and the default 0.3/0.7 split lets the recency lane
+    // override a one-step relevance difference whenever the pool is deep
+    // (the recency lane's RRF spread grows with pool size while the
+    // adjacent-rank lexical gap stays constant — measured as the trial-2
+    // failure: off-topic recent drawers outranked the cue-matched older
+    // one). With a cue, ordering must be lexical-dominant and recency
+    // strictly a tie-break, which is exactly the 1.0/0.0 weighting (the
+    // lexical sort already breaks ties by input order = recency). The
+    // caller's rrf_k, mmr_lambda, and page_size still apply; only the lane
+    // split is overridden. Twin of the Swift recipe's effectiveTuning.
+    let effective_tuning = if cue_terms.is_empty() {
+        tuning.clone()
+    } else {
+        RecallFrameTuning {
+            bm25_weight: 1.0,
+            vector_weight: 0.0,
+            ..tuning.clone()
+        }
+    };
+    let reranked = rerank(&rows, &effective_tuning, cue_terms);
+
+    // Apply cap BEFORE synthesis so the synthesizer's work is bounded by
+    // the user limit, not the pool size. The cap is applied after reranking
+    // so the most cue-relevant drawers survive, not the most recent.
+    // None = no truncation (previous behaviour).
+    let reranked = match cap {
+        Some(n) => reranked.into_iter().take(n).collect::<Vec<_>>(),
+        None => reranked,
+    };
+
     let meta: Vec<DrawerRowMeta> = reranked
         .iter()
         .map(|r| meta_by_id.get(&r.id).cloned().unwrap_or_default())
         .collect();
 
-    // 3. Synthesize over the full reranked set as one terminal page
+    // 3. Synthesize over the (capped, reranked) set as one terminal page
     //    (read-only, C-9 — no estate write).
     let page = RecallPage {
         rows: reranked,
@@ -243,7 +288,7 @@ mod tests {
             "cats and dogs are pets",
         ]);
         let out =
-            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names())
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names(), &[], None)
                 .expect("run");
         assert_eq!(out.drawer_count, 3, "all recalled rows feed synthesis");
         assert!(
@@ -260,7 +305,7 @@ mod tests {
     fn gs2_empty_estate_yields_empty_document() {
         let (coord, h) = coord_with_rows(&[]);
         let out =
-            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names())
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names(), &[], None)
                 .expect("run");
         assert_eq!(out.drawer_count, 0);
         assert!(out.context.patterns.is_empty());
@@ -286,6 +331,46 @@ mod tests {
         assert_eq!(
             err,
             RecipeError::MissingCapability(NeuronKitCapability::Synthesize)
+        );
+    }
+
+    // GS-4: cap truncates post-rank — the most cue-relevant drawer survives,
+    // not the most recent. Twin of Swift capTruncatesAfterRerank.
+    #[test]
+    fn gs4_cap_truncates_after_rerank() {
+        // First captured (oldest): matches all three cue terms.
+        // Second and third (newer): match none.
+        // With cap=1 the oldest (most cue-relevant) drawer must feed synthesis.
+        let (coord, h) = coord_with_rows(&[
+            "daguerreotype vintage cameras photography collection", // oldest, 3 matches
+            "modern digital exhibition display",                    // newer, 0 matches
+            "contemporary art installation space",                  // newest, 0 matches
+        ]);
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "vintage".to_string(),
+            "cameras".to_string(),
+        ];
+        let out = run_grounded_synthesis(
+            &coord,
+            &h,
+            unconfirmed(),
+            RecallFrameTuning::default(),
+            NOW,
+            &empty_names(),
+            &cue_terms,
+            Some(1),
+        )
+        .expect("run");
+
+        // cap=1 → exactly one drawer feeds synthesis.
+        assert_eq!(out.drawer_count, 1, "cap 1 must truncate to exactly 1 drawer");
+        // The surviving drawer is the cue-matched one; its content appears in
+        // key_insights (synthesize picks first-row excerpts in stream order).
+        let insight = out.context.key_insights.first().cloned().unwrap_or_default();
+        assert!(
+            insight.contains("daguerreotype"),
+            "the cue-relevant drawer must survive the cap; key_insights[0]={insight}"
         );
     }
 }

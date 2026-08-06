@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.5.0
+version: 1.6.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-07-16
+date: 2026-08-06
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -1986,6 +1986,11 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-08-06
+`HybridRecallEngine.rerank` gains `cueTerms: [String] = []`. Added to § 3 Functions.
+When non-empty the L-lexical lane ranks by distinct-cue-term-match count descending;
+empty `cueTerms` is bit-identical to the previous output. Rust port mirrors Swift.
 
 ### 1.5.0 -- 2026-07-16
 Audit pass: added all surface items shipped since 1.4.0 that were absent

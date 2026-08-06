@@ -45,13 +45,30 @@ public struct GroundedSynthesis: Recipe {
         public let frame: RecallFrame
         /// Hybrid-recall tuning knobs. Defaults to `.default`.
         public let tuning: RecallFrameTuning
+        /// Cue terms for the lexical RRF lane. When non-empty, drawers are
+        /// reranked by distinct-cue-term-match count before synthesis,
+        /// surfacing the most query-relevant drawers over the most recent.
+        /// Default [] = input-order recency lane only (previous behaviour,
+        /// bit-identical output). Forwarded to `hybridRecall(cueTerms:)`.
+        public let cueTerms: [String]
+        /// Maximum drawers fed into synthesis, applied AFTER reranking.
+        /// The most cue-relevant drawers survive the cap, not the most
+        /// recent. nil = no truncation (previous behaviour). Trial 2
+        /// measured client timeouts when synthesis ran over a 200-drawer
+        /// pool; the cap bounds the synthesizer's work while the cue-pool
+        /// bound (AriaMcpKit) keeps the ranking lane wide.
+        public let cap: Int?
 
         public init(
             frame: RecallFrame,
-            tuning: RecallFrameTuning = .default
+            tuning: RecallFrameTuning = .default,
+            cueTerms: [String] = [],
+            cap: Int? = nil
         ) {
             self.frame = frame
             self.tuning = tuning
+            self.cueTerms = cueTerms
+            self.cap = cap
         }
     }
 
@@ -112,11 +129,37 @@ public struct GroundedSynthesis: Recipe {
         //    Contradiction recipe.
         var fullFrame = input.frame
         fullFrame.hydrationLevel = .full
+        // Forward cueTerms so the lexical RRF lane ranks by distinct-term-match
+        // count. Empty cueTerms = input-order recency (previous behaviour).
+        //
+        // Lane weights are RECIPE-OWNED when a cue is present: grounding is
+        // this recipe's contract, and the default 0.3/0.7 split lets the
+        // recency lane override a one-step relevance difference whenever the
+        // pool is deep (the recency lane's RRF spread grows with pool size
+        // while the adjacent-rank lexical gap stays constant — measured as
+        // the trial-2 failure: off-topic recent drawers outranked the
+        // cue-matched older one). With a cue, ordering must be
+        // lexical-dominant and recency strictly a tie-break, which is
+        // exactly the 1.0/0.0 weighting (the lexical sort already breaks
+        // ties by input order = recency). The caller's rrfK, mmrLambda, and
+        // pageSize still apply; only the lane split is overridden.
+        let effectiveTuning: RecallFrameTuning
+        if input.cueTerms.isEmpty {
+            effectiveTuning = input.tuning
+        } else {
+            effectiveTuning = RecallFrameTuning(
+                bm25Weight: 1.0,
+                vectorWeight: 0.0,
+                rrfK: input.tuning.rrfK,
+                mmrLambda: input.tuning.mmrLambda,
+                pageSize: input.tuning.pageSize)
+        }
         let stream = try await hybridRecall(
             fullFrame,
             handle: estate,
             on: kit,
-            tuning: input.tuning
+            tuning: effectiveTuning,
+            cueTerms: input.cueTerms
         )
 
         // 2. Drain every page. hybridRecall reranks the FULL result
@@ -130,22 +173,29 @@ public struct GroundedSynthesis: Recipe {
         }
         let allRows = pages.flatMap { $0.rows }
 
-        // 3. Synthesize over the full recalled set, presented as one
+        // Apply cap BEFORE synthesis so the synthesizer's work is bounded
+        // by the user limit, not the pool size. Cap is applied after reranking:
+        // the most cue-relevant drawers survive, not the most recent.
+        // Type inference retains the element type without spelling the ambiguous
+        // `Drawer` name (see file-header type-resolution note).
+        // nil cap = no truncation (previous behaviour).
+        let rowsToSynthesize = input.cap.map { Array(allRows.prefix($0)) } ?? allRows
+
+        // 3. Synthesize over the (capped, reranked) set, presented as one
         //    terminal page. Read-only (C-9): no estate write.
         let combined = RecallStream.Page(
-            rows: allRows, pageIndex: 0, isLast: true
+            rows: rowsToSynthesize, pageIndex: 0, isLast: true
         )
         let context = try await ContextSynthesizer.synthesize(
             from: combined, estate: estate
         )
 
         // Emit cognitionkit.recipe.run with status "complete". The step_count
-        // tag is the number of recalled drawers that fed the synthesis —
-        // the meaningful unit of work for this recipe. Byte-identical to
-        // the output whether monitoring is on or off (C-Det: telemetry is
-        // additive; allRows.count is already computed above).
-        emitRecipeComplete(name: name, stepCount: allRows.count, ts: startTs)
+        // tag is the number of drawers that fed synthesis (post-cap) so the
+        // telemetry reflects the synthesizer's actual work. Byte-identical to
+        // the output whether monitoring is on or off (C-Det: additive telemetry).
+        emitRecipeComplete(name: name, stepCount: rowsToSynthesize.count, ts: startTs)
 
-        return Output(context: context, drawerCount: allRows.count)
+        return Output(context: context, drawerCount: rowsToSynthesize.count)
     }
 }

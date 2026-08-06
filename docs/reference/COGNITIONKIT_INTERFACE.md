@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Interface
-version: 1.5.0
+version: 1.6.0
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1153,6 +1153,10 @@ disabled.
 *End of CognitionKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-08-06
+`GroundedSynthesis.Input` extended with `cueTerms: [String] = []` and `cap: Int? = nil`.
+Both Swift and Rust `run_grounded_synthesis` signatures updated accordingly.
 
 ### 1.5.0 -- 2026-07-16
 Closed two missing RecipeError cases in both ports (verifier gap):

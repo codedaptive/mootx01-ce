@@ -231,10 +231,10 @@ fn rerank_math_identical_regardless_of_monitoring() {
     let tuning = RecallFrameTuning::default_tuning();
 
     Intellectus::set_enabled(false);
-    let result_off = rerank(&drawers, &tuning);
+    let result_off = rerank(&drawers, &tuning, &[]);
 
     Intellectus::set_enabled(true);
-    let result_on = rerank(&drawers, &tuning);
+    let result_on = rerank(&drawers, &tuning, &[]);
 
     let ids_off: Vec<_> = result_off.iter().map(|d| d.id.clone()).collect();
     let ids_on: Vec<_> = result_on.iter().map(|d| d.id.clone()).collect();

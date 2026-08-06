@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.30.0
+version: 1.31.0
 status: accepted-1.1-target
 date: 2026-08-06
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -341,6 +341,15 @@ response text alone. A query whose every token is dropped MUST be rejected
 with invalidParams, never silently degraded to the unscoped digest. With
 `query` omitted the tool produces the whole-estate digest (the pre-1.34
 behavior, unchanged).
+
+Ranking rule (1.31): when a cue is present, ordering within the matched
+pool MUST be lexical-dominant — drawers rank by distinct-cue-term-match
+count descending, with recency strictly a tie-break — and the user's
+`limit` MUST cap the pool AFTER ranking. Any weighting that lets the
+recency lane override a one-step relevance difference is non-conformant:
+the recency lane's rank spread grows with pool size while the
+adjacent-rank relevance gap stays constant, so blended weights degrade to
+recency-first exactly on the large estates where grounding matters.
 
 ### Conformance contract
 
@@ -977,6 +986,19 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.31.0 -- 2026-08-06
+Cue-ranking grounding contract extension for `moot_synthesize`:
+
+- When `query` is present, the recall frame is widened to
+  `max(limit, groundedSynthesisCuePoolBound=200)` so the full matched pool
+  is available for ranking. The user's `limit` is applied as a post-rank cap so
+  only the top-N cue-ranked drawers feed synthesis.
+- The dispatch layer extracts `cueTerms` from the grounding terms and passes
+  them through to `GroundedSynthesis.Input` so the HybridRecallEngine's
+  cue-term lane can rank the pool before the cap is applied.
+- Empty `cueTerms` (no query) preserves previous output exactly — no change
+  to the whole-estate digest path.
 
 ### 1.30.0 -- 2026-08-06
 

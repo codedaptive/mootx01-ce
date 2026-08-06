@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.7.0
+version: 1.8.0
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1046,6 +1046,14 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.8.0 -- 2026-08-06
+Added cue-term rerank contract (§ 4.3 cue-term lane). `HybridRecallEngine.rerank`
+gains an optional `cueTerms: [String]` parameter. When non-empty, the two RRF
+lanes become genuinely independent: L-lexical ranks drawers by distinct-cue-term-match
+count descending with input-order tie-break; L-semantic remains input order (recency).
+Empty `cueTerms` is bit-identical to the previous output. Swift and Rust ports both
+updated with four conformance tests each.
 
 ### 1.4.1 -- 2026-06-25
 Corrected § 12.2 to the recall-driven dreaming contract Decision 7: the dreaming work is a

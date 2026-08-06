@@ -197,6 +197,64 @@ struct RecipeToolsTests {
         #expect(!text.contains("quantum"))
     }
 
+    /// Ranking is driven by cue-term relevance, not recency. File 25 memories:
+    /// the OLDEST contains distinctive answer terms; 24 newer memories share a
+    /// generic word that also appears in the query but is dominated by the
+    /// distinctive terms. With limit:5, recency alone evicts the answer drawer;
+    /// with cue-relevance ranking it rises to the top and appears in keyInsights.
+    @Test func testGroundedSynthesisCueRankingBringsOldAnswerToTop() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "gsrank"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // File the answer memory FIRST (oldest). Contains four distinctive terms
+        // that uniquely identify it.
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "daguerreotype vintage cameras photography collection"))
+
+        // File 4 newer memories. Each contains the generic word "collection"
+        // (passes the contentMatches filter) plus unrelated content.
+        //
+        // Pool size of 5 (1 answer + 4 generic) is chosen so MMR diversity
+        // surfaces the answer at position 3: after the 2 most-recent generic
+        // drawers are selected, all remaining generics carry a ~0.95 shingle
+        // similarity penalty while the answer (very different content) carries
+        // only ~0.08. That penalty gap makes the answer's MMR score exceed every
+        // remaining generic's. With cap=3 the answer occupies the third slot in
+        // keyInsights. A pool of 10+ generics pushes the answer past position 3;
+        // a pool of 3 generics means limit=3 alone evicts the answer pre-change.
+        for i in 1...4 {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_memory",
+                arguments: fileArgs(content: "grocery store shopping collection item \(i)"))
+        }
+
+        // Query with distinctive terms + generic term. limit:3 means recency
+        // alone would return 3 grocery drawers (evicting the answer at position
+        // 5). The cue-pool bound widens the frame to 200, bringing all 5 drawers
+        // into ranking. MMR diversity places the answer 3rd; cap=3 keeps it.
+        let result = try await dispatcher.dispatch(
+            name: "moot_synthesize",
+            arguments: .object([
+                "query": .string("daguerreotype vintage cameras collection"),
+                "filter": .string("unconfirmed"),
+                "limit": .integer(3),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // The answer drawer must appear in keyInsights — its first line excerpt
+        // contains the distinctive terms. keyInsights is the last of the 3-slot
+        // cap (positions 1 and 2 are the 2 most-recent generic drawers).
+        #expect(text.contains("daguerreotype"),
+                "answer drawer content must appear in keyInsights after cue ranking; got: \(text)")
+        #expect(text.contains("query: daguerreotype vintage cameras collection"))
+    }
+
     /// A query whose every token is a stopword or too short must be rejected
     /// (invalidParams), never silently degraded to an unscoped digest.
     @Test func testGroundedSynthesisAllStopwordQueryThrowsInvalidParams() async throws {

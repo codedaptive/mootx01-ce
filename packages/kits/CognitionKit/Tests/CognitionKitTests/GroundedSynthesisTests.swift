@@ -110,4 +110,40 @@ struct GroundedSynthesisTests {
         #expect(recipe.name == "grounded_synthesis")
         #expect(Set(recipe.requiredCapabilities) == [.hybridRecall, .synthesize])
     }
+
+    /// Cap truncates post-rank: the reranker runs first, then cap keeps only
+    /// the top-N scored drawers. The cue-relevant drawer is deliberately the
+    /// OLDEST — the exact configuration the mission exists for (recency-only
+    /// ordering evicts it; measured as the trial-2 failure). With cap=1 it
+    /// must still be the sole survivor: with a cue present the recipe's
+    /// lane weighting is lexical-dominant, recency strictly a tie-break.
+    /// Twin of Rust `gs4_cap_truncates_after_rerank` (identical fixture).
+    @Test("cap truncates after rerank — most relevant survives not most recent")
+    func capTruncatesAfterRerank() async throws {
+        try await withCognitionLock {
+            // d1 (filed FIRST, oldest): matches all three cue terms.
+            // d2, d3 (newer): match none. Recency alone would pick d3.
+            let (kit, handle) = try await makeEstate(capturing: [
+                "daguerreotype vintage cameras photography collection",  // index 0 — oldest, 3 distinct matches
+                "modern digital exhibition display",                     // index 1 — newer, 0 matches
+                "contemporary art installation space",                   // index 2 — newest, 0 matches
+            ])
+
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                cueTerms: ["daguerreotype", "vintage", "cameras"],
+                cap: 1
+            )
+            let out = try await GroundedSynthesis().run(
+                input: input, estate: handle, kit: kit)
+
+            // cap: 1 → exactly one drawer feeds synthesis.
+            #expect(out.drawerCount == 1,
+                    "cap 1 must truncate the ranked result to exactly 1 drawer")
+            // That one drawer is the cue-matched one; its content appears in
+            // keyInsights (makeKeyInsights picks the first row in stream order).
+            #expect(out.context.keyInsights.first?.contains("daguerreotype") == true,
+                    "the cue-relevant drawer must be the one that survives the cap")
+        }
+    }
 }

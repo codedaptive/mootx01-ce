@@ -653,6 +653,15 @@ enum RecipeTools {
 
     // MARK: - grounded_synthesis
 
+    /// Maximum frame limit for grounded-synthesis cue-pool recall. When a
+    /// query is present the FRAME widens to this bound so the lexical RRF
+    /// lane can rank the full matched pool before the user limit caps synthesis.
+    /// The contentMatches filter already scopes the pool; this constant only
+    /// guards pathological over-matching. 200 was measured as tolerable in
+    /// trial 2 — unbounded synthesis caused 4/50 calls to time out on the
+    /// client. Parity: Rust `GROUNDED_SYNTHESIS_CUE_POOL_BOUND = 200`.
+    private static let groundedSynthesisCuePoolBound: Int = 200
+
     private static func runGroundedSynthesis(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -668,6 +677,7 @@ enum RecipeTools {
         // a stopword is rejected rather than silently ignored — a caller who
         // sent a cue must never receive an unscoped estate digest.
         let query = try optionalString(args["query"], argument: "query")
+        var cueTerms: [String] = []
         if let query {
             let terms = groundingTerms(from: query)
             guard !terms.isEmpty else {
@@ -678,20 +688,31 @@ enum RecipeTools {
                     + "ground on")
             }
             filterChain.append(.any(terms.map { .contentMatches($0) }))
+            cueTerms = terms
         }
         // Route through clampLimit so negative and over-ceiling values are
         // rejected/clamped at the MCP boundary. Parity: Rust recipe_tools.rs
         // run_grounded_synthesis_tool uses clamp_limit with the same ceiling.
-        let limit = try ToolDispatcher.clampLimit(
+        let userLimit = try ToolDispatcher.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        // When a query is present, widen the frame to the cue-pool bound so
+        // the lexical RRF lane ranks the full matched pool before the user
+        // limit caps synthesis. Without a query the frame limit equals the
+        // user limit — no behavioural change from previous behaviour.
+        let frameLimit = cueTerms.isEmpty ? userLimit : max(userLimit, groundedSynthesisCuePoolBound)
+        // When a query is present, pass the user limit as the recipe cap so
+        // synthesis is bounded even when the frame is wide. Without a query
+        // the cap is nil — the full recalled set feeds synthesis unchanged.
+        let recipeCap: Int? = cueTerms.isEmpty ? nil : userLimit
         let frame = LocusKit.RecallFrame(
             filterChain: filterChain,
             hydrationLevel: .structured,
-            limit: limit,
+            limit: frameLimit,
             ordering: .byCaptureTimeDesc)
 
         let out = try await GroundedSynthesis().run(
-            input: .init(frame: frame), estate: handle, kit: kit)
+            input: .init(frame: frame, cueTerms: cueTerms, cap: recipeCap),
+            estate: handle, kit: kit)
 
         let doc = out.context
         // The cue is part of the document's identity: a grounded synthesis

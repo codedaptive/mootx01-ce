@@ -77,11 +77,12 @@ public func hybridRecall(
     _ frame: RecallFrame,
     handle: EstateHandle,
     on glk: GeniusLocusKit,
-    tuning: RecallFrameTuning = .default
+    tuning: RecallFrameTuning = .default,
+    cueTerms: [String] = []
 ) async throws -> RecallStream {
     let start = Date().timeIntervalSince1970
     let drawers = try await glk.recall(handle, frame)
-    let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
+    let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning, cueTerms: cueTerms)
     let stream = RecallStream(rows: reranked, pageSize: tuning.pageSize)
 
     // Emit hybrid-recall telemetry at the operation boundary. `start` is
@@ -243,27 +244,65 @@ public struct RecallStream: AsyncSequence, Sendable {
 internal enum HybridRecallEngine {
 
     /// Apply RRF fusion (k = `tuning.rrfK`) and MMR rerank
-    /// (λ = `tuning.mmrLambda`) to `drawers` and return the reranked
-    /// list. Pure function — deterministic across Swift and Rust versions.
-    static func rerank(drawers: [Drawer], tuning: RecallFrameTuning) -> [Drawer] {
+    /// (λ = `tuning.mmrLambda`) to `drawers` and return the reranked list.
+    /// Pure function — deterministic across Swift and Rust versions.
+    ///
+    /// When `cueTerms` is non-empty the two RRF lanes become genuinely
+    /// independent: L-lexical ranks drawers by distinct-cue-term-match count
+    /// descending (input-order tie-break); L-semantic is input order (recency).
+    /// When `cueTerms` is empty, both lanes equal input order — output is
+    /// bit-identical to the previous single-list path (hard requirement for
+    /// callers that pass no query).
+    static func rerank(drawers: [Drawer], tuning: RecallFrameTuning, cueTerms: [String] = []) -> [Drawer] {
         guard !drawers.isEmpty else { return [] }
 
-        // RRF over the single fused list returned by the verb. Today
-        // L₁ == L₂ == drawers; the RRF score still runs to keep the
-        // math identical to the day the estate surface widens. RRF
-        // score is monotonic-decreasing with rank, so the rank order
-        // does not change relative to the input, but the score is
-        // recorded for the MMR relevance term below.
+        // Build the lexical rank order.
+        // When cueTerms is non-empty: rank by DISTINCT cue-term-match count
+        // descending, input-order tie-break. Distinct count — not occurrence
+        // count — is intentional: generic terms that appear many times in one
+        // drawer award only +1, so they cannot inflate a drawer above one that
+        // matches more distinct cue terms. Ties break by input index (stable).
+        // When cueTerms is empty: lexical order == input order, so both lanes
+        // collapse to the same sequence and the RRF math produces the same
+        // score vector as before.
+        let lexicalOrder: [Int]
+        if cueTerms.isEmpty {
+            lexicalOrder = Array(drawers.indices)
+        } else {
+            let lowTerms = cueTerms.map { $0.lowercased() }
+            // (matchCount, originalIndex) pairs for stable sort.
+            let scored: [(Int, Int)] = drawers.indices.map { idx in
+                let lower = drawers[idx].content.lowercased()
+                let distinct = lowTerms.filter { lower.contains($0) }.count
+                return (distinct, idx)
+            }
+            // Sort by count DESC; input index ASC as stable tie-break.
+            let sorted = scored.sorted { a, b in
+                a.0 != b.0 ? a.0 > b.0 : a.1 < b.1
+            }
+            lexicalOrder = sorted.map { $0.1 }
+        }
+
+        // Map originalIndex → lexical rank for O(1) lookup.
+        var lexRank = [Int: Int]()
+        lexRank.reserveCapacity(drawers.count)
+        for (rank, idx) in lexicalOrder.enumerated() {
+            lexRank[idx] = rank
+        }
+
+        // RRF with genuinely independent lanes:
+        // L-lexical: ranked by distinct-cue-term count (or input order when
+        // cueTerms is empty).  L-semantic: input order (recency — the verb's
+        // natural ordering). When cueTerms is empty both lanes equal input
+        // order and the formula reduces to the previous single-list math —
+        // bit-identical output guaranteed.
         var rrfScore: [Int: Float] = [:]
         rrfScore.reserveCapacity(drawers.count)
-        for (idx, _) in drawers.enumerated() {
-            let lexical = 1.0 / Float(tuning.rrfK + idx + 1)
-            let semantic = 1.0 / Float(tuning.rrfK + idx + 1)
-            // Weighted sum matches the spec's two-path formulation.
-            // With equal lists the weighting collapses to a constant
-            // factor and does not reorder; with future independent
-            // lists the weighting will reorder, which is the point.
-            rrfScore[idx] = tuning.bm25Weight * lexical + tuning.vectorWeight * semantic
+        for semRank in drawers.indices {
+            let lRank = lexRank[semRank] ?? semRank
+            let lexical = 1.0 / Float(tuning.rrfK + lRank + 1)
+            let semantic = 1.0 / Float(tuning.rrfK + semRank + 1)
+            rrfScore[semRank] = tuning.bm25Weight * lexical + tuning.vectorWeight * semantic
         }
 
         // MMR rerank. Selects the next drawer that maximises

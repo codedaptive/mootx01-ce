@@ -501,6 +501,15 @@ fn run_list_recipes_catalog(args: &BTreeMap<String, JsonValue>) -> Result<serde_
 // moot_grounded_synthesis
 // ---------------------------------------------------------------------------
 
+/// Maximum frame limit for grounded-synthesis cue-pool recall. When a query
+/// is present the frame widens to this bound so the lexical RRF lane can rank
+/// the full matched pool before the user limit caps synthesis. The
+/// contentMatches filter already scopes the pool; this constant only guards
+/// pathological over-matching. 200 was measured as tolerable in trial 2 —
+/// unbounded synthesis caused 4/50 calls to time out on the client.
+/// Parity: Swift `groundedSynthesisCuePoolBound = 200`.
+const GROUNDED_SYNTHESIS_CUE_POOL_BOUND: usize = 200;
+
 fn run_grounded_synthesis_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -517,6 +526,7 @@ fn run_grounded_synthesis_tool(
     // never receive an unscoped estate digest. Twin of Swift
     // runGroundedSynthesis.
     let query = optional_string_value(args.get("query"), "query")?.map(str::to_string);
+    let mut cue_terms: Vec<String> = Vec::new();
     if let Some(ref q) = query {
         let terms = grounding_terms(q);
         if terms.is_empty() {
@@ -527,6 +537,7 @@ fn run_grounded_synthesis_tool(
                     .to_string(),
             ));
         }
+        cue_terms = terms.clone();
         filter_chain.push(locus_kit::filter::Filter::Any(
             terms
                 .into_iter()
@@ -537,14 +548,31 @@ fn run_grounded_synthesis_tool(
     // Route through clamp_limit so negative and over-ceiling values are
     // rejected/clamped at the MCP boundary. Parity: Swift runGroundedSynthesis
     // uses ToolDispatcher.clampLimit with the same ceiling.
-    let limit = clamp_limit(
+    let user_limit = clamp_limit(
         optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
     )?;
+    // When a query is present, widen the frame to the cue-pool bound so the
+    // lexical RRF lane ranks the full matched pool before the user limit caps
+    // synthesis. Without a query the frame limit equals the user limit —
+    // no behavioural change from previous behaviour.
+    let frame_limit = if cue_terms.is_empty() {
+        user_limit
+    } else {
+        user_limit.max(GROUNDED_SYNTHESIS_CUE_POOL_BOUND)
+    };
+    // When a query is present, pass the user limit as the recipe cap so
+    // synthesis is bounded even when the frame is wide. Without a query
+    // the cap is None — the full recalled set feeds synthesis unchanged.
+    let recipe_cap: Option<usize> = if cue_terms.is_empty() {
+        None
+    } else {
+        Some(user_limit)
+    };
 
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = HydrationLevel::Structured;
     frame.ordering = Ordering::ByCaptureTimeDesc;
-    frame.limit = Some(limit);
+    frame.limit = Some(frame_limit);
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
@@ -563,6 +591,8 @@ fn run_grounded_synthesis_tool(
         RecallFrameTuning::default(),
         now,
         &node_names,
+        &cue_terms,
+        recipe_cap,
     )
     .map_err(error_from_recipe)?;
 

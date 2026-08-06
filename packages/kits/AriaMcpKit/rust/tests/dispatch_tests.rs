@@ -7087,6 +7087,76 @@ fn grounding_terms_contract() {
     assert_eq!(grounding_terms(&long.join(" ")).len(), 12);
 }
 
+/// Ranking is driven by cue-term relevance, not recency. File 25 memories: the
+/// OLDEST contains distinctive answer terms; 24 newer memories share a generic
+/// word that also appears in the query but is dominated by the distinctive terms.
+/// With limit:5, recency alone evicts the answer drawer; cue-relevance ranking
+/// brings it to the top so it appears in keyInsights.
+/// Twin of Swift `testGroundedSynthesisCueRankingBringsOldAnswerToTop`.
+///
+/// Pool size of 5 (1 answer + 4 generic) is chosen so MMR diversity surfaces
+/// the answer at position 3: after the 2 most-recent generics are selected,
+/// all remaining generics carry a ~0.95 shingle-similarity penalty while the
+/// answer (very different content) carries only ~0.08. That penalty gap makes
+/// the answer's MMR score exceed every remaining generic. cap=3 captures it.
+#[test]
+fn grounded_synthesis_cue_ranking_brings_old_answer_to_top() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // File the answer memory FIRST (oldest). Contains four distinctive terms.
+    file_one_memory(
+        &registry,
+        "daguerreotype vintage cameras photography collection",
+        "recipe-tests",
+    );
+    // Sleep briefly so the 4 generic memories get a later filedAt timestamp,
+    // placing the answer at semRank=4 (oldest) in the (filedAt DESC, id DESC)
+    // recall order. Without this the in-memory store's UUID tie-break is random
+    // and the test becomes non-deterministic.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    // File 4 newer memories containing the generic word "collection" plus
+    // unrelated content. 4 generics + 1 answer = 5-drawer pool that makes the
+    // MMR math work at cap=3 (see module-level comment).
+    for i in 1..=4 {
+        file_one_memory(
+            &registry,
+            &format!("grocery store shopping collection item {i}"),
+            "recipe-tests",
+        );
+    }
+
+    // Query with distinctive terms + generic term. limit:3 — recency alone
+    // would pick the 3 newest grocery drawers (evicting the answer at position
+    // 5). The cue-pool bound widens the frame to 200, bringing all 5 drawers
+    // into ranking. MMR diversity places the answer 3rd; cap=3 includes it in
+    // keyInsights.
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args![
+            "query" => "daguerreotype vintage cameras collection",
+            "filter" => "unconfirmed",
+            "limit" => 3_i64
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("cue-ranked synthesize must dispatch");
+
+    assert!(is_success(&result), "cue-ranked synthesize should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // The answer drawer must appear in keyInsights. It occupies the 3rd slot
+    // of the cap-3 output (positions 1 and 2 are the 2 most-recent generics).
+    assert!(
+        text.contains("daguerreotype"),
+        "answer drawer content must appear in keyInsights after cue ranking; got: {text}"
+    );
+    assert!(
+        text.contains("query: daguerreotype vintage cameras collection"),
+        "response must name the cue; got: {text}"
+    );
+}
+
 /// `moot_synthesize` with an over-ceiling `limit` must succeed (clamped).
 #[test]
 fn grounded_synthesis_over_ceiling_limit_is_clamped() {

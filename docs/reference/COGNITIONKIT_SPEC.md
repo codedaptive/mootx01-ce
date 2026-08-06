@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Specification
-version: 1.4.0
+version: 1.5.0
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -754,6 +754,20 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-08-06
+`GroundedSynthesis.Input` gains `cueTerms: [String] = []` and `cap: Int? = nil`.
+When `cueTerms` is non-empty, recall is passed through `HybridRecallEngine.rerank`
+with the cue terms so the lexical lane is genuinely independent of the recency lane,
+and the recipe OWNS the lane weights: it overrides the tuning's lane split to
+lexical-dominant (1.0/0.0 — recency strictly a tie-break, which the lexical
+sort's input-order tie-break provides), because any blended weighting lets the
+recency lane's pool-size-scaled rank spread override a one-step relevance
+difference on large estates. The caller's `rrfK`, `mmrLambda`, and `pageSize`
+still apply. `cap` is applied after rerank so only the top-N ranked drawers feed
+synthesis — preventing a wide frame from overwhelming the synthesizer while still
+surfacing the most relevant drawer regardless of filing date. Rust port mirrors
+Swift.
 
 ### 1.4.0 -- 2026-07-16
 Closed missing DoS-bound invariants (verifier gap):

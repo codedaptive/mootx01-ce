@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.34.0
+version: 1.35.0
 status: accepted-1.1-target
 date: 2026-08-06
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1216,6 +1216,17 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.35.0 -- 2026-08-06
+Cue-ranking dispatch wiring for `moot_synthesize`:
+
+- `runGroundedSynthesis` (Swift) / `run_grounded_synthesis_tool` (Rust) compute
+  `frameLimit = max(userLimit, groundedSynthesisCuePoolBound=200)` and
+  `recipeCap = userLimit` when a query is present. Both are threaded through to
+  `GroundedSynthesis.Input` / `run_grounded_synthesis` so the cue-term reranker
+  sees the full matched pool before the user's limit caps the synthesis.
+- No change to the tool's public argument surface — this is an internal routing
+  contract change only.
 
 ### 1.34.0 -- 2026-08-06
 

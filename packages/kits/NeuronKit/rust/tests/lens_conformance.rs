@@ -1017,7 +1017,7 @@ fn lenses_reproduce_shared_vectors() {
             mmr_lambda: rc.mmr_lambda,
             ..RecallFrameTuning::default_tuning()
         };
-        let out = rerank(&drawers, &tuning);
+        let out = rerank(&drawers, &tuning, &[]);
         let ids: Vec<String> = out.iter().map(|d| d.id.clone()).collect();
         assert_eq!(ids, rc.expected_order, "hybrid_recall rerank order");
     }
@@ -1033,7 +1033,7 @@ fn lenses_reproduce_shared_vectors() {
                 content: d.content.clone(),
             })
             .collect();
-        let reranked = rerank(&drawers, &RecallFrameTuning::default_tuning());
+        let reranked = rerank(&drawers, &RecallFrameTuning::default_tuning(), &[]);
         let pages = page_recall(&reranked, pc.page_size);
         assert_eq!(pages.len(), pc.pages.len(), "hybrid_recall page count");
         for (got, want) in pages.iter().zip(&pc.pages) {
