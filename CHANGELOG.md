@@ -5,6 +5,29 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.39 — 2026-08-06
+
+**Installer fix — macOS `.pkg` left `~/.local/bin` root-owned, blocking setup.**
+On a fresh Mac the postinstall script creates `~/.local` and `~/.local/bin` as
+root and previously repaired ownership only on the two symlinks inside them.
+Because replacing a symlink needs write permission on the directory that
+contains it, `mootx01 install` then failed with "couldn't be removed because you
+don't have permission" and the setup step never ran — no server, no database.
+Both directories now have their ownership repaired. The repair is deliberately
+not recursive: `~/.local` is shared with pipx, cargo and other tools, and
+re-owning their files would be worse than the original problem.
+
+The installing user is now identified from the owner of `$HOME` — the same value
+that decides where files are written — instead of from the console session. The
+two disagreed under Fast User Switching, during headless and MDM installs, and
+after `su`, each of which could leave files owned by the wrong user or by root.
+
+Also hardened: the postinstall refuses to write to or change ownership of
+`~/.local`, `~/.local/bin` or `~/.mootx01` when any of them is a symlink rather
+than a real directory. The script runs as root, so a symlink standing in one of
+those places would have redirected root-privileged writes and ownership changes
+to whatever it pointed at.
+
 ## v1.0.38 — 2026-07-30
 
 **Packaging-only release — plugin MCP server renamed to `memory`.** No code

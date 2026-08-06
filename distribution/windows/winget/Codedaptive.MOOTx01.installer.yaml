@@ -26,7 +26,7 @@
 #   loudly at winget validation rather than shipping a wrong hash.
 
 PackageIdentifier: Codedaptive.MOOTx01
-PackageVersion: 1.0.37
+PackageVersion: 1.0.38
 
 InstallerType: inno
 Scope: user
@@ -46,11 +46,11 @@ AppsAndFeaturesEntries:
 
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.37/mootx01-1.0.37-windows-x86_64-setup.exe
-    InstallerSha256: 16AF6350D0150CD2349057D1F1739EA5C6E794A7731A2B7F9CA04E5264A39E99
+    InstallerUrl: https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.38/mootx01-1.0.38-windows-x86_64-setup.exe
+    InstallerSha256: 43B08D9734961F077D353C2B5CA0C5671AFD46C2E30AA3D853AD5BA8F19E58D5
   - Architecture: arm64
-    InstallerUrl: https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.37/mootx01-1.0.37-windows-arm64-setup.exe
-    InstallerSha256: E77369C899E98FE35C9FC8719359A04B9CE6A10CAD13871FC8CE98D557853D27
+    InstallerUrl: https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.38/mootx01-1.0.38-windows-arm64-setup.exe
+    InstallerSha256: 23FA67511AA266DA57B02EC04B40D72D3045A81AC5207D5CE8992758C21F5505
 
 ManifestType: installer
 ManifestVersion: 1.12.0
