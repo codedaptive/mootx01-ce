@@ -110,9 +110,9 @@ struct VaultToolsTests {
         // arbitrary local SQLite files (same security posture as vault tools).
         #expect(!names.contains("moot_palace_import"))
         // Vault-off removes the five moot_vault_* tools plus palace import.
-        // 75 vault-on − 6 = 69 (dataset + packet + contradiction-hunter tools are not
+        // 76 vault-on − 6 = 70 (dataset + packet + contradiction-hunter tools are not
         // vault-gated).
-        #expect(toolsOff.count == 69)
+        #expect(toolsOff.count == 70)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -120,8 +120,8 @@ struct VaultToolsTests {
         let toolsNoEnv = ToolProjection.tools(environment: [:])
         let names = Set(toolsNoEnv.map(\.name))
         #expect(names.contains("moot_vault_export"))
-        // 66 baseline + 2 contradiction-hunter + 3 dataset tools + 4 packet tools = 75.
-        #expect(toolsNoEnv.count == 75)
+        // 67 baseline + 2 contradiction-hunter + 3 dataset tools + 4 packet tools = 76 (incl. moot_recall_connected).
+        #expect(toolsNoEnv.count == 76)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.

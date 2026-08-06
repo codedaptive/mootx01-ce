@@ -52,10 +52,11 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 35 total: 12 recipe tools + 23 lens tools. moot_distill is the sole
+        // 36 total: 13 recipe tools + 23 lens tools. moot_distill is the sole
         // distillation-sweep name (its compatibility alias is gone — Phase 2 of
         // SPEC_DISTILLATION_STORAGE §3) and moot_recollect retired with the
-        // factoid tier (§3/§11).
+        // factoid tier (§3/§11). moot_recall_connected joined 2026-08-06
+        // (graph-diffusion multi-hop recall).
         #expect(recipeNames == [
             "moot_confirm_migration",
             "moot_distill",
@@ -86,6 +87,7 @@ struct RecipeToolsTests {
             "moot_lens_trust_synthesis",
             "moot_list_lenses",
             "moot_list_recipes",
+            "moot_recall_connected",
             "moot_recall_distilled",
             "moot_recall_precise",
             "moot_recall_shaped",
@@ -129,6 +131,65 @@ struct RecipeToolsTests {
             #expect(!interfaceNames.contains(tool.name),
                     "recipe tool \(tool.name) must not collide with an interface tool name")
         }
+    }
+
+    // MARK: - recall_connected dispatch
+
+    /// The bridge scenario recall_connected exists for: the answer memory
+    /// shares NO words with the query and is reachable only through a
+    /// connection edge. File hop-1 (matches the query), file the answer,
+    /// link them (a validated tunnel via moot_link_memories), then ask.
+    /// Plain similarity cannot surface the answer; the walk must.
+    @Test func testConnectedRecallReachesBridgeLinkedAnswer() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "rc"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        func fileOne(_ content: String) async throws -> String {
+            let result = try await dispatcher.dispatch(
+                name: "moot_file_memory", arguments: fileArgs(content: content))
+            let text = result.objectValue?["content"]?.arrayValue?.first?
+                .objectValue?["text"]?.stringValue ?? ""
+            // "filed memory <UUID>" — first line, third token.
+            return text.split(separator: "\n").first?
+                .split(separator: " ").last.map(String.init) ?? ""
+        }
+
+        let hop1 = try await fileOne("Melanie mentioned her sister visited from Cambridge")
+        let answer = try await fileOne("Caroline finished the astrophysics degree this spring")
+        // Distractors so the anchor pool is not trivially the whole estate.
+        _ = try await fileOne("grocery shopping list for the weekend")
+        _ = try await fileOne("bicycle maintenance notes and tire pressure")
+
+        // Validated tunnel between hop-1 and the answer (the human-approved
+        // edge class; associations are the dream's pending equivalent).
+        _ = try await dispatcher.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(hop1),
+                "to_id": .string(answer),
+                "kind": .string("relates"),
+                "label": .string("sister identity bridge"),
+            ]))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string("Melanie sister Cambridge"),
+                "wing": .string("recipe-tests"),
+                "filter": .string("unconfirmed"),
+                "limit": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.hasPrefix("found "), "memory_search-shaped header expected")
+        #expect(text.contains(answer),
+                "the tunnel-linked answer must be reachable via the walk; got: \(text)")
+        #expect(text.contains("connected: anchor="),
+                "the lane-provenance line must be present")
     }
 
     // MARK: - grounded_synthesis dispatch
@@ -817,10 +878,10 @@ struct RecipeToolsTests {
 
     @Test func testRecipeToolsCount() {
         // 12 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
-        // preciseRecall, shapedRecall, vagueRecall, runMigration,
+        // preciseRecall, connectedRecall, shapedRecall, vagueRecall, runMigration,
         // confirmMigration, dream, distill, recallDistilled,
         // huntContradictions.
-        #expect(RecipeTools.tools().count == 12)
+        #expect(RecipeTools.tools().count == 13)
         let names = RecipeTools.tools().map(\.name)
         #expect(names.contains("moot_distill"))
         #expect(!names.contains("moot_consolidate"))

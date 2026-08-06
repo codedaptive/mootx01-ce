@@ -63,6 +63,12 @@ enum RecipeTools {
     /// tools (one per shape) — the AI picks a deterministic recipe by name instead
     /// of simulating steering.
     static let shapedRecallToolName = "moot_recall_shaped"
+    /// Connected-recall tool: multi-hop retrieval by graph diffusion — a
+    /// scored anchor grab seeds a deterministic walk-with-restart over the
+    /// estate's tunnels ∪ pending associations, and the walk's visit ranking
+    /// fuses with the anchor ranking. The EXPENSIVE recall path: the caller
+    /// escalates here for hard bridge questions the similarity lanes miss.
+    static let connectedRecallToolName = "moot_recall_connected"
     static let runMigrationBenchmarkToolName = "moot_run_migration"
     static let confirmMigrationPromotionToolName = "moot_confirm_migration"
     /// On-demand dream tool: rebuild the estate's derived accelerators (the
@@ -117,6 +123,7 @@ enum RecipeTools {
             || name == preciseRecallToolName
             || name == vagueRecallToolName
             || name == shapedRecallToolName
+            || name == connectedRecallToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
@@ -138,6 +145,7 @@ enum RecipeTools {
             groundedSynthesisTool(),
             preciseRecallTool(),
             shapedRecallTool(),
+            connectedRecallTool(),
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
             dreamTool(),
@@ -261,6 +269,28 @@ enum RecipeTools {
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
+    }
+
+    /// The connected-recall tool. Runs the ConnectedRecall recipe: a scored
+    /// anchor grab seeds a deterministic walk-with-restart over the estate's
+    /// connection graph — tunnels (validated) plus dream-produced pending
+    /// associations — and the walk's visit ranking fuses with the anchor
+    /// ranking. Same output shape as moot_memory_search.
+    private static func connectedRecallTool() -> ProjectedTool {
+        ProjectedTool(
+            name: connectedRecallToolName,
+            description: "Connected recall: multi-hop retrieval by graph diffusion. A scored anchor search seeds a deterministic random walk with restart over the estate's connection structure (tunnels plus pending associations), reaching bridge-linked memories that share no words with the query; the walk's visit ranking is fused with the anchor ranking. This is the EXPENSIVE recall path — use it for hard bridge questions (\"what did X's sister study\" when the sister's name only appears in the estate) after the similarity lanes (moot_memory_search, moot_recall_precise, moot_recall_shaped) miss. Returns dense rows in the same shape as moot_memory_search plus a lane-provenance summary line.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema("The question text — drives the scored anchor search that seeds the walk."),
+                    "wing": stringSchema("Optional wing whose tunnel graph joins the walk. Omit to walk pending associations only (tunnels are wing-scoped; associations are estate-wide). null is invalid."),
+                    "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -527,6 +557,8 @@ enum RecipeTools {
             return try await runGroundedSynthesis(args, kit: kit, handle: handle)
         case preciseRecallToolName:
             return try await runPreciseRecall(args, kit: kit, handle: handle)
+        case connectedRecallToolName:
+            return try await runConnectedRecall(args, kit: kit, handle: handle)
         case vagueRecallToolName:
             return try await runVagueRecall(args, kit: kit, handle: handle)
         case shapedRecallToolName:
@@ -873,6 +905,64 @@ enum RecipeTools {
             lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
                 + "results may be imprecise. Refine with specific identifiers for higher confidence.")
         }
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
+    }
+
+    // MARK: - recall_connected
+
+    /// Run the ConnectedRecall recipe and serialize its matches in the SAME
+    /// plain-text shape `moot_memory_search` emits (found-N header + one
+    /// dense row per hit), so every mootText parser works unchanged. A
+    /// trailing `connected:` line names the lane provenance (anchor / walk /
+    /// both counts) — the walk lane is the tool's whole reason to exist, so
+    /// the response says whether it contributed.
+    private static func runConnectedRecall(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        let filter = try decodeSingleFilter(args["filter"])
+        // Wing scopes the TUNNEL side of the walk graph; associations are
+        // estate-wide. Omitted wing = association-only graph (tunnels are
+        // wing-scoped reads and there is no all-wings tunnel verb).
+        let wing = try optionalString(args["wing"], argument: "wing") ?? ""
+
+        let matches = try await ConnectedRecall.run(
+            kit: kit, handle: handle, query: query,
+            wing: wing, filter: filter, limit: limit)
+
+        // Same sensitivity-gated dense-row rendering the precise tool uses:
+        // the structured-tier fetch decides what may be shown; the recipe's
+        // in-hand content never bypasses the gate.
+        let estate = try await kit.estate(for: handle)
+        let shownMatches = Array(matches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: shownMatches.map { $0.id }, estate: estate)
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
+
+        var lines: [String] = ["found \(matches.count) memory(s)"]
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in shownMatches {
+            if let d = drawersByID[match.id] {
+                lines.append(DenseRow.render(d))
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
+            } else {
+                lines.append(DenseRow.renderUnhydrated(id: match.id))
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
+        }
+        let anchorCount = matches.filter { $0.source == "anchor" }.count
+        let walkCount = matches.filter { $0.source == "walk" }.count
+        let bothCount = matches.filter { $0.source == "both" }.count
+        lines.append("connected: anchor=\(anchorCount) walk=\(walkCount) both=\(bothCount)")
         return ToolDispatcher.structuredTextResult(
             lines.joined(separator: "\n"), results: results)
     }

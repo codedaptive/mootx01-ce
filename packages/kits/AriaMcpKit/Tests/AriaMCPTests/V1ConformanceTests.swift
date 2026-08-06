@@ -195,7 +195,7 @@ struct V1ConformanceTests {
         //   23rd lens = moot_lens_node_motion (diffusion node-layer lens).
         //   11th recipe = moot_hunt_contradictions (Wave 1: moot_recollect removed).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
-        #expect(tools.count == 75, "tools/list must return exactly 75 tools; got \(tools.count)")
+        #expect(tools.count == 76, "tools/list must return exactly 76 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────
