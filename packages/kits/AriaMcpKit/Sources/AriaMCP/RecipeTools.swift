@@ -233,7 +233,8 @@ enum RecipeTools {
             description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve, hasLinks. Omit for ordinary recall across any confirmation state. \"hasLinks\" scopes synthesis to drawers with links/citations — citation-scoped synthesis. null is invalid."),
+                    "query": stringSchema("Free-text cue that grounds the synthesis: distinctive terms are extracted and matched (OR, case-insensitive) against memory content, so only cue-relevant memories feed the document. Omit to synthesize over the whole recalled set (an estate digest); null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve, hasLinks. Omit for ordinary recall across any confirmation state. \"hasLinks\" scopes synthesis to drawers with links/citations — citation-scoped synthesis. Composes (AND) with query when both are given. null is invalid."),
                     "limit": integerSchema("Max drawers to recall. Omit for no explicit cap; null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
@@ -657,7 +658,27 @@ enum RecipeTools {
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> JSONValue {
-        let filterChain = try decodeFilterChain(args["filter"])
+        var filterChain = try decodeFilterChain(args["filter"])
+        // query — the grounding cue the recipe contract promises
+        // ("hybrid-recall a QUERY and synthesize", GroundedSynthesis.swift).
+        // The cue enters through the frame the recipe already takes:
+        // distinctive terms become an OR of content predicates, AND-composed
+        // with any kind filter above. The recipe's RRF+MMR rerank then fuses
+        // the cue-scoped pool before synthesis. A query whose every token is
+        // a stopword is rejected rather than silently ignored — a caller who
+        // sent a cue must never receive an unscoped estate digest.
+        let query = try optionalString(args["query"], argument: "query")
+        if let query {
+            let terms = groundingTerms(from: query)
+            guard !terms.isEmpty else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "query contains no usable terms (all tokens are "
+                    + "stopwords or too short); provide distinctive words to "
+                    + "ground on")
+            }
+            filterChain.append(.any(terms.map { .contentMatches($0) }))
+        }
         // Route through clampLimit so negative and over-ceiling values are
         // rejected/clamped at the MCP boundary. Parity: Rust recipe_tools.rs
         // run_grounded_synthesis_tool uses clamp_limit with the same ceiling.
@@ -673,9 +694,13 @@ enum RecipeTools {
             input: .init(frame: frame), estate: handle, kit: kit)
 
         let doc = out.context
+        // The cue is part of the document's identity: a grounded synthesis
+        // and an estate digest are different measurements, so the response
+        // names which one it is (line appears only when a query was given).
+        let queryLine = query.map { "query: \($0)\n" } ?? ""
         let body = """
         grounded_synthesis: \(out.drawerCount) drawer(s)
-        summary: \(doc.summary)
+        \(queryLine)summary: \(doc.summary)
         patterns: \(doc.patterns.joined(separator: ", "))
         successRate: \(doc.successRate)
         recommendations:
@@ -1762,6 +1787,46 @@ enum RecipeTools {
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Unknown filter: \(name)")
         }
+    }
+
+    /// Stopwords excluded from grounding-term extraction: question scaffolding
+    /// and function words that would match nearly every memory and destroy the
+    /// cue's selectivity. Deliberately small — an over-eager list starts
+    /// eating content words. MUST stay byte-identical to Rust
+    /// `GROUNDING_STOPWORDS` in recipe_tools.rs (conformance-checked there).
+    private static let groundingStopwords: Set<String> = [
+        "the", "and", "for", "are", "was", "were", "has", "have", "had",
+        "did", "does", "not", "with", "that", "this", "from", "they",
+        "their", "them", "then", "than", "there", "these", "those", "you",
+        "your", "what", "when", "where", "which", "who", "whom", "why",
+        "how", "will", "would", "could", "should", "about", "been", "being",
+        "into", "over", "under", "after", "before", "between", "during",
+        "any", "all", "each", "most", "some", "such", "can", "may", "might",
+        "must", "shall", "its", "his", "her", "him", "she", "our", "out",
+        "but", "per", "via", "also", "just", "only", "very", "much", "more",
+    ]
+
+    /// Extracts the distinctive grounding terms from a free-text query:
+    /// alphanumeric runs, lowercased (content matching is case-insensitive on
+    /// both ports), dropping stopwords and short fragments (< 3 chars unless
+    /// they carry a digit — "42" or "3b" are distinctive, "at" is not),
+    /// deduplicated in first-appearance order, capped at 12 terms so a pasted
+    /// paragraph cannot degenerate into an unbounded OR. Deterministic pure
+    /// function of the query — MUST stay behavior-identical to Rust
+    /// `grounding_terms` in recipe_tools.rs.
+    static func groundingTerms(from query: String) -> [String] {
+        var seen = Set<String>()
+        var terms: [String] = []
+        for raw in query.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            let token = raw.lowercased()
+            let hasDigit = token.contains { $0.isNumber }
+            guard token.count >= 3 || hasDigit else { continue }
+            guard !groundingStopwords.contains(token) else { continue }
+            guard seen.insert(token).inserted else { continue }
+            terms.append(token)
+            if terms.count == 12 { break }
+        }
+        return terms
     }
 
     /// Shared single-filter decoder used by precise recall, shaped recall, and

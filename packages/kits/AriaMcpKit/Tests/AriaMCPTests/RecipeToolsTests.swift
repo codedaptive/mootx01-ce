@@ -162,6 +162,74 @@ struct RecipeToolsTests {
         #expect(text.contains("carbon"))
     }
 
+    /// `query` scopes the recalled pool: only memories whose content matches
+    /// a distinctive term feed the synthesis, and the response names the cue
+    /// (a grounded synthesis and an estate digest are different measurements).
+    @Test func testGroundedSynthesisQueryScopesTheRecalledPool() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "gsq"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        for text in [
+            "carbon chemistry of organic compounds",
+            "carbon based biochemistry of life",
+            "quantum mechanics fundamentals",
+        ] {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_memory", arguments: fileArgs(content: text))
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_synthesize",
+            arguments: .object([
+                "query": .string("carbon compounds"),
+                "filter": .string("unconfirmed"),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // Both carbon memories match a term; the quantum memory matches none.
+        #expect(text.contains("grounded_synthesis: 2 drawer"))
+        #expect(text.contains("query: carbon compounds"))
+        #expect(!text.contains("quantum"))
+    }
+
+    /// A query whose every token is a stopword or too short must be rejected
+    /// (invalidParams), never silently degraded to an unscoped digest.
+    @Test func testGroundedSynthesisAllStopwordQueryThrowsInvalidParams() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "gse"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        await #expect(throws: JSONRPCError.self) {
+            let args: JSONValue = .object(["query": .string("what did they do")])
+            _ = try await dispatcher.dispatch(name: "moot_synthesize", arguments: args)
+        }
+    }
+
+    /// The term extractor's contract, pinned so both ports cannot drift:
+    /// stopwords and short fragments drop, digit-bearing short tokens stay,
+    /// tokens lowercase and dedupe in first-appearance order, cap at 12.
+    @Test func testGroundingTermsContract() {
+        // Stopwords and 2-char fragments drop; content words survive lowercased.
+        #expect(RecipeTools.groundingTerms(from: "What did Melanie buy at Trader Joe's?")
+            == ["melanie", "buy", "trader", "joe"])
+        // Digit-bearing short tokens are distinctive and survive.
+        #expect(RecipeTools.groundingTerms(from: "was it 46 or 3b") == ["46", "3b"])
+        // Dedupe preserves first-appearance order.
+        #expect(RecipeTools.groundingTerms(from: "carbon Carbon CARBON life")
+            == ["carbon", "life"])
+        // All-stopword input yields no terms (the dispatch layer rejects it).
+        #expect(RecipeTools.groundingTerms(from: "what did they do").isEmpty)
+        // Cap at 12 terms.
+        let long = (1...20).map { "uniqueterm\($0)" }.joined(separator: " ")
+        #expect(RecipeTools.groundingTerms(from: long).count == 12)
+    }
+
     // MARK: - recall_precise dispatch
 
     @Test func testPreciseRecallDispatchReturnsMootTextShape() async throws {

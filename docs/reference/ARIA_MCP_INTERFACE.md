@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.33.0
+version: 1.34.0
 status: accepted-1.1-target
-date: 2026-08-04
+date: 2026-08-06
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -347,6 +347,17 @@ the 23 reasoning-lens tools below.
   `moot_distill`, `moot_recall_distilled`, `moot_recall_vague`,
   `moot_hunt_contradictions`
   (12 CognitionKit recipe tools)
+  - `moot_synthesize` — run the GroundedSynthesis recipe: hybrid-recall and
+    synthesize the recalled set into a grounded context document (summary,
+    patterns, success rate, recommendations, key insights). Optional `query`
+    grounds the synthesis: distinctive terms are extracted (stopwords and
+    <3-char fragments drop unless digit-bearing; lowercased; deduped; capped
+    at 12) and matched case-insensitively (OR) against memory content,
+    AND-composed with the optional `filter` kind, so only cue-relevant
+    memories feed the document; the response carries a `query:` line naming
+    the cue. A query whose every token is a stopword is rejected
+    (invalidParams) rather than silently degraded to an unscoped digest.
+    Omit `query` for the whole-estate digest (previous behavior, unchanged).
   - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
     required capabilities per entry. No estate args required.
   - `moot_recall_precise` — coarse-grab a generous candidate pool then re-rank by
@@ -1205,6 +1216,17 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.34.0 -- 2026-08-06
+
+- `moot_synthesize` gains optional `query`: grounding-term extraction
+  (stopword/short-fragment drop, digit exception, dedupe, cap 12) into an
+  OR of case-insensitive content predicates AND-composed with `filter`;
+  response names the cue with a `query:` line; all-stopword queries are
+  rejected as invalidParams. Both ports. Completes the GroundedSynthesis
+  recipe contract ("hybrid-recall a query and synthesize") at the ARIA
+  surface — previously the tool accepted no cue and always produced a
+  whole-estate recency digest.
 
 ### 1.33.0 -- 2026-08-05
 

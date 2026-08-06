@@ -752,6 +752,7 @@ fn synthesize_tool() -> serde_json::Value {
         "description": "Behaviour recipe: hybrid-recall memories and synthesize them into a grounded context document (summary, patterns, success rate, recommendations, key insights).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
+                "query": string_schema("Free-text cue that grounds the synthesis: distinctive terms are extracted and matched (OR, case-insensitive) against memory content, so only cue-relevant memories feed the document. Omit to synthesize over the whole recalled set (an estate digest)."),
                 "filter": filter_schema(),
                 "limit": integer_schema("Max memories to recall.")
             }),

@@ -506,7 +506,34 @@ fn run_grounded_synthesis_tool(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
-    let filter_chain = decode_filter_chain(args)?;
+    let mut filter_chain = decode_filter_chain(args)?;
+    // query — the grounding cue the recipe contract promises
+    // ("hybrid-recall a QUERY and synthesize", Swift GroundedSynthesis.swift).
+    // The cue enters through the frame the recipe already takes: distinctive
+    // terms become an OR of content predicates, AND-composed with any kind
+    // filter above. The recipe's RRF+MMR rerank then fuses the cue-scoped
+    // pool before synthesis. A query whose every token is a stopword is
+    // rejected rather than silently ignored — a caller who sent a cue must
+    // never receive an unscoped estate digest. Twin of Swift
+    // runGroundedSynthesis.
+    let query = optional_string_value(args.get("query"), "query")?.map(str::to_string);
+    if let Some(ref q) = query {
+        let terms = grounding_terms(q);
+        if terms.is_empty() {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "query contains no usable terms (all tokens are stopwords or \
+                 too short); provide distinctive words to ground on"
+                    .to_string(),
+            ));
+        }
+        filter_chain.push(locus_kit::filter::Filter::Any(
+            terms
+                .into_iter()
+                .map(locus_kit::filter::Filter::ContentMatches)
+                .collect(),
+        ));
+    }
     // Route through clamp_limit so negative and over-ceiling values are
     // rejected/clamped at the MCP boundary. Parity: Swift runGroundedSynthesis
     // uses ToolDispatcher.clampLimit with the same ceiling.
@@ -540,9 +567,14 @@ fn run_grounded_synthesis_tool(
     .map_err(error_from_recipe)?;
 
     let doc = &out.context;
+    // The cue is part of the document's identity: a grounded synthesis and an
+    // estate digest are different measurements, so the response names which
+    // one it is (line appears only when a query was given). Twin of Swift.
+    let query_line = query.map(|q| format!("query: {q}\n")).unwrap_or_default();
     let body = format!(
-        "grounded_synthesis: {} drawer(s)\nsummary: {}\npatterns: {}\nsuccessRate: {:.1}\nrecommendations:\n{}\nkeyInsights:\n{}",
+        "grounded_synthesis: {} drawer(s)\n{}summary: {}\npatterns: {}\nsuccessRate: {:.1}\nrecommendations:\n{}\nkeyInsights:\n{}",
         out.drawer_count,
+        query_line,
         doc.summary,
         doc.patterns.join(", "),
         doc.success_rate,
@@ -1796,6 +1828,57 @@ fn optional_string_value<'a>(
             format!("{key} must be a string; omit it to use the default"),
         )),
     }
+}
+
+/// Stopwords excluded from grounding-term extraction: question scaffolding
+/// and function words that would match nearly every memory and destroy the
+/// cue's selectivity. Deliberately small — an over-eager list starts eating
+/// content words. MUST stay byte-identical to Swift `groundingStopwords` in
+/// RecipeTools.swift.
+const GROUNDING_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "are", "was", "were", "has", "have", "had",
+    "did", "does", "not", "with", "that", "this", "from", "they",
+    "their", "them", "then", "than", "there", "these", "those", "you",
+    "your", "what", "when", "where", "which", "who", "whom", "why",
+    "how", "will", "would", "could", "should", "about", "been", "being",
+    "into", "over", "under", "after", "before", "between", "during",
+    "any", "all", "each", "most", "some", "such", "can", "may", "might",
+    "must", "shall", "its", "his", "her", "him", "she", "our", "out",
+    "but", "per", "via", "also", "just", "only", "very", "much", "more",
+];
+
+/// Extracts the distinctive grounding terms from a free-text query:
+/// alphanumeric runs, lowercased (content matching is case-insensitive on
+/// both ports), dropping stopwords and short fragments (< 3 chars unless
+/// they carry a digit — "42" or "3b" are distinctive, "at" is not),
+/// deduplicated in first-appearance order, capped at 12 terms so a pasted
+/// paragraph cannot degenerate into an unbounded OR. Deterministic pure
+/// function of the query — MUST stay behavior-identical to Swift
+/// `groundingTerms(from:)` in RecipeTools.swift.
+pub fn grounding_terms(query: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !c.is_alphanumeric()) {
+        if raw.is_empty() {
+            continue;
+        }
+        let token = raw.to_lowercase();
+        let has_digit = token.chars().any(|c| c.is_numeric());
+        if token.chars().count() < 3 && !has_digit {
+            continue;
+        }
+        if GROUNDING_STOPWORDS.contains(&token.as_str()) {
+            continue;
+        }
+        if !seen.insert(token.clone()) {
+            continue;
+        }
+        terms.push(token);
+        if terms.len() == 12 {
+            break;
+        }
+    }
+    terms
 }
 
 fn decode_sensitivity(value: Option<&JsonValue>) -> Result<i64, JSONRPCError> {

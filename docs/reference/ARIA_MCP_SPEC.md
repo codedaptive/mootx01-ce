@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.29.0
+version: 1.30.0
 status: accepted-1.1-target
-date: 2026-08-04
+date: 2026-08-06
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -327,6 +327,20 @@ moot_lens_associations carries exemplar drawer ids capped at 5, so every
 lens claim is hydratable via moot_memory_get without a fresh search. For
 the full enumeration see
 ARIA_MCP_INTERFACE.md §2.
+
+`moot_synthesize` grounding contract: the optional `query` argument scopes
+the recalled pool before synthesis. Distinctive terms are extracted from
+the query by a deterministic pure function that MUST stay
+behavior-identical across ports (alphanumeric runs, lowercased; stopwords
+and fragments under 3 chars drop unless digit-bearing; first-appearance
+dedupe; capped at 12 terms) and become an OR of case-insensitive content
+predicates AND-composed with the optional `filter` kind. The response
+names the cue on a `query:` line — a grounded synthesis and a whole-estate
+digest are different measurements and MUST be distinguishable from the
+response text alone. A query whose every token is dropped MUST be rejected
+with invalidParams, never silently degraded to the unscoped digest. With
+`query` omitted the tool produces the whole-estate digest (the pre-1.34
+behavior, unchanged).
 
 ### Conformance contract
 
@@ -963,6 +977,14 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.30.0 -- 2026-08-06
+
+- `moot_synthesize` grounding contract: optional `query` scopes the
+  recalled pool via deterministic grounding-term extraction (port-identical
+  pure function) into OR'd case-insensitive content predicates, AND-composed
+  with `filter`; the response names the cue; all-stopword queries are
+  invalidParams. Query omitted = whole-estate digest, unchanged.
 
 ### 1.29.0 -- 2026-08-05
 

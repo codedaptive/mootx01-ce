@@ -7014,6 +7014,79 @@ fn grounded_synthesis_negative_limit_returns_invalid_params() {
         "negative limit on moot_synthesize must yield invalidParams; message: {}", err.message);
 }
 
+/// `query` scopes the recalled pool: only memories whose content matches a
+/// distinctive term feed the synthesis, and the response names the cue (a
+/// grounded synthesis and an estate digest are different measurements).
+/// Twin of Swift `testGroundedSynthesisQueryScopesTheRecalledPool`.
+#[test]
+fn grounded_synthesis_query_scopes_the_recalled_pool() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    for content in [
+        "carbon chemistry of organic compounds",
+        "carbon based biochemistry of life",
+        "quantum mechanics fundamentals",
+    ] {
+        file_one_memory(&registry, content, "recipe-tests");
+    }
+
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args!["query" => "carbon compounds", "filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    ).expect("query-scoped synthesize must dispatch");
+    assert!(is_success(&result), "synthesize should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // Both carbon memories match a term; the quantum memory matches none.
+    assert!(text.contains("grounded_synthesis: 2 drawer"),
+        "query must scope the pool to the 2 carbon memories; got: {text}");
+    assert!(text.contains("query: carbon compounds"),
+        "the response must name the cue; got: {text}");
+    assert!(!text.contains("quantum"),
+        "the unmatched memory must not leak into the document; got: {text}");
+}
+
+/// A query whose every token is a stopword or too short must be rejected
+/// (invalidParams), never silently degraded to an unscoped digest.
+/// Twin of Swift `testGroundedSynthesisAllStopwordQueryThrowsInvalidParams`.
+#[test]
+fn grounded_synthesis_all_stopword_query_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let err = dispatch_tool(
+        "moot_synthesize",
+        &args!["query" => "what did they do"],
+        &registry,
+        &ledger,
+    ).unwrap_err();
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS,
+        "all-stopword query must yield invalidParams; message: {}", err.message);
+}
+
+/// The term extractor's contract, pinned so both ports cannot drift:
+/// stopwords and short fragments drop, digit-bearing short tokens stay,
+/// tokens lowercase and dedupe in first-appearance order, cap at 12.
+/// Twin of Swift `testGroundingTermsContract` (identical fixtures).
+#[test]
+fn grounding_terms_contract() {
+    use aria_mcp::recipe_tools::grounding_terms;
+    assert_eq!(
+        grounding_terms("What did Melanie buy at Trader Joe's?"),
+        vec!["melanie", "buy", "trader", "joe"]
+    );
+    assert_eq!(grounding_terms("was it 46 or 3b"), vec!["46", "3b"]);
+    assert_eq!(
+        grounding_terms("carbon Carbon CARBON life"),
+        vec!["carbon", "life"]
+    );
+    assert!(grounding_terms("what did they do").is_empty());
+    let long: Vec<String> = (1..=20).map(|i| format!("uniqueterm{i}")).collect();
+    assert_eq!(grounding_terms(&long.join(" ")).len(), 12);
+}
+
 /// `moot_synthesize` with an over-ceiling `limit` must succeed (clamped).
 #[test]
 fn grounded_synthesis_over_ceiling_limit_is_clamped() {
