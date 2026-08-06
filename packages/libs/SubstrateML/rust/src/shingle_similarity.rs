@@ -63,14 +63,24 @@ pub fn shingles(s: &str) -> BTreeSet<String> {
 /// Returns `|S(a) ∩ S(b)| / |S(a) ∪ S(b)|` as an f32. Two empty inputs
 /// score 0.0; otherwise the ratio of intersection to union cardinality.
 pub fn similarity(a: &str, b: &str) -> f32 {
-    let sa = shingles(a);
-    let sb = shingles(b);
+    similarity_sets(&shingles(a), &shingles(b))
+}
+
+/// Jaccard over PRE-COMPUTED shingle sets — the same math as the string
+/// version, which delegates here (I-25: one implementation per substrate
+/// atomic). Exists so a caller comparing one corpus pairwise (e.g.
+/// NeuronKit's MMR rerank) can shingle each text ONCE and reuse the sets:
+/// rebuilding both sets per pairwise call measured 181 s over a
+/// 250-drawer pool. `|A ∩ B| / |A ∪ B|`, with the union computed as
+/// |A| + |B| − |A ∩ B| (identical value, no set materialization).
+/// Twin of Swift `ShingleSimilarity.similarity(_:_:)` (set overload).
+pub fn similarity_sets(sa: &BTreeSet<String>, sb: &BTreeSet<String>) -> f32 {
     // Both empty: no shingles to compare, define as fully dissimilar.
     if sa.is_empty() && sb.is_empty() {
         return 0.0;
     }
-    let inter = sa.intersection(&sb).count();
-    let union = sa.union(&sb).count();
+    let inter = sa.intersection(sb).count();
+    let union = sa.len() + sb.len() - inter;
     // Union is zero only if both sets are empty (handled above); the
     // guard keeps the division provably safe for any future edit.
     if union == 0 {

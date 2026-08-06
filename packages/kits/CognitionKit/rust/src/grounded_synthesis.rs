@@ -214,7 +214,13 @@ pub fn run_grounded_synthesis(
         is_last: true,
     };
     let drawer_count = page.rows.len();
-    let context = synthesize(&page, &meta);
+    // Cue-grounded: every ranked survivor must be VISIBLE in the document,
+    // so key_insights scales to the synthesized set (trial 3 measured 30/35
+    // misses with the answer ranked into the capped set but invisible behind
+    // the historical 3-row excerpt). Digest mode keeps the 3-row bound.
+    // Twin of the Swift recipe's maxKeyInsights threading.
+    let max_key_insights = if cue_terms.is_empty() { 3 } else { drawer_count };
+    let context = synthesize(&page, &meta, max_key_insights);
 
     // Emit recipe complete. drawer_count is finalised before the emit call so
     // the return value is identical whether monitoring is on or off (C-Det

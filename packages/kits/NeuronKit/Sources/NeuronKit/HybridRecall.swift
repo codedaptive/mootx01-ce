@@ -330,6 +330,25 @@ internal enum HybridRecallEngine {
         var selected: [Int] = []
         selected.reserveCapacity(drawers.count)
 
+        // Shingle each drawer ONCE and memoize pairwise similarities. The
+        // selection loop below evaluates candidate-vs-selected pairs across
+        // every step (~n³/6 evaluations); computing each from raw strings
+        // rebuilt both shingle sets per call and measured 181 s over a
+        // 250-drawer pool (the trial-3 synthesize timeouts). With cached
+        // sets and a pair memo the distinct work is at most n²/2 set
+        // intersections. Output is bit-identical — same substrate kernel,
+        // same values, computed once.
+        let shingleSets = drawers.map { ShingleSimilarity.shingles($0.content) }
+        var pairMemo: [Int: Float] = [:]
+        func pairSimilarity(_ a: Int, _ b: Int) -> Float {
+            let (lo, hi) = a < b ? (a, b) : (b, a)
+            let key = lo &* drawers.count &+ hi
+            if let cached = pairMemo[key] { return cached }
+            let value = ShingleSimilarity.similarity(shingleSets[lo], shingleSets[hi])
+            pairMemo[key] = value
+            return value
+        }
+
         while !remaining.isEmpty {
             var bestIdx = -1
             var bestScore: Float = -.infinity
@@ -343,7 +362,7 @@ internal enum HybridRecallEngine {
                 } else {
                     var m: Float = 0
                     for s in selected {
-                        let sim = shingleSimilarity(drawers[idx].content, drawers[s].content)
+                        let sim = pairSimilarity(idx, s)
                         if sim > m { m = sim }
                     }
                     maxSim = m

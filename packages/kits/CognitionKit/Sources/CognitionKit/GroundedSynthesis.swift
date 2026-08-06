@@ -186,8 +186,15 @@ public struct GroundedSynthesis: Recipe {
         let combined = RecallStream.Page(
             rows: rowsToSynthesize, pageIndex: 0, isLast: true
         )
+        // Cue-grounded: every ranked survivor must be VISIBLE in the
+        // document, so keyInsights scales to the synthesized set (trial 3
+        // measured 30/35 misses with the answer ranked into the capped set
+        // but invisible behind the historical 3-row excerpt). Digest mode
+        // keeps the 3-row default.
         let context = try await ContextSynthesizer.synthesize(
-            from: combined, estate: estate
+            from: combined,
+            estate: estate,
+            maxKeyInsights: input.cueTerms.isEmpty ? 3 : rowsToSynthesize.count
         )
 
         // Emit cognitionkit.recipe.run with status "complete". The step_count

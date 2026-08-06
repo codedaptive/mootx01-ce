@@ -137,7 +137,7 @@ pub fn run_trust_grounded_synthesis(
         page_index: 0,
         is_last: true,
     };
-    let context = synthesize(&page, &meta);
+    let context = synthesize(&page, &meta, 3);
 
     // v1.1.0: if a calibration curve was supplied, map each drawer's
     // confidence ordinal to [0, 1] (raw_value max = 56) and calibrate.

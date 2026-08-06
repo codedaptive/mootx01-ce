@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Specification
-version: 1.1.0
+version: 1.2.0
 status: active
-date: 2026-08-04
+date: 2026-08-06
 description: "Behavioral specification for SubstrateML: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -383,7 +383,12 @@ a single whole-string shingle; `""` yields the empty set);
 `similarity(_:_:)` returns `|S(a) ∩ S(b)| / |S(a) ∪ S(b)|` as f32, with
 both-empty inputs defined as 0.0. The function is a pure function of its
 two string arguments — no locale-sensitive transforms, no clock, no
-randomness (ML-4-class determinism).
+randomness (ML-4-class determinism). A set overload (Swift
+`similarity(_:_: Set<String>)`, Rust `similarity_sets`) computes the
+identical value over PRE-COMPUTED shingle sets; the string form delegates
+to it (one implementation, I-25). It exists for pairwise-corpus callers
+(NeuronKit's MMR rerank) that shingle each text once — rebuilding both
+sets per pairwise call measured 181 s over a 250-drawer pool.
 
 This is the substrate home for math currently duplicated above the
 substrate: `NeuronKit`'s `HybridRecallEngine` rerank similarity term and
@@ -1265,6 +1270,14 @@ verified by the `conformance*` tests in `VizGraphSignalsTests.swift` and
 `viz_graph_signals_tests.rs`.
 
 ## Changelog
+
+### 1.2.0 -- 2026-08-06
+
+- § 5.5b: set overload for `ShingleSimilarity` (Swift set-typed
+  `similarity`, Rust `similarity_sets`) — identical math over
+  pre-computed shingle sets; string form delegates to it. Motivated by
+  NeuronKit's MMR rerank rebuilding both sets per pairwise call
+  (measured 181 s over a 250-drawer pool).
 
 ### 1.1.0 -- 2026-08-04
 Additive: promoted the Deterministic Contradiction Projection (DCP) v0.1 locked

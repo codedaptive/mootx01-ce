@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Specification
-version: 1.5.0
+version: 1.6.0
 status: active
 date: 2026-08-06
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
@@ -754,6 +754,14 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-08-06
+
+- GroundedSynthesis keyInsights bound: cue-grounded runs excerpt EVERY
+  capped survivor (maxKeyInsights = post-cap drawer count); digest runs
+  keep the historical 3-row bound. Trial 3 measured 30/35 misses with
+  the answer ranked into the capped set but invisible behind the 3-row
+  excerpt.
 
 ### 1.5.0 -- 2026-08-06
 `GroundedSynthesis.Input` gains `cueTerms: [String] = []` and `cap: Int? = nil`.

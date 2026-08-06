@@ -255,6 +255,26 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning, cue_terms: &[St
     let mut remaining: Vec<bool> = vec![true; drawers.len()];
     let mut selected: Vec<usize> = Vec::with_capacity(drawers.len());
 
+    // Shingle each drawer ONCE and memoize pairwise similarities. The
+    // selection loop below evaluates candidate-vs-selected pairs across
+    // every step (~n³/6 evaluations); computing each from raw strings
+    // rebuilt both shingle sets per call and measured 181 s over a
+    // 250-drawer pool (the trial-3 synthesize timeouts). With cached sets
+    // and a pair memo the distinct work is at most n²/2 set intersections.
+    // Output is bit-identical — same substrate kernel, same values,
+    // computed once. Twin of the Swift pairSimilarity memo.
+    let shingle_sets: Vec<std::collections::BTreeSet<String>> =
+        drawers.iter().map(|d| shingles(&d.content)).collect();
+    let mut pair_memo: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+    let n = drawers.len();
+    let mut pair_similarity = |a: usize, b: usize| -> f32 {
+        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+        let key = lo * n + hi;
+        *pair_memo.entry(key).or_insert_with(|| {
+            substrate_shingle::similarity_sets(&shingle_sets[lo], &shingle_sets[hi])
+        })
+    };
+
     while selected.len() < drawers.len() {
         let mut best_idx: isize = -1;
         let mut best_score = f32::NEG_INFINITY;
@@ -270,7 +290,7 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning, cue_terms: &[St
             } else {
                 let mut m: f32 = 0.0;
                 for &s in &selected {
-                    let sim = shingle_similarity(&drawers[idx].content, &drawers[s].content);
+                    let sim = pair_similarity(idx, s);
                     if sim > m {
                         m = sim;
                     }
