@@ -79,6 +79,7 @@ pub mod migration_ranking;
 pub mod mind_overlap_recipe;
 pub mod moment_recipe;
 pub mod precedence_recipe;
+pub mod connected_recall;
 pub mod precise_recall;
 pub mod rhythm_recipe;
 pub mod shaped_recall;

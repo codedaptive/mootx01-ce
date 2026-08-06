@@ -282,14 +282,14 @@ fn tools_list_count_is_71() {
     //   71  total (memory adapter excluded — opt-in, off by default)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 73.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 72, "expected 72 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_71_names() {
+fn tools_list_name_set_matches_expected_72_names() {
     // Gate: all 70 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
@@ -345,6 +345,7 @@ fn tools_list_name_set_matches_expected_71_names() {
         "moot_run_migration",
         "moot_confirm_migration",
         "moot_recall_precise",
+        "moot_recall_connected",
         "moot_recall_shaped",
         "moot_recall_vague",
         "moot_dream",
@@ -6046,7 +6047,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 71, "vault-on must produce 71 tools (66 + 2 contradiction-hunter + 3 dataset)");
+    assert_eq!(arr.len(), 72, "vault-on must produce 72 tools (67 + 2 contradiction-hunter + 3 dataset; incl. moot_recall_connected)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6061,7 +6062,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 65, "vault-off must produce 65 tools (71 - 5 vault - palace import)");
+    assert_eq!(arr.len(), 66, "vault-off must produce 66 tools (72 - 5 vault - palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -7052,6 +7053,48 @@ fn grounded_synthesis_query_ranks_cue_matches_first() {
         .unwrap_or("");
     assert!(first_insight.contains("carbon"),
         "cue-matched memory must lead keyInsights; got '{first_insight}'");
+}
+
+/// The bridge scenario recall_connected exists for: an answer memory
+/// sharing NO words with the query, reachable only through a
+/// moot_link_memories tunnel from the hop-1 memory. Plain similarity
+/// cannot surface it; the walk must. Twin of Swift
+/// `testConnectedRecallReachesBridgeLinkedAnswer`.
+#[test]
+fn connected_recall_reaches_bridge_linked_answer() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let hop1 = file_one_memory(
+        &registry, "Melanie mentioned her sister visited from Cambridge", "recipe-tests");
+    let answer = file_one_memory(
+        &registry, "Caroline finished the astrophysics degree this spring", "recipe-tests");
+    file_one_memory(&registry, "grocery shopping list for the weekend", "recipe-tests");
+    file_one_memory(&registry, "bicycle maintenance notes and tire pressure", "recipe-tests");
+
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => hop1.as_str(), "to_id" => answer.as_str(),
+               "kind" => "relates", "label" => "sister identity bridge"],
+        &registry,
+        &ledger,
+    ).expect("link must dispatch");
+    assert!(is_success(&link), "link_memories should succeed; got: {link:?}");
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "Melanie sister Cambridge", "wing" => "recipe-tests",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        &registry,
+        &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.starts_with("found "), "memory_search-shaped header expected; got: {text}");
+    assert!(text.contains(&answer),
+        "the tunnel-linked answer must be reachable via the walk; got: {text}");
+    assert!(text.contains("connected: anchor="),
+        "the lane-provenance line must be present; got: {text}");
 }
 
 /// A query whose every token is a stopword or too short must be rejected

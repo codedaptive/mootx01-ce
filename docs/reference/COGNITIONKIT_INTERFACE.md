@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Interface
-version: 1.7.0
+version: 1.8.0
 status: active
 date: 2026-08-06
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
@@ -1153,6 +1153,12 @@ disabled.
 *End of CognitionKit Interface.*
 
 ## Changelog
+
+### 1.8.0 -- 2026-08-06
+
+- `ConnectedRecall.run(kit:handle:query:wing:filter:limit:seeds:steps:
+  restartProbability:)` → `[ConnectedMatch]` (id, room, content,
+  source anchor|walk|both). Rust: `run_connected_recall(...)`.
 
 ### 1.7.0 -- 2026-08-06
 

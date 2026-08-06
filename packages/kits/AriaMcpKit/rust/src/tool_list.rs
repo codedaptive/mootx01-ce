@@ -173,6 +173,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     tools.push(run_migration_tool());
     tools.push(confirm_migration_tool());
     tools.push(recall_precise_tool());
+    tools.push(recall_connected_tool());
     tools.push(recall_shaped_tool());
     // moot_dream: matrix rebuild + dreaming cycle. Schema mirrors Swift
     // `RecipeTools.dreamTool()`. The tool runs one on-demand cycle (accepts a
@@ -811,6 +812,25 @@ fn recall_precise_tool() -> serde_json::Value {
                 "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, dense-fused, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
+            }),
+            json!(["query"])
+        ))),
+        "outputSchema": recall_results_output_schema()
+    })
+}
+
+/// The connected-recall tool — multi-hop retrieval by graph diffusion.
+/// Mirrors Swift `RecipeTools.connectedRecallTool()` (description parity).
+fn recall_connected_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_recall_connected",
+        "description": "Connected recall: multi-hop retrieval by graph diffusion. A scored anchor search seeds a deterministic random walk with restart over the estate's connection structure (tunnels plus pending associations), reaching bridge-linked memories that share no words with the query; the walk's visit ranking is fused with the anchor ranking. This is the EXPENSIVE recall path — use it for hard bridge questions (\"what did X's sister study\" when the sister's name only appears in the estate) after the similarity lanes (moot_memory_search, moot_recall_precise, moot_recall_shaped) miss. Returns dense rows in the same shape as moot_memory_search plus a lane-provenance summary line.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The question text — drives the scored anchor search that seeds the walk."),
+                "wing": string_schema("Optional wing whose tunnel graph joins the walk. Omit to walk pending associations only (tunnels are wing-scoped; associations are estate-wide)."),
+                "limit": integer_schema("Max ranked matches to return. Default 20."),
+                "filter": filter_schema()
             }),
             json!(["query"])
         ))),

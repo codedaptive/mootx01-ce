@@ -251,6 +251,10 @@ const RUN_MIGRATION: &str = "moot_run_migration";
 const CONFIRM_MIGRATION: &str = "moot_confirm_migration";
 /// Precise-recall tool — mirrors Swift `RecipeTools.preciseRecallToolName`.
 const RECALL_PRECISE: &str = "moot_recall_precise";
+/// Connected recall: multi-hop retrieval by graph diffusion (scored anchor
+/// seeds a walk-with-restart over tunnels ∪ pending associations). The
+/// EXPENSIVE recall path — callers escalate here for bridge questions.
+const RECALL_CONNECTED: &str = "moot_recall_connected";
 const RECALL_VAGUE: &str = "moot_recall_vague";
 /// Shaped-recall tool (named RecallShape preset) — mirrors Swift
 /// `RecipeTools.shapedRecallToolName`.
@@ -307,6 +311,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RUN_MIGRATION
             | CONFIRM_MIGRATION
             | RECALL_PRECISE
+            | RECALL_CONNECTED
             | RECALL_VAGUE
             | RECALL_SHAPED
             | DREAM
@@ -348,6 +353,7 @@ pub fn dispatch(
         RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
         CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
+        RECALL_CONNECTED => run_connected_recall_tool(args, registry),
         RECALL_VAGUE => run_vague_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
@@ -610,6 +616,80 @@ fn run_grounded_synthesis_tool(
 /// moot_recall_vague — two-hop vague recall (Wave-2 §4.4). Mirrors Swift
 /// `RecipeTools.runVagueRecall`: D12 bounds clamped at the boundary, vague
 /// summaries first with level tags, hydrated originals after, no-hits hint.
+/// moot_recall_connected — the ConnectedRecall recipe over MCP. Serializes
+/// matches in the SAME shape moot_memory_search emits (found-N header +
+/// dense rows) plus a trailing `connected: anchor/walk/both` provenance
+/// line. Twin of Swift `runConnectedRecall`.
+fn run_connected_recall_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let query = require_string(args, "query")?;
+    let limit = clamp_limit(
+        optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
+    )?;
+    let filter = decode_precise_filter(args)?;
+    // Wing scopes the TUNNEL side of the walk graph; associations are
+    // estate-wide. Omitted wing = association-only graph.
+    let wing = optional_string(args, "wing")?.unwrap_or("").to_string();
+
+    let now = crate::dispatch::wall_now();
+    let coord = estate.coord.lock().unwrap();
+    let matches = cognition_kit::connected_recall::run_connected_recall(
+        &coord,
+        &estate.handle,
+        &query,
+        &wing,
+        filter,
+        limit,
+        now,
+    )
+    .map_err(error_from_recipe)?;
+
+    // Dense-row reply: drawer lookups from the all_drawers set (same
+    // sensitivity-gated rendering path the precise tool uses); the match's
+    // room field carries the raw parent node id, resolved to a display
+    // name here.
+    let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        all_drawers.iter()
+            .filter(|d| seen.insert(d.parent_node_id.clone()))
+            .map(|d| d.parent_node_id.clone())
+            .collect()
+    };
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+    let mut lines = vec![format!("found {} memory(s)", matches.len())];
+    let mut results: Vec<StructuredRow> = Vec::new();
+    for m in matches.iter().take(50) {
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::dense_row::render(d));
+                let room = node_names
+                    .get(&m.room)
+                    .map(|(_, room)| room.clone());
+                results.push(structured_recall_row(
+                    &m.id, room, Some(m.content.clone()), d));
+            }
+            None => {
+                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
+    }
+    let anchor_count = matches.iter().filter(|m| m.source == "anchor").count();
+    let walk_count = matches.iter().filter(|m| m.source == "walk").count();
+    let both_count = matches.iter().filter(|m| m.source == "both").count();
+    lines.push(format!(
+        "connected: anchor={anchor_count} walk={walk_count} both={both_count}"
+    ));
+    Ok(structured_text_result(&lines.join("\n"), &results))
+}
+
 fn run_vague_recall_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,

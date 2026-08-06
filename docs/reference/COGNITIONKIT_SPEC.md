@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Specification
-version: 1.7.0
+version: 1.8.0
 status: active
 date: 2026-08-06
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
@@ -754,6 +754,15 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.8.0 -- 2026-08-06
+
+- New recipe ConnectedRecall (`recall_connected`): scored anchor grab →
+  multi-seed walk-with-restart (FNV-seeded, deterministic) over
+  tunnels ∪ associations (both directions, drawer-endpoint edges) →
+  RRF fusion → late hydration. Degrades to plain scored recall on a
+  structureless estate, never below it. Rust twin
+  `connected_recall::run_connected_recall`.
 
 ### 1.7.0 -- 2026-08-06
 

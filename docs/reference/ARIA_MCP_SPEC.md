@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.32.0
+version: 1.33.0
 status: accepted-1.1-target
 date: 2026-08-06
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -992,6 +992,18 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.33.0 -- 2026-08-06
+
+- New recipe tool `moot_recall_connected`: multi-hop retrieval by graph
+  diffusion — a scored anchor search seeds a deterministic
+  walk-with-restart over tunnels (validated) ∪ dream-produced pending
+  associations (Bob's 2026-08-06 ruling: pending edges are walkable,
+  ~2–3% less confident; the discount is recorded, not applied — below
+  Monte Carlo visit-count resolution). RRF fusion with the anchor
+  ranking; memory_search output shape + a `connected:` lane-provenance
+  line. The EXPENSIVE recall path; escalation is caller-side. Tool
+  totals: 76 vault-on / 70 vault-off (Swift), 72 / 66 (Rust surface).
 
 ### 1.32.0 -- 2026-08-06
 

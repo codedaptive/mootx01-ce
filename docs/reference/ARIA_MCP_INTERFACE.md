@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.36.0
+version: 1.37.0
 status: accepted-1.1-target
 date: 2026-08-06
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1216,6 +1216,12 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.37.0 -- 2026-08-06
+
+- `moot_recall_connected` (recipe provenance, recall family, shares the
+  recall-results output schema): args query (required), wing, limit,
+  filter, estateID. Recipe tool roster 13.
 
 ### 1.36.0 -- 2026-08-06
 
