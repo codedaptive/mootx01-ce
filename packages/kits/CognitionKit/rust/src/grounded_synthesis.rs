@@ -25,7 +25,10 @@ use std::collections::HashMap;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
 use intellectus_lib::{report, StatSample};
-use locus_kit::filter::{HydrationLevel, RecallFrame};
+use genius_locus_kit::recall::{
+    GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+};
+use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
 use neuron_kit::{
     rerank, synthesize, ContextDocument, DrawerRow, DrawerRowMeta, RecallFrameTuning, RecallPage,
 };
@@ -72,6 +75,13 @@ pub(crate) fn emit_recipe_complete(recipe: &str, step_count: usize, ts: f64) {
     });
 }
 
+/// Wide bound on each grounding lane's pool. The cue predicate (lane A)
+/// and the scored search (lane B) both scope hard already; this bound only
+/// guards pathological matches. 200 measured tolerable end-to-end (0.1 s
+/// rerank after the shingle-cache fix); the user's `cap` bounds what feeds
+/// synthesis, not this. Twin of Swift `GroundedSynthesis.groundingPoolBound`.
+pub const GROUNDING_POOL_BOUND: usize = 200;
+
 /// Recipe output: the synthesized, provenance-grounded context document and
 /// the number of recalled drawers it was grounded on. Mirrors the Swift
 /// `GroundedSynthesis.Output`.
@@ -94,6 +104,10 @@ pub struct GroundedOutput {
 /// work is bounded by the user limit, not the pool size. None = no truncation
 /// (previous behaviour). The cap is applied after reranking so the most
 /// cue-relevant drawers survive, not the most recent.
+///
+/// `query` is the raw text for the SCORED second lane (BM25 + vector via the
+/// GLK UnionBest/Raw request). The scored lane reaches relevant rows that
+/// share NO cue terms with the question. None = lexical-only grounding.
 pub fn run_grounded_synthesis(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
@@ -103,6 +117,7 @@ pub fn run_grounded_synthesis(
     node_names: &std::collections::HashMap<String, (String, String)>,
     cue_terms: &[String],
     cap: Option<usize>,
+    query: Option<&str>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     // B-5: verify capabilities before any substrate touch. A capability gate
     // failure propagates as RecipeRunError::Recipe.
@@ -131,9 +146,93 @@ pub fn run_grounded_synthesis(
     //    as the Contradiction recipe. Mirrors the Swift GroundedSynthesis.
     let mut full_frame = frame;
     full_frame.hydration_level = HydrationLevel::Full;
-    let drawers = coord
-        .recall(handle, full_frame, now)
+
+    // GROUNDED POOL CONSTRUCTION — the recipe owns both lanes (twin of the
+    // Swift recipe):
+    //   Lane A (lexical): base frame + an OR of ContentMatches predicates
+    //   over the cue terms, wide-bounded. Reaches rows that literally
+    //   contain a distinctive question word.
+    //   Lane B (scored): base frame WITHOUT the cue predicate, driven by
+    //   the raw query through the GLK scored search (UnionBest/Raw,
+    //   BM25 + vector — the lane PreciseRecall's coarse grab uses).
+    //   Reaches relevant rows that share NO question words.
+    // Union: scored hits FIRST in their relevance order, then lane-A
+    // extras in frame (recency) order, deduplicated by id — the reranker's
+    // semantic lane is input order, so this ordering is what makes it mean
+    // relevance.
+    let grounded = !cue_terms.is_empty();
+    let mut lane_a_frame = full_frame.clone();
+    let mut scored_rows: Option<Vec<locus_kit::drawer::Drawer>> = None;
+    if grounded {
+        let pool_bound = cap.unwrap_or(0).max(GROUNDING_POOL_BOUND);
+        lane_a_frame.filter_chain.push(Filter::Any(
+            cue_terms.iter().map(|t| Filter::ContentMatches(t.clone())).collect(),
+        ));
+        lane_a_frame.limit = Some(pool_bound);
+        if let Some(q) = query {
+            let mut lane_b_frame = full_frame.clone();
+            lane_b_frame.limit = Some(pool_bound);
+            let request = GLKRecallRequest {
+                frame: lane_b_frame,
+                mode: GLKRecallMode::UnionBest,
+                scoring: GLKRecallScoring::Raw,
+                limit: pool_bound,
+                fallback: RecallFallbackPolicy::AllowDegraded,
+                query_text: Some(q.to_string()),
+                trace_limit: Some(cap.unwrap_or(tuning.page_size as usize)),
+                origin: genius_locus_kit::recall::RecallOrigin::Internal,
+                recall_shape: None,
+            };
+            let result = coord
+                .recall_scored(handle, request, now)
+                .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
+            // SCORING-EVIDENCE GATE (twin of Swift hybridRecall): a lane-B
+            // hit that arrived ONLY via the bitmap lane carries no relevance
+            // rank — under AllowDegraded the scored request degrades to a
+            // bitmap scan whose order is recency, and treating that order as
+            // relevance would resurrect the recency-dominance failure. Only
+            // hits bearing scoring evidence (BM25 / Hamming / dense cosine)
+            // form the relevance lead block; bitmap-only hits are dropped —
+            // anything lexically relevant among them arrives via lane A. A
+            // hit whose drawer failed hydration is skipped for the same
+            // reason as Swift: no body for the synthesizer or term lane.
+            use genius_locus_kit::recall::RecallEvidencePath as Ev;
+            scored_rows = Some(
+                result
+                    .hits
+                    .into_iter()
+                    .filter(|h| {
+                        h.sources.iter().any(|s| {
+                            matches!(s, Ev::CorpusBm25 | Ev::VectorHamming | Ev::VectorDense)
+                        })
+                    })
+                    .filter_map(|h| h.drawer)
+                    .collect(),
+            );
+        }
+    }
+    let lane_a = coord
+        .recall(handle, lane_a_frame, now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
+    let scored_lead_count = scored_rows.as_ref().map_or(0, |s| s.len());
+    let drawers: Vec<locus_kit::drawer::Drawer> = match scored_rows {
+        Some(scored) => {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut union = Vec::with_capacity(scored.len() + lane_a.len());
+            for d in scored {
+                if seen.insert(d.id.clone()) {
+                    union.push(d);
+                }
+            }
+            for d in lane_a {
+                if seen.insert(d.id.clone()) {
+                    union.push(d);
+                }
+            }
+            union
+        }
+        None => lane_a,
+    };
 
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
     //    synthesis. Recalled rows are active, hence currently believed; the
@@ -170,25 +269,25 @@ pub fn run_grounded_synthesis(
     // Realign metadata to the reranked order so synthesize's index-matched
     // lookups stay correct.
     //
-    // Lane weights are RECIPE-OWNED when a cue is present: grounding is this
-    // recipe's contract, and the default 0.3/0.7 split lets the recency lane
-    // override a one-step relevance difference whenever the pool is deep
-    // (the recency lane's RRF spread grows with pool size while the
-    // adjacent-rank lexical gap stays constant — measured as the trial-2
-    // failure: off-topic recent drawers outranked the cue-matched older
-    // one). With a cue, ordering must be lexical-dominant and recency
-    // strictly a tie-break, which is exactly the 1.0/0.0 weighting (the
-    // lexical sort already breaks ties by input order = recency). The
-    // caller's rrf_k, mmr_lambda, and page_size still apply; only the lane
-    // split is overridden. Twin of the Swift recipe's effectiveTuning.
-    let effective_tuning = if cue_terms.is_empty() {
-        tuning.clone()
-    } else {
+    // RECENCY-SHALL-NOT-DOMINATE invariant (twin of Swift hybridRecall,
+    // which owns it there — the rust recipe composes the lanes itself, so
+    // the invariant lives here): when cue terms exist but the semantic
+    // lane carries no genuine relevance (no scored lane requested, or it
+    // degraded to zero evidence-bearing hits), the fusion split must be
+    // lexical-dominant — recency strictly a tie-break. The default 0.3/0.7
+    // split is honest two-relevance-lane weighting ONLY when the lead
+    // block is real (the recency lane's RRF spread grows with pool size
+    // while the adjacent-rank lexical gap stays constant — the measured
+    // trial-2 failure). rrf_k, mmr_lambda, and page_size always come from
+    // the caller.
+    let effective_tuning = if grounded && scored_lead_count == 0 {
         RecallFrameTuning {
             bm25_weight: 1.0,
             vector_weight: 0.0,
             ..tuning.clone()
         }
+    } else {
+        tuning.clone()
     };
     let reranked = rerank(&rows, &effective_tuning, cue_terms);
 
@@ -294,7 +393,7 @@ mod tests {
             "cats and dogs are pets",
         ]);
         let out =
-            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names(), &[], None)
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names(), &[], None, None)
                 .expect("run");
         assert_eq!(out.drawer_count, 3, "all recalled rows feed synthesis");
         assert!(
@@ -311,7 +410,7 @@ mod tests {
     fn gs2_empty_estate_yields_empty_document() {
         let (coord, h) = coord_with_rows(&[]);
         let out =
-            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names(), &[], None)
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &empty_names(), &[], None, None)
                 .expect("run");
         assert_eq!(out.drawer_count, 0);
         assert!(out.context.patterns.is_empty());
@@ -366,6 +465,7 @@ mod tests {
             &empty_names(),
             &cue_terms,
             Some(1),
+            None,
         )
         .expect("run");
 
@@ -377,6 +477,61 @@ mod tests {
         assert!(
             insight.contains("daguerreotype"),
             "the cue-relevant drawer must survive the cap; key_insights[0]={insight}"
+        );
+    }
+
+    // GS-5: the scoring-evidence gate — the DEGRADED contract. This minimal
+    // in-memory estate has no scoring providers, so every lane-B hit is
+    // bitmap-only (its order is recency, not relevance) and the gate drops
+    // them all. Hybrid grounding on such an estate must behave EXACTLY like
+    // lexical-only grounding: same single term-matched drawer, term match
+    // leading — a degraded scored lane must never smuggle recency ordering
+    // in as relevance (the trial-2 failure mode). The LIVE-lane reach
+    // guarantee (non-term rows admitted below term matches) is exercised
+    // where scoring providers exist: the live product (benchmark trial 5).
+    // Twin of Swift scoredLaneDegradedContractEqualsLexicalOnly.
+    #[test]
+    fn gs5_scored_lane_degraded_contract_equals_lexical_only() {
+        let (coord, h) = coord_with_rows(&[
+            "daguerreotype vintage cameras photography collection", // matches cue terms
+            "modern digital exhibition display",                    // 0 term matches
+            "contemporary art installation space",                  // 0 term matches
+        ]);
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "vintage".to_string(),
+            "cameras".to_string(),
+        ];
+
+        let lexical_only = run_grounded_synthesis(
+            &coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW,
+            &empty_names(), &cue_terms, Some(20), None,
+        )
+        .expect("lexical-only run");
+        let hybrid_degraded = run_grounded_synthesis(
+            &coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW,
+            &empty_names(), &cue_terms, Some(20),
+            Some("daguerreotype vintage cameras"),
+        )
+        .expect("hybrid run on a no-provider estate");
+
+        assert_eq!(
+            hybrid_degraded.drawer_count, lexical_only.drawer_count,
+            "a degraded scored lane must not change the pool"
+        );
+        assert_eq!(
+            hybrid_degraded.drawer_count, 1,
+            "only the term match feeds synthesis on a degraded estate"
+        );
+        let first = hybrid_degraded
+            .context
+            .key_insights
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            first.contains("daguerreotype"),
+            "the term match must lead; key_insights[0]={first}"
         );
     }
 }

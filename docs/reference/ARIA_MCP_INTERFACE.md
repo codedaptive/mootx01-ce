@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.35.0
+version: 1.36.0
 status: accepted-1.1-target
 date: 2026-08-06
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1216,6 +1216,14 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.36.0 -- 2026-08-06
+
+- `moot_synthesize` grounding is now HYBRID: the raw query also drives a
+  scored BM25+vector lane (reaching memories that share no query words);
+  grounding becomes a ranking guarantee (term matches lead) rather than a
+  hard lexical exclusion. Dispatch passes the base frame + query + terms;
+  the recipe owns lanes and bounds.
 
 ### 1.35.0 -- 2026-08-06
 Cue-ranking dispatch wiring for `moot_synthesize`:

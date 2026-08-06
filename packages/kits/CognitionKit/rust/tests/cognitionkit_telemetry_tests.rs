@@ -228,6 +228,7 @@ fn grounded_synthesis_emits_nothing_when_disabled() {
         &HashMap::new(),
         &[],
         None,
+        None,
     );
 
     assert_eq!(
@@ -284,6 +285,7 @@ fn grounded_synthesis_emits_start_and_complete() {
         &HashMap::new(),
         &[],
         None,
+        None,
     );
 
     let metrics = sink.all_named(METRIC_RECIPE_RUN);
@@ -328,8 +330,8 @@ fn two_grounded_synthesis_runs_emit_four_metrics() {
     Intellectus::install(sink.clone());
     Intellectus::set_enabled(true);
 
-    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &HashMap::new(), &[], None);
-    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &HashMap::new(), &[], None);
+    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &HashMap::new(), &[], None, None);
+    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW, &HashMap::new(), &[], None, None);
 
     assert_eq!(
         sink.count_named(METRIC_RECIPE_RUN),
@@ -361,6 +363,7 @@ fn grounded_synthesis_step_count_tag_matches_drawer_count() {
         NOW,
         &HashMap::new(),
         &[],
+        None,
         None,
     )
     .expect("run");
@@ -510,6 +513,7 @@ fn grounded_synthesis_output_identical_with_and_without_telemetry() {
         &HashMap::new(),
         &[],
         None,
+        None,
     )
     .expect("off-path run");
 
@@ -525,6 +529,7 @@ fn grounded_synthesis_output_identical_with_and_without_telemetry() {
         NOW,
         &HashMap::new(),
         &[],
+        None,
         None,
     )
     .expect("on-path run");

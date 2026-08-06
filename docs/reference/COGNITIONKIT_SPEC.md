@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Specification
-version: 1.6.0
+version: 1.7.0
 status: active
 date: 2026-08-06
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
@@ -754,6 +754,17 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.7.0 -- 2026-08-06
+
+- GroundedSynthesis grounding pool: the recipe OWNS both lanes. Lane A =
+  base frame + OR of contentMatches cue predicates; lane B = scored
+  search over the raw query (`Input.query`), both bounded by
+  `groundingPoolBound` (200). Lane weighting moved into hybridRecall
+  (the recency-shall-not-dominate invariant); the recipe passes caller
+  tuning through. Degraded contract: on an estate whose scored lane
+  yields no scoring-evidence hits, hybrid grounding behaves exactly like
+  lexical-only grounding.
 
 ### 1.6.0 -- 2026-08-06
 

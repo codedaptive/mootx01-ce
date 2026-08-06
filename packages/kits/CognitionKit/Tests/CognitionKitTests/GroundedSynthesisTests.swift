@@ -146,4 +146,49 @@ struct GroundedSynthesisTests {
                     "the cue-relevant drawer must be the one that survives the cap")
         }
     }
+
+    /// The scoring-evidence gate — the DEGRADED contract. When lane-B hits
+    /// carry no scoring evidence (BM25 / Hamming / dense cosine), the gate
+    /// drops them: their order is recency, not relevance, and admitting it
+    /// would resurrect the recency-dominance failure. Hybrid grounding then
+    /// behaves EXACTLY like lexical-only grounding — same pool, term match
+    /// leading. The LIVE-lane reach guarantee (non-term rows admitted below
+    /// term matches) is exercised where scoring providers exist: the live
+    /// product (benchmark trial 5). Twin of Rust
+    /// `gs5_scored_lane_degraded_contract_equals_lexical_only`; whether this
+    /// estate's scored lane is live is environment-dependent, so the pinned
+    /// invariants are the ones that hold in BOTH conditions: the term match
+    /// leads, and the pool never SHRINKS below the lexical reach.
+    @Test("scored lane never shrinks the pool; term match leads")
+    func scoredLaneNeverShrinksPoolAndTermMatchLeads() async throws {
+        try await withCognitionLock {
+            let (kit, handle) = try await makeEstate(capturing: [
+                "daguerreotype vintage cameras photography collection",  // matches cue terms
+                "modern digital exhibition display",                     // 0 term matches
+                "contemporary art installation space",                   // 0 term matches
+            ])
+            let cueTerms = ["daguerreotype", "vintage", "cameras"]
+
+            let lexicalOnly = try await GroundedSynthesis().run(
+                input: .init(
+                    frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                    cueTerms: cueTerms,
+                    cap: 20),
+                estate: handle, kit: kit)
+            #expect(lexicalOnly.drawerCount == 1,
+                    "lexical-only grounding reaches only the term match")
+
+            let hybrid = try await GroundedSynthesis().run(
+                input: .init(
+                    frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                    cueTerms: cueTerms,
+                    cap: 20,
+                    query: "daguerreotype vintage cameras"),
+                estate: handle, kit: kit)
+            #expect(hybrid.drawerCount >= lexicalOnly.drawerCount,
+                    "the scored lane must never shrink the pool below lexical reach")
+            #expect(hybrid.context.keyInsights.first?.contains("daguerreotype") == true,
+                    "the term match must lead the hybrid ranking")
+        }
+    }
 }

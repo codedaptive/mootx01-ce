@@ -501,30 +501,22 @@ fn run_list_recipes_catalog(args: &BTreeMap<String, JsonValue>) -> Result<serde_
 // moot_grounded_synthesis
 // ---------------------------------------------------------------------------
 
-/// Maximum frame limit for grounded-synthesis cue-pool recall. When a query
-/// is present the frame widens to this bound so the lexical RRF lane can rank
-/// the full matched pool before the user limit caps synthesis. The
-/// contentMatches filter already scopes the pool; this constant only guards
-/// pathological over-matching. 200 was measured as tolerable in trial 2 —
-/// unbounded synthesis caused 4/50 calls to time out on the client.
-/// Parity: Swift `groundedSynthesisCuePoolBound = 200`.
-const GROUNDED_SYNTHESIS_CUE_POOL_BOUND: usize = 200;
-
 fn run_grounded_synthesis_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
-    let mut filter_chain = decode_filter_chain(args)?;
+    let filter_chain = decode_filter_chain(args)?;
     // query — the grounding cue the recipe contract promises
     // ("hybrid-recall a QUERY and synthesize", Swift GroundedSynthesis.swift).
-    // The cue enters through the frame the recipe already takes: distinctive
-    // terms become an OR of content predicates, AND-composed with any kind
-    // filter above. The recipe's RRF+MMR rerank then fuses the cue-scoped
-    // pool before synthesis. A query whose every token is a stopword is
-    // rejected rather than silently ignored — a caller who sent a cue must
-    // never receive an unscoped estate digest. Twin of Swift
-    // runGroundedSynthesis.
+    // The dispatch layer extracts the distinctive terms and validates; the
+    // RECIPE owns both grounding lanes (the lexical cue predicate and the
+    // scored BM25+vector search over the raw query) plus the pool bounds —
+    // this layer passes the base kind-filter frame, the raw query, the
+    // terms, and the user limit as the post-rank cap. A query whose every
+    // token is a stopword is rejected rather than silently ignored — a
+    // caller who sent a cue must never receive an unscoped estate digest.
+    // Twin of Swift runGroundedSynthesis.
     let query = optional_string_value(args.get("query"), "query")?.map(str::to_string);
     let mut cue_terms: Vec<String> = Vec::new();
     if let Some(ref q) = query {
@@ -537,13 +529,7 @@ fn run_grounded_synthesis_tool(
                     .to_string(),
             ));
         }
-        cue_terms = terms.clone();
-        filter_chain.push(locus_kit::filter::Filter::Any(
-            terms
-                .into_iter()
-                .map(locus_kit::filter::Filter::ContentMatches)
-                .collect(),
-        ));
+        cue_terms = terms;
     }
     // Route through clamp_limit so negative and over-ceiling values are
     // rejected/clamped at the MCP boundary. Parity: Swift runGroundedSynthesis
@@ -551,18 +537,9 @@ fn run_grounded_synthesis_tool(
     let user_limit = clamp_limit(
         optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
     )?;
-    // When a query is present, widen the frame to the cue-pool bound so the
-    // lexical RRF lane ranks the full matched pool before the user limit caps
-    // synthesis. Without a query the frame limit equals the user limit —
-    // no behavioural change from previous behaviour.
-    let frame_limit = if cue_terms.is_empty() {
-        user_limit
-    } else {
-        user_limit.max(GROUNDED_SYNTHESIS_CUE_POOL_BOUND)
-    };
-    // When a query is present, pass the user limit as the recipe cap so
-    // synthesis is bounded even when the frame is wide. Without a query
-    // the cap is None — the full recalled set feeds synthesis unchanged.
+    // Grounded runs pass the user limit as the recipe cap (synthesis is
+    // bounded even when the recipe widens its lane pools); digest runs keep
+    // the frame-limit semantics unchanged.
     let recipe_cap: Option<usize> = if cue_terms.is_empty() {
         None
     } else {
@@ -572,7 +549,7 @@ fn run_grounded_synthesis_tool(
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = HydrationLevel::Structured;
     frame.ordering = Ordering::ByCaptureTimeDesc;
-    frame.limit = Some(frame_limit);
+    frame.limit = Some(user_limit);
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
@@ -593,6 +570,7 @@ fn run_grounded_synthesis_tool(
         &node_names,
         &cue_terms,
         recipe_cap,
+        query.as_deref(),
     )
     .map_err(error_from_recipe)?;
 

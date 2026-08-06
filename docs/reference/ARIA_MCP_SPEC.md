@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.31.0
+version: 1.32.0
 status: accepted-1.1-target
 date: 2026-08-06
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -342,14 +342,20 @@ with invalidParams, never silently degraded to the unscoped digest. With
 `query` omitted the tool produces the whole-estate digest (the pre-1.34
 behavior, unchanged).
 
-Ranking rule (1.31): when a cue is present, ordering within the matched
-pool MUST be lexical-dominant — drawers rank by distinct-cue-term-match
-count descending, with recency strictly a tie-break — and the user's
-`limit` MUST cap the pool AFTER ranking. Any weighting that lets the
-recency lane override a one-step relevance difference is non-conformant:
-the recency lane's rank spread grows with pool size while the
-adjacent-rank relevance gap stays constant, so blended weights degrade to
-recency-first exactly on the large estates where grounding matters.
+Ranking rule (1.31, extended 1.32): when a cue is present the pool is
+HYBRID — a lexical lane (rows containing distinctive query terms) unioned
+with a scored lane (BM25 + vector over the raw query, reaching rows that
+share no query words) — and the user's `limit` MUST cap the pool AFTER
+ranking. Fusion weighting is legitimate ONLY while the scored lane
+carries genuine relevance (hits bearing scoring evidence); when the
+scored lane is absent or degrades to bitmap-only hits, ordering MUST be
+lexical-dominant with recency strictly a tie-break. Any weighting that
+lets a recency-ordered lane override a one-step relevance difference is
+non-conformant: the recency lane's rank spread grows with pool size while
+the adjacent-rank relevance gap stays constant, so blended weights degrade
+to recency-first exactly on the large estates where grounding matters. A
+zero-term-match row admitted by the scored lane must never outrank a
+term-matching row.
 
 ### Conformance contract
 
@@ -986,6 +992,14 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.32.0 -- 2026-08-06
+
+- `moot_synthesize` grounding contract extended to HYBRID pool
+  acquisition: the raw query drives a scored BM25+vector lane beside the
+  lexical term lane; ranking-rule paragraph updated (fusion only while
+  the scored lane bears scoring evidence; lexical-dominant otherwise;
+  zero-term-match rows never outrank term matches).
 
 ### 1.31.0 -- 2026-08-06
 Cue-ranking grounding contract extension for `moot_synthesize`:

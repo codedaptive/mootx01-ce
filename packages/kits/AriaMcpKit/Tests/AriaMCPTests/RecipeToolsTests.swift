@@ -162,10 +162,13 @@ struct RecipeToolsTests {
         #expect(text.contains("carbon"))
     }
 
-    /// `query` scopes the recalled pool: only memories whose content matches
-    /// a distinctive term feed the synthesis, and the response names the cue
-    /// (a grounded synthesis and an estate digest are different measurements).
-    @Test func testGroundedSynthesisQueryScopesTheRecalledPool() async throws {
+    /// `query` grounds the synthesis through BOTH hybrid lanes: the lexical
+    /// cue lane ranks term-matching memories first, and the scored lane
+    /// (BM25 + vector, high-recall) may admit non-matching rows BELOW them
+    /// up to the cap. The response names the cue, and the cue-relevant
+    /// memories must LEAD the document — grounding is a ranking guarantee,
+    /// not a hard exclusion, now that the scored lane is live.
+    @Test func testGroundedSynthesisQueryRanksCueMatchesFirst() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "gsq"))
@@ -191,10 +194,15 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Both carbon memories match a term; the quantum memory matches none.
-        #expect(text.contains("grounded_synthesis: 2 drawer"))
         #expect(text.contains("query: carbon compounds"))
-        #expect(!text.contains("quantum"))
+        // The first keyInsight is a cue-matched memory — the two-lane fusion
+        // must never let a zero-term-match row outrank a term match.
+        let insights = text.components(separatedBy: "keyInsights:").last ?? ""
+        let firstInsight = insights.split(separator: "\n")
+            .first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("- ") }
+            .map(String.init) ?? ""
+        #expect(firstInsight.contains("carbon"),
+                "cue-matched memory must lead keyInsights; got '\(firstInsight)'")
     }
 
     /// Ranking is driven by cue-term relevance, not recency. File 25 memories:

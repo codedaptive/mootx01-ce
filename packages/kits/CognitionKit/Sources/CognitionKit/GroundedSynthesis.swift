@@ -56,21 +56,37 @@ public struct GroundedSynthesis: Recipe {
         /// recent. nil = no truncation (previous behaviour). Trial 2
         /// measured client timeouts when synthesis ran over a 200-drawer
         /// pool; the cap bounds the synthesizer's work while the cue-pool
-        /// bound (AriaMcpKit) keeps the ranking lane wide.
+        /// bound keeps the ranking lane wide.
         public let cap: Int?
+        /// Raw query text for the SCORED second lane (BM25 + vector via
+        /// the GLK `.unionBest`/`.raw` request — the lane PreciseRecall's
+        /// coarse grab uses). The scored lane reaches relevant rows that
+        /// share NO cue terms with the question — the semantic gap that
+        /// capped the lexical-only pool at 34/50 misses in trial 4. nil =
+        /// lexical-only grounding (previous behaviour).
+        public let query: String?
 
         public init(
             frame: RecallFrame,
             tuning: RecallFrameTuning = .default,
             cueTerms: [String] = [],
-            cap: Int? = nil
+            cap: Int? = nil,
+            query: String? = nil
         ) {
             self.frame = frame
             self.tuning = tuning
             self.cueTerms = cueTerms
             self.cap = cap
+            self.query = query
         }
     }
+
+    /// Wide bound on each grounding lane's pool. The cue predicate (lane A)
+    /// and the scored search (lane B) both scope hard already; this bound
+    /// only guards pathological matches. 200 measured tolerable end-to-end
+    /// (0.1 s rerank after the shingle-cache fix); the user's `cap` bounds
+    /// what feeds synthesis, not this.
+    public static let groundingPoolBound = 200
 
     /// Recipe output: the synthesized context document and the number
     /// of drawers it was grounded on.
@@ -132,34 +148,45 @@ public struct GroundedSynthesis: Recipe {
         // Forward cueTerms so the lexical RRF lane ranks by distinct-term-match
         // count. Empty cueTerms = input-order recency (previous behaviour).
         //
-        // Lane weights are RECIPE-OWNED when a cue is present: grounding is
-        // this recipe's contract, and the default 0.3/0.7 split lets the
-        // recency lane override a one-step relevance difference whenever the
-        // pool is deep (the recency lane's RRF spread grows with pool size
-        // while the adjacent-rank lexical gap stays constant — measured as
-        // the trial-2 failure: off-topic recent drawers outranked the
-        // cue-matched older one). With a cue, ordering must be
-        // lexical-dominant and recency strictly a tie-break, which is
-        // exactly the 1.0/0.0 weighting (the lexical sort already breaks
-        // ties by input order = recency). The caller's rrfK, mmrLambda, and
-        // pageSize still apply; only the lane split is overridden.
-        let effectiveTuning: RecallFrameTuning
-        if input.cueTerms.isEmpty {
-            effectiveTuning = input.tuning
-        } else {
-            effectiveTuning = RecallFrameTuning(
-                bm25Weight: 1.0,
-                vectorWeight: 0.0,
-                rrfK: input.tuning.rrfK,
-                mmrLambda: input.tuning.mmrLambda,
-                pageSize: input.tuning.pageSize)
+        // GROUNDED POOL CONSTRUCTION — the recipe owns both lanes:
+        //   Lane A (lexical): the base frame + an OR of contentMatches
+        //   predicates over the cue terms, wide-bounded. Reaches rows that
+        //   literally contain a distinctive question word.
+        //   Lane B (scored): the base frame WITHOUT the cue predicate,
+        //   driven by the raw query through the GLK scored search
+        //   (`.unionBest`/`.raw`, BM25 + vector). Reaches relevant rows
+        //   that share NO question words — the semantic gap measured as
+        //   34/50 pool misses in trial 4.
+        let grounded = !input.cueTerms.isEmpty
+        var laneAFrame = fullFrame
+        var scoredLane: ScoredLane? = nil
+        if grounded {
+            let poolBound = max(input.cap ?? 0, Self.groundingPoolBound)
+            laneAFrame.filterChain.append(
+                .any(input.cueTerms.map { .contentMatches($0) }))
+            laneAFrame.limit = poolBound
+            if let query = input.query {
+                var laneBFrame = fullFrame
+                laneBFrame.limit = poolBound
+                scoredLane = ScoredLane(
+                    frame: laneBFrame,
+                    queryText: query,
+                    traceLimit: input.cap ?? input.tuning.pageSize)
+            }
         }
+
+        // Lane weighting lives in hybridRecall (the recency-shall-not-
+        // dominate invariant): with cue terms and no genuine relevance in
+        // the semantic lane it goes lexical-dominant; with a live scored
+        // lead block it honors the caller's fusion split. The recipe passes
+        // its tuning through untouched.
         let stream = try await hybridRecall(
-            fullFrame,
+            laneAFrame,
             handle: estate,
             on: kit,
-            tuning: effectiveTuning,
-            cueTerms: input.cueTerms
+            tuning: input.tuning,
+            cueTerms: input.cueTerms,
+            scoredLane: scoredLane
         )
 
         // 2. Drain every page. hybridRecall reranks the FULL result

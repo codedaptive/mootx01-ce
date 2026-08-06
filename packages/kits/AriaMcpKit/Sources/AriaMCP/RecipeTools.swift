@@ -657,25 +657,22 @@ enum RecipeTools {
     /// query is present the FRAME widens to this bound so the lexical RRF
     /// lane can rank the full matched pool before the user limit caps synthesis.
     /// The contentMatches filter already scopes the pool; this constant only
-    /// guards pathological over-matching. 200 was measured as tolerable in
-    /// trial 2 — unbounded synthesis caused 4/50 calls to time out on the
-    /// client. Parity: Rust `GROUNDED_SYNTHESIS_CUE_POOL_BOUND = 200`.
-    private static let groundedSynthesisCuePoolBound: Int = 200
-
     private static func runGroundedSynthesis(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> JSONValue {
-        var filterChain = try decodeFilterChain(args["filter"])
+        let filterChain = try decodeFilterChain(args["filter"])
         // query — the grounding cue the recipe contract promises
         // ("hybrid-recall a QUERY and synthesize", GroundedSynthesis.swift).
-        // The cue enters through the frame the recipe already takes:
-        // distinctive terms become an OR of content predicates, AND-composed
-        // with any kind filter above. The recipe's RRF+MMR rerank then fuses
-        // the cue-scoped pool before synthesis. A query whose every token is
-        // a stopword is rejected rather than silently ignored — a caller who
-        // sent a cue must never receive an unscoped estate digest.
+        // The dispatch layer extracts the distinctive terms and validates;
+        // the RECIPE owns both grounding lanes (the lexical cue predicate
+        // and the scored BM25+vector search over the raw query) plus the
+        // pool bounds — this layer passes the base kind-filter frame, the
+        // raw query, the terms, and the user limit as the post-rank cap.
+        // A query whose every token is a stopword is rejected rather than
+        // silently ignored — a caller who sent a cue must never receive an
+        // unscoped estate digest.
         let query = try optionalString(args["query"], argument: "query")
         var cueTerms: [String] = []
         if let query {
@@ -687,7 +684,6 @@ enum RecipeTools {
                     + "stopwords or too short); provide distinctive words to "
                     + "ground on")
             }
-            filterChain.append(.any(terms.map { .contentMatches($0) }))
             cueTerms = terms
         }
         // Route through clampLimit so negative and over-ceiling values are
@@ -695,23 +691,18 @@ enum RecipeTools {
         // run_grounded_synthesis_tool uses clamp_limit with the same ceiling.
         let userLimit = try ToolDispatcher.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
-        // When a query is present, widen the frame to the cue-pool bound so
-        // the lexical RRF lane ranks the full matched pool before the user
-        // limit caps synthesis. Without a query the frame limit equals the
-        // user limit — no behavioural change from previous behaviour.
-        let frameLimit = cueTerms.isEmpty ? userLimit : max(userLimit, groundedSynthesisCuePoolBound)
-        // When a query is present, pass the user limit as the recipe cap so
-        // synthesis is bounded even when the frame is wide. Without a query
-        // the cap is nil — the full recalled set feeds synthesis unchanged.
+        // Grounded runs pass the user limit as the recipe cap (synthesis is
+        // bounded even when the recipe widens its lane pools); digest runs
+        // keep the frame-limit semantics unchanged.
         let recipeCap: Int? = cueTerms.isEmpty ? nil : userLimit
         let frame = LocusKit.RecallFrame(
             filterChain: filterChain,
             hydrationLevel: .structured,
-            limit: frameLimit,
+            limit: userLimit,
             ordering: .byCaptureTimeDesc)
 
         let out = try await GroundedSynthesis().run(
-            input: .init(frame: frame, cueTerms: cueTerms, cap: recipeCap),
+            input: .init(frame: frame, cueTerms: cueTerms, cap: recipeCap, query: query),
             estate: handle, kit: kit)
 
         let doc = out.context

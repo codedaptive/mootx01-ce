@@ -7019,7 +7019,7 @@ fn grounded_synthesis_negative_limit_returns_invalid_params() {
 /// grounded synthesis and an estate digest are different measurements).
 /// Twin of Swift `testGroundedSynthesisQueryScopesTheRecalledPool`.
 #[test]
-fn grounded_synthesis_query_scopes_the_recalled_pool() {
+fn grounded_synthesis_query_ranks_cue_matches_first() {
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
@@ -7036,16 +7036,22 @@ fn grounded_synthesis_query_scopes_the_recalled_pool() {
         &args!["query" => "carbon compounds", "filter" => "unconfirmed"],
         &registry,
         &ledger,
-    ).expect("query-scoped synthesize must dispatch");
+    ).expect("query-grounded synthesize must dispatch");
     assert!(is_success(&result), "synthesize should succeed; got: {result:?}");
     let text = content_text(&result);
-    // Both carbon memories match a term; the quantum memory matches none.
-    assert!(text.contains("grounded_synthesis: 2 drawer"),
-        "query must scope the pool to the 2 carbon memories; got: {text}");
     assert!(text.contains("query: carbon compounds"),
         "the response must name the cue; got: {text}");
-    assert!(!text.contains("quantum"),
-        "the unmatched memory must not leak into the document; got: {text}");
+    // Two-lane grounding is a RANKING guarantee, not a hard exclusion: the
+    // scored lane (high-recall) may admit non-matching rows BELOW the term
+    // matches. The first keyInsight must be a cue-matched memory — a
+    // zero-term-match row must never outrank a term match.
+    let insights = text.split("keyInsights:").last().unwrap_or("");
+    let first_insight = insights
+        .lines()
+        .find(|l| l.trim_start().starts_with("- "))
+        .unwrap_or("");
+    assert!(first_insight.contains("carbon"),
+        "cue-matched memory must lead keyInsights; got '{first_insight}'");
 }
 
 /// A query whose every token is a stopword or too short must be rejected

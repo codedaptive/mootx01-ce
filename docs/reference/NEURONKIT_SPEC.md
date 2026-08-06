@@ -1,6 +1,6 @@
 ---
 title: NeuronKit Specification
-version: 1.8.0
+version: 1.9.0
 status: active
 date: 2026-08-06
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1046,6 +1046,21 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.9.0 -- 2026-08-06
+
+- § 4.1/4.3 hybrid recall FINISHED: `hybridRecall` gains an optional
+  scored second lane (`ScoredLane` — a GLK `.unionBest`/`.raw` request
+  over the raw query, the lane PreciseRecall's coarse grab uses). Union:
+  evidence-bearing scored hits lead in relevance order, frame-lane extras
+  follow in recency order, deduplicated by id.
+- SCORING-EVIDENCE GATE: lane-B hits bearing no scoring evidence
+  (corpusBM25 / vectorHamming / vectorDense) are dropped — under
+  AllowDegraded their order is recency, not relevance.
+- RECENCY-SHALL-NOT-DOMINATE invariant (owned by hybridRecall): with cue
+  terms and zero evidence-bearing scored hits, the fusion split MUST be
+  lexical-dominant (1.0/0.0); with a live lead block the caller's split
+  (default 0.3/0.7) applies.
 
 ### 1.8.0 -- 2026-08-06
 Added cue-term rerank contract (§ 4.3 cue-term lane). `HybridRecallEngine.rerank`

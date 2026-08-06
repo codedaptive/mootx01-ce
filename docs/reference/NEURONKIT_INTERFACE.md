@@ -1,7 +1,7 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.7.0
+version: 1.8.0
 spec_type: kit
 authors: MOOTx01 maintainers
 date: 2026-08-06
@@ -1986,6 +1986,12 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.8.0 -- 2026-08-06
+
+- New public `ScoredLane` (frame, queryText, traceLimit);
+  `hybridRecall(_:handle:on:tuning:cueTerms:scoredLane:)` gains the
+  defaulted `scoredLane` parameter (nil = single-lane behavior).
 
 ### 1.7.0 -- 2026-08-06
 
