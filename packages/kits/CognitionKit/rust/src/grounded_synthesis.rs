@@ -34,7 +34,7 @@ use neuron_kit::{
 };
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
-use crate::error::{RecipeRunError, SubstrateError};
+use crate::error::{RecipeError, RecipeRunError, SubstrateError};
 
 // MARK: - Telemetry constants and helpers
 
@@ -163,6 +163,18 @@ fn run_grounded_synthesis_impl(
         ],
         &shipped_capabilities(),
     )?;
+
+    // Validate cap before the recipe begins work. Rust's `usize` prevents
+    // negative values, so `Some(0)` is the only value that would produce a
+    // silent empty synthesis set (`.take(0)` on the reranked pool). Zero
+    // drawers fed into the synthesizer yield a vacuous context document;
+    // treat it as a caller error consistent with the
+    // `TooManyPlans`/`TooManyOriginEntries` guard pattern (reject before
+    // any work begins). Mirrors Swift guard for `cap <= 0` where negative
+    // values are also possible through the `Int?` public API.
+    if let Some(0) = cap {
+        return Err(RecipeRunError::Recipe(RecipeError::InvalidCap { value: 0 }));
+    }
 
     // Emit recipe start AFTER the capability gate so we never fire a "start"
     // for an invocation that will immediately throw. `now` is the
@@ -577,5 +589,62 @@ mod tests {
             first.contains("daguerreotype"),
             "the term match must lead; key_insights[0]={first}"
         );
+    }
+
+    // GS-6: C2 — zero cap is rejected at the public boundary with
+    // `RecipeError::InvalidCap`. Rust's `usize` prevents negative values;
+    // `Some(0)` is the problematic value that would otherwise silently produce
+    // an empty synthesis set. Mirrors Swift `testZeroCapThrowsInvalidCap`.
+    #[test]
+    fn gs6_zero_cap_returns_invalid_cap_error() {
+        let (coord, h) = coord_with_rows(&[
+            "polar bear tracking in the arctic",
+            "penguin migration patterns",
+        ]);
+        let err = run_grounded_synthesis(
+            &coord,
+            &h,
+            unconfirmed(),
+            RecallFrameTuning::default(),
+            NOW,
+            &empty_names(),
+            &[],
+            Some(0), // zero cap — must be rejected
+            None,
+        )
+        .expect_err("cap=0 must return an error, not succeed");
+
+        assert_eq!(
+            err,
+            RecipeRunError::Recipe(RecipeError::InvalidCap { value: 0 }),
+            "zero cap must raise RecipeError::InvalidCap(value: 0); got: {err}"
+        );
+    }
+
+    // GS-7: C2 — huge cap (usize::MAX) does not crash. Verifies that the
+    // cap path handles values far beyond any realistic pool without overflow
+    // or panic (Rust `.take(usize::MAX)` is safe — it returns however many
+    // items exist). Twin of Swift `testHugeCapDoesNotCrash`.
+    #[test]
+    fn gs7_huge_cap_does_not_crash() {
+        let (coord, h) = coord_with_rows(&[
+            "solar flare event data",
+            "coronal mass ejection impact",
+        ]);
+        let out = run_grounded_synthesis(
+            &coord,
+            &h,
+            unconfirmed(),
+            RecallFrameTuning::default(),
+            NOW,
+            &empty_names(),
+            &[],
+            Some(usize::MAX), // enormous cap — must not panic
+            None,
+        )
+        .expect("huge cap must not crash");
+
+        // All recalled rows feed synthesis — usize::MAX does not truncate.
+        assert_eq!(out.drawer_count, 2, "huge cap must not truncate a small pool");
     }
 }

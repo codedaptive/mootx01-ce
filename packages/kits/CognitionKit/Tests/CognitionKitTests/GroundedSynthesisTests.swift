@@ -247,4 +247,94 @@ struct GroundedSynthesisTests {
                     "the term match must lead the hybrid ranking")
         }
     }
+
+    // MARK: - C2: negative/zero cap validation
+
+    /// C2 — negative cap throws `RecipeError.invalidCap(value:)`.
+    ///
+    /// Swift's `Array.prefix(_ maxLength: Int)` panics when `maxLength < 0`
+    /// (standard library precondition). Before this fix, a direct-API caller
+    /// passing `cap: -1` would crash the process. The guard added after
+    /// `verifyCapabilities` catches the invalid value and raises a structured
+    /// error. Parity: Rust `gs6_zero_cap_returns_invalid_cap_error` (usize
+    /// prevents negative, so only cap=0 is tested there).
+    @Test("negative cap throws RecipeError.invalidCap")
+    func testNegativeCapThrowsInvalidCap() async throws {
+        try await withCognitionLock {
+            let (kit, handle) = try await makeEstate(capturing: [
+                "negative cap test content",
+            ])
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                cap: -1  // invalid — must be rejected, not crash
+            )
+            do {
+                _ = try await GroundedSynthesis().run(
+                    input: input, estate: handle, kit: kit)
+                Issue.record("negative cap must throw RecipeError.invalidCap, not succeed")
+            } catch let e as RecipeError {
+                #expect(e == .invalidCap(value: -1),
+                        "negative cap must throw .invalidCap(value: -1); got: \(e)")
+            } catch {
+                Issue.record("negative cap must throw RecipeError, not \(type(of: error)): \(error)")
+            }
+        }
+    }
+
+    /// C2 — zero cap throws `RecipeError.invalidCap(value:)`.
+    ///
+    /// A cap of zero would silently produce an empty synthesis set (0 drawers
+    /// fed to the synthesizer yields a vacuous context). Treated as a caller
+    /// error — consistent with the guard pattern in `tooManyPlans` and
+    /// `tooManyOriginEntries` (reject before work begins). Parity: Rust
+    /// `gs6_zero_cap_returns_invalid_cap_error`.
+    @Test("zero cap throws RecipeError.invalidCap")
+    func testZeroCapThrowsInvalidCap() async throws {
+        try await withCognitionLock {
+            let (kit, handle) = try await makeEstate(capturing: [
+                "zero cap test content alpha",
+                "zero cap test content beta",
+            ])
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                cap: 0  // invalid — must be rejected
+            )
+            do {
+                _ = try await GroundedSynthesis().run(
+                    input: input, estate: handle, kit: kit)
+                Issue.record("zero cap must throw RecipeError.invalidCap, not succeed")
+            } catch let e as RecipeError {
+                #expect(e == .invalidCap(value: 0),
+                        "zero cap must throw .invalidCap(value: 0); got: \(e)")
+            } catch {
+                Issue.record("zero cap must throw RecipeError, not \(type(of: error)): \(error)")
+            }
+        }
+    }
+
+    /// C2 — huge cap (`Int.max`) does not crash.
+    ///
+    /// Swift's `Array.prefix(_ maxLength: Int)` only panics on negative values;
+    /// very large positive values are safe (prefix returns however many elements
+    /// exist). This test ensures the guard does not reject valid extreme values
+    /// and that the recipe completes normally. Parity: Rust
+    /// `gs7_huge_cap_does_not_crash`.
+    @Test("huge cap (Int.max) completes without crash")
+    func testHugeCapDoesNotCrash() async throws {
+        try await withCognitionLock {
+            let (kit, handle) = try await makeEstate(capturing: [
+                "huge cap test row alpha",
+                "huge cap test row beta",
+            ])
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                cap: Int.max  // enormous — must not crash or be rejected
+            )
+            let out = try await GroundedSynthesis().run(
+                input: input, estate: handle, kit: kit)
+            // All recalled rows feed synthesis — Int.max does not truncate a 2-row pool.
+            #expect(out.drawerCount == 2,
+                    "Int.max cap must not truncate a 2-row pool; got \(out.drawerCount)")
+        }
+    }
 }

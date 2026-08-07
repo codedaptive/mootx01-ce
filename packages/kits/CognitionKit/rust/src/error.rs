@@ -58,6 +58,14 @@ pub enum RecipeError {
     /// work. Refused before any branch is derived. Mirrors Swift
     /// `RecipeError.tooManyOriginEntries`.
     TooManyOriginEntries { count: usize, maximum: usize },
+
+    /// A `cap` parameter was zero (or, via the Swift public API, negative).
+    /// Rust's `usize` prevents negative values; `Some(0)` is the one value
+    /// that produces a silent empty synthesis set. Zero drawers fed into the
+    /// synthesizer yield a vacuous context document; treat it as a caller
+    /// error consistent with `TooManyPlans` / `TooManyOriginEntries`.
+    /// Mirrors Swift `RecipeError.invalidCap`.
+    InvalidCap { value: usize },
 }
 
 /// DoS bounds on attacker-influenceable migration input. Mirror Swift
@@ -112,6 +120,11 @@ impl fmt::Display for RecipeError {
                 f,
                 "RecipeError.tooManyOriginEntries: {} origin entries exceeds the maximum of {}.",
                 count, maximum
+            ),
+            RecipeError::InvalidCap { value } => write!(
+                f,
+                "RecipeError.invalidCap: cap must be > 0, got {}; pass None to synthesize without a cap.",
+                value
             ),
         }
     }
@@ -259,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_recipe_error_cases_exist() {
+    fn all_recipe_error_cases_exist() {
         // Structural exhaustiveness check: this match covers every Rust
         // `RecipeError` variant. It is a Rust compile-time gate only — it does
         // not detect a Swift-only enum change. A Swift-side addition requires a
@@ -284,6 +297,7 @@ mod tests {
             },
             RecipeError::TooManyPlans { count: 21, maximum: 20 },
             RecipeError::TooManyOriginEntries { count: 5001, maximum: 5000 },
+            RecipeError::InvalidCap { value: 0 },
         ];
         // Exhaustive match — compiler enforces that every arm is covered.
         for c in &cases {
@@ -296,6 +310,7 @@ mod tests {
                 RecipeError::UserConfirmationRequired { .. } => "userConfirmationRequired",
                 RecipeError::TooManyPlans { .. } => "tooManyPlans",
                 RecipeError::TooManyOriginEntries { .. } => "tooManyOriginEntries",
+                RecipeError::InvalidCap { .. } => "invalidCap",
             };
         }
         // Every description carries the Swift-matching case-name prefix.
@@ -307,6 +322,7 @@ mod tests {
         assert!(format!("{}", cases[5]).contains("userConfirmationRequired"));
         assert!(format!("{}", cases[6]).contains("tooManyPlans"));
         assert!(format!("{}", cases[7]).contains("tooManyOriginEntries"));
+        assert!(format!("{}", cases[8]).contains("invalidCap"));
     }
 
     // ── SubstrateError ────────────────────────────────────────────────────────

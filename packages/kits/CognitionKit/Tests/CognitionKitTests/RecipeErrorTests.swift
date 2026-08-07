@@ -70,4 +70,25 @@ struct RecipeErrorTests {
             RecipeError.insufficientBranches(minimum: 2, provided: 1)
                 != RecipeError.tournamentNoWinner(disqualifiedCount: 1))
     }
+
+    /// C2 — `invalidCap` carries the invalid value and its description names
+    /// the case. Mirrors Rust `RecipeError::InvalidCap` via the
+    /// `Display` implementation in `error.rs`.
+    @Test("invalidCap describes the invalid cap value")
+    func invalidCapDescription() {
+        let errorNeg = RecipeError.invalidCap(value: -1)
+        #expect(errorNeg.description.contains("invalidCap"),
+                "description must name the case")
+        #expect(errorNeg.description.contains("-1"),
+                "description must carry the invalid value")
+
+        let errorZero = RecipeError.invalidCap(value: 0)
+        #expect(errorZero.description.contains("invalidCap"))
+        #expect(errorZero.description.contains("0"))
+
+        // Equatable parity.
+        #expect(RecipeError.invalidCap(value: -1) == RecipeError.invalidCap(value: -1))
+        #expect(RecipeError.invalidCap(value: -1) != RecipeError.invalidCap(value: -2))
+        #expect(RecipeError.invalidCap(value: 0) != RecipeError.tournamentNoWinner(disqualifiedCount: 0))
+    }
 }

@@ -129,6 +129,20 @@ public struct GroundedSynthesis: Recipe {
         // Spec B-5: verify capabilities before any substrate touch.
         try verifyCapabilities(required: requiredCapabilities)
 
+        // Validate cap before the recipe begins work. Swift's
+        // `Array.prefix(_ maxLength: Int)` panics when `maxLength < 0`
+        // (the standard library asserts `maxLength >= 0` via a precondition).
+        // A zero cap produces an empty synthesis set, which is a vacuous
+        // result; treat it as a caller error consistent with the pattern
+        // established by `tooManyPlans` and `tooManyOriginEntries` (reject
+        // before any work begins). Mirrors Rust guard for `Some(0)` on the
+        // `usize` path where negative values are structurally impossible.
+        if let cap = input.cap {
+            guard cap > 0 else {
+                throw RecipeError.invalidCap(value: cap)
+            }
+        }
+
         // Capture the recipe-start timestamp once at the entry boundary for
         // paired start/complete telemetry. The clock is read unconditionally
         // regardless of whether monitoring is enabled; it does not affect the
