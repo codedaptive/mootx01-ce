@@ -822,12 +822,13 @@ fn recall_precise_tool() -> serde_json::Value {
 /// The connected-recall tool — multi-hop retrieval by graph diffusion.
 /// Mirrors Swift `RecipeTools.connectedRecallTool()` (description parity).
 fn recall_connected_tool() -> serde_json::Value {
-    // moot_recall_connected does NOT declare outputSchema: the structured-recall
-    // output schema is scoped to the four-tool recall family (moot_memory_search,
-    // moot_memory_get, moot_recall_shaped, moot_recall_precise). Connected recall
-    // returns the same dense-row shape as moot_memory_search but is out of scope
-    // for the shared schema contract — adding it here would break the
-    // recall_family_declares_one_shared_output_schema pin test.
+    // moot_recall_connected declares the SHARED recall-results output schema:
+    // it returns dense rows in the same shape as moot_memory_search, so it is
+    // the fifth member of the recall family alongside moot_memory_search,
+    // moot_memory_get, moot_recall_shaped, and moot_recall_precise. The Swift
+    // twin (RecipeTools.connectedRecallTool) declares the same schema; the
+    // recall_family_declares_one_shared_output_schema pin test enforces both
+    // membership and schema identity.
     json!({
         "name": "moot_recall_connected",
         "description": "Connected recall: multi-hop retrieval by graph diffusion. A scored anchor search seeds a deterministic random walk with restart over the estate's connection structure (tunnels plus pending associations), reaching bridge-linked memories that share no words with the query; the walk's visit ranking is fused with the anchor ranking. This is the EXPENSIVE recall path — use it for hard bridge questions (\"what did X's sister study\" when the sister's name only appears in the estate) after the similarity lanes (moot_memory_search, moot_recall_precise, moot_recall_shaped) miss. Returns dense rows in the same shape as moot_memory_search plus a lane-provenance summary line.",
@@ -839,7 +840,8 @@ fn recall_connected_tool() -> serde_json::Value {
                 "filter": filter_schema()
             }),
             json!(["query"])
-        )))
+        ))),
+        "outputSchema": recall_results_output_schema()
     })
 }
 
