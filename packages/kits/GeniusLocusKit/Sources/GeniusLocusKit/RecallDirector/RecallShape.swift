@@ -226,6 +226,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         "field",
         "preference",
         "anti_redundant",
+        "session_hybrid",
     ]
 
     /// Resolve a named preset to its documented signed-weight shape.
@@ -402,6 +403,24 @@ public struct RecallShape: Sendable, Codable, Equatable {
                 antiSimilarLanes: [DenseSignal.fdc],
                 frontierK: frontierKFloor)
 
+        // Session-granularity hybrid recall: amplify bm25 (keyword match for
+        // conversation fragments), dense (semantic similarity within the
+        // session context), and temporal (recency within the session window).
+        // The ShapedRecall recipe special-cases this name to route through
+        // hybridRecall's scoredLane seam; the shape here represents the
+        // per-lane steering for the frame recall pass inside that path.
+        // Post-processing applies a bounded temporal-window boost and
+        // speaker-aware weighting before the final re-sort — both are
+        // applied after the evidence gate, so a zero-evidence hit can never
+        // be lifted past a scored hit.
+        case "session_hybrid":
+            return RecallShape(
+                laneWeights: [
+                    "bm25": 1.3,
+                    "dense": 1.2,
+                    "temporal": 1.2,
+                ])
+
         default:
             return nil
         }
@@ -454,6 +473,8 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Preference-led — amplify the learned-preference column (matrixAware scoring only)."
         case "anti_redundant":
             return "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64."
+        case "session_hybrid":
+            return "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal."
         default:
             return ""
         }

@@ -40,7 +40,8 @@ fn preset_names_are_discoverable_and_each_resolves() {
             );
         }
     }
-    assert_eq!(RecallShape::PRESET_NAMES.len(), 19);
+    // session_hybrid is the 20th preset (added in W1-session-hybrid).
+    assert_eq!(RecallShape::PRESET_NAMES.len(), 20);
 }
 
 #[test]
@@ -157,6 +158,26 @@ fn anti_redundant_inverts_fdc_and_suppresses_bm25_hamming() {
     assert_eq!(
         s.effective_frontier_k(200),
         RecallShape::FRONTIER_K_FLOOR
+    );
+}
+
+#[test]
+fn session_hybrid_amplifies_bm25_dense_temporal() {
+    // session_hybrid is the session-granularity preset: bm25 (keyword match
+    // for conversation fragments), dense (semantic similarity), temporal
+    // (recency within the session window) all amplified above neutral.
+    // No lanes excluded — session_hybrid is additive over balanced.
+    let s = RecallShape::preset("session_hybrid").unwrap();
+    assert!(s.weight("bm25") > 1.0, "bm25 must be amplified");
+    assert!(s.weight("dense") > 1.0, "dense must be amplified");
+    assert!(s.weight("temporal") > 1.0, "temporal must be amplified");
+    // Lanes not named stay neutral.
+    assert_eq!(s.weight("locus"), 1.0, "locus should be neutral");
+    assert_eq!(s.weight("hamming"), 1.0, "hamming should be neutral");
+    // Description is non-empty.
+    assert!(
+        !RecallShape::preset_description("session_hybrid").is_empty(),
+        "session_hybrid must have a catalog description"
     );
 }
 

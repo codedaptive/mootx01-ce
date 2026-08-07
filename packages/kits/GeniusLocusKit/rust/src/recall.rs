@@ -684,7 +684,7 @@ impl RecallShape {
     /// The names of every preset in the roster, in stable declaration order — the
     /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
     /// Swift `RecallShape.presetNames` byte-for-byte.
-    pub const PRESET_NAMES: [&'static str; 19] = [
+    pub const PRESET_NAMES: [&'static str; 20] = [
         "balanced",
         "precise",
         "conceptual",
@@ -704,6 +704,10 @@ impl RecallShape {
         "field",
         "preference",
         "anti_redundant",
+        // session_hybrid: session-granularity recall — hybridRecall scoredLane +
+        // bounded temporal-window boost + speaker-aware weighting. Added in
+        // W1-session-hybrid. Mirrors Swift RecallShape.presetNames.
+        "session_hybrid",
     ];
 
     /// Resolve a named preset to its documented signed-weight shape. Mirrors
@@ -839,6 +843,18 @@ impl RecallShape {
                 Some(s.with_anti_similar_lanes(anti))
             }
 
+            // Session-granularity hybrid recall: amplify bm25 (keyword match for
+            // conversation fragments), dense (semantic similarity within the session
+            // context), and temporal (recency within the session window). The
+            // CognitionKit ShapedRecall recipe special-cases this name to route
+            // through the hybridRecall scoredLane seam with post-processing boosts
+            // (temporal window + speaker-aware weighting). Mirrors Swift
+            // RecallShape.preset("session_hybrid").
+            "session_hybrid" => Some(shape(
+                &[("bm25", 1.3), ("dense", 1.2), ("temporal", 1.2)],
+                None,
+            )),
+
             _ => None,
         }
     }
@@ -868,6 +884,7 @@ impl RecallShape {
             "field" => "Field-led — amplify the co-occurrence column (matrixAware scoring only).",
             "preference" => "Preference-led — amplify the learned-preference column (matrixAware scoring only).",
             "anti_redundant" => "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64.",
+            "session_hybrid" => "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal.",
             _ => "",
         }
     }
