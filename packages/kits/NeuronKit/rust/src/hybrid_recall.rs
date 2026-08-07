@@ -694,6 +694,52 @@ mod tests {
         );
     }
 
+    // ── gs5 adversarial pin (A3 adjudication, 2026-08-06) ────────────────────
+
+    /// Adversarial pin: zero-term-match row at maximal recency (input position 0)
+    /// must not outrank a term-matched row (input position 1) under
+    /// lexical-dominant tuning (bm25=1.0, vector=0.0).
+    ///
+    /// With DEFAULT weights (bm25=0.3, vector=0.7):
+    ///   RRF("zero-match") = 0.3/62 + 0.7/61 ≈ 0.01632
+    ///   RRF("term-match") = 0.3/61 + 0.7/62 ≈ 0.01621
+    /// Default weights select zero-match first — the recency-dominance failure
+    /// the hybrid_recall() guard prevents by switching to lexical-dominant tuning
+    /// when scored_lead_count == 0 && !cue_terms.is_empty().
+    ///
+    /// With LEXICAL-DOMINANT weights (bm25=1.0, vector=0.0):
+    ///   RRF("term-match") = 1.0/61 ≈ 0.01639
+    ///   RRF("zero-match") = 1.0/62 ≈ 0.01613
+    /// Lexical-dominant weights select term-match first. This test pins that
+    /// correct ordering at the reranker level under the guard-enforced tuning.
+    ///
+    /// Twin of Swift `gs5AdversarialZeroMatchLosesUnderLexicalDominantTuning`.
+    #[test]
+    fn gs5_adversarial_zero_match_loses_under_lexical_dominant_tuning() {
+        let drawers = vec![
+            d("zero-match", "unrelated topic about weather forecasting"), // pos 0, 0 cue matches
+            d("term-match", "daguerreotype vintage cameras photography"),  // pos 1, 3 cue matches
+        ];
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "vintage".to_string(),
+            "cameras".to_string(),
+        ];
+        // Lexical-dominant tuning: what hybrid_recall() applies when the scored
+        // lane is degraded (scored_lead_count == 0 && !cue_terms.is_empty()).
+        let lexical_dominant = RecallFrameTuning {
+            bm25_weight: 1.0,
+            vector_weight: 0.0,
+            ..RecallFrameTuning::default()
+        };
+        let out = rerank(&drawers, &lexical_dominant, &cue_terms);
+        assert_eq!(
+            out[0].id, "term-match",
+            "zero-term-match row at maximal recency must not outrank term-matched row under lexical-dominant tuning"
+        );
+        assert_eq!(out.len(), 2, "both rows present — reranker reorders, does not drop");
+    }
+
     /// Tie-break is deterministic (stable input order wins); two calls produce
     /// identical output.
     #[test]

@@ -280,6 +280,58 @@ struct HybridRecallEngineTests {
                     "all drawers must be present in output")
         }
     }
+
+    // MARK: - gs5 adversarial pin (A3 adjudication, 2026-08-06)
+
+    /// Adversarial pin: zero-term-match row at maximal recency (input position 0)
+    /// must not outrank a term-matched row under lexical-dominant tuning.
+    ///
+    /// Setup: "zero-match" arrives FIRST (semantic rank 0, maximum recency
+    /// advantage) with zero cue-term matches. "term-match" arrives SECOND
+    /// (semantic rank 1) with three cue-term matches. This is the adversarial
+    /// case Codex finding 4 / commit 40c855b6 questioned.
+    ///
+    /// With DEFAULT weights (bm25=0.3, vector=0.7) the 70% semantic (recency)
+    /// lane dominates adjacent rows:
+    ///   RRF("zero-match") = 0.3/62 + 0.7/61 ≈ 0.01632
+    ///   RRF("term-match") = 0.3/61 + 0.7/62 ≈ 0.01621
+    /// Default weights would select zero-match first — the recency-dominance
+    /// failure the hybridRecall() RECENCY-SHALL-NOT-DOMINATE guard prevents by
+    /// switching to lexical-dominant tuning when scoredLeadCount == 0 &&
+    /// !cueTerms.isEmpty.
+    ///
+    /// With LEXICAL-DOMINANT weights (bm25=1.0, vector=0.0) the cue-term lane
+    /// has full authority:
+    ///   RRF("term-match") = 1.0/61 ≈ 0.01639
+    ///   RRF("zero-match") = 1.0/62 ≈ 0.01613
+    /// Lexical-dominant weights select term-match first. This test pins that
+    /// correct ordering at the reranker level with the guard-enforced tuning.
+    ///
+    /// Twin of Rust `gs5_adversarial_zero_match_loses_under_lexical_dominant_tuning`.
+    @Test("gs5 adversarial: zero-term-match row at maximal recency loses under lexical-dominant tuning")
+    func gs5AdversarialZeroMatchLosesUnderLexicalDominantTuning() async throws {
+        try await withIntellectusLock {
+            let zeroMatch = makeDrawer(
+                id: "zero-match",
+                content: "unrelated topic about weather forecasting")
+            let termMatch = makeDrawer(
+                id: "term-match",
+                content: "daguerreotype vintage cameras photography")
+            let cueTerms = ["daguerreotype", "vintage", "cameras"]
+
+            // Lexical-dominant tuning: what hybridRecall() applies when the
+            // scored lane is degraded (scoredLeadCount == 0 && !cueTerms.isEmpty).
+            let lexicalTuning = RecallFrameTuning(bm25Weight: 1.0, vectorWeight: 0.0)
+            let out = HybridRecallEngine.rerank(
+                drawers: [zeroMatch, termMatch],
+                tuning: lexicalTuning,
+                cueTerms: cueTerms)
+            #expect(out.first?.id == "term-match",
+                    "zero-term-match row at maximal recency must not outrank term-matched row under lexical-dominant tuning")
+            #expect(out.count == 2,
+                    "both rows present — reranker reorders, does not drop")
+        }
+    }
 }
 
 @Suite("Recall stream paging")
