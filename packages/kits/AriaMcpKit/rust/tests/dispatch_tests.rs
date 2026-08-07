@@ -7193,6 +7193,8 @@ fn grounded_synthesis_mixed_pool_only_exposes_normal_rows() {
 /// `testConnectedRecallReachesBridgeLinkedAnswer`.
 #[test]
 fn connected_recall_reaches_bridge_linked_answer() {
+    use locus_kit::frames::TunnelCaptureFrame;
+
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
@@ -7203,14 +7205,26 @@ fn connected_recall_reaches_bridge_linked_answer() {
     file_one_memory(&registry, "grocery shopping list for the weekend", "recipe-tests");
     file_one_memory(&registry, "bicycle maintenance notes and tire pressure", "recipe-tests");
 
-    let link = dispatch_tool(
-        "moot_link_memories",
-        &args!["from_id" => hop1.as_str(), "to_id" => answer.as_str(),
-               "kind" => "relates", "label" => "sister identity bridge"],
-        &registry,
-        &ledger,
-    ).expect("link must dispatch");
-    assert!(is_success(&link), "link_memories should succeed; got: {link:?}");
+    // Create the tunnel directly rather than via moot_link_memories: the MCP
+    // surface's ID-lookup calls coord.resolve_drawer_node_names, which requires a
+    // registered node topology provider. In the test in-memory estate that provider
+    // is absent, so names resolve to empty strings and the tunnel gets stored with
+    // source_wing = "" — making it invisible to recall_tunnels("recipe-tests").
+    // Direct estate.capture_tunnel with explicit wing names bypasses the lookup.
+    let now = aria_mcp::dispatch::wall_now();
+    {
+        let coord = registry.coord.lock().unwrap();
+        let locus_estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        let mut tunnel_frame = TunnelCaptureFrame::new(
+            "recipe-tests", "recipe-tests", "recipe-tests", "recipe-tests",
+            "sister identity bridge", "test",
+        );
+        tunnel_frame.source_drawer_id = Some(hop1.clone());
+        tunnel_frame.target_drawer_id = Some(answer.clone());
+        locus_estate.capture_tunnel(tunnel_frame, now)
+            .expect("tunnel capture must succeed");
+    }
 
     let result = dispatch_tool(
         "moot_recall_connected",
@@ -7226,6 +7240,132 @@ fn connected_recall_reaches_bridge_linked_answer() {
         "the tunnel-linked answer must be reachable via the walk; got: {text}");
     assert!(text.contains("connected: anchor="),
         "the lane-provenance line must be present; got: {text}");
+}
+
+/// Gate invariant: a withdrawn memory linked by a tunnel to a live anchor must
+/// NOT appear in connected-recall results. The walk discovers the edge and
+/// attempts hydration; the gated RecallFrame(filterChain: []) excludes the
+/// withdrawn row via insert_defaults' CurrentlyBelieve filter.
+/// Twin of Swift `testConnectedRecallExcludesTombstonedRows`.
+#[test]
+fn connected_recall_excludes_withdrawn_rows() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Dead memory — shares no words with the query; will be withdrawn.
+    let dead = file_one_memory(&registry, "XylophoneZebra secret project archive notes", "recipe-tests");
+    // Anchor — matches the query directly.
+    let anchor = file_one_memory(&registry, "Quarterly planning moved to Thursday confirmed", "recipe-tests");
+    // Distractor.
+    file_one_memory(&registry, "bicycle tire pressure maintenance schedule", "recipe-tests");
+
+    // Link dead → anchor so the walk can discover dead from anchor.
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => dead.as_str(), "to_id" => anchor.as_str(),
+               "kind" => "relates", "label" => "tombstone gate test link"],
+        &registry, &ledger,
+    ).expect("link must dispatch");
+    assert!(is_success(&link), "link_memories should succeed; got: {link:?}");
+
+    // Withdraw the dead memory — state transition to Withdrawn, excluded by
+    // CurrentlyBelieve default filter on walk hydration.
+    let withdraw = dispatch_tool(
+        "moot_withdraw_memory",
+        &args!["id" => dead.as_str()],
+        &registry, &ledger,
+    ).expect("withdraw must dispatch");
+    assert!(is_success(&withdraw), "withdraw should succeed; got: {withdraw:?}");
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "quarterly planning Thursday",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // The withdrawn memory's distinctive content must NOT appear.
+    assert!(!text.contains("XylophoneZebra"),
+        "withdrawn row content must be absent from connected recall; got: {text}");
+}
+
+/// Gate invariant: a sensitivity-restricted memory linked by a tunnel to a live
+/// anchor must NOT appear in connected-recall results. The walk discovers the edge;
+/// the gated RecallFrame applies the insert_defaults ceiling of
+/// SensitivityAtMost(Elevated), excluding Restricted rows.
+/// Twin of Swift `testConnectedRecallExcludesSensitivityRestrictedRows`.
+#[test]
+fn connected_recall_excludes_sensitivity_restricted_rows() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::{CaptureFrame, TunnelCaptureFrame};
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Anchor — matches the query.
+    let anchor = file_one_memory(
+        &registry, "Annual performance review scheduling confirmed", "recipe-tests");
+    // Distractor.
+    file_one_memory(&registry, "grocery run Saturday morning", "recipe-tests");
+
+    // Restricted memory — filed at Restricted sensitivity so the default
+    // SensitivityAtMost(Elevated) ceiling blocks it from walk hydration.
+    let restricted_content = "ConfidentialAardvark internal salary band information";
+    let mut capture_frame = CaptureFrame::new(
+        restricted_content,
+        CaptureChannel::Typed,
+        "recipe-tests",
+        LatticeAnchor::udc("004"),
+        "aria-mcp-tests",
+        "default",
+    );
+    capture_frame.sensitivity = AdjectiveSensitivity::Restricted;
+    // Subject required at the MCP surface for PR-02 dense rows.
+    capture_frame.subject = Some(restricted_content.chars().take(120).collect());
+    let now = aria_mcp::dispatch::wall_now();
+    let restricted_id = {
+        let coord = registry.coord.lock().unwrap();
+        coord.capture(&registry.default.handle, capture_frame, now)
+            .expect("restricted capture must succeed")
+            .id
+    };
+
+    // Link restricted → anchor bypassing moot_link_memories: that MCP tool's
+    // internal ID-lookup uses RecallFrame::new(vec![]) which receives the
+    // SensitivityAtMost(Elevated) default — it cannot see Restricted drawers
+    // and would fail with "from_id not found". For this test we need the tunnel
+    // edge to exist in the graph so the walk discovers it; we create it directly
+    // via Estate::capture_tunnel, which has no sensitivity gate on ID lookup.
+    {
+        let coord = registry.coord.lock().unwrap();
+        let locus_estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        // Wing/room display fields can be empty — the structural connection
+        // is carried by source_drawer_id / target_drawer_id.
+        let mut tunnel_frame = TunnelCaptureFrame::new(
+            "recipe-tests", "recipe-tests", "recipe-tests", "recipe-tests",
+            "sensitivity gate test link", "test",
+        );
+        tunnel_frame.source_drawer_id = Some(restricted_id.clone());
+        tunnel_frame.target_drawer_id = Some(anchor.clone());
+        locus_estate.capture_tunnel(tunnel_frame, now)
+            .expect("tunnel capture must succeed");
+    }
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "annual performance review scheduling",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // The restricted memory's distinctive content must NOT appear.
+    assert!(!text.contains("ConfidentialAardvark"),
+        "restricted row content must be absent from connected recall; got: {text}");
 }
 
 /// A query whose every token is a stopword or too short must be rejected

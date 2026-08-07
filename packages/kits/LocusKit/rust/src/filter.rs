@@ -233,9 +233,10 @@ pub enum Filter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallFrame {
     /// Filter chain interpreted as implicit conjunction (equivalent
-    /// to `Filter::All(filter_chain)`). Per spec § 7.9.1. Must contain
-    /// at least one filter; an empty chain is an invalid recall and
-    /// the evaluator surfaces a typed error.
+    /// to `Filter::All(filter_chain)`). Per spec § 7.9.1.
+    /// An empty chain is accepted: `BitmapEvaluator::insert_defaults`
+    /// prepends the default state, trust, and sensitivity filters before
+    /// evaluation, so an empty chain recalls currently-believed content.
     pub filter_chain: Vec<Filter>,
     /// How much of each row to hydrate. Per spec § 7.3.
     pub hydration_level: HydrationLevel,

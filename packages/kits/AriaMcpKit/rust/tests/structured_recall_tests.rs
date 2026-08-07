@@ -408,11 +408,15 @@ fn opaque_rows_carry_no_room_or_content() {
 fn recall_family_declares_one_shared_output_schema() {
     let tools = build_tool_list_with_flags(true, false);
     let tools = tools.as_array().expect("tools array");
+    // Five tools in the recall family as of 2026-08-06: moot_recall_connected
+    // joined the family with its outputSchema added (parity with Swift
+    // StructuredRecallResultTests.recallFamilyDeclaresOneSharedOutputSchema).
     let family = [
         "moot_memory_search",
         "moot_memory_get",
         "moot_recall_shaped",
         "moot_recall_precise",
+        "moot_recall_connected",
     ];
 
     let mut schemas: Vec<&serde_json::Value> = Vec::new();
@@ -427,7 +431,7 @@ fn recall_family_declares_one_shared_output_schema() {
             ),
         }
     }
-    assert_eq!(schemas.len(), family.len(), "all four in-scope tools declare it");
+    assert_eq!(schemas.len(), family.len(), "all five in-scope tools declare it");
     for schema in &schemas[1..] {
         assert_eq!(*schema, schemas[0], "one shared schema across the family");
     }

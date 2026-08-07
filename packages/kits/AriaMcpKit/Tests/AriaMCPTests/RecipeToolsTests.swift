@@ -192,6 +192,137 @@ struct RecipeToolsTests {
                 "the lane-provenance line must be present")
     }
 
+    /// Gate invariant: a tombstoned (withdrawn) memory linked by a tunnel to
+    /// a live anchor must NOT appear in connected-recall results. The walk
+    /// discovers the edge and attempts hydration; the gated overload
+    /// (RecallFrame(filterChain: [])) excludes the withdrawn row via the
+    /// insertDefaults .currentlyBelieve filter.
+    @Test func testConnectedRecallExcludesTombstonedRows() async throws {
+        let owner = OwnerCredentials(ownerIdentifier: "crg-tomb")
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit, owner: owner)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        func fileOne(_ content: String) async throws -> String {
+            let result = try await dispatcher.dispatch(
+                name: "moot_file_memory", arguments: fileArgs(content: content))
+            let text = result.objectValue?["content"]?.arrayValue?.first?
+                .objectValue?["text"]?.stringValue ?? ""
+            return text.split(separator: "\n").first?
+                .split(separator: " ").last.map(String.init) ?? ""
+        }
+
+        // The dead memory is the walk target; it shares no words with the query.
+        let deadContent = "XylophoneZebra secret project archive notes"
+        let dead = try await fileOne(deadContent)
+        // Anchor memory matches the query directly.
+        let anchor = try await fileOne("Quarterly planning moved to Thursday confirmed")
+        // Distractor to prevent trivial recall.
+        _ = try await fileOne("bicycle tire pressure maintenance schedule")
+
+        // Link dead → anchor so the walk can discover dead from anchor.
+        _ = try await dispatcher.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(dead),
+                "to_id": .string(anchor),
+                "kind": .string("relates"),
+                "label": .string("tombstone gate test link"),
+            ]))
+
+        // Withdraw the dead memory — state transition to .withdrawn, which
+        // insertDefaults' .currentlyBelieve filter excludes.
+        let withdrawResult = try await dispatcher.dispatch(
+            name: "moot_withdraw_memory",
+            arguments: .object(["id": .string(dead)]))
+        let withdrawText = withdrawResult.objectValue?["content"]?.arrayValue?.first?
+            .objectValue?["text"]?.stringValue ?? ""
+        #expect(withdrawText.contains("withdrew"), "withdraw must succeed; got: \(withdrawText)")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string("quarterly planning Thursday"),
+                "filter": .string("unconfirmed"),
+                "limit": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // The dead memory's distinctive content must NOT appear — the gated
+        // hydrate must have excluded the withdrawn row.
+        #expect(!text.contains("XylophoneZebra"),
+                "tombstoned row content must be absent from connected recall; got: \(text)")
+    }
+
+    /// Gate invariant: a sensitivity-restricted memory linked by a tunnel to a
+    /// live anchor must NOT appear in connected-recall results. The walk
+    /// discovers the edge; the gated overload applies the insertDefaults ceiling
+    /// of .sensitivityAtMost(.elevated), excluding .restricted rows.
+    @Test func testConnectedRecallExcludesSensitivityRestrictedRows() async throws {
+        let owner = OwnerCredentials(ownerIdentifier: "crg-sens")
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit, owner: owner)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        func fileOne(_ content: String) async throws -> String {
+            let result = try await dispatcher.dispatch(
+                name: "moot_file_memory", arguments: fileArgs(content: content))
+            let text = result.objectValue?["content"]?.arrayValue?.first?
+                .objectValue?["text"]?.stringValue ?? ""
+            return text.split(separator: "\n").first?
+                .split(separator: " ").last.map(String.init) ?? ""
+        }
+
+        // Anchor memory — matches the query.
+        let anchor = try await fileOne("Annual performance review scheduling confirmed")
+        // Distractor.
+        _ = try await fileOne("grocery run Saturday morning")
+
+        // Restricted memory — filed at .restricted sensitivity so the default
+        // sensitivity ceiling (.elevated) blocks it from connected-recall hydration.
+        let restrictedContent = "ConfidentialAardvark internal salary band information"
+        let restricted = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string(restrictedContent),
+                "subject": .string(String(restrictedContent.prefix(120))),
+                "location": .string("recipe-tests"),
+                "sensitivity": .string("restricted"),
+            ]))
+        let restrictedText = restricted.objectValue?["content"]?.arrayValue?.first?
+            .objectValue?["text"]?.stringValue ?? ""
+        let restrictedID = restrictedText.split(separator: "\n").first?
+            .split(separator: " ").last.map(String.init) ?? ""
+        #expect(!restrictedID.isEmpty, "restricted memory must be filed; got: \(restrictedText)")
+
+        // Link restricted → anchor so the walk can reach it from anchor.
+        _ = try await dispatcher.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(restrictedID),
+                "to_id": .string(anchor),
+                "kind": .string("relates"),
+                "label": .string("sensitivity gate test link"),
+            ]))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string("annual performance review scheduling"),
+                "filter": .string("unconfirmed"),
+                "limit": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // The restricted memory's distinctive content must NOT appear.
+        #expect(!text.contains("ConfidentialAardvark"),
+                "restricted row content must be absent from connected recall; got: \(text)")
+    }
+
     // MARK: - grounded_synthesis dispatch
 
     @Test func testGroundedSynthesisDispatchReturnsContext() async throws {

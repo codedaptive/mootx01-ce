@@ -155,7 +155,11 @@ pub fn run_connected_recall(
     // Rank walk hits by summed visits, deterministic tie-break by id.
     let mut walk_ranked: Vec<(RowId, u64)> = visit_totals.into_iter().collect();
     walk_ranked.sort_by(|a, b| b.1.cmp(&a.1).then(Uuid::from_u128(a.0.0).to_string().cmp(&Uuid::from_u128(b.0.0).to_string())));
-    let walk_ids: Vec<String> = walk_ranked.iter().map(|(r, _)| Uuid::from_u128(r.0).to_string().to_uppercase()).collect();
+    // UUID lowercase matches the storage representation written by LocusKit
+    // (Uuid::new_v4().to_string() is lowercase by default). The walk visits
+    // RowId values; converting them with to_string() — NOT to_uppercase() —
+    // produces IDs that key into body_by_id and the anchor id set correctly.
+    let walk_ids: Vec<String> = walk_ranked.iter().map(|(r, _)| Uuid::from_u128(r.0).to_string()).collect();
 
     // 4. FUSION — RRF (k = 60) over the two ranked lists; both lanes are
     //    relevance-bearing (scored similarity / structural reachability
