@@ -1,6 +1,6 @@
 ---
 title: NeuronKit Specification
-version: 1.9.0
+version: 1.9.1
 status: active
 date: 2026-08-06
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1162,3 +1162,12 @@ C-12 documents the ingress defence's unconditional-rejection guarantee
 and its counted observability. No change to the rejection defence itself
 — rejected entries are still never re-admitted; this is observability
 only.
+
+### 1.9.1 -- 2026-08-06
+Document the `scoredLane: ScoredLane?` seam on `hybridRecall` as the composition
+point for caller-supplied evidence-scoring passes. The `session_hybrid` preset in
+GLK RecallShape.presetNames (W1-session-hybrid) is the first consumer: it drives
+`hybridRecall` with a `ScoredLane` built from the query text, enforcing the
+RECENCY-SHALL-NOT-DOMINATE invariant while SessionHybridFusion applies bounded
+temporal-window + speaker-aware boosts as a secondary sort key. No invariant
+change; this is a conformance annotation only.

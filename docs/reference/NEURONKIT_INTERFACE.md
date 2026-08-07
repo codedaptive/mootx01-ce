@@ -1,7 +1,7 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.8.0
+version: 1.8.1
 spec_type: kit
 authors: MOOTx01 maintainers
 date: 2026-08-06
@@ -2077,3 +2077,9 @@ feat/distillation-hmm-extractor.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.8.1 -- 2026-08-06
+Annotation: `hybridRecall(_:handle:on:tuning:cueTerms:scoredLane:)` — the
+`scoredLane: ScoredLane?` parameter is now documented as the public composition
+seam for caller-supplied secondary scoring passes. First consumer: the
+`session_hybrid` ShapedRecall path in CognitionKit (W1-session-hybrid).

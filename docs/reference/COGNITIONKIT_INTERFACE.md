@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Interface
-version: 1.8.0
+version: 1.8.1
 status: active
 date: 2026-08-06
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
@@ -1243,3 +1243,12 @@ tests.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.8.1 -- 2026-08-06
+Added `session_hybrid` as a named preset supported by `ShapedRecall.run()` in
+both Swift and Rust. The preset name routes through the hybridRecall scoredLane
+seam (Swift) / shaped recall + inline fusion (Rust) and applies
+`SessionHybridFusion` temporal-window + speaker-aware boosts post-processing.
+New types: `SessionHybridFusion` (Swift `enum`, Rust `session_hybrid_fusion` module).
+No change to `ShapedRecall.Input`/`Output` signatures or the `RecallShape` API —
+`session_hybrid` is a new name in `RecallShape.presetNames` only.

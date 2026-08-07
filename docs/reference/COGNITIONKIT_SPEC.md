@@ -1,6 +1,6 @@
 ---
 title: CognitionKit Specification
-version: 1.8.0
+version: 1.8.1
 status: active
 date: 2026-08-06
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
@@ -841,3 +841,14 @@ filters). Conformance: `ShapedRecallTests.swift` / `shaped_recall.rs`.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.8.1 -- 2026-08-06
+Added `session_hybrid` named preset support to `ShapedRecall`. When
+`input.preset == "session_hybrid"`, `run()` routes through `runSessionHybrid()`,
+which drives `hybridRecall` via the `scoredLane` seam and then applies
+`SessionHybridFusion` temporal-window + speaker-aware boosts as a secondary sort
+key. Three conformance invariants: (1) scoredLane enforces RECENCY-SHALL-NOT-DOMINATE;
+(2) max combined boost 0.006 < cross-group evidence gap at rank >= 36 (evidence gate);
+(3) no Date() inside boost math (determinism). Rust port uses an equivalent inline
+fusion path (no scored_lane on Rust hybrid_recall). New: SessionHybridFusion.swift,
+SessionHybridTests.swift (12 tests), session_hybrid_fusion.rs (9 tests).
