@@ -647,21 +647,31 @@ fn run_connected_recall_tool(
     )
     .map_err(error_from_recipe)?;
 
-    // Dense-row reply: drawer lookups from the all_drawers set (same
-    // sensitivity-gated rendering path the precise tool uses); the match's
-    // room field carries the raw parent node id, resolved to a display
-    // name here.
-    let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
+    // Hydrate through a RecallFrame so graph hits cannot bypass tombstone and
+    // sensitivity defaults. Missing (gated) matches retain their opaque row.
+    let match_ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
+    let gated_drawers = coord
+        .estate_for(&estate.handle)
+        .ok()
+        .and_then(|locus_estate| {
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+            locus_estate
+                .get_drawers_matching_frame(&match_ids, &frame)
+                .ok()
+                .map(|found| found.admissible)
+        })
+        .unwrap_or_default();
     let parent_ids: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
-        all_drawers.iter()
+        gated_drawers.iter()
             .filter(|d| seen.insert(d.parent_node_id.clone()))
             .map(|d| d.parent_node_id.clone())
             .collect()
     };
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
     let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
-        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+        gated_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
 
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
     let mut results: Vec<StructuredRow> = Vec::new();

@@ -171,10 +171,10 @@ pub fn run_connected_recall(
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     let fused_ids: Vec<String> = fused.into_iter().take(safe_limit).map(|(id, _)| id).collect();
 
-    // 5. HYDRATE walk-only survivors. The rust GLK has no per-id hydrate;
-    //    walk-only bodies come from one all_drawers scan (the aria layer
-    //    already performs the same scan per call for node names, so this
-    //    adds no new cost class). Anchor rows carry pre-fetched bodies.
+    // 5. HYDRATE walk-only survivors through the normal RecallFrame boundary.
+    //    Graph edges can outlive a drawer's visibility, so a raw corpus lookup
+    //    here would let a stale edge disclose a tombstoned or sensitive row.
+    //    Anchor rows already carry bodies from the gated scored recall.
     let walk_set: HashSet<&String> = walk_ids.iter().collect();
     let anchor_set: HashSet<&String> = anchor_ids.iter().collect();
     let needs_bodies: Vec<&String> = fused_ids
@@ -182,11 +182,14 @@ pub fn run_connected_recall(
         .filter(|id| !body_by_id.contains_key(*id))
         .collect();
     if !needs_bodies.is_empty() {
-        let all = coord.all_drawers(handle).unwrap_or_default();
-        let wanted: HashSet<&String> = needs_bodies.into_iter().collect();
-        for d in all {
-            if wanted.contains(&d.id) {
-                body_by_id.insert(d.id.clone(), (d.content.clone(), d.parent_node_id.clone()));
+        if let Ok(estate) = coord.estate_for(handle) {
+            let ids: Vec<String> = needs_bodies.into_iter().cloned().collect();
+            let mut frame = RecallFrame::new(vec![]);
+            frame.hydration_level = HydrationLevel::Full;
+            if let Ok(found) = estate.get_drawers_matching_frame(&ids, &frame) {
+                for d in found.admissible {
+                    body_by_id.insert(d.id.clone(), (d.content.clone(), d.parent_node_id.clone()));
+                }
             }
         }
     }
