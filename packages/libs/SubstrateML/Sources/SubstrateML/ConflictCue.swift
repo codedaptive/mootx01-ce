@@ -11,7 +11,7 @@
 // on cheap, explainable lexical evidence and leave paraphrased
 // contradictions to the BYOAI client's judgment (the borderline band).
 //
-// THREE CUES, checked strongest-first:
+// FOUR CUES, checked strongest-first:
 //
 //   1. valueDivergence — the two token streams are the same template
 //      differing ONLY in value-bearing positions (tokens containing a
@@ -30,6 +30,15 @@
 //      supersession marker (deprecated, superseded, replaced, instead
 //      of, moved to, ...) over substantially similar content: "use the
 //      staging endpoint" vs "the staging endpoint is deprecated".
+//
+//   4. wordExclusion — the weakest cue, checked ONLY when cues 1-3 all
+//      declined the pair: a shared leading token run (the subject/
+//      predicate anchor) followed by word-valued (digit-free) divergent
+//      tails on BOTH sides: "Riley Nakamura works at Acme Robotics" vs
+//      "Riley Nakamura works at Northwind Analytics". Its score is
+//      structurally clamped below `strongThreshold`, so it only ever
+//      surfaces borderline candidates for the BYOAI client — it can
+//      never auto-propose a tunnel.
 //
 // DETERMINISM AND CONFORMANCE. Pure function of the two input strings —
 // no locale-sensitive transforms beyond ASCII-safe lowercasing, no
@@ -58,8 +67,34 @@ public enum ConflictCueKind: String, Sendable, Equatable {
     case negationAsymmetry = "negation_asymmetry"
     /// Revision/supersession marker over substantially similar content.
     case markerRevision = "marker_revision"
+    /// Shared leading anchor with word-valued (digit-free) divergent
+    /// tails on both sides — mutually exclusive word values over the
+    /// same subject ("works at Acme Robotics" vs "works at Northwind
+    /// Analytics"). Score is structurally clamped below
+    /// `ConflictCue.strongThreshold`; see `evaluate`.
+    case wordExclusion = "word_exclusion"
     /// No conflict evidence.
     case none = "none"
+}
+
+extension ConflictCueKind {
+    /// The contradiction tier this cue kind feeds, or `nil` for `none`.
+    ///
+    /// Tier taxonomy: tier 1 is the typed-KGFact lane — structured
+    /// subject/predicate collisions produced elsewhere in the estate,
+    /// never by this lexical screen, which is why no case maps to 1
+    /// here. Tier 2 is a CONFLICT CANDIDATE — cheap lexical evidence
+    /// that two claims are in tension (`negationAsymmetry`,
+    /// `markerRevision`, `wordExclusion`). Tier 3 is DIVERGENCE — the
+    /// same template with different values (`valueDivergence`), the
+    /// highest-precision lexical signal.
+    public var contradictionTier: Int? {
+        switch self {
+        case .valueDivergence: return 3
+        case .negationAsymmetry, .markerRevision, .wordExclusion: return 2
+        case .none: return nil
+        }
+    }
 }
 
 /// Result of a pairwise conflict screen: the strongest cue found and a
@@ -86,6 +121,32 @@ public enum ConflictCue {
     /// BORDERLINE — surfaced as a candidate pair for the BYOAI client to
     /// adjudicate, never auto-proposed.
     public static let borderlineThreshold: Float = 0.45
+
+    /// Ceiling for `wordExclusion` scores — one hundredth below
+    /// `strongThreshold` so the cue can NEVER cross into auto-propose
+    /// territory. The clamp is structural enforcement of "maybe?", not
+    /// a tuning knob.
+    static let wordExclusionCeiling: Float = 0.69
+
+    /// Width of the `wordExclusion` scoring band above
+    /// `borderlineThreshold`. Deliberately 0.24 (not the full 0.25 gap
+    /// to `strongThreshold`) so that even a hypothetical anchor
+    /// fraction of 1.0 lands exactly on `wordExclusionCeiling`, still
+    /// below `strongThreshold`.
+    static let wordExclusionBandWidth: Float = 0.24
+
+    /// Minimum shared leading tokens for a substantial anchor. Two
+    /// tokens ("riley nakamura", "the flag") is the smallest run that
+    /// plausibly names a subject; a single shared leading token ("the",
+    /// "bob") is too weak to anchor an exclusion claim.
+    static let wordExclusionMinAnchorTokens: Int = 2
+
+    /// Minimum fraction of the LONGER token stream the shared anchor
+    /// must cover. 0.5 admits the "<entity> is a staff engineer" shape
+    /// (3-token anchor over 6 tokens) while rejecting sentences that
+    /// merely open with the same couple of words and then diverge into
+    /// unrelated content.
+    static let wordExclusionMinAnchorFraction: Float = 0.5
 
     /// Standalone negation cue tokens. Deliberately excludes bare "no"
     /// (too common in benign contexts); contractions arrive as token
@@ -251,9 +312,64 @@ public enum ConflictCue {
         }
 
         // ── Cue 3: revision marker ─────────────────────────────────────
-        if hasMarker(tokensA) != hasMarker(tokensB),
-           claimSimilarity >= borderlineThreshold {
+        let markerA = hasMarker(tokensA)
+        let markerB = hasMarker(tokensB)
+        if markerA != markerB, claimSimilarity >= borderlineThreshold {
             return ConflictCueResult(kind: .markerRevision, score: claimSimilarity)
+        }
+
+        // ── Cue 4: word exclusion ──────────────────────────────────────
+        // The weakest cue — reached ONLY after cues 1-3 all declined, so
+        // the three original cue outcomes stay byte-identical to the
+        // pre-cue-4 screen. Targets word-valued mutual exclusions over
+        // the same subject: "Riley Nakamura works at Acme Robotics" vs
+        // "Riley Nakamura works at Northwind Analytics".
+        //
+        // Guards, in order:
+        //   - negation or marker ASYMMETRY → cues 2/3 own that pair
+        //     shape; if they declined (claim similarity below the
+        //     borderline bar) the pair stays none rather than
+        //     downgrading into this weaker cue.
+        //   - digit-bearing tails on BOTH sides → value territory:
+        //     digit-vs-digit diffs belong to valueDivergence, and the
+        //     pure-digit "sarah chen 3" vs "sarah chen 7" shape is a
+        //     cross-ENTITY difference (different subjects), the known
+        //     false-positive class this guard exists to exclude.
+        //   - the shared anchor must be substantial (minimum leading-run
+        //     length AND minimum fraction of the longer stream) so
+        //     unrelated sentences score none.
+        if negatedA == negatedB, markerA == markerB {
+            // Shared leading token run — the subject/predicate anchor.
+            var anchor = 0
+            while anchor < tokensA.count, anchor < tokensB.count,
+                  tokensA[anchor] == tokensB[anchor] {
+                anchor += 1
+            }
+            let tailA = tokensA[anchor...]
+            let tailB = tokensB[anchor...]
+            // Both value phrases must exist: a pure prefix/extension pair
+            // ("… in Paris" vs "… in Paris anymore") is not an exclusion.
+            if anchor >= wordExclusionMinAnchorTokens, !tailA.isEmpty, !tailB.isEmpty {
+                let tailACarriesDigit = tailA.contains { $0.contains(where: { $0.isNumber }) }
+                let tailBCarriesDigit = tailB.contains { $0.contains(where: { $0.isNumber }) }
+                if !(tailACarriesDigit && tailBCarriesDigit) {
+                    // Anchor overlap vs divergence: the fraction of the
+                    // LONGER stream covered by the shared anchor, so a
+                    // long unmatched tail on either side dilutes it.
+                    let total = max(tokensA.count, tokensB.count)
+                    let anchorFraction = Float(anchor) / Float(total)
+                    if anchorFraction >= wordExclusionMinAnchorFraction {
+                        // Map the anchor fraction into the borderline band
+                        // and clamp: the score can NEVER reach
+                        // strongThreshold, so this cue only ever surfaces
+                        // candidates for the BYOAI client — "maybe?" is
+                        // enforced structurally, not by tuning.
+                        let raw = borderlineThreshold + wordExclusionBandWidth * anchorFraction
+                        let score = min(raw, wordExclusionCeiling)
+                        return ConflictCueResult(kind: .wordExclusion, score: score)
+                    }
+                }
+            }
         }
 
         return ConflictCueResult(kind: .none, score: 0)
