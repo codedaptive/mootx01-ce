@@ -119,6 +119,41 @@ pub fn run_grounded_synthesis(
     cap: Option<usize>,
     query: Option<&str>,
 ) -> Result<GroundedOutput, RecipeRunError> {
+    run_grounded_synthesis_impl(
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query, false,
+    )
+}
+
+/// Variant for read surfaces that must enforce the provenance-sensitivity axis
+/// in addition to the RecallFrame adjective-sensitivity gate.
+pub fn run_grounded_synthesis_with_provenance_gate(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    frame: RecallFrame,
+    tuning: RecallFrameTuning,
+    now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+    cue_terms: &[String],
+    cap: Option<usize>,
+    query: Option<&str>,
+) -> Result<GroundedOutput, RecipeRunError> {
+    run_grounded_synthesis_impl(
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query, true,
+    )
+}
+
+fn run_grounded_synthesis_impl(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    frame: RecallFrame,
+    tuning: RecallFrameTuning,
+    now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+    cue_terms: &[String],
+    cap: Option<usize>,
+    query: Option<&str>,
+    exclude_provenance_sensitive: bool,
+) -> Result<GroundedOutput, RecipeRunError> {
     // B-5: verify capabilities before any substrate touch. A capability gate
     // failure propagates as RecipeRunError::Recipe.
     verify_capabilities(
@@ -215,7 +250,7 @@ pub fn run_grounded_synthesis(
         .recall(handle, lane_a_frame, now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
     let scored_lead_count = scored_rows.as_ref().map_or(0, |s| s.len());
-    let drawers: Vec<locus_kit::drawer::Drawer> = match scored_rows {
+    let mut drawers: Vec<locus_kit::drawer::Drawer> = match scored_rows {
         Some(scored) => {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut union = Vec::with_capacity(scored.len() + lane_a.len());
@@ -233,6 +268,15 @@ pub fn run_grounded_synthesis(
         }
         None => lane_a,
     };
+    if exclude_provenance_sensitive {
+        drawers.retain(|drawer| {
+            !matches!(
+                drawer.sensitivity(),
+                locus_kit::provenance::Sensitivity::Restricted
+                    | locus_kit::provenance::Sensitivity::Secret
+            )
+        });
+    }
 
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
     //    synthesis. Recalled rows are active, hence currently believed; the

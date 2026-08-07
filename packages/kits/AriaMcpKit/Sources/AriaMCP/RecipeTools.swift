@@ -734,7 +734,12 @@ enum RecipeTools {
             ordering: .byCaptureTimeDesc)
 
         let out = try await GroundedSynthesis().run(
-            input: .init(frame: frame, cueTerms: cueTerms, cap: recipeCap, query: query),
+            input: .init(
+                frame: frame,
+                cueTerms: cueTerms,
+                cap: recipeCap,
+                query: query,
+                excludeProvenanceSensitive: true),
             estate: handle, kit: kit)
 
         let doc = out.context

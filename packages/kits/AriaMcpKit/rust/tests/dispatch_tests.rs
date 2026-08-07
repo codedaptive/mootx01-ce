@@ -7055,6 +7055,41 @@ fn grounded_synthesis_query_ranks_cue_matches_first() {
         "cue-matched memory must lead keyInsights; got '{first_insight}'");
 }
 
+/// Provenance Restricted/Secret is a separate axis from the adjective
+/// sensitivity enforced by RecallFrame. Synthesis must gate that axis before
+/// verbatim key-insight excerpts are produced.
+#[test]
+fn grounded_synthesis_does_not_expose_provenance_sensitive_rows() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SurfacedRecallLedger::new();
+    for tier in [
+        locus_kit::provenance::Sensitivity::Restricted,
+        locus_kit::provenance::Sensitivity::Secret,
+    ] {
+        file_one_memory_with_provenance_sensitivity(
+            &registry,
+            "classified aardvark synthesis token",
+            "vault",
+            tier,
+        );
+    }
+
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args!["query" => "aardvark synthesis", "filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    )
+    .expect("synthesis should succeed after gated rows are removed");
+    let text = content_text(&result);
+    assert!(is_success(&result));
+    assert!(
+        !text.contains("classified aardvark synthesis token"),
+        "provenance-sensitive content must not reach keyInsights: {text}"
+    );
+    assert!(text.contains("grounded_synthesis: 0 drawer(s)"));
+}
+
 /// The bridge scenario recall_connected exists for: an answer memory
 /// sharing NO words with the query, reachable only through a
 /// moot_link_memories tunnel from the hop-1 memory. Plain similarity

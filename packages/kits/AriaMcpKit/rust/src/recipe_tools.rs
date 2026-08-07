@@ -73,8 +73,8 @@
 use std::collections::BTreeMap;
 
 use cognition_kit::{
-    recipe_catalog, run_grounded_synthesis, run_precise_recall, run_shaped_recall, OriginEntry,
-    PlanInput, PRECISE_DEFAULT_POOL,
+    recipe_catalog, run_grounded_synthesis_with_provenance_gate, run_precise_recall,
+    run_shaped_recall, OriginEntry, PlanInput, PRECISE_DEFAULT_POOL,
 };
 use genius_locus_kit::recall::RecallShape;
 use genius_locus_kit::branches::BranchId;
@@ -567,7 +567,7 @@ fn run_grounded_synthesis_tool(
         .map(|d| d.parent_node_id.clone())
         .collect();
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &all_node_ids);
-    let out = run_grounded_synthesis(
+    let out = run_grounded_synthesis_with_provenance_gate(
         &coord,
         &estate.handle,
         frame,

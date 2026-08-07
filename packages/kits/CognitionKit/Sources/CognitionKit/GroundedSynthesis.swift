@@ -65,19 +65,25 @@ public struct GroundedSynthesis: Recipe {
         /// capped the lexical-only pool at 34/50 misses in trial 4. nil =
         /// lexical-only grounding (previous behaviour).
         public let query: String?
+        /// Exclude rows gated by provenance sensitivity before synthesis.
+        /// MCP read surfaces enable this because recall-frame sensitivity
+        /// filters cover the adjective axis, not provenance bits 30...35.
+        public let excludeProvenanceSensitive: Bool
 
         public init(
             frame: RecallFrame,
             tuning: RecallFrameTuning = .default,
             cueTerms: [String] = [],
             cap: Int? = nil,
-            query: String? = nil
+            query: String? = nil,
+            excludeProvenanceSensitive: Bool = false
         ) {
             self.frame = frame
             self.tuning = tuning
             self.cueTerms = cueTerms
             self.cap = cap
             self.query = query
+            self.excludeProvenanceSensitive = excludeProvenanceSensitive
         }
     }
 
@@ -198,7 +204,10 @@ public struct GroundedSynthesis: Recipe {
         for await page in stream {
             pages.append(page)
         }
-        let allRows = pages.flatMap { $0.rows }
+        let recalledRows = pages.flatMap { $0.rows }
+        let allRows = input.excludeProvenanceSensitive
+            ? recalledRows.filter { $0.sensitivity != .restricted && $0.sensitivity != .secret }
+            : recalledRows
 
         // Apply cap BEFORE synthesis so the synthesizer's work is bounded
         // by the user limit, not the pool size. Cap is applied after reranking:
