@@ -211,10 +211,12 @@ public struct ShapedRecall: Recipe {
         // lexical-dominant fusion (bm25Weight 1.0, vectorWeight 0.0) so
         // keyword-relevant recency wins cleanly rather than mixing with a
         // degraded similarity signal.
-        let cueTerms = input.query
-            .split(separator: " ")
-            .map { String($0) }
-            .filter { !$0.isEmpty }
+        //
+        // The conversion is bounded at SessionHybridFusion.cueTermsCap to prevent
+        // the hybridRecall rerank loop (O(|cueTerms| × |candidatePool|)) from
+        // becoming quadratic in query length. See SessionHybridFusion.cueTermsCap
+        // and SessionHybridFusion.cueTerms(from:) for the cap rationale.
+        let cueTerms = SessionHybridFusion.cueTerms(from: input.query)
 
         let stream = try await hybridRecall(
             frame,

@@ -60,6 +60,48 @@ enum SessionHybridFusion {
     /// 2 * boostMax = 0.006, still below the cross-group evidence gap.
     static let speakerBoostMax: Double = 0.003
 
+    // MARK: - Query to cue terms
+
+    /// Cap on the number of cue terms derived from the query.
+    ///
+    /// Reuses `GroundedSynthesis.groundingPoolBound` (200) — the same value
+    /// that bounds each grounding lane's candidate pool — because the hybridRecall
+    /// rerank loop inside NeuronKit's HybridRecallEngine is O(|cueTerms| ×
+    /// |candidatePool|). The candidate pool is already bounded at
+    /// `groundingPoolBound`; without a matching cap on |cueTerms| a pathologically
+    /// long query (thousands of whitespace-separated tokens) produces an
+    /// O(10^6)-per-call cross-product reachable through moot_recall_shaped. Capping
+    /// at the same value keeps the worst-case product at
+    /// groundingPoolBound² = 40,000 — O(N) in the pool size, not O(N × queryLen).
+    ///
+    /// No new parallel constant is introduced: this value is not defined here but
+    /// read directly from `GroundedSynthesis.groundingPoolBound`.
+    static let cueTermsCap = GroundedSynthesis.groundingPoolBound
+
+    /// Convert a raw query string to bounded cue terms for the lexical rerank lane.
+    ///
+    /// Splits on whitespace, drops empty tokens, and caps the result at
+    /// `cueTermsCap`. The cap prevents the hybridRecall rerank loop from becoming
+    /// quadratic in query length (see `cueTermsCap` documentation).
+    ///
+    /// The cue terms drive the RECENCY-SHALL-NOT-DOMINATE fallback: when the
+    /// scored lane produces zero evidence-bearing hits, hybridRecall switches to
+    /// lexical-dominant fusion. They are NOT the scored search query — that path
+    /// goes through the ScoredLane's raw BM25 + vector search, which is bounded
+    /// by the frame limit, not by this list.
+    ///
+    /// - Parameter query: The raw query string from ShapedRecall.Input.
+    /// - Returns: Up to `cueTermsCap` non-empty whitespace tokens.
+    static func cueTerms(from query: String) -> [String] {
+        Array(
+            query
+                .split(separator: " ")
+                .map { String($0) }
+                .filter { !$0.isEmpty }
+                .prefix(cueTermsCap)
+        )
+    }
+
     // MARK: - Temporal window extraction
 
     /// Extract a (start, end) session window from the filter chain.

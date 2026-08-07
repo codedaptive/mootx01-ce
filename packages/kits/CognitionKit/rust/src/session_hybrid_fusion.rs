@@ -33,6 +33,13 @@ use locus_kit::drawer::Drawer;
 use locus_kit::filter::Filter;
 use locus_kit::provenance::Channel;
 
+// Cap on cue terms reuses GROUNDING_POOL_BOUND from grounded_synthesis: the
+// hybridRecall rerank loop cost is O(|cue_terms| × |candidate_pool|). The
+// candidate pool is already bounded at GROUNDING_POOL_BOUND; without a
+// matching cap on |cue_terms| a long query is a DoS vector. See
+// `query_to_cue_terms` and Swift `SessionHybridFusion.cueTermsCap`.
+use crate::grounded_synthesis::GROUNDING_POOL_BOUND;
+
 // MARK: - Configuration constants
 
 /// Maximum score delta a temporal window boost can contribute. Capped so the
@@ -48,6 +55,35 @@ const SPEAKER_BOOST_MAX: f64 = 0.003;
 /// RRF damping constant — mirrors NeuronKit's HybridRecallEngine k=60 convention.
 /// Base score at rank N = 1.0 / (N as f64 + RRF_K + 1.0).
 const RRF_K: f64 = 60.0;
+
+/// Cap on cue terms derived from the query string. Reuses `GROUNDING_POOL_BOUND`
+/// (200) — the same value that bounds each grounding lane's candidate pool —
+/// because the rerank loop cost is O(|cue_terms| × |candidate_pool|). The pool is
+/// already bounded; without a matching cap on |cue_terms| a long query is a DoS
+/// vector (Codex finding 13, f3be739). Capping at the same value keeps the
+/// worst-case product at GROUNDING_POOL_BOUND² = 40,000 — O(N) in pool size.
+/// Parity with Swift `SessionHybridFusion.cueTermsCap`.
+pub const CUE_TERMS_CAP: usize = GROUNDING_POOL_BOUND;
+
+/// Convert a raw query string to bounded cue terms for the lexical rerank lane.
+///
+/// Splits on whitespace, drops empty tokens, and caps at `CUE_TERMS_CAP` to
+/// prevent the rerank loop from becoming quadratic in query length. Parity with
+/// Swift `SessionHybridFusion.cueTerms(from:)`.
+///
+/// The current Rust `run_session_hybrid` path uses the shaped GLK recall preset
+/// (which internalises bm25/dense weight steering) rather than a separate
+/// cue-term rerank pass. This function is provided as parity infrastructure so
+/// the cap is in place and testable when the rerank path is extended; it is also
+/// useful for callers that need to pass a bounded cue list to the grounded pool.
+pub fn query_to_cue_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .take(CUE_TERMS_CAP)
+        .map(|t| t.to_string())
+        .collect()
+}
 
 // MARK: - Temporal window extraction
 
@@ -256,6 +292,57 @@ mod tests {
         d.event_time = event_time_ms;
         d.provenance = provenance;
         d
+    }
+
+    // SHF-10: pathological query — cue terms count is bounded at CUE_TERMS_CAP.
+    // Codex finding 13 (f3be739): without this cap a long query feeds an O(terms ×
+    // pool) rerank loop, making it a DoS surface via moot_recall_shaped.
+    #[test]
+    fn shf10_pathological_query_capped_at_bound() {
+        // Build a query with 2× the cap in whitespace-separated tokens.
+        let token_count = CUE_TERMS_CAP * 2; // 400 tokens
+        let long_query: String = (0..token_count)
+            .map(|i| format!("token{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let terms = query_to_cue_terms(&long_query);
+
+        assert_eq!(
+            terms.len(),
+            CUE_TERMS_CAP,
+            "cue terms must be bounded at CUE_TERMS_CAP regardless of query length"
+        );
+    }
+
+    // SHF-11: normal query — cue terms count is below cap (no truncation applied).
+    #[test]
+    fn shf11_normal_query_below_cap_passes_through() {
+        let query = "what did you say about quantum mechanics in our last session";
+        let terms = query_to_cue_terms(query);
+
+        // 11 whitespace-separated non-empty tokens: what/did/you/say/about/
+        // quantum/mechanics/in/our/last/session — all under the cap.
+        assert_eq!(terms.len(), 11,
+            "normal query: all tokens pass through unchanged (no cap applied)");
+    }
+
+    // SHF-12: fixture — query_to_cue_terms is deterministic; normal query produces
+    // byte-identical output across two calls (parity with Swift §7 fixture test).
+    #[test]
+    fn shf12_cue_terms_deterministic_for_normal_query() {
+        let query = "five token normal query test";
+
+        let terms1 = query_to_cue_terms(query);
+        let terms2 = query_to_cue_terms(query);
+
+        assert_eq!(terms1, terms2,
+            "query_to_cue_terms must be deterministic");
+        assert_eq!(
+            terms1,
+            vec!["five", "token", "normal", "query", "test"],
+            "query_to_cue_terms must match raw whitespace split for a query below the cap"
+        );
     }
 
     // SHF-1: temporal window extraction returns None when no temporal bounds.

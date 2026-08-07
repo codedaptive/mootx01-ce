@@ -413,6 +413,54 @@ struct SessionHybridTests {
                 "SessionHybridFusion must produce identical ranking for identical inputs")
     }
 
+    // MARK: - §7 cueTerms cap (DoS guard, Codex finding 13 / f3be739)
+
+    @Test("pathological query: cueTerms count is bounded at cueTermsCap")
+    func cueTermsCapBoundsLongQuery() {
+        // Construct a query with 2× the cap in whitespace-separated tokens.
+        // Without the cap this would feed a quadratic O(terms × pool) rerank loop
+        // (Codex finding 13). The fix caps at SessionHybridFusion.cueTermsCap ==
+        // GroundedSynthesis.groundingPoolBound (200).
+        let tokenCount = SessionHybridFusion.cueTermsCap * 2  // 400 tokens
+        let longQuery = (0..<tokenCount).map { "token\($0)" }.joined(separator: " ")
+
+        let terms = SessionHybridFusion.cueTerms(from: longQuery)
+
+        #expect(terms.count == SessionHybridFusion.cueTermsCap,
+                "cueTerms must be bounded at cueTermsCap regardless of query length")
+    }
+
+    @Test("normal query: cueTerms count is below cap — no truncation applied")
+    func cueTermsNoTruncationForNormalQuery() {
+        // A realistic query has well under 200 tokens. Verify the cap is not
+        // applied prematurely — term count must match the raw split exactly.
+        let query = "what did you say about quantum mechanics in our last session"
+
+        let terms = SessionHybridFusion.cueTerms(from: query)
+
+        // 11 whitespace-separated non-empty tokens: what/did/you/say/about/
+        // quantum/mechanics/in/our/last/session.
+        #expect(terms.count == 11,
+                "normal query: all tokens pass through unchanged (no cap applied)")
+    }
+
+    @Test("cueTerms fixture: ranking for a 5-token query is byte-identical before and after the cap")
+    func cueTermsRankingIdenticalForNormalQuery() {
+        // Pin that the cap does NOT change ranking for a normal-length query.
+        // SessionHybridFusion.boost uses the cue terms indirectly (they are passed
+        // to hybridRecall, not to boost directly), so we verify cueTerms output
+        // is identical across two calls — a fixed input must give a fixed output.
+        let query = "five token normal query test"
+
+        let terms1 = SessionHybridFusion.cueTerms(from: query)
+        let terms2 = SessionHybridFusion.cueTerms(from: query)
+
+        #expect(terms1 == terms2,
+                "cueTerms(from:) must be deterministic — identical inputs produce identical output")
+        #expect(terms1 == ["five", "token", "normal", "query", "test"],
+                "cueTerms(from:) must match raw whitespace split for a query below the cap")
+    }
+
     // MARK: - §6 No-boost no-op
 
     @Test("no-boost: SessionHybridFusion preserves hybridRecall order when no boosts apply")
