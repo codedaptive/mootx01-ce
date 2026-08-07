@@ -5,7 +5,7 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
-## v1.0.39 — 2026-08-06
+## v1.0.40 — 2026-08-06
 
 **Installer fix — macOS `.pkg` left `~/.local/bin` root-owned, blocking setup.**
 On a fresh Mac the postinstall script creates `~/.local` and `~/.local/bin` as
