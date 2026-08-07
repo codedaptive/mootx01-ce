@@ -3906,99 +3906,26 @@ impl EstateCoordinator {
             }
         }
 
-        // kNN candidate mining, canonical-pair deduplicated.
-        //
-        // Lane 1 — drawer-keyed rows under the caller's `model_id`. Rows
-        // whose item is not in this lane fail `get_vector` and fall through.
-        let mut candidate_pairs: Vec<(String, String)> = Vec::new();
-        let mut seen_pairs: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for probe_id in &probe_ids {
-            let probe_engram = match vector_store.get_vector(probe_id, model_id) {
-                Ok(Some(e)) => e,
-                _ => continue,
-            };
-            let matches = match vector_store.find_nearest(&probe_engram, model_id, 5) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            for m in matches {
-                if m.item_id == *probe_id || m.distance > proximity_threshold {
-                    continue;
-                }
-                let key = pair_key(probe_id, &m.item_id);
-                if !seen_pairs.insert(key) {
-                    continue;
-                }
-                let (a, b) = if *probe_id < m.item_id {
-                    (probe_id.clone(), m.item_id.clone())
-                } else {
-                    (m.item_id.clone(), probe_id.clone())
-                };
-                candidate_pairs.push((a, b));
-            }
-        }
-
-        // Drawer contents + node names. Loaded before lane 2 because the corpus
-        // lane needs probe-drawer content to build its BM25 query; the screen
-        // below reuses the same map.
+        // Drawer contents + node names. Loaded before candidate generation
+        // because the corpus lane needs probe-drawer content to build its
+        // BM25 query; the screen below reuses the same map.
         let all_drawers: Vec<locus_kit::drawer::Drawer> =
             estate.all_drawers().map_err(remap_err)?;
         let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
         let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
             all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
 
-        // Lane 2 — the corpus lane, the ONLY lane a production estate populates
-        // (the encode drain writes chunk-keyed rows under the corpus provider's
-        // model_id, so lane 1's drawer-keyed `get_vector` finds nothing there).
-        // Candidate generation here is LEXICAL, via the corpus's persistent BM25
-        // inverted index — NOT vectors. A contradiction is two statements about
-        // the same thing that disagree; "about the same thing" is what BM25
-        // answers cheaply (sub-linear WAND/BMW over posting lists), and it is
-        // the same shared-term similarity the conflict-cue screen keys on. The
-        // vector lanes were unusable at estate scale — the binary SimHash space
-        // is degenerate (109k estate: 748 chunks within Hamming ≤ 2, true twin
-        // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
-        // returns SOURCE (drawer) IDs directly. `seen_pairs` keys on drawer IDs,
-        // so both lanes dedupe together. Mirrors the Swift lane-2 block.
-        if let Some(corpus) = self.corpus_kits.get(handle) {
-            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
-            // IDs are the probe drawers directly, no chunk→drawer remap.
-            let mut probe_drawer_ids: Vec<String> = probe_ids.to_vec();
-            probe_drawer_ids.sort();
-            probe_drawer_ids.dedup();
-            for pd_id in &probe_drawer_ids {
-                let pd = match drawers_by_id.get(pd_id.as_str()) {
-                    Some(d) => *d,
-                    None => continue,
-                };
-                if pd.content.is_empty() {
-                    continue;
-                }
-                // Cap the query length so per-probe cost is independent of body size.
-                let query: String = pd
-                    .content
-                    .chars()
-                    .take(HUNT_BM25_QUERY_CHAR_LIMIT)
-                    .collect();
-                let hits = corpus.bm25_top_k_by_source(&query, HUNT_BM25_CANDIDATE_K);
-                for (source_id, _score) in hits {
-                    if source_id == *pd_id {
-                        continue;
-                    }
-                    let key = pair_key(pd_id, &source_id);
-                    if !seen_pairs.insert(key) {
-                        continue;
-                    }
-                    let (a, b) = if *pd_id < source_id {
-                        (pd_id.clone(), source_id)
-                    } else {
-                        (source_id, pd_id.clone())
-                    };
-                    candidate_pairs.push((a, b));
-                }
-            }
-        }
+        // One shared retrieval pass (both candidate lanes). Factored out
+        // so the tiered contradiction search reuses the identical pass —
+        // see `contradiction_candidate_pairs` below.
+        let candidate_pairs = self.contradiction_candidate_pairs(
+            vector_store,
+            &probe_ids,
+            &drawers_by_id,
+            model_id,
+            proximity_threshold,
+            self.corpus_kits.get(handle),
+        );
 
         let probes_scanned = probe_ids.len();
         let mut pairs_screened = 0usize;
@@ -4096,6 +4023,428 @@ impl EstateCoordinator {
             borderline,
             deduplicated,
         })
+    }
+
+    /// The candidate-generation half of the lexical contradiction
+    /// surfaces — the single retrieval pass shared by
+    /// `hunt_contradictions` and `tiered_contradiction_search` (probe
+    /// sampling stays with the callers, which own the store-absent /
+    /// no-probe early reporting; the LANES live here so there is
+    /// exactly one implementation of them). Runs ONCE per caller — the
+    /// tiered search's tier-2 and tier-3 lanes both consume this one
+    /// pass, never two passes over the estate.
+    ///
+    /// Returns canonicalized (min, max) drawer-ID pairs, within-pass
+    /// deduplicated. Order follows probe/lane iteration; consumers
+    /// that need a stable order must sort on their own key — the
+    /// tiered search ranks on (score, pair_key) for exactly this
+    /// reason. Mirrors Swift `contradictionCandidatePairs`.
+    #[allow(clippy::too_many_arguments)]
+    fn contradiction_candidate_pairs(
+        &self,
+        vector_store: &Arc<VectorStore>,
+        probe_ids: &[String],
+        drawers_by_id: &std::collections::HashMap<&str, &locus_kit::drawer::Drawer>,
+        model_id: &str,
+        proximity_threshold: i32,
+        corpus: Option<&Arc<CorpusContentEngine>>,
+    ) -> Vec<(String, String)> {
+        let pair_key = |a: &str, b: &str| -> String {
+            if a < b { format!("{}||{}", a, b) } else { format!("{}||{}", b, a) }
+        };
+
+        // kNN candidate mining, canonical-pair deduplicated.
+        //
+        // Lane 1 — drawer-keyed rows under the caller's `model_id`. Rows
+        // whose item is not in this lane fail `get_vector` and fall through.
+        let mut candidate_pairs: Vec<(String, String)> = Vec::new();
+        let mut seen_pairs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for probe_id in probe_ids {
+            let probe_engram = match vector_store.get_vector(probe_id, model_id) {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let matches = match vector_store.find_nearest(&probe_engram, model_id, 5) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            for m in matches {
+                if m.item_id == *probe_id || m.distance > proximity_threshold {
+                    continue;
+                }
+                let key = pair_key(probe_id, &m.item_id);
+                if !seen_pairs.insert(key) {
+                    continue;
+                }
+                let (a, b) = if *probe_id < m.item_id {
+                    (probe_id.clone(), m.item_id.clone())
+                } else {
+                    (m.item_id.clone(), probe_id.clone())
+                };
+                candidate_pairs.push((a, b));
+            }
+        }
+
+        // Lane 2 — the corpus lane, the ONLY lane a production estate populates
+        // (the encode drain writes chunk-keyed rows under the corpus provider's
+        // model_id, so lane 1's drawer-keyed `get_vector` finds nothing there).
+        // Candidate generation here is LEXICAL, via the corpus's persistent BM25
+        // inverted index — NOT vectors. A contradiction is two statements about
+        // the same thing that disagree; "about the same thing" is what BM25
+        // answers cheaply (sub-linear WAND/BMW over posting lists), and it is
+        // the same shared-term similarity the conflict-cue screen keys on. The
+        // vector lanes were unusable at estate scale — the binary SimHash space
+        // is degenerate (109k estate: 748 chunks within Hamming ≤ 2, true twin
+        // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
+        // returns SOURCE (drawer) IDs directly. `seen_pairs` keys on drawer IDs,
+        // so both lanes dedupe together. Mirrors the Swift lane-2 block.
+        if let Some(corpus) = corpus {
+            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
+            // IDs are the probe drawers directly, no chunk→drawer remap.
+            let mut probe_drawer_ids: Vec<String> = probe_ids.to_vec();
+            probe_drawer_ids.sort();
+            probe_drawer_ids.dedup();
+            for pd_id in &probe_drawer_ids {
+                let pd = match drawers_by_id.get(pd_id.as_str()) {
+                    Some(d) => *d,
+                    None => continue,
+                };
+                if pd.content.is_empty() {
+                    continue;
+                }
+                // Cap the query length so per-probe cost is independent of body size.
+                let query: String = pd
+                    .content
+                    .chars()
+                    .take(HUNT_BM25_QUERY_CHAR_LIMIT)
+                    .collect();
+                let hits = corpus.bm25_top_k_by_source(&query, HUNT_BM25_CANDIDATE_K);
+                for (source_id, _score) in hits {
+                    if source_id == *pd_id {
+                        continue;
+                    }
+                    let key = pair_key(pd_id, &source_id);
+                    if !seen_pairs.insert(key) {
+                        continue;
+                    }
+                    let (a, b) = if *pd_id < source_id {
+                        (pd_id.clone(), source_id)
+                    } else {
+                        (source_id, pd_id.clone())
+                    };
+                    candidate_pairs.push((a, b));
+                }
+            }
+        }
+
+        candidate_pairs
+    }
+
+    /// Run one tiered contradiction search over `handle`. Mirrors Swift
+    /// `tieredContradictionSearch(in:tier:topK:modelID:probeLimit:now:)`.
+    ///
+    /// `tier == None` runs synthesis (all three lanes + assembler); a
+    /// specific tier runs ONLY that lane, with no cross-tier dedup —
+    /// the purpose-run answers its own question. `top_k` is clamped to
+    /// `TIERED_TOP_K_CEILING`; zero returns an empty report
+    /// deterministically. `_now` is the caller's deterministic clock
+    /// (fleet clock discipline): the search is a pure read and files
+    /// nothing, so it is currently unconsumed — it is part of the
+    /// signature so the ARIA seam and any future watermarking never
+    /// need a signature break.
+    pub fn tiered_contradiction_search(
+        &self,
+        handle: &EstateHandle,
+        tier: Option<crate::brain::tiered_contradiction_search::ContradictionTier>,
+        top_k: usize,
+        model_id: &str,
+        probe_limit: usize,
+        _now: i64,
+    ) -> Result<
+        crate::brain::tiered_contradiction_search::TieredContradictionReport,
+        VerbDispatchError,
+    > {
+        use crate::brain::tiered_contradiction_search::{
+            assemble_synthesis, effective_top_k, ordered_pair, rank_and_trim_tier1,
+            rank_lexical, tiered_pair_key, ContradictionTier, TierFinding, TierLaneCounts,
+            TieredContradictionReport, TieredSearchDiagnostics, TieredSearchMode,
+        };
+        use substrate_ml::conflict_cue;
+
+        let mode = tier
+            .map(TieredSearchMode::Single)
+            .unwrap_or(TieredSearchMode::Synthesis);
+        let effective_k = effective_top_k(top_k);
+        if effective_k == 0 {
+            return Ok(TieredContradictionReport::empty(mode));
+        }
+
+        let run_tier1 = matches!(tier, None | Some(ContradictionTier::TypedProven));
+        let run_lexical = matches!(
+            tier,
+            None | Some(ContradictionTier::LexicalStructural)
+                | Some(ContradictionTier::LexicalValue)
+        );
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("tiered_contradiction_search", "", e))
+        };
+
+        // One drawer walk serves BOTH lanes: tier 1's endpoint event
+        // times (epoch-millisecond clock → whole seconds at the seam,
+        // KI-003 — the same division the sweep seam performs, so the
+        // recency ranking and the Swift twin agree on the domain) and
+        // the lexical screen's content + eligibility reads. This is the
+        // same gated read path the hunter and the sweep seam use — no
+        // new parallel path to drawer content.
+        let all_drawers: Vec<locus_kit::drawer::Drawer> =
+            estate.all_drawers().map_err(remap_err)?;
+        let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        // ---- Tier 1 lane: the typed proving sweep ----
+        let mut tier1_fetched: Vec<TierFinding> = Vec::new();
+        let mut tier1_candidates = 0usize;
+        let mut tier1_ceiling_filtered = 0usize;
+        let mut sweep_truncated_buckets = 0usize;
+        if run_tier1 {
+            let sweep = self.conflict_projection_sweep(handle)?;
+            sweep_truncated_buckets = sweep.truncated_buckets;
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            // Applied here to the TYPED lane's output for the same reason
+            // the typed proposal loop applies it: this verb is an
+            // ungranted read surface, and even a content-free finding
+            // (result id + coordinate digest + endpoint ids) discloses
+            // more than the renderer's redacted line for a restricted
+            // pair. The ceiling compares RAW values — never a decoded
+            // tier, which coerces beyond-spec raws back to Normal — and
+            // the sweep's ceiling already fails closed to Secret on any
+            // unresolvable endpoint, so a hydration gap cannot pass this
+            // gate. Findings that DO pass carry their ceiling through
+            // unchanged for finer-grained rendering downstream.
+            let elevated = locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value();
+            let proven_total = sweep.proven.len();
+            let eligible: Vec<_> = sweep
+                .proven
+                .into_iter()
+                .filter(|f| {
+                    f.outcome.source_drawer_ids.len() == 2
+                        && f.sensitivity_ceiling_raw <= elevated
+                })
+                .collect();
+            tier1_ceiling_filtered = proven_total - eligible.len();
+            tier1_candidates = eligible.len();
+
+            let mut event_seconds: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            for finding in &eligible {
+                for id in &finding.outcome.source_drawer_ids {
+                    if let Some(d) = drawers_by_id.get(id.as_str()) {
+                        event_seconds.insert(id.clone(), d.event_time.div_euclid(1000));
+                    }
+                }
+            }
+            tier1_fetched = rank_and_trim_tier1(
+                &eligible,
+                &event_seconds,
+                ContradictionTier::TypedProven.fetch_budget(effective_k),
+            );
+        }
+
+        // ---- Tiers 2/3: ONE shared lexical retrieval pass ----
+        let mut tier2_all: Vec<TierFinding> = Vec::new();
+        let mut tier3_all: Vec<TierFinding> = Vec::new();
+        let mut tier2_candidates = 0usize;
+        let mut tier3_candidates = 0usize;
+        let mut probes_scanned = 0usize;
+        let mut vector_store_available = true;
+        if run_lexical {
+            match self.vector_stores.get(handle) {
+                None => vector_store_available = false,
+                Some(vector_store) => {
+                    // Same retrieval the hunter runs (probe sampling + kNN
+                    // lane + BM25 corpus lane), executed ONCE — both lexical
+                    // tiers classify out of this single candidate set.
+                    // Proximity uses the hunter's same 64 default (the cue
+                    // screen is the precision gate; proximity only bounds
+                    // the candidate set). A failed probe-source scan
+                    // degrades to an empty pass, matching the hunter.
+                    let probe_ids =
+                        vector_store.recent_item_ids(probe_limit).unwrap_or_default();
+                    probes_scanned = probe_ids.len();
+                    let candidate_pairs = self.contradiction_candidate_pairs(
+                        vector_store,
+                        &probe_ids,
+                        &drawers_by_id,
+                        model_id,
+                        64,
+                        self.corpus_kits.get(handle),
+                    );
+
+                    for (a_id, b_id) in candidate_pairs {
+                        let (a, b) = match (
+                            drawers_by_id.get(a_id.as_str()),
+                            drawers_by_id.get(b_id.as_str()),
+                        ) {
+                            (Some(a), Some(b)) => (*a, *b),
+                            _ => continue,
+                        };
+                        if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
+                            continue;
+                        }
+                        // Match BitmapEvaluator's default recall posture: callers
+                        // without an explicit sensitivity grant may only mine the Normal
+                        // tier (normal + elevated). Restricted/secret rows must not be
+                        // screened, proposed, or echoed as borderline snippets.
+                        let elevated =
+                            locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value();
+                        if a.adjective_sensitivity().raw_value() > elevated
+                            || b.adjective_sensitivity().raw_value() > elevated
+                        {
+                            continue;
+                        }
+
+                        let cue = conflict_cue::evaluate(&a.content, &b.content);
+                        // P1's classifier: structural cues → tier 2, value
+                        // divergence → tier 3, none → None. The lexical screen
+                        // never yields tier 1 (proof is the typed lane's job),
+                        // so an unexpected mapping is dropped rather than
+                        // misfiled.
+                        let tier_class = match cue
+                            .kind
+                            .contradiction_tier()
+                            .and_then(ContradictionTier::from_raw)
+                        {
+                            Some(t) if t != ContradictionTier::TypedProven => t,
+                            _ => continue,
+                        };
+
+                        let (da, db) = ordered_pair(&a.id, &b.id);
+                        let first = drawers_by_id.get(da.as_str()).copied().unwrap_or(a);
+                        let second = drawers_by_id.get(db.as_str()).copied().unwrap_or(b);
+                        let finding = TierFinding {
+                            tier: tier_class,
+                            pair_key: tiered_pair_key(&a.id, &b.id),
+                            drawer_a: da,
+                            drawer_b: db,
+                            cue_kind: Some(cue.kind.as_str().to_string()),
+                            rule_id: None,
+                            score: Some(cue.score),
+                            source_snippet: Some(
+                                first.content.chars().take(HUNT_SNIPPET_LIMIT).collect(),
+                            ),
+                            target_snippet: Some(
+                                second.content.chars().take(HUNT_SNIPPET_LIMIT).collect(),
+                            ),
+                            result_id: None,
+                            coordinate_digest: None,
+                            sensitivity_ceiling_raw: None,
+                        };
+                        match tier_class {
+                            ContradictionTier::LexicalStructural => tier2_all.push(finding),
+                            ContradictionTier::LexicalValue => tier3_all.push(finding),
+                            ContradictionTier::TypedProven => {} // unreachable per the guard
+                        }
+                    }
+                    tier2_candidates = tier2_all.len();
+                    tier3_candidates = tier3_all.len();
+                    tier2_all = rank_lexical(tier2_all);
+                    tier3_all = rank_lexical(tier3_all);
+                }
+            }
+        }
+        tier2_all.truncate(ContradictionTier::LexicalStructural.fetch_budget(effective_k));
+        tier3_all.truncate(ContradictionTier::LexicalValue.fetch_budget(effective_k));
+        let tier2_fetched = tier2_all;
+        let tier3_fetched = tier3_all;
+
+        let diagnostics = TieredSearchDiagnostics {
+            vector_store_available,
+            probes_scanned,
+            sweep_truncated_buckets,
+            tier1_candidates,
+            tier2_candidates,
+            tier3_candidates,
+            tier1_ceiling_filtered,
+        };
+
+        match mode {
+            TieredSearchMode::Synthesis => {
+                let assembly = assemble_synthesis(
+                    tier1_fetched,
+                    tier2_fetched,
+                    tier3_fetched,
+                    effective_k,
+                );
+                Ok(TieredContradictionReport {
+                    mode,
+                    tier1: assembly.tier1,
+                    tier2: assembly.tier2,
+                    tier3: assembly.tier3,
+                    tier1_counts: assembly.tier1_counts,
+                    tier2_counts: assembly.tier2_counts,
+                    tier3_counts: assembly.tier3_counts,
+                    diagnostics,
+                })
+            }
+            TieredSearchMode::Single(requested) => {
+                // Purpose-run: this lane's top `top_k`, NO cross-tier
+                // dedup. A pair that is also a tier-1 proof still
+                // appears in a tier-3 run — the caller asked "what
+                // tier-3 signals exist", and hiding the pair because a
+                // stronger class also holds it would answer a different
+                // question.
+                let lane = match requested {
+                    ContradictionTier::TypedProven => tier1_fetched,
+                    ContradictionTier::LexicalStructural => tier2_fetched,
+                    ContradictionTier::LexicalValue => tier3_fetched,
+                };
+                let fetched = lane.len();
+                let returned: Vec<TierFinding> =
+                    lane.into_iter().take(effective_k).collect();
+                let lane_counts = TierLaneCounts {
+                    fetched,
+                    returned: returned.len(),
+                    promoted_away: 0,
+                    backfilled: 0,
+                };
+                let (mut tier1, mut tier2, mut tier3) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut c1, mut c2, mut c3) = (
+                    TierLaneCounts::default(),
+                    TierLaneCounts::default(),
+                    TierLaneCounts::default(),
+                );
+                match requested {
+                    ContradictionTier::TypedProven => {
+                        tier1 = returned;
+                        c1 = lane_counts;
+                    }
+                    ContradictionTier::LexicalStructural => {
+                        tier2 = returned;
+                        c2 = lane_counts;
+                    }
+                    ContradictionTier::LexicalValue => {
+                        tier3 = returned;
+                        c3 = lane_counts;
+                    }
+                }
+                Ok(TieredContradictionReport {
+                    mode,
+                    tier1,
+                    tier2,
+                    tier3,
+                    tier1_counts: c1,
+                    tier2_counts: c2,
+                    tier3_counts: c3,
+                    diagnostics,
+                })
+            }
+        }
     }
 
     /// Run one typed sweep and file a PROPOSED `contradicts` tunnel for
