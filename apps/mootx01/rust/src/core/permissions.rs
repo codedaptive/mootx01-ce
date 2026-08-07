@@ -74,7 +74,7 @@ const READ_TOOLS: &[&str] = &[
     "moot_list_lenses", "moot_list_recipes",
     "moot_vault_status", "moot_vault_job",
     "moot_memory_search", "moot_memory_get", "moot_memory_list",
-    "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled",
+    "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped", "moot_recall_distilled",
     "moot_recall_vague",
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",

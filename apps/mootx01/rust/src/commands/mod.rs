@@ -12,6 +12,11 @@ use crate::core::paths;
 pub mod db;
 pub mod drain;
 pub mod dream;
+/// `enable`/`disable` feature toggles and `hook-capture` entry point.
+pub mod enable;
+/// Harness Memory Mode — routes Claude Code project-memory writes into the
+/// MOOTx01 estate via a PreToolUse hook and settings.json merge.
+pub mod harness_memory;
 pub mod install;
 pub mod proxy;
 pub mod query;
@@ -54,6 +59,16 @@ pub fn dispatch(command: Command) -> ExitCode {
             ExitCode::from(unlock::run_unlock(&tier, &data_dir) as u8)
         }
         Command::Lock => ExitCode::from(unlock::run_lock() as u8),
+        // Feature toggles (enable/disable harness-memory, memory-tool).
+        Command::Enable { feature, yes, ingest_all } => {
+            enable::run_enable(&feature, yes, ingest_all)
+        }
+        Command::Disable { feature, yes, restore_all, no_restore } => {
+            enable::run_disable(&feature, yes, restore_all, no_restore)
+        }
+        // PreToolUse capture hook entry point (called by the hook script installed
+        // at ~/.mootx01/hooks/capture-harness-memory.sh).
+        Command::HookCapture => enable::run_hook_capture(),
         // Version/Help/HelpFor are handled in main before dispatch.
         Command::Version | Command::Help | Command::HelpFor(_) => {
             unreachable!("handled in main")

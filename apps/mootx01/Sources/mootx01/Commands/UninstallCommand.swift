@@ -100,6 +100,22 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✓ Stopped and removed the resident mootx01 daemon (launchd).")
             #endif
 
+            // Tear down Harness Memory Mode state BEFORE removing the binary —
+            // the hook script references the binary path (exec "<abs>" hook-capture);
+            // clean up the reference while the binary is still present.
+            // Pure file ops: no daemon contact, no restore offer (restore is the
+            // interactive disable command's responsibility, not uninstall's).
+            let harnessSettingsURL = MootPaths.globalClaudeSettingsURL(homeDirectory: home)
+            let harnessHookURL = HarnessMemoryPaths.hookScriptURL(homeDirectory: home)
+            let harnessClaudeURL = HarnessMemoryPaths.globalCLAUDEMDURL(homeDirectory: home)
+            let harnessWasActive = FileManager.default.fileExists(atPath: harnessHookURL.path)
+            try? HarnessMemorySettings.disable(settingsURL: harnessSettingsURL, homeDirectory: home)
+            try? HarnessMemoryHook.remove(at: harnessHookURL)
+            try? HarnessMemoryCLAUDE.disable(at: harnessClaudeURL)
+            if harnessWasActive {
+                print("  ✓ Removed harness-memory hook and settings.")
+            }
+
             // Remove the placed binaries (~/.mootx01) and the PATH wrappers
             // (~/.local/bin/mootx01, ~/.local/bin/moot-mgr). Inverse of install's
             // placeBinary/placeMgrBinary.

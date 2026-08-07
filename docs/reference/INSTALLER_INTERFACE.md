@@ -1,8 +1,8 @@
 ---
 title: Installer Interface
 status: active
-version: 1.1.0
-date: 2026-08-03
+version: 1.2.0
+date: 2026-08-07
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -32,11 +32,17 @@ purpose: |
   - `AgentPicker.swift` — `AgentPicker`, `AgentPickerError`
   - `DatabaseManager.swift` — `DatabaseManager`, `MOOTx01DatabaseError`
   - `PermissionsWriter.swift` — `PermissionsWriter`
+  - `HarnessMemory.swift` — Harness Memory Mode (MXE-HM): `HarnessMemoryPaths`,
+    `HarnessMemorySettings`, `HarnessMemoryCLAUDE`, `HarnessMemoryHook`,
+    `HarnessMemoryRecord`, `DaemonClient` (protocol), `LiveDaemonClient`,
+    `DaemonError`, `HarnessMemoryMatcher`, `IngestResult`, `HarnessMemoryIngest`,
+    `RestoreResult`, `HarnessMemoryRestore`
 - `Sources/mootx01/` — the `mootx01` executable
   - `MootMain.swift` — `@main Mootx01` root `AsyncParsableCommand`
   - `Commands/` — `ServeCommand`, `InstallCommand`, `UninstallCommand`,
     `DbCommand` (+ `DbCreate`/`DbList`/`DbOpen`/`DbDelete`),
-    `StatusCommand`, `QueryCommand`
+    `StatusCommand`, `QueryCommand`, `EnableCommand`, `DisableCommand`,
+    `HookCaptureCommand`
 - `Tests/MootInstallerCoreTests/` — conformance tests
 - `Package.swift` — manifest
 
@@ -232,6 +238,131 @@ public enum PermissionsWriter {
 }
 ```
 
+### Harness Memory Mode types (MXE-HM)
+
+The following types ship in `MootInstallerCore/HarnessMemory.swift` and are
+used by the `enable harness-memory` / `disable harness-memory` CLI commands
+and the `hook-capture` hook handler.
+
+```swift
+/// Path constants for Harness Memory Mode files under ~/.mootx01/.
+public enum HarnessMemoryPaths {
+    public static func hooksDirURL(homeDirectory: URL) -> URL
+    public static func hookScriptURL(homeDirectory: URL) -> URL
+    public static func globalCLAUDEMDURL(homeDirectory: URL) -> URL
+    public static func claudeProjectsURL(homeDirectory: URL) -> URL
+}
+
+/// Pure JSON transforms for Claude settings.json harness-memory toggles.
+public enum HarnessMemorySettings {
+    public static let autoMemoryKey: String  // "autoMemoryEnabled"
+    public static func enable(settingsURL: URL, homeDirectory: URL) throws
+    public static func disable(settingsURL: URL, homeDirectory: URL) throws
+    public static func hasHookEntry(in settings: [String: Any], commandPath: String) -> Bool
+    public static func addHookEntry(to settings: inout [String: Any], commandPath: String)
+    public static func removeHookEntry(from settings: inout [String: Any], commandPath: String)
+    public static func backupIfPresent(settingsURL: URL) throws
+    public static func readSettings(at url: URL) throws -> [String: Any]
+    public static func writeSettings(_ settings: [String: Any], to url: URL) throws
+}
+
+/// CLAUDE.md block management: merges / removes the sentinel-marked teaching block.
+public enum HarnessMemoryCLAUDE {
+    public static let beginMarker: String  // "<!-- mootx01:harness-memory:begin -->"
+    public static let endMarker: String   // "<!-- mootx01:harness-memory:end -->"
+    public static func hasBlock(in text: String) -> Bool
+    public static func mergeBlock(into text: String) -> String   // idempotent
+    public static func removeBlock(from text: String) -> String  // idempotent
+    public static func enable(at url: URL) throws
+    public static func disable(at url: URL) throws
+}
+
+/// Thin shell hook script lifecycle (install / remove).
+public enum HarnessMemoryHook {
+    public static func scriptContent(binaryPath: String) -> String
+    public static func install(at url: URL, binaryPath: String) throws
+    public static func remove(at url: URL) throws
+}
+
+/// Describes a memory record in the estate relevant to ingest / restore.
+public struct HarnessMemoryRecord: Sendable {
+    public let id: String
+    public let location: String
+    public let content: String
+    public let eventTime: Date
+    public let isSuperseded: Bool
+}
+
+/// Protocol for daemon communication (JSON-RPC 2.0 over loopback HTTP).
+/// Abstracted for testability — `MockDaemonClient` in tests; `LiveDaemonClient` in production.
+public protocol DaemonClient: Sendable {
+    func fileMemory(location: String, content: String, eventTime: Date, kind: String?) async throws -> Bool
+    func listMemories(locationPrefix: String) async throws -> [HarnessMemoryRecord]
+    func updateMemory(id: String, mutation: String, note: String?) async throws
+    func ping() async -> Bool
+}
+
+/// Production daemon client: JSON-RPC 2.0 POST to http://127.0.0.1:<port>.
+public struct LiveDaemonClient: DaemonClient {
+    public init(port: Int)
+}
+
+/// Path matching for Claude Code project memory files.
+/// Matches paths of the shape `<any>/.claude/projects/<slug>/memory/<name>`.
+public enum HarnessMemoryMatcher {
+    public static func match(path: String) -> (projectSlug: String, fileName: String)?
+    public static var teachingMessage: String { get }
+}
+
+/// Result of ingesting one Claude Code project memory file into the estate.
+public struct IngestResult: Sendable {
+    public enum Outcome: Sendable {
+        case filed
+        case revived
+        case skipped(String)
+        case failed(String)
+    }
+    public let location: String
+    public let outcome: Outcome
+}
+
+/// Ingest scanner: MOVE semantics — reads on-disk memory files, files them in
+/// the estate, then deletes the source (or revives a superseded drawer on re-enable).
+public enum HarnessMemoryIngest {
+    public static func scanProjects(homeDirectory: URL) throws -> [(slug: String, files: [URL])]
+    public static func ingestFile(
+        _ url: URL,
+        projectSlug: String,
+        isReEnable: Bool,
+        daemon: some DaemonClient,
+        now: Date
+    ) async -> IngestResult
+    public static func removeEmptyMemoryDir(projectSlug: String, homeDirectory: URL) throws
+}
+
+/// Result of restoring one memory from the estate back to disk.
+public struct RestoreResult: Sendable {
+    public enum Outcome: Sendable {
+        case restored
+        case skipped(String)
+        case failed(String)
+    }
+    public let location: String
+    public let outcome: Outcome
+}
+
+/// Restore: writes estate memories back to ~/.claude/projects/<slug>/memory/<name>
+/// and marks them superseded in the estate (reverse of ingest).
+public enum HarnessMemoryRestore {
+    public static func restore(
+        projectSlugs: [String],
+        homeDirectory: URL,
+        daemon: some DaemonClient,
+        now: Date
+    ) async throws -> [RestoreResult]
+}
+```
+
 ## § 3 — Public functions
 
 The library exposes no free functions; all operations are static
@@ -242,18 +373,41 @@ members of the caseless-enum namespaces in § 2.
 The root command is `@main struct Mootx01: AsyncParsableCommand`
 (command name `mootx01`). Subcommands:
 
-| Subcommand | Command name | Platforms |
-|---|---|---|
-| `ServeCommand` | `serve` | macOS only (default subcommand) |
-| `InstallCommand` | `install` | all |
-| `UninstallCommand` | `uninstall` | all |
-| `DbCommand` | `db` (subcommands: `create`, `list`, `open`, `delete`) | all |
-| `StatusCommand` | `status` | all |
-| `QueryCommand` | `query` | all |
+| Subcommand | Command name | Platforms | Shown in --help |
+|---|---|---|---|
+| `ServeCommand` | `serve` | macOS only (default subcommand) | yes |
+| `InstallCommand` | `install` | all | yes |
+| `UninstallCommand` | `uninstall` | all | yes |
+| `DbCommand` | `db` (subcommands: `create`, `list`, `open`, `delete`) | all | yes |
+| `StatusCommand` | `status` | all | yes |
+| `QueryCommand` | `query` | all | yes |
+| `EnableCommand` | `enable` (subcommand: `harness-memory`) | all | yes |
+| `DisableCommand` | `disable` (subcommand: `harness-memory`) | all | yes |
+| `HookCaptureCommand` | `hook-capture` | all | no (internal) |
 
 On non-macOS platforms `serve` is omitted (it requires the Apple-only
 MCP server runtime); on macOS `serve` is the default subcommand so a
 bare `mootx01` invocation in an MCP client config starts the server.
+
+`HookCaptureCommand` (`hook-capture`) is the PreToolUse hook handler
+invoked by `~/.mootx01/hooks/capture-harness-memory.sh`. It is
+registered in the subcommand list but hidden from `--help`
+(`shouldDisplay: false`). It reads a Claude Code PreToolUse JSON event
+from stdin and emits a JSON `permissionDecision` response to stdout.
+
+`EnableCommand` (`enable harness-memory`) and `DisableCommand`
+(`disable harness-memory`) accept the following flags:
+
+```
+enable harness-memory [-y/--yes] [--ingest-all]
+  -y / --yes        Suppress all confirmation prompts.
+  --ingest-all      Ingest all existing project memory files without per-file prompts.
+
+disable harness-memory [-y/--yes] [--restore-all | --no-restore]
+  -y / --yes        Suppress all confirmation prompts.
+  --restore-all     Restore all estate memories to disk without per-project prompts.
+  --no-restore      Skip the restore offer entirely.
+```
 
 ## § 4 — Errors
 
@@ -267,6 +421,13 @@ public enum MOOTx01DatabaseError: Error, CustomStringConvertible {
     case notFound(String)
     case invalidName(String)
     case deleteDefault
+}
+
+/// Errors thrown by `LiveDaemonClient` (JSON-RPC 2.0 over loopback HTTP).
+public enum DaemonError: Error, CustomStringConvertible {
+    case httpError(Int)     // non-2xx HTTP response code
+    case parseError         // response body not valid JSON-RPC 2.0
+    case rpcError(String)   // JSON-RPC error.message from the daemon
 }
 ```
 
@@ -319,6 +480,19 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-08-07
+Added Harness Memory Mode (MXE-HM) public surface. New `MootInstallerCore` types:
+`HarnessMemoryPaths`, `HarnessMemorySettings`, `HarnessMemoryCLAUDE`, `HarnessMemoryHook`,
+`HarnessMemoryRecord` (Sendable struct), `DaemonClient` (Sendable protocol),
+`LiveDaemonClient`, `DaemonError` (new error type), `HarnessMemoryMatcher`,
+`IngestResult` + `HarnessMemoryIngest`, `RestoreResult` + `HarnessMemoryRestore`.
+New CLI subcommands: `enable harness-memory` (`EnableCommand`) and
+`disable harness-memory` (`DisableCommand`), each with `-y`/`--yes` and
+`--ingest-all` / `--restore-all` / `--no-restore` flags.
+New internal subcommand: `hook-capture` (`HookCaptureCommand`, `shouldDisplay: false`),
+invoked by `~/.mootx01/hooks/capture-harness-memory.sh` as a Claude Code PreToolUse
+hook handler. Minor-version bump: additive surface, no existing signature changed.
 
 ### 1.1.0 -- 2026-08-03
 Added `MCPClients.pluginServerName` (Swift) and `core::clients::PLUGIN_SERVER_NAME` (Rust) to the documented surface, and scoped `serverName` / `SERVER_NAME` to DIRECT (non-plugin) entries. The plugin package's MCP server key became `memory` at `7f64973aa` so plugin tools surface as `plugin:mootx01:memory`; direct entries deliberately keep `mootx01`. Both keys are now named constants rather than scattered literals, and the two are not interchangeable. Minor bump: additive surface, no existing signature changed.

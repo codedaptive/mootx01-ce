@@ -92,6 +92,9 @@ struct Mootx01: AsyncParsableCommand {
                 // Feature toggles (M-MEMTOOL-1).
                 EnableCommand.self,
                 DisableCommand.self,
+                // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
+                // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
+                HookCaptureCommand.self,
             ]
         )
         #else
@@ -107,6 +110,9 @@ struct Mootx01: AsyncParsableCommand {
                 QueryCommand.self,
                 EnableCommand.self,
                 DisableCommand.self,
+                // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
+                // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
+                HookCaptureCommand.self,
             ]
         )
         #endif
