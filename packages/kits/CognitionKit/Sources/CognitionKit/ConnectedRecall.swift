@@ -175,26 +175,22 @@ public enum ConnectedRecall {
         // 5. HYDRATE walk-only survivors (anchor rows carry bodies already)
         //    and assemble matches in fused order with lane provenance.
         //
-        //    GATING ASYMMETRY (flagged for Bob ruling, do not change without
-        //    an explicit decision): anchor recall (step 1) uses the CALLER's
-        //    filter chain, so caller-supplied predicates (e.g. .inRoom, custom
-        //    sensitivity floor) scope both the anchor pool and the walk seeds.
-        //    Walk hydration below uses RecallFrame(filterChain: []) — an empty
-        //    chain — which receives SPEC DEFAULTS only (state=currentlyBelieve,
-        //    trust=trustworthy, sensitivity≤elevated). This means a walk-only
-        //    hit that satisfies the defaults but not the caller's full filter
-        //    still surfaces. The asymmetry is intentional: the walk discovers
-        //    bridge memories that might sit in rooms the caller did not name,
-        //    and tightening walk hydration to the caller's chain would silently
-        //    discard bridge discoveries. Kept as-is; recorded for review.
+        //    Walk hydration carries the CALLER's filter, exactly as anchor
+        //    recall (step 1) does. Both paths gate identically: a query with
+        //    filter:"exportable" must never surface a non-exportable drawer
+        //    just because it is reachable from an exportable anchor through a
+        //    tunnel or association (Bob ruling, Wave-3 G1). insertDefaults is
+        //    per-axis and conditional on absence, so the caller filter rides
+        //    ALONGSIDE the spec defaults, never instead of them.
         let anchorByID = Dictionary(uniqueKeysWithValues: anchorRows.map { ($0.id, $0) })
         let walkSet = Set(walkRanked)
         let needsHydration = fused.filter { anchorByID[$0] == nil }
         // Use the GATED overload so tombstoned rows (state=withdrawn/terminal)
-        // and sensitivity-restricted rows (>elevated) are excluded. The empty
-        // filter chain triggers insertDefaults: currentlyBelieve + trustworthy
-        // + sensitivityAtMost(.elevated). Graph edges can outlive a drawer's
-        // visibility — a stale edge must not disclose a withdrawn or sensitive row.
+        // and sensitivity-restricted rows (>elevated) are excluded: the frame
+        // receives insertDefaults (currentlyBelieve + trustworthy +
+        // sensitivityAtMost(.elevated)) plus the caller's filter. Graph edges
+        // can outlive a drawer's visibility — a stale edge must not disclose
+        // a withdrawn, sensitive, or caller-filtered row.
         let hydratedDrawers: [String: Drawer]
         if needsHydration.isEmpty {
             hydratedDrawers = [:]
@@ -202,7 +198,7 @@ public enum ConnectedRecall {
             let drawers = (try? await kit.hydrate(
                 handle,
                 ids: Array(needsHydration),
-                matchingFrame: RecallFrame(filterChain: []))) ?? []
+                matchingFrame: RecallFrame(filterChain: [filter]))) ?? []
             hydratedDrawers = Dictionary(
                 uniqueKeysWithValues: drawers.map { ($0.id, $0) })
         }

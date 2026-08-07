@@ -72,7 +72,7 @@ pub fn run_connected_recall(
     //    (the Rust GLK exposes no per-id hydrate; same convention as the
     //    rust PreciseRecall).
     let frame = RecallFrame {
-        filter_chain: vec![filter],
+        filter_chain: vec![filter.clone()],
         hydration_level: HydrationLevel::Full,
         limit: Some(pool),
         ordering: Ordering::ByCaptureTimeDesc,
@@ -175,10 +175,15 @@ pub fn run_connected_recall(
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     let fused_ids: Vec<String> = fused.into_iter().take(safe_limit).map(|(id, _)| id).collect();
 
-    // 5. HYDRATE walk-only survivors through the normal RecallFrame boundary.
-    //    Graph edges can outlive a drawer's visibility, so a raw corpus lookup
-    //    here would let a stale edge disclose a tombstoned or sensitive row.
-    //    Anchor rows already carry bodies from the gated scored recall.
+    // 5. HYDRATE walk-only survivors through the normal RecallFrame boundary,
+    //    carrying the CALLER's filter exactly as the anchor recall does. Both
+    //    paths gate identically: filter:"exportable" must never surface a
+    //    non-exportable drawer just because it is tunnel-reachable from an
+    //    exportable anchor (Bob ruling, Wave-3 G1). insert_defaults is
+    //    per-axis and conditional on absence, so the caller filter rides
+    //    alongside the spec defaults. Graph edges can outlive a drawer's
+    //    visibility, so a raw corpus lookup here would let a stale edge
+    //    disclose a tombstoned, sensitive, or caller-filtered row.
     let walk_set: HashSet<&String> = walk_ids.iter().collect();
     let anchor_set: HashSet<&String> = anchor_ids.iter().collect();
     let needs_bodies: Vec<&String> = fused_ids
@@ -188,7 +193,7 @@ pub fn run_connected_recall(
     if !needs_bodies.is_empty() {
         if let Ok(estate) = coord.estate_for(handle) {
             let ids: Vec<String> = needs_bodies.into_iter().cloned().collect();
-            let mut frame = RecallFrame::new(vec![]);
+            let mut frame = RecallFrame::new(vec![filter]);
             frame.hydration_level = HydrationLevel::Full;
             if let Ok(found) = estate.get_drawers_matching_frame(&ids, &frame) {
                 for d in found.admissible {

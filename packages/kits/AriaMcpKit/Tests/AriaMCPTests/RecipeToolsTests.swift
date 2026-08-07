@@ -195,8 +195,8 @@ struct RecipeToolsTests {
     /// Gate invariant: a tombstoned (withdrawn) memory linked by a tunnel to
     /// a live anchor must NOT appear in connected-recall results. The walk
     /// discovers the edge and attempts hydration; the gated overload
-    /// (RecallFrame(filterChain: [])) excludes the withdrawn row via the
-    /// insertDefaults .currentlyBelieve filter.
+    /// (insertDefaults plus the caller's filter) excludes the withdrawn row
+    /// via .currentlyBelieve.
     @Test func testConnectedRecallExcludesTombstonedRows() async throws {
         let owner = OwnerCredentials(ownerIdentifier: "crg-tomb")
         let kit = GeniusLocusKit()
@@ -321,6 +321,194 @@ struct RecipeToolsTests {
         // The restricted memory's distinctive content must NOT appear.
         #expect(!text.contains("ConfidentialAardvark"),
                 "restricted row content must be absent from connected recall; got: \(text)")
+    }
+
+    /// Shared setup for the Wave-3 G1 walk-filter tests: file an anchor (with
+    /// optional exportability), file a walk-only target sharing no words with
+    /// the query, link target → anchor, and PROVE walk reachability with an
+    /// unrestricted control query before any filtered assertion — a gate test
+    /// whose walk never reaches the target passes vacuously.
+    /// Twin of Rust `g1_walk_fixture`.
+    private func g1WalkFixture(
+        kit: GeniusLocusKit, handle: EstateHandle,
+        dispatcher: ToolDispatcher,
+        anchorContent: String, anchorExportability: String?,
+        targetContent: String, targetExportability: String?,
+        controlQuery: String
+    ) async throws -> (anchor: String, target: String) {
+        func fileWith(_ content: String, _ exportability: String?) async throws -> String {
+            var fields: [String: JSONValue] = [
+                "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
+                "location": .string("recipe-tests"),
+            ]
+            if let e = exportability { fields["exportability"] = .string(e) }
+            let result = try await dispatcher.dispatch(
+                name: "moot_file_memory", arguments: .object(fields))
+            let text = result.objectValue?["content"]?.arrayValue?.first?
+                .objectValue?["text"]?.stringValue ?? ""
+            return text.split(separator: "\n").first?
+                .split(separator: " ").last.map(String.init) ?? ""
+        }
+
+        // Filing order is load-bearing. On the in-memory test estate the
+        // scored anchor recall degrades to capture-time-descending order, so
+        // the 20-deep anchor pool is simply the 20 NEWEST drawers. The
+        // target is filed FIRST (oldest — guaranteed outside the pool, so
+        // it can only arrive through the tunnel walk), then 25 distractors
+        // to fill the pool, then the anchor LAST (newest — guaranteed in
+        // the pool, so the walk always has its seed).
+        let target = try await fileWith(targetContent, targetExportability)
+        for i in 1...25 {
+            _ = try await fileWith(
+                "distractor \(i) garden compost rotation and seasonal seed notes", nil)
+        }
+        let anchor = try await fileWith(anchorContent, anchorExportability)
+
+        // Capture the tunnel DIRECTLY with sourceWing "recipe-tests": the
+        // walk reads tunnels whose SOURCE wing matches the query's wing arg,
+        // and moot_link_memories records the drawers' resolved wing (the
+        // estate default), which the "recipe-tests" query would never see —
+        // the tunnel would be invisible and the gate test vacuous. Same
+        // shape as the Rust fixture's direct capture_tunnel.
+        let estate = try await kit.estate(for: handle)
+        let tunnelFrame = TunnelCaptureFrame(
+            sourceWing: "recipe-tests", sourceRoom: "recipe-tests",
+            targetWing: "recipe-tests", targetRoom: "recipe-tests",
+            label: "g1 walk gate test link", addedBy: "aria-mcp-tests",
+            sourceDrawerId: target, targetDrawerId: anchor, kind: .references)
+        _ = try await estate.capture(tunnelFrame)
+
+        // CONTROL: unrestricted filter must reach the target through the walk.
+        // If this fails the fixture is broken, not the gate.
+        let control = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string(controlQuery),
+                "wing": .string("recipe-tests"),
+                "filter": .string("unconfirmed"),
+                "limit": .integer(10),
+            ]))
+        let controlText = control.objectValue?["content"]?.arrayValue?.first?
+            .objectValue?["text"]?.stringValue ?? ""
+        #expect(controlText.contains(target),
+                "FIXTURE: the walk must reach the linked target under an unrestricted filter; got: \(controlText)")
+        return (anchor, target)
+    }
+
+    /// Wave-3 G1 gate invariant: the CALLER's filter applies to walk
+    /// hydration, not only to anchor recall. A non-exportable (born-private)
+    /// drawer linked to an exportable anchor must NOT surface its content
+    /// under filter:"exportable", while the exportable anchor itself must.
+    /// Twin of Rust `connected_recall_walk_honors_exportable_filter`.
+    @Test func testConnectedRecallWalkHonorsExportableFilter() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "g1-exp"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await g1WalkFixture(
+            kit: kit, handle: handle,
+            dispatcher: dispatcher,
+            anchorContent: "Roadmap review moved to Friday afternoon confirmed",
+            anchorExportability: "public",
+            targetContent: "VelvetOctopus internal pricing draft numbers",
+            targetExportability: nil,
+            controlQuery: "roadmap review Friday")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string("roadmap review Friday"),
+                "wing": .string("recipe-tests"),
+                "filter": .string("exportable"),
+                "limit": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("Roadmap review"),
+                "exportable anchor content must be present; got: \(text)")
+        #expect(!text.contains("VelvetOctopus"),
+                "non-exportable row content must be absent under filter:exportable; got: \(text)")
+    }
+
+    /// Wave-3 G1 gate invariant, confirmation axis: an unconfirmed drawer
+    /// linked to a user-confirmed anchor must NOT surface its content under
+    /// filter:"userConfirmed".
+    /// Twin of Rust `connected_recall_walk_honors_user_confirmed_filter`.
+    @Test func testConnectedRecallWalkHonorsUserConfirmedFilter() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "g1-conf"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let fixture = try await g1WalkFixture(
+            kit: kit, handle: handle,
+            dispatcher: dispatcher,
+            anchorContent: "Sprint retro moved to Tuesday morning confirmed",
+            anchorExportability: nil,
+            targetContent: "CrimsonNarwhal draft merger term sheet notes",
+            targetExportability: nil,
+            controlQuery: "sprint retro Tuesday")
+        _ = try await dispatcher.dispatch(
+            name: "moot_confirm_memory",
+            arguments: .object(["id": .string(fixture.anchor)]))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string("sprint retro Tuesday"),
+                "wing": .string("recipe-tests"),
+                "filter": .string("userConfirmed"),
+                "limit": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("Sprint retro"),
+                "confirmed anchor content must be present; got: \(text)")
+        #expect(!text.contains("CrimsonNarwhal"),
+                "unconfirmed row content must be absent under filter:userConfirmed; got: \(text)")
+    }
+
+    /// Wave-3 G1 gate invariant, containment axis: a PUBLIC drawer linked to
+    /// a contained (born-private) anchor must NOT surface its content under
+    /// filter:"contained" — the inverse of the exportable test.
+    /// Twin of Rust `connected_recall_walk_honors_contained_filter`.
+    @Test func testConnectedRecallWalkHonorsContainedFilter() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "g1-cont"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await g1WalkFixture(
+            kit: kit, handle: handle,
+            dispatcher: dispatcher,
+            anchorContent: "Standup notes archived for Thursday review",
+            anchorExportability: nil,
+            targetContent: "AmberFalcon public changelog draft for the release",
+            targetExportability: "public",
+            controlQuery: "standup notes Thursday")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string("standup notes Thursday"),
+                "wing": .string("recipe-tests"),
+                "filter": .string("contained"),
+                "limit": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("Standup notes"),
+                "contained anchor content must be present; got: \(text)")
+        #expect(!text.contains("AmberFalcon"),
+                "public row content must be absent under filter:contained; got: \(text)")
     }
 
     // MARK: - grounded_synthesis dispatch

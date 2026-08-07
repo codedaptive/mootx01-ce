@@ -7244,8 +7244,8 @@ fn connected_recall_reaches_bridge_linked_answer() {
 
 /// Gate invariant: a withdrawn memory linked by a tunnel to a live anchor must
 /// NOT appear in connected-recall results. The walk discovers the edge and
-/// attempts hydration; the gated RecallFrame(filterChain: []) excludes the
-/// withdrawn row via insert_defaults' CurrentlyBelieve filter.
+/// attempts hydration; the gated RecallFrame (insert_defaults plus the
+/// caller's filter) excludes the withdrawn row via CurrentlyBelieve.
 /// Twin of Swift `testConnectedRecallExcludesTombstonedRows`.
 #[test]
 fn connected_recall_excludes_withdrawn_rows() {
@@ -7366,6 +7366,180 @@ fn connected_recall_excludes_sensitivity_restricted_rows() {
     // The restricted memory's distinctive content must NOT appear.
     assert!(!text.contains("ConfidentialAardvark"),
         "restricted row content must be absent from connected recall; got: {text}");
+}
+
+/// Shared setup for the Wave-3 G1 walk-filter tests: file an anchor (with
+/// optional exportability), file a walk-only target that shares no words
+/// with the query, capture a tunnel target→anchor directly (the MCP link
+/// tool cannot register wing names on the in-memory estate — see the bridge
+/// test above), and PROVE walk reachability with an unrestricted control
+/// query before any filtered assertion. A gate test whose walk never reaches
+/// the target passes vacuously; the control query removes that failure mode.
+fn g1_walk_fixture(
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    anchor_content: &str,
+    anchor_exportability: Option<&str>,
+    target_content: &str,
+    target_exportability: Option<&str>,
+    control_query: &str,
+) -> (String, String) {
+    use locus_kit::frames::TunnelCaptureFrame;
+
+    let file_with = |content: &str, exportability: Option<&str>| -> String {
+        let mut a = args!["content" => content, "subject" => content,
+                          "location" => "recipe-tests"];
+        if let Some(e) = exportability {
+            a.insert("exportability".to_owned(), JsonValue::String(e.to_owned()));
+        }
+        let filed = dispatch_tool("moot_file_memory", &a, registry, ledger)
+            .expect("file_memory must succeed");
+        assert!(is_success(&filed), "file_memory should succeed; got: {filed:?}");
+        content_text(&filed).lines().next()
+            .and_then(|l| l.strip_prefix("filed memory ")).unwrap_or("").to_owned()
+    };
+
+    // NOTE deliberate twin divergence from the Swift fixture: the Rust
+    // in-memory estate ships charter-hint seed drawers and does not rank
+    // the anchor pool by pure recency, so the Swift flood-and-reorder
+    // shape starves the walk of its seed here. This small fixture is
+    // proven non-vacuous for THIS port by the pre-fix counter-proof (all
+    // three walk tests fail on exactly the leak assertion when the filter
+    // propagation is reverted).
+    let anchor = file_with(anchor_content, anchor_exportability);
+    let target = file_with(target_content, target_exportability);
+    file_with("bicycle tire pressure maintenance schedule", None);
+
+    // Direct tunnel capture with explicit wing names, exactly as the bridge
+    // test does: the walk reads wing-scoped tunnels and the queries below
+    // pass wing:"recipe-tests".
+    let now = aria_mcp::dispatch::wall_now();
+    {
+        let coord = registry.coord.lock().unwrap();
+        let locus_estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        let mut tunnel_frame = TunnelCaptureFrame::new(
+            "recipe-tests", "recipe-tests", "recipe-tests", "recipe-tests",
+            "g1 walk gate test link", "test",
+        );
+        tunnel_frame.source_drawer_id = Some(target.clone());
+        tunnel_frame.target_drawer_id = Some(anchor.clone());
+        locus_estate.capture_tunnel(tunnel_frame, now)
+            .expect("tunnel capture must succeed");
+    }
+
+    // CONTROL: unrestricted filter must reach the target through the walk.
+    // If this fails the fixture is broken, not the gate.
+    let control = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => control_query, "wing" => "recipe-tests",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        registry, ledger,
+    ).expect("control connected recall must dispatch");
+    assert!(is_success(&control), "control query should succeed; got: {control:?}");
+    let control_text = content_text(&control);
+    assert!(control_text.contains(&target),
+        "FIXTURE: the walk must reach the linked target under an \
+         unrestricted filter; got: {control_text}");
+
+    (anchor, target)
+}
+
+/// Wave-3 G1 gate invariant: the CALLER's filter applies to walk hydration,
+/// not only to anchor recall. A non-exportable (born-private) drawer linked
+/// to an exportable anchor must NOT surface its content under
+/// filter:"exportable", while the exportable anchor itself must.
+/// Twin of Swift `testConnectedRecallWalkHonorsExportableFilter`.
+#[test]
+fn connected_recall_walk_honors_exportable_filter() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let (_anchor, _target) = g1_walk_fixture(
+        &registry, &ledger,
+        "Roadmap review moved to Friday afternoon confirmed", Some("public"),
+        "VelvetOctopus internal pricing draft numbers", None,
+        "roadmap review Friday",
+    );
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "roadmap review Friday", "wing" => "recipe-tests",
+               "filter" => "exportable", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // Over-gating check: the exportable anchor's content must be present.
+    assert!(text.contains("Roadmap review"),
+        "exportable anchor content must be present; got: {text}");
+    // The private drawer's content must NOT ride in through the walk.
+    assert!(!text.contains("VelvetOctopus"),
+        "non-exportable row content must be absent under filter:exportable; got: {text}");
+}
+
+/// Wave-3 G1 gate invariant, confirmation axis: an unconfirmed drawer linked
+/// to a user-confirmed anchor must NOT surface its content under
+/// filter:"userConfirmed".
+/// Twin of Swift `testConnectedRecallWalkHonorsUserConfirmedFilter`.
+#[test]
+fn connected_recall_walk_honors_user_confirmed_filter() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let (anchor, _target) = g1_walk_fixture(
+        &registry, &ledger,
+        "Sprint retro moved to Tuesday morning confirmed", None,
+        "CrimsonNarwhal draft merger term sheet notes", None,
+        "sprint retro Tuesday",
+    );
+    let confirm = dispatch_tool(
+        "moot_confirm_memory", &args!["id" => anchor.as_str()], &registry, &ledger,
+    ).expect("confirm must dispatch");
+    assert!(is_success(&confirm), "confirm_memory should succeed; got: {confirm:?}");
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "sprint retro Tuesday", "wing" => "recipe-tests",
+               "filter" => "userConfirmed", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("Sprint retro"),
+        "confirmed anchor content must be present; got: {text}");
+    assert!(!text.contains("CrimsonNarwhal"),
+        "unconfirmed row content must be absent under filter:userConfirmed; got: {text}");
+}
+
+/// Wave-3 G1 gate invariant, containment axis: a PUBLIC drawer linked to a
+/// contained (born-private) anchor must NOT surface its content under
+/// filter:"contained" — the inverse of the exportable test.
+/// Twin of Swift `testConnectedRecallWalkHonorsContainedFilter`.
+#[test]
+fn connected_recall_walk_honors_contained_filter() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let (_anchor, _target) = g1_walk_fixture(
+        &registry, &ledger,
+        "Standup notes archived for Thursday review", None,
+        "AmberFalcon public changelog draft for the release", Some("public"),
+        "standup notes Thursday",
+    );
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "standup notes Thursday", "wing" => "recipe-tests",
+               "filter" => "contained", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("Standup notes"),
+        "contained anchor content must be present; got: {text}");
+    assert!(!text.contains("AmberFalcon"),
+        "public row content must be absent under filter:contained; got: {text}");
 }
 
 /// A query whose every token is a stopword or too short must be rejected

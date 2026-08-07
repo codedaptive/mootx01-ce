@@ -953,11 +953,15 @@ enum RecipeTools {
 
         // Same sensitivity-gated dense-row rendering the precise tool uses:
         // the structured-tier fetch decides what may be shown; the recipe's
-        // in-hand content never bypasses the gate.
+        // in-hand content never bypasses the gate. The caller's filter rides
+        // in the frame (Wave-3 G1): walk-discovered ids arrive here without
+        // having passed the caller's filter at recall time, so render is the
+        // second gate that keeps e.g. a non-exportable bridge drawer opaque
+        // under filter:"exportable".
         let estate = try await kit.estate(for: handle)
         let shownMatches = Array(matches.prefix(50))
         let drawersByID = try await structuredDrawersByID(
-            ids: shownMatches.map { $0.id }, estate: estate)
+            ids: shownMatches.map { $0.id }, estate: estate, filterChain: [filter])
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: drawersByID.values.map { $0.parentNodeId })
 
@@ -1193,20 +1197,25 @@ enum RecipeTools {
     }
 
     /// Typed-drawer twin of `denseRowsByID` (MXE-SS): the SAME by-id read
-    /// through the SAME empty-filter-chain `RecallFrame` — the load-bearing
-    /// default gate documented on `denseRowsByID` — returning the drawers
-    /// themselves so the structured block can take subject and provenance
-    /// sensitivity from the row. Structured hydration: content blobs are NOT
-    /// loaded here; recall-recipe content comes from the match and passes
-    /// through the redaction switch in `ToolDispatcher.structuredRecallRow`.
-    /// Gated ids are ABSENT from the map exactly as they are from
-    /// `denseRowsByID`, and callers fall through to the opaque row (the twin
-    /// of `DenseRow.renderUnhydrated`).
-    static func structuredDrawersByID(ids: [String], estate: Estate) async throws -> [String: Drawer] {
+    /// through the SAME gated `RecallFrame` — the load-bearing default gate
+    /// documented on `denseRowsByID` — returning the drawers themselves so
+    /// the structured block can take subject and provenance sensitivity from
+    /// the row. `filterChain` carries the CALLER's filter when the tool
+    /// surface accepts one (connected recall passes it so walk-reachable rows
+    /// cannot bypass it at render, Wave-3 G1); insertDefaults rides alongside
+    /// either way. Structured hydration: content blobs are NOT loaded here;
+    /// recall-recipe content comes from the match and passes through the
+    /// redaction switch in `ToolDispatcher.structuredRecallRow`. Gated ids
+    /// are ABSENT from the map exactly as they are from `denseRowsByID`, and
+    /// callers fall through to the opaque row (the twin of
+    /// `DenseRow.renderUnhydrated`).
+    static func structuredDrawersByID(
+        ids: [String], estate: Estate, filterChain: [Filter] = []
+    ) async throws -> [String: Drawer] {
         guard !ids.isEmpty else { return [:] }
         let fetched = try await estate.getDrawers(
             ids: ids,
-            matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .structured),
+            matchingFrame: RecallFrame(filterChain: filterChain, hydrationLevel: .structured),
             hydrationLevel: .structured)
         return Dictionary(uniqueKeysWithValues: fetched.admissible.map { ($0.id, $0) })
     }

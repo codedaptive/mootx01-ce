@@ -659,20 +659,23 @@ fn run_connected_recall_tool(
         &estate.handle,
         &query,
         &wing,
-        filter,
+        filter.clone(),
         limit,
         now,
     )
     .map_err(error_from_recipe)?;
 
-    // Hydrate through a RecallFrame so graph hits cannot bypass tombstone and
-    // sensitivity defaults. Missing (gated) matches retain their opaque row.
+    // Hydrate through a RecallFrame carrying the CALLER's filter plus the
+    // insert_defaults gates, so graph hits cannot bypass tombstone,
+    // sensitivity, or caller-filter constraints (Wave-3 G1: a walk-reachable
+    // non-exportable drawer must stay opaque under filter:"exportable").
+    // Missing (gated) matches retain their opaque row.
     let match_ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
     let gated_drawers = coord
         .estate_for(&estate.handle)
         .ok()
         .and_then(|locus_estate| {
-            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![filter]);
             frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
             locus_estate
                 .get_drawers_matching_frame(&match_ids, &frame)
