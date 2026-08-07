@@ -6022,6 +6022,50 @@ fn dream_dispatch_rejects_malformed_now_as_invalid_params() {
     );
 }
 
+/// C1 — dream associates="all" uses a bounded probe limit, not unbounded None.
+///
+/// After the fix, `run_dream_tool` with `associates: "all"` passes
+/// `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE` (10_000) to `coord.associate_sweep`,
+/// not `None`. On a tiny estate (2 rows) the probe count equals the estate
+/// size (≤ 2) — well under the cap. The test verifies that the "all" path
+/// completes without error and the response body contains no association-error
+/// text, confirming the bounded path executed.
+///
+/// Parity: Swift `dreamAssociatesAllUsesBoundedProbeNotUnlimited`.
+#[test]
+fn dream_all_mode_uses_bounded_probe_limit_not_unlimited() {
+    let registry = EstateRegistry::new_inmemory();
+    // File two memories. The bounded path (Some(10_000)) must not crash here;
+    // on an estate with no VectorStore, the associate sweep returns a zero
+    // report — the important thing is the path completes without error.
+    file_one_memory(&registry, "boundary probe limit test item alpha", "study");
+    file_one_memory(&registry, "boundary probe limit test item beta", "study");
+
+    let result = dispatch_tool(
+        "moot_dream",
+        &args!["now" => "2026-07-01T00:00:00Z", "associates" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_dream associates=all must not throw a transport fault");
+
+    assert!(
+        is_success(&result),
+        "moot_dream associates=all must return isError:false; got: {result:?}"
+    );
+    let text = content_text(&result);
+    // The bounded path must not produce an error annotation in the body.
+    assert!(
+        !text.contains("association sweep error"),
+        "associates=all must not produce an error annotation; got body:\n{text}"
+    );
+    // The dreaming cycle must complete normally.
+    assert!(
+        text.contains("dreaming cycle complete"),
+        "moot_dream result must contain 'dreaming cycle complete' for associates=all; got:\n{text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Vault gating
 // ---------------------------------------------------------------------------

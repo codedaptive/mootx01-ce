@@ -1387,6 +1387,25 @@ enum RecipeTools {
 
     // MARK: - dream
 
+    /// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
+    ///
+    /// "all" mode is intended for post-import full-estate coverage: after a bulk
+    /// import the caller wants proximity associations mined across every item, not
+    /// just the 50 most-recent. Without a cap, `probeLimit: nil` passes `Int.max`
+    /// to `VectorStore.recentItemIDs(limit:)`, which scans the whole table and then
+    /// runs O(N × k) kNN probes — on a pathologically large estate that could run
+    /// for minutes inside an MCP tool call.
+    ///
+    /// 10_000 items is the bound:
+    ///   - At HNSW scale (k = 5, O(k·log N)): ~700K similarity ops, a few seconds.
+    ///   - Personal estates with >10K vector-indexed drawers are exceptional;
+    ///     repeated calls converge anyway (existing associations are skipped).
+    ///   - Consistent with the contradiction-hunt's 500-probe per-call bound:
+    ///     the associate sweep is the "full-coverage" companion, so 20× is generous.
+    ///
+    /// Parity constant: Rust `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE = 10_000`.
+    private static let dreamAssociateAllModeMaxProbe: Int = 10_000
+
     /// Run `moot_dream`: rebuild the estate's derived accelerators, then run one
     /// dreaming cycle. Two distinct effects, both required for a fully "dreamt"
     /// estate:
@@ -1483,7 +1502,14 @@ enum RecipeTools {
         let associatesMode = (try? optionalString(args["associates"], argument: "associates")) ?? "recent"
         var assocLine = ""
         if associatesMode != "off" {
-            let assocProbeLimit: Int? = associatesMode == "all" ? nil : VectorSimilaritySignal.defaultProbeLimit
+            // Server-side probe budget: "all" uses the named constant (10_000) rather
+            // than nil (unbounded) — an unbounded MCP probe is a DoS vector on large
+            // estates. "recent" uses the standing-signal default (50). Both are
+            // finite; the nil path is intentionally removed. Parity: Rust
+            // run_dream_tool uses DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE for "all".
+            let assocProbeLimit: Int = associatesMode == "all"
+                ? Self.dreamAssociateAllModeMaxProbe
+                : VectorSimilaritySignal.defaultProbeLimit
             let assocReport = try await kit.associateSweep(
                 in: handle, probeLimit: assocProbeLimit, now: now)
             if assocReport.probed > 0 || assocReport.written > 0 {

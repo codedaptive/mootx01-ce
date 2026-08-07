@@ -276,6 +276,24 @@ const RECOLLECT: &str = "moot_recollect";
 /// `RecipeTools.huntContradictionsToolName`.
 const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 
+/// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
+///
+/// "all" mode is intended for post-import full-estate coverage: the caller
+/// wants proximity associations mined across every item. Without a cap,
+/// `probe_limit: None` passes `usize::MAX` to `recent_item_ids`, loading the
+/// whole table and running O(N × k) kNN probes — on a large estate that runs
+/// for minutes inside an MCP call.
+///
+/// 10_000 items is the bound:
+///   - At HNSW scale (k = 5, O(k·log N)): ~700K similarity ops, a few seconds.
+///   - Personal estates with >10K vector-indexed drawers are exceptional;
+///     repeated calls converge anyway (existing associations are skipped).
+///   - Consistent with hunt_contradictions' 500-probe per-call bound:
+///     the associate sweep is the "full-coverage" companion, so 20× is generous.
+///
+/// Parity constant: Swift `RecipeTools.dreamAssociateAllModeMaxProbe = 10_000`.
+const DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE: usize = 10_000;
+
 // ---------------------------------------------------------------------------
 // Contract-change notice texts — byte-identical to Swift notice constants.
 // Both twins must produce the exact same wire text for any given notice so
@@ -1435,19 +1453,22 @@ fn run_dream_tool(
         );
     }
     // Step 3.5 — association sweep (dream associate step). Three modes
-    // from the "associates" argument: "all" = probe_limit None (full
-    // estate coverage, for post-import runs), "recent" = the signal's
-    // default probe window (fast, mirrors the standing cadence; the
-    // DEFAULT), "off" = skip. Reuses the coordinator guard held since
-    // the accelerator rebuild at the top of this function — re-locking
-    // self-deadlocked once before. Mirrors Swift runDream step 3.5;
-    // report line appends after the subject line below, matching the
-    // Swift body ordering.
+    // from the "associates" argument:
+    //   "all"    — DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE (bounded full coverage,
+    //              for post-import runs). Previously None (unbounded); changed
+    //              to a finite bound so an MCP call cannot trigger O(N²) kNN
+    //              work on a pathologically large estate.
+    //   "recent" — VectorSimilaritySignal::DEFAULT_PROBE_LIMIT (50, fast,
+    //              mirrors the standing cadence; the DEFAULT).
+    //   "off"    — skip entirely.
+    // Reuses the coordinator guard held since the accelerator rebuild at the
+    // top of this function — re-locking self-deadlocked once before.
+    // Mirrors Swift runDream step 3.5 (uses dreamAssociateAllModeMaxProbe = 10_000).
     let associates_mode = optional_string(args, "associates")?.unwrap_or("recent");
     let mut assoc_line = String::new();
     if associates_mode != "off" {
         let probe_limit = if associates_mode == "all" {
-            None
+            Some(DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE)
         } else {
             Some(genius_locus_kit::brain::signals::vector_similarity::VectorSimilaritySignal::DEFAULT_PROBE_LIMIT)
         };
