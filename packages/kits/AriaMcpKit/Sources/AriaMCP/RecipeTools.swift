@@ -733,6 +733,17 @@ enum RecipeTools {
             limit: userLimit,
             ordering: .byCaptureTimeDesc)
 
+        // excludeProvenanceSensitive: true silently removes rows whose
+        // provenance sensitivity (bits 30–35) is Restricted or Secret before
+        // the synthesizer runs. This is pool-removal, not redaction: the
+        // output count reflects only surviving rows, and no redaction marker
+        // appears in the response. This differs from the search surface
+        // (moot_memory_search / moot_recall_precise) which emits a visible
+        // "⛔ restricted" marker where a gated row would otherwise appear.
+        // The RecallFrame adjective filter (bits 6–11) does not cover
+        // provenance bits; this gate is the explicit provenance axis check.
+        // See ToolDispatch.swift near_anchor: comments for the near-anchor
+        // variant, which uses the same provenance-first ordering discipline.
         let out = try await GroundedSynthesis().run(
             input: .init(
                 frame: frame,

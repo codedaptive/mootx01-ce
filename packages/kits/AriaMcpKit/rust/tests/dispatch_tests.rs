@@ -7134,6 +7134,58 @@ fn grounded_synthesis_does_not_expose_provenance_sensitive_rows() {
     assert!(text.contains("grounded_synthesis: 0 drawer(s)"));
 }
 
+/// Mixed-pool case: one normal row and one provenance-restricted row.
+/// The gate must silently remove the restricted row from synthesis and
+/// pass the normal row through into keyInsights. A gate that blocks
+/// everything (including normal rows) must FAIL this test — the gate
+/// covers provenance bits 30–35, not the adjective axis.
+/// Twin of Swift `testSynthesizeDoesNotExposeProvenanceSensitiveRows`.
+#[test]
+fn grounded_synthesis_mixed_pool_only_exposes_normal_rows() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Normal row — must survive into keyInsights.
+    file_one_memory_with_provenance_sensitivity(
+        &registry,
+        "classified aardvark synthesis normaltoken",
+        "vault",
+        locus_kit::provenance::Sensitivity::Normal,
+    );
+
+    // Restricted row — must be removed by the provenance gate.
+    file_one_memory_with_provenance_sensitivity(
+        &registry,
+        "classified aardvark synthesis restrictedtoken",
+        "vault",
+        locus_kit::provenance::Sensitivity::Restricted,
+    );
+
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args!["filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    )
+    .expect("synthesis must succeed with a mixed pool");
+    let text = content_text(&result);
+    assert!(is_success(&result), "synthesis must succeed; got: {text}");
+
+    // Only the normal row feeds synthesis — gate removes restricted before synthesize.
+    assert!(
+        text.contains("grounded_synthesis: 1 drawer(s)"),
+        "only the normal row must survive the gate; got: {text}"
+    );
+    assert!(
+        !text.contains("restrictedtoken"),
+        "provenance-restricted content must not reach keyInsights; got: {text}"
+    );
+    assert!(
+        text.contains("normaltoken"),
+        "normal row content must appear in keyInsights; got: {text}"
+    );
+}
+
 /// The bridge scenario recall_connected exists for: an answer memory
 /// sharing NO words with the query, reachable only through a
 /// moot_link_memories tunnel from the hop-1 memory. Plain similarity

@@ -147,6 +147,62 @@ struct GroundedSynthesisTests {
         }
     }
 
+    /// Provenance-restricted rows are silently removed from the synthesis
+    /// pool when `excludeProvenanceSensitive: true`. The gate operates on
+    /// provenance bits 30–35 (`Drawer.sensitivity`), which the recall-frame
+    /// adjective filter does not cover. A restricted row must not appear in
+    /// `keyInsights`; a normal row in a mixed estate must survive.
+    /// Twin of Rust `gs6_provenance_gate_excludes_restricted_rows`.
+    @Test("provenance-restricted rows absent when excludeProvenanceSensitive enabled")
+    func provenanceRestrictedRowAbsentWhenGateEnabled() async throws {
+        try await withCognitionLock {
+            let kit = GeniusLocusKit()
+            let storage = InMemoryStorage(
+                configuration: EstateConfiguration(
+                    estateID: UUID(), backend: .inMemory))
+            let handle = try await kit.open(
+                storage: storage,
+                owner: OwnerCredentials(ownerIdentifier: "gs-prov-gate"))
+
+            // Capture a normal row — must survive the gate.
+            let normalFrame = CaptureFrame(
+                content: "classified aardvark synthesis normaltoken",
+                channel: .typed,
+                room: "lab",
+                latticeAnchor: .udc("540"),
+                addedBy: "tester",
+                embeddingModelID: "test-v1",
+                provenanceSensitivity: .normal)
+            _ = try await kit.capture(handle, normalFrame)
+
+            // Capture a provenance-restricted row — must be excluded.
+            let restrictedFrame = CaptureFrame(
+                content: "classified aardvark synthesis restrictedtoken",
+                channel: .typed,
+                room: "lab",
+                latticeAnchor: .udc("540"),
+                addedBy: "tester",
+                embeddingModelID: "test-v1",
+                provenanceSensitivity: .restricted)
+            _ = try await kit.capture(handle, restrictedFrame)
+
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+                excludeProvenanceSensitive: true)
+            let out = try await GroundedSynthesis().run(
+                input: input, estate: handle, kit: kit)
+
+            // Only the normal row feeds synthesis; restricted is silently removed.
+            #expect(out.drawerCount == 1,
+                    "restricted row must be removed; only 1 normal row survives")
+            let allInsights = out.context.keyInsights.joined(separator: " ")
+            #expect(allInsights.contains("normaltoken"),
+                    "normal row content must appear in keyInsights")
+            #expect(!allInsights.contains("restrictedtoken"),
+                    "restricted row content must not appear in keyInsights")
+        }
+    }
+
     /// The scoring-evidence gate — the DEGRADED contract. When lane-B hits
     /// carry no scoring evidence (BM25 / Hamming / dense cosine), the gate
     /// drops them: their order is recency, not relevance, and admitting it

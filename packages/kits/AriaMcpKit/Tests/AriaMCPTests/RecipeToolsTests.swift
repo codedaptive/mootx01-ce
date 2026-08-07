@@ -324,6 +324,63 @@ struct RecipeToolsTests {
         #expect(text.contains("query: daguerreotype vintage cameras collection"))
     }
 
+    /// `moot_synthesize` silently removes provenance-restricted rows from the
+    /// synthesis pool. The gate covers provenance bits 30–35 (`Sensitivity`),
+    /// which the recall-frame adjective filter does not reach. A mixed estate
+    /// (1 normal + 1 provenance-restricted row) must expose the normal row's
+    /// content in `keyInsights` and must NOT expose the restricted row's content.
+    /// Unlike `moot_memory_search`, which emits a visible redaction marker for
+    /// restricted rows it encountered, synthesis silently drops them — the
+    /// output count reflects only the surviving pool.
+    /// Twin of Rust `grounded_synthesis_mixed_pool_only_exposes_normal_rows`.
+    @Test func testSynthesizeDoesNotExposeProvenanceSensitiveRows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "gs-prov"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture the normal row directly so we can set provenanceSensitivity.
+        // moot_file_memory routes through the MCP capture path which does not
+        // expose the provenance sensitivity parameter; direct kit.capture is
+        // the correct harness surface for provenance gate tests.
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "classified aardvark synthesis normaltoken",
+            channel: .typed,
+            room: "prov-gate-test",
+            latticeAnchor: .udc("004"),
+            addedBy: "aria-mcp-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: .normal))
+
+        // Capture the provenance-restricted row.
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "classified aardvark synthesis restrictedtoken",
+            channel: .typed,
+            room: "prov-gate-test",
+            latticeAnchor: .udc("004"),
+            addedBy: "aria-mcp-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: .restricted))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_synthesize",
+            arguments: .object(["filter": .string("unconfirmed")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+
+        // Only the normal row feeds synthesis — provenance gate removes the
+        // restricted row before the synthesizer runs.
+        #expect(text.contains("grounded_synthesis: 1 drawer"),
+                "only the normal row must reach synthesis; got: \(text)")
+        #expect(!text.contains("restrictedtoken"),
+                "provenance-restricted content must not reach keyInsights; got: \(text)")
+        #expect(text.contains("normaltoken"),
+                "normal row content must appear in keyInsights; got: \(text)")
+    }
+
     /// A query whose every token is a stopword or too short must be rejected
     /// (invalidParams), never silently degraded to an unscoped digest.
     @Test func testGroundedSynthesisAllStopwordQueryThrowsInvalidParams() async throws {
