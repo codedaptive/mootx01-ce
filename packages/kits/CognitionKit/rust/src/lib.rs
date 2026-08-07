@@ -110,7 +110,7 @@ pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
 pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};
 pub use exploratory_recall_recipe::{run_exploratory_recall, ExploratoryRecallOutput, ExploratoryResult};
 pub use free_association_recipe::{run_free_association, Association};
-pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
+pub use grounded_synthesis::{run_grounded_synthesis, run_grounded_synthesis_with_provenance_gate, GroundedOutput};
 pub use keystones_recipe::run_keystones;
 pub use latent_themes_recipe::run_latent_themes;
 pub use migration_live::{
