@@ -82,6 +82,7 @@ pub mod precedence_recipe;
 pub mod connected_recall;
 pub mod precise_recall;
 pub mod rhythm_recipe;
+pub mod session_hybrid_fusion;
 pub mod shaped_recall;
 pub mod theme_weather_recipe;
 pub mod trust_lens_recipe;

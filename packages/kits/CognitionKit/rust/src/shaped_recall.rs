@@ -29,6 +29,7 @@ use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
 
 use crate::error::{RecipeRunError, SubstrateError};
 use crate::precise_recall::PreciseMatch;
+use crate::session_hybrid_fusion;
 
 /// The output of a shaped recall: the ranked matches (sharing the `PreciseMatch`
 /// shape with `precise_recall` so the ARIA surface serializes both identically)
@@ -73,6 +74,28 @@ pub fn run(
     } else {
         "balanced".to_string()
     };
+
+    // SESSION_HYBRID: run the shaped recall first (using the bm25/dense/temporal
+    // weight vector), then apply SessionHybridFusion temporal-window + speaker-
+    // aware boosts as a secondary sort key.
+    //
+    // Parity note: the Rust port lacks the NeuronKit hybridRecall scored_lane
+    // parameter available in Swift. The Rust session_hybrid path instead runs the
+    // standard shaped GLK recall (which applies the preset's lane weights) and then
+    // applies SessionHybridFusion on the output — preserving OUTPUT parity (same
+    // re-ranking semantics) without widening the Rust hybrid_recall signature.
+    if preset == "session_hybrid" {
+        return run_session_hybrid(
+            coord,
+            handle,
+            query,
+            shape,
+            filter,
+            limit,
+            now,
+            node_names,
+        );
+    }
 
     // Run the estate recall verb through GLK in `.unionBest` / `.matrixAware` —
     // the only mode that activates the full weighted column set (locus, bm25,
@@ -133,6 +156,83 @@ pub fn run(
     Ok(ShapedRecallOutput {
         matches,
         applied_preset,
+    })
+}
+
+/// Session-hybrid recall: shaped GLK recall (bm25/dense/temporal weights) followed
+/// by SessionHybridFusion temporal-window + speaker-aware boosts.
+///
+/// Separated from `run()` to keep the main path readable; same public contract
+/// (`ShapedRecallOutput`, no new public surface).
+#[allow(clippy::too_many_arguments)]
+fn run_session_hybrid(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    query: &str,
+    shape: Option<RecallShape>,
+    filter: Filter,
+    limit: usize,
+    now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+) -> Result<ShapedRecallOutput, RecipeRunError> {
+    // Run the shaped GLK recall. We fetch more candidates than `limit` so the
+    // fusion post-processing has a complete ranked pool to reorder. The pool
+    // is capped at 3× limit minimum 50 — enough for a meaningful re-rank pass.
+    let pool_size = (limit * 3).max(50);
+    let frame = RecallFrame {
+        filter_chain: vec![filter.clone()],
+        hydration_level: HydrationLevel::Full,
+        limit: Some(pool_size),
+        ordering: Ordering::ByCaptureTimeDesc,
+        as_of: None,
+        trace_limit: None,
+    };
+    let request = GLKRecallRequest {
+        frame,
+        mode: GLKRecallMode::UnionBest,
+        scoring: GLKRecallScoring::MatrixAware,
+        limit: pool_size,
+        fallback: RecallFallbackPolicy::AllowDegraded,
+        query_text: Some(query.to_string()),
+        trace_limit: None,
+        origin: genius_locus_kit::recall::RecallOrigin::Internal,
+        recall_shape: shape,
+    };
+    let result = coord
+        .recall_scored(handle, request, now)
+        .map_err(|e| SubstrateError::new("recall_session_hybrid", format!("{e:?}")))?;
+
+    // Extract hydrated Drawers from the hits. Non-hydrated hits (None drawer)
+    // are dropped — fusion needs the drawer body for provenance decode.
+    let drawers: Vec<locus_kit::drawer::Drawer> = result
+        .hits
+        .into_iter()
+        .filter_map(|hit| hit.drawer)
+        .collect();
+
+    // Apply temporal-window + speaker-aware boosts as a secondary sort key.
+    let boosted = session_hybrid_fusion::boost(drawers, &filter, query, limit);
+
+    // Project to PreciseMatch.
+    let matches: Vec<PreciseMatch> = boosted
+        .into_iter()
+        .map(|(drawer, score)| {
+            let (_wing, room) = node_names
+                .get(&drawer.parent_node_id)
+                .cloned()
+                .unwrap_or_default();
+            PreciseMatch {
+                id: drawer.id,
+                room,
+                content: drawer.content,
+                score,
+            }
+        })
+        .collect();
+
+    Ok(ShapedRecallOutput {
+        matches,
+        applied_preset: "session_hybrid".to_string(),
     })
 }
 
