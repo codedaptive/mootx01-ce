@@ -90,8 +90,17 @@ fn seed_in_source(
 fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> String {
     // Subject is required at the file_memory boundary (PR-02); the capped
     // content prefix is a good-enough test subject.
+    //
+    // `impatient: true` mirrors the Swift twin's `file` helper: the write
+    // lands synchronously instead of parking in the encode queue, so a
+    // hunt that runs next actually screens the pair. Without it the
+    // planted drawers are invisible to the probe set (hunts do not drain
+    // the queue) and assertions pin an artifact of drain timing, not the
+    // wiring — the MXE-CT3 cue-"parity" false alarm came from
+    // exactly this asymmetry.
     let subject: String = content.chars().take(120).collect();
-    let a = args!["content" => content, "subject" => subject.as_str(), "location" => location];
+    let a = args!["content" => content, "subject" => subject.as_str(),
+                  "location" => location, "impatient" => true];
     let result = dispatch_tool("moot_file_memory", &a, registry, &SurfacedRecallLedger::new()).expect("file_memory must succeed");
     assert!(is_success(&result), "file_memory should succeed; got: {result:?}");
     let text = content_text(&result);
@@ -9607,7 +9616,6 @@ fn hunt_without_new_args_keeps_legacy_report_and_appends_digest() {
     let registry = EstateRegistry::new_inmemory();
     file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
     file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
-    file_one_memory(&registry, "Bob lives in Paris", "work/notes");
 
     let result = dispatch_tool(
         "moot_hunt_contradictions",
@@ -9685,13 +9693,13 @@ fn hunt_without_new_args_keeps_legacy_report_and_appends_digest() {
 #[test]
 fn hunt_single_tier_search_is_read_only() {
     let registry = EstateRegistry::new_inmemory();
+    // Same two-document estate shape as
+    // hunt_without_new_args_keeps_legacy_report_and_appends_digest —
+    // ConflictCue is a pure function of the two content strings, so the
+    // impatient pair alone is sufficient and classifies value_divergence
+    // identically to the Swift twin.
     file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
     file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
-    // Third document matters: the lexical cue classification consults
-    // corpus statistics, and a two-document corpus degenerates the
-    // screen away from value_divergence. Same estate shape as
-    // hunt_without_new_args_keeps_legacy_report_and_appends_digest.
-    file_one_memory(&registry, "Bob lives in Paris", "work/notes");
 
     let before = {
         let coord = registry.coord.lock().unwrap();
@@ -9760,14 +9768,11 @@ fn hunt_single_tier_search_is_read_only() {
 #[test]
 fn dream_files_candidates_and_appends_digest() {
     let registry = EstateRegistry::new_inmemory();
+    // Twin of the Swift test: two impatient documents, no args. The cue
+    // is a pure pairwise function — this pair is value_divergence in
+    // both ports regardless of surrounding estate content.
     file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
     file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
-    // Third document + wall-clock now (twin of the Swift test, which
-    // passes no args): a fixed PAST `now` against wall-clock filed_at
-    // flips the cue screen's temporal math, and a two-document corpus
-    // degenerates the classification — both would make this test assert
-    // an artifact instead of the wiring.
-    file_one_memory(&registry, "Bob lives in Paris", "work/notes");
 
     let result = dispatch_tool(
         "moot_dream",
@@ -9778,14 +9783,12 @@ fn dream_files_candidates_and_appends_digest() {
     .expect("dream must not throw");
     let text = content_text(&result);
 
-    // Step 3 runs the hunter; step 3.25's all-tier filing then reports
-    // filed/suppressed/ceilingSkipped. The cue CLASS the pair lands in
-    // is engine physics (corpus statistics shift under the dreaming
-    // cycle's own writes), so this test pins the WIRING facts — the
-    // counts line exists, in format, with the typed tier empty — and
-    // not the lexical classification.
+    // Step 3 runs the hunter — the planted pair is a strong
+    // value_divergence, so exactly one contradicts tunnel is proposed
+    // (Swift-twin-strength assertion). Step 3.25's all-tier filing then
+    // reports filed/suppressed/ceilingSkipped.
     assert!(
-        text.contains("\ncontradictionsProposed: "),
+        text.contains("contradictionsProposed: 1"),
         "dream: {text}"
     );
     let filed_line = text
@@ -9799,6 +9802,13 @@ fn dream_files_candidates_and_appends_digest() {
     assert!(text.contains("TIER 1 — CONTRADICTION (proven)"));
     assert!(text.contains("TIER 2 — CONFLICT CANDIDATE"));
     assert!(text.contains("TIER 3 — DIVERGENCE"));
+    // The planted pair surfaces as a tier-3 value divergence in the
+    // digest — the classification pin the false "corpus statistics"
+    // comment previously talked this test out of.
+    assert!(
+        text.contains("(value_divergence, score "),
+        "dream digest: {text}"
+    );
     assert!(text.contains("lane_seconds: propose="));
     assert!(text.contains("synthesis_wall_seconds: "));
 }
