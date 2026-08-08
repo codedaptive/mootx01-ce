@@ -444,11 +444,12 @@ fn link_memories_tool() -> serde_json::Value {
 fn review_tunnel_tool() -> serde_json::Value {
     json!({
         "name": "moot_review_tunnel",
-        "description": "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+        "description": "Review a PROPOSED connection on the review ladder (e.g. an agent-derived contradiction from the hunter): accept activates it (user-only), reject withdraws it, endorse records a model endorsement without activating. A model reject is an objection — it withdraws only when no model endorsement exists (reopenable); otherwise the proposal stays and is marked contested. User-rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "tunnel_id": string_schema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
-                "verdict": string_schema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                "verdict": string_schema("\"accept\" to activate the link (user-only), \"reject\" to withdraw it, \"endorse\" to record an endorsement vote without activating."),
+                "reviewed_by": string_schema("Reviewer identity recorded in the review ledger (default \"user\"). Model reviewers pass their model id (e.g. \"claude\", \"apple-onboard\"). verdict \"accept\" requires the default — edge activation is user-only."),
                 "reason": string_schema("Optional note explaining the verdict.")
             }),
             json!(["tunnel_id", "verdict"])
@@ -908,7 +909,7 @@ fn recall_shaped_tool() -> serde_json::Value {
 fn dream_tool() -> serde_json::Value {
     json!({
         "name": "moot_dream",
-        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
+        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review), file tier-labeled conflict-tunnel candidates across all three contradiction tiers (typed proof, structural lexical cue, value divergence — surviving the decline matrix), and optionally run one vector-similarity association sweep (proximity-based edge mining). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction, candidate-filing, and association counts plus a tiered synthesis digest.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
@@ -927,10 +928,18 @@ fn dream_tool() -> serde_json::Value {
 fn hunt_contradictions_tool() -> serde_json::Value {
     json!({
         "name": "moot_hunt_contradictions",
-        "description": "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the corpus search index (run moot_reindex after bulk import).",
+        "description": "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. With tier absent or \"all\", the sweep report is followed by a tiered synthesis digest (TIER 1 typed proofs, TIER 2 structural lexical cues, TIER 3 value divergence); with tier 1, 2, or 3 the call is a read-only purpose search of that lane alone — nothing is filed. Requires the corpus search index (run moot_reindex after bulk import).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "probe_limit": integer_schema("Maximum vector-indexed memories probed this sweep (default 500). Repeated calls converge: settled pairs are skipped."),
+                // Union domain (integer 1|2|3 or the string "all"), so no
+                // "type" key — the description carries the domain and the
+                // dispatch boundary validates it. Declared IDENTICALLY in
+                // the Swift twin (RecipeTools.huntContradictionsTool).
+                "tier": {
+                    "description": "Optional tier filter: 1 (typed proven contradictions), 2 (structural lexical conflict candidates), 3 (value divergence), or \"all\" (default — legacy sweep plus tiered synthesis digest). A single tier runs a read-only purpose search of that lane alone."
+                },
+                "top_k": integer_schema("Findings per tier section in the tiered digest (default 5, valid 1...50)."),
                 "now": string_schema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock.")
             }),
             json!([])

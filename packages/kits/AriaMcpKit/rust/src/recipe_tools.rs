@@ -139,29 +139,7 @@ pub(crate) fn conflict_projection_section(
             .cloned()
             .collect()
     };
-    let dense_by_id: BTreeMap<String, String> = if visible_ids.is_empty() {
-        BTreeMap::new()
-    } else {
-        match coord.estate_for(handle) {
-            Ok(locus_estate) => {
-                let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
-                frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
-                locus_estate
-                    .get_drawers_matching_frame(&visible_ids, &frame)
-                    .map(|f| {
-                        f.admissible
-                            .into_iter()
-                            .map(|d| {
-                                let row = crate::dense_row::render(&d);
-                                (d.id.clone(), row)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
-            Err(_) => BTreeMap::new(),
-        }
-    };
+    let dense_by_id = dense_rows_by_id(coord, handle, &visible_ids);
 
     let mut lines: Vec<String> = vec![
         format!("proven: {}", sweep.counts.proven_contradiction),
@@ -240,6 +218,198 @@ pub(crate) fn conflict_projection_section(
         ));
     }
     lines
+}
+
+/// Structured-tier by-id dense-row fetch behind the default-gated
+/// RecallFrame — the ONE drawer-content path every contradiction
+/// renderer uses (the typed projection section above AND the tiered
+/// digest below share it, so there is no parallel rendering path to the
+/// same data). Gated rows are simply ABSENT from the map; callers fall
+/// through to the opaque row. Mirrors Swift `RecipeTools.denseRowsByID`.
+fn dense_rows_by_id(
+    coord: &genius_locus_kit::coordinator::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    visible_ids: &[String],
+) -> BTreeMap<String, String> {
+    if visible_ids.is_empty() {
+        return BTreeMap::new();
+    }
+    match coord.estate_for(handle) {
+        Ok(locus_estate) => {
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+            locus_estate
+                .get_drawers_matching_frame(visible_ids, &frame)
+                .map(|f| {
+                    f.admissible
+                        .into_iter()
+                        .map(|d| {
+                            let row = crate::dense_row::render(&d);
+                            (d.id.clone(), row)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+/// Exact tier section headers — the wire contract for every surface
+/// that renders a `TieredContradictionReport` (hunt and dream share
+/// this ONE renderer, M4 pattern: one renderer, lines never drift).
+/// Parity: Swift `RecipeTools.tier1Header` etc.
+pub(crate) const TIER1_HEADER: &str = "TIER 1 — CONTRADICTION (proven)";
+pub(crate) const TIER2_HEADER: &str = "TIER 2 — CONFLICT CANDIDATE";
+pub(crate) const TIER3_HEADER: &str = "TIER 3 — DIVERGENCE";
+
+/// Render a `TieredContradictionReport` as report lines. The ONE
+/// tiered renderer: `moot_hunt_contradictions` (both modes) and
+/// `moot_dream` (synthesis digest) both route through here so the
+/// sections never drift between surfaces or ports.
+///
+/// Tier-1 blocks reuse the typed lane's rendering contract
+/// (`conflict_projection_section`'s F13 redaction path): a secret
+/// finding is counted by the lane counts only (no block), a restricted
+/// finding renders ONLY the coordinate-digest line, and a finding at or
+/// below elevated renders result essentials plus the SAME gated dense
+/// rows (`dense_rows_by_id`). The tiered verb already ceiling-filters
+/// findings above elevated out of its tier-1 section
+/// (`tier1_ceiling_filtered`), so the secret/restricted arms here are
+/// defense in depth, not the primary gate.
+///
+/// Tiers 2/3 render the drawer pair plus cue kind and score — no
+/// content snippets: the legacy CANDIDATE feed is the snippet surface,
+/// and the digest must not become a second content disclosure path.
+///
+/// `lane_seconds` is `Some` in SYNTHESIS mode only: per-tier lane
+/// counts and the elapsed-seconds lines render only for a synthesis
+/// digest. The seconds are measured by the CALLER around each GLK
+/// call — the engines are deterministic (no clock reads inside), so
+/// wall-clock timing lives at this dispatch layer, the I/O boundary.
+/// Mirrors Swift `RecipeTools.tieredSectionLines`.
+fn tiered_section_lines(
+    report: &genius_locus_kit::brain::tiered_contradiction_search::TieredContradictionReport,
+    dense_rows: &BTreeMap<String, String>,
+    lane_seconds: Option<&[(&str, f64)]>,
+) -> Vec<String> {
+    use genius_locus_kit::brain::tiered_contradiction_search::{
+        ContradictionTier, TieredSearchMode,
+    };
+    let synthesis = matches!(report.mode, TieredSearchMode::Synthesis);
+    let mut lines: Vec<String> = Vec::new();
+    let secret_raw = locus_kit::adjectives::AdjectiveSensitivity::Secret.raw_value() as i64;
+    let restricted_raw =
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted.raw_value() as i64;
+
+    for tier in [
+        ContradictionTier::TypedProven,
+        ContradictionTier::LexicalStructural,
+        ContradictionTier::LexicalValue,
+    ] {
+        // Single-tier mode renders ONLY the requested lane's section;
+        // the other sections are structurally empty and would render as
+        // bare headers, which misreads as "lane ran, found none".
+        if let TieredSearchMode::Single(requested) = report.mode {
+            if requested != tier {
+                continue;
+            }
+        }
+        let (header, findings, counts) = match tier {
+            ContradictionTier::TypedProven => (TIER1_HEADER, &report.tier1, report.tier1_counts),
+            ContradictionTier::LexicalStructural => {
+                (TIER2_HEADER, &report.tier2, report.tier2_counts)
+            }
+            ContradictionTier::LexicalValue => (TIER3_HEADER, &report.tier3, report.tier3_counts),
+        };
+        lines.push(header.to_string());
+        if synthesis {
+            lines.push(format!(
+                "  lane: fetched {}, returned {}, promotedAway {}, backfilled {}",
+                counts.fetched, counts.returned, counts.promoted_away, counts.backfilled
+            ));
+        }
+        for finding in findings {
+            match tier {
+                ContradictionTier::TypedProven => {
+                    let ceiling = finding.sensitivity_ceiling_raw.unwrap_or(secret_raw);
+                    if ceiling >= secret_raw {
+                        continue;
+                    }
+                    if ceiling >= restricted_raw {
+                        lines.push(format!(
+                            "  a conflicting claim exists at {} [restricted]",
+                            finding.coordinate_digest.as_deref().unwrap_or("?")
+                        ));
+                        continue;
+                    }
+                    lines.push(format!(
+                        "  PROVEN {} at {} (rule {})",
+                        finding.result_id.as_deref().unwrap_or("?"),
+                        finding.coordinate_digest.as_deref().unwrap_or("?"),
+                        finding.rule_id.as_deref().unwrap_or("?")
+                    ));
+                    for id in [&finding.drawer_a, &finding.drawer_b] {
+                        lines.push(format!(
+                            "    {}",
+                            dense_rows
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("{id} · - · - · - · -"))
+                        ));
+                    }
+                }
+                _ => {
+                    lines.push(format!(
+                        "  {} vs {} ({}, score {})",
+                        finding.drawer_a,
+                        finding.drawer_b,
+                        finding.cue_kind.as_deref().unwrap_or("?"),
+                        finding.score.unwrap_or(0.0)
+                    ));
+                }
+            }
+        }
+    }
+    if synthesis {
+        if let Some(lanes) = lane_seconds {
+            // Per-lane elapsed + synthesis wall time (the sum of the GLK
+            // calls this tool made). %.3f both ports for byte parity.
+            let parts: Vec<String> = lanes
+                .iter()
+                .map(|(label, secs)| format!("{label}={secs:.3}"))
+                .collect();
+            lines.push(format!("lane_seconds: {}", parts.join(" ")));
+            let total: f64 = lanes.iter().map(|(_, secs)| secs).sum();
+            lines.push(format!("synthesis_wall_seconds: {total:.3}"));
+        }
+    }
+    lines
+}
+
+/// Hydrate the gated dense rows for a tiered report's fully visible
+/// tier-1 findings and render its sections. Mirrors Swift
+/// `RecipeTools.renderTieredSections`.
+fn render_tiered_sections(
+    coord: &genius_locus_kit::coordinator::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    report: &genius_locus_kit::brain::tiered_contradiction_search::TieredContradictionReport,
+    lane_seconds: Option<&[(&str, f64)]>,
+) -> Vec<String> {
+    let restricted_raw =
+        locus_kit::adjectives::AdjectiveSensitivity::Restricted.raw_value() as i64;
+    let visible_ids: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        report
+            .tier1
+            .iter()
+            .filter(|f| f.sensitivity_ceiling_raw.unwrap_or(restricted_raw) < restricted_raw)
+            .flat_map(|f| [f.drawer_a.clone(), f.drawer_b.clone()])
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    };
+    let dense_rows = dense_rows_by_id(coord, handle, &visible_ids);
+    tiered_section_lines(report, &dense_rows, lane_seconds)
 }
 
 /// Recipe tool names — mirrors Swift `RecipeTools` static constants.
@@ -1433,6 +1603,28 @@ fn run_dream_tool(
             )
         })?;
 
+    // Step 3.25 — MXE-CT3 P3: file tier-labeled conflict-tunnel
+    // candidates at ALL three tiers (typed proof, structural lexical
+    // cue, value divergence) out of one typed sweep + one shared
+    // lexical pass, surviving the decline matrix (P2.5 contract: model
+    // filing never activates — the user settles proposals via
+    // moot_review_tunnel). Timed at this dispatch layer: the engine is
+    // deterministic, clocks live at the I/O boundary. Mirrors Swift
+    // runDream step 3.25 (GLK defaults: minilm-v6, probe 50, topK 10).
+    let propose_start = std::time::Instant::now();
+    let candidates = coord
+        .propose_conflict_tunnels(&estate.handle, "minilm-v6", 50, 10, now_epoch_ms)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "dream: conflict-tunnel candidate filing failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            )
+        })?;
+    let propose_seconds = propose_start.elapsed().as_secs_f64();
+
     // Parity with Swift RecipeTools.runDreamTool: single-line summary
     // ("rebuilt" not "rebuild"), then newline-separated stats.
     let mut body = format!(
@@ -1524,6 +1716,42 @@ fn run_dream_tool(
         &conflict_projection_section(&coord, &estate.handle, Some(hunt.borderline.len()))
             .join("\n"),
     );
+
+    // MXE-CT3 P3 — candidate-filing counts (step 3.25) and the tiered
+    // synthesis digest, rendered through the SAME shared renderer the
+    // hunt tool uses (one renderer, lines never drift). Mirrors Swift
+    // runDream (synthesis defaults: topK 5, minilm-v6, probe 50).
+    body.push_str(&format!(
+        "\nconflictTunnelsFiled: tier1 {}, tier2 {}, tier3 {} (suppressed: {}, ceilingSkipped: {})",
+        candidates.proposed_tunnel_ids.len(),
+        candidates.proposed_tier2_ids.len(),
+        candidates.proposed_tier3_ids.len(),
+        candidates.suppressed,
+        candidates.ceiling_skipped,
+    ));
+    let tiered_start = std::time::Instant::now();
+    let tiered = coord
+        .tiered_contradiction_search(&estate.handle, None, 5, "minilm-v6", 50, now_epoch_ms)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "dream: tiered synthesis failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            )
+        })?;
+    let tiered_seconds = tiered_start.elapsed().as_secs_f64();
+    body.push('\n');
+    body.push_str(
+        &render_tiered_sections(
+            &coord,
+            &estate.handle,
+            &tiered,
+            Some(&[("propose", propose_seconds), ("synthesis", tiered_seconds)]),
+        )
+        .join("\n"),
+    );
     Ok(text_result(&body))
 }
 
@@ -1531,10 +1759,19 @@ fn run_dream_tool(
 /// Strong findings persist as proposed contradicts tunnels (the hunt does
 /// its own writes); borderline candidates come back with snippets for the
 /// calling agent to adjudicate. Mirrors Swift `runHuntContradictions`.
+///
+/// MXE-CT3 P3 tier modes:
+/// - `tier` absent or `"all"` (the default): today's exact legacy sweep
+///   report, unchanged byte for byte, PLUS an appended tiered synthesis
+///   digest (`tiered_contradiction_search` synthesis mode).
+/// - `tier` 1|2|3: a read-only purpose search of that single lane —
+///   no legacy sweep, no tunnels filed, no writes of any kind.
 fn run_hunt_contradictions_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    use genius_locus_kit::brain::tiered_contradiction_search::ContradictionTier;
+
     let estate = registry.resolve_direct(args)?;
 
     // Deterministic `now` when supplied; otherwise the wall clock. Malformed
@@ -1560,8 +1797,82 @@ fn run_hunt_contradictions_tool(
             ))
         }
     };
+    // `tier`: integer 1|2|3 or the string "all"; anything else is
+    // rejected at this public boundary with the valid domain named
+    // (b77ec03e8/b96c01617 precedent). None = synthesis ("all").
+    // Mirrors Swift's identical validation.
+    let single_tier: Option<ContradictionTier> = match args.get("tier") {
+        None => None,
+        Some(JsonValue::String(s)) if s == "all" => None,
+        Some(v) => Some(
+            v.as_i64()
+                .and_then(|n| u8::try_from(n).ok())
+                .and_then(ContradictionTier::from_raw)
+                .ok_or_else(|| {
+                    JSONRPCError::new(
+                        JSONRPCErrorCode::INVALID_PARAMS,
+                        "tier must be 1, 2, 3, or \"all\"".to_string(),
+                    )
+                })?,
+        ),
+    };
+    // `top_k`: findings per tier section. 1...50 mirrors GLK's
+    // `TIERED_TOP_K_CEILING` clamp — the boundary rejects what the
+    // engine would clamp, so the caller learns the domain instead of
+    // silently getting less.
+    let top_k: usize = match args.get("top_k") {
+        None => 5,
+        Some(v) => match v.as_i64() {
+            Some(n) if (1..=50).contains(&n) => n as usize,
+            _ => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "top_k must be an integer in 1...50".to_string(),
+                ))
+            }
+        },
+    };
 
     let coord = estate.coord.lock().unwrap();
+
+    // ---- Single-tier purpose search (read-only, nothing filed) ----
+    if let Some(tier) = single_tier {
+        let report = coord
+            .tiered_contradiction_search(
+                &estate.handle,
+                Some(tier),
+                top_k,
+                "minilm-v6",
+                probe_limit,
+                now_epoch_ms,
+            )
+            .map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                    crate::interface_tools::describe_verb_dispatch_error(&e),
+                )
+            })?;
+        // The lexical lanes (2/3) need the vector index; the typed lane
+        // (1) does not — diagnostics report true for a tier-1-only run,
+        // so this guard cannot misfire there.
+        if !report.diagnostics.vector_store_available {
+            return Ok(text_result(
+                "moot_hunt_contradictions: no vector index for this estate — run moot_reindex first, then hunt again.",
+            ));
+        }
+        let mut lines = vec![format!(
+            "moot_hunt_contradictions: tier {} search complete",
+            tier.raw_value()
+        )];
+        lines.extend(render_tiered_sections(&coord, &estate.handle, &report, None));
+        return Ok(text_result(&lines.join("\n")));
+    }
+
+    // ---- Legacy sweep (tier absent / "all") — unchanged path ----
+    // Wall-clock timing wraps the GLK calls at this dispatch layer: the
+    // engines are deterministic (no clock reads inside), so the I/O
+    // boundary is the only place elapsed time may be measured.
+    let hunt_start = std::time::Instant::now();
     let report = coord
         .hunt_contradictions(&estate.handle, "minilm-v6", probe_limit, None, 64, now_epoch_ms)
         .map_err(|e| {
@@ -1570,6 +1881,7 @@ fn run_hunt_contradictions_tool(
                 crate::interface_tools::describe_verb_dispatch_error(&e),
             )
         })?;
+    let hunt_seconds = hunt_start.elapsed().as_secs_f64();
 
     if !report.vector_store_available {
         return Ok(text_result(
@@ -1616,6 +1928,35 @@ fn run_hunt_contradictions_tool(
         &coord,
         &estate.handle,
         Some(report.borderline.len()),
+    ));
+
+    // MXE-CT3 P3 — appended tiered synthesis digest. Everything above
+    // this line is the legacy report, byte-identical to the pre-P3
+    // output (the benchmark parser matches the trimmed "PROPOSED "/
+    // "CANDIDATE " prefixes and the count lines above — never touch
+    // those emitters). Timed at this dispatch layer (I/O boundary).
+    let tiered_start = std::time::Instant::now();
+    let tiered = coord
+        .tiered_contradiction_search(
+            &estate.handle,
+            None,
+            top_k,
+            "minilm-v6",
+            probe_limit,
+            now_epoch_ms,
+        )
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                crate::interface_tools::describe_verb_dispatch_error(&e),
+            )
+        })?;
+    let tiered_seconds = tiered_start.elapsed().as_secs_f64();
+    lines.extend(render_tiered_sections(
+        &coord,
+        &estate.handle,
+        &tiered,
+        Some(&[("hunt", hunt_seconds), ("synthesis", tiered_seconds)]),
     ));
     Ok(text_result(&lines.join("\n")))
 }

@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.24.0
+version: 1.25.0
 status: accepted-1.1-target
-date: 2026-08-05
+date: 2026-08-07
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1921,7 +1921,119 @@ surface.
 
 *End of GeniusLocusKit Specification.*
 
+## § TIERED_CONTRADICTION — Tier taxonomy, tiered search, candidate filing, and the review ladder
+
+### Tier taxonomy
+
+Every contradiction finding carries one of three epistemic classes
+(`ContradictionTier`, raw values 1/2/3, from the SubstrateML
+`ConflictCueKind.contradictionTier` mapping):
+
+- **Tier 1 — typed proof** (`typedProven`): a `conflictProjectionSweep`
+  ProvenContradiction. Constraints proved the conflict; no lexical
+  score exists — the tier-1 lane ranks by endpoint-event recency, and
+  the absence of a score is load-bearing (nothing may fold tiers into
+  one ranked list by comparing across it).
+- **Tier 2 — structural lexical cue** (`lexicalStructural`):
+  negation_asymmetry, marker_revision, word_exclusion.
+- **Tier 3 — value divergence** (`lexicalValue`): same claim shape,
+  different value (value_divergence).
+
+Tiers are epistemic classes, not score bands: a strong tier-3 lexical
+cue never outranks a weak tier-1 typed proof.
+
+### Tiered search (`tieredContradictionSearch` / `tiered_contradiction_search`)
+
+One read-only search verb, two modes:
+
+- **Synthesis** (`tier` nil/None): all three lanes run, then the
+  assembler applies promote-to-highest-tier dedup on the
+  case-canonical unordered pair key, backfills lower tiers from their
+  over-fetch (fetch budgets K / 2K / 3K), and returns the three
+  sections in tier order 1-2-3 — never interleaved.
+- **Single tier**: ONLY that lane runs, with no cross-tier dedup — a
+  purpose-run answers its own question, so a pair that is also a
+  tier-1 proof still appears in a tier-3 run.
+
+Retrieval runs ONCE per search: tiers 2/3 share one lexical pass (the
+hunter's retrieval + ConflictCue screen, factored as
+`lexicalTierScan` / `lexical_tier_scan`); tier 1 reads the typed
+sweep. `topK` is clamped to 50 (`TieredContradictionCore.topKCeiling`
+/ `TIERED_TOP_K_CEILING`); non-positive returns a deterministic empty
+report. Tier-1 findings whose raw sensitivity ceiling exceeds
+Elevated are filtered out and counted (`tier1CeilingFiltered`) — the
+verb is an ungranted read surface. The search files nothing and
+writes nothing.
+
+### Candidate filing (`proposeConflictTunnels` / `propose_conflict_tunnels`)
+
+One typed sweep plus the SAME shared lexical pass files PROPOSED
+`contradicts` tunnels at every tier that survives the decline matrix.
+Labels are tier-keyed: `dcp: <rule>@<version> result=<id>` (tier 1),
+`tier2:<cue>@<cueVersion>` and `tier3:<cue>@<cueVersion>` (lexical
+tiers; `conflictCueVersion` = 1 is the rejection-renewal key — a
+version bump renews a rejected pair, the new engine is new evidence).
+`lexicalTopK` (clamped like the search verb; 0 disables lexical
+filing) budgets the lexical lanes. Typed findings above the Elevated
+raw ceiling are never proposed and are counted apart
+(`ceilingSkipped`).
+
+**Decline matrix** (suppression of re-filing after rejection):
+
+- a rejection at a HIGHER tier class (numerically lower) suppresses
+  regardless of label — the rejected proof damns the maybe;
+- a rejection at the SAME tier suppresses only the same renewal key;
+- a rejection at a LOWER tier class never suppresses.
+
+Live pairs (any label family) always dedupe. `hunter: `-labeled
+tunnels sit outside the matrix label families.
+
+### Review ladder (Rejected / Proposed / Endorsed / Accepted)
+
+Model (AI) reviewers may ENDORSE (`endorseTunnel`) and OBJECT
+(`objectToTunnel`). ONLY the user ACCEPTS: there is deliberately no
+path from endorsements to lifecycle `.active` — edge activation stays
+human-authoritative through `Estate.respondToTunnel(accept: true)`,
+and no vote total activates anything.
+
+- **Endorse**: one vote per distinct endorser (idempotent
+  re-endorsement refreshes its timestamp only), sets the endorsed bit
+  (14), sets the contested bit (15) when the ext ledger also holds a
+  model objection. Lifecycle untouched.
+- **Object**: with NO model endorsement on record the proposal
+  WITHDRAWS (the AI-rejected path — the ledger's objection entry
+  makes it reopenable; the decline matrix suppresses re-proposal at
+  this tier and below, never above). With a model endorsement present
+  the tunnel STAYS `.proposed` and the contested bit is set — genuine
+  model disagreement is the most user-worthy queue position.
+
+Both verbs fail loud on not-found, not-proposed, empty reviewer
+identity, and corrupt ext ledgers. Reviewer identity is recorded on
+every transition (including user accept/reject through
+`respondToTunnel`).
+
+**Review-queue ranking** (`ReviewQueueRanking` / `review_queue`):
+tier class first, contested-first within a tier band, endorser
+diversity weight (model family = the prefix before the first `-` or
+`:`), then recency. Endorsement weight feeds this ranking only.
+
+State lives on the tunnel (LocusKit): operational bits 14/15 and the
+`ext` review ledger — see LOCUSKIT_SPEC.md § tunnel review state.
+
 ## Changelog
+
+### 1.25.0 -- 2026-08-07
+
+New § TIERED_CONTRADICTION (MXE-CT3): the three-tier contradiction
+taxonomy (`ContradictionTier` 1/2/3 — typed proof, structural lexical
+cue, value divergence), the `tieredContradictionSearch` read verb
+(synthesis + single-tier modes, one shared lexical retrieval pass,
+topK clamp 50, Elevated ceiling filter), the extended
+`proposeConflictTunnels` all-tier filing pass with tier-keyed labels
+and the decline matrix, the review ladder
+(Rejected/Proposed/Endorsed/Accepted; `endorseTunnel` /
+`objectToTunnel`; endorse never activates — user-only activation),
+and `ReviewQueueRanking`.
 
 ### 1.24.0 -- 2026-08-05
 

@@ -2514,6 +2514,9 @@ fn insert_lifecycle_tunnel_for_drawer(
         tombstoned_at: None,
         removed_by_batch: None,
         order_key: None,
+        // No review-ledger state on a freshly filed test edge (the ext
+        // column carries the TunnelReviewLedger once a reviewer votes).
+        ext: None,
     };
     registry.default.store.add_tunnel(&t).expect("add_tunnel must succeed");
 }
@@ -9535,5 +9538,440 @@ fn dream_associates_all_sweeps_dedups_on_second_dream() {
     if let Some(line) = t2.lines().find(|l| l.starts_with("associationsWritten")) {
         assert!(line.contains("deduplicated: "), "got: {line}");
         assert!(line.starts_with("associationsWritten: 0 "), "re-run writes nothing: {line}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MXE-CT3 P3 — tiered hunt modes, dream candidate filing, review ladder
+// ---------------------------------------------------------------------------
+//
+// Twin of Swift TieredContradictionSurfaceTests.swift: boundary
+// validation for the new hunt args, the legacy-report pin (everything
+// before the first TIER header is byte-for-byte today's report), the
+// read-only single-tier purpose search, the dream candidate-filing +
+// digest wiring, and the moot_review_tunnel review ladder.
+
+/// Invalid `tier` / `top_k` values are rejected at the public boundary
+/// with the valid domain named (b77ec03e8/b96c01617 precedent).
+#[test]
+fn hunt_rejects_invalid_tier_and_top_k() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    for bad in [
+        serde_json::json!(0),
+        serde_json::json!(4),
+        serde_json::json!(-1),
+        serde_json::json!("2"),
+        serde_json::json!("typed"),
+        serde_json::json!(true),
+    ] {
+        let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+        a.insert("tier".to_string(), JsonValue::from(bad.clone()));
+        let err = dispatch_tool("moot_hunt_contradictions", &a, &registry, &ledger)
+            .expect_err(&format!("tier {bad} must be rejected"));
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("tier must be 1, 2, 3, or \"all\""),
+            "message was: {}",
+            err.message
+        );
+    }
+    for bad in [
+        serde_json::json!(0),
+        serde_json::json!(51),
+        serde_json::json!(-3),
+        serde_json::json!("5"),
+        serde_json::json!(false),
+    ] {
+        let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+        a.insert("top_k".to_string(), JsonValue::from(bad.clone()));
+        let err = dispatch_tool("moot_hunt_contradictions", &a, &registry, &ledger)
+            .expect_err(&format!("top_k {bad} must be rejected"));
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("top_k must be an integer in 1...50"),
+            "message was: {}",
+            err.message
+        );
+    }
+}
+
+/// With the new args ABSENT the hunt report's legacy portion is exactly
+/// today's report — no new vocabulary before the typed section ends —
+/// and the tiered synthesis digest is APPENDED after it. The benchmark
+/// parser matches the trimmed "PROPOSED "/"CANDIDATE " prefixes and the
+/// count lines, so this pin is load-bearing.
+#[test]
+fn hunt_without_new_args_keeps_legacy_report_and_appends_digest() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
+    file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
+    file_one_memory(&registry, "Bob lives in Paris", "work/notes");
+
+    let result = dispatch_tool(
+        "moot_hunt_contradictions",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("hunt must not throw");
+    let text = content_text(&result);
+
+    // The digest is APPENDED: the report splits at the first tier header
+    // into legacy portion + digest.
+    let split = text
+        .find("TIER 1 — CONTRADICTION (proven)")
+        .unwrap_or_else(|| panic!("digest missing from: {text}"));
+    let (legacy, digest) = text.split_at(split);
+
+    assert!(
+        legacy.starts_with("moot_hunt_contradictions: sweep complete\n"),
+        "legacy portion: {legacy}"
+    );
+    assert!(legacy.contains("\nprobesScanned: "));
+    assert!(legacy.contains("\npairsScreened: "));
+    assert!(legacy.contains("\nalreadySettled: "));
+    assert!(legacy.contains("\nproposed: 1"), "legacy portion: {legacy}");
+    // Benchmark-parser contract: the two-space-indented emitter lines
+    // are unchanged.
+    let proposed_line = legacy
+        .lines()
+        .find(|l| l.starts_with("  PROPOSED "))
+        .unwrap_or_else(|| panic!("no PROPOSED line in: {legacy}"));
+    assert!(proposed_line.contains(" contradicts "));
+    assert!(proposed_line.contains("score"));
+    assert!(proposed_line.contains("tunnel"));
+    // Typed section still closes the legacy portion.
+    assert!(legacy.contains("\nproven: "));
+    assert!(legacy.contains("\ncoverage: "));
+    for new_token in [
+        "TIER ",
+        "lane:",
+        "lane_seconds:",
+        "synthesis_wall_seconds:",
+        "conflictTunnelsFiled:",
+    ] {
+        assert!(
+            !legacy.contains(new_token),
+            "new token {new_token} leaked into the legacy portion: {legacy}"
+        );
+    }
+
+    // Digest shape: all three sections in tier order, per-lane counts,
+    // and the dispatch-layer timing lines.
+    let t2 = digest
+        .find("TIER 2 — CONFLICT CANDIDATE")
+        .unwrap_or_else(|| panic!("no TIER 2 in: {digest}"));
+    let t3 = digest
+        .find("TIER 3 — DIVERGENCE")
+        .unwrap_or_else(|| panic!("no TIER 3 in: {digest}"));
+    assert!(t2 < t3, "sections must render in tier order");
+    assert!(digest.contains("  lane: fetched "));
+    assert!(digest.contains("lane_seconds: hunt="));
+    assert!(digest.contains(" synthesis="));
+    assert!(digest.contains("synthesis_wall_seconds: "));
+    // The planted value-divergent pair is a tier-3 finding.
+    assert!(
+        digest[t3..].contains("(value_divergence, score "),
+        "tier 3 section: {}",
+        &digest[t3..]
+    );
+}
+
+/// tier=N runs a read-only purpose search: its own header, only the
+/// requested section, no legacy sweep vocabulary, no synthesis-only
+/// counts/timing lines, and — the contract — no writes.
+#[test]
+fn hunt_single_tier_search_is_read_only() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
+    file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
+    // Third document matters: the lexical cue classification consults
+    // corpus statistics, and a two-document corpus degenerates the
+    // screen away from value_divergence. Same estate shape as
+    // hunt_without_new_args_keeps_legacy_report_and_appends_digest.
+    file_one_memory(&registry, "Bob lives in Paris", "work/notes");
+
+    let before = {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        estate.all_tunnels().expect("all_tunnels").len()
+    };
+
+    let result = dispatch_tool(
+        "moot_hunt_contradictions",
+        &args!["tier" => 3, "top_k" => 10],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("tier-3 search must not throw");
+    let text = content_text(&result);
+
+    assert!(
+        text.starts_with("moot_hunt_contradictions: tier 3 search complete\n"),
+        "got: {text}"
+    );
+    assert!(text.contains("TIER 3 — DIVERGENCE"));
+    assert!(
+        text.contains("(value_divergence, score "),
+        "tier-3 findings: {text}"
+    );
+    for absent in [
+        "sweep complete",
+        "probesScanned:",
+        "  PROPOSED ",
+        "  CANDIDATE ",
+        "TIER 1 —",
+        "TIER 2 —",
+        "lane:",
+        "lane_seconds:",
+        "synthesis_wall_seconds:",
+    ] {
+        assert!(!text.contains(absent), "unexpected {absent} in: {text}");
+    }
+
+    let after = {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        estate.all_tunnels().expect("all_tunnels").len()
+    };
+    assert_eq!(after, before, "single-tier search must not write");
+
+    // Tier 1 runs without a vector-store dependency and renders its
+    // header even when the typed lane finds nothing.
+    let t1 = dispatch_tool(
+        "moot_hunt_contradictions",
+        &args!["tier" => 1],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("tier-1 search must not throw");
+    let t1_text = content_text(&t1);
+    assert!(
+        t1_text.starts_with("moot_hunt_contradictions: tier 1 search complete\n"),
+        "got: {t1_text}"
+    );
+    assert!(t1_text.contains("TIER 1 — CONTRADICTION (proven)"));
+}
+
+/// moot_dream files tier-labeled candidates (step 3.25) and appends the
+/// tiered synthesis digest through the same shared renderer.
+#[test]
+fn dream_files_candidates_and_appends_digest() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
+    file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
+    // Third document + wall-clock now (twin of the Swift test, which
+    // passes no args): a fixed PAST `now` against wall-clock filed_at
+    // flips the cue screen's temporal math, and a two-document corpus
+    // degenerates the classification — both would make this test assert
+    // an artifact instead of the wiring.
+    file_one_memory(&registry, "Bob lives in Paris", "work/notes");
+
+    let result = dispatch_tool(
+        "moot_dream",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dream must not throw");
+    let text = content_text(&result);
+
+    // Step 3 runs the hunter; step 3.25's all-tier filing then reports
+    // filed/suppressed/ceilingSkipped. The cue CLASS the pair lands in
+    // is engine physics (corpus statistics shift under the dreaming
+    // cycle's own writes), so this test pins the WIRING facts — the
+    // counts line exists, in format, with the typed tier empty — and
+    // not the lexical classification.
+    assert!(
+        text.contains("\ncontradictionsProposed: "),
+        "dream: {text}"
+    );
+    let filed_line = text
+        .lines()
+        .find(|l| l.starts_with("conflictTunnelsFiled: "))
+        .unwrap_or_else(|| panic!("no conflictTunnelsFiled line in: {text}"));
+    assert!(filed_line.starts_with("conflictTunnelsFiled: tier1 0, tier2 "), "filed line: {filed_line}");
+    assert!(filed_line.contains("(suppressed: "), "filed line: {filed_line}");
+    assert!(filed_line.contains("ceilingSkipped: "), "filed line: {filed_line}");
+
+    assert!(text.contains("TIER 1 — CONTRADICTION (proven)"));
+    assert!(text.contains("TIER 2 — CONFLICT CANDIDATE"));
+    assert!(text.contains("TIER 3 — DIVERGENCE"));
+    assert!(text.contains("lane_seconds: propose="));
+    assert!(text.contains("synthesis_wall_seconds: "));
+}
+
+/// Parse the tunnel id out of a `linked … (<id>)[ note]` response line.
+fn tunnel_id_from_link_response(text: &str) -> String {
+    let open = text.rfind('(').expect("no ( in link response");
+    let close = text[open..].find(')').expect("no ) in link response") + open;
+    text[open + 1..close].to_string()
+}
+
+/// The moot_review_tunnel review ladder: endorse records without
+/// activating, a model objection contests or withdraws, and edge
+/// activation stays user-only at the public boundary.
+#[test]
+fn review_ladder_endorse_object_and_user_only_activation() {
+    use locus_kit::tunnel_operational::TunnelLifecycle;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let a = file_one_memory(&registry, "Bob lives in Paris", "work/notes");
+    let b = file_one_memory(&registry, "Bob lives in Lyon", "work/notes");
+
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => a.as_str(), "to_id" => b.as_str(),
+               "kind" => "contradicts", "proposed" => true],
+        &registry,
+        &ledger,
+    )
+    .expect("link must not throw");
+    let tunnel_id = tunnel_id_from_link_response(content_text(&link));
+
+    // accept by a model reviewer is refused at the boundary.
+    let err = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "accept",
+               "reviewed_by" => "claude"],
+        &registry,
+        &ledger,
+    )
+    .expect_err("model accept must be rejected");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("edge activation is user-only"),
+        "message was: {}",
+        err.message
+    );
+
+    // Unknown verdicts and empty reviewer ids are boundary errors too.
+    let err = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "snooze"],
+        &registry,
+        &ledger,
+    )
+    .expect_err("unknown verdict must be rejected");
+    assert!(
+        err.message
+            .contains("verdict must be \"accept\", \"reject\", or \"endorse\""),
+        "message was: {}",
+        err.message
+    );
+    let err = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "endorse",
+               "reviewed_by" => ""],
+        &registry,
+        &ledger,
+    )
+    .expect_err("empty reviewer must be rejected");
+    assert!(
+        err.message.contains("reviewed_by must be a non-empty string"),
+        "message was: {}",
+        err.message
+    );
+
+    // Model endorsement: recorded, lifecycle untouched.
+    let endorse = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "endorse",
+               "reviewed_by" => "claude"],
+        &registry,
+        &ledger,
+    )
+    .expect("endorse must not throw");
+    let endorse_text = content_text(&endorse);
+    assert!(
+        endorse_text.contains("endorsed by claude (distinct endorsers: 1)"),
+        "endorse: {endorse_text}"
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        let t = estate
+            .get_tunnel(&tunnel_id)
+            .expect("get_tunnel")
+            .expect("tunnel exists");
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Proposed, "endorse must never activate");
+    }
+
+    // Model objection AFTER a model endorsement: contested, stays
+    // proposed for user attention.
+    let object = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "reject",
+               "reviewed_by" => "gpt"],
+        &registry,
+        &ledger,
+    )
+    .expect("objection must not throw");
+    let object_text = content_text(&object);
+    assert!(
+        object_text.contains("objected by gpt — contested"),
+        "object: {object_text}"
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        let t = estate
+            .get_tunnel(&tunnel_id)
+            .expect("get_tunnel")
+            .expect("tunnel exists");
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Proposed);
+    }
+
+    // User accept (default reviewed_by) still activates.
+    let accept = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "accept"],
+        &registry,
+        &ledger,
+    )
+    .expect("accept must not throw");
+    assert!(
+        content_text(&accept).contains("accepted — the contradicts link is now active"),
+        "accept: {}",
+        content_text(&accept)
+    );
+
+    // Second proposal: a model objection with NO endorsement on record
+    // withdraws (the AI-rejected, reopenable path).
+    let c = file_one_memory(&registry, "the deploy window is Tuesday", "work/notes");
+    let d = file_one_memory(&registry, "the deploy window is Friday", "work/notes");
+    let second_link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => c.as_str(), "to_id" => d.as_str(),
+               "kind" => "contradicts", "proposed" => true],
+        &registry,
+        &ledger,
+    )
+    .expect("second link must not throw");
+    let second_id = tunnel_id_from_link_response(content_text(&second_link));
+    let solo = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => second_id.as_str(), "verdict" => "reject",
+               "reviewed_by" => "claude"],
+        &registry,
+        &ledger,
+    )
+    .expect("solo objection must not throw");
+    assert!(
+        content_text(&solo).contains("objected by claude — withdrawn"),
+        "solo objection: {}",
+        content_text(&solo)
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        let t = estate
+            .get_tunnel(&second_id)
+            .expect("get_tunnel")
+            .expect("tunnel exists");
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Withdrawn);
     }
 }

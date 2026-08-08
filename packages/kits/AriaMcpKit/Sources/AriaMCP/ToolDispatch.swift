@@ -2340,37 +2340,122 @@ extension ToolDispatcher {
         return Self.textResult("linked \(fromID) → \(toID) via \(label) (\(tunnel.id))\(stateNote)")
     }
 
-    /// `moot_review_tunnel` — settle a PROPOSED tunnel: accept activates it,
-    /// reject withdraws it. Only tunnels in the proposed lifecycle (the
-    /// contradiction hunter's findings and agent-filed proposed links) are
-    /// reviewable; a settled edge cannot be rewritten by a stale review.
-    /// Rejected pairs are never re-proposed by the hunter (durable dedup).
+    /// Map a proposal's label family to the tier lens recorded on a
+    /// review-ladder vote. The label-family contract is GLK's
+    /// (ConflictTunnelLifecycle.swift: "dcp: " → tier 1, "tier2:" → 2,
+    /// "tier3:" → 3); this dispatch-layer mirror exists because those
+    /// prefixes are internal to GLK. Labels outside the matrix family
+    /// (hunter-filed, agent-filed) default to tier 3 — the weakest
+    /// epistemic class, so a vote on an unlabeled proposal never
+    /// inflates its standing. Parity: Rust `tier_lens_for_label`.
+    static func tierLens(forLabel label: String) -> ContradictionTier {
+        if label.hasPrefix("dcp: ") { return .typedProven }
+        if label.hasPrefix("tier2:") { return .lexicalStructural }
+        if label.hasPrefix("tier3:") { return .lexicalValue }
+        return .lexicalValue
+    }
+
+    /// `moot_review_tunnel` — review a PROPOSED tunnel on the MXE-CT3
+    /// review ladder (Rejected / Proposed / Endorsed / Accepted):
+    ///
+    /// - `accept` (user-only): activates the edge via the existing
+    ///   `respondToTunnel` path, recording `reviewed_by` in the review
+    ///   ledger. Edge activation is human-authoritative — a model
+    ///   reviewer can NEVER activate, no matter how many endorsements
+    ///   accumulate.
+    /// - `reject` with `reviewed_by` "user": withdraws permanently via
+    ///   `respondToTunnel` (durable dedup — never re-proposed).
+    /// - `reject` with a model `reviewed_by`: the AI-objection path
+    ///   (`objectToTunnel`) — withdraws only when no model endorsement
+    ///   exists (reopenable); otherwise the tunnel stays proposed and is
+    ///   marked contested for user attention.
+    /// - `endorse` (any reviewer, user included): records an endorsement
+    ///   vote (`endorseTunnel`) without touching lifecycle; weight feeds
+    ///   review-queue ranking only.
+    ///
+    /// Only tunnels in the proposed lifecycle are reviewable; a settled
+    /// edge cannot be rewritten by a stale review.
     func runReviewTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let tunnelID = try requireString(args, "tunnel_id")
         let verdict = try requireString(args, "verdict")
-        guard verdict == "accept" || verdict == "reject" else {
+        guard verdict == "accept" || verdict == "reject" || verdict == "endorse" else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
-                message: "verdict must be \"accept\" or \"reject\"")
+                message: "verdict must be \"accept\", \"reject\", or \"endorse\"")
+        }
+        let reviewedBy = try optionalString(args["reviewed_by"], argument: "reviewed_by") ?? "user"
+        guard !reviewedBy.isEmpty else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "reviewed_by must be a non-empty string")
+        }
+        // The ladder's one hard wall, enforced at the public boundary:
+        // edge activation is user-only. Models endorse or reject.
+        guard verdict != "accept" || reviewedBy == "user" else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "edge activation is user-only — verdict \"accept\" requires "
+                    + "reviewed_by \"user\"; model reviewers use \"endorse\" or \"reject\"")
         }
         let reason = try optionalString(args["reason"], argument: "reason")
         let estate = try await kit.estate(for: handle)
-        do {
-            try await estate.respondToTunnel(
-                id: tunnelID,
-                accept: verdict == "accept",
-                changedBy: serverIdentity,
-                reason: reason)
-        } catch let error as LocusKitError {
-            // Not-found and not-proposed are caller errors, surfaced as clean
-            // tool-level messages rather than opaque failures.
-            return Self.errorResult("moot_review_tunnel: \(error)")
+
+        // Tier lens for ladder votes, derived from the proposal's label
+        // family. A missing tunnel falls through to the GLK verb, which
+        // owns the not-found error (single validation source).
+        let label = try await estate.getTunnel(id: tunnelID)?.label ?? ""
+        let lens = Self.tierLens(forLabel: label)
+        // Review timestamps are wall-clock: this tool is a live I/O
+        // surface (no `now` argument), and the deterministic engines
+        // receive the instant from here, the I/O boundary.
+        let now = Date()
+
+        switch (verdict, reviewedBy) {
+        case ("endorse", _):
+            do {
+                let outcome = try await kit.endorseTunnel(
+                    in: handle, tunnelID: tunnelID,
+                    endorserID: reviewedBy, tierLens: lens, now: now)
+                let contestedNote = outcome.contested ? ", contested" : ""
+                return Self.textResult(
+                    "moot_review_tunnel: \(tunnelID) endorsed by \(reviewedBy) "
+                        + "(distinct endorsers: \(outcome.distinctEndorsers)\(contestedNote)).")
+            } catch let error as LocusKitError {
+                return Self.errorResult("moot_review_tunnel: \(error)")
+            }
+        case ("reject", let reviewer) where reviewer != "user":
+            // AI rejection semantics: an objection, not a user verdict.
+            do {
+                let outcome = try await kit.objectToTunnel(
+                    in: handle, tunnelID: tunnelID,
+                    reviewerID: reviewer, tierLens: lens, now: now)
+                let text = outcome.withdrawn
+                    ? "objected by \(reviewer) — withdrawn (no model endorsement on record; the user can reopen it)"
+                    : "objected by \(reviewer) — contested: a model endorsement exists, so the proposal stays for user review"
+                return Self.textResult("moot_review_tunnel: \(tunnelID) \(text).")
+            } catch let error as LocusKitError {
+                return Self.errorResult("moot_review_tunnel: \(error)")
+            }
+        default:
+            // User accept/reject — the existing settle path, now
+            // recording the reviewer identity in the review ledger.
+            do {
+                try await estate.respondToTunnel(
+                    id: tunnelID,
+                    accept: verdict == "accept",
+                    changedBy: reviewedBy,
+                    reason: reason)
+            } catch let error as LocusKitError {
+                // Not-found and not-proposed are caller errors, surfaced as clean
+                // tool-level messages rather than opaque failures.
+                return Self.errorResult("moot_review_tunnel: \(error)")
+            }
+            let outcome = verdict == "accept"
+                ? "accepted — the contradicts link is now active"
+                : "rejected — the link is withdrawn and this pair will never be re-proposed"
+            return Self.textResult("moot_review_tunnel: \(tunnelID) \(outcome).")
         }
-        let outcome = verdict == "accept"
-            ? "accepted — the contradicts link is now active"
-            : "rejected — the link is withdrawn and this pair will never be re-proposed"
-        return Self.textResult("moot_review_tunnel: \(tunnelID) \(outcome).")
     }
 
     /// `moot_connection_search` — find connections going out from a memory.

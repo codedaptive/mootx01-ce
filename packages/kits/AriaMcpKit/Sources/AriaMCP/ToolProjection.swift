@@ -363,11 +363,12 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_review_tunnel",
-                description: "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+                description: "Review a PROPOSED connection on the review ladder (e.g. an agent-derived contradiction from the hunter): accept activates it (user-only), reject withdraws it, endorse records a model endorsement without activating. A model reject is an objection — it withdraws only when no model endorsement exists (reopenable); otherwise the proposal stays and is marked contested. User-rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "tunnel_id": stringSchema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
-                        "verdict": stringSchema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                        "verdict": stringSchema("\"accept\" to activate the link (user-only), \"reject\" to withdraw it, \"endorse\" to record an endorsement vote without activating."),
+                        "reviewed_by": stringSchema("Reviewer identity recorded in the review ledger (default \"user\"). Model reviewers pass their model id (e.g. \"claude\", \"apple-onboard\"). verdict \"accept\" requires the default — edge activation is user-only."),
                         "reason": stringSchema("Optional note explaining the verdict."),
                     ],
                     required: ["tunnel_id", "verdict"]

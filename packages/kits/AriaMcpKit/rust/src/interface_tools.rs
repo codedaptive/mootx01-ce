@@ -1826,11 +1826,43 @@ fn run_link_memories(
     }
 }
 
-/// Settle a PROPOSED tunnel: accept activates it, reject withdraws it.
-/// Only tunnels in the proposed lifecycle (the contradiction hunter's
-/// findings and agent-filed proposed links) are reviewable; a settled edge
-/// cannot be rewritten by a stale review. Rejected pairs are never
-/// re-proposed by the hunter (durable dedup). Mirrors Swift `runReviewTunnel`.
+/// Map a proposal's label family to the tier lens recorded on a
+/// review-ladder vote. The label-family contract is GLK's
+/// (`rejection_tier_of_label`: "dcp: " → tier 1, "tier2:" → 2,
+/// "tier3:" → 3). Labels outside the matrix family (hunter-filed,
+/// agent-filed) default to tier 3 — the weakest epistemic class, so a
+/// vote on an unlabeled proposal never inflates its standing. Parity:
+/// Swift `ToolDispatcher.tierLens(forLabel:)`.
+fn tier_lens_for_label(
+    label: &str,
+) -> genius_locus_kit::brain::tiered_contradiction_search::ContradictionTier {
+    use genius_locus_kit::brain::conflict_projection_sweep::rejection_tier_of_label;
+    use genius_locus_kit::brain::tiered_contradiction_search::ContradictionTier;
+    match rejection_tier_of_label(label) {
+        Some(1) => ContradictionTier::TypedProven,
+        Some(2) => ContradictionTier::LexicalStructural,
+        _ => ContradictionTier::LexicalValue,
+    }
+}
+
+/// Review a PROPOSED tunnel on the MXE-CT3 review ladder (Rejected /
+/// Proposed / Endorsed / Accepted):
+///
+/// - `accept` (user-only): activates via the existing
+///   `respond_to_tunnel` path, recording `reviewed_by` in the review
+///   ledger. Edge activation is human-authoritative — a model reviewer
+///   can NEVER activate, no matter how many endorsements accumulate.
+/// - `reject` with `reviewed_by` "user": withdraws permanently
+///   (durable dedup — never re-proposed).
+/// - `reject` with a model `reviewed_by`: the AI-objection path
+///   (`object_to_tunnel`) — withdraws only when no model endorsement
+///   exists (reopenable); otherwise the tunnel stays proposed and is
+///   marked contested for user attention.
+/// - `endorse` (any reviewer, user included): records an endorsement
+///   vote (`endorse_tunnel`) without touching lifecycle; weight feeds
+///   review-queue ranking only.
+///
+/// Mirrors Swift `runReviewTunnel`.
 fn run_review_tunnel(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -1838,24 +1870,89 @@ fn run_review_tunnel(
     let estate = registry.resolve_direct(args)?;
     let tunnel_id = require_string(args, "tunnel_id")?;
     let verdict = require_string(args, "verdict")?;
-    if verdict != "accept" && verdict != "reject" {
+    if verdict != "accept" && verdict != "reject" && verdict != "endorse" {
         return Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
-            "verdict must be \"accept\" or \"reject\"".to_string(),
+            "verdict must be \"accept\", \"reject\", or \"endorse\"".to_string(),
+        ));
+    }
+    let reviewed_by = optional_string(args, "reviewed_by")?.unwrap_or("user");
+    if reviewed_by.is_empty() {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "reviewed_by must be a non-empty string".to_string(),
+        ));
+    }
+    // The ladder's one hard wall, enforced at the public boundary:
+    // edge activation is user-only. Models endorse or reject.
+    if verdict == "accept" && reviewed_by != "user" {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "edge activation is user-only — verdict \"accept\" requires reviewed_by \"user\"; model reviewers use \"endorse\" or \"reject\"".to_string(),
         ));
     }
     let reason = optional_string(args, "reason")?;
 
+    // Review timestamps are wall-clock: this tool is a live I/O surface
+    // (no `now` argument), and the deterministic engines receive the
+    // instant from here, the I/O boundary.
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
     let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
     })?;
 
+    // Tier lens for ladder votes, derived from the proposal's label
+    // family. A missing tunnel falls through to the GLK verb, which
+    // owns the not-found error (single validation source).
+    let label = locus_estate
+        .get_tunnel(tunnel_id)
+        .ok()
+        .flatten()
+        .map(|t| t.label)
+        .unwrap_or_default();
+    let lens = tier_lens_for_label(&label);
+
+    if verdict == "endorse" {
+        return match coord.endorse_tunnel(&estate.handle, tunnel_id, reviewed_by, lens, now) {
+            Ok((_new_endorser, distinct_endorsers, contested)) => {
+                let contested_note = if contested { ", contested" } else { "" };
+                Ok(text_result(&format!(
+                    "moot_review_tunnel: {tunnel_id} endorsed by {reviewed_by} (distinct endorsers: {distinct_endorsers}{contested_note})."
+                )))
+            }
+            // Not-found and not-proposed are caller errors, surfaced as
+            // clean tool-level messages rather than opaque failures.
+            Err(e) => Ok(error_result(&format!(
+                "moot_review_tunnel: {}",
+                describe_verb_dispatch_error(&e)
+            ))),
+        };
+    }
+    if verdict == "reject" && reviewed_by != "user" {
+        // AI rejection semantics: an objection, not a user verdict.
+        return match coord.object_to_tunnel(&estate.handle, tunnel_id, reviewed_by, lens, now) {
+            Ok((withdrawn, _contested)) => {
+                let text = if withdrawn {
+                    format!("objected by {reviewed_by} — withdrawn (no model endorsement on record; the user can reopen it)")
+                } else {
+                    format!("objected by {reviewed_by} — contested: a model endorsement exists, so the proposal stays for user review")
+                };
+                Ok(text_result(&format!("moot_review_tunnel: {tunnel_id} {text}.")))
+            }
+            Err(e) => Ok(error_result(&format!(
+                "moot_review_tunnel: {}",
+                describe_verb_dispatch_error(&e)
+            ))),
+        };
+    }
+
+    // User accept/reject — the existing settle path, now recording the
+    // reviewer identity in the review ledger.
     match locus_estate.respond_to_tunnel(
         tunnel_id,
         verdict == "accept",
-        registry.server_identity.as_str(),
+        reviewed_by,
         reason,
         now,
     ) {

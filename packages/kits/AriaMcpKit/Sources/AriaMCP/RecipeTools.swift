@@ -381,7 +381,7 @@ enum RecipeTools {
     private static func dreamTool() -> ProjectedTool {
         ProjectedTool(
             name: dreamToolName,
-            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review), and optionally run one vector-similarity association sweep (proximity-based edge mining). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction and association counts.",
+            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review), file tier-labeled conflict-tunnel candidates across all three contradiction tiers (typed proof, structural lexical cue, value divergence — surviving the decline matrix), and optionally run one vector-similarity association sweep (proximity-based edge mining). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction, candidate-filing, and association counts plus a tiered synthesis digest.",
             inputSchema: objectSchema(
                 properties: [
                     "now": stringSchema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
@@ -406,7 +406,7 @@ enum RecipeTools {
     private static func huntContradictionsTool() -> ProjectedTool {
         ProjectedTool(
             name: huntContradictionsToolName,
-            description: "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the corpus search index (run moot_reindex after bulk import).",
+            description: "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. With tier absent or \"all\", the sweep report is followed by a tiered synthesis digest (TIER 1 typed proofs, TIER 2 structural lexical cues, TIER 3 value divergence); with tier 1, 2, or 3 the call is a read-only purpose search of that lane alone — nothing is filed. Requires the corpus search index (run moot_reindex after bulk import).",
             inputSchema: objectSchema(
                 properties: [
                     "probe_limit": .object([
@@ -414,6 +414,24 @@ enum RecipeTools {
                         "description": .string(
                             "Maximum vector-indexed memories probed this sweep (default 500). "
                                 + "Repeated calls converge: settled pairs are skipped."),
+                    ]),
+                    // Union domain (integer 1|2|3 or the string "all"), so no
+                    // "type" key — the description carries the domain and the
+                    // dispatch boundary validates it. Declared IDENTICALLY in
+                    // the Rust twin (tool_list.rs hunt_contradictions_tool).
+                    "tier": .object([
+                        "description": .string(
+                            "Optional tier filter: 1 (typed proven contradictions), "
+                                + "2 (structural lexical conflict candidates), 3 (value "
+                                + "divergence), or \"all\" (default — legacy sweep plus "
+                                + "tiered synthesis digest). A single tier runs a "
+                                + "read-only purpose search of that lane alone."),
+                    ]),
+                    "top_k": .object([
+                        "type": .string("integer"),
+                        "description": .string(
+                            "Findings per tier section in the tiered digest "
+                                + "(default 5, valid 1...50)."),
                     ]),
                     "now": stringSchema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
@@ -1310,6 +1328,120 @@ enum RecipeTools {
             sweep, denseRows: denseRows, lexicalCandidates: lexicalCandidates)
     }
 
+    // MARK: - tiered contradiction sections (MXE-CT3 P3)
+
+    /// Exact tier section headers — the wire contract for every surface
+    /// that renders a `TieredContradictionReport` (hunt and dream share
+    /// this ONE renderer, M4 pattern: one renderer, lines never drift).
+    /// Parity: Rust `recipe_tools::TIER1_HEADER` etc.
+    static let tier1Header = "TIER 1 — CONTRADICTION (proven)"
+    static let tier2Header = "TIER 2 — CONFLICT CANDIDATE"
+    static let tier3Header = "TIER 3 — DIVERGENCE"
+
+    /// Render a `TieredContradictionReport` as report lines. The ONE
+    /// tiered renderer: `moot_hunt_contradictions` (both modes) and
+    /// `moot_dream` (synthesis digest) both route through here so the
+    /// sections never drift between surfaces or ports.
+    ///
+    /// Tier-1 blocks reuse the typed lane's rendering contract
+    /// (`conflictProjectionSection`'s F13 redaction path): a secret
+    /// finding is counted by the lane counts only (no block), a
+    /// restricted finding renders ONLY the coordinate-digest line, and a
+    /// finding at or below elevated renders result essentials plus the
+    /// SAME gated dense rows (`denseRowsByID` — no parallel rendering
+    /// path to drawer content). The tiered verb already ceiling-filters
+    /// findings above elevated out of its tier-1 section
+    /// (`tier1CeilingFiltered`), so the secret/restricted arms here are
+    /// defense in depth, not the primary gate.
+    ///
+    /// Tiers 2/3 render the drawer pair plus cue kind and score — no
+    /// content snippets: the legacy CANDIDATE feed is the snippet
+    /// surface, and the digest must not become a second content
+    /// disclosure path.
+    ///
+    /// `laneSeconds` is non-nil in SYNTHESIS mode only: per-tier lane
+    /// counts (fetched/returned/promotedAway/backfilled) and the
+    /// elapsed-seconds lines render only for a synthesis digest. The
+    /// seconds are measured by the CALLER around each GLK call — the
+    /// engines are deterministic (no clock reads inside), so wall-clock
+    /// timing lives at this dispatch layer, the I/O boundary.
+    static func tieredSectionLines(
+        _ report: TieredContradictionReport,
+        denseRows: [String: String],
+        laneSeconds: [(label: String, seconds: Double)]?
+    ) -> [String] {
+        let synthesis = report.mode == .synthesis
+        var lines: [String] = []
+        let secretRaw = AdjectiveSensitivity.secret.rawValue
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+
+        for tier in ContradictionTier.allCases {
+            // Single-tier mode renders ONLY the requested lane's section;
+            // the other sections are structurally empty and would render
+            // as bare headers, which misreads as "lane ran, found none".
+            if case .single(let requested) = report.mode, requested != tier { continue }
+            switch tier {
+            case .typedProven: lines.append(Self.tier1Header)
+            case .lexicalStructural: lines.append(Self.tier2Header)
+            case .lexicalValue: lines.append(Self.tier3Header)
+            }
+            if synthesis {
+                let c = report.counts(for: tier)
+                lines.append("  lane: fetched \(c.fetched), returned \(c.returned), "
+                    + "promotedAway \(c.promotedAway), backfilled \(c.backfilled)")
+            }
+            for finding in report.findings(for: tier) {
+                switch tier {
+                case .typedProven:
+                    let ceiling = finding.sensitivityCeilingRaw ?? secretRaw
+                    if ceiling >= secretRaw { continue }
+                    if ceiling >= restrictedRaw {
+                        lines.append("  a conflicting claim exists at "
+                            + "\(finding.coordinateDigest ?? "?") [restricted]")
+                        continue
+                    }
+                    lines.append("  PROVEN \(finding.resultID ?? "?") "
+                        + "at \(finding.coordinateDigest ?? "?") "
+                        + "(rule \(finding.ruleID ?? "?"))")
+                    for id in [finding.drawerA, finding.drawerB] {
+                        lines.append("    \(denseRows[id] ?? "\(id) · - · - · - · -")")
+                    }
+                case .lexicalStructural, .lexicalValue:
+                    lines.append("  \(finding.drawerA) vs \(finding.drawerB) "
+                        + "(\(finding.cueKind ?? "?"), score \(finding.score ?? 0))")
+                }
+            }
+        }
+        if synthesis, let laneSeconds {
+            // Per-lane elapsed + synthesis wall time (the sum of the GLK
+            // calls this tool made). %.3f both ports for byte parity.
+            let parts = laneSeconds.map { "\($0.label)=\(String(format: "%.3f", $0.seconds))" }
+            lines.append("lane_seconds: " + parts.joined(separator: " "))
+            let total = laneSeconds.reduce(0.0) { $0 + $1.seconds }
+            lines.append("synthesis_wall_seconds: " + String(format: "%.3f", total))
+        }
+        return lines
+    }
+
+    /// Hydrate the gated dense rows for a tiered report's fully visible
+    /// tier-1 findings and render its sections. The dense rows come from
+    /// the SAME `denseRowsByID` fetch (structured hydration behind the
+    /// default-gated RecallFrame) the typed projection section uses.
+    static func renderTieredSections(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        report: TieredContradictionReport,
+        laneSeconds: [(label: String, seconds: Double)]?
+    ) async throws -> [String] {
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        let visibleIDs = report.tier1
+            .filter { ($0.sensitivityCeilingRaw ?? restrictedRaw) < restrictedRaw }
+            .flatMap { [$0.drawerA, $0.drawerB] }
+        let denseRows = try await denseRowsByID(
+            ids: Array(Set(visibleIDs)), estate: kit.estate(for: handle))
+        return tieredSectionLines(report, denseRows: denseRows, laneSeconds: laneSeconds)
+    }
+
     // MARK: - run_migration_benchmark
 
     private static func runMigrationBenchmark(
@@ -1503,6 +1635,17 @@ enum RecipeTools {
         let hunt = try await kit.huntContradictions(
             in: handle, probeLimit: 500, now: now)
 
+        // Step 3.25 — MXE-CT3 P3: file tier-labeled conflict-tunnel
+        // candidates at ALL three tiers (typed proof, structural lexical
+        // cue, value divergence) out of one typed sweep + one shared
+        // lexical pass, surviving the decline matrix (P2.5 contract:
+        // model filing never activates — the user settles proposals via
+        // moot_review_tunnel). Timed at this dispatch layer: the engine
+        // is deterministic, clocks live at the I/O boundary.
+        let proposeStart = Date()
+        let candidates = try await kit.proposeConflictTunnels(in: handle, now: now)
+        let proposeSeconds = Date().timeIntervalSince(proposeStart)
+
         // Step 3.5 — vector-similarity association sweep.
         //
         // Mines proximity pairs from the estate's VectorStore and writes
@@ -1580,6 +1723,23 @@ enum RecipeTools {
             estate: kit.estate(for: handle),
             lexicalCandidates: hunt.borderline.count)
         body += "\n" + typedSection.joined(separator: "\n")
+
+        // MXE-CT3 P3 — candidate-filing counts (step 3.25) and the
+        // tiered synthesis digest, rendered through the SAME shared
+        // renderer the hunt tool uses (one renderer, lines never drift).
+        body += "\nconflictTunnelsFiled: tier1 \(candidates.proposedTunnelIDs.count), "
+            + "tier2 \(candidates.proposedTier2IDs.count), "
+            + "tier3 \(candidates.proposedTier3IDs.count) "
+            + "(suppressed: \(candidates.suppressed), "
+            + "ceilingSkipped: \(candidates.ceilingSkipped))"
+        let tieredStart = Date()
+        let tiered = try await kit.tieredContradictionSearch(
+            in: handle, topK: 5, now: now)
+        let tieredSeconds = Date().timeIntervalSince(tieredStart)
+        let tieredLines = try await renderTieredSections(
+            kit: kit, handle: handle, report: tiered,
+            laneSeconds: [("propose", proposeSeconds), ("synthesis", tieredSeconds)])
+        body += "\n" + tieredLines.joined(separator: "\n")
         return ToolDispatcher.textResult(body)
     }
 
@@ -1589,6 +1749,13 @@ enum RecipeTools {
     /// Strong findings persist as proposed contradicts tunnels (the hunt does
     /// its own writes); borderline candidates come back with snippets for the
     /// calling agent to adjudicate.
+    ///
+    /// MXE-CT3 P3 tier modes:
+    /// - `tier` absent or `"all"` (the default): today's exact legacy sweep
+    ///   report, unchanged byte for byte, PLUS an appended tiered synthesis
+    ///   digest (`tieredContradictionSearch` synthesis mode).
+    /// - `tier` 1|2|3: a read-only purpose search of that single lane —
+    ///   no legacy sweep, no tunnels filed, no writes of any kind.
     private static func runHuntContradictions(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -1614,10 +1781,69 @@ enum RecipeTools {
             }
             probeLimit = Int(n)
         }
+        // `tier`: integer 1|2|3 or the string "all"; anything else is
+        // rejected at this public boundary with the valid domain named
+        // (b77ec03e8/b96c01617 precedent). nil = synthesis ("all").
+        var singleTier: ContradictionTier?
+        if let raw = args["tier"] {
+            switch raw {
+            case .string("all"):
+                singleTier = nil
+            case .integer(let n):
+                guard let t = ContradictionTier(rawValue: Int(n)) else {
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "tier must be 1, 2, 3, or \"all\"")
+                }
+                singleTier = t
+            default:
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "tier must be 1, 2, 3, or \"all\"")
+            }
+        }
+        // `top_k`: findings per tier section. 1...50 mirrors GLK's
+        // `TieredContradictionCore.topKCeiling` clamp — the boundary
+        // rejects what the engine would clamp, so the caller learns the
+        // domain instead of silently getting less.
+        var topK = 5
+        if let raw = args["top_k"] {
+            guard case .integer(let n) = raw, n >= 1, n <= 50 else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "top_k must be an integer in 1...50")
+            }
+            topK = Int(n)
+        }
 
+        // ---- Single-tier purpose search (read-only, nothing filed) ----
+        if let tier = singleTier {
+            let report = try await kit.tieredContradictionSearch(
+                in: handle, tier: tier, topK: topK,
+                probeLimit: probeLimit, now: now)
+            // The lexical lanes (2/3) need the vector index; the typed
+            // lane (1) does not — diagnostics report true for a
+            // tier-1-only run, so this guard cannot misfire there.
+            guard report.diagnostics.vectorStoreAvailable else {
+                return ToolDispatcher.textResult(
+                    "moot_hunt_contradictions: no vector index for this estate — "
+                        + "run moot_reindex first, then hunt again.")
+            }
+            var lines = ["moot_hunt_contradictions: tier \(tier.rawValue) search complete"]
+            lines += try await renderTieredSections(
+                kit: kit, handle: handle, report: report, laneSeconds: nil)
+            return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        }
+
+        // ---- Legacy sweep (tier absent / "all") — unchanged path ----
+        // Wall-clock timing wraps the GLK calls at this dispatch layer:
+        // the engines are deterministic (no Date() inside), so the I/O
+        // boundary is the only place elapsed time may be measured.
+        let huntStart = Date()
         // Sensitivity ceiling is hardcoded .elevated (fail-safe by design); huntContradictions does NOT consult SensitivityGrantLedger.
         let report = try await kit.huntContradictions(
             in: handle, probeLimit: probeLimit, now: now)
+        let huntSeconds = Date().timeIntervalSince(huntStart)
 
         guard report.vectorStoreAvailable else {
             return ToolDispatcher.textResult(
@@ -1655,6 +1881,19 @@ enum RecipeTools {
             kit: kit, handle: handle,
             estate: kit.estate(for: handle),
             lexicalCandidates: report.borderline.count)
+
+        // MXE-CT3 P3 — appended tiered synthesis digest. Everything above
+        // this line is the legacy report, byte-identical to the pre-P3
+        // output (the benchmark parser matches the trimmed "PROPOSED "/
+        // "CANDIDATE " prefixes and the count lines above — never touch
+        // those emitters). Timed at this dispatch layer (I/O boundary).
+        let tieredStart = Date()
+        let tiered = try await kit.tieredContradictionSearch(
+            in: handle, topK: topK, probeLimit: probeLimit, now: now)
+        let tieredSeconds = Date().timeIntervalSince(tieredStart)
+        lines += try await renderTieredSections(
+            kit: kit, handle: handle, report: tiered,
+            laneSeconds: [("hunt", huntSeconds), ("synthesis", tieredSeconds)])
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 

@@ -395,13 +395,30 @@ enum TeachmeGuides {
         """
 
     private static let reviewTunnelGuide = """
-        moot_review_tunnel — Settle a PROPOSED connection: accept or reject.
+        moot_review_tunnel — Review a PROPOSED connection on the review
+        ladder: accept (user-only), reject, or endorse.
 
         Proposed edges come from the contradiction hunter (background scout,
         moot_dream sweep, or moot_hunt_contradictions) and from agent-filed
-        moot_link_memories proposed:true links. Accept activates the edge;
-        reject withdraws it PERMANENTLY — a rejected pair is never
-        re-proposed by the hunter.
+        moot_link_memories proposed:true links.
+
+        The ladder (Rejected / Proposed / Endorsed / Accepted):
+          - accept — activates the edge. USER-ONLY: accept with a model
+            reviewed_by is refused (invalidParams). No number of model
+            endorsements ever activates an edge.
+          - endorse — records an endorsement vote (any reviewer, the user
+            included) WITHOUT activating. Endorsement weight feeds
+            review-queue ranking only.
+          - reject with reviewed_by "user" (the default) — withdraws
+            PERMANENTLY; the pair is never re-proposed.
+          - reject with a model reviewed_by — an OBJECTION: with no model
+            endorsement on record the proposal withdraws (the user can
+            reopen it); with one it stays proposed and is marked
+            CONTESTED — genuine model disagreement, ranked for user
+            attention.
+
+        reviewed_by is the reviewer identity recorded in the review
+        ledger (default "user"; models pass their model id).
 
         Only tunnels currently in the proposed lifecycle are reviewable;
         reviewing an already-settled edge is refused.
@@ -412,6 +429,8 @@ enum TeachmeGuides {
 
         Examples:
           { "tunnel_id": "<tunnel-uuid>", "verdict": "accept" }
+          { "tunnel_id": "<tunnel-uuid>", "verdict": "endorse",
+            "reviewed_by": "claude" }
           { "tunnel_id": "<tunnel-uuid>", "verdict": "reject",
             "reason": "not a real conflict — different services" }
 
@@ -419,8 +438,10 @@ enum TeachmeGuides {
           moot_review_tunnel: <tunnel-uuid> accepted — the contradicts link is now active.
 
         Common mistakes:
-          - Rejecting to "snooze" a finding. Rejection is durable; the pair
-            will never be re-proposed.
+          - Rejecting to "snooze" a finding. A user rejection is durable;
+            the pair will never be re-proposed.
+          - Passing verdict "accept" as a model reviewer. Activation is
+            the user's alone — endorse instead.
           - Reviewing an active or withdrawn tunnel; only proposed ones qualify.
         """
 
@@ -445,6 +466,25 @@ enum TeachmeGuides {
         borderline candidates (or not at all) — your judgment is the
         second stage.
 
+        The three-tier taxonomy (tier / top_k args):
+          TIER 1 — CONTRADICTION (proven): typed-lane proofs. Constraints
+            proved the conflict; no lexical score exists here.
+          TIER 2 — CONFLICT CANDIDATE: structural lexical cues (negation
+            asymmetry, revision markers, word exclusion).
+          TIER 3 — DIVERGENCE: same claim shape, different value — the
+            divergence word family (discrepancy, variance, disparity,
+            inconsistency, divergence) is this tier's class.
+        Tiers are epistemic classes, not score bands: sections always
+        render in tier order and are never interleaved into one ranked
+        list — a strong tier-3 cue never outranks a weak tier-1 proof.
+
+        tier absent or "all" (default): the legacy sweep report exactly
+        as before, followed by a tiered synthesis digest (duplicates
+        promote to their highest tier; lower tiers backfill; per-lane
+        counts and elapsed seconds included). tier 1|2|3: a READ-ONLY
+        purpose search of that lane alone — nothing is filed, no writes.
+        top_k (default 5, valid 1...50) bounds each tier section.
+
         Requires the corpus search index — run moot_reindex after bulk
         import. The same sweep runs inside moot_dream and hourly in the
         resident daemon's contradiction scout; this tool is the on-demand form.
@@ -454,18 +494,25 @@ enum TeachmeGuides {
         Example (full sweep, deterministic):
           { "probe_limit": 2000, "now": "2026-06-11T00:00:00Z" }
 
+        Example (read-only tier-3 purpose search):
+          { "tier": 3, "top_k": 10 }
+
         Response:
           moot_hunt_contradictions: probesScanned=N pairsScreened=N
           PROPOSED <n>: <src-id> contradicts <tgt-id> [cue score] (tunnel <uuid>)
           CANDIDATE <n>: <src-id> vs <tgt-id> [cue score]
             a: <snippet>
             b: <snippet>
+          TIER 1 — CONTRADICTION (proven) / TIER 2 — CONFLICT CANDIDATE /
+          TIER 3 — DIVERGENCE sections follow (synthesis digest).
 
         Common mistakes:
           - Running before moot_reindex on a fresh import; the report will
             say the vector index is unavailable and scan nothing.
           - Treating borderline candidates as findings. They are unjudged;
             adjudicate before recording.
+          - Expecting a single-tier run to file tunnels. It is a pure
+            read; only the default/"all" sweep persists findings.
         """
 
     private static let connectionSearchGuide = """
@@ -967,6 +1014,11 @@ enum TeachmeGuides {
              screens them for lexical conflict, and persists strong findings
              as PROPOSED contradicts links (review with
              moot_lens_contradiction, settle with moot_review_tunnel).
+          3.25. Files tier-labeled CONFLICT-TUNNEL CANDIDATES at all three
+             contradiction tiers (typed proof, structural lexical cue,
+             value divergence) that survive the decline matrix. Filing
+             never activates: candidates land as PROPOSED for the review
+             ladder, and the report counts filed/suppressed/ceilingSkipped.
           3.5. Runs one ASSOCIATION SWEEP: mines kNN proximity pairs from
              the estate's vector index and writes new association tunnels
              directly. Dedup is durable — existing active associations are
@@ -1007,6 +1059,9 @@ enum TeachmeGuides {
           contradictionsProposed: N
           contradictionCandidatesBorderline: N
           associationsWritten: N (probed: N, deduplicated: N)
+          conflictTunnelsFiled: tier1 N, tier2 N, tier3 N (suppressed: N, ceilingSkipped: N)
+          TIER 1 — CONTRADICTION (proven) / TIER 2 — CONFLICT CANDIDATE /
+          TIER 3 — DIVERGENCE sections follow (tiered synthesis digest).
         """
 
     // MARK: - Maintenance

@@ -49,6 +49,8 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_palace_import" => GUIDE_PALACE_IMPORT,
         // Recipe — contradiction hunter (on-demand sweep)
         "moot_hunt_contradictions" => GUIDE_HUNT_CONTRADICTIONS,
+        // Recipe — on-demand dream (matrix + cycle + hunts + filing)
+        "moot_dream" => GUIDE_DREAM,
         // Generic fallbacks for prefixed groups
         _ if tool_name.starts_with("moot_lens_") => GUIDE_LENS_GENERIC,
         _ if matches!(
@@ -329,25 +331,41 @@ Mistakes:
     use proposed:true so the user gets to review it.";
 
 const GUIDE_REVIEW_TUNNEL: &str = "\
-moot_review_tunnel — settle a PROPOSED connection: accept or reject
+moot_review_tunnel — review a PROPOSED connection on the review
+ladder: accept (user-only), reject, or endorse
 
 Proposed edges come from the contradiction hunter (background scout,
 moot_dream sweep, or moot_hunt_contradictions) and from agent-filed
-moot_link_memories proposed:true links. Accept activates the edge;
-reject withdraws it PERMANENTLY — a rejected pair is never re-proposed.
+moot_link_memories proposed:true links.
+
+The ladder (Rejected / Proposed / Endorsed / Accepted):
+  — accept: activates the edge. USER-ONLY: accept with a model
+    reviewed_by is refused (invalidParams). No number of model
+    endorsements ever activates an edge.
+  — endorse: records an endorsement vote (any reviewer, the user
+    included) WITHOUT activating; weight feeds review-queue ranking.
+  — reject with reviewed_by \"user\" (the default): withdraws
+    PERMANENTLY; the pair is never re-proposed.
+  — reject with a model reviewed_by: an OBJECTION — with no model
+    endorsement on record the proposal withdraws (the user can reopen
+    it); with one it stays proposed and is marked CONTESTED.
 
 Required args:
   tunnel_id (string) tunnel ID (shown by moot_lens_contradiction)
-  verdict   (string) \"accept\" or \"reject\"
+  verdict   (string) \"accept\", \"reject\", or \"endorse\"
 
 Optional args:
-  reason (string) note explaining the verdict
+  reviewed_by (string) reviewer identity in the review ledger
+              (default \"user\"; models pass their model id)
+  reason      (string) note explaining the verdict
 
-Example:
+Examples:
   { \"tunnel_id\": \"<uuid>\", \"verdict\": \"accept\" }
+  { \"tunnel_id\": \"<uuid>\", \"verdict\": \"endorse\", \"reviewed_by\": \"claude\" }
 
 Mistakes:
-  — Rejecting to \"snooze\" a finding: rejection is durable.
+  — Rejecting to \"snooze\" a finding: a user rejection is durable.
+  — Passing verdict \"accept\" as a model reviewer; endorse instead.
   — Reviewing an active or withdrawn tunnel; only proposed ones qualify.";
 
 const GUIDE_HUNT_CONTRADICTIONS: &str = "\
@@ -362,12 +380,67 @@ keyword (BM25) index, screens each pair with a lexical conflict cue
     pair genuinely conflicts, record it with moot_link_memories
     kind=contradicts proposed=true.
 
+The three-tier taxonomy (tier / top_k args):
+  TIER 1 — CONTRADICTION (proven): typed-lane proofs. Constraints
+    proved the conflict; no lexical score exists here.
+  TIER 2 — CONFLICT CANDIDATE: structural lexical cues (negation
+    asymmetry, revision markers, word exclusion).
+  TIER 3 — DIVERGENCE: same claim shape, different value — the
+    divergence word family (discrepancy, variance, disparity,
+    inconsistency, divergence) is this tier's class.
+Tiers are epistemic classes, not score bands: sections always render
+in tier order, never interleaved — a strong tier-3 cue never outranks
+a weak tier-1 proof.
+
+tier absent or \"all\" (default): the legacy sweep report exactly as
+before, followed by a tiered synthesis digest (duplicates promote to
+their highest tier; lower tiers backfill; per-lane counts and elapsed
+seconds included). tier 1|2|3: a READ-ONLY purpose search of that lane
+alone — nothing is filed. top_k (default 5, valid 1...50) bounds each
+tier section.
+
 Optional args:
   probe_limit (int)    max vector-indexed memories probed (default 500)
+  tier        (int|\"all\") 1, 2, 3, or \"all\" (default \"all\")
+  top_k       (int)    findings per tier section (default 5, 1...50)
   now         (string) ISO8601 instant for deterministic runs
 
 Requires the corpus search index — run moot_reindex after bulk import.
 Rejected and already-linked pairs are deduplicated (never re-proposed).";
+
+const GUIDE_DREAM: &str = "\
+moot_dream — dream the estate: matrix, dreaming cycle, contradiction
+hunt, tier-labeled candidate filing, and association sweep
+
+Effects, in order:
+  1. Rebuilds the co-occurrence/temporal MATRIX TIER from the estate's
+     audit log and registers it for recall scoring. The matrix is
+     built by dreaming, NOT by capture.
+  2. Runs one DREAMING CYCLE: mines latent co-occurrence alignments
+     into proposals and writes one cycle diary entry.
+  3. Runs one CONTRADICTION-HUNT sweep over memory content; strong
+     findings persist as PROPOSED contradicts links.
+  3.25. Files tier-labeled CONFLICT-TUNNEL CANDIDATES at all three
+     contradiction tiers (typed proof, structural lexical cue, value
+     divergence) that survive the decline matrix. Filing never
+     activates: candidates land as PROPOSED for the review ladder,
+     and the report counts filed/suppressed/ceilingSkipped.
+  3.5. Runs one ASSOCIATION SWEEP (kNN proximity mining). Modes via
+     the associates argument: \"recent\" (default), \"all\" (after
+     bulk import), \"off\".
+
+Dreaming-cycle proposals (effect 2) are USAGE-DRIVEN — a freshly
+imported, never-recalled estate legitimately reports 0 cycle
+proposals. Content is examined by effects 3/3.25/3.5, which need the
+vector index (run moot_reindex after bulk import).
+
+Optional args:
+  now        (string) ISO8601 instant for deterministic runs
+  associates (string) \"recent\" | \"all\" | \"off\"
+
+Response ends with conflictTunnelsFiled counts and the tiered
+synthesis digest (TIER 1 — CONTRADICTION (proven) / TIER 2 — CONFLICT
+CANDIDATE / TIER 3 — DIVERGENCE sections).";
 
 const GUIDE_CONNECTION_SEARCH: &str = "\
 moot_connection_search — list outgoing tunnels from a memory

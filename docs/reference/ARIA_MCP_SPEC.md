@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.33.0
+version: 1.34.0
 status: accepted-1.1-target
-date: 2026-08-06
+date: 2026-08-07
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -229,13 +229,55 @@ Three tools plus one lens expose the content-driven contradiction hunter
   rejected pair is never re-proposed. Optional `probe_limit`
   (default 500, max 10000) and `now` (ISO8601, deterministic runs). With
   no vector index the report says so honestly and scans nothing.
-- `moot_review_tunnel` (Tier 2, ask tier) — settles a proposed tunnel:
-  `verdict: "accept"` → lifecycle `active`; `"reject"` → `withdrawn`.
-  Only proposed-lifecycle tunnels are reviewable; not-found and
+
+  Tier modes (optional `tier`: integer 1|2|3 or `"all"`, default
+  `"all"`; optional `top_k`: integer 1...50, default 5 — out-of-domain
+  values are `invalidParams` naming the valid domain):
+  - `tier` absent or `"all"` — the legacy sweep report above, byte
+    for byte, followed by an appended tiered synthesis digest
+    (GLK `tieredContradictionSearch` synthesis mode): sections
+    `TIER 1 — CONTRADICTION (proven)`, `TIER 2 — CONFLICT CANDIDATE`,
+    `TIER 3 — DIVERGENCE`, always in tier order, never interleaved.
+    The digest prints per-tier lane counts
+    (fetched/returned/promotedAway/backfilled) plus per-lane elapsed
+    seconds and a synthesis wall time, measured at the dispatch layer
+    (engines are deterministic; clocks live at the I/O boundary).
+    Tier-1 blocks render through the same gated dense-row +
+    redaction path as the typed projection section (secret → counted
+    only; restricted → coordinate-digest line only); tiers 2/3 render
+    drawer pair + cue kind + score, never content snippets.
+  - `tier` 1|2|3 — a READ-ONLY purpose search of that single lane
+    (no legacy sweep, no tunnels filed, no writes); renders only the
+    requested tier's section.
+- `moot_review_tunnel` (Tier 2, ask tier) — reviews a proposed tunnel
+  on the review ladder (Rejected / Proposed / Endorsed / Accepted).
+  `verdict: "accept" | "reject" | "endorse"`, optional `reviewed_by`
+  (reviewer identity, default `"user"`):
+  - `accept` (user-only) → lifecycle `active`; `accept` with a
+    non-`"user"` `reviewed_by` is `invalidParams` ("edge activation is
+    user-only") — no model verdict ever activates an edge.
+  - `reject` with `reviewed_by: "user"` → `withdrawn` (durable dedup).
+  - `reject` with a model `reviewed_by` → GLK `objectToTunnel`: with no
+    model endorsement on record the proposal withdraws (reopenable);
+    with one it stays `proposed` and is marked contested (bit 15).
+  - `endorse` (any reviewer, user included) → GLK `endorseTunnel`:
+    records an endorsement vote in the ext review ledger and sets the
+    endorsed bit (14) without touching lifecycle.
+  Reviewer identity is recorded in the tunnel's ext review ledger on
+  every transition. The tier lens recorded on ladder votes derives from
+  the proposal's label family (`dcp: ` → 1, `tier2:` → 2, `tier3:` → 3;
+  labels outside the matrix family default to tier 3). Only
+  proposed-lifecycle tunnels are reviewable; not-found and
   not-proposed return clean tool-level errors.
 - `moot_dream` — runs the same hunt sweep as its content-driven third
   phase (probe budget 500/call) and reports `contradictionsProposed` /
-  `contradictionCandidatesBorderline` in the cycle summary.
+  `contradictionCandidatesBorderline` in the cycle summary. After the
+  hunt phase it files tier-labeled conflict-tunnel candidates at all
+  three tiers via GLK `proposeConflictTunnels` (decline-matrix
+  suppression applies; filing never activates) and reports
+  `conflictTunnelsFiled: tier1 N, tier2 N, tier3 N (suppressed: N,
+  ceilingSkipped: N)`, then appends the tiered synthesis digest
+  (topK 5) through the same shared renderer the hunt tool uses.
 - `moot_lens_contradiction` — reports lifecycle tiers on contradicts
   edges: active (confirmed) and proposed (flagged
   `proposed (agent-derived, unreviewed)`, shown by default);
@@ -992,6 +1034,20 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.34.0 -- 2026-08-07
+
+- Tiered contradiction surface (MXE-CT3 P3). `moot_hunt_contradictions`
+  gains optional `tier` (1|2|3|"all", default "all") and `top_k`
+  (1...50, default 5): default mode appends a tiered synthesis digest
+  after the unchanged legacy report; a single tier is a read-only
+  purpose search. `moot_review_tunnel` gains `reviewed_by` (default
+  "user") and the `endorse` verdict — the review ladder: accept is
+  user-only, a model reject is an objection (withdraw or contest),
+  endorse records a vote without activating. `moot_dream` files
+  tier-labeled conflict-tunnel candidates (`proposeConflictTunnels`)
+  after its hunt phase and appends the tiered digest via the shared
+  renderer.
 
 ### 1.33.0 -- 2026-08-06
 
