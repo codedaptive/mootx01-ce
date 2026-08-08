@@ -2128,7 +2128,8 @@ public actor DrawerStore {
             addedBy: t.addedBy, filedAt: t.filedAt,
             tombstonedAt: t.tombstonedAt,
             removedByBatch: t.removedByBatch,
-            orderKey: t.orderKey
+            orderKey: t.orderKey,
+            ext: t.ext
         )
         _ = try await storage.rowStore.insert(
             table: "tunnels", values: Self.tunnelValues(tunnelWithSensitivity))
@@ -2277,19 +2278,24 @@ public actor DrawerStore {
     /// permanently and its endpoint pair is the dedup memory that keeps the
     /// contradiction hunter from re-proposing a rejected pair.
     ///
-    /// Audit: like `retireTunnel`, this performs only the bitmap update —
-    /// the caller (the ARIA review tool / dreaming diary) records who
-    /// reviewed and why. `changedBy`/`reason` are accepted here so the
-    /// verb's signature is stable when a tunnel audit trail lands.
+    /// Reviewer identity (MXE-CT3 review ladder): the transition records
+    /// `changedBy` into the ext review ledger's `reviewedBy` field —
+    /// reviewer identity is recorded on EVERY transition, accept and
+    /// reject alike. Accept/reject semantics are unchanged. A malformed
+    /// existing ext ledger throws (fail-loud) rather than being
+    /// overwritten. `reason` is accepted so the verb's signature is
+    /// stable when a fuller tunnel audit trail lands.
     ///
     /// - Parameters:
     ///   - tunnelId:  id of the proposed tunnel under review.
     ///   - accept:    true → `.active` (accepted); false → `.withdrawn` (rejected).
-    ///   - changedBy: agent or user performing the review.
-    ///   - reason:    optional reviewer note (not yet persisted; see Audit above).
+    ///   - changedBy: agent or user performing the review; recorded in
+    ///     the ext ledger's `reviewedBy`.
+    ///   - reason:    optional reviewer note (not yet persisted).
     ///   - now:       deterministic clock supplied by the caller.
     /// - Throws: `tunnelNotFound` if the tunnel does not exist;
-    ///   `invalidContent` if it is not in `.proposed` lifecycle.
+    ///   `invalidContent` if it is not in `.proposed` lifecycle or its
+    ///   ext ledger is corrupt.
     ///
     /// Mirrors Rust `DrawerStore::respond_to_tunnel`.
     public func respondToTunnel(
@@ -2307,9 +2313,48 @@ public actor DrawerStore {
                 "tunnel \(tunnelId) is \(existing.lifecycle) — only a proposed tunnel can be reviewed")
         }
         let reviewed = existing.withLifecycle(accept ? .active : .withdrawn)
+        // Record who reviewed (ladder: reviewer identity on every
+        // transition). Parse-tolerant of unknown ext tenants; fail-loud
+        // on corruption.
+        var ledger = try TunnelReviewLedger.parse(existing.ext)
+        ledger.recordReview(by: changedBy)
         _ = try await storage.rowStore.update(
             table: "tunnels",
-            values: ["operationalBitmap": .bitmap(reviewed.operationalBitmap)],
+            values: [
+                "operationalBitmap": .bitmap(reviewed.operationalBitmap),
+                "ext": ledger.serialized().map { TypedValue.json(Data($0.utf8)) } ?? .null
+            ],
+            where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
+        )
+    }
+
+    /// Persist a review-ladder state change: `operationalBitmap` (the
+    /// endorsed/contested/lifecycle bits) and the `ext` review ledger,
+    /// in one update.
+    ///
+    /// This is the write primitive behind the GLK endorsement verbs
+    /// (`endorseTunnel` / `objectToTunnel`) — LocusKit owns the column,
+    /// GLK owns the review policy. The caller supplies the fully-formed
+    /// bitmap and canonical ledger serialization; no interpretation
+    /// happens here.
+    ///
+    /// - Throws: `tunnelNotFound` if no tunnel with `tunnelId` exists.
+    ///
+    /// Mirrors Rust `DrawerStore::stamp_tunnel_review`.
+    public func stampTunnelReview(
+        id tunnelId: String,
+        operationalBitmap: Int64,
+        ext: String?
+    ) async throws {
+        guard try await getTunnel(id: tunnelId) != nil else {
+            throw LocusKitError.tunnelNotFound(id: tunnelId)
+        }
+        _ = try await storage.rowStore.update(
+            table: "tunnels",
+            values: [
+                "operationalBitmap": .bitmap(operationalBitmap),
+                "ext": ext.map { TypedValue.json(Data($0.utf8)) } ?? .null
+            ],
             where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
         )
     }
@@ -3648,7 +3693,10 @@ public actor DrawerStore {
             "adjectiveBitmap": .bitmap(t.adjectiveBitmap),
             "operationalBitmap": .bitmap(t.operationalBitmap),
             "provenanceBitmap": .bitmap(t.provenanceBitmap),
-            "order_key": t.orderKey.map { TypedValue.float($0) } ?? .null
+            "order_key": t.orderKey.map { TypedValue.float($0) } ?? .null,
+            // Forward-compat JSON slot (review ledger, MXE-CT3). Bound as
+            // .json bytes; the SQLite backend stores json columns as BLOB.
+            "ext": t.ext.map { TypedValue.json(Data($0.utf8)) } ?? .null
         ]
     }
 
@@ -3918,8 +3966,26 @@ public actor DrawerStore {
             filedAt: try date(table: "tunnels", column: "filedAt", row["filedAt"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"]),
-            orderKey: optDouble(row["order_key"])
+            orderKey: optDouble(row["order_key"]),
+            // SQLite read-back primitive decode: json columns come back
+            // as .json (BLOB storage), but legacy TEXT writes and the
+            // InMemory backend can surface .text — tolerate both.
+            ext: optJSONString(row["ext"])
         )
+    }
+
+    /// Decode a nullable JSON column into its String form, tolerating
+    /// every representation a backend can hand back: `.json` bytes (the
+    /// SQLite BLOB path), `.text` (legacy TEXT storage / InMemory), and
+    /// `.blob` (raw bytes). NULL/absent yields nil. Same read-back
+    /// tolerance discipline as the UUID/HLC/date decoders above.
+    private static func optJSONString(_ v: TypedValue?) -> String? {
+        switch v {
+        case .json(let d): return String(data: d, encoding: .utf8)
+        case .text(let s): return s
+        case .blob(let d): return String(data: d, encoding: .utf8)
+        default: return nil
+        }
     }
 
     private static func associationFromRow(_ row: StorageRow) throws -> Association {

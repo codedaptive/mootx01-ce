@@ -27,7 +27,10 @@
 // fetch budgets, lane ranking, and the assembler. Estate reads (the
 // typed sweep, the shared hunt retrieval, hydration) happen in the
 // coordinator seam. Read-and-report ONLY — no tunnel proposals, no
-// writes (the review ladder is a later wave's mission).
+// writes. The WRITE half lives in the coordinator's
+// `propose_conflict_tunnels` (tier-labeled filing out of the same
+// lexical scan) and `endorse_tunnel` / `object_to_tunnel` (the P2.5
+// review ladder), plus `brain::review_queue` for queue ranking.
 
 use super::conflict_projection_sweep::ConflictFinding;
 use std::collections::{HashMap, HashSet};

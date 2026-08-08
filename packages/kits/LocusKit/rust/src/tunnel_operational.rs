@@ -19,7 +19,13 @@
 //! bits 9–11  TunnelStrength     (3 bits, scale-gapped, raws 0/2/4/6)
 //! bit  12    has_inverse        (1 bit, exclusive)
 //! bit  13    is_retired         (1 bit,  / recall-driven dreaming)
-//! bits 14–63 reserved
+//! bit  14    is_endorsed        (1 bit, MXE-CT3 review ladder — a model
+//!            reviewer endorsed this still-Proposed tunnel; NOT a
+//!            lifecycle case, only the user activates)
+//! bit  15    is_contested       (1 bit, MXE-CT3 review ladder — the ext
+//!            ledger holds both a model endorsement and a model
+//!            objection)
+//! bits 16–63 reserved
 //! ```
 //!
 //! ## Tunnel provenance layout (low-to-high)
@@ -323,6 +329,59 @@ impl Tunnel {
         copy
     }
 
+    // ─── Review-ladder accessors (MXE-CT3) ──
+
+    /// Bit 14 of `operational_bitmap` — endorsed flag (review ladder:
+    /// Rejected / Proposed / Endorsed / Accepted).
+    ///
+    /// Set when a model reviewer endorses a `Proposed` tunnel via the GLK
+    /// endorsement verb. Endorsed is deliberately NOT a `TunnelLifecycle`
+    /// case: the tunnel stays `Proposed`, and edge activation is
+    /// human-authoritative — only `respond_to_tunnel(accept: true)` (the
+    /// user path) moves lifecycle to `Active`. The endorsement ledger
+    /// lives in `ext`; this bit is the cheap bitmap-tier filter over it.
+    ///
+    /// Mirrors Swift `Tunnel.isEndorsedBit` (bit 14).
+    pub const IS_ENDORSED_BIT: i64 = 1 << 14;
+
+    /// Bit 15 of `operational_bitmap` — contested flag.
+    ///
+    /// Set when the `ext` ledger holds BOTH a model endorsement and a
+    /// model objection: genuine model disagreement, the most user-worthy
+    /// review-queue position. Mirrors Swift `Tunnel.isContestedBit`.
+    pub const IS_CONTESTED_BIT: i64 = 1 << 15;
+
+    /// True when at least one model reviewer endorsed this proposed
+    /// tunnel (bit 14).
+    pub fn is_endorsed(&self) -> bool {
+        self.operational_bitmap & Self::IS_ENDORSED_BIT != 0
+    }
+
+    /// True when the ledger holds both a model endorsement and a model
+    /// objection (bit 15).
+    pub fn is_contested(&self) -> bool {
+        self.operational_bitmap & Self::IS_CONTESTED_BIT != 0
+    }
+
+    /// Return a copy with the endorsed bit (14) set. Lifecycle bits are
+    /// NOT touched — an endorsed tunnel stays `Proposed`; acceptance is
+    /// the user's alone. Mirrors Swift `Tunnel.withEndorsed()`.
+    pub fn with_endorsed(&self) -> Tunnel {
+        let mut copy = self.clone();
+        copy.operational_bitmap |= Self::IS_ENDORSED_BIT;
+        copy
+    }
+
+    /// Return a copy with the contested bit (15) set. The endorsed bit is
+    /// left as-is — a contested tunnel IS endorsed by someone; contested
+    /// marks the disagreement, it does not erase the endorsement.
+    /// Mirrors Swift `Tunnel.withContested()`.
+    pub fn with_contested(&self) -> Tunnel {
+        let mut copy = self.clone();
+        copy.operational_bitmap |= Self::IS_CONTESTED_BIT;
+        copy
+    }
+
     /// Return a copy of this tunnel with lifecycle bits 3–5 rewritten to
     /// `lifecycle`. Used by `DrawerStore::respond_to_tunnel` to move a
     /// `Proposed` tunnel to `Active` (accepted) or `Withdrawn` (rejected).
@@ -549,6 +608,53 @@ mod tests {
     fn is_retired_bit_matches_swift_constant() {
         // Swift: isRetiredBit = 1 << 13 = 8192. Rust must agree.
         assert_eq!(Tunnel::IS_RETIRED_BIT, 8192);
+    }
+
+    // ─── Review-ladder accessor tests (bits 14/15, MXE-CT3) ──
+
+    #[test]
+    fn is_endorsed_defaults_false_and_bit_is_fourteen() {
+        assert!(!t_with(0).is_endorsed(), "fresh tunnel is not endorsed");
+        assert_eq!(Tunnel::IS_ENDORSED_BIT, 1 << 14);
+        let endorsed = t_with(0).with_endorsed();
+        assert!(endorsed.is_endorsed());
+        assert_eq!(endorsed.operational_bitmap & (1 << 14), 1 << 14);
+    }
+
+    #[test]
+    fn is_contested_defaults_false_and_bit_is_fifteen() {
+        assert!(!t_with(0).is_contested(), "fresh tunnel is not contested");
+        assert_eq!(Tunnel::IS_CONTESTED_BIT, 1 << 15);
+        let contested = t_with(0).with_contested();
+        assert!(contested.is_contested());
+        assert_eq!(contested.operational_bitmap & (1 << 15), 1 << 15);
+    }
+
+    #[test]
+    fn endorsed_and_contested_do_not_disturb_other_bits() {
+        // direction=bidirectional, lifecycle=proposed, retired set.
+        let bits: i64 = 1 | (1 << 3) | (1 << 13);
+        let t = t_with(bits).with_endorsed().with_contested();
+        assert_eq!(t.direction(), TunnelDirection::Bidirectional);
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Proposed);
+        assert!(t.is_retired());
+        assert!(t.is_endorsed());
+        assert!(t.is_contested());
+        // Clearing either bit restores exactly the prior bitmap and
+        // does not disturb its sibling (quad "clear" leg).
+        let mut cleared = t.clone();
+        cleared.operational_bitmap &= !Tunnel::IS_ENDORSED_BIT;
+        assert!(!cleared.is_endorsed());
+        assert!(cleared.is_contested());
+        assert_eq!(cleared.operational_bitmap & bits, bits);
+    }
+
+    #[test]
+    fn with_endorsed_does_not_touch_lifecycle() {
+        // Endorsed is NOT a lifecycle case — a proposed tunnel stays
+        // proposed through endorsement (only the user activates).
+        let proposed = t_with(1 << 3);
+        assert_eq!(proposed.with_endorsed().lifecycle(), TunnelLifecycle::Proposed);
     }
 
     // ─── Provenance accessor tests ──────────

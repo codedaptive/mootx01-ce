@@ -3225,7 +3225,7 @@ impl DrawerStore for DrawerStoreCore {
         &self,
         tunnel_id: &str,
         accept: bool,
-        _changed_by: &str,
+        changed_by: &str,
         _reason: Option<&str>,
         _now: i64,
     ) -> Result<(), LocusKitError> {
@@ -3245,8 +3245,60 @@ impl DrawerStore for DrawerStoreCore {
         } else {
             TunnelLifecycle::Withdrawn
         });
+        // Reviewer identity on every transition (MXE-CT3 review ladder):
+        // record `changed_by` into the ext ledger's reviewedBy. Tolerant
+        // of unknown ext tenants; fail-loud on corruption. Mirrors Swift
+        // `DrawerStore.respondToTunnel`.
+        let mut ledger =
+            crate::tunnel_review_ledger::TunnelReviewLedger::parse(existing.ext.as_deref())?;
+        ledger.record_review(changed_by);
         let mut vals = std::collections::BTreeMap::new();
         vals.insert("operationalBitmap".to_string(), TypedValue::Bitmap(reviewed.operational_bitmap));
+        vals.insert(
+            "ext".to_string(),
+            ledger
+                .serialized()
+                .map(|s| TypedValue::Json(s.into_bytes()))
+                .unwrap_or(TypedValue::Null),
+        );
+        self.storage
+            .row_store()
+            .update(
+                T_TUNNELS,
+                vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "id"),
+                    TypedValue::Text(tunnel_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    /// Persist a review-ladder state change: `operational_bitmap` (the
+    /// endorsed/contested/lifecycle bits) and the `ext` review ledger, in
+    /// one update. Write primitive behind the GLK endorsement verbs —
+    /// LocusKit owns the column, GLK owns the review policy. Mirrors
+    /// Swift `DrawerStore.stampTunnelReview(id:operationalBitmap:ext:)`.
+    fn stamp_tunnel_review(
+        &self,
+        tunnel_id: &str,
+        operational_bitmap: i64,
+        ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        // Verify the tunnel exists first so we can return TunnelNotFound.
+        let _ = self.get_tunnel(tunnel_id)?
+            .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert(
+            "operationalBitmap".to_string(),
+            TypedValue::Bitmap(operational_bitmap),
+        );
+        vals.insert(
+            "ext".to_string(),
+            ext.map(|s| TypedValue::Json(s.as_bytes().to_vec()))
+                .unwrap_or(TypedValue::Null),
+        );
         self.storage
             .row_store()
             .update(
@@ -5626,6 +5678,14 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<(), LocusKitError> {
         self.inner.stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
     }
+    fn stamp_tunnel_review(
+        &self,
+        tunnel_id: &str,
+        operational_bitmap: i64,
+        ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        self.inner.stamp_tunnel_review(tunnel_id, operational_bitmap, ext)
+    }
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.outline_children(parent_drawer_id)
     }
@@ -6231,6 +6291,15 @@ fn tunnel_values(t: &Tunnel) -> BTreeMap<String, TypedValue> {
             .map(TypedValue::Float)
             .unwrap_or(TypedValue::Null),
     );
+    // Forward-compat JSON slot (review ledger, MXE-CT3). Bound as Json
+    // bytes; the SQLite backend stores json columns as BLOB.
+    m.insert(
+        "ext".to_string(),
+        t.ext
+            .as_ref()
+            .map(|s| TypedValue::Json(s.as_bytes().to_vec()))
+            .unwrap_or(TypedValue::Null),
+    );
     m
 }
 
@@ -6676,6 +6745,24 @@ fn tunnel_from_row(row: &StorageRow) -> Tunnel {
         tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
         removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
         order_key: opt_float_value_of(row.get("order_key")),
+        // SQLite read-back primitive decode: json columns come back as
+        // Json (BLOB storage), but legacy TEXT writes and the InMemory
+        // backend can surface Text — tolerate both (house discipline).
+        ext: opt_json_string_of(row.get("ext")),
+    }
+}
+
+/// Decode a nullable JSON column into its String form, tolerating every
+/// representation a backend can hand back: `Json` bytes (the SQLite
+/// BLOB path), `Text` (legacy TEXT storage / InMemory), and `Blob` (raw
+/// bytes). NULL/absent yields `None`. Mirrors Swift
+/// `DrawerStore.optJSONString`.
+fn opt_json_string_of(v: Option<&TypedValue>) -> Option<String> {
+    match v {
+        Some(TypedValue::Json(d)) => String::from_utf8(d.clone()).ok(),
+        Some(TypedValue::Text(s)) => Some(s.clone()),
+        Some(TypedValue::Blob(d)) => String::from_utf8(d.clone()).ok(),
+        _ => None,
     }
 }
 

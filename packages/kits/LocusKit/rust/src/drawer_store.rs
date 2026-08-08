@@ -1134,6 +1134,23 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Persist a review-ladder state change: `operational_bitmap` (the
+    /// endorsed/contested/lifecycle bits) and the `ext` review ledger, in
+    /// one update (MXE-CT3). Write primitive behind the GLK endorsement
+    /// verbs. Returns `TunnelNotFound` when the tunnel does not exist.
+    ///
+    /// Mirrors Swift `DrawerStore.stampTunnelReview(id:operationalBitmap:ext:)`.
+    fn stamp_tunnel_review(
+        &self,
+        _tunnel_id: &str,
+        _operational_bitmap: i64,
+        _ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "stamp_tunnel_review not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------
     // Outline helpers (node-tree integrity, NT-L5)
     // -----------------------------------------------------------------
@@ -2593,5 +2610,13 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         adj_bitmap: i64,
     ) -> Result<(), LocusKitError> {
         self.as_ref().stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
+    }
+    fn stamp_tunnel_review(
+        &self,
+        tunnel_id: &str,
+        operational_bitmap: i64,
+        ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().stamp_tunnel_review(tunnel_id, operational_bitmap, ext)
     }
 }

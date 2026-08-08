@@ -112,6 +112,14 @@ pub struct Tunnel {
     ///. Siblings under the same parent sort by
     /// ascending `order_key`. `None` for non-parent tunnel kinds.
     pub order_key: Option<f64>,
+
+    /// Forward-compat JSON extension slot (nullable `ext` column). MXE-CT3
+    /// P2.5 is the first consumer: the review-ladder endorsement ledger
+    /// lives here as canonical JSON (see `tunnel_review_ledger`). `None`
+    /// for tunnels that have never carried a review record. Decoded
+    /// tolerantly from `Json`/`Text` read-back; unknown keys inside the
+    /// JSON are preserved on rewrite. Mirrors Swift `Tunnel.ext`.
+    pub ext: Option<String>,
 }
 
 impl Tunnel {
@@ -152,6 +160,7 @@ impl Tunnel {
             tombstoned_at: None,
             removed_by_batch: None,
             order_key: None,
+            ext: None,
         }
     }
 
@@ -188,6 +197,7 @@ impl PartialEq for Tunnel {
             && self.tombstoned_at == other.tombstoned_at
             && self.removed_by_batch == other.removed_by_batch
             && self.order_key.map(f64::to_bits) == other.order_key.map(f64::to_bits)
+            && self.ext == other.ext
     }
 }
 
@@ -212,6 +222,7 @@ impl std::hash::Hash for Tunnel {
         self.tombstoned_at.hash(state);
         self.removed_by_batch.hash(state);
         self.order_key.map(f64::to_bits).hash(state);
+        self.ext.hash(state);
     }
 }
 
@@ -244,6 +255,7 @@ mod tests {
         assert_eq!(t.tombstoned_at, None);
         assert_eq!(t.removed_by_batch, None);
         assert_eq!(t.order_key, None);
+        assert_eq!(t.ext, None);
     }
 
     #[test]

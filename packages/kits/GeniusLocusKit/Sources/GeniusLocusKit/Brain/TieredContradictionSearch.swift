@@ -31,8 +31,11 @@
 // estate. Tier 1 reads the typed sweep, which is its own pure read.
 //
 // This surface is read-and-report ONLY: no tunnel proposals, no
-// writes, no lifecycle transitions (the review ladder is a later
-// wave's mission). Rust twin: rust/src/brain/tiered_contradiction_search.rs
+// writes, no lifecycle transitions. The WRITE half lives in
+// ConflictTunnelLifecycle.swift (`proposeConflictTunnels` files
+// tier-labeled proposals out of the same `lexicalTierScan` pass) and
+// TunnelReviewLadder.swift (the P2.5 endorse/object review ladder).
+// Rust twin: rust/src/brain/tiered_contradiction_search.rs
 // (pure core) + the coordinator's `tiered_contradiction_search` seam.
 
 import Foundation
@@ -533,83 +536,21 @@ public extension GeniusLocusKit {
         }
 
         // ---- Tiers 2/3: ONE shared lexical retrieval pass ----
-        var tier2Ranked: [TierFinding] = []
-        var tier3Ranked: [TierFinding] = []
-        var tier2Candidates = 0
-        var tier3Candidates = 0
-        var probesScanned = 0
-        var vectorStoreAvailable = true
+        // Factored into `lexicalTierScan` (below) so the P2.5 tier-2/3
+        // proposal filing in `proposeConflictTunnels` classifies out of
+        // the IDENTICAL pass — one retrieval, one cue screen, two
+        // consumers.
+        var scan = LexicalLaneScan.empty
         if runLexical {
-            // Same retrieval the hunter runs (probe sampling + kNN lane
-            // + BM25 corpus lane), executed ONCE — both lexical tiers
-            // classify out of this single candidate set. Proximity uses
-            // the hunter's same 64 default (the cue screen is the
-            // precision gate; proximity only bounds the candidate set).
-            let candidates = try await contradictionCandidatePairs(
-                in: handle, modelID: modelID, probeLimit: probeLimit,
-                proximityThreshold: 64)
-            vectorStoreAvailable = candidates.vectorStoreAvailable
-            probesScanned = candidates.probeIDs.count
-
-            // Batched late hydration through the hunter's same gated
-            // seam: load every candidate body once.
-            let estate = try estate(for: handle)
-            let allIDs = Array(Set(candidates.pairs.flatMap { [$0.a, $0.b] }))
-            var drawersByID: [String: Drawer] = [:]
-            if !allIDs.isEmpty {
-                for drawer in try await estate.hydrateBodies(ids: allIDs) {
-                    drawersByID[drawer.id] = drawer
-                }
-            }
-
-            for pair in candidates.pairs {
-                guard let a = drawersByID[pair.a], let b = drawersByID[pair.b],
-                      a.tombstonedAt == nil, b.tombstonedAt == nil else { continue }
-                // Match BitmapEvaluator's default recall posture: callers
-                // without an explicit sensitivity grant may only mine the Normal
-                // tier (normal + elevated). Restricted/secret rows must not be
-                // screened, proposed, or echoed as borderline snippets.
-                guard a.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue,
-                      b.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue
-                else { continue }
-
-                let cue = ConflictCue.evaluate(a.content, b.content)
-                // P1's classifier: structural cues → tier 2, value
-                // divergence → tier 3, none → nil. The lexical screen
-                // never yields tier 1 (proof is the typed lane's job),
-                // so an unexpected mapping is dropped rather than
-                // misfiled.
-                guard let cueTier = cue.kind.contradictionTier,
-                      let tierClass = ContradictionTier(rawValue: cueTier),
-                      tierClass != .typedProven else { continue }
-
-                let ordered = TieredContradictionCore.orderedPair(a.id, b.id)
-                let first = drawersByID[ordered.a] ?? a
-                let second = drawersByID[ordered.b] ?? b
-                let finding = TierFinding(
-                    tier: tierClass,
-                    pairKey: TieredContradictionCore.pairKey(a.id, b.id),
-                    drawerA: ordered.a,
-                    drawerB: ordered.b,
-                    cueKind: cue.kind.rawValue,
-                    ruleID: nil,
-                    score: cue.score,
-                    sourceSnippet: String(first.content.prefix(Self.huntSnippetLimit)),
-                    targetSnippet: String(second.content.prefix(Self.huntSnippetLimit)),
-                    resultID: nil,
-                    coordinateDigest: nil,
-                    sensitivityCeilingRaw: nil)
-                switch tierClass {
-                case .lexicalStructural: tier2Ranked.append(finding)
-                case .lexicalValue: tier3Ranked.append(finding)
-                case .typedProven: break // unreachable per the guard above
-                }
-            }
-            tier2Candidates = tier2Ranked.count
-            tier3Candidates = tier3Ranked.count
-            tier2Ranked = TieredContradictionCore.rankLexical(tier2Ranked)
-            tier3Ranked = TieredContradictionCore.rankLexical(tier3Ranked)
+            scan = try await lexicalTierScan(
+                in: handle, modelID: modelID, probeLimit: probeLimit)
         }
+        let tier2Ranked = scan.tier2Ranked
+        let tier3Ranked = scan.tier3Ranked
+        let tier2Candidates = scan.tier2Candidates
+        let tier3Candidates = scan.tier3Candidates
+        let probesScanned = scan.probesScanned
+        let vectorStoreAvailable = scan.vectorStoreAvailable
         let tier2Fetched = Array(tier2Ranked.prefix(
             TieredContradictionCore.fetchBudget(for: .lexicalStructural, topK: effectiveK)))
         let tier3Fetched = Array(tier3Ranked.prefix(
@@ -665,5 +606,111 @@ public extension GeniusLocusKit {
                 tier3Counts: requested == .lexicalValue ? laneCounts : .zero,
                 diagnostics: diagnostics)
         }
+    }
+}
+
+// MARK: - Shared lexical lane scan
+
+/// One lexical retrieval pass's classified output — the tier-2/3 half
+/// of the tiered search, factored so `tieredContradictionSearch` (the
+/// read verb) and `proposeConflictTunnels` (the P2.5 filing pass)
+/// consume the IDENTICAL retrieval + cue screen. `tier2Ranked` /
+/// `tier3Ranked` are ranked (`rankLexical`) and UNCAPPED — each
+/// consumer applies its own fetch budget.
+internal struct LexicalLaneScan: Sendable {
+    let vectorStoreAvailable: Bool
+    let probesScanned: Int
+    /// Qualifying candidates seen per lane BEFORE any cap.
+    let tier2Candidates: Int
+    let tier3Candidates: Int
+    let tier2Ranked: [TierFinding]
+    let tier3Ranked: [TierFinding]
+
+    static let empty = LexicalLaneScan(
+        vectorStoreAvailable: true, probesScanned: 0,
+        tier2Candidates: 0, tier3Candidates: 0,
+        tier2Ranked: [], tier3Ranked: [])
+}
+
+internal extension GeniusLocusKit {
+
+    /// Run the shared lexical retrieval pass and classify candidates
+    /// into tier-2/3 findings. Same retrieval the hunter runs (probe
+    /// sampling + kNN lane + BM25 corpus lane), executed ONCE — both
+    /// lexical tiers classify out of this single candidate set.
+    /// Proximity uses the hunter's same 64 default (the cue screen is
+    /// the precision gate; proximity only bounds the candidate set).
+    /// Rust twin: `EstateCoordinator::lexical_tier_scan`.
+    func lexicalTierScan(
+        in handle: EstateHandle,
+        modelID: String,
+        probeLimit: Int
+    ) async throws -> LexicalLaneScan {
+        let candidates = try await contradictionCandidatePairs(
+            in: handle, modelID: modelID, probeLimit: probeLimit,
+            proximityThreshold: 64)
+
+        // Batched late hydration through the hunter's same gated seam:
+        // load every candidate body once.
+        let estate = try estate(for: handle)
+        let allIDs = Array(Set(candidates.pairs.flatMap { [$0.a, $0.b] }))
+        var drawersByID: [String: Drawer] = [:]
+        if !allIDs.isEmpty {
+            for drawer in try await estate.hydrateBodies(ids: allIDs) {
+                drawersByID[drawer.id] = drawer
+            }
+        }
+
+        var tier2: [TierFinding] = []
+        var tier3: [TierFinding] = []
+        for pair in candidates.pairs {
+            guard let a = drawersByID[pair.a], let b = drawersByID[pair.b],
+                  a.tombstonedAt == nil, b.tombstonedAt == nil else { continue }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            guard a.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue,
+                  b.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue
+            else { continue }
+
+            let cue = ConflictCue.evaluate(a.content, b.content)
+            // P1's classifier: structural cues → tier 2, value
+            // divergence → tier 3, none → nil. The lexical screen never
+            // yields tier 1 (proof is the typed lane's job), so an
+            // unexpected mapping is dropped rather than misfiled.
+            guard let cueTier = cue.kind.contradictionTier,
+                  let tierClass = ContradictionTier(rawValue: cueTier),
+                  tierClass != .typedProven else { continue }
+
+            let ordered = TieredContradictionCore.orderedPair(a.id, b.id)
+            let first = drawersByID[ordered.a] ?? a
+            let second = drawersByID[ordered.b] ?? b
+            let finding = TierFinding(
+                tier: tierClass,
+                pairKey: TieredContradictionCore.pairKey(a.id, b.id),
+                drawerA: ordered.a,
+                drawerB: ordered.b,
+                cueKind: cue.kind.rawValue,
+                ruleID: nil,
+                score: cue.score,
+                sourceSnippet: String(first.content.prefix(Self.huntSnippetLimit)),
+                targetSnippet: String(second.content.prefix(Self.huntSnippetLimit)),
+                resultID: nil,
+                coordinateDigest: nil,
+                sensitivityCeilingRaw: nil)
+            switch tierClass {
+            case .lexicalStructural: tier2.append(finding)
+            case .lexicalValue: tier3.append(finding)
+            case .typedProven: break // unreachable per the guard above
+            }
+        }
+        return LexicalLaneScan(
+            vectorStoreAvailable: candidates.vectorStoreAvailable,
+            probesScanned: candidates.probeIDs.count,
+            tier2Candidates: tier2.count,
+            tier3Candidates: tier3.count,
+            tier2Ranked: TieredContradictionCore.rankLexical(tier2),
+            tier3Ranked: TieredContradictionCore.rankLexical(tier3))
     }
 }

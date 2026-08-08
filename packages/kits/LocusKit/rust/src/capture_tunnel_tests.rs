@@ -461,3 +461,110 @@ fn review_guards_reject_active_and_unknown() {
         .unwrap_err();
     assert!(matches!(err, LocusKitError::TunnelNotFound { .. }));
 }
+
+// ─── MXE-CT3 P2.5 — ext review ledger + review-ladder store tests ───
+// (These reuse the proposed-lifecycle `proposed_frame()` helper above.)
+
+#[test]
+fn ext_round_trips_through_the_store() {
+    let (estate, store) = make_estate_with_store();
+    let captured = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+    assert_eq!(captured.ext, None, "fresh tunnels carry no ext");
+
+    // Stamp a ledger and reload — ext and bits survive the round-trip.
+    let mut ledger = crate::tunnel_review_ledger::TunnelReviewLedger::new();
+    ledger.record_endorsement("claude", "2026-08-07T12:00:00Z", 2);
+    let stamped = captured.with_endorsed();
+    store
+        .stamp_tunnel_review(
+            &captured.id,
+            stamped.operational_bitmap,
+            ledger.serialized().as_deref(),
+        )
+        .unwrap();
+    let loaded = store.get_tunnel(&captured.id).unwrap().unwrap();
+    assert!(loaded.is_endorsed());
+    assert!(!loaded.is_contested());
+    assert_eq!(loaded.lifecycle(), TunnelLifecycle::Proposed);
+    let reparsed =
+        crate::tunnel_review_ledger::TunnelReviewLedger::parse(loaded.ext.as_deref()).unwrap();
+    assert_eq!(reparsed.distinct_endorser_count(), 1);
+    assert_eq!(reparsed.endorsements[0].by, "claude");
+    // Reopen after reload: the reparsed ledger accepts further votes
+    // and serializes identically to a fresh continuation.
+    let mut continued = reparsed;
+    assert!(continued.record_endorsement("apple-onboard", "2026-08-07T13:00:00Z", 2));
+    assert_eq!(continued.distinct_endorser_count(), 2);
+}
+
+#[test]
+fn respond_to_tunnel_records_reviewer_identity_in_ext() {
+    let (estate, store) = make_estate_with_store();
+    // Reject path.
+    let rejected = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+    estate
+        .respond_to_tunnel(&rejected.id, false, "bob", None, NOW + 1)
+        .unwrap();
+    let loaded = store.get_tunnel(&rejected.id).unwrap().unwrap();
+    assert_eq!(loaded.lifecycle(), TunnelLifecycle::Withdrawn);
+    let ledger =
+        crate::tunnel_review_ledger::TunnelReviewLedger::parse(loaded.ext.as_deref()).unwrap();
+    assert_eq!(ledger.reviewed_by.as_deref(), Some("bob"));
+    assert!(ledger.objections.is_empty(), "user rejection carries no objection entry");
+
+    // Accept path records identity too (reviewer identity on EVERY
+    // transition) and semantics are unchanged.
+    let accepted = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+    estate
+        .respond_to_tunnel(&accepted.id, true, "bob", None, NOW + 1)
+        .unwrap();
+    let loaded = store.get_tunnel(&accepted.id).unwrap().unwrap();
+    assert_eq!(loaded.lifecycle(), TunnelLifecycle::Active);
+    let ledger =
+        crate::tunnel_review_ledger::TunnelReviewLedger::parse(loaded.ext.as_deref()).unwrap();
+    assert_eq!(ledger.reviewed_by.as_deref(), Some("bob"));
+}
+
+#[test]
+fn respond_to_tunnel_preserves_unknown_ext_tenants() {
+    let (estate, store) = make_estate_with_store();
+    let t = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+    // Another tenant wrote to ext before review.
+    store
+        .stamp_tunnel_review(&t.id, t.operational_bitmap, Some("{\"zFuture\":{\"keep\":true}}"))
+        .unwrap();
+    estate
+        .respond_to_tunnel(&t.id, false, "bob", None, NOW + 1)
+        .unwrap();
+    let loaded = store.get_tunnel(&t.id).unwrap().unwrap();
+    assert_eq!(
+        loaded.ext.as_deref(),
+        Some("{\"reviewedBy\":\"bob\",\"zFuture\":{\"keep\":true}}")
+    );
+}
+
+#[test]
+fn respond_to_tunnel_fails_loud_on_corrupt_ext() {
+    let (estate, store) = make_estate_with_store();
+    let t = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+    store
+        .stamp_tunnel_review(&t.id, t.operational_bitmap, Some("not json {"))
+        .unwrap();
+    let err = estate
+        .respond_to_tunnel(&t.id, false, "bob", None, NOW + 1)
+        .unwrap_err();
+    assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    // The corrupt ext was NOT silently overwritten.
+    let loaded = store.get_tunnel(&t.id).unwrap().unwrap();
+    assert_eq!(loaded.ext.as_deref(), Some("not json {"));
+    assert_eq!(loaded.lifecycle(), TunnelLifecycle::Proposed);
+}
+
+#[test]
+fn stamp_tunnel_review_unknown_tunnel_is_not_found() {
+    let (_estate, store) = make_estate_with_store();
+    let err = store
+        .stamp_tunnel_review("no-such-tunnel", 0, None)
+        .unwrap_err();
+    assert!(matches!(err, LocusKitError::TunnelNotFound { .. }));
+}

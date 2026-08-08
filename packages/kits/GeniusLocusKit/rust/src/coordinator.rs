@@ -680,6 +680,115 @@ pub struct DreamingItem {
 /// `GeniusLocusKit.huntSnippetLimit`.
 pub const HUNT_SNIPPET_LIMIT: usize = 160;
 
+/// One lexical retrieval pass's classified output — the tier-2/3 half
+/// of the tiered search, factored so `tiered_contradiction_search` (the
+/// read verb) and `propose_conflict_tunnels` (the P2.5 filing pass)
+/// consume the IDENTICAL retrieval + cue screen. `tier2_ranked` /
+/// `tier3_ranked` are ranked (`rank_lexical`) and UNCAPPED — each
+/// consumer applies its own fetch budget. Mirrors Swift
+/// `LexicalLaneScan` (TieredContradictionSearch.swift).
+struct LexicalLaneScan {
+    vector_store_available: bool,
+    probes_scanned: usize,
+    /// Qualifying candidates seen per lane BEFORE any cap.
+    tier2_candidates: usize,
+    tier3_candidates: usize,
+    tier2_ranked: Vec<crate::brain::tiered_contradiction_search::TierFinding>,
+    tier3_ranked: Vec<crate::brain::tiered_contradiction_search::TierFinding>,
+}
+
+impl LexicalLaneScan {
+    fn empty() -> Self {
+        LexicalLaneScan {
+            vector_store_available: true,
+            probes_scanned: 0,
+            tier2_candidates: 0,
+            tier3_candidates: 0,
+            tier2_ranked: Vec::new(),
+            tier3_ranked: Vec::new(),
+        }
+    }
+}
+
+/// Mutable dedup state threaded through one `propose_conflict_tunnels`
+/// pass. Mirrors Swift `GeniusLocusKit.ProposalFilingState`.
+struct ConflictFilingState {
+    /// Pairs with a live (active/proposed) claim — pre-existing OR
+    /// filed earlier in THIS pass.
+    live_pairs: std::collections::HashSet<String>,
+    /// Withdrawn history per pair within the matrix label families.
+    withdrawn_by_pair: std::collections::HashMap<String, Vec<(u8, String)>>,
+    /// Live-pair + decline-matrix suppressions, all tiers.
+    suppressed: usize,
+}
+
+/// Shared filing step for every tier: decline-matrix check, endpoint
+/// resolution (never file fabricated coordinates), capture as Proposed.
+/// Returns the new tunnel id, or `None` when the filing was suppressed
+/// or its endpoints could not resolve. Mirrors Swift
+/// `GeniusLocusKit.fileProposal`.
+#[allow(clippy::too_many_arguments)]
+fn file_conflict_proposal(
+    estate: &Estate,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+    drawers_by_id: &std::collections::HashMap<&str, &locus_kit::drawer::Drawer>,
+    state: &mut ConflictFilingState,
+    pair: String,
+    a: &str,
+    b: &str,
+    tier: u8,
+    renewal_key: &str,
+    label: String,
+    now: i64,
+) -> Result<Option<String>, locus_kit::error::LocusKitError> {
+    use crate::brain::conflict_projection_sweep::decline_matrix_suppresses;
+    use locus_kit::frames::TunnelCaptureFrame;
+    use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+
+    if state.live_pairs.contains(&pair) {
+        state.suppressed += 1;
+        return Ok(None);
+    }
+    if decline_matrix_suppresses(
+        tier,
+        renewal_key,
+        state.withdrawn_by_pair.get(&pair).map(Vec::as_slice).unwrap_or(&[]),
+    ) {
+        state.suppressed += 1;
+        return Ok(None);
+    }
+    // Endpoint coordinates from the node tree — skip rather than file
+    // fabricated coordinates (hunter posture).
+    let (Some(da), Some(db)) = (drawers_by_id.get(a), drawers_by_id.get(b)) else {
+        return Ok(None);
+    };
+    let (Some((a_wing, a_room)), Some((b_wing, b_room))) = (
+        node_names.get(&da.parent_node_id),
+        node_names.get(&db.parent_node_id),
+    ) else {
+        return Ok(None);
+    };
+    let mut frame = TunnelCaptureFrame::new(
+        a_wing.clone(),
+        a_room.clone(),
+        b_wing.clone(),
+        b_room.clone(),
+        label,
+        "conflict-projection",
+    );
+    frame.source_drawer_id = Some(a.to_string());
+    frame.target_drawer_id = Some(b.to_string());
+    frame.kind = TunnelKind::Contradicts;
+    frame.origin_class = TunnelOriginClass::Derived;
+    frame.lifecycle = TunnelLifecycle::Proposed;
+    let tunnel = estate.capture_tunnel(frame, now)?;
+    // Filing order is tier 1 → 2 → 3, so inserting here also suppresses
+    // same-pair filings at the lower tiers of THIS pass — the claim just
+    // went on the books.
+    state.live_pairs.insert(pair);
+    Ok(Some(tunnel.id))
+}
+
 /// A `contradicts` tunnel the hunter proposed this pass. Rust mirror of
 /// Swift `ProposedContradiction`.
 #[derive(Debug, Clone, PartialEq)]
@@ -4166,11 +4275,10 @@ impl EstateCoordinator {
         VerbDispatchError,
     > {
         use crate::brain::tiered_contradiction_search::{
-            assemble_synthesis, effective_top_k, ordered_pair, rank_and_trim_tier1,
-            rank_lexical, tiered_pair_key, ContradictionTier, TierFinding, TierLaneCounts,
-            TieredContradictionReport, TieredSearchDiagnostics, TieredSearchMode,
+            assemble_synthesis, effective_top_k, rank_and_trim_tier1, ContradictionTier,
+            TierFinding, TierLaneCounts, TieredContradictionReport, TieredSearchDiagnostics,
+            TieredSearchMode,
         };
-        use substrate_ml::conflict_cue;
 
         let mode = tier
             .map(TieredSearchMode::Single)
@@ -4257,107 +4365,21 @@ impl EstateCoordinator {
         }
 
         // ---- Tiers 2/3: ONE shared lexical retrieval pass ----
-        let mut tier2_all: Vec<TierFinding> = Vec::new();
-        let mut tier3_all: Vec<TierFinding> = Vec::new();
-        let mut tier2_candidates = 0usize;
-        let mut tier3_candidates = 0usize;
-        let mut probes_scanned = 0usize;
-        let mut vector_store_available = true;
-        if run_lexical {
-            match self.vector_stores.get(handle) {
-                None => vector_store_available = false,
-                Some(vector_store) => {
-                    // Same retrieval the hunter runs (probe sampling + kNN
-                    // lane + BM25 corpus lane), executed ONCE — both lexical
-                    // tiers classify out of this single candidate set.
-                    // Proximity uses the hunter's same 64 default (the cue
-                    // screen is the precision gate; proximity only bounds
-                    // the candidate set). A failed probe-source scan
-                    // degrades to an empty pass, matching the hunter.
-                    let probe_ids =
-                        vector_store.recent_item_ids(probe_limit).unwrap_or_default();
-                    probes_scanned = probe_ids.len();
-                    let candidate_pairs = self.contradiction_candidate_pairs(
-                        vector_store,
-                        &probe_ids,
-                        &drawers_by_id,
-                        model_id,
-                        64,
-                        self.corpus_kits.get(handle),
-                    );
-
-                    for (a_id, b_id) in candidate_pairs {
-                        let (a, b) = match (
-                            drawers_by_id.get(a_id.as_str()),
-                            drawers_by_id.get(b_id.as_str()),
-                        ) {
-                            (Some(a), Some(b)) => (*a, *b),
-                            _ => continue,
-                        };
-                        if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
-                            continue;
-                        }
-                        // Match BitmapEvaluator's default recall posture: callers
-                        // without an explicit sensitivity grant may only mine the Normal
-                        // tier (normal + elevated). Restricted/secret rows must not be
-                        // screened, proposed, or echoed as borderline snippets.
-                        let elevated =
-                            locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value();
-                        if a.adjective_sensitivity().raw_value() > elevated
-                            || b.adjective_sensitivity().raw_value() > elevated
-                        {
-                            continue;
-                        }
-
-                        let cue = conflict_cue::evaluate(&a.content, &b.content);
-                        // P1's classifier: structural cues → tier 2, value
-                        // divergence → tier 3, none → None. The lexical screen
-                        // never yields tier 1 (proof is the typed lane's job),
-                        // so an unexpected mapping is dropped rather than
-                        // misfiled.
-                        let tier_class = match cue
-                            .kind
-                            .contradiction_tier()
-                            .and_then(ContradictionTier::from_raw)
-                        {
-                            Some(t) if t != ContradictionTier::TypedProven => t,
-                            _ => continue,
-                        };
-
-                        let (da, db) = ordered_pair(&a.id, &b.id);
-                        let first = drawers_by_id.get(da.as_str()).copied().unwrap_or(a);
-                        let second = drawers_by_id.get(db.as_str()).copied().unwrap_or(b);
-                        let finding = TierFinding {
-                            tier: tier_class,
-                            pair_key: tiered_pair_key(&a.id, &b.id),
-                            drawer_a: da,
-                            drawer_b: db,
-                            cue_kind: Some(cue.kind.as_str().to_string()),
-                            rule_id: None,
-                            score: Some(cue.score),
-                            source_snippet: Some(
-                                first.content.chars().take(HUNT_SNIPPET_LIMIT).collect(),
-                            ),
-                            target_snippet: Some(
-                                second.content.chars().take(HUNT_SNIPPET_LIMIT).collect(),
-                            ),
-                            result_id: None,
-                            coordinate_digest: None,
-                            sensitivity_ceiling_raw: None,
-                        };
-                        match tier_class {
-                            ContradictionTier::LexicalStructural => tier2_all.push(finding),
-                            ContradictionTier::LexicalValue => tier3_all.push(finding),
-                            ContradictionTier::TypedProven => {} // unreachable per the guard
-                        }
-                    }
-                    tier2_candidates = tier2_all.len();
-                    tier3_candidates = tier3_all.len();
-                    tier2_all = rank_lexical(tier2_all);
-                    tier3_all = rank_lexical(tier3_all);
-                }
-            }
-        }
+        // Factored into `lexical_tier_scan` (below) so the P2.5 tier-2/3
+        // proposal filing in `propose_conflict_tunnels` classifies out
+        // of the IDENTICAL pass — one retrieval, one cue screen, two
+        // consumers. Mirrors Swift `lexicalTierScan`.
+        let scan = if run_lexical {
+            self.lexical_tier_scan(handle, &drawers_by_id, model_id, probe_limit)
+        } else {
+            LexicalLaneScan::empty()
+        };
+        let tier2_candidates = scan.tier2_candidates;
+        let tier3_candidates = scan.tier3_candidates;
+        let probes_scanned = scan.probes_scanned;
+        let vector_store_available = scan.vector_store_available;
+        let mut tier2_all = scan.tier2_ranked;
+        let mut tier3_all = scan.tier3_ranked;
         tier2_all.truncate(ContradictionTier::LexicalStructural.fetch_budget(effective_k));
         tier3_all.truncate(ContradictionTier::LexicalValue.fetch_budget(effective_k));
         let tier2_fetched = tier2_all;
@@ -4447,34 +4469,153 @@ impl EstateCoordinator {
         }
     }
 
-    /// Run one typed sweep and file a PROPOSED `contradicts` tunnel for
-    /// every proven finding that survives the dedup contract (DCP M5 —
-    /// mirrors Swift `proposeConflictTunnels(in:)`).
+    /// Run the shared lexical retrieval pass and classify candidates
+    /// into tier-2/3 findings. Same retrieval the hunter runs (probe
+    /// sampling + kNN lane + BM25 corpus lane), executed ONCE — both
+    /// lexical tiers classify out of this single candidate set.
+    /// Proximity uses the hunter's same 64 default (the cue screen is
+    /// the precision gate; proximity only bounds the candidate set).
+    /// A failed probe-source scan degrades to an empty pass, matching
+    /// the hunter. Ranked lists are UNCAPPED — each consumer applies
+    /// its own fetch budget. Swift twin: `lexicalTierScan`.
+    fn lexical_tier_scan(
+        &self,
+        handle: &EstateHandle,
+        drawers_by_id: &std::collections::HashMap<&str, &locus_kit::drawer::Drawer>,
+        model_id: &str,
+        probe_limit: usize,
+    ) -> LexicalLaneScan {
+        use crate::brain::tiered_contradiction_search::{
+            ordered_pair, rank_lexical, tiered_pair_key, ContradictionTier, TierFinding,
+        };
+        use substrate_ml::conflict_cue;
+
+        let Some(vector_store) = self.vector_stores.get(handle) else {
+            return LexicalLaneScan {
+                vector_store_available: false,
+                ..LexicalLaneScan::empty()
+            };
+        };
+        let probe_ids = vector_store.recent_item_ids(probe_limit).unwrap_or_default();
+        let probes_scanned = probe_ids.len();
+        let candidate_pairs = self.contradiction_candidate_pairs(
+            vector_store,
+            &probe_ids,
+            drawers_by_id,
+            model_id,
+            64,
+            self.corpus_kits.get(handle),
+        );
+
+        let mut tier2: Vec<TierFinding> = Vec::new();
+        let mut tier3: Vec<TierFinding> = Vec::new();
+        for (a_id, b_id) in candidate_pairs {
+            let (a, b) = match (
+                drawers_by_id.get(a_id.as_str()),
+                drawers_by_id.get(b_id.as_str()),
+            ) {
+                (Some(a), Some(b)) => (*a, *b),
+                _ => continue,
+            };
+            if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
+                continue;
+            }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            let elevated = locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value();
+            if a.adjective_sensitivity().raw_value() > elevated
+                || b.adjective_sensitivity().raw_value() > elevated
+            {
+                continue;
+            }
+
+            let cue = conflict_cue::evaluate(&a.content, &b.content);
+            // P1's classifier: structural cues → tier 2, value
+            // divergence → tier 3, none → None. The lexical screen
+            // never yields tier 1 (proof is the typed lane's job), so
+            // an unexpected mapping is dropped rather than misfiled.
+            let tier_class = match cue
+                .kind
+                .contradiction_tier()
+                .and_then(ContradictionTier::from_raw)
+            {
+                Some(t) if t != ContradictionTier::TypedProven => t,
+                _ => continue,
+            };
+
+            let (da, db) = ordered_pair(&a.id, &b.id);
+            let first = drawers_by_id.get(da.as_str()).copied().unwrap_or(a);
+            let second = drawers_by_id.get(db.as_str()).copied().unwrap_or(b);
+            let finding = TierFinding {
+                tier: tier_class,
+                pair_key: tiered_pair_key(&a.id, &b.id),
+                drawer_a: da,
+                drawer_b: db,
+                cue_kind: Some(cue.kind.as_str().to_string()),
+                rule_id: None,
+                score: Some(cue.score),
+                source_snippet: Some(first.content.chars().take(HUNT_SNIPPET_LIMIT).collect()),
+                target_snippet: Some(second.content.chars().take(HUNT_SNIPPET_LIMIT).collect()),
+                result_id: None,
+                coordinate_digest: None,
+                sensitivity_ceiling_raw: None,
+            };
+            match tier_class {
+                ContradictionTier::LexicalStructural => tier2.push(finding),
+                ContradictionTier::LexicalValue => tier3.push(finding),
+                ContradictionTier::TypedProven => {} // unreachable per the guard
+            }
+        }
+        LexicalLaneScan {
+            vector_store_available: true,
+            probes_scanned,
+            tier2_candidates: tier2.len(),
+            tier3_candidates: tier3.len(),
+            tier2_ranked: rank_lexical(tier2),
+            tier3_ranked: rank_lexical(tier3),
+        }
+    }
+
+    /// Run one typed sweep PLUS the shared lexical pass and file
+    /// PROPOSED `contradicts` tunnels at every tier that survives the
+    /// decline matrix (DCP M5 + MXE-CT3 P2.5 — mirrors Swift
+    /// `proposeConflictTunnels(in:registry:modelID:probeLimit:lexicalTopK:now:)`;
+    /// see ConflictTunnelLifecycle.swift's header for the full ladder,
+    /// label-family, and decline-matrix contracts).
     ///
-    /// Dedup contract (F14/F15): any live (active or proposed)
-    /// contradicts tunnel between the pair suppresses; a WITHDRAWN
-    /// typed proposal suppresses only the SAME rule@version (rejection
-    /// durable, F14) — a registry version bump files a NEW instance
-    /// (F15); a withdrawn LEXICAL (hunter) tunnel does not suppress a
-    /// typed proof. `now` is epoch milliseconds.
+    /// `model_id` / `probe_limit` parameterize the lexical retrieval
+    /// (same contract as `tiered_contradiction_search`); `lexical_top_k`
+    /// is the per-lane filing budget for tiers 2/3 (clamped by
+    /// `effective_top_k`, expanded by the lane fetch budgets; 0 disables
+    /// lexical filing). `now` is epoch milliseconds.
     ///
     /// Sensitivity ceiling: a proven finding whose endpoint sensitivity
     /// ceiling exceeds Elevated is never proposed — the same policy, the
     /// same raw-value comparison, and the same position ahead of the dedup
     /// check that the lexical hunter applies before it screens a pair.
     /// Ceiling skips are counted apart from dedup suppressions so the
-    /// gate's activity is visible in the report.
+    /// gate's activity is visible in the report. The lexical lanes apply
+    /// the same ceiling per-endpoint inside `lexical_tier_scan`.
     pub fn propose_conflict_tunnels(
         &self,
         handle: &EstateHandle,
+        model_id: &str,
+        probe_limit: usize,
+        lexical_top_k: usize,
         now: i64,
     ) -> Result<crate::brain::conflict_projection_sweep::ConflictTunnelProposalReport, VerbDispatchError>
     {
-        use crate::brain::conflict_projection_sweep::{pair_key, ConflictTunnelProposalReport};
-        use locus_kit::frames::TunnelCaptureFrame;
-        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
-
-        const LABEL_PREFIX: &str = "dcp: ";
+        use crate::brain::conflict_projection_sweep::{
+            rejection_tier_of_label, ConflictTunnelProposalReport, CONFLICT_CUE_VERSION,
+            CONFLICT_PROPOSAL_LABEL_PREFIX, TIER2_PROPOSAL_LABEL_PREFIX,
+            TIER3_PROPOSAL_LABEL_PREFIX,
+        };
+        use crate::brain::tiered_contradiction_search::{
+            effective_top_k, tiered_pair_key, ContradictionTier,
+        };
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
 
         let sweep = self.conflict_projection_sweep(handle)?;
         let estate = self.estate_for_verb(handle)?;
@@ -4482,11 +4623,20 @@ impl EstateCoordinator {
             VerbDispatchError::from(remap("propose_conflict_tunnels", "", e))
         };
 
-        let mut live_pairs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut withdrawn_typed_labels: std::collections::HashMap<
-            String,
-            Vec<String>,
-        > = std::collections::HashMap::new();
+        // Dedup state: live pairs (any label family — a live claim is a
+        // live claim) and the withdrawn history per pair WITHIN the
+        // matrix label families (`hunter:` labels classify None and stay
+        // outside — the hunter's own dedup lives in the hunter).
+        //
+        // Pair keys are P2's LOWERCASE-CANONICAL `tiered_pair_key` — the
+        // tier-1 keys (sweep source_drawer_ids) and tier-2/3 keys
+        // (hydrated drawer ids) must collide regardless of how either
+        // surface cased a UUID (c95910dff precedent). Mirrors Swift.
+        let mut state = ConflictFilingState {
+            live_pairs: std::collections::HashSet::new(),
+            withdrawn_by_pair: std::collections::HashMap::new(),
+            suppressed: 0,
+        };
         for tunnel in estate.all_tunnels().map_err(remap_err)? {
             if tunnel.kind != TunnelKind::Contradicts {
                 continue;
@@ -4496,14 +4646,18 @@ impl EstateCoordinator {
             else {
                 continue;
             };
-            let pair = pair_key(s, t);
+            let pair = tiered_pair_key(s, t);
             match tunnel.lifecycle() {
                 TunnelLifecycle::Active | TunnelLifecycle::Proposed => {
-                    live_pairs.insert(pair);
+                    state.live_pairs.insert(pair);
                 }
                 TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => {
-                    if tunnel.label.starts_with(LABEL_PREFIX) {
-                        withdrawn_typed_labels.entry(pair).or_default().push(tunnel.label.clone());
+                    if let Some(tier) = rejection_tier_of_label(&tunnel.label) {
+                        state
+                            .withdrawn_by_pair
+                            .entry(pair)
+                            .or_default()
+                            .push((tier, tunnel.label.clone()));
                     }
                 }
             }
@@ -4514,8 +4668,8 @@ impl EstateCoordinator {
         let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
             all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
 
+        // ---- Tier 1: the typed proving sweep ----
         let mut proposed = Vec::new();
-        let mut suppressed = 0usize;
         let mut ceiling_skipped = 0usize;
         for finding in &sweep.proven {
             let outcome = &finding.outcome;
@@ -4541,59 +4695,249 @@ impl EstateCoordinator {
                 continue;
             }
             let (a, b) = (&outcome.source_drawer_ids[0], &outcome.source_drawer_ids[1]);
-            let pair = pair_key(a, b);
-            let renewal_key =
-                format!("{LABEL_PREFIX}{}@{}", outcome.rule_id, outcome.rule_version);
-            let label = format!("{renewal_key} result={}", outcome.result_id);
-            if live_pairs.contains(&pair) {
-                suppressed += 1;
-                continue;
-            }
-            if withdrawn_typed_labels
-                .get(&pair)
-                .is_some_and(|labels| labels.iter().any(|l| l.starts_with(&renewal_key)))
-            {
-                // F14: exact repeat of a rejected proof stays rejected;
-                // a different rule VERSION misses this prefix (F15).
-                suppressed += 1;
-                continue;
-            }
-            // Endpoint coordinates from the node tree — skip rather than
-            // file fabricated coordinates (hunter posture).
-            let (Some(da), Some(db)) =
-                (drawers_by_id.get(a.as_str()), drawers_by_id.get(b.as_str()))
-            else {
-                continue;
-            };
-            let (Some((a_wing, a_room)), Some((b_wing, b_room))) = (
-                node_names.get(&da.parent_node_id),
-                node_names.get(&db.parent_node_id),
-            ) else {
-                continue;
-            };
-            let mut frame = TunnelCaptureFrame::new(
-                a_wing.clone(),
-                a_room.clone(),
-                b_wing.clone(),
-                b_room.clone(),
-                label,
-                "conflict-projection",
+            let renewal_key = format!(
+                "{CONFLICT_PROPOSAL_LABEL_PREFIX}{}@{}",
+                outcome.rule_id, outcome.rule_version
             );
-            frame.source_drawer_id = Some(a.clone());
-            frame.target_drawer_id = Some(b.clone());
-            frame.kind = TunnelKind::Contradicts;
-            frame.origin_class = TunnelOriginClass::Derived;
-            frame.lifecycle = TunnelLifecycle::Proposed;
-            let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
-            live_pairs.insert(pair);
-            proposed.push(tunnel.id);
+            let label = format!("{renewal_key} result={}", outcome.result_id);
+            if let Some(id) = file_conflict_proposal(
+                estate,
+                &node_names,
+                &drawers_by_id,
+                &mut state,
+                tiered_pair_key(a, b),
+                a,
+                b,
+                1,
+                &renewal_key,
+                label,
+                now,
+            )
+            .map_err(remap_err)?
+            {
+                proposed.push(id);
+            }
         }
+
+        // ---- Tiers 2/3: the shared lexical pass (P2.5) ----
+        // Same retrieval + cue screen the tiered search reads; the
+        // lanes' ranked findings become reviewable proposals, capped by
+        // the same 2×/3× fetch budgets the search verb applies. Tier 2
+        // files before tier 3: a pair claimed at tier 2 this pass must
+        // not also file at tier 3 (`live_pairs` enforces).
+        let mut proposed_tier2 = Vec::new();
+        let mut proposed_tier3 = Vec::new();
+        let effective_k = effective_top_k(lexical_top_k);
+        if effective_k > 0 {
+            let scan = self.lexical_tier_scan(handle, &drawers_by_id, model_id, probe_limit);
+            let lanes = [
+                (
+                    2u8,
+                    TIER2_PROPOSAL_LABEL_PREFIX,
+                    scan.tier2_ranked
+                        .iter()
+                        .take(ContradictionTier::LexicalStructural.fetch_budget(effective_k))
+                        .collect::<Vec<_>>(),
+                ),
+                (
+                    3u8,
+                    TIER3_PROPOSAL_LABEL_PREFIX,
+                    scan.tier3_ranked
+                        .iter()
+                        .take(ContradictionTier::LexicalValue.fetch_budget(effective_k))
+                        .collect::<Vec<_>>(),
+                ),
+            ];
+            for (tier, prefix, findings) in lanes {
+                for finding in findings {
+                    let renewal_key = format!(
+                        "{prefix}{}@{CONFLICT_CUE_VERSION}",
+                        finding.cue_kind.as_deref().unwrap_or("")
+                    );
+                    let label =
+                        format!("{renewal_key} score={}", finding.score.unwrap_or(0.0));
+                    if let Some(id) = file_conflict_proposal(
+                        estate,
+                        &node_names,
+                        &drawers_by_id,
+                        &mut state,
+                        finding.pair_key.clone(),
+                        &finding.drawer_a,
+                        &finding.drawer_b,
+                        tier,
+                        &renewal_key,
+                        label,
+                        now,
+                    )
+                    .map_err(remap_err)?
+                    {
+                        if tier == 2 {
+                            proposed_tier2.push(id);
+                        } else {
+                            proposed_tier3.push(id);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(ConflictTunnelProposalReport {
             sweep,
             proposed_tunnel_ids: proposed,
-            suppressed,
+            proposed_tier2_ids: proposed_tier2,
+            proposed_tier3_ids: proposed_tier3,
+            suppressed: state.suppressed,
             ceiling_skipped,
         })
+    }
+
+    /// Model-reviewer endorsement of a Proposed tunnel (MXE-CT3 review
+    /// ladder — mirrors Swift `endorseTunnel(in:tunnelID:endorserID:tierLens:now:)`;
+    /// see TunnelReviewLadder.swift's header for the full ladder
+    /// contract and why endorse can NEVER activate).
+    ///
+    /// Appends to the ext ledger (one vote per distinct endorser —
+    /// idempotent), sets the endorsed bit (14), and sets the contested
+    /// bit (15) when the ledger already holds a model objection.
+    /// Lifecycle is NOT touched: only the user activates, through
+    /// `Estate::respond_to_tunnel(accept: true)`. `now` is epoch
+    /// milliseconds. Returns
+    /// (new_endorser, distinct_endorsers, contested).
+    pub fn endorse_tunnel(
+        &self,
+        handle: &EstateHandle,
+        tunnel_id: &str,
+        endorser_id: &str,
+        tier_lens: crate::brain::tiered_contradiction_search::ContradictionTier,
+        now: i64,
+    ) -> Result<(bool, usize, bool), VerbDispatchError> {
+        use locus_kit::tunnel_operational::TunnelLifecycle;
+        use locus_kit::tunnel_review_ledger::{iso8601_from_millis, TunnelReviewLedger};
+
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("endorse_tunnel", tunnel_id, e))
+        };
+        if endorser_id.is_empty() {
+            return Err(remap_err(locus_kit::error::LocusKitError::InvalidContent(
+                "endorserID must not be empty".to_string(),
+            )));
+        }
+        let estate = self.estate_for_verb(handle)?;
+        let tunnel = estate
+            .get_tunnel(tunnel_id)
+            .map_err(remap_err)?
+            .ok_or_else(|| {
+                remap_err(locus_kit::error::LocusKitError::TunnelNotFound {
+                    id: tunnel_id.to_string(),
+                })
+            })?;
+        if tunnel.lifecycle() != TunnelLifecycle::Proposed {
+            return Err(remap_err(locus_kit::error::LocusKitError::InvalidContent(
+                format!(
+                    "tunnel {} is {:?} — only a proposed tunnel can be endorsed",
+                    tunnel_id,
+                    tunnel.lifecycle()
+                ),
+            )));
+        }
+        let mut ledger =
+            TunnelReviewLedger::parse(tunnel.ext.as_deref()).map_err(remap_err)?;
+        let new_endorser = ledger.record_endorsement(
+            endorser_id,
+            &iso8601_from_millis(now),
+            tier_lens.raw_value() as i64,
+        );
+        let mut updated = tunnel.with_endorsed();
+        if ledger.is_contested_evidence() {
+            updated = updated.with_contested();
+        }
+        estate
+            .stamp_tunnel_review(
+                tunnel_id,
+                updated.operational_bitmap,
+                ledger.serialized().as_deref(),
+            )
+            .map_err(remap_err)?;
+        Ok((
+            new_endorser,
+            ledger.distinct_endorser_count(),
+            updated.is_contested(),
+        ))
+    }
+
+    /// Model-reviewer rejection/objection on a Proposed tunnel (MXE-CT3
+    /// — mirrors Swift `objectToTunnel(in:tunnelID:reviewerID:tierLens:now:)`).
+    ///
+    /// Records the objection and reviewer identity, then: with NO model
+    /// endorsement the proposal WITHDRAWS (the AI-rejected path — the
+    /// objection entry makes it reopenable, and the decline matrix
+    /// suppresses at this tier and below, never above); with a model
+    /// endorsement present the tunnel STAYS Proposed and the contested
+    /// bit (15) is set — genuine model disagreement is the most
+    /// user-worthy queue position. Returns (withdrawn, contested).
+    pub fn object_to_tunnel(
+        &self,
+        handle: &EstateHandle,
+        tunnel_id: &str,
+        reviewer_id: &str,
+        tier_lens: crate::brain::tiered_contradiction_search::ContradictionTier,
+        now: i64,
+    ) -> Result<(bool, bool), VerbDispatchError> {
+        use locus_kit::tunnel_operational::TunnelLifecycle;
+        use locus_kit::tunnel_review_ledger::{iso8601_from_millis, TunnelReviewLedger};
+
+        let remap_err = |e: locus_kit::error::LocusKitError| {
+            VerbDispatchError::from(remap("object_to_tunnel", tunnel_id, e))
+        };
+        if reviewer_id.is_empty() {
+            return Err(remap_err(locus_kit::error::LocusKitError::InvalidContent(
+                "reviewerID must not be empty".to_string(),
+            )));
+        }
+        let estate = self.estate_for_verb(handle)?;
+        let tunnel = estate
+            .get_tunnel(tunnel_id)
+            .map_err(remap_err)?
+            .ok_or_else(|| {
+                remap_err(locus_kit::error::LocusKitError::TunnelNotFound {
+                    id: tunnel_id.to_string(),
+                })
+            })?;
+        if tunnel.lifecycle() != TunnelLifecycle::Proposed {
+            return Err(remap_err(locus_kit::error::LocusKitError::InvalidContent(
+                format!(
+                    "tunnel {} is {:?} — only a proposed tunnel can be objected to",
+                    tunnel_id,
+                    tunnel.lifecycle()
+                ),
+            )));
+        }
+        let mut ledger =
+            TunnelReviewLedger::parse(tunnel.ext.as_deref()).map_err(remap_err)?;
+        ledger.record_objection(
+            reviewer_id,
+            &iso8601_from_millis(now),
+            tier_lens.raw_value() as i64,
+        );
+        ledger.record_review(reviewer_id);
+
+        let contested = ledger.is_contested_evidence();
+        let updated = if contested {
+            // Endorsed elsewhere → stays proposed, marked contested.
+            tunnel.with_contested()
+        } else {
+            // AI-rejected: withdraw. The ledger's objection entry is the
+            // reopenable record.
+            tunnel.with_lifecycle(TunnelLifecycle::Withdrawn)
+        };
+        estate
+            .stamp_tunnel_review(
+                tunnel_id,
+                updated.operational_bitmap,
+                ledger.serialized().as_deref(),
+            )
+            .map_err(remap_err)?;
+        Ok((!contested, contested))
     }
 
     /// File the ACTIVE `supersedes` tunnels for a meeting-capture
@@ -10639,7 +10983,7 @@ mod tests {
                     NOW,
                 ))
                 .unwrap();
-            let report = coord.propose_conflict_tunnels(&h, NOW).expect("propose");
+            let report = coord.propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW).expect("propose");
             let persisted = estate
                 .all_tunnels()
                 .unwrap()
@@ -10718,7 +11062,7 @@ mod tests {
             .capture_meeting_decisions(
                 &h, "Decision: project-phoenix.launch_date = 2026-10-01", &b.id, NOW)
             .unwrap();
-        let first = coord.propose_conflict_tunnels(&h, NOW).expect("propose");
+        let first = coord.propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW).expect("propose");
         assert_eq!(first.sweep.counts.proven_contradiction, 1);
         assert_eq!(first.proposed_tunnel_ids.len(), 1, "F21: one proposed tunnel");
         assert_eq!(first.suppressed, 0);
@@ -10732,7 +11076,7 @@ mod tests {
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].lifecycle(), TunnelLifecycle::Proposed);
         assert!(tunnels[0].label.starts_with("dcp: dim.decision.launch_date@1"));
-        let second = coord.propose_conflict_tunnels(&h, NOW).expect("propose again");
+        let second = coord.propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW).expect("propose again");
         assert!(second.proposed_tunnel_ids.is_empty());
         assert_eq!(second.suppressed, 1);
 
@@ -10760,7 +11104,7 @@ mod tests {
             estate2.capture_tunnel(frame, NOW).unwrap();
         };
         plant("dcp: dim.decision.launch_date@1 result=old", TunnelLifecycle::Withdrawn);
-        let f14 = coord2.propose_conflict_tunnels(&h2, NOW).expect("propose");
+        let f14 = coord2.propose_conflict_tunnels(&h2, "minilm-v6", 50, 10, NOW).expect("propose");
         assert!(f14.proposed_tunnel_ids.is_empty(), "F14: exact repeat stays rejected");
         assert_eq!(f14.suppressed, 1);
 
@@ -10795,7 +11139,7 @@ mod tests {
             lexical.lifecycle = TunnelLifecycle::Withdrawn;
             estate3.capture_tunnel(lexical, NOW).unwrap();
         }
-        let f15 = coord3.propose_conflict_tunnels(&h3, NOW).expect("propose");
+        let f15 = coord3.propose_conflict_tunnels(&h3, "minilm-v6", 50, 10, NOW).expect("propose");
         assert_eq!(
             f15.proposed_tunnel_ids.len(),
             1,
@@ -10828,7 +11172,7 @@ mod tests {
         let sweep = coord4.conflict_projection_sweep(&h4).expect("sweep");
         assert_eq!(sweep.counts.proven_contradiction, 0);
         assert_eq!(sweep.counts.historical_succession, 1);
-        let proposals = coord4.propose_conflict_tunnels(&h4, NOW).expect("propose");
+        let proposals = coord4.propose_conflict_tunnels(&h4, "minilm-v6", 50, 10, NOW).expect("propose");
         assert!(proposals.proposed_tunnel_ids.is_empty());
         // Unknown replaced-fact id reports unresolved, files nothing.
         let ghost = coord4
@@ -12413,6 +12757,200 @@ mod tests {
             locus_kit::tunnel_operational::TunnelOriginClass::Derived
         );
         assert_eq!(tunnel.added_by, "contradiction-hunter");
+    }
+
+    // ── Review ladder — MXE-CT3 P2.5 (mirrors Swift TunnelReviewLadderTests) ──
+
+    #[test]
+    fn tier3_filing_happy_path_and_live_suppression() {
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+
+        let report = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose");
+        assert!(report.proposed_tunnel_ids.is_empty(), "no typed proof planted");
+        assert!(report.proposed_tier2_ids.is_empty());
+        assert_eq!(report.proposed_tier3_ids.len(), 1);
+
+        let estate = coord.estate_for_verb(&h).unwrap();
+        let tunnels: Vec<_> = estate
+            .all_tunnels()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == TunnelKind::Contradicts)
+            .collect();
+        assert_eq!(tunnels.len(), 1);
+        let filed = &tunnels[0];
+        assert_eq!(filed.lifecycle(), TunnelLifecycle::Proposed);
+        assert!(filed.label.starts_with("tier3:value_divergence@1 "));
+        assert!(!filed.is_endorsed() && !filed.is_contested());
+
+        // Second pass: the live proposal suppresses re-filing.
+        let second = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose again");
+        assert!(second.proposed_tier3_ids.is_empty());
+        assert!(second.suppressed >= 1);
+    }
+
+    #[test]
+    fn user_reject_t1_suppresses_lower_tier_refiling() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        let a = hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        let b = hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+        coord
+            .add_kg_fact(&h, "Sarah Chen L1", "Employer", "Acme Robotics", &a.id, NOW)
+            .unwrap();
+        coord
+            .add_kg_fact(&h, "Sarah Chen L1", "Employer", "Beta Corp", &b.id, NOW)
+            .unwrap();
+
+        // Tier-1 files first; its live claim suppresses the tier-3
+        // filing of the same pair within the same pass.
+        let first = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose");
+        assert_eq!(first.proposed_tunnel_ids.len(), 1);
+        assert!(first.proposed_tier3_ids.is_empty());
+
+        // The user rejects the PROOF.
+        let estate = coord.estate_for_verb(&h).unwrap();
+        estate
+            .respond_to_tunnel(&first.proposed_tunnel_ids[0], false, "bob", None, NOW)
+            .unwrap();
+
+        // Re-propose: tier-1 stays rejected (F14) AND the tier-3 maybe
+        // is suppressed too — the user did not want this pair.
+        let second = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose again");
+        assert!(second.proposed_tunnel_ids.is_empty());
+        assert!(second.proposed_tier2_ids.is_empty());
+        assert!(second.proposed_tier3_ids.is_empty());
+        assert!(second.suppressed >= 2);
+    }
+
+    #[test]
+    fn ai_reject_t3_never_suppresses_typed_t1() {
+        use crate::brain::tiered_contradiction_search::ContradictionTier;
+        use locus_kit::tunnel_operational::TunnelLifecycle;
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        let a = hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        let b = hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+
+        // Tier-3 files, then a model reviewer rejects it (withdraw).
+        let first = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose");
+        let tier3_id = first.proposed_tier3_ids[0].clone();
+        let (withdrawn, contested) = coord
+            .object_to_tunnel(&h, &tier3_id, "claude", ContradictionTier::LexicalValue, NOW)
+            .expect("object");
+        assert!(withdrawn);
+        assert!(!contested);
+        // The withdrawal carries the model's identity — reopenable.
+        let estate = coord.estate_for_verb(&h).unwrap();
+        let loaded = estate.get_tunnel(&tier3_id).unwrap().unwrap();
+        assert_eq!(loaded.lifecycle(), TunnelLifecycle::Withdrawn);
+        let ledger = locus_kit::tunnel_review_ledger::TunnelReviewLedger::parse(
+            loaded.ext.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(ledger.objections.len(), 1);
+        assert_eq!(ledger.objections[0].by, "claude");
+        assert_eq!(ledger.reviewed_by.as_deref(), Some("claude"));
+
+        // Typed proof arrives: tier 1 proposes DESPITE the tier-3
+        // rejection (lower never suppresses higher); tier-3 stays
+        // suppressed (same renewal key).
+        coord
+            .add_kg_fact(&h, "Sarah Chen L2", "Employer", "Acme Robotics", &a.id, NOW)
+            .unwrap();
+        coord
+            .add_kg_fact(&h, "Sarah Chen L2", "Employer", "Beta Corp", &b.id, NOW)
+            .unwrap();
+        let second = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose again");
+        assert_eq!(second.proposed_tunnel_ids.len(), 1);
+        assert!(second.proposed_tier3_ids.is_empty());
+    }
+
+    #[test]
+    fn endorse_is_idempotent_contested_detected_user_accept_unchanged() {
+        use crate::brain::tiered_contradiction_search::ContradictionTier;
+        use locus_kit::tunnel_operational::TunnelLifecycle;
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+        let report = coord
+            .propose_conflict_tunnels(&h, "minilm-v6", 50, 10, NOW)
+            .expect("propose");
+        let id = report.proposed_tier3_ids[0].clone();
+
+        // Endorse: bit 14 set, stays proposed, one vote per endorser.
+        let (new1, count1, contested1) = coord
+            .endorse_tunnel(&h, &id, "claude", ContradictionTier::LexicalValue, NOW)
+            .expect("endorse");
+        assert!(new1 && count1 == 1 && !contested1);
+        let (new2, count2, _) = coord
+            .endorse_tunnel(&h, &id, "claude", ContradictionTier::LexicalValue, NOW + 60_000)
+            .expect("re-endorse");
+        assert!(!new2, "idempotent per endorser");
+        assert_eq!(count2, 1);
+
+        let estate = coord.estate_for_verb(&h).unwrap();
+        let endorsed = estate.get_tunnel(&id).unwrap().unwrap();
+        assert!(endorsed.is_endorsed());
+        assert_eq!(
+            endorsed.lifecycle(),
+            TunnelLifecycle::Proposed,
+            "endorsed is NOT a lifecycle case"
+        );
+
+        // A second family objects → contested, STAYS proposed.
+        let (withdrawn, contested) = coord
+            .object_to_tunnel(
+                &h, &id, "apple-onboard", ContradictionTier::LexicalValue, NOW + 120_000,
+            )
+            .expect("object");
+        assert!(!withdrawn, "a contested proposal stays for the user");
+        assert!(contested);
+        let contested_tunnel = estate.get_tunnel(&id).unwrap().unwrap();
+        assert!(contested_tunnel.is_contested() && contested_tunnel.is_endorsed());
+        assert_eq!(contested_tunnel.lifecycle(), TunnelLifecycle::Proposed);
+
+        // Contested floats to the top of its tier band in the queue.
+        let ledger = locus_kit::tunnel_review_ledger::TunnelReviewLedger::parse(
+            contested_tunnel.ext.as_deref(),
+        )
+        .unwrap();
+        let entry = crate::brain::review_queue::entry_for(&contested_tunnel, &ledger);
+        let quiet = crate::brain::review_queue::ReviewQueueEntry {
+            tunnel_id: "quiet".to_string(),
+            tier: 3,
+            contested: false,
+            weight: 5.0,
+            recency_iso: "2026-08-07T12:00:00Z".to_string(),
+        };
+        let ranked = crate::brain::review_queue::rank(vec![quiet, entry]);
+        assert_eq!(ranked[0].tunnel_id, id);
+
+        // The user path, unchanged, is the ONLY activation.
+        estate.respond_to_tunnel(&id, true, "bob", None, NOW).unwrap();
+        let active = estate.get_tunnel(&id).unwrap().unwrap();
+        assert_eq!(active.lifecycle(), TunnelLifecycle::Active);
+        // And a settled tunnel cannot be endorsed.
+        assert!(coord
+            .endorse_tunnel(&h, &id, "claude", ContradictionTier::LexicalValue, NOW)
+            .is_err());
     }
 
     #[test]
