@@ -2503,3 +2503,67 @@ struct RecallDirectorMatrixConformanceTests {
         try await kit.close(handle)
     }
 }
+
+// MARK: - Locus rank determinism
+
+/// Verifies that `GeniusLocusKit.stableLocusRankList` assigns rank-linear
+/// scores by (filedAt DESC, id DESC), not by input-array position.
+///
+/// Regression test for the batch replay locus-lane drift found in JI-6:
+/// when two drawers share the same filedAt (common in rapid batch imports),
+/// BitmapEvaluator's sort had no id tiebreak, so the order the drawers
+/// arrived in `locusRows` was undefined across runs. Adding the stable
+/// total order in stableLocusRankList ensures identical scores every run.
+@Suite("Locus rank determinism")
+struct RecallDirectorLocusRankDeterminismTests {
+
+    private func makeDrawer(id: String, filedAt: Date) -> LocusKit.Drawer {
+        Drawer(
+            id: id, content: "test", parentNodeId: "p",
+            addedBy: "test", filedAt: filedAt, embeddingModelID: "m"
+        )
+    }
+
+    /// stableLocusRankList must produce the same (id, score) list regardless
+    /// of the input order when two drawers share the same filedAt.
+    @Test
+    func stableLocusRankListIsOrderIndependentForEqualFiledAt() {
+        let t = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        // "0000..." < "ffff..." lexicographically — after the fix, ffff ranks 0 (score 1.0).
+        let dLow  = makeDrawer(id: "00000000-0000-0000-0000-000000000000", filedAt: t)
+        let dHigh = makeDrawer(id: "ffffffff-ffff-ffff-ffff-ffffffffffff", filedAt: t)
+        let k = 2
+
+        let r1 = GeniusLocusKit.stableLocusRankList(rows: [dLow, dHigh],  frontierK: k)
+        let r2 = GeniusLocusKit.stableLocusRankList(rows: [dHigh, dLow], frontierK: k)
+
+        #expect(r1.map(\.id) == r2.map(\.id),
+                "locus rank id order must be stable regardless of input order for equal filedAt")
+        #expect(r1.map(\.score) == r2.map(\.score),
+                "locus rank scores must be stable regardless of input order for equal filedAt")
+
+        // The drawer with the lexicographically higher id must occupy rank 0 (highest score).
+        #expect(r1.first?.id == dHigh.id,
+                "higher-id drawer must be rank 0 when filedAt is tied")
+        let highScore = r1.first(where: { $0.id == dHigh.id })?.score ?? -1
+        let lowScore  = r1.first(where: { $0.id == dLow.id  })?.score ?? -1
+        #expect(highScore > lowScore,
+                "higher-id drawer must score higher than lower-id drawer when filedAt is tied")
+    }
+
+    /// stableLocusRankList must still rank by filedAt DESC when timestamps differ.
+    @Test
+    func stableLocusRankListRanksByFiledAtDescFirst() {
+        let t1 = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let t2 = Date(timeIntervalSinceReferenceDate: 2_000_000)  // newer
+        let dOld = makeDrawer(id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", filedAt: t1)
+        let dNew = makeDrawer(id: "00000000-0000-0000-0000-000000000000", filedAt: t2)
+        let k = 2
+
+        // dNew is newer (higher filedAt) so it must rank first despite lower id.
+        let r = GeniusLocusKit.stableLocusRankList(rows: [dOld, dNew], frontierK: k)
+
+        #expect(r.first?.id == dNew.id,
+                "newer-filedAt drawer must rank first regardless of id order")
+    }
+}

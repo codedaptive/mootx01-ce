@@ -9289,8 +9289,14 @@ impl EstateCoordinator {
             let (all_locus, locus_degraded) =
                 estate.recall(traced_frame, now).collect_all_with_degraded();
             degraded_stages.extend(locus_degraded);
-            let locus_rows: Vec<Drawer> =
-                all_locus.into_iter().take(plan.frontier_k).collect();
+            // Sort before rank assignment: (filed_at DESC, id DESC) gives a total order.
+            // Without the id tiebreak, equal-filed_at drawers arrive in whatever order the
+            // BitmapEvaluator scan left them — which varies across runs when the SQLite scan
+            // order differs (e.g. batch imports within the same millisecond). The id DESC
+            // tiebreak guarantees identical rank scores between runs. Mirrors Swift fix.
+            let locus_rows: Vec<Drawer> = stable_locus_rank_rows(
+                all_locus.into_iter().take(plan.frontier_k).collect()
+            );
             locus_list = locus_rows
                 .iter()
                 .enumerate()
@@ -10601,6 +10607,22 @@ impl EstateCoordinator {
             hits,
         })
     }
+}
+
+// MARK: - Locus rank helpers
+
+/// Sorts a locus row slice by (filed_at DESC, id DESC) before rank assignment.
+///
+/// Without the id tiebreak, equal-filed_at drawers arrive in whatever order the
+/// BitmapEvaluator scan left them — which varies across runs when the underlying
+/// SQLite scan order differs (e.g. batch imports within the same millisecond). The
+/// id DESC tiebreak gives a total order, guaranteeing identical rank-linear scores
+/// between runs. Mirrors the Swift `RecallDirector.stableLocusRankList` fix.
+fn stable_locus_rank_rows(mut rows: Vec<Drawer>) -> Vec<Drawer> {
+    rows.sort_by(|a, b| {
+        b.filed_at.cmp(&a.filed_at).then_with(|| b.id.cmp(&a.id))
+    });
+    rows
 }
 
 #[cfg(test)]
@@ -13160,5 +13182,45 @@ mod tests {
         let want: std::collections::HashSet<&str> =
             [a.id.as_str(), b.id.as_str()].into_iter().collect();
         assert_eq!(got, want);
+    }
+
+    // ── Locus rank determinism ─────────────────────────────────────────────
+    // Regression tests for the batch-replay locus-lane drift found in JI-6.
+    // When drawers share filed_at (common in rapid batch imports), the sort
+    // without an id tiebreak produces different orders across runs. The fix:
+    // stable_locus_rank_rows sorts by (filed_at DESC, id DESC) first.
+
+    fn rank_drawer(id: &str, filed_at: i64) -> Drawer {
+        Drawer::new(id, "test", "parent", "actor", filed_at, "m")
+    }
+
+    #[test]
+    fn stable_locus_rank_rows_is_order_independent_for_equal_filed_at() {
+        let t = 1_000_000_i64;
+        let d_low  = rank_drawer("00000000-0000-0000-0000-000000000000", t);
+        let d_high = rank_drawer("ffffffff-ffff-ffff-ffff-ffffffffffff", t);
+
+        let r1 = stable_locus_rank_rows(vec![d_low.clone(), d_high.clone()]);
+        let r2 = stable_locus_rank_rows(vec![d_high.clone(), d_low.clone()]);
+
+        let ids1: Vec<&str> = r1.iter().map(|d| d.id.as_str()).collect();
+        let ids2: Vec<&str> = r2.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids1, ids2,
+            "locus rank order must be stable regardless of input order for equal filed_at");
+
+        // Higher id must rank first (rank-0 = highest score).
+        assert_eq!(r1[0].id, d_high.id,
+            "higher-id drawer must be rank 0 when filed_at is tied");
+    }
+
+    #[test]
+    fn stable_locus_rank_rows_ranks_by_filed_at_desc_first() {
+        let d_old = rank_drawer("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1_000_000);
+        let d_new = rank_drawer("00000000-0000-0000-0000-000000000000", 2_000_000);
+
+        // d_new is newer so it must rank first despite lower id.
+        let r = stable_locus_rank_rows(vec![d_old.clone(), d_new.clone()]);
+        assert_eq!(r[0].id, d_new.id,
+            "newer filed_at drawer must rank first regardless of id order");
     }
 }

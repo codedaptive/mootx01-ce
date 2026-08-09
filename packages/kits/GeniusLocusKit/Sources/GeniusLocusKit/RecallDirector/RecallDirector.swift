@@ -593,9 +593,13 @@ public extension GeniusLocusKit {
         // failed locus read names a `locus.*` stage so the hybrid result can
         // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
         degradedStages.append(contentsOf: stream.degradedStages)
-        let locusList: [(id: String, score: Float)] = Array(locusRows.prefix(plan.frontierK))
-            .enumerated()
-            .map { (idx, d) in (id: d.id, score: Float(plan.frontierK - idx) / Float(plan.frontierK)) }
+        // Sort before rank assignment: (filedAt DESC, id DESC) gives a total order.
+        // Without the id tiebreak, equal-filedAt drawers arrive in whatever order
+        // BitmapEvaluator's sort leaves them — which varies between runs when the
+        // underlying SQLite scan order differs (e.g. batch imports within the same
+        // millisecond). The id tiebreak guarantees identical rank scores across runs.
+        let locusList: [(id: String, score: Float)] = GeniusLocusKit.stableLocusRankList(
+            rows: Array(locusRows.prefix(plan.frontierK)), frontierK: plan.frontierK)
 
         // Corpus and vector lanes — only if corpus is registered.
         var bm25List: [(id: String, score: Float)] = []
@@ -2430,6 +2434,32 @@ public extension GeniusLocusKit {
             )
         case .structured, .full:
             return d
+        }
+    }
+
+    // MARK: - Locus rank helpers
+
+    /// Converts a slice of locus rows into a ranked (id, score) list.
+    ///
+    /// Sorts by (filedAt DESC, id DESC) before assigning rank-linear scores
+    /// so the output is identical regardless of the order the upstream
+    /// BitmapEvaluator scan delivered the rows. Without the id tiebreak,
+    /// equal-timestamp drawers — common in batch imports — can arrive in
+    /// different scan orders between runs, causing locus lane drift.
+    ///
+    /// - Parameters:
+    ///   - rows: Locus rows already capped to `frontierK` items.
+    ///   - frontierK: The frontier size used to compute rank-linear scores.
+    /// - Returns: Tuples of (drawer id, score) ordered by rank (rank 0 first).
+    internal static func stableLocusRankList(
+        rows: [LocusKit.Drawer], frontierK: Int
+    ) -> [(id: String, score: Float)] {
+        let sorted = rows.sorted {
+            if $0.filedAt != $1.filedAt { return $0.filedAt > $1.filedAt }
+            return $0.id > $1.id
+        }
+        return sorted.enumerated().map { idx, d in
+            (id: d.id, score: Float(frontierK - idx) / Float(frontierK))
         }
     }
 }
