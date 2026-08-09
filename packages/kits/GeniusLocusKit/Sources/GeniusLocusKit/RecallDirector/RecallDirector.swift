@@ -316,7 +316,7 @@ public extension GeniusLocusKit {
     /// 1. Compile a `RecallQuerySketch` — embeds query text into `queryEngram`.
     /// 2. BM25 top-`frontierK` via `Corpus.bm25TopKBySource` (source-keyed).
     /// 3. Hamming top-`frontierK` via `VectorStore.findNearest`.
-    /// 4. RRF-fuse both ranked lists (`k=60`, UUID tie-break ascending).
+    /// 4. RRF-fuse both ranked lists (`k=60`, content-derived stable key tie-break).
     /// 5. Hydrate top-`request.limit` hits from the estate.
     ///
     /// When no corpus is registered:
@@ -525,7 +525,7 @@ public extension GeniusLocusKit {
             // takes its all-1.0 fast path — unweighted two-lane RRF.
             let weights = laneWeights(
                 for: request.recallShape, laneKeys: ["bm25", "hamming"])
-            fused = rrfFuseN([bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
+            fused = GeniusLocusKit.rrfFuseN([bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
         }
 
         // Hydrate fused hits from the estate, applying the recall frame's filter
@@ -562,7 +562,7 @@ public extension GeniusLocusKit {
     /// 2. Locus lane: top-`frontierK` from LocusKit bitmap evaluator.
     /// 3. BM25 lane: top-`frontierK` from `Corpus.bm25TopKBySource`.
     /// 4. Vector lane: top-`frontierK` from `VectorStore.findNearest`.
-    /// 5. RRF-fuse all three lists (`k=60`, UUID tie-break ascending).
+    /// 5. RRF-fuse all three lists (`k=60`, content-derived stable key tie-break).
     /// 6. Hydrate top-`request.limit` hits from the estate.
     private func recallHybrid(
         estate: LocusKit.Estate,
@@ -701,6 +701,25 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Stable content-keyed tiebreak for equal-score items in bm25List and vectorList.
+        // Drawer UUIDs are freshly minted on each estate import, so UUID-based tiebreaks
+        // produce different rank assignments across replay runs for tied items, flipping
+        // candidates across the K boundary and causing meanStaleInTopK drift.
+        // locusRows carries the drawer content field (verbatim, deterministic for the same
+        // seed); IDs not present in locusRows fall back to the UUID string — acceptable
+        // because non-locus-indexed items cannot be the boundary-crossing culprits
+        // (they appear in at most two lanes, accruing lower RRF mass than three-lane items).
+        let locusContentByID: [String: String] = Dictionary(
+            uniqueKeysWithValues: locusRows.map { ($0.id, $0.content) })
+        bm25List.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (locusContentByID[x.id] ?? x.id) < (locusContentByID[y.id] ?? y.id)
+        }
+        vectorList.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (locusContentByID[x.id] ?? x.id) < (locusContentByID[y.id] ?? y.id)
+        }
+
         // Build the candidate list according to the requested scoring strategy.
         //
         // .rrf  — three-way RRF fusion of locus, BM25, and vector; default
@@ -751,8 +770,9 @@ public extension GeniusLocusKit {
             // takes its all-1.0 fast path — unweighted three-lane RRF.
             let weights = laneWeights(
                 for: request.recallShape, laneKeys: ["locus", "bm25", "hamming"])
-            fused = rrfFuseN(
-                [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
+            fused = GeniusLocusKit.rrfFuseN(
+                [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit,
+                contentKeyMap: locusContentByID)
         }
 
         // Hydrate fused hits from the estate. Locus rows are already in memory
@@ -971,8 +991,11 @@ public extension GeniusLocusKit {
     /// nothing for that id. Each input list is an INDEPENDENT VOTER: an id present
     /// in more lists accrues more reciprocal-rank mass, so a candidate surfaced by
     /// multiple signals ranks at or above one surfaced by a single signal (the
-    /// consensus property). Tie-break: drawerID string ascending (deterministic,
-    /// matching `VectorStore.findNearest`).
+    /// consensus property). Tie-break: content-derived key from `contentKeyMap`
+    /// (drawer content text, which is stable across replay runs), falling back to
+    /// the id string for items not in the map. Never UUID-only: drawer UUIDs are
+    /// minted fresh on each estate import and produce non-deterministic orderings
+    /// across runs for equal-score candidates at the K boundary.
     ///
     /// This is the single N-way RRF primitive the corpusOnly (2-list) and hybrid
     /// (3-list) lanes call directly, so the RRF math has exactly one implementation.
@@ -1013,11 +1036,18 @@ public extension GeniusLocusKit {
     ///            formula. A non-empty array MUST match `lists.count`.
     ///   - k: RRF smoothing constant. 60 is the Robertson et al. recommendation.
     ///   - limit: Maximum results to return.
-    private func rrfFuseN(
+    ///   - contentKeyMap: Optional map from item id to a content-derived stable key used
+    ///            as the sort tiebreak. Callers supply drawer content text so the tiebreak
+    ///            is deterministic across replay runs. Items absent from the map fall back
+    ///            to their id string, which is UUID-based and may differ between runs —
+    ///            acceptable for items not indexed in the locus lane (they cannot be the
+    ///            equal-score boundary items that cause drift).
+    internal static func rrfFuseN(
         _ lists: [[(id: String, score: Float)]],
         weights: [Float] = [],
         k: Int,
-        limit: Int
+        limit: Int,
+        contentKeyMap: [String: String] = [:]
     ) -> [(id: String, score: Float)] {
         var rrf: [String: Double] = [:]
         for (listIndex, list) in lists.enumerated() {
@@ -1034,7 +1064,10 @@ public extension GeniusLocusKit {
         var ranked = rrf.map { (id: $0.key, score: Float($0.value)) }
         ranked.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return x.id < y.id
+            // Content-derived tiebreak: stable across replay runs because drawer content
+            // is deterministic for a given seed, unlike drawer UUIDs which are minted
+            // fresh on each estate import.
+            return (contentKeyMap[x.id] ?? x.id) < (contentKeyMap[y.id] ?? y.id)
         }
         return Array(ranked.prefix(limit))
     }

@@ -2595,3 +2595,80 @@ struct RecallDirectorLocusRankDeterminismTests {
                 "middle-content drawer must be rank 1 after sort-then-cap")
     }
 }
+
+// MARK: - RRF fusion determinism tests (MXE-JI-7)
+
+/// Verifies that `rrfFuseN` breaks equal-score ties by content-derived key,
+/// not by drawer UUID. Drawer UUIDs are freshly minted on each estate import,
+/// so UUID-only tiebreaks produce different rank assignments across replay runs
+/// for items with identical BM25 and vector scores — the root cause of the
+/// `meanStaleInTopK` drift fixed by MXE-JI-7.
+@Suite("RRF fusion determinism (MXE-JI-7)")
+struct RRFFuseNDeterminismTests {
+
+    /// Simulates two replay runs that carry the same logical content under
+    /// different drawer UUIDs. Equal RRF fused scores (items appear in opposite
+    /// rank positions across two lists) force the tiebreak to determine order.
+    ///
+    /// Run 1: "aaa-alpha" (UUID for Alpha) < "bbb-beta" (UUID for Beta) —
+    ///        UUID tiebreak puts Alpha first in run 1.
+    /// Run 2: "aaa-beta" (UUID for Beta) < "zzz-alpha" (UUID for Alpha) —
+    ///        UUID tiebreak puts Beta first in run 2 (the bug: logical ordering reversed).
+    /// Content tiebreak: "Alpha content" < "Beta content" — Alpha first in both runs.
+    @Test
+    func rrfFuseNBreaksTiesByContentNotUUID() {
+        // Items appear in OPPOSITE rank positions across two lists → equal fused scores.
+        // rrf(X) = 1/(60+0+1) + 1/(60+1+1) = 1/61 + 1/62
+        // rrf(Y) = 1/(60+1+1) + 1/(60+0+1) = 1/62 + 1/61  — same sum; scores tie.
+        // The tiebreak determines which logical content ranks first.
+        //
+        // Run 1: Alpha="aaa-alpha", Beta="bbb-beta". UUID sort: aaa < bbb → Alpha first.
+        // Run 2: Alpha="zzz-alpha", Beta="aaa-beta". UUID sort: aaa < zzz → Beta first (BUG).
+        // Content tiebreak: "Alpha content" < "Beta content" → Alpha first in both (FIX).
+        let lists1: [[(id: String, score: Float)]] = [
+            [(id: "aaa-alpha", score: 0.5), (id: "bbb-beta", score: 0.5)],
+            [(id: "bbb-beta", score: 0.5), (id: "aaa-alpha", score: 0.5)],
+        ]
+        let lists2: [[(id: String, score: Float)]] = [
+            [(id: "zzz-alpha", score: 0.5), (id: "aaa-beta", score: 0.5)],
+            [(id: "aaa-beta", score: 0.5), (id: "zzz-alpha", score: 0.5)],
+        ]
+        let keyMap1: [String: String] = ["aaa-alpha": "Alpha content", "bbb-beta": "Beta content"]
+        let keyMap2: [String: String] = ["zzz-alpha": "Alpha content", "aaa-beta": "Beta content"]
+
+        let r1 = GeniusLocusKit.rrfFuseN(lists1, k: 60, limit: 2, contentKeyMap: keyMap1)
+        let r2 = GeniusLocusKit.rrfFuseN(lists2, k: 60, limit: 2, contentKeyMap: keyMap2)
+
+        // Both runs: Alpha (content "Alpha content") ranks before Beta.
+        #expect(r1.count == 2, "run 1 must return 2 results")
+        #expect(r2.count == 2, "run 2 must return 2 results")
+        #expect(keyMap1[r1[0].id] == "Alpha content",
+                "run 1 rank-0 must be Alpha content, got \(r1[0].id)")
+        #expect(keyMap1[r1[1].id] == "Beta content",
+                "run 1 rank-1 must be Beta content, got \(r1[1].id)")
+        #expect(keyMap2[r2[0].id] == "Alpha content",
+                "run 2 rank-0 must be Alpha content, got \(r2[0].id)")
+        #expect(keyMap2[r2[1].id] == "Beta content",
+                "run 2 rank-1 must be Beta content, got \(r2[1].id)")
+    }
+
+    /// Verifies that the default empty contentKeyMap falls back to id-string ordering
+    /// when RRF scores tie. Two items in opposite order across two lists produce equal
+    /// fused scores — the tiebreak then determines position.
+    @Test
+    func rrfFuseNWithEmptyContentMapFallsBackToIDOrdering() {
+        // List 1: [zzz, aaa] — zzz at rank 0, aaa at rank 1.
+        // List 2: [aaa, zzz] — aaa at rank 0, zzz at rank 1.
+        // rrf(zzz) = 1/(60+0+1) + 1/(60+1+1) = 1/61 + 1/62
+        // rrf(aaa) = 1/(60+1+1) + 1/(60+0+1) = 1/62 + 1/61  — same sum, scores tie.
+        // Tiebreak (no contentKeyMap → id string): "aaa" < "zzz", so aaa ranks first.
+        let lists: [[(id: String, score: Float)]] = [
+            [(id: "zzz", score: 0.5), (id: "aaa", score: 0.5)],
+            [(id: "aaa", score: 0.5), (id: "zzz", score: 0.5)],
+        ]
+        let r = GeniusLocusKit.rrfFuseN(lists, k: 60, limit: 2)
+        #expect(r.count == 2)
+        #expect(r[0].id == "aaa", "id fallback: aaa < zzz so aaa must rank first on a tie")
+        #expect(r[1].id == "zzz")
+    }
+}
