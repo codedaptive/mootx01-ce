@@ -1,12 +1,12 @@
 ---
 title: VaultKit JSON Seed-File Format
-version: 1.0.1
+version: 1.1.0
 status: active
-date: 2026-08-08
-description: Canonical definition of seed-file schema v1 — the rigid, versioned JSON format consumed by the moot_json_import lane, both ports.
+date: 2026-08-09
+description: Canonical definition of seed-file schema v1.1 — the rigid, versioned JSON format consumed by the moot_json_import lane, both ports.
 ---
 
-# VaultKit JSON Seed-File Format (schema v1)
+# VaultKit JSON Seed-File Format (schema v1.1)
 
 This document is the authority definition of the seed-file format the
 `moot_json_import` lane consumes. The format belongs to VaultKit, where the
@@ -64,7 +64,8 @@ exactly the failure class this lane eliminates.
   "room": "supersession/chains",
   "kind": "prose",
   "sensitivity": "normal",
-  "exportability": "private"
+  "exportability": "private",
+  "subject": "First sentence of the content."
 }
 ```
 
@@ -78,6 +79,7 @@ exactly the failure class this lane eliminates.
 | `kind` | no | One of `prose` (default), `code`, `transcript`, `list`, `structuredJSON`, `imageCaption`. The system-managed kinds (`fingerprintOnly`, `dataset`) are not seedable. |
 | `sensitivity` | no | One of `normal` (default), `elevated`, `restricted`, `secret`. |
 | `exportability` | no | One of `private` (default), `public`. `public` is NOT allowed together with `sensitivity: secret` (substrate invariant I-22) — the combination is rejected in total validation, never clamped. |
+| `subject` | no | **Schema v1.1.** Optional caller-supplied subject line. Non-empty, ≤120 characters. An empty string is a hard error (omit the key to mark as subject-debt instead). When present, written via `setSubjectRepresentation`/`set_subject_representation` with pipeline version `import-v1` (bottom trust tier — regenerable by the backfill daemon). When absent, the record is subject-debt: the backfill daemon will regenerate a subject. The import receipt carries `subjectsProvided` and `subjectsDebt` counters for the file. |
 
 ## `facts[]`
 
@@ -125,14 +127,23 @@ After validation the lane runs: one estate snapshot → strict-append
 collision assertion (any lineage overlap with the existing estate is a hard
 error naming the colliding record id) → pure frame build in file order →
 windowed bulk write (`captureBatch`, 125k-row transaction windows) →
-intra-file relationship pass (facts, tunnels) → one deferred encode enqueue
-→ audit receipt carrying `seedSha256`, the SHA-256 of the input bytes, so
-any estate is traceable to the exact seed file that built it. The importer
-returns after the encode enqueue; the drain barrier and dream are caller
-protocol steps.
+subject attribution phase (records carrying `subject` have it written via
+`setSubjectRepresentation` with pipeline `import-v1`; records without a
+subject accrue debt for the backfill daemon) → intra-file relationship pass
+(facts, tunnels) → one deferred encode enqueue → audit receipt carrying
+`seedSha256`, `subjectsProvided`, and `subjectsDebt`, so any estate is
+traceable to the exact seed file that built it. The importer returns after
+the encode enqueue; the drain barrier and dream are caller protocol steps.
 
 ## Changelog
 
+- **1.1.0 (2026-08-09)** — Schema v1.1: added optional `subject` field on
+  records (mission MXE-JI-4). Non-empty, ≤120 chars when present; empty
+  string is a hard error; absent = subject debt. Written via
+  `setSubjectRepresentation` with pipeline `import-v1` (bottom trust tier).
+  Import receipt now carries `subjectsProvided` and `subjectsDebt` counters.
+  Pipeline description updated to include the subject attribution phase
+  (Phase 5.5). Error message updated from "schema v1" to "schema v1.1".
 - **1.0.1 (2026-08-08)** — Documented the I-22 validation rule:
   `sensitivity: secret` + `exportability: public` is rejected in total
   validation (the storage gate refuses the combination on every write;
