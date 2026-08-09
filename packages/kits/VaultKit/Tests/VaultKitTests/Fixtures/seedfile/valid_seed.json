@@ -1,0 +1,40 @@
+{
+  "format_version": 1,
+  "name": "fixture-valid-seed",
+  "records": [
+    {
+      "id": "r0001",
+      "content": "The quarterly planning meeting moved to Thursday.",
+      "event_time": "2026-01-03T09:00:00Z",
+      "wing": "Benchmark",
+      "room": "supersession/chains",
+      "kind": "prose",
+      "sensitivity": "normal",
+      "exportability": "private"
+    },
+    {
+      "id": "r0002",
+      "content": "Sarah sends the planning invites on Monday.",
+      "event_time": "2026-01-04T10:30:00Z",
+      "room": "supersession/chains"
+    },
+    {
+      "id": "r0003",
+      "content": "The planning meeting moved back to Wednesday.",
+      "event_time": "2026-01-05T08:15:00.250Z",
+      "wing": "Benchmark",
+      "room": "supersession/chains",
+      "kind": "transcript",
+      "sensitivity": "elevated",
+      "exportability": "public"
+    }
+  ],
+  "facts": [
+    { "subject": "planning meeting", "predicate": "scheduled_on", "object": "Thursday", "record_id": "r0001" },
+    { "subject": "planning meeting", "predicate": "scheduled_on", "object": "Wednesday", "record_id": "r0003" }
+  ],
+  "tunnels": [
+    { "from": "r0003", "to": "r0001", "kind": "supersedes", "label": "reschedule chain" },
+    { "from": "r0002", "to": "r0001", "kind": "references" }
+  ]
+}

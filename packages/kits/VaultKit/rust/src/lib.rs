@@ -35,6 +35,10 @@
 //! - `palace_bridge` — `PalaceBridge` + `ImportReport` (direct palace →
 //!   substrate import, bypassing NoteIR; applies four import guards:
 //!   tombstone, content-idempotent dedup, sensitivity floor, tunnel sig dedup).
+//! - `json_import_bridge` — `JsonImportBridge` + seed-file schema v1 types
+//!   (the fourth import lane: rigid versioned JSON with total pre-write
+//!   validation, strict-append collision assertion, file-order ingestion;
+//!   see `docs/JSON_IMPORT_FORMAT.md`).
 //! - `error` — `VaultKitError` (MOOTx01Error-style structured error enum).
 //!
 //! ## Conformance
@@ -53,6 +57,7 @@ pub mod drawer_mapping;
 pub mod error;
 pub mod exchange_adapter;
 pub mod import_policy;
+pub mod json_import_bridge;
 pub mod mcp_stdio_client;
 pub mod mem_palace_chroma_adapter;
 pub mod note_ir;
@@ -72,6 +77,9 @@ pub use corpus_document::{CorpusDocument, CURRENT_FORMAT_VERSION};
 pub use drawer_mapping::{DrawerMapping, ExportProjection, ImportOutcome};
 pub use error::VaultKitError;
 pub use exchange_adapter::{ExchangeAdapter, ExchangeExport};
+pub use json_import_bridge::{
+    JsonImportLimits, JsonSeedFact, JsonSeedFile, JsonSeedRecord, JsonSeedTunnel,
+};
 pub use mcp_stdio_client::{McpCallResult, McpClientError, McpStdioClient};
 pub use mem_palace_chroma_adapter::MemPalaceChromaAdapter;
 pub use note_ir::{Block, FactIR, NoteIR, OccurredAt, SourceRef, WikiLink};
