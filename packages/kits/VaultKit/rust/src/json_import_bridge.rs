@@ -1029,9 +1029,62 @@ impl JsonImportBridge<'_> {
             }
         }
 
+        // Phase 7 — ONE deferred encode-enqueue sweep (delta-aware), the
+        // exact `import_notes` seam (collect + enqueue + rollup). The
+        // importer adds no drain barrier of its own and never dreams —
+        // those are caller protocol steps in the seed-run protocol.
+        if let Some((corpus, jobs)) = self
+            .coordinator
+            .collect_reindex_jobs(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("collect_reindex_jobs failed: {e:?}")))?
+        {
+            report.enqueued_for_encode = jobs.len();
+            if jobs.is_empty() {
+                // Nothing was missing: no new chunks enter the corpus, so
+                // the Merkle tree and every embedding are exactly as
+                // current as before this import — skip the tail entirely.
+                eprintln!("[json-import] nothing to index — reindex tail skipped");
+            } else {
+                eprintln!(
+                    "[json-import] {} drawers enqueued on the encode stream (embedded via the live basis at drain)",
+                    jobs.len()
+                );
+                corpus.enqueue_change_batch(&jobs).map_err(|e| {
+                    VaultKitError::VerbError(format!("enqueue_change_batch failed: {e:?}"))
+                })?;
+                self.coordinator.rollup_after_reindex(handle, now).map_err(|e| {
+                    VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}"))
+                })?;
+            }
+        }
+
+        // Phase 8 — audit receipt in the established receipt shape plus
+        // `seedSha256` over the exact input bytes, so any estate is
+        // traceable to the seed file that built it. Key order is pinned
+        // byte-identical to the Swift twin's receipt.
+        report.seed_sha256 = sha256_hex(&data);
+        let source = seed_path.display().to_string();
+        let entry = format!(
+            "{{\"operation\":\"json-import\",\"source\":{},\"seedName\":{},\
+             \"drawersWritten\":{},\"factsWritten\":{},\"tunnelsCreated\":{},\
+             \"seedSha256\":\"{}\",\"occurredAt\":\"{}\"}}",
+            json_string(&source),
+            json_string(&report.seed_name),
+            report.drawers_written,
+            report.facts_written,
+            report.tunnels_created,
+            report.seed_sha256,
+            crate::drawer_mapping::ms_to_iso8601(now),
+        );
+        self.write_receipt(&entry, handle, now)?;
+
         eprintln!(
-            "json-import: {} drawers, {} facts, {} tunnels from seed {}",
-            report.drawers_written, report.facts_written, report.tunnels_created, file.name
+            "json-import: {} drawers, {} facts, {} tunnels, {} enqueued for encode from seed {}",
+            report.drawers_written,
+            report.facts_written,
+            report.tunnels_created,
+            report.enqueued_for_encode,
+            file.name
         );
         // Final 100% tick so the caller sees completion at the true total.
         if processed > 0 {
@@ -1041,6 +1094,157 @@ impl JsonImportBridge<'_> {
         }
         Ok(report)
     }
+
+    /// File one receipt into the estate diary — same channel, wing/room,
+    /// and bitmap as the vault/palace receipts (spec § 5.6: Migration
+    /// event, Info severity, MigrationTool actor). `filed_at` carries the
+    /// caller-supplied `now` so the receipt is deterministic and queryable
+    /// by time. Mirrors `PalaceBridge::write_receipt`.
+    fn write_receipt(
+        &self,
+        entry_text: &str,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<(), VaultKitError> {
+        use locus_kit::diary_operational::{DiaryActorClass, DiaryEventClass, DiarySeverity};
+        let bitmap = DiaryEventClass::Migration.raw_value()
+            | (DiarySeverity::Info.raw_value() << 4)
+            | (DiaryActorClass::MigrationTool.raw_value() << 7);
+        let mut entry = locus_kit::diary_entry::DiaryEntry::new(
+            Uuid::new_v4().to_string(),
+            crate::vault_bridge::VaultBridge::RECEIPT_AGENT_NAME.to_string(),
+            entry_text.to_string(),
+            "vault-receipt".to_string(),
+            "wing_vaultkit".to_string(),
+            "receipts".to_string(),
+            now,
+            "no-embedding".to_string(),
+        );
+        entry.operational_bitmap = bitmap;
+        let estate = self
+            .coordinator
+            .estate_for(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        estate
+            .add_diary_entry(&entry)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))
+    }
+}
+
+/// Minimal JSON string encoder for receipt fields that carry arbitrary
+/// filesystem paths and seed names (quotes/backslashes escaped per
+/// RFC 8259). Same encoding as the VaultBridge/PalaceBridge receipts.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// MARK: - SHA-256 (dependency-free)
+
+/// Lowercase-hex SHA-256 of the seed file's exact input bytes.
+///
+/// Hand-rolled (FIPS 180-4) rather than pulling the `sha2` crate:
+/// external dependencies in kits require explicit per-crate approval, and
+/// vault-kit's dependency set does not include a hash crate. ~60 lines of
+/// constant-table compression is cheaper than a dependency review, and the
+/// NIST test vectors below pin correctness. The Swift twin uses CryptoKit
+/// (a system framework); both ports produce the identical digest string.
+fn sha256_hex(data: &[u8]) -> String {
+    // FIPS 180-4 §4.2.2 round constants (first 32 bits of the fractional
+    // parts of the cube roots of the first 64 primes).
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    // §5.3.3 initial hash value (first 32 bits of the fractional parts of
+    // the square roots of the first 8 primes).
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    // §5.1.1 padding: append 0x80, zero-fill to 56 mod 64, then the
+    // original bit length as a big-endian u64.
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut message = data.to_vec();
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    // §6.2.2 compression, one 512-bit block at a time.
+    for block in message.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in block.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut hex = String::with_capacity(64);
+    for word in h {
+        hex.push_str(&format!("{word:08x}"));
+    }
+    hex
 }
 
 // MARK: - Tests (mirrors JsonImportBridgeTests.swift Part 1 suite 1:1)
@@ -1796,6 +2000,113 @@ mod tests {
         };
         let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
         assert!(drawers.is_empty());
+    }
+
+    // MARK: Part 4 — enqueue + receipt (mirrors Swift "JsonImportBridge
+    // enqueue + receipt" suite; the provisioned-corpus enqueue test lives
+    // on the Swift side, where GLK provision() wires a deterministic-model
+    // Corpus — the Rust in-memory coordinator registers no corpus, so
+    // collect_reindex_jobs returns None and enqueued stays 0 here).
+
+    #[test]
+    fn sha256_matches_nist_vectors() {
+        // FIPS 180-4 / NIST CAVS vectors pin the dependency-free
+        // implementation to the standard.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    #[test]
+    fn receipt_carries_digest_and_counts() {
+        let (mut coordinator, handle) = open_estate();
+        let report = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge
+                .import_seed(
+                    &fixture_seed_path(),
+                    &handle,
+                    None,
+                    NOW,
+                    None,
+                    genius_locus_kit::EncodeSpeed::Foreground,
+                )
+                .expect("import succeeds")
+        };
+
+        // Digest is the SHA-256 of the exact input bytes.
+        let data = std::fs::read(fixture_seed_path()).expect("fixture readable");
+        let expected = sha256_hex(&data);
+        assert_eq!(report.seed_sha256, expected);
+
+        // One receipt in the diary, in the established receipt shape plus
+        // seedSha256.
+        let receipts: Vec<_> = coordinator
+            .recall_diary_entries(&handle)
+            .expect("diary")
+            .into_iter()
+            .filter(|e| e.agent_name == crate::vault_bridge::VaultBridge::RECEIPT_AGENT_NAME)
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert_eq!(receipt.topic, "vault-receipt");
+        assert_eq!(receipt.filed_at, NOW);
+        assert!(receipt.entry.contains("\"operation\":\"json-import\""));
+        assert!(receipt.entry.contains("\"seedName\":\"fixture-valid-seed\""));
+        assert!(receipt.entry.contains("\"drawersWritten\":3"));
+        assert!(receipt.entry.contains("\"factsWritten\":2"));
+        assert!(receipt.entry.contains("\"tunnelsCreated\":2"));
+        assert!(receipt
+            .entry
+            .contains(&format!("\"seedSha256\":\"{expected}\"")));
+    }
+
+    #[test]
+    fn no_receipt_on_failure() {
+        let (mut coordinator, handle) = open_estate();
+
+        // Occupy r0001's lineage so the strict-append assertion fires.
+        let mut occupying = CaptureFrame::new(
+            "occupies r0001",
+            CaptureChannel::ImportedFile,
+            "rm",
+            LatticeAnchor::udc("000"),
+            "test",
+            "no-embedding",
+        );
+        occupying.lineage_id = Some(DrawerMapping::lineage_id("r0001"));
+        coordinator
+            .capture(&handle, occupying, NOW)
+            .expect("capture");
+
+        {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            let _ = bridge.import_seed(
+                &fixture_seed_path(),
+                &handle,
+                None,
+                NOW,
+                None,
+                genius_locus_kit::EncodeSpeed::Foreground,
+            );
+        }
+
+        let receipts: Vec<_> = coordinator
+            .recall_diary_entries(&handle)
+            .expect("diary")
+            .into_iter()
+            .filter(|e| e.agent_name == crate::vault_bridge::VaultBridge::RECEIPT_AGENT_NAME)
+            .collect();
+        assert!(receipts.is_empty());
     }
 
     #[test]

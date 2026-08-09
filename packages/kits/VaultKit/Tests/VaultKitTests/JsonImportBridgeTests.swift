@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import CryptoKit
 import LocusKit
 import GeniusLocusKit
 import PersistenceKit
@@ -630,5 +631,112 @@ struct JsonImportWriteTests {
             handle,
             RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
         #expect(drawers.isEmpty)
+    }
+}
+
+// Part 4 — phase 7 (deferred encode enqueue) and phase 8 (digest-bearing
+// audit receipt).
+@Suite("JsonImportBridge enqueue + receipt")
+struct JsonImportReceiptTests {
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimportbridge-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    /// Provisioned estate (Corpus mounted, deterministic embedding model)
+    /// so `reindexMissing` can enqueue — same helper shape as
+    /// `VaultBridgeTests.openProvisionedEstate`.
+    private func openProvisionedEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimport-encode-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let params = EstateProvisionParams(
+            estateName: "JsonImport Encode Test Estate",
+            kind: .glk,
+            zoomWindowLow: 1,
+            zoomWindowHigh: 10,
+            frameworkProfile: "KnowledgeWork",
+            syncMode: .none
+        )
+        let handle = try await kit.provision(
+            storage: storage, owner: owner, params: params,
+            embeddingModels: [.deterministic]
+        )
+        return (kit, handle)
+    }
+
+    @Test("receipt carries the seed digest and the exact counts")
+    func receiptWithDigest() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let now = Date()
+
+        let report = try await bridge.importSeed(
+            at: JsonImportBridgeTests.fixtureSeedURL, into: handle, now: now)
+
+        // Digest is the SHA-256 of the exact input bytes.
+        let data = try Data(contentsOf: JsonImportBridgeTests.fixtureSeedURL)
+        let expected = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        #expect(report.seedSha256 == expected)
+
+        // One receipt in the diary, in the established receipt shape plus
+        // seedSha256.
+        let receipts = try await kit.readDiaryEntries(
+            in: handle, agentName: VaultBridge.receiptAgentName)
+        #expect(receipts.count == 1)
+        let receipt = try #require(receipts.first)
+        #expect(receipt.topic == "vault-receipt")
+        #expect(receipt.filedAt == now)
+        #expect(receipt.entry.contains(#""operation":"json-import""#))
+        #expect(receipt.entry.contains(#""seedName":"fixture-valid-seed""#))
+        #expect(receipt.entry.contains(#""drawersWritten":3"#))
+        #expect(receipt.entry.contains(#""factsWritten":2"#))
+        #expect(receipt.entry.contains(#""tunnelsCreated":2"#))
+        #expect(receipt.entry.contains(#""seedSha256":"\#(expected)""#))
+    }
+
+    @Test("a failed import files NO receipt (zero writes includes the diary)")
+    func noReceiptOnFailure() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Occupy r0001's lineage so the strict-append assertion fires.
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "occupies r0001",
+            channel: .importedFile,
+            room: "rm",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "no-embedding",
+            lineageID: DrawerMapping.lineageID(forStableSourceKey: "r0001")))
+
+        _ = try? await bridge.importSeed(
+            at: JsonImportBridgeTests.fixtureSeedURL, into: handle, now: Date())
+
+        let receipts = try await kit.readDiaryEntries(
+            in: handle, agentName: VaultBridge.receiptAgentName)
+        #expect(receipts.isEmpty)
+    }
+
+    @Test("import into a provisioned estate enqueues every record for encode")
+    func enqueueReachesRecordCount() async throws {
+        let (kit, handle) = try await openProvisionedEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let report = try await bridge.importSeed(
+            at: JsonImportBridgeTests.fixtureSeedURL, into: handle, now: Date())
+
+        // Every imported record is enqueued; reindexMissing's internal
+        // drain polling means the encode work has settled by return, so
+        // the enqueued count IS the encoded-drawer count for this seed.
+        #expect(report.enqueuedForEncode == 3,
+                "all 3 records must be enqueued for encode; got \(report.enqueuedForEncode)")
     }
 }

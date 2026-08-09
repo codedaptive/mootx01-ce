@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import OSLog
 import LocusKit
 import GeniusLocusKit
@@ -766,16 +767,96 @@ extension JsonImportBridge {
             }
         }
 
+        // Phase 7 — ONE deferred encode-enqueue sweep (delta-aware), the
+        // exact `importNotes` seam (`VaultBridge.importNotes` phase). The
+        // importer adds no drain barrier of its own and never dreams —
+        // those are caller protocol steps in the seed-run protocol.
+        report.enqueuedForEncode = try await kit.reindexMissing(handle: handle, now: now)
+
+        // Phase 8 — audit receipt in the established receipt shape plus
+        // `seedSha256` over the exact input bytes, so any estate is
+        // traceable to the seed file that built it.
+        report.seedSha256 = Self.sha256Hex(data)
+        try await writeImportReceipt(report, source: seedURL.path, handle: handle, now: now)
+
         log.info(
             """
             json-import: \(report.drawersWritten, privacy: .public) drawers, \
             \(report.factsWritten, privacy: .public) facts, \
-            \(report.tunnelsCreated, privacy: .public) tunnels from seed \
-            \(file.name, privacy: .public)
+            \(report.tunnelsCreated, privacy: .public) tunnels, \
+            \(report.enqueuedForEncode, privacy: .public) enqueued for encode \
+            from seed \(file.name, privacy: .public)
             """
         )
         // Final 100% tick so the caller sees completion at the true total.
         if processed > 0 { progress?(processed, total) }
         return report
+    }
+
+    // MARK: Phase 8 helpers — receipt + digest
+
+    /// Write the import receipt: one diary entry per successful import run,
+    /// in the established receipt shape (same channel, wing/room, and
+    /// bitmap as the vault/palace receipts) plus the `seedSha256` field.
+    /// The entry body is canonical JSON with a fixed key order, shared
+    /// verbatim with the Rust port.
+    private func writeImportReceipt(
+        _ report: JsonImportReport,
+        source: String,
+        handle: EstateHandle,
+        now: Date
+    ) async throws {
+        let entry = """
+        {"operation":"json-import",\
+        "source":\(Self.jsonString(source)),\
+        "seedName":\(Self.jsonString(report.seedName)),\
+        "drawersWritten":\(report.drawersWritten),\
+        "factsWritten":\(report.factsWritten),\
+        "tunnelsCreated":\(report.tunnelsCreated),\
+        "seedSha256":"\(report.seedSha256)",\
+        "occurredAt":"\(OccurredAt(date: now).iso8601)"}
+        """
+        try await kit.addDiaryEntry(in: handle, DiaryEntry(
+            agentName: VaultBridge.receiptAgentName,
+            entry: entry,
+            topic: "vault-receipt",
+            wing: "wing_vaultkit",
+            room: "receipts",
+            filedAt: now,
+            // Receipts carry no embedding; non-empty model id is required by schema.
+            embeddingModelID: "no-embedding",
+            operationalBitmap: VaultBridge.receiptBitmap
+        ))
+    }
+
+    /// Minimal JSON string encoder for receipt fields that carry arbitrary
+    /// filesystem paths and seed names (quotes/backslashes escaped per
+    /// RFC 8259). Same encoding as the VaultBridge/PalaceBridge receipts.
+    private static func jsonString(_ s: String) -> String {
+        var out = "\""
+        for ch in s.unicodeScalars {
+            switch ch {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if ch.value < 0x20 {
+                    out += String(format: "\\u%04x", ch.value)
+                } else {
+                    out.unicodeScalars.append(ch)
+                }
+            }
+        }
+        return out + "\""
+    }
+
+    /// Lowercase-hex SHA-256 of the seed file's exact input bytes.
+    /// CryptoKit is a system framework (no package dependency); the Rust
+    /// twin carries a dependency-free implementation validated against the
+    /// NIST vectors, so both ports produce the identical digest string.
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
