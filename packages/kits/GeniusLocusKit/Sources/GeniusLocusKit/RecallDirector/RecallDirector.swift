@@ -587,7 +587,12 @@ public extension GeniusLocusKit {
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
-            if locusRows.count >= plan.frontierK { break }
+            // No early-break: stableLocusRankList sorts ALL candidates before
+            // capping to frontierK. Breaking early gives the sort only a
+            // page-order-dependent subset — causing drift when BitmapEvaluator
+            // page order varies between runs (e.g. batch imports where all
+            // drawers share the same filedAt, making SQLite scan order the
+            // only differentiator between pages).
         }
         // Surface LocusKit recall internal-read failures (P0-5 sites 1-5): a
         // failed locus read names a `locus.*` stage so the hybrid result can
@@ -602,8 +607,11 @@ public extension GeniusLocusKit {
         // fallback for records sharing one event_time, e.g. contradiction pairs).
         // Drawer.id is a UUID minted fresh on each import — NOT stable across runs
         // and must NOT be used as a tiebreak.
+        // Pass the full uncapped candidate set — stableLocusRankList sorts first, then
+        // caps to frontierK. Capping before sort selects an arbitrary subset when
+        // BitmapEvaluator delivers equal-filedAt items in non-deterministic order.
         let locusList: [(id: String, score: Float)] = GeniusLocusKit.stableLocusRankList(
-            rows: Array(locusRows.prefix(plan.frontierK)), frontierK: plan.frontierK)
+            rows: locusRows, frontierK: plan.frontierK)
 
         // Corpus and vector lanes — only if corpus is registered.
         var bm25List: [(id: String, score: Float)] = []
@@ -1130,13 +1138,19 @@ public extension GeniusLocusKit {
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
-            if locusRows.count >= plan.frontierK { break }
+            // No early-break: sort runs over ALL candidates; cap happens after.
         }
         // Surface LocusKit recall internal-read failures (P0-5 sites 1-5): a
         // failed locus read names a `locus.*` stage so the unionBest result can
         // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
         degradedStages.append(contentsOf: stream.degradedStages)
-        let locusSlice = Array(locusRows.prefix(plan.frontierK))
+        // Sort before cap — same stable comparator as the hybrid path so locus
+        // selection is deterministic regardless of BitmapEvaluator page order.
+        let locusSlice: [LocusKit.Drawer] = Array(locusRows.sorted {
+            if $0.filedAt != $1.filedAt { return $0.filedAt > $1.filedAt }
+            if $0.eventTime != $1.eventTime { return $0.eventTime > $1.eventTime }
+            return $0.content > $1.content
+        }.prefix(plan.frontierK))
 
         // Step 3 — BM25 lane (only when corpus is registered and query text present).
         var bm25Hits: [RecallHit] = []
@@ -2458,8 +2472,12 @@ public extension GeniusLocusKit {
     /// across runs and amplifies rather than suppresses locus drift.
     ///
     /// - Parameters:
-    ///   - rows: Locus rows already capped to `frontierK` items.
-    ///   - frontierK: The frontier size used to compute rank-linear scores.
+    ///   - rows: Full uncapped locus candidate set. Sorting and capping to `frontierK`
+    ///     both happen inside this function so the selected subset is always drawn from
+    ///     a deterministically-ordered collection, regardless of BitmapEvaluator's
+    ///     delivery order.
+    ///   - frontierK: The frontier size; only the top `frontierK` rows after sorting
+    ///     are scored and returned.
     /// - Returns: Tuples of (drawer id, score) ordered by rank (rank 0 first).
     internal static func stableLocusRankList(
         rows: [LocusKit.Drawer], frontierK: Int
@@ -2469,7 +2487,9 @@ public extension GeniusLocusKit {
             if $0.eventTime != $1.eventTime { return $0.eventTime > $1.eventTime }
             return $0.content > $1.content
         }
-        return sorted.enumerated().map { idx, d in
+        // Cap AFTER sort: prefix on an unsorted set selects an arbitrary subset when
+        // BitmapEvaluator delivers equal-filedAt items in non-deterministic SQLite scan order.
+        return sorted.prefix(frontierK).enumerated().map { idx, d in
             (id: d.id, score: Float(frontierK - idx) / Float(frontierK))
         }
     }

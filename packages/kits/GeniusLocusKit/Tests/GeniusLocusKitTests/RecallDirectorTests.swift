@@ -2571,4 +2571,27 @@ struct RecallDirectorLocusRankDeterminismTests {
         #expect(r.first?.id == dNew.id,
                 "newer-filedAt drawer must rank first regardless of content order")
     }
+
+    /// Verifies that frontierK capping happens AFTER the sort, not before.
+    /// When more rows than frontierK are supplied in an arbitrary order, the
+    /// returned list must be the top frontierK from the sorted ordering — not
+    /// the top frontierK from the delivery order (which varies between runs).
+    @Test
+    func stableLocusRankListCapsToFrontierKAfterSort() {
+        let t = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        // Three drawers with equal filedAt; content is the tiebreak.
+        // "zzz" > "bbb" > "aaa" so sorted order is dHigh, dMid, dLow.
+        let dLow  = makeDrawer(id: "any-a", content: "aaa", filedAt: t)
+        let dMid  = makeDrawer(id: "any-b", content: "bbb", filedAt: t)
+        let dHigh = makeDrawer(id: "any-c", content: "zzz", filedAt: t)
+        // k=2 with 3 inputs: if prefix runs before sort, which 2 survive depends on
+        // delivery order; if prefix runs after sort, always dHigh and dMid survive.
+        let r = GeniusLocusKit.stableLocusRankList(rows: [dLow, dHigh, dMid], frontierK: 2)
+
+        #expect(r.count == 2, "must return exactly frontierK results")
+        #expect(r.first?.id == dHigh.id,
+                "highest-content drawer must be rank 0 after sort-then-cap")
+        #expect(r.last?.id == dMid.id,
+                "middle-content drawer must be rank 1 after sort-then-cap")
+    }
 }

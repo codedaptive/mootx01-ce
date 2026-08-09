@@ -9289,14 +9289,14 @@ impl EstateCoordinator {
             let (all_locus, locus_degraded) =
                 estate.recall(traced_frame, now).collect_all_with_degraded();
             degraded_stages.extend(locus_degraded);
-            // Sort before rank assignment: (filed_at DESC, id DESC) gives a total order.
-            // Without the id tiebreak, equal-filed_at drawers arrive in whatever order the
-            // BitmapEvaluator scan left them — which varies across runs when the SQLite scan
-            // order differs (e.g. batch imports within the same millisecond). The id DESC
-            // tiebreak guarantees identical rank scores between runs. Mirrors Swift fix.
-            let locus_rows: Vec<Drawer> = stable_locus_rank_rows(
-                all_locus.into_iter().take(plan.frontier_k).collect()
-            );
+            // Sort before rank assignment — full set, capped inside stable_locus_rank_rows.
+            // Without a stable tiebreak, equal-filed_at drawers arrive in whatever order
+            // BitmapEvaluator's scan left them — varying across runs when SQLite scan order
+            // differs (e.g. batch imports within the same millisecond). The stable sort uses
+            // (filed_at DESC, event_time DESC, content DESC); id (UUID) is minted fresh on
+            // each import and must NOT be used as a tiebreak. Cap happens AFTER sort so the
+            // selected subset is always drawn from the deterministic ordering.
+            let locus_rows: Vec<Drawer> = stable_locus_rank_rows(all_locus, plan.frontier_k);
             locus_list = locus_rows
                 .iter()
                 .enumerate()
@@ -10419,15 +10419,16 @@ impl EstateCoordinator {
             traced_frame.trace_limit = Some(request.trace_limit.unwrap_or(request.limit));
         }
 
-        // Drain the locus lane up to frontier_k rows. collect_all_with_degraded
+        // Collect the full locus lane from LocusKit. collect_all_with_degraded
         // surfaces LocusKit recall internal-read failures (P0-5 sites 1-5):
         // since this no-corpus path's RESULT is the locus lane, a failed locus
         // read names a locus.* stage so a FAILED recall is distinguishable from
         // a GENUINE-EMPTY estate. Seeded into degraded_stages below.
         let (all_locus, locus_degraded) =
             estate.recall(traced_frame, now).collect_all_with_degraded();
-        let locus_rows: Vec<Drawer> =
-            all_locus.into_iter().take(plan.frontier_k).collect();
+        // Sort before scoring using the same stable comparator as the hybrid path.
+        // Cap happens inside stable_locus_rank_rows after sort — same pattern.
+        let locus_rows: Vec<Drawer> = stable_locus_rank_rows(all_locus, plan.frontier_k);
 
         // Build rank-normalised (id, score) list. Rank 0 → highest score.
         // Formula: score = (frontier_k - rank) / frontier_k, range (0, 1].
@@ -10623,13 +10624,16 @@ impl EstateCoordinator {
 /// fresh on each import and must NOT be used as a tiebreak — it varies across runs
 /// and amplifies locus drift rather than suppressing it.
 /// Mirrors the Swift `RecallDirector.stableLocusRankList` fix.
-fn stable_locus_rank_rows(mut rows: Vec<Drawer>) -> Vec<Drawer> {
+fn stable_locus_rank_rows(mut rows: Vec<Drawer>, frontier_k: usize) -> Vec<Drawer> {
     rows.sort_by(|a, b| {
         b.filed_at
             .cmp(&a.filed_at)
             .then_with(|| b.event_time.cmp(&a.event_time))
             .then_with(|| b.content.cmp(&a.content))
     });
+    // Cap AFTER sort: take() on an unsorted set selects an arbitrary subset when
+    // BitmapEvaluator delivers equal-filed_at items in non-deterministic SQLite scan order.
+    rows.truncate(frontier_k);
     rows
 }
 
@@ -13213,8 +13217,8 @@ mod tests {
         let d_low  = rank_drawer("any-a", "aaa content", t);
         let d_high = rank_drawer("any-b", "zzz content", t);
 
-        let r1 = stable_locus_rank_rows(vec![d_low.clone(), d_high.clone()]);
-        let r2 = stable_locus_rank_rows(vec![d_high.clone(), d_low.clone()]);
+        let r1 = stable_locus_rank_rows(vec![d_low.clone(), d_high.clone()], 2);
+        let r2 = stable_locus_rank_rows(vec![d_high.clone(), d_low.clone()], 2);
 
         let contents1: Vec<&str> = r1.iter().map(|d| d.content.as_str()).collect();
         let contents2: Vec<&str> = r2.iter().map(|d| d.content.as_str()).collect();
@@ -13232,8 +13236,28 @@ mod tests {
         let d_new = rank_drawer("any-b", "test content", 2_000_000);
 
         // d_new is newer so it must rank first regardless of content.
-        let r = stable_locus_rank_rows(vec![d_old.clone(), d_new.clone()]);
+        let r = stable_locus_rank_rows(vec![d_old.clone(), d_new.clone()], 2);
         assert_eq!(r[0].id, d_new.id,
             "newer filed_at drawer must rank first regardless of content order");
+    }
+
+    /// frontier_k cap must apply AFTER sort, not before.
+    /// With 3 drawers and frontier_k=2, the returned rows must be the top 2
+    /// from the sorted ordering — not 2 rows from the delivery order.
+    #[test]
+    fn stable_locus_rank_rows_caps_to_frontier_k_after_sort() {
+        let t = 1_000_000_i64;
+        let d_low  = rank_drawer("any-a", "aaa content", t);
+        let d_mid  = rank_drawer("any-b", "bbb content", t);
+        let d_high = rank_drawer("any-c", "zzz content", t);
+        // Deliberate delivery order: low first, then high, then mid.
+        // If cap runs before sort, d_low and d_high survive (first 2 delivered).
+        // If cap runs after sort, d_high and d_mid survive (top 2 by content).
+        let r = stable_locus_rank_rows(vec![d_low.clone(), d_high.clone(), d_mid.clone()], 2);
+        assert_eq!(r.len(), 2, "must return exactly frontier_k rows");
+        assert_eq!(r[0].content, d_high.content,
+            "highest-content drawer must be rank 0 after sort-then-cap");
+        assert_eq!(r[1].content, d_mid.content,
+            "middle-content drawer must be rank 1 after sort-then-cap");
     }
 }
