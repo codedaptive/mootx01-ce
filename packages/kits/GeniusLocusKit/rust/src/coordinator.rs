@@ -10611,16 +10611,24 @@ impl EstateCoordinator {
 
 // MARK: - Locus rank helpers
 
-/// Sorts a locus row slice by (filed_at DESC, id DESC) before rank assignment.
+/// Sorts a locus row slice by (filed_at DESC, event_time DESC, content DESC) before
+/// rank assignment.
 ///
-/// Without the id tiebreak, equal-filed_at drawers arrive in whatever order the
+/// Without a stable tiebreak, equal-filed_at drawers arrive in whatever order the
 /// BitmapEvaluator scan left them — which varies across runs when the underlying
-/// SQLite scan order differs (e.g. batch imports within the same millisecond). The
-/// id DESC tiebreak gives a total order, guaranteeing identical rank-linear scores
-/// between runs. Mirrors the Swift `RecallDirector.stableLocusRankList` fix.
+/// SQLite scan order differs (e.g. batch imports within the same millisecond).
+/// `event_time` is the corpus event date — deterministic and stable across runs for
+/// the same seed content. `content` is the verbatim text, the final fallback for
+/// records sharing one event_time (e.g. contradiction pairs). `id` (UUID) is minted
+/// fresh on each import and must NOT be used as a tiebreak — it varies across runs
+/// and amplifies locus drift rather than suppressing it.
+/// Mirrors the Swift `RecallDirector.stableLocusRankList` fix.
 fn stable_locus_rank_rows(mut rows: Vec<Drawer>) -> Vec<Drawer> {
     rows.sort_by(|a, b| {
-        b.filed_at.cmp(&a.filed_at).then_with(|| b.id.cmp(&a.id))
+        b.filed_at
+            .cmp(&a.filed_at)
+            .then_with(|| b.event_time.cmp(&a.event_time))
+            .then_with(|| b.content.cmp(&a.content))
     });
     rows
 }
@@ -13187,40 +13195,45 @@ mod tests {
     // ── Locus rank determinism ─────────────────────────────────────────────
     // Regression tests for the batch-replay locus-lane drift found in JI-6.
     // When drawers share filed_at (common in rapid batch imports), the sort
-    // without an id tiebreak produces different orders across runs. The fix:
-    // stable_locus_rank_rows sorts by (filed_at DESC, id DESC) first.
+    // without a deterministic tiebreak produces different orders across runs.
+    // The fix: stable_locus_rank_rows sorts by
+    // (filed_at DESC, event_time DESC, content DESC).
+    // id (UUID) is minted fresh on each import and must NOT be used as a
+    // tiebreak — it is non-deterministic across runs.
 
-    fn rank_drawer(id: &str, filed_at: i64) -> Drawer {
-        Drawer::new(id, "test", "parent", "actor", filed_at, "m")
+    fn rank_drawer(id: &str, content: &str, filed_at: i64) -> Drawer {
+        Drawer::new(id, content, "parent", "actor", filed_at, "m")
     }
 
     #[test]
     fn stable_locus_rank_rows_is_order_independent_for_equal_filed_at() {
         let t = 1_000_000_i64;
-        let d_low  = rank_drawer("00000000-0000-0000-0000-000000000000", t);
-        let d_high = rank_drawer("ffffffff-ffff-ffff-ffff-ffffffffffff", t);
+        // content is the deterministic tiebreak: same content every run for the
+        // same seed. id (UUID) is minted fresh on each import — not stable.
+        let d_low  = rank_drawer("any-a", "aaa content", t);
+        let d_high = rank_drawer("any-b", "zzz content", t);
 
         let r1 = stable_locus_rank_rows(vec![d_low.clone(), d_high.clone()]);
         let r2 = stable_locus_rank_rows(vec![d_high.clone(), d_low.clone()]);
 
-        let ids1: Vec<&str> = r1.iter().map(|d| d.id.as_str()).collect();
-        let ids2: Vec<&str> = r2.iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(ids1, ids2,
+        let contents1: Vec<&str> = r1.iter().map(|d| d.content.as_str()).collect();
+        let contents2: Vec<&str> = r2.iter().map(|d| d.content.as_str()).collect();
+        assert_eq!(contents1, contents2,
             "locus rank order must be stable regardless of input order for equal filed_at");
 
-        // Higher id must rank first (rank-0 = highest score).
-        assert_eq!(r1[0].id, d_high.id,
-            "higher-id drawer must be rank 0 when filed_at is tied");
+        // Higher content string must rank first (rank-0 = highest score).
+        assert_eq!(r1[0].content, d_high.content,
+            "higher-content drawer must be rank 0 when filed_at and event_time are tied");
     }
 
     #[test]
     fn stable_locus_rank_rows_ranks_by_filed_at_desc_first() {
-        let d_old = rank_drawer("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1_000_000);
-        let d_new = rank_drawer("00000000-0000-0000-0000-000000000000", 2_000_000);
+        let d_old = rank_drawer("any-a", "test content", 1_000_000);
+        let d_new = rank_drawer("any-b", "test content", 2_000_000);
 
-        // d_new is newer so it must rank first despite lower id.
+        // d_new is newer so it must rank first regardless of content.
         let r = stable_locus_rank_rows(vec![d_old.clone(), d_new.clone()]);
         assert_eq!(r[0].id, d_new.id,
-            "newer filed_at drawer must rank first regardless of id order");
+            "newer filed_at drawer must rank first regardless of content order");
     }
 }

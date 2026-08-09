@@ -593,11 +593,15 @@ public extension GeniusLocusKit {
         // failed locus read names a `locus.*` stage so the hybrid result can
         // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
         degradedStages.append(contentsOf: stream.degradedStages)
-        // Sort before rank assignment: (filedAt DESC, id DESC) gives a total order.
-        // Without the id tiebreak, equal-filedAt drawers arrive in whatever order
+        // Sort before rank assignment: (filedAt DESC, eventTime DESC, content DESC).
+        // Without a stable tiebreak, equal-filedAt drawers arrive in whatever order
         // BitmapEvaluator's sort leaves them — which varies between runs when the
         // underlying SQLite scan order differs (e.g. batch imports within the same
-        // millisecond). The id tiebreak guarantees identical rank scores across runs.
+        // millisecond). eventTime is the corpus event date (deterministic for the
+        // same seed content); content is the verbatim text (fully deterministic
+        // fallback for records sharing one event_time, e.g. contradiction pairs).
+        // Drawer.id is a UUID minted fresh on each import — NOT stable across runs
+        // and must NOT be used as a tiebreak.
         let locusList: [(id: String, score: Float)] = GeniusLocusKit.stableLocusRankList(
             rows: Array(locusRows.prefix(plan.frontierK)), frontierK: plan.frontierK)
 
@@ -2441,11 +2445,17 @@ public extension GeniusLocusKit {
 
     /// Converts a slice of locus rows into a ranked (id, score) list.
     ///
-    /// Sorts by (filedAt DESC, id DESC) before assigning rank-linear scores
-    /// so the output is identical regardless of the order the upstream
-    /// BitmapEvaluator scan delivered the rows. Without the id tiebreak,
-    /// equal-timestamp drawers — common in batch imports — can arrive in
-    /// different scan orders between runs, causing locus lane drift.
+    /// Sorts by (filedAt DESC, eventTime DESC, content DESC) before assigning
+    /// rank-linear scores so the output is identical regardless of the order the
+    /// upstream BitmapEvaluator scan delivered the rows.
+    ///
+    /// Tiebreak rationale: in batch imports all drawers share one `filedAt`
+    /// (the import wall-clock). `eventTime` is the corpus event date — a
+    /// deterministic, seed-derived value stable across runs. `content` is the
+    /// verbatim text, the final fallback for records that also share one
+    /// `eventTime` (e.g. contradiction pairs). `Drawer.id` is a UUID minted
+    /// fresh on each import and must NOT be used as a tiebreak — it varies
+    /// across runs and amplifies rather than suppresses locus drift.
     ///
     /// - Parameters:
     ///   - rows: Locus rows already capped to `frontierK` items.
@@ -2456,7 +2466,8 @@ public extension GeniusLocusKit {
     ) -> [(id: String, score: Float)] {
         let sorted = rows.sorted {
             if $0.filedAt != $1.filedAt { return $0.filedAt > $1.filedAt }
-            return $0.id > $1.id
+            if $0.eventTime != $1.eventTime { return $0.eventTime > $1.eventTime }
+            return $0.content > $1.content
         }
         return sorted.enumerated().map { idx, d in
             (id: d.id, score: Float(frontierK - idx) / Float(frontierK))
