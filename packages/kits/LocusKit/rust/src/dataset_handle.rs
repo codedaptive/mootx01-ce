@@ -129,6 +129,15 @@ impl DatasetHandleContent {
 /// Mirrors Swift `datasetHandleEmbeddingModelID` in `DatasetHandle.swift`.
 pub const DATASET_HANDLE_EMBEDDING_MODEL_ID: &str = "dataset-handle";
 
+/// Embedding model ID stamped on all drawers created via the VaultKit
+/// import path (JsonImportBridge, PalaceBridge, DrawerMapping). Drawers
+/// with this ID carry no vector embedding — the import path does not run
+/// the encode pipeline. Single source of truth for all import writers in
+/// both Swift and Rust.
+///
+/// Mirrors Swift `importEmbeddingModelID` in `DatasetHandle.swift`.
+pub const IMPORT_EMBEDDING_MODEL_ID: &str = "vaultkit-noembed-v1";
+
 // ---------------------------------------------------------------------------
 // Estate extension — dataset handle signature patch (MX-TAB-5)
 // ---------------------------------------------------------------------------

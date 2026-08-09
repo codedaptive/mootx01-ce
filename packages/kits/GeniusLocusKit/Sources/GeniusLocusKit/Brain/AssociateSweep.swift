@@ -190,10 +190,16 @@ public extension GeniusLocusKit {
     ///   - `probeLimit: nil` → ALL item IDs ("everything" coverage, for dream/benchmark use).
     ///   - `probeLimit: n` → the `n` most-recently-filed item IDs.
     ///
-    /// Determinism: probe order is `ORDER BY filed_at DESC, item_id ASC` — the
-    /// ORDER BY guaranteed by `VectorStore.recentItemIDs(limit:)`. Same-seed
-    /// estates write the same association set on repeated calls, subject to the
-    /// INSERT-OR-IGNORE dedup guard in `addAssociation`.
+    /// Determinism invariant (MXE-JI-5 D4, verified 2026-08-09): this function
+    /// has no stochastic steps. Probe order is `ORDER BY filed_at DESC, item_id ASC`
+    /// from `VectorStore.recentItemIDs(limit:)` — a total order (no tied sort
+    /// keys survive: filed_at ties break on item_id). `findNearest` returns
+    /// `(distance ASC, itemID ASC)` — a total order documented in
+    /// `VectorStore.swift`. `settledSet` is checked, never iterated.
+    /// Zero calls to shuffle/randomElement/arc4random in this file or in
+    /// `VectorSimilaritySignal.swift`. Same-seed estate + same vector store →
+    /// identical association output on repeated calls, subject to INSERT-OR-IGNORE
+    /// in `addAssociation`.
     ///
     /// Dedup: all existing active (non-tombstoned) associations are loaded upfront
     /// into a settled set before the scan runs. Tombstoned associations are excluded

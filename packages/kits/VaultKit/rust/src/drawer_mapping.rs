@@ -34,6 +34,7 @@ use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle, intake::WriteMode};
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
+    dataset_handle::IMPORT_EMBEDDING_MODEL_ID,
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
@@ -183,7 +184,7 @@ pub struct DrawerMapping {
 
 impl Default for DrawerMapping {
     fn default() -> Self {
-        Self::new("vaultkit-import", "vaultkit-noembed-v1", true)
+        Self::new("vaultkit-import", IMPORT_EMBEDDING_MODEL_ID, true)
     }
 }
 

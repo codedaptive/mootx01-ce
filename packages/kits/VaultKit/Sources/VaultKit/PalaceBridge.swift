@@ -44,7 +44,7 @@ public struct PalaceBridge: Sendable {
 
     // Default field values that mirror VaultBridge / DrawerMapping defaults.
     static let addedBy = "palacebridge-import"
-    static let embeddingModelID = "vaultkit-noembed-v1"
+    static let embeddingModelID = importEmbeddingModelID
     // UDC sentinel for items without a pre-classified code.
     static let fallbackUDC = "000"
 

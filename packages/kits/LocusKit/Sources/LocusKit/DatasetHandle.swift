@@ -159,6 +159,16 @@ public struct DatasetHandleContent: Codable, Sendable, Equatable {
 /// `dataset_handle.rs`.
 public let datasetHandleEmbeddingModelID = "dataset-handle"
 
+/// Embedding model ID stamped on all drawers created via the VaultKit
+/// import path (JsonImportBridge, PalaceBridge, DrawerMapping). Drawers
+/// with this ID carry no vector embedding — the import path does not run
+/// the encode pipeline. Single source of truth for all import writers in
+/// both Swift and Rust.
+///
+/// Mirrors the Rust constant `IMPORT_EMBEDDING_MODEL_ID` in
+/// `dataset_handle.rs`.
+public let importEmbeddingModelID = "vaultkit-noembed-v1"
+
 // MARK: - Estate + Dataset handle verbs
 
 public extension Estate {

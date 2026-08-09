@@ -517,7 +517,7 @@ public struct JsonImportBridge: Sendable {
 
     // Default field values that mirror VaultBridge / PalaceBridge defaults.
     static let addedBy = "jsonimportbridge-import"
-    static let embeddingModelID = "vaultkit-noembed-v1"
+    static let embeddingModelID = importEmbeddingModelID
     /// UDC sentinel for unclassified content — exactly the anchor
     /// `PalaceBridge.buildChromaFrame` stamps; the GLK capture seam
     /// classifies on ingestion when the sentinel is present.

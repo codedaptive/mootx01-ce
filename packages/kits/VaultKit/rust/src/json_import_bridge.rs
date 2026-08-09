@@ -33,6 +33,7 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::handle::EstateHandle;
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
+    dataset_handle::IMPORT_EMBEDDING_MODEL_ID as EMBEDDING_MODEL_ID,
     drawer_operational::{CaptureChannel, ContentKind},
     estate_types::LatticeAnchor,
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
@@ -713,7 +714,7 @@ fn parse_utc_iso8601_ms(s: &str) -> Option<i64> {
 
 // Default field values that mirror VaultBridge / PalaceBridge defaults.
 const ADDED_BY: &str = "jsonimportbridge-import";
-const EMBEDDING_MODEL_ID: &str = "vaultkit-noembed-v1";
+// EMBEDDING_MODEL_ID: aliased from locus_kit::dataset_handle::IMPORT_EMBEDDING_MODEL_ID above.
 /// UDC sentinel for unclassified content — exactly the anchor
 /// `PalaceBridge::build_chroma_frame` stamps; the GLK capture seam
 /// classifies on ingestion when the sentinel is present.
