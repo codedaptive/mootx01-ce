@@ -255,10 +255,11 @@ fn route_tool(
     //    can record surfaced ids and dereference verbs can note usage.
     //    Also passes build_serial so moot_estate_ping can include it.
     if crate::interface_tools::is_interface_tool(name) {
-        // moot_palace_import opens arbitrary local SQLite files — same security
-        // posture as vault import/export. Refuse when vault is disabled so a
-        // hard-coded caller gets a clear message rather than an opaque dispatch.
-        if name == "moot_palace_import" && !vault_on {
+        // moot_palace_import and moot_json_import open arbitrary local files
+        // — same security posture as vault import/export. Refuse when vault
+        // is disabled so a hard-coded caller gets a clear message rather
+        // than an opaque dispatch.
+        if (name == "moot_palace_import" || name == "moot_json_import") && !vault_on {
             return Ok(error_result(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));

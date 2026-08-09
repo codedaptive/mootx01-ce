@@ -261,7 +261,7 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_71() {
+fn tools_list_count_is_73() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -286,20 +286,21 @@ fn tools_list_count_is_71() {
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     //    3  dataset tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats) — MX-TAB-7
     // ----
-    //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
+    //    5  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
+    //                          moot_palace_import, moot_json_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   71  total (memory adapter excluded — opt-in, off by default)
+    //   73  total (memory adapter excluded — opt-in, off by default)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
     // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 73.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 72, "expected 72 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 73, "expected 73 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_72_names() {
-    // Gate: all 70 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_73_names() {
+    // Gate: all 73 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -365,6 +366,7 @@ fn tools_list_name_set_matches_expected_72_names() {
         "moot_drain_status",
         "moot_reclassify_fdc",
         "moot_palace_import",
+        "moot_json_import",
         // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
         "moot_lens_constellation",
@@ -405,7 +407,7 @@ fn tools_list_name_set_matches_expected_72_names() {
     .collect();
 
     // Use build_tool_list_with_flags with memory_on=false: this test gates the
-    // baseline 71-name set; the `memory` tool's opt-in appearance is tested in
+    // baseline 73-name set; the `memory` tool's opt-in appearance is tested in
     // memory_adapter_tests.rs. Deterministic flag prevents racing the env-var
     // mutations in the three memory_env_lock()-gated tests below.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
@@ -472,9 +474,9 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate (3)
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-        // Monitoring + Maintenance / admin (4)
+        // Monitoring + Maintenance / admin (5)
         "moot_monitoring_status", "moot_reindex", "moot_drain_status",
-        "moot_reclassify_fdc", "moot_palace_import",
+        "moot_reclassify_fdc", "moot_palace_import", "moot_json_import",
     ];
     for name in &dispatch_cases {
         assert!(
@@ -6103,7 +6105,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 72, "vault-on must produce 72 tools (67 + 2 contradiction-hunter + 3 dataset; incl. moot_recall_connected)");
+    assert_eq!(arr.len(), 73, "vault-on must produce 73 tools (67 + 2 contradiction-hunter + 3 dataset + moot_json_import; incl. moot_recall_connected)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6118,11 +6120,12 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 66, "vault-off must produce 66 tools (72 - 5 vault - palace import)");
+    assert_eq!(arr.len(), 66, "vault-off must produce 66 tools (73 - 5 vault - 2 gated import lanes)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
-                   "moot_vault_reconcile", "moot_vault_job", "moot_palace_import"] {
+                   "moot_vault_reconcile", "moot_vault_job", "moot_palace_import",
+                   "moot_json_import"] {
         assert!(!names.contains(name), "vault-off: {name} must NOT appear in tools/list");
     }
     // A sample of non-vault tools must still be present.
@@ -6144,6 +6147,7 @@ fn dispatch_vault_tool_when_vault_off_returns_clear_error() {
         "moot_vault_reconcile",
         "moot_vault_job",
         "moot_palace_import",
+        "moot_json_import",
     ];
     for name in &vault_names {
         let result = dispatch_tool_with_vault_flag(
@@ -9984,4 +9988,148 @@ fn review_ladder_endorse_object_and_user_only_activation() {
             .expect("tunnel exists");
         assert_eq!(t.lifecycle(), TunnelLifecycle::Withdrawn);
     }
+}
+
+// ---------------------------------------------------------------------------
+// moot_json_import — seed-file JSON lane over the MCP dispatch surface
+// (MXE-JI-1 Part 5: registration round-trip both ports)
+// ---------------------------------------------------------------------------
+
+/// A seed fixture round-trips through a real moot_json_import dispatch call
+/// and the records are really in the estate the registry served.
+#[test]
+fn json_import_round_trips_seed_fixture_over_mcp() {
+    let registry = EstateRegistry::new_inmemory();
+    // Baseline BEFORE the import: the in-memory registry pre-seeds charter
+    // hints, so the assertion below is a delta, not an absolute count.
+    let before = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let baseline = active_memories(content_text(&before));
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-roundtrip-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "mcp-round-trip", "records": [
+             {"id": "m1", "content": "mcp round trip sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/roundtrip"},
+             {"id": "m2", "content": "mcp round trip sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/roundtrip"}],
+            "facts": [{"subject": "sentinel", "predicate": "counted", "object": "two", "record_id": "m1"}],
+            "tunnels": [{"from": "m2", "to": "m1", "kind": "references"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let result = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true, // vault_on
+    )
+    .expect("json import must dispatch");
+    std::fs::remove_file(&path).ok();
+
+    assert!(is_success(&result), "import must succeed; got: {result:?}");
+    let body = content_text(&result);
+    assert!(body.contains("2 drawers"), "got: {body}");
+    assert!(body.contains("1 facts"), "got: {body}");
+    assert!(body.contains("1 tunnels"), "got: {body}");
+    assert!(body.contains("seedSha256="), "got: {body}");
+
+    // The records are really in the estate: the estate summary counts them
+    // on top of whatever the in-memory registry pre-seeds (charter hints),
+    // and the seed's fact landed in the KG.
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let status_text = content_text(&status);
+    assert_eq!(
+        active_memories(status_text),
+        baseline + 2,
+        "both records must be active in the estate; got: {status_text}"
+    );
+    assert!(
+        status_text.contains("kg facts: 1 active"),
+        "the seed fact must land in the KG; got: {status_text}"
+    );
+}
+
+/// Parse the "memories: N active" count out of a moot_estate_status body.
+fn active_memories(status_text: &str) -> usize {
+    status_text
+        .lines()
+        .find_map(|l| l.strip_prefix("memories: "))
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .expect("estate status must report an active-memory count")
+}
+
+/// The zero-partial-write contract over MCP: an invalid seed is an isError
+/// tool result naming the offending element, and the estate stays empty.
+#[test]
+fn json_import_invalid_seed_is_error_result_with_zero_writes() {
+    let registry = EstateRegistry::new_inmemory();
+    // Baseline BEFORE the failed import (charter hints are pre-seeded).
+    let before = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let baseline = active_memories(content_text(&before));
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-invalid-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "bad", "records": [
+             {"id": "m1", "content": "c", "event_time": "2026-02-01T10:00:00Z", "room": "rm"}],
+            "tunnels": [{"from": "m1", "to": "m999", "kind": "references"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let result = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true, // vault_on
+    )
+    .expect("json import must dispatch");
+    std::fs::remove_file(&path).ok();
+
+    assert!(is_tool_error(&result), "validation failure must be isError; got: {result:?}");
+    let body = content_text(&result);
+    assert!(body.contains("\"m999\""), "offending element must be named; got: {body}");
+
+    // Zero writes — never a partial estate: the active count is exactly
+    // the pre-import baseline and no KG fact landed.
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let status_text = content_text(&status);
+    assert_eq!(
+        active_memories(status_text),
+        baseline,
+        "estate must be untouched; got: {status_text}"
+    );
+    assert!(
+        status_text.contains("kg facts: 0 active"),
+        "no fact may land on a failed import; got: {status_text}"
+    );
 }

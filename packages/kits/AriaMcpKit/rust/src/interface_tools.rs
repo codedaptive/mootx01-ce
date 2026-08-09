@@ -53,6 +53,7 @@ use genius_locus_kit_migrations::SharedContentMigrationExt;
 
 use substrate_types::{RowState, RowStateCluster};
 
+use vault_kit::json_import_bridge::JsonImportBridge;
 use vault_kit::palace_bridge::PalaceBridge;
 
 use crate::dispatch::{
@@ -125,14 +126,15 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     // Monitoring control (1) — out-of-band sensitivity grants: read/write daemon telemetry flag.
     // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
     "moot_monitoring_status",
-    // Maintenance (4)
+    // Maintenance (5)
     "moot_reindex",
     "moot_drain_status",
     "moot_reclassify_fdc",
     "moot_palace_import",
+    "moot_json_import",
 ];
 
-/// True when `name` is one of the 20 Tier 1–5 interface tools or the 4
+/// True when `name` is one of the Tier 1–5 interface tools or the 5
 /// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
@@ -404,6 +406,7 @@ pub fn dispatch(
         "moot_drain_status" => run_drain_status(args, registry),
         "moot_reclassify_fdc" => run_reclassify_fdc(args, registry),
         "moot_palace_import" => run_palace_import(args, registry),
+        "moot_json_import" => run_json_import(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown interface tool: {name}"),
@@ -3791,6 +3794,92 @@ fn run_palace_import(
         report.drawers_skipped_tombstoned,
         report.tunnels_created,
         report.items_skipped,
+    )))
+}
+
+/// `moot_json_import` — import a seed file (rigid versioned JSON, schema
+/// v1) into the estate: the bulk seeding lane. The whole file is validated
+/// before any write; any schema violation or lineage collision (strict
+/// append) is a tool-level error naming the offending element with the
+/// estate untouched — the zero-partial-write contract. Mirrors Swift
+/// `runJsonImport`. Vault-gating happens in `route_tool` (dispatch.rs),
+/// alongside `moot_palace_import`'s gate.
+fn run_json_import(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let path = require_string(args, "path")?;
+    let seed_path = std::path::Path::new(&path);
+    let now = wall_now();
+
+    // Optional default wing for records that omit `wing`. An explicit
+    // empty string is invalid rather than silently ignored.
+    let wing: Option<String> = match args.get("wing") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(s) if !s.is_empty() => Some(s.to_string()),
+            _ => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "wing must be non-empty; omit it to use the estate default wing".to_string(),
+                ))
+            }
+        },
+    };
+
+    // mode (encode SPEED, default foreground) — SPEED only, mirroring the
+    // palace tool's contract: the WRITE strategy is always windowed bulk,
+    // never caller-chosen. Fail-closed on an unknown value.
+    let mode = match args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_lowercase()) {
+        None => EncodeSpeed::Foreground,
+        Some(ref s) if s == "foreground" => EncodeSpeed::Foreground,
+        Some(ref s) if s == "background" => EncodeSpeed::Background,
+        Some(_) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)".to_string(),
+            ))
+        }
+    };
+
+    let mut coord = estate.coord.lock().unwrap();
+    let mut bridge = JsonImportBridge::new(&mut coord);
+    let report = match bridge.import_seed(
+        seed_path,
+        &estate.handle,
+        wing.as_deref(),
+        now,
+        Some(&|processed, total| {
+            // Live progress to stderr, fired by the bridge every 10 records
+            // — the sole live-progress channel during a long import.
+            eprintln!("json import: {processed}/{total} drawers");
+        }),
+        mode,
+    ) {
+        Ok(report) => report,
+        // Validation / collision failures are tool-level errors: the estate
+        // is untouched (zero-partial-write contract) and the message names
+        // the first offending element.
+        Err(vault_kit::VaultKitError::AdapterError(message)) => {
+            return Ok(error_result(&message))
+        }
+        Err(e) => return Ok(error_result(&format!("json import failed: {e}"))),
+    };
+
+    Ok(text_result(&format!(
+        "json import complete: {} drawers, {} facts, {} tunnels from seed \"{}\" \
+         (strict append — every record is a fresh lineage). seedSha256={}. \
+         {} drawers enqueued for semantic encoding; keyword and structured recall work \
+         almost immediately, and full semantic/vector recall lights up after the encode \
+         work settles — poll moot_drain_status until idle before relying on semantic \
+         search over the imported memories.",
+        report.drawers_written,
+        report.facts_written,
+        report.tunnels_created,
+        report.seed_name,
+        report.seed_sha256,
+        report.enqueued_for_encode,
     )))
 }
 

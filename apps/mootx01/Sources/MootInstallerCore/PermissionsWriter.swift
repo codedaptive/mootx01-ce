@@ -148,6 +148,10 @@ public enum PermissionsWriter {
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
         "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
+        // Seed-file JSON import (MXE-JI-1): reads a seed file from the
+        // filesystem and bulk-writes the estate — same Ask posture as
+        // palace/vault import.
+        "moot_json_import",
         // Dataset import (MX-TAB-7): creates a backend table and can read a
         // csv_path from the filesystem — same Ask posture as palace/vault import.
         "moot_file_dataset",

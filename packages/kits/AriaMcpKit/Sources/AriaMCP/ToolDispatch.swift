@@ -1237,10 +1237,11 @@ extension ToolDispatcher {
 /// Static dispatch table for the five-tier AI-client interface tools plus the
 /// Maintenance tier.
 ///
-/// Each of the 20 Tier 1–5 interface tools plus 1 Maintenance tool (21 total)
-/// has a named `run*` function on `ToolDispatcher`; this type routes from name
-/// to function, isolating the dispatch logic from the tool-name string
-/// constants. Mirrors the Rust `INTERFACE_TOOLS` constant in `interface_tools.rs`.
+/// Each interface tool (the Tier 1–5 tools plus the Maintenance/admin
+/// tools, enumerated in `names` below) has a named `run*` function on
+/// `ToolDispatcher`; this type routes from name to function, isolating the
+/// dispatch logic from the tool-name string constants. Mirrors the Rust
+/// `INTERFACE_TOOLS` constant in `interface_tools.rs`.
 enum InterfaceTools {
 
     private static let names: Set<String> = [
@@ -1267,6 +1268,8 @@ enum InterfaceTools {
         "moot_reindex", "moot_drain_status", "moot_reclassify_fdc",
         // Direct palace import (bypass NoteIR)
         "moot_palace_import",
+        // Direct seed-file JSON import (schema v1, strict append)
+        "moot_json_import",
     ]
 
     static func isInterfaceTool(_ name: String) -> Bool {
@@ -1316,6 +1319,8 @@ enum InterfaceTools {
         case "moot_reclassify_fdc":    return try await dispatcher.runReclassifyFDC(args)
         // Direct palace import
         case "moot_palace_import":     return try await dispatcher.runPalaceImport(args)
+        // Direct seed-file JSON import
+        case "moot_json_import":       return try await dispatcher.runJsonImport(args)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -3650,6 +3655,82 @@ extension ToolDispatcher {
             "Keyword (exact-term) and structured (wing/room) recall work almost immediately. " +
             "Full SEMANTIC / vector recall — meaning-based RAG search — becomes available only AFTER background indexing completes: every drawer is chunked and embedded, then the corpus embedding-basis is retrained on the whole import and republished, so recently-imported terms enter the semantic vocabulary. On a large import that takes tens of seconds to a few minutes. " +
             "BE PATIENT: poll moot_drain_status until it reports idle before relying on semantic search over the imported memories, and tell the user that deep meaning-based recall over a fresh import becomes available shortly after import, not instantly."
+        )
+    }
+
+    /// `moot_json_import` — import a seed file (rigid versioned JSON,
+    /// schema v1) into the estate: the bulk seeding lane. The whole file is
+    /// validated BEFORE any write; any schema violation or lineage
+    /// collision (strict append) returns a tool-level error naming the
+    /// offending element with the estate untouched — the zero-partial-write
+    /// contract. Canonical format doc:
+    /// `packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md`.
+    ///
+    /// Gated behind `MOOTX01_VAULT` for the same reason as vault/palace
+    /// import: this tool reads arbitrary files from the local filesystem.
+    func runJsonImport(_ args: [String: JSONValue]) async throws -> JSONValue {
+        guard ToolProjection.vaultEnabled(environment: environment) else {
+            return Self.errorResult(
+                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
+            )
+        }
+        let handle = try resolveHandle(args)
+        let path = try requireString(args, "path")
+        let seedURL = URL(fileURLWithPath: path)
+        let now = Date()
+
+        // Optional default wing for records that omit `wing`. An explicit
+        // empty string is invalid rather than silently ignored.
+        let wing = try optionalString(args["wing"], argument: "wing")
+        if let wing, wing.isEmpty {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "wing must be non-empty; omit it to use the estate default wing")
+        }
+
+        // mode (encode SPEED, default foreground) — SPEED only, mirroring
+        // the palace tool's contract: the WRITE strategy is always windowed
+        // bulk, never caller-chosen. Fail-closed on an unknown value.
+        let modeStr = (try optionalString(args["mode"], argument: "mode")) ?? "foreground"
+        let mode: EncodeSpeed
+        switch modeStr.lowercased() {
+        case "foreground": mode = .foreground
+        case "background": mode = .background
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)"
+            )
+        }
+
+        let bridge = JsonImportBridge(kit: kit)
+        let report: JsonImportReport
+        do {
+            report = try await bridge.importSeed(
+                at: seedURL, into: handle, defaultWing: wing, now: now,
+                progress: { processed, total in
+                    // Live progress to stderr, fired by the bridge every 10
+                    // records — the sole live-progress channel during a
+                    // long import.
+                    fputs("json import: \(processed)/\(total) drawers\n", stderr)
+                },
+                mode: mode)
+        } catch let VaultKitError.adapterError(message) {
+            // Validation / collision failures are tool-level errors: the
+            // estate is untouched (zero-partial-write contract) and the
+            // message names the first offending element.
+            return Self.errorResult(message)
+        }
+
+        return Self.textResult(
+            "json import complete: \(report.drawersWritten) drawers, " +
+            "\(report.factsWritten) facts, \(report.tunnelsCreated) tunnels " +
+            "from seed \"\(report.seedName)\" (strict append — every record is a fresh lineage). " +
+            "seedSha256=\(report.seedSha256). " +
+            "\(report.enqueuedForEncode) drawers enqueued for semantic encoding; " +
+            "keyword and structured recall work almost immediately, and full semantic/vector " +
+            "recall lights up after the encode work settles — poll moot_drain_status until idle " +
+            "before relying on semantic search over the imported memories."
         )
     }
 }

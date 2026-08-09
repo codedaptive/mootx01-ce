@@ -9,8 +9,8 @@
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
 //!   Monitoring (1) — moot_monitoring_status (out-of-band sensitivity grants, telemetry flag R/W)
-//!   Maintenance (3/4) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
-//!                       and vault-gated moot_palace_import
+//!   Maintenance (3/5) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
+//!                       and vault-gated moot_palace_import + moot_json_import
 //!   Federation (1) — moot_federated_search
 //!   Recipe (12) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
 //!                 recall_precise, recall_shaped, dream, hunt_contradictions,
@@ -22,13 +22,13 @@
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 71 tools (out-of-band sensitivity grants added moot_monitoring_status;
+//! Vault-on (default): 73 tools (out-of-band sensitivity grants added moot_monitoring_status;
 //! FDC reset added moot_reclassify_fdc; the contradiction hunter added
 //! moot_hunt_contradictions + moot_review_tunnel; MX-TAB-7 added 3 dataset
 //! tools moot_file_dataset/query/stats).
-//! Vault-off (MOOTX01_VAULT=0): 65 tools —
-//! the five moot_vault_* tools and moot_palace_import are hidden together
-//! because all open local SQLite files (filesystem import/export vector).
+//! Vault-off (MOOTX01_VAULT=0): the five moot_vault_* tools,
+//! moot_palace_import, and moot_json_import are hidden together because all
+//! open local files (filesystem import/export vector).
 //! Dataset tools are always present (not vault-gated).
 //! Memory adapter (opt-in, MOOTX01_MEMORY_TOOL=1): adds 1 tool (`memory`) above the
 //! base count — 72 vault-on or 66 vault-off when enabled. Default (absent / ≠ "1")
@@ -74,8 +74,8 @@ pub fn memory_enabled() -> bool {
 /// Produces 71 tools when vault is enabled (the default) or 65 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
 /// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
-/// `moot_palace_import` tool is hidden with the vault surface (same security
-/// posture). Dataset tools (moot_file_dataset, moot_dataset_query,
+/// `moot_palace_import` and `moot_json_import` tools are hidden with the vault
+/// surface (same security posture). Dataset tools (moot_file_dataset, moot_dataset_query,
 /// moot_dataset_stats) are always present and are NOT vault-gated.
 /// Out-of-band sensitivity grants added `moot_monitoring_status`; the FDC
 /// reset tool added `moot_reclassify_fdc`; the contradiction hunter added
@@ -103,10 +103,10 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
 /// e.g. `build_tool_list_with_flags(vault_enabled(), false)` to get the
 /// baseline 71/65 count without racing against memory-tool env mutations.
 pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json::Value {
-    // Vault-on: 71 tools. Vault-off: 65 tools (palace_import + 5 vault_* hidden).
-    // Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1: 72/66.
+    // Vault-on: 73 tools. Vault-off: 66 tools (palace_import + json_import
+    // + 5 vault_* hidden). Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1.
     // Dataset tools (3) are always present regardless of vault flag.
-    let capacity = if vault_on { 71 } else { 65 } + if memory_on { 1 } else { 0 };
+    let capacity = if vault_on { 73 } else { 66 } + if memory_on { 1 } else { 0 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1) — opt-in, prepended when
@@ -154,13 +154,14 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     tools.push(monitoring_status_tool());
 
     // Maintenance — index backfill and drain status are always available.
-    // Direct palace import opens arbitrary local SQLite files, so it is
-    // gated with the vault import/export surface.
+    // Direct palace import and seed-file JSON import open arbitrary local
+    // files, so both are gated with the vault import/export surface.
     tools.push(reindex_tool());
     tools.push(drain_status_tool());
     tools.push(reclassify_fdc_tool());
     if vault_on {
         tools.push(palace_import_tool());
+        tools.push(json_import_tool());
     }
 
     // Federation (1)
@@ -692,6 +693,25 @@ fn palace_import_tool() -> serde_json::Value {
                 "mode": string_schema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard on the performance cores; \"background\" yields for very large imports so the drain does not saturate the machine. This sets SPEED only — the write strategy (bulk transaction vs stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground).")
             }),
             json!(["palace_path"])
+        )))
+    })
+}
+
+/// moot_json_import — import a seed file (rigid versioned JSON, schema v1)
+/// directly into the estate: the bulk seeding lane. Total pre-write
+/// validation + strict append; vault-gated like moot_palace_import. Mirrors
+/// Swift `ToolProjection.estateTools()` seed-file-import section.
+fn json_import_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_json_import",
+        "description": "Import a seed file (rigid versioned JSON, schema v1) directly into the estate — the bulk seeding lane. The WHOLE file is validated before any write: any schema violation, or any lineage collision with memories already in the estate (strict append — this lane never dedups or updates), returns one error naming the first offending element and the estate is untouched (zero-partial-write contract). On success, records land in file order with explicit lineage (derived from each record's id) and explicit event times; facts and tunnels are wired through intra-file record ids; encode/index work is enqueued automatically (poll moot_drain_status to watch semantic recall come online); and an audit receipt carrying the seed file's SHA-256 digest is filed, so the estate is traceable to the exact seed file that built it. The canonical schema definition lives at packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "path": string_schema("Absolute filesystem path to the seed JSON file (schema v1: format_version, name, records[], facts[], tunnels[])."),
+                "wing": string_schema("Optional default wing for records that omit `wing`. Omit to use the estate default wing. null is invalid."),
+                "mode": string_schema("Optional encode SPEED for the deferred encoding: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large imports. SPEED only — the write strategy is always windowed bulk, not caller-chosen. Omit to use the default (foreground).")
+            }),
+            json!(["path"])
         )))
     })
 }

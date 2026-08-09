@@ -47,6 +47,7 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_federated_search" => GUIDE_FEDERATED_SEARCH,
         // Maintenance
         "moot_palace_import" => GUIDE_PALACE_IMPORT,
+        "moot_json_import" => GUIDE_JSON_IMPORT,
         // Recipe — contradiction hunter (on-demand sweep)
         "moot_hunt_contradictions" => GUIDE_HUNT_CONTRADICTIONS,
         // Recipe — on-demand dream (matrix + cycle + hunts + filing)
@@ -717,6 +718,42 @@ Note:
 // ---------------------------------------------------------------------------
 // Maintenance
 // ---------------------------------------------------------------------------
+
+const GUIDE_JSON_IMPORT: &str = "\
+moot_json_import — import a seed file (JSON schema v1) into the estate
+
+The bulk seeding lane: a rigid, versioned JSON file carrying records
+(content + explicit event times), facts, and tunnels. Canonical format:
+packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.
+
+The two guarantees that distinguish it from the other import lanes:
+  - ZERO-PARTIAL-WRITE: the WHOLE file is validated before any write. A
+    bad file (wrong format_version, duplicate ids, dangling references,
+    empty content, bad event_time, unknown keys) is ONE error naming the
+    first offending element, and the estate is untouched.
+  - STRICT APPEND: any lineage collision with memories already in the
+    estate is a hard error — this lane never dedups, never updates, never
+    resurrects. A seed file either builds exactly what it says or builds
+    nothing.
+
+Required args:
+  path (string) absolute path to the seed JSON file
+
+Optional args:
+  wing (string) default wing for records that omit `wing`
+  mode (string) encode SPEED: \"foreground\" (default) or \"background\".
+        The write strategy is always windowed bulk.
+
+Post-import: encode/index work is enqueued automatically; keyword and
+structured recall work almost immediately, and semantic/vector recall
+lights up after the encode work settles — poll moot_drain_status until
+idle. The audit receipt carries the seed file's SHA-256 (seedSha256).
+
+Common mistakes:
+  - Re-importing the same seed into the same estate (strict append makes
+    that a lineage-collision error — use a fresh estate).
+  - Omitting the trailing Z on event_time (schema v1 pins UTC).
+  - Expecting count-and-skip behavior: this lane has no skips.";
 
 const GUIDE_PALACE_IMPORT: &str = "\
 moot_palace_import — import a MemPalace directly into the estate

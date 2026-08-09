@@ -742,9 +742,12 @@ enum TeachmeGuides {
         let tier2 = ToolProjection.connectionTools().count
         let tier3 = ToolProjection.knowledgeGraphTools().count
         let tier4 = ToolProjection.journalTools().count
-        // estateTools() always includes moot_palace_import (8 total).
-        // The 7 non-vault-gated estate tools are always present.
-        let tier5Always  = ToolProjection.estateTools().filter { $0.name != "moot_palace_import" }.count
+        // estateTools() always includes moot_palace_import and
+        // moot_json_import (9 total). The 7 non-vault-gated estate tools
+        // are always present.
+        let tier5Always  = ToolProjection.estateTools().filter {
+            $0.name != "moot_palace_import" && $0.name != "moot_json_import"
+        }.count
         // Tier 6: 4 Tier-6 recipe tools + all lens tools (moot_list_lenses shows these 27).
         let tier6RecipeCount = 4  // list_lenses, synthesize, recall_precise, recall_shaped
         let tier6 = tier6RecipeCount + LensTools.tools().count
@@ -786,7 +789,7 @@ enum TeachmeGuides {
               moot_estate_status, moot_estate_map, moot_estate_ping,
               moot_monitoring_status, moot_reindex, moot_drain_status,
               moot_reclassify_fdc
-              [vault-on only: moot_palace_import]
+              [vault-on only: moot_palace_import, moot_json_import]
 
             Tier 6 — Cognition (\(tier6) tools):
               moot_list_lenses, moot_synthesize, moot_recall_precise,
@@ -993,6 +996,7 @@ enum TeachmeGuides {
 
         case "moot_reclassify_fdc":   return reclassifyFDCGuide
         case "moot_palace_import":    return palaceImportGuide
+        case "moot_json_import":      return jsonImportGuide
         default: return nil
         }
     }
@@ -1109,6 +1113,48 @@ enum TeachmeGuides {
             the stored FDC/Q-ID lattice anchor.
           - Treating 000 as a bug. 000 is the intentional unclassified sentinel
             for content the classifier should not force into a knowledge class.
+        """
+
+    private static let jsonImportGuide = """
+        moot_json_import — import a seed file (JSON schema v1) into the estate.
+
+        The bulk seeding lane: a rigid, versioned JSON file carrying records
+        (content + explicit event times), facts, and tunnels. The canonical
+        format definition is packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.
+
+        The two guarantees that distinguish it from the other import lanes:
+          - ZERO-PARTIAL-WRITE: the WHOLE file is validated before any write.
+            A bad file (wrong format_version, duplicate ids, dangling
+            record_id/from/to references, empty content, bad event_time,
+            unknown keys) is ONE error naming the first offending element,
+            and the estate is untouched.
+          - STRICT APPEND: any lineage collision with memories already in
+            the estate is a hard error — this lane never dedups, never
+            updates, never resurrects. A seed file either builds exactly
+            what it says or builds nothing.
+
+        When to use vs siblings:
+          - moot_palace_import — when importing a MemPalace, not a seed file
+          - moot_vault_import — when importing a Markdown/Obsidian vault
+          - moot_file_memory — when adding a single memory, not a bulk seed
+
+        Arguments:
+          - path (required): absolute path to the seed JSON file.
+          - wing (optional): default wing for records that omit `wing`.
+          - mode (optional, encode SPEED only): foreground (default) or
+            background. The write strategy is always windowed bulk.
+
+        Post-import: encode/index work is enqueued automatically; keyword and
+        structured recall work almost immediately, and semantic/vector recall
+        lights up after the encode work settles — poll moot_drain_status
+        until idle. The audit receipt carries the seed file's SHA-256
+        (seedSha256), so the estate is traceable to its exact seed bytes.
+
+        Common mistakes:
+          - Re-importing the same seed into the same estate (strict append
+            makes that a lineage-collision error — use a fresh estate).
+          - Omitting the trailing Z on event_time (schema v1 pins UTC).
+          - Expecting count-and-skip behavior: this lane has no skips.
         """
 
     private static let palaceImportGuide = """
