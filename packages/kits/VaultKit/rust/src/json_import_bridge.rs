@@ -2150,6 +2150,252 @@ mod tests {
         );
     }
 
+    // MARK: Part 6 — determinism harness (mirrors Swift
+    // "JsonImportDeterminism" suite; driven by
+    // Tests/determinism/json_import_determinism.sh, which byte-compares
+    // the canonical inventory this module writes to $JI_INVENTORY_OUT with
+    // the Swift twin's).
+
+    /// The canonical determinism seed — every record carries an EXPLICIT
+    /// wing so the inventory never depends on the ports' default-wing
+    /// naming. Shared verbatim with the Swift twin.
+    const DETERMINISM_SEED: &str = r#"{"format_version": 1, "name": "determinism-harness", "records": [
+          {"id": "d1", "content": "determinism record one", "event_time": "2026-03-01T08:00:00Z", "wing": "HarnessA", "room": "alpha/one", "kind": "prose", "sensitivity": "normal", "exportability": "private"},
+          {"id": "d2", "content": "determinism record two", "event_time": "2026-03-01T09:30:00.250Z", "wing": "HarnessA", "room": "alpha/two", "kind": "transcript", "sensitivity": "elevated", "exportability": "public"},
+          {"id": "d3", "content": "determinism record three", "event_time": "2026-03-02T10:00:00Z", "wing": "HarnessB", "room": "beta/one", "kind": "code", "sensitivity": "restricted", "exportability": "private"},
+          {"id": "d4", "content": "determinism record four", "event_time": "2026-03-03T11:15:00Z", "wing": "HarnessB", "room": "beta/one", "kind": "list", "sensitivity": "normal", "exportability": "private"}],
+         "facts": [
+          {"subject": "harness", "predicate": "counts", "object": "four", "record_id": "d1"},
+          {"subject": "harness", "predicate": "spans", "object": "two wings", "record_id": "d3"}],
+         "tunnels": [
+          {"from": "d2", "to": "d1", "kind": "supersedes", "label": "chain"},
+          {"from": "d4", "to": "d3", "kind": "references"}]}"#;
+
+    /// Canonical, sorted, port-neutral inventory of the estate's imported
+    /// drawers, facts, and tunnels. Format pinned byte-identical to the
+    /// Swift twin's `canonicalInventory`.
+    fn canonical_inventory(coordinator: &EstateCoordinator, handle: &EstateHandle) -> String {
+        let frame = RecallFrame {
+            filter_chain: vec![
+                Filter::CurrentlyBelieve,
+                Filter::Any(vec![
+                    Filter::UserConfirmed,
+                    Filter::Unconfirmed,
+                    Filter::AutomatedConfirmedOnly,
+                ]),
+                Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+                Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
+            ],
+            hydration_level: HydrationLevel::Full,
+            limit: Some(1_000_000),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(handle, frame, NOW).expect("recall");
+        let node_names =
+            crate::drawer_mapping::resolve_drawer_node_names(coordinator, handle, &drawers);
+        let mut lineage_by_row_id: std::collections::HashMap<String, Uuid> =
+            std::collections::HashMap::new();
+        let mut lines: Vec<String> = Vec::new();
+
+        for drawer in &drawers {
+            lineage_by_row_id.insert(drawer.id.clone(), drawer.lineage_id);
+            let empty = (String::new(), String::new());
+            let (wing, room) = node_names.get(&drawer.parent_node_id).unwrap_or(&empty);
+            let content_hash = sha256_hex(drawer.content.as_bytes());
+            lines.push(format!(
+                "drawer|{}|{}|{}|{}|{}|{}|{}|{}",
+                drawer.lineage_id, // uuid Display is lowercase-hyphenated
+                wing,
+                room,
+                drawer.content_kind().raw_value(),
+                drawer.adjective_sensitivity().raw_value(),
+                drawer.exportability().raw_value(),
+                drawer.event_time,
+                content_hash
+            ));
+        }
+
+        for fact in coordinator.recall_kg_facts(handle).expect("facts") {
+            let anchor = lineage_by_row_id
+                .get(&fact.source_drawer_id)
+                .map(|u| u.to_string())
+                .unwrap_or_default();
+            lines.push(format!(
+                "fact|{}|{}|{}|{}",
+                fact.subject, fact.predicate, fact.object, anchor
+            ));
+        }
+
+        // Tunnels: union over the wings the drawers landed in; synthetic
+        // containment tunnels (node-topology echoes) are excluded.
+        // including_restricted=true — the sanctioned widening (same as
+        // vault export's private scope): the default Normal-tier ceiling
+        // would hide tunnels touching restricted drawers, and the harness
+        // must inventory EVERYTHING the seed built.
+        let mut wings: Vec<String> = drawers
+            .iter()
+            .filter_map(|d| node_names.get(&d.parent_node_id).map(|(w, _)| w.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        wings.sort();
+        for wing in &wings {
+            for tunnel in coordinator
+                .recall_tunnels_with_ceiling(handle, wing, true)
+                .expect("tunnels")
+                .iter()
+                .filter(|t| t.added_by != "nodeTopologyProvider")
+            {
+                let src = tunnel
+                    .source_drawer_id
+                    .as_ref()
+                    .and_then(|id| lineage_by_row_id.get(id))
+                    .map(|u| u.to_string())
+                    .unwrap_or_default();
+                let tgt = tunnel
+                    .target_drawer_id
+                    .as_ref()
+                    .and_then(|id| lineage_by_row_id.get(id))
+                    .map(|u| u.to_string())
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "tunnel|{}|{}/{}|{}/{}|{}|{}|{}",
+                    tunnel.kind.raw_value(),
+                    tunnel.source_wing,
+                    tunnel.source_room,
+                    tunnel.target_wing,
+                    tunnel.target_room,
+                    tunnel.label,
+                    src,
+                    tgt
+                ));
+            }
+        }
+
+        lines.sort();
+        format!("{}\n", lines.join("\n"))
+    }
+
+    // (a) Malformed seed → zero writes; the import errors.
+    #[test]
+    fn json_import_determinism_malformed_zero_writes() {
+        let (mut coordinator, handle) = open_estate();
+        let path = temp_seed_file("{malformed");
+        let result = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge.import_seed(
+                &path,
+                &handle,
+                None,
+                NOW,
+                None,
+                genius_locus_kit::EncodeSpeed::Foreground,
+            )
+        };
+        std::fs::remove_file(&path).ok();
+        assert!(
+            matches!(result, Err(VaultKitError::AdapterError(_))),
+            "a malformed seed MUST error — a stub that succeeds is a mission failure"
+        );
+
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(10),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
+        assert!(drawers.is_empty(), "zero writes on a malformed seed");
+    }
+
+    // (b) Collision → hard error.
+    #[test]
+    fn json_import_determinism_collision_hard_error() {
+        let (mut coordinator, handle) = open_estate();
+        let mut occupying = CaptureFrame::new(
+            "occupies d1",
+            CaptureChannel::ImportedFile,
+            "rm",
+            LatticeAnchor::udc("000"),
+            "harness",
+            "no-embedding",
+        );
+        occupying.lineage_id = Some(DrawerMapping::lineage_id("d1"));
+        coordinator
+            .capture(&handle, occupying, NOW)
+            .expect("capture");
+        let path = temp_seed_file(DETERMINISM_SEED);
+        let result = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge.import_seed(
+                &path,
+                &handle,
+                None,
+                NOW,
+                None,
+                genius_locus_kit::EncodeSpeed::Foreground,
+            )
+        };
+        std::fs::remove_file(&path).ok();
+        match result {
+            Err(VaultKitError::AdapterError(message)) => {
+                assert!(
+                    message.contains("\"d1\"") && message.contains("lineage collision"),
+                    "a collision MUST be a hard error naming the colliding id; got: {message}"
+                );
+            }
+            other => panic!("expected collision AdapterError; got {other:?}"),
+        }
+    }
+
+    // (c) Double-run determinism + the cross-port inventory artifact (d).
+    #[test]
+    fn json_import_determinism_double_run_inventory_identical() {
+        let path = temp_seed_file(DETERMINISM_SEED);
+        let mut inventories: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let (mut coordinator, handle) = open_estate();
+            let report = {
+                let mut bridge = JsonImportBridge::new(&mut coordinator);
+                bridge
+                    .import_seed(
+                        &path,
+                        &handle,
+                        None,
+                        NOW,
+                        None,
+                        genius_locus_kit::EncodeSpeed::Foreground,
+                    )
+                    .expect("import succeeds")
+            };
+            assert_eq!(report.drawers_written, 4);
+            assert_eq!(report.facts_written, 2);
+            assert_eq!(report.tunnels_created, 2);
+            inventories.push(canonical_inventory(&coordinator, &handle));
+        }
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            inventories[0], inventories[1],
+            "same seed, fresh estates → byte-identical inventories"
+        );
+        // The inventory is meaningfully populated — a stub writing an
+        // empty file must fail here, not pass silently.
+        assert_eq!(
+            inventories[0].lines().count(),
+            8,
+            "inventory must carry 4 drawers + 2 facts + 2 tunnels"
+        );
+
+        // (d) Export for the script's cross-port byte comparison.
+        if let Ok(out_path) = std::env::var("JI_INVENTORY_OUT") {
+            std::fs::write(&out_path, &inventories[0]).expect("inventory writable");
+        }
+    }
+
     #[test]
     fn default_wing_fills_only_records_omitting_wing() {
         let file = fixture_file();
