@@ -814,6 +814,235 @@ pub fn build_frames(file: &JsonSeedFile, default_wing: Option<&str>) -> Vec<Capt
         .collect()
 }
 
+// MARK: - Report
+
+/// Counts returned by a seed-file import run. Unlike `ImportReport` there
+/// are no skip counters: the JSON lane has no skips — a file either lands
+/// whole or errors with zero writes. Mirrors Swift `JsonImportReport`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JsonImportReport {
+    /// The seed file's `name`, carried into the receipt for traceability.
+    pub seed_name: String,
+    /// Drawers captured (exactly `records.len()` on success — strict
+    /// append means every record is a fresh lineage).
+    pub drawers_written: usize,
+    /// KG facts filed from the `facts` section.
+    pub facts_written: usize,
+    /// Tunnels created from the `tunnels` section.
+    pub tunnels_created: usize,
+    /// Drawers enqueued for semantic encoding by the phase-7 deferred
+    /// sweep, mirroring `ImportReport.enqueued_for_encode`.
+    pub enqueued_for_encode: usize,
+    /// Lowercase-hex SHA-256 of the seed file's exact input bytes, carried
+    /// into the audit receipt so any estate is traceable to the seed file
+    /// that built it.
+    pub seed_sha256: String,
+}
+
+// MARK: - Import pipeline (phases 1–6)
+
+impl JsonImportBridge<'_> {
+    /// Import a seed file (schema v1) into the estate.
+    ///
+    /// Phases: (1) parse under the byte ceiling, (2) total validation —
+    /// any violation is ZERO writes and one error naming the first
+    /// offending element, (3) one occupied-lineage snapshot + strict-
+    /// append assertion, (4) pure frame build in file order, (5) windowed
+    /// bulk write via `capture_batch` in `import_policy::BULK_WINDOW`
+    /// transaction windows, (6) intra-file relationship pass (facts,
+    /// tunnels). Mirrors Swift `importSeed`.
+    ///
+    /// Determinism: `now` is caller-supplied (epoch ms) and stamps only
+    /// fact filing times and (Part 4) the receipt; drawer event times come
+    /// from the records.
+    pub fn import_seed(
+        &mut self,
+        seed_path: &std::path::Path,
+        handle: &EstateHandle,
+        default_wing: Option<&str>,
+        now: i64,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: genius_locus_kit::EncodeSpeed,
+    ) -> Result<JsonImportReport, VaultKitError> {
+        self.import_seed_windowed(
+            seed_path,
+            handle,
+            default_wing,
+            now,
+            progress,
+            mode,
+            crate::import_policy::BULK_WINDOW,
+        )
+    }
+
+    /// Internal seam with an explicit `window_size` so the windowed-write
+    /// bookkeeping is testable without a 125k-record fixture. Production
+    /// entry (above) always passes `import_policy::BULK_WINDOW`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn import_seed_windowed(
+        &mut self,
+        seed_path: &std::path::Path,
+        handle: &EstateHandle,
+        default_wing: Option<&str>,
+        now: i64,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: genius_locus_kit::EncodeSpeed,
+        window_size: usize,
+    ) -> Result<JsonImportReport, VaultKitError> {
+        // Phase 1 — byte ceiling charged from the on-disk size BEFORE the
+        // file is read (palace pattern), then parse + total validation
+        // (phase 2). Zero estate interaction until both pass.
+        let metadata = std::fs::metadata(seed_path)
+            .map_err(|_| err(format!("seed file not found at {}", seed_path.display())))?;
+        let on_disk_bytes = metadata.len() as usize;
+        if on_disk_bytes > self.limits.max_seed_file_bytes {
+            return Err(err(format!(
+                "seed file exceeds byte ceiling: {} bytes > limit {} at {}",
+                on_disk_bytes,
+                self.limits.max_seed_file_bytes,
+                seed_path.display()
+            )));
+        }
+        let data = std::fs::read(seed_path).map_err(|e| {
+            err(format!(
+                "seed file could not be read at {}: {e}",
+                seed_path.display()
+            ))
+        })?;
+        let file = JsonSeedFile::parse(&data, &self.limits)?;
+
+        // Phase 3 — ONE snapshot, then the strict-append assertion. Any
+        // overlap is a hard error before any write.
+        let occupied = self.occupied_lineage_ids(handle, now)?;
+        assert_strict_append(&file, &occupied)?;
+
+        // Declare the encode SPEED before any encode work is enqueued —
+        // SPEED only, the write strategy is fixed.
+        self.coordinator.set_encode_speed(handle, mode);
+
+        let mut report = JsonImportReport {
+            seed_name: file.name.clone(),
+            ..Default::default()
+        };
+
+        // Phase 4 — pure frame build in file order.
+        let frames = build_frames(&file, default_wing);
+
+        // Phase 5 — windowed bulk write: one transaction per window,
+        // report bookkeeping advancing per COMMITTED window (a mid-import
+        // failure reports only rows that actually landed). No stream
+        // branch. The record-id → drawer map is built from the returned
+        // drawers, which `capture_batch` yields in input order.
+        let mut drawers_by_record_id: std::collections::HashMap<String, locus_kit::drawer::Drawer> =
+            std::collections::HashMap::with_capacity(file.records.len());
+        let mut processed: usize = 0;
+        let total = file.records.len();
+        let mut start = 0;
+        while start < frames.len() {
+            let end = (start + window_size).min(frames.len());
+            let written = self
+                .coordinator
+                .capture_batch(handle, frames[start..end].to_vec(), now)
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+            for (record, drawer) in file.records[start..end].iter().zip(written) {
+                drawers_by_record_id.insert(record.id.clone(), drawer);
+                report.drawers_written += 1;
+                processed += 1;
+                if processed % 10 == 0 {
+                    if let Some(p) = &progress {
+                        p(processed, total);
+                    }
+                }
+            }
+            start = end;
+        }
+
+        // Phase 6 — relationship pass. Facts and tunnels resolve their
+        // endpoints through the id → drawer map (the validator guaranteed
+        // every reference resolves, so a miss here is impossible by
+        // construction). Facts anchor to the record's drawer and inherit
+        // its bitmaps through the standard KG fact seam.
+        for fact in &file.facts {
+            let anchor = &drawers_by_record_id[&fact.record_id];
+            let origin = locus_kit::kg_fact::KGFactOrigin {
+                added_by: ADDED_BY.to_string(),
+                foreign_source_key: String::new(),
+                foreign_record_id: String::new(),
+            };
+            self.coordinator
+                .add_kg_fact_with_origin(
+                    handle,
+                    &fact.subject,
+                    &fact.predicate,
+                    &fact.object,
+                    &anchor.id,
+                    &origin,
+                    now,
+                )
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+            report.facts_written += 1;
+        }
+
+        if !file.tunnels.is_empty() {
+            // Endpoint wing/room names resolved once for all imported
+            // drawers (batch-returned drawers carry node ids, not names).
+            let all_drawers: Vec<locus_kit::drawer::Drawer> =
+                drawers_by_record_id.values().cloned().collect();
+            let node_names = crate::drawer_mapping::resolve_drawer_node_names(
+                self.coordinator,
+                handle,
+                &all_drawers,
+            );
+            for tunnel in &file.tunnels {
+                let source = &drawers_by_record_id[&tunnel.from];
+                let target = &drawers_by_record_id[&tunnel.to];
+                let empty = (String::new(), String::new());
+                let (source_wing, source_room) =
+                    node_names.get(&source.parent_node_id).unwrap_or(&empty);
+                let (target_wing, target_room) =
+                    node_names.get(&target.parent_node_id).unwrap_or(&empty);
+                // Unlabeled tunnels get the same "source -> target"
+                // fill-in the palace lane applies (I-5: non-empty body).
+                let label = tunnel.label.clone().unwrap_or_else(|| {
+                    format!("{source_wing}/{source_room} -> {target_wing}/{target_room}")
+                });
+                let mut frame = locus_kit::frames::TunnelCaptureFrame::new(
+                    source_wing.as_str(),
+                    source_room.as_str(),
+                    target_wing.as_str(),
+                    target_room.as_str(),
+                    label,
+                    ADDED_BY,
+                );
+                frame.source_drawer_id = Some(source.id.clone());
+                frame.target_drawer_id = Some(target.id.clone());
+                frame.kind = tunnel.kind;
+                frame.origin_class = locus_kit::tunnel_operational::TunnelOriginClass::Imported;
+                let estate = self
+                    .coordinator
+                    .estate_for(handle)
+                    .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                estate
+                    .capture_tunnel(frame, now)
+                    .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+                report.tunnels_created += 1;
+            }
+        }
+
+        eprintln!(
+            "json-import: {} drawers, {} facts, {} tunnels from seed {}",
+            report.drawers_written, report.facts_written, report.tunnels_created, file.name
+        );
+        // Final 100% tick so the caller sees completion at the true total.
+        if processed > 0 {
+            if let Some(p) = &progress {
+                p(processed, total);
+            }
+        }
+        Ok(report)
+    }
+}
+
 // MARK: - Tests (mirrors JsonImportBridgeTests.swift Part 1 suite 1:1)
 
 #[cfg(test)]
@@ -1331,6 +1560,283 @@ mod tests {
         assert!(first.iter().all(|f| f.channel == CaptureChannel::ImportedFile));
         assert!(first.iter().all(|f| f.provenance_channel == Channel::FileImport));
         assert!(first.iter().all(|f| f.source_type == SourceType::Imported));
+    }
+
+    // MARK: Part 3 — import pipeline (mirrors Swift "JsonImportBridge
+    // import pipeline (write + relationships)" suite 1:1)
+
+    /// Write a seed JSON string to a temp file and return its path.
+    fn temp_seed_file(json: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("jsonimport-rust-test-{}.json", Uuid::new_v4()));
+        std::fs::write(&path, json).expect("temp seed writable");
+        path
+    }
+
+    /// Stored (real) tunnels only: `recall_tunnels` unions synthetic
+    /// "containment" tunnels from the node-topology provider into its
+    /// result; those are structural echoes of the node tree, not rows the
+    /// importer wrote, so inventory assertions must exclude them.
+    fn stored_tunnels(
+        coordinator: &EstateCoordinator,
+        handle: &EstateHandle,
+        wing: &str,
+    ) -> Vec<locus_kit::tunnel::Tunnel> {
+        coordinator
+            .recall_tunnels(handle, wing)
+            .expect("tunnels")
+            .into_iter()
+            .filter(|t| t.added_by != "nodeTopologyProvider")
+            .collect()
+    }
+
+    #[test]
+    fn fixture_round_trip_lands_exact_counts() {
+        let (mut coordinator, handle) = open_estate();
+        let report = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge
+                .import_seed(
+                    &fixture_seed_path(),
+                    &handle,
+                    None,
+                    NOW,
+                    None,
+                    genius_locus_kit::EncodeSpeed::Foreground,
+                )
+                .expect("import succeeds")
+        };
+
+        assert_eq!(report.seed_name, "fixture-valid-seed");
+        assert_eq!(report.drawers_written, 3);
+        assert_eq!(report.facts_written, 2);
+        assert_eq!(report.tunnels_created, 2);
+
+        // Drawers landed with explicit event times (not `now`).
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Full,
+            limit: Some(100),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
+        assert_eq!(drawers.len(), 3);
+        let r1 = drawers
+            .iter()
+            .find(|d| d.lineage_id == DrawerMapping::lineage_id("r0001"))
+            .expect("r0001 present");
+        assert_eq!(
+            r1.event_time,
+            parse_utc_iso8601_ms("2026-01-03T09:00:00Z").unwrap()
+        );
+
+        // Facts landed anchored to their records' drawers.
+        let facts = coordinator.recall_kg_facts(&handle).expect("facts");
+        assert_eq!(facts.len(), 2);
+        let thursday = facts
+            .iter()
+            .find(|f| f.object == "Thursday")
+            .expect("Thursday fact");
+        assert_eq!(thursday.source_drawer_id, r1.id);
+        assert_eq!(thursday.subject, "planning meeting");
+
+        // Tunnels landed with the explicit label; the unlabeled one's
+        // source (r0002) lands in the estate DEFAULT wing, so only the
+        // Benchmark-sourced supersedes tunnel is asserted by wing here.
+        let benchmark_tunnels = stored_tunnels(&coordinator, &handle, "Benchmark");
+        assert!(benchmark_tunnels
+            .iter()
+            .any(|t| t.kind == TunnelKind::Supersedes && t.label == "reschedule chain"));
+    }
+
+    #[test]
+    fn two_window_seed_commits_both_windows() {
+        let (mut coordinator, handle) = open_estate();
+
+        // 5 records at an internal window size of 2 → 3 windows (2+2+1).
+        let records: Vec<String> = (1..=5)
+            .map(|i| {
+                format!(
+                    "{{\"id\": \"w{i}\", \"content\": \"window record {i}\", \
+                     \"event_time\": \"2026-01-01T00:00:0{i}Z\", \"room\": \"rm\"}}"
+                )
+            })
+            .collect();
+        let json = format!(
+            "{{\"format_version\": 1, \"name\": \"two-window\", \"records\": [{}]}}",
+            records.join(",")
+        );
+        let path = temp_seed_file(&json);
+
+        let report = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge
+                .import_seed_windowed(
+                    &path,
+                    &handle,
+                    None,
+                    NOW,
+                    None,
+                    genius_locus_kit::EncodeSpeed::Foreground,
+                    2,
+                )
+                .expect("import succeeds")
+        };
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(report.drawers_written, 5);
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(100),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
+        assert_eq!(drawers.len(), 5);
+    }
+
+    #[test]
+    fn zero_writes_on_collision() {
+        let (mut coordinator, handle) = open_estate();
+
+        // Occupy r0002's lineage before the import.
+        let mut occupying = CaptureFrame::new(
+            "occupies r0002",
+            CaptureChannel::ImportedFile,
+            "rm",
+            LatticeAnchor::udc("000"),
+            "test",
+            "no-embedding",
+        );
+        occupying.lineage_id = Some(DrawerMapping::lineage_id("r0002"));
+        coordinator
+            .capture(&handle, occupying, NOW)
+            .expect("capture");
+
+        let result = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge.import_seed(
+                &fixture_seed_path(),
+                &handle,
+                None,
+                NOW,
+                None,
+                genius_locus_kit::EncodeSpeed::Foreground,
+            )
+        };
+        match result {
+            Ok(_) => panic!("expected lineage-collision error"),
+            Err(VaultKitError::AdapterError(message)) => {
+                assert!(message.contains("\"r0002\""), "got: {message}");
+            }
+            Err(other) => panic!("expected AdapterError; got {other:?}"),
+        }
+
+        // ZERO writes: only the pre-existing drawer, no facts, no stored
+        // tunnels (synthetic containment tunnels excluded — see
+        // stored_tunnels).
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(100),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
+        assert_eq!(drawers.len(), 1);
+        let facts = coordinator.recall_kg_facts(&handle).expect("facts");
+        assert!(facts.is_empty());
+        let tunnels = stored_tunnels(&coordinator, &handle, "Benchmark");
+        assert!(tunnels.is_empty());
+    }
+
+    #[test]
+    fn zero_writes_on_invalid_file() {
+        let (mut coordinator, handle) = open_estate();
+
+        // Valid JSON, invalid schema (dangling tunnel endpoint) — the
+        // validator must reject BEFORE any estate work.
+        let path = temp_seed_file(
+            "{\"format_version\": 1, \"name\": \"bad\", \"records\": [\
+              {\"id\": \"r1\", \"content\": \"c\", \"event_time\": \"2026-01-01T00:00:00Z\", \"room\": \"rm\"}],\
+             \"tunnels\": [{\"from\": \"r1\", \"to\": \"r999\", \"kind\": \"references\"}]}",
+        );
+
+        let result = {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge.import_seed(
+                &path,
+                &handle,
+                None,
+                NOW,
+                None,
+                genius_locus_kit::EncodeSpeed::Foreground,
+            )
+        };
+        std::fs::remove_file(&path).ok();
+        match result {
+            Ok(_) => panic!("expected validation error"),
+            Err(VaultKitError::AdapterError(message)) => {
+                assert!(message.contains("\"r999\""), "got: {message}");
+            }
+            Err(other) => panic!("expected AdapterError; got {other:?}"),
+        }
+
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(100),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
+        assert!(drawers.is_empty());
+    }
+
+    #[test]
+    fn default_wing_routes_records_omitting_wing() {
+        let (mut coordinator, handle) = open_estate();
+        {
+            let mut bridge = JsonImportBridge::new(&mut coordinator);
+            bridge
+                .import_seed(
+                    &fixture_seed_path(),
+                    &handle,
+                    Some("SeedWing"),
+                    NOW,
+                    None,
+                    genius_locus_kit::EncodeSpeed::Foreground,
+                )
+                .expect("import succeeds");
+        }
+
+        let frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(100),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let drawers = coordinator.recall(&handle, frame, NOW).expect("recall");
+        let r2 = drawers
+            .iter()
+            .find(|d| d.lineage_id == DrawerMapping::lineage_id("r0002"))
+            .expect("r0002 present");
+        let names = crate::drawer_mapping::resolve_drawer_node_names(
+            &coordinator,
+            &handle,
+            std::slice::from_ref(r2),
+        );
+        assert_eq!(
+            names.get(&r2.parent_node_id).map(|(w, _)| w.as_str()),
+            Some("SeedWing")
+        );
     }
 
     #[test]

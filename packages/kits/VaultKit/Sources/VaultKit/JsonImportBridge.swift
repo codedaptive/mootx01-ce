@@ -578,3 +578,204 @@ public struct JsonImportBridge: Sendable {
         }
     }
 }
+
+// MARK: - Report
+
+/// Counts returned by a seed-file import run. Unlike `ImportReport` there
+/// are no skip counters: the JSON lane has no skips — a file either lands
+/// whole or errors with zero writes.
+public struct JsonImportReport: Sendable, Equatable {
+
+    /// The seed file's `name`, carried into the receipt for traceability.
+    public var seedName = ""
+
+    /// Drawers captured (exactly `records.count` on success — strict
+    /// append means every record is a fresh lineage).
+    public var drawersWritten = 0
+
+    /// KG facts filed from the `facts` section.
+    public var factsWritten = 0
+
+    /// Tunnels created from the `tunnels` section.
+    public var tunnelsCreated = 0
+
+    /// Drawers enqueued for semantic encoding by the phase-7 deferred
+    /// sweep (`reindexMissing`), mirroring `ImportReport.enqueuedForEncode`.
+    public var enqueuedForEncode = 0
+
+    /// Lowercase-hex SHA-256 of the seed file's exact input bytes, carried
+    /// into the audit receipt so any estate is traceable to the seed file
+    /// that built it.
+    public var seedSha256 = ""
+
+    public init() {}
+}
+
+// MARK: - Import pipeline (phases 1–6)
+
+extension JsonImportBridge {
+
+    /// Import a seed file (schema v1) into the estate.
+    ///
+    /// Phases: (1) parse under the byte ceiling, (2) total validation —
+    /// any violation is ZERO writes and one error naming the first
+    /// offending element, (3) one occupied-lineage snapshot + strict-append
+    /// assertion, (4) pure frame build in file order, (5) windowed bulk
+    /// write via `captureBatch` in `ImportPolicy.bulkWindow` transaction
+    /// windows, (6) intra-file relationship pass (facts, tunnels).
+    ///
+    /// Determinism: `now` is caller-supplied and stamps only fact filing
+    /// times and (Part 4) the receipt; drawer event times come from the
+    /// records. Same seed file into a fresh estate → same inventory,
+    /// every run, both ports.
+    ///
+    /// - Parameters:
+    ///   - seedURL: the seed JSON file on the local filesystem.
+    ///   - defaultWing: wing for records that omit `wing`; nil uses the
+    ///     estate default wing.
+    ///   - mode: encode SPEED for the deferred encode work (foreground
+    ///     drains hard; background yields). SPEED only — the write
+    ///     strategy is always windowed bulk; there is no stream branch.
+    public func importSeed(
+        at seedURL: URL,
+        into handle: EstateHandle,
+        defaultWing: String? = nil,
+        now: Date,
+        progress: VaultProgress? = nil,
+        mode: EncodeSpeed = .foreground
+    ) async throws -> JsonImportReport {
+        try await importSeed(
+            at: seedURL, into: handle, defaultWing: defaultWing, now: now,
+            progress: progress, mode: mode, windowSize: ImportPolicy.bulkWindow)
+    }
+
+    /// Internal seam with an explicit `windowSize` so the windowed-write
+    /// bookkeeping is testable without a 125k-record fixture. Production
+    /// entry (above) always passes `ImportPolicy.bulkWindow`.
+    func importSeed(
+        at seedURL: URL,
+        into handle: EstateHandle,
+        defaultWing: String?,
+        now: Date,
+        progress: VaultProgress?,
+        mode: EncodeSpeed,
+        windowSize: Int
+    ) async throws -> JsonImportReport {
+        // Phase 1 — byte ceiling charged from the on-disk size BEFORE the
+        // file is read (palace pattern), then parse + total validation
+        // (phase 2). Zero estate interaction until both pass.
+        guard FileManager.default.fileExists(atPath: seedURL.path) else {
+            throw VaultKitError.adapterError("seed file not found at \(seedURL.path)")
+        }
+        let onDiskBytes = MemPalaceChromaAdapter.fileByteCount(at: seedURL)
+        guard onDiskBytes <= limits.maxSeedFileBytes else {
+            throw VaultKitError.adapterError(
+                "seed file exceeds byte ceiling: \(onDiskBytes) bytes > limit \(limits.maxSeedFileBytes) at \(seedURL.path)")
+        }
+        let data = try Data(contentsOf: seedURL)
+        let file = try JsonSeedFile.parse(data: data, limits: limits)
+
+        // Phase 3 — ONE snapshot, then the strict-append assertion. Any
+        // overlap is a hard error before any write.
+        let occupied = try await occupiedLineageIDs(handle: handle)
+        try Self.assertStrictAppend(file: file, occupied: occupied)
+
+        // Fetch the estate actor once (tunnel capture + node-name
+        // resolution); declare the encode SPEED before any encode work is
+        // enqueued — SPEED only, the write strategy is fixed.
+        let estate = try await kit.estate(for: handle)
+        await kit.setEncodeSpeed(mode, for: handle)
+
+        var report = JsonImportReport()
+        report.seedName = file.name
+
+        // Phase 4 — pure frame build in file order.
+        let frames = Self.buildFrames(file: file, defaultWing: defaultWing)
+
+        // Phase 5 — windowed bulk write: one transaction per window, report
+        // bookkeeping advancing per COMMITTED window (a mid-import failure
+        // reports only rows that actually landed). No stream branch. The
+        // record-id → drawer map is built from the returned drawers, which
+        // `captureBatch` yields in input order.
+        var drawersByRecordID: [String: Drawer] = [:]
+        drawersByRecordID.reserveCapacity(file.records.count)
+        var processed = 0
+        let total = file.records.count
+        var start = 0
+        while start < frames.count {
+            let end = min(start + windowSize, frames.count)
+            let written = try await kit.captureBatch(handle, Array(frames[start..<end]))
+            for (record, drawer) in zip(file.records[start..<end], written) {
+                drawersByRecordID[record.id] = drawer
+                report.drawersWritten += 1
+                processed += 1
+                if processed % 10 == 0 { progress?(processed, total) }
+            }
+            start = end
+        }
+
+        // Phase 6 — relationship pass. Facts and tunnels resolve their
+        // endpoints through the id → drawer map (the validator guaranteed
+        // every reference resolves, so a miss here is impossible by
+        // construction). Facts anchor to the record's drawer and inherit
+        // its bitmaps through the standard captureKGFact seam.
+        for fact in file.facts {
+            let anchor = drawersByRecordID[fact.recordID]!
+            _ = try await kit.captureKGFact(
+                handle,
+                subject: fact.subject,
+                predicate: fact.predicate,
+                object: fact.object,
+                sourceDrawerID: anchor.id,
+                addedBy: Self.addedBy,
+                now: now)
+            report.factsWritten += 1
+        }
+
+        if !file.tunnels.isEmpty {
+            // Endpoint wing/room names resolved once for all imported
+            // drawers (batch-returned drawers carry node ids, not names).
+            let nodeNames = try await estate.resolveNodeNames(
+                parentNodeIds: file.records.compactMap { drawersByRecordID[$0.id]?.parentNodeId })
+            for tunnel in file.tunnels {
+                let source = drawersByRecordID[tunnel.from]!
+                let target = drawersByRecordID[tunnel.to]!
+                let sourceNames = nodeNames[source.parentNodeId]
+                let targetNames = nodeNames[target.parentNodeId]
+                let sourceWing = sourceNames?.wing ?? ""
+                let sourceRoom = sourceNames?.room ?? ""
+                let targetWing = targetNames?.wing ?? ""
+                let targetRoom = targetNames?.room ?? ""
+                // Unlabeled tunnels get the same "source -> target"
+                // fill-in the palace lane applies (I-5: non-empty body).
+                let label = tunnel.label
+                    ?? "\(sourceWing)/\(sourceRoom) -> \(targetWing)/\(targetRoom)"
+                let tunnelFrame = TunnelCaptureFrame(
+                    sourceWing: sourceWing,
+                    sourceRoom: sourceRoom,
+                    targetWing: targetWing,
+                    targetRoom: targetRoom,
+                    label: label,
+                    addedBy: Self.addedBy,
+                    sourceDrawerId: source.id,
+                    targetDrawerId: target.id,
+                    kind: tunnel.kind,
+                    originClass: .imported)
+                _ = try await estate.capture(tunnelFrame)
+                report.tunnelsCreated += 1
+            }
+        }
+
+        log.info(
+            """
+            json-import: \(report.drawersWritten, privacy: .public) drawers, \
+            \(report.factsWritten, privacy: .public) facts, \
+            \(report.tunnelsCreated, privacy: .public) tunnels from seed \
+            \(file.name, privacy: .public)
+            """
+        )
+        // Final 100% tick so the caller sees completion at the true total.
+        if processed > 0 { progress?(processed, total) }
+        return report
+    }
+}

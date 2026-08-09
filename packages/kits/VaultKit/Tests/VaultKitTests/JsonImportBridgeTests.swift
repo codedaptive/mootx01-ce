@@ -453,3 +453,182 @@ struct JsonImportPipelineTests {
         #expect(bare[1].wing == nil)
     }
 }
+
+// Part 3 — phase 5 (windowed bulk write) and phase 6 (relationship pass).
+@Suite("JsonImportBridge import pipeline (write + relationships)")
+struct JsonImportWriteTests {
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimportbridge-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    /// Write a seed JSON string to a temp file and return its URL.
+    private func tempSeedFile(_ json: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jsonimport-test-\(UUID().uuidString).json")
+        try Data(json.utf8).write(to: url)
+        return url
+    }
+
+    @Test("fixture seed lands with exact drawer/fact/tunnel counts")
+    func fixtureRoundTrip() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let now = Date()
+
+        let report = try await bridge.importSeed(
+            at: JsonImportBridgeTests.fixtureSeedURL, into: handle, now: now)
+
+        #expect(report.seedName == "fixture-valid-seed")
+        #expect(report.drawersWritten == 3)
+        #expect(report.factsWritten == 2)
+        #expect(report.tunnelsCreated == 2)
+
+        // Drawers landed with explicit event times (not `now`).
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 100))
+        #expect(drawers.count == 3)
+        let r1 = try #require(drawers.first {
+            $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0001")
+        })
+        #expect(r1.eventTime == ISO8601DateFormatter().date(from: "2026-01-03T09:00:00Z"))
+
+        // Facts landed anchored to their records' drawers.
+        let facts = try await kit.recallKGFacts(handle)
+        #expect(facts.count == 2)
+        let thursday = try #require(facts.first { $0.object == "Thursday" })
+        #expect(thursday.sourceDrawerID == r1.id)
+        #expect(thursday.subject == "planning meeting")
+
+        // Tunnels landed with drawer endpoints and the generated default
+        // label for the unlabeled one. The unlabeled tunnel's source is
+        // r0002, which omits `wing` and therefore lands in the estate
+        // DEFAULT wing — resolve it rather than assuming a name.
+        let estate = try await kit.estate(for: handle)
+        let r2 = try #require(drawers.first {
+            $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0002")
+        })
+        let r2Names = try await estate.resolveNodeNames(parentNodeIds: [r2.parentNodeId])
+        let defaultWingName = try #require(r2Names[r2.parentNodeId]?.wing)
+
+        let benchmarkTunnels = try await kit.recallTunnels(handle, wing: "Benchmark")
+        #expect(benchmarkTunnels.contains { $0.kind == .supersedes && $0.label == "reschedule chain" })
+        let defaultWingTunnels = try await kit.recallTunnels(handle, wing: defaultWingName)
+        #expect(defaultWingTunnels.contains {
+            $0.kind == .references
+                && $0.label == "\(defaultWingName)/supersession/chains -> Benchmark/supersession/chains"
+        })
+    }
+
+    @Test("a seed spanning two write windows commits both windows")
+    func twoWindowWrite() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // 5 records at an internal window size of 2 → 3 windows (2+2+1).
+        let records = (1...5).map {
+            #"{"id": "w\#($0)", "content": "window record \#($0)", "event_time": "2026-01-01T00:00:0\#($0)Z", "room": "rm"}"#
+        }.joined(separator: ",")
+        let url = try tempSeedFile(
+            #"{"format_version": 1, "name": "two-window", "records": [\#(records)]}"#)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(
+            at: url, into: handle, defaultWing: nil, now: Date(),
+            progress: nil, mode: .foreground, windowSize: 2)
+
+        #expect(report.drawersWritten == 5)
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
+        #expect(drawers.count == 5)
+    }
+
+    @Test("default wing routes records that omit wing")
+    func defaultWingApplied() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        _ = try await bridge.importSeed(
+            at: JsonImportBridgeTests.fixtureSeedURL, into: handle,
+            defaultWing: "SeedWing", now: Date())
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
+        let r2 = try #require(drawers.first {
+            $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0002")
+        })
+        let estate = try await kit.estate(for: handle)
+        let names = try await estate.resolveNodeNames(parentNodeIds: [r2.parentNodeId])
+        #expect(names[r2.parentNodeId]?.wing == "SeedWing")
+    }
+
+    @Test("lineage collision performs ZERO writes — never a partial estate")
+    func zeroWritesOnCollision() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Occupy r0002's lineage before the import.
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: "occupies r0002",
+            channel: .importedFile,
+            room: "rm",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "no-embedding",
+            lineageID: DrawerMapping.lineageID(forStableSourceKey: "r0002")))
+
+        do {
+            _ = try await bridge.importSeed(
+                at: JsonImportBridgeTests.fixtureSeedURL, into: handle, now: Date())
+            Issue.record("expected lineage-collision error")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("\"r0002\""), "got: \(message)")
+        }
+
+        // ZERO writes: only the pre-existing drawer, no facts, no tunnels.
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
+        #expect(drawers.count == 1)
+        let facts = try await kit.recallKGFacts(handle)
+        #expect(facts.isEmpty)
+        let tunnels = try await kit.recallTunnels(handle, wing: "Benchmark")
+        #expect(tunnels.isEmpty)
+    }
+
+    @Test("an invalid seed file performs ZERO writes")
+    func zeroWritesOnInvalidFile() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Valid JSON, invalid schema (dangling tunnel endpoint) — the
+        // validator must reject BEFORE any estate work.
+        let url = try tempSeedFile("""
+            {"format_version": 1, "name": "bad", "records": [
+              {"id": "r1", "content": "c", "event_time": "2026-01-01T00:00:00Z", "room": "rm"}],
+             "tunnels": [{"from": "r1", "to": "r999", "kind": "references"}]}
+            """)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        do {
+            _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+            Issue.record("expected validation error")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("\"r999\""), "got: \(message)")
+        }
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
+        #expect(drawers.isEmpty)
+    }
+}
