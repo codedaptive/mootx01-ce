@@ -80,6 +80,12 @@ public struct JsonSeedRecord: Sendable, Equatable {
     public var sensitivity: AdjectiveSensitivity
     /// Exportability adjective; schema default `private`.
     public var exportability: AdjectiveExportability
+    /// Optional subject line (schema v1.1). When present: non-empty,
+    /// ≤ `DrawerStore.subjectLengthContract` (120) chars. Written via
+    /// `setSubjectRepresentation(import-v1)` after captureBatch. Absent
+    /// → the drawer enters the estate's subject-debt queue for AI
+    /// backfill.
+    public var subject: String?
 }
 
 /// One validated fact from the seed file's `facts` array. `recordID` is
@@ -128,7 +134,7 @@ public struct JsonSeedFile: Sendable, Equatable {
         ["format_version", "name", "records", "facts", "tunnels"]
     private static let recordKeys: Set<String> =
         ["id", "content", "event_time", "wing", "room", "kind",
-         "sensitivity", "exportability"]
+         "sensitivity", "exportability", "subject"]
     private static let factKeys: Set<String> =
         ["subject", "predicate", "object", "record_id"]
     private static let tunnelKeys: Set<String> =
@@ -258,7 +264,7 @@ public struct JsonSeedFile: Sendable, Equatable {
         let at = "record[\(index)] (id \"\(id)\")"
 
         if let unknown = object.keys.filter({ !recordKeys.contains($0) }).sorted().first {
-            throw err("\(at): unknown key \"\(unknown)\" — schema v1 record keys are id, content, event_time, wing, room, kind, sensitivity, exportability")
+            throw err("\(at): unknown key \"\(unknown)\" — schema v1.1 record keys are id, content, event_time, wing, room, kind, sensitivity, exportability, subject")
         }
         guard !seenIDs.contains(id) else {
             throw err("\(at): duplicate id — ids must be unique within the seed file")
@@ -312,6 +318,20 @@ public struct JsonSeedFile: Sendable, Equatable {
             exportability = parsed
         }
 
+        // Schema v1.1 — optional subject field. When present: non-empty
+        // string, ≤ DrawerStore.subjectLengthContract (120) extended
+        // grapheme clusters. Absent → nil (subject-debt candidate).
+        var subject: String?
+        if object.keys.contains("subject") {
+            guard let subjectValue = object["subject"] as? String, !subjectValue.isEmpty else {
+                throw err("\(at): subject is empty (omit it or provide a non-empty string ≤ \(DrawerStore.subjectLengthContract) chars)")
+            }
+            guard subjectValue.count <= DrawerStore.subjectLengthContract else {
+                throw err("\(at): subject exceeds the \(DrawerStore.subjectLengthContract)-character contract (\(subjectValue.count) chars)")
+            }
+            subject = subjectValue
+        }
+
         // Invariant I-22: a secret row can never be public. The storage
         // gate refuses this combination on every write, so it MUST be
         // rejected here in total validation — otherwise a multi-window
@@ -326,7 +346,7 @@ public struct JsonSeedFile: Sendable, Equatable {
         return JsonSeedRecord(
             id: id, content: content, eventTime: eventTime, wing: wing,
             room: room, kind: kind, sensitivity: sensitivity,
-            exportability: exportability)
+            exportability: exportability, subject: subject)
     }
 
     private static func parseFact(
@@ -615,6 +635,14 @@ public struct JsonImportReport: Sendable, Equatable {
     /// sweep (`reindexMissing`), mirroring `ImportReport.enqueuedForEncode`.
     public var enqueuedForEncode = 0
 
+    /// Records that carried an explicit subject in the seed file and had
+    /// that subject written via `setSubjectRepresentation(import-v1)`.
+    public var subjectsProvided = 0
+
+    /// Records without a subject in the seed file — each is an ordinary
+    /// subject-debt candidate for the AI backfill lane.
+    public var subjectsDebt = 0
+
     /// Lowercase-hex SHA-256 of the seed file's exact input bytes, carried
     /// into the audit receipt so any estate is traceable to the seed file
     /// that built it.
@@ -726,6 +754,23 @@ extension JsonImportBridge {
             start = end
         }
 
+        // Phase 5.5 — subject attribution: write import-v1 subjects for
+        // records that carried an explicit subject in the seed file.
+        // Records without a subject enter the estate's subject-debt queue
+        // for AI backfill; their subject column stays NULL.
+        for record in file.records {
+            if let subject = record.subject {
+                let drawer = drawersByRecordID[record.id]!
+                _ = try await estate.setSubjectRepresentation(
+                    drawerId: drawer.id,
+                    subject: subject,
+                    pipelineVersion: DrawerStore.subjectPipelineImportV1,
+                    at: now)
+                report.subjectsProvided += 1
+            }
+        }
+        report.subjectsDebt = file.records.count - report.subjectsProvided
+
         // Phase 6 — relationship pass. Facts and tunnels resolve their
         // endpoints through the id → drawer map (the validator guaranteed
         // every reference resolves, so a miss here is impossible by
@@ -824,6 +869,8 @@ extension JsonImportBridge {
         "drawersWritten":\(report.drawersWritten),\
         "factsWritten":\(report.factsWritten),\
         "tunnelsCreated":\(report.tunnelsCreated),\
+        "subjectsProvided":\(report.subjectsProvided),\
+        "subjectsDebt":\(report.subjectsDebt),\
         "seedSha256":"\(report.seedSha256)",\
         "occurredAt":"\(OccurredAt(date: now).iso8601)"}
         """

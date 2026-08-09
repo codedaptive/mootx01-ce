@@ -754,3 +754,243 @@ struct JsonImportReceiptTests {
                 "all 3 records must be enqueued for encode; got \(report.enqueuedForEncode)")
     }
 }
+
+// Part 5 — schema v1.1: optional per-record subject field (MXE-JI-4).
+//
+// The subject field is optional in the seed file. When present it must be
+// non-empty and ≤ DrawerStore.subjectLengthContract (120) chars. On import,
+// each record's subject is written via setSubjectRepresentation(import-v1);
+// records without a subject enter the estate's subject-debt queue. The
+// receipt carries subjectsProvided and subjectsDebt counters.
+@Suite("JsonImportBridge schema v1.1 — subject field")
+struct JsonImportSubjectTests {
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimport-subject-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    private func parse(_ json: String) throws -> JsonSeedFile {
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default)
+    }
+
+    private func tempSeedFile(_ json: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jsonimport-subj-\(UUID().uuidString).json")
+        try Data(json.utf8).write(to: url)
+        return url
+    }
+
+    // MARK: Validator — subject field
+
+    @Test("valid subject ≤ 120 chars parses and survives to JsonSeedRecord")
+    func subjectValidParsed() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"A valid subject under the limit."}
+        ]}
+        """)
+        #expect(file.records[0].subject == "A valid subject under the limit.")
+    }
+
+    @Test("subject absent → record.subject is nil (debt candidate)")
+    func subjectAbsentIsNil() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm"}
+        ]}
+        """)
+        #expect(file.records[0].subject == nil)
+    }
+
+    @Test("subject exactly 120 chars passes validation")
+    func subjectAtLimit() throws {
+        let at120 = String(repeating: "x", count: 120)
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"\(at120)"}
+        ]}
+        """)
+        #expect(file.records[0].subject?.count == 120)
+    }
+
+    @Test("subject exceeding 120 chars is a hard error naming the contract")
+    func subjectTooLong() {
+        let over = String(repeating: "y", count: 121)
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"\(over)"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected adapterError for subject exceeding 120 chars")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("subject"), "got: \(message)")
+            #expect(message.contains("120"), "got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.adapterError; got \(error)")
+        }
+    }
+
+    @Test("empty subject string is a hard error")
+    func subjectEmpty() {
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":""}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected adapterError for empty subject")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("subject"), "got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.adapterError; got \(error)")
+        }
+    }
+
+    // MARK: Phase 5.5 — subject write + report counts
+
+    @Test("all subjects provided → subjectsProvided equals record count, debt zero")
+    func allSubjectsProvided() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"subj-all","records":[
+          {"id":"s1","content":"First record.","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"First."},
+          {"id":"s2","content":"Second record.","event_time":"2026-01-01T00:00:01Z","room":"rm",
+           "subject":"Second."}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.subjectsProvided == 2)
+        #expect(report.subjectsDebt == 0)
+    }
+
+    @Test("no subjects provided → subjectsDebt equals record count, provided zero")
+    func noSubjectsProvided() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"subj-none","records":[
+          {"id":"n1","content":"No subject here.","event_time":"2026-01-01T00:00:00Z","room":"rm"},
+          {"id":"n2","content":"Nor here.","event_time":"2026-01-01T00:00:01Z","room":"rm"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.subjectsProvided == 0)
+        #expect(report.subjectsDebt == 2)
+    }
+
+    @Test("mixed subjects: provided + debt sum to record count")
+    func mixedSubjects() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"subj-mixed","records":[
+          {"id":"m1","content":"Has a subject.","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"Has one."},
+          {"id":"m2","content":"No subject.","event_time":"2026-01-01T00:00:01Z","room":"rm"},
+          {"id":"m3","content":"Also a subject.","event_time":"2026-01-01T00:00:02Z","room":"rm",
+           "subject":"Also one."}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.subjectsProvided == 2)
+        #expect(report.subjectsDebt == 1)
+        #expect(report.subjectsProvided + report.subjectsDebt == report.drawersWritten)
+    }
+
+    @Test("provided subject is written with import-v1 pipeline tier")
+    func subjectPipelineTier() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"subj-tier","records":[
+          {"id":"t1","content":"Check the tier.","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"Tier check."}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+
+        // Recall the drawer and confirm subject and pipeline version.
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "Check the tier." })
+        #expect(drawer.subject == "Tier check.")
+        #expect(drawer.subjectPipelineVersion == DrawerStore.subjectPipelineImportV1)
+    }
+
+    @Test("import is deterministic: two runs on identical seeds produce identical drawers")
+    func importDeterminism() async throws {
+        // Two separate estates, same seed — drawer subjects must match.
+        let seedJSON = """
+        {"format_version":1,"name":"det-subj","records":[
+          {"id":"d1","content":"Determinism check.","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"Det check."},
+          {"id":"d2","content":"Second record.","event_time":"2026-01-01T00:00:01Z","room":"rm",
+           "subject":"Second det."}
+        ]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        func importIntoFreshEstate() async throws -> [String?] {
+            let kit = GeniusLocusKit()
+            let owner = OwnerCredentials(ownerIdentifier: "det-\(UUID().uuidString)")
+            let storage = InMemoryStorage(configuration: EstateConfiguration(
+                estateID: UUID(), backend: .inMemory))
+            _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+            let handle = try await kit.open(storage: storage, owner: owner)
+            let bridge = JsonImportBridge(kit: kit)
+            _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+            let drawers = try await kit.recall(
+                handle,
+                RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+            return drawers.sorted { $0.lineageID < $1.lineageID }.map(\.subject)
+        }
+
+        let run1 = try await importIntoFreshEstate()
+        let run2 = try await importIntoFreshEstate()
+        #expect(run1 == run2, "subjects must match across deterministic re-runs")
+    }
+
+    @Test("receipt carries subjectsProvided and subjectsDebt")
+    func receiptCarriesSubjectCounts() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"subj-receipt","records":[
+          {"id":"rc1","content":"With subject.","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"With."},
+          {"id":"rc2","content":"Without subject.","event_time":"2026-01-01T00:00:01Z","room":"rm"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+
+        let receipts = try await kit.readDiaryEntries(
+            in: handle, agentName: VaultBridge.receiptAgentName)
+        let receipt = try #require(receipts.first)
+        #expect(receipt.entry.contains(#""subjectsProvided":1"#),
+                "receipt must carry subjectsProvided; got: \(receipt.entry)")
+        #expect(receipt.entry.contains(#""subjectsDebt":1"#),
+                "receipt must carry subjectsDebt; got: \(receipt.entry)")
+    }
+}

@@ -128,14 +128,21 @@ pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
 
 /// Pipeline-version tag for subjects produced by the on-device miniLLM
 /// rider (PR-10's producer; the Rust lane stays DARK until a model
-/// exists — seam compiled, gated off). Provenance tiers stored in
-/// `subject_pipeline_version`: ai-v1 (filing/backfill AI), minillm-v1
-/// (model rider), consolidation-v1 (deterministic vague writer),
-/// seed-v1 (structural seeds). A version differing from a requested
-/// producer contract marks the row a REGENERATION candidate
-/// (`count_missing_subject`) — the migration lever. Twin of Swift
-/// `DrawerStore.subjectPipelineMiniLLMV1`.
+/// exists — seam compiled, gated off). Trust ladder (highest first):
+/// ai-v1 (filing/backfill AI), minillm-v1 (model rider),
+/// consolidation-v1 (deterministic vague writer), seed-v1 (structural
+/// seeds), import-v1 (batch seed files, schema v1.1). A version
+/// differing from a requested producer contract marks the row a
+/// REGENERATION candidate (`count_missing_subject`) — the migration
+/// lever. Twin of Swift `DrawerStore.subjectPipelineMiniLLMV1`.
 pub const SUBJECT_PIPELINE_MINILLM_V1: &str = "minillm-v1";
+
+/// Pipeline-version tag for subjects provided by a batch seed file via
+/// the `moot_json_import` lane (schema v1.1). Sits at the bottom of the
+/// trust ladder — regenerable by every higher-tier producer. Records
+/// imported without a subject carry NULL and are ordinary subject-debt
+/// candidates. Twin of Swift `DrawerStore.subjectPipelineImportV1`.
+pub const SUBJECT_PIPELINE_IMPORT_V1: &str = "import-v1";
 
 /// Result of a lineage-wide gated expunge (`expunge_gated`). Twin of
 /// Swift `DrawerStore.ExpungeOutcome`.

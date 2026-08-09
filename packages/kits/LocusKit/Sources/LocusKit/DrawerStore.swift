@@ -5132,15 +5132,24 @@ public actor DrawerStore {
     /// Pipeline-version tag for subjects produced by the on-device
     /// miniLLM rider (PR-10's producer; the Rust lane stays dark until a
     /// model exists). The provenance tiers stored in
-    /// `subject_pipeline_version`:
+    /// `subject_pipeline_version` (trust ladder, highest first):
     ///   ai-v1            — the filing/backfill AI (capture + setSubject)
     ///   minillm-v1       — the model rider
     ///   consolidation-v1 — the deterministic vague-tier writer
     ///   seed-v1          — structural charter-hint seeds
+    ///   import-v1        — batch seed files (moot_json_import, schema v1.1)
     /// A version differing from a requested producer contract marks the
     /// row a REGENERATION candidate (`countMissingSubject`) — the
     /// migration lever. Twin: Rust `SUBJECT_PIPELINE_MINILLM_V1`.
     public static let subjectPipelineMiniLLMV1 = "minillm-v1"
+
+    /// Pipeline-version tag for subjects provided by a batch seed file
+    /// via the `moot_json_import` lane (schema v1.1). Sits at the bottom
+    /// of the trust ladder — regenerable by every higher-tier producer.
+    /// Records imported WITHOUT a subject carry NULL and are ordinary
+    /// subject-debt candidates for the AI backfill lane. Twin of Rust
+    /// `SUBJECT_PIPELINE_IMPORT_V1`.
+    public static let subjectPipelineImportV1 = "import-v1"
 
     /// The subject-debt predicate, optionally widened by regeneration
     /// tiers (PR-10): subject NULL, or produced under one of
