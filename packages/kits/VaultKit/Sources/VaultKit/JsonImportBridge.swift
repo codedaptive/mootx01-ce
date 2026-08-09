@@ -312,6 +312,17 @@ public struct JsonSeedFile: Sendable, Equatable {
             exportability = parsed
         }
 
+        // Invariant I-22: a secret row can never be public. The storage
+        // gate refuses this combination on every write, so it MUST be
+        // rejected here in total validation — otherwise a multi-window
+        // seed could commit earlier windows before the gate's refusal,
+        // breaking the zero-partial-write contract. Rejected, not clamped:
+        // silent mutation of a seed's declared adjectives is the same
+        // determinism hazard as silent dedup.
+        if sensitivity == .secret && exportability == .public_ {
+            throw err("\(at): exportability \"public\" is not allowed with sensitivity \"secret\" (invariant I-22)")
+        }
+
         return JsonSeedRecord(
             id: id, content: content, eventTime: eventTime, wing: wing,
             room: room, kind: kind, sensitivity: sensitivity,

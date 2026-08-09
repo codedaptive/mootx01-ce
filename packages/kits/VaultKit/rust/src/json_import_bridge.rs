@@ -373,6 +373,20 @@ fn parse_record(
         AdjectiveExportability::Private
     };
 
+    // Invariant I-22: a secret row can never be public. The storage gate
+    // refuses this combination on every write, so it MUST be rejected here
+    // in total validation — otherwise a multi-window seed could commit
+    // earlier windows before the gate's refusal, breaking the
+    // zero-partial-write contract. Rejected, not clamped: silent mutation
+    // of a seed's declared adjectives is the same determinism hazard as
+    // silent dedup. Mirrors the Swift twin byte-for-byte.
+    if sensitivity == AdjectiveSensitivity::Secret && exportability == AdjectiveExportability::Public
+    {
+        return Err(err(format!(
+            "{at}: exportability \"public\" is not allowed with sensitivity \"secret\" (invariant I-22)"
+        )));
+    }
+
     Ok(JsonSeedRecord {
         id,
         content,
@@ -1522,6 +1536,28 @@ mod tests {
             ),
             &["record[0]", "exportability", "shared"],
         );
+    }
+
+    #[test]
+    fn secret_public_rejected_in_total_validation() {
+        // The storage gate refuses secret+public on every write; the
+        // validator must reject it BEFORE any window commits, or a
+        // multi-window seed could land partially (I-22).
+        expect_error(
+            &seed(
+                r#"[{"id": "r1", "content": "c", "event_time": "2026-01-01T00:00:00Z", "room": "rm", "sensitivity": "secret", "exportability": "public"}]"#,
+                "[]",
+                "[]",
+            ),
+            &["record[0]", "\"r1\"", "public", "secret", "I-22"],
+        );
+        // secret + private (default) remains valid.
+        parse_str(&seed(
+            r#"[{"id": "r1", "content": "c", "event_time": "2026-01-01T00:00:00Z", "room": "rm", "sensitivity": "secret"}]"#,
+            "[]",
+            "[]",
+        ))
+        .expect("secret with default private exportability is valid");
     }
 
     #[test]

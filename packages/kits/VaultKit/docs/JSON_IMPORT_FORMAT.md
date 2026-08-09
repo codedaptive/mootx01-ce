@@ -1,6 +1,6 @@
 ---
 title: VaultKit JSON Seed-File Format
-version: 1.0.0
+version: 1.0.1
 status: active
 date: 2026-08-08
 description: Canonical definition of seed-file schema v1 — the rigid, versioned JSON format consumed by the moot_json_import lane, both ports.
@@ -77,7 +77,7 @@ exactly the failure class this lane eliminates.
 | `room` | yes | Non-empty room path. |
 | `kind` | no | One of `prose` (default), `code`, `transcript`, `list`, `structuredJSON`, `imageCaption`. The system-managed kinds (`fingerprintOnly`, `dataset`) are not seedable. |
 | `sensitivity` | no | One of `normal` (default), `elevated`, `restricted`, `secret`. |
-| `exportability` | no | One of `private` (default), `public`. |
+| `exportability` | no | One of `private` (default), `public`. `public` is NOT allowed together with `sensitivity: secret` (substrate invariant I-22) — the combination is rejected in total validation, never clamped. |
 
 ## `facts[]`
 
@@ -133,5 +133,9 @@ protocol steps.
 
 ## Changelog
 
+- **1.0.1 (2026-08-08)** — Documented the I-22 validation rule:
+  `sensitivity: secret` + `exportability: public` is rejected in total
+  validation (the storage gate refuses the combination on every write;
+  rejecting pre-write preserves the zero-partial-write contract).
 - **1.0.0 (2026-08-08)** — Initial canonical definition of seed-file
   schema v1, authored with the `moot_json_import` lane (mission MXE-JI-1).

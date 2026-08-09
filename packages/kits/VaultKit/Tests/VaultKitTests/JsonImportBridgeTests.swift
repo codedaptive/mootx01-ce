@@ -251,6 +251,20 @@ struct JsonImportBridgeTests {
             contains: ["record[0]", "exportability", "shared"])
     }
 
+    @Test("secret + public is rejected in total validation (I-22)")
+    func secretPublicRejected() {
+        // The storage gate refuses secret+public on every write; the
+        // validator must reject it BEFORE any window commits, or a
+        // multi-window seed could land partially.
+        expectParseError(
+            seed(records: #"[{"id": "r1", "content": "c", "event_time": "2026-01-01T00:00:00Z", "room": "rm", "sensitivity": "secret", "exportability": "public"}]"#),
+            contains: ["record[0]", "\"r1\"", "public", "secret", "I-22"])
+        // secret + private (default) remains valid.
+        #expect(throws: Never.self) {
+            _ = try parse(seed(records: #"[{"id": "r1", "content": "c", "event_time": "2026-01-01T00:00:00Z", "room": "rm", "sensitivity": "secret"}]"#))
+        }
+    }
+
     @Test("unknown record key is rejected (rigid schema)")
     func unknownRecordKey() {
         expectParseError(
