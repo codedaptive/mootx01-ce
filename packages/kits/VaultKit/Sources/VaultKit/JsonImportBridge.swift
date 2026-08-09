@@ -468,3 +468,113 @@ public struct JsonSeedFile: Sendable, Equatable {
         return fmt.date(from: s)
     }
 }
+
+// MARK: - Bridge (phases 3–8)
+
+/// The JSON import lane's estate-facing half. Phases 1–2 (parse + total
+/// validation) live on `JsonSeedFile.parse`; this type owns the snapshot,
+/// the strict-append assertion, the pure frame build, and (Parts 3–4) the
+/// windowed write, relationship pass, encode enqueue, and receipt.
+public struct JsonImportBridge: Sendable {
+
+    let kit: GeniusLocusKit
+    private let log = Logger(subsystem: "com.mootx01.kit", category: "VaultKit")
+
+    /// The ceilings this bridge enforces on an untrusted seed file.
+    public var limits: JsonImportLimits
+
+    // Default field values that mirror VaultBridge / PalaceBridge defaults.
+    static let addedBy = "jsonimportbridge-import"
+    static let embeddingModelID = "vaultkit-noembed-v1"
+    /// UDC sentinel for unclassified content — exactly the anchor
+    /// `PalaceBridge.buildChromaFrame` stamps; the GLK capture seam
+    /// classifies on ingestion when the sentinel is present.
+    static let fallbackUDC = "000"
+
+    public init(kit: GeniusLocusKit, limits: JsonImportLimits = .default) {
+        self.kit = kit
+        self.limits = limits
+    }
+
+    // MARK: Phase 3 — occupied-lineage snapshot + strict-append assertion
+
+    /// Snapshot every lineage the estate already carries — active,
+    /// withdrawn (usedToBelieve), and erased (tombstoned). ONE snapshot
+    /// before any write; no per-row probes. The recall frames are the same
+    /// shapes `PalaceBridge.existingDrawerState` /
+    /// `existingTombstonedLineageIDs` use, at `.structured` hydration
+    /// because only lineage ids are needed (the JSON lane has no
+    /// content-idempotent guard to feed — overlap of any kind is an error).
+    func occupiedLineageIDs(handle: EstateHandle) async throws -> Set<UUID> {
+        let active = try await kit.recall(
+            handle,
+            RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                limit: 10_000_000
+            )
+        )
+        let withdrawn = try await kit.recall(
+            handle,
+            RecallFrame(
+                filterChain: [.usedToBelieve],
+                hydrationLevel: .structured,
+                limit: 10_000_000
+            )
+        )
+        let erased = try await kit.tombstonedLineageIDs(handle)
+        return Set(active.map(\.lineageID))
+            .union(withdrawn.map(\.lineageID))
+            .union(erased)
+    }
+
+    /// Strict-append assertion: any overlap between the file's record
+    /// lineages and the estate is a hard error naming the FIRST colliding
+    /// record in file order. Silent dedup is banned as a determinism
+    /// hazard — a seed file either builds exactly what it says or builds
+    /// nothing. (A withdrawn/erased overlap would otherwise resurrect or
+    /// shadow a tombstoned lineage, so those count as collisions too.)
+    static func assertStrictAppend(file: JsonSeedFile, occupied: Set<UUID>) throws {
+        for (index, record) in file.records.enumerated() {
+            let lineage = DrawerMapping.lineageID(forStableSourceKey: record.id)
+            if occupied.contains(lineage) {
+                throw VaultKitError.adapterError(
+                    "record[\(index)] (id \"\(record.id)\"): lineage collision — this id's lineage already exists in the estate (strict append: the JSON lane never dedups)"
+                )
+            }
+        }
+    }
+
+    // MARK: Phase 4 — pure frame build (file order)
+
+    /// Build one `CaptureFrame` per record, in FILE ORDER, with explicit
+    /// lineage (from the record id) and explicit `eventTime` (validated at
+    /// parse). Pure: no estate access, no clock — same input, same frames,
+    /// every time, both ports.
+    ///
+    /// - Parameter defaultWing: fills records that omit `wing`; nil leaves
+    ///   the frame wing nil so the estate default wing applies at capture.
+    static func buildFrames(file: JsonSeedFile, defaultWing: String?) -> [CaptureFrame] {
+        file.records.map { record in
+            CaptureFrame(
+                content: record.content,
+                channel: .importedFile,
+                room: record.room,
+                // Sentinel UDC anchor exactly as buildChromaFrame does.
+                latticeAnchor: LatticeAnchor(udcCode: fallbackUDC),
+                addedBy: addedBy,
+                embeddingModelID: embeddingModelID,
+                sensitivity: record.sensitivity,
+                kind: record.kind,
+                // Provenance: imported from a file (same stamps as
+                // DrawerMapping.makeCaptureFrame's vault import path).
+                provenanceChannel: .fileImport,
+                sourceType: .imported,
+                lineageID: DrawerMapping.lineageID(forStableSourceKey: record.id),
+                eventTime: record.eventTime,
+                exportability: record.exportability,
+                wing: record.wing ?? defaultWing
+            )
+        }
+    }
+}

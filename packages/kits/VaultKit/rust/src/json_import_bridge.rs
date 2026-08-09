@@ -23,13 +23,21 @@
 //! The canonical schema definition ships with this code at
 //! `packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
-use crate::drawer_mapping::iso8601_to_ms;
+use uuid::Uuid;
+
+use crate::drawer_mapping::{iso8601_to_ms, DrawerMapping};
 use crate::error::VaultKitError;
+use genius_locus_kit::coordinator::EstateCoordinator;
+use genius_locus_kit::handle::EstateHandle;
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
-    drawer_operational::ContentKind,
+    drawer_operational::{CaptureChannel, ContentKind},
+    estate_types::LatticeAnchor,
+    filter::{Filter, HydrationLevel, Ordering, RecallFrame},
+    frames::CaptureFrame,
+    provenance::{Channel, SourceType},
     tunnel_operational::TunnelKind,
 };
 
@@ -653,6 +661,159 @@ fn parse_utc_iso8601_ms(s: &str) -> Option<i64> {
     iso8601_to_ms(s)
 }
 
+// MARK: - Bridge (phases 3–8)
+
+// Default field values that mirror VaultBridge / PalaceBridge defaults.
+const ADDED_BY: &str = "jsonimportbridge-import";
+const EMBEDDING_MODEL_ID: &str = "vaultkit-noembed-v1";
+/// UDC sentinel for unclassified content — exactly the anchor
+/// `PalaceBridge::build_chroma_frame` stamps; the GLK capture seam
+/// classifies on ingestion when the sentinel is present.
+const FALLBACK_UDC: &str = "000";
+
+/// The JSON import lane's estate-facing half. Phases 1–2 (parse + total
+/// validation) live on `JsonSeedFile::parse`; this type owns the snapshot,
+/// the strict-append assertion, the pure frame build, and (Parts 3–4) the
+/// windowed write, relationship pass, encode enqueue, and receipt.
+/// Mirrors Swift `JsonImportBridge`; holds a mutable reference to an
+/// `EstateCoordinator` (the same pattern as `VaultBridge`/`PalaceBridge`).
+pub struct JsonImportBridge<'a> {
+    coordinator: &'a mut EstateCoordinator,
+    /// The ceilings this bridge enforces on an untrusted seed file.
+    limits: JsonImportLimits,
+}
+
+impl<'a> JsonImportBridge<'a> {
+    /// Create a bridge at the shipping import limits.
+    pub fn new(coordinator: &'a mut EstateCoordinator) -> Self {
+        Self {
+            coordinator,
+            limits: JsonImportLimits::default(),
+        }
+    }
+
+    /// Create a bridge with explicit limits, for a caller with a
+    /// known-good oversized seed.
+    pub fn with_limits(coordinator: &'a mut EstateCoordinator, limits: JsonImportLimits) -> Self {
+        Self { coordinator, limits }
+    }
+
+    // MARK: Phase 3 — occupied-lineage snapshot
+
+    /// Snapshot every lineage the estate already carries — active,
+    /// withdrawn (usedToBelieve), and erased (tombstoned). ONE snapshot
+    /// before any write; no per-row probes. The recall frames are the
+    /// same shapes `PalaceBridge::existing_drawer_state` /
+    /// `existing_tombstoned_lineage_ids` use, at `Structured` hydration
+    /// because only lineage ids are needed (the JSON lane has no
+    /// content-idempotent guard to feed — overlap of any kind is an
+    /// error). Mirrors Swift `occupiedLineageIDs`.
+    pub fn occupied_lineage_ids(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<HashSet<Uuid>, VaultKitError> {
+        let active_frame = RecallFrame {
+            filter_chain: vec![Filter::Unconfirmed],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(10_000_000),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let active = self
+            .coordinator
+            .recall(handle, active_frame, now)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let withdrawn_frame = RecallFrame {
+            filter_chain: vec![Filter::UsedToBelieve],
+            hydration_level: HydrationLevel::Structured,
+            limit: Some(10_000_000),
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let withdrawn = self
+            .coordinator
+            .recall(handle, withdrawn_frame, now)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let erased = self
+            .coordinator
+            .tombstoned_lineage_ids(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let mut occupied: HashSet<Uuid> = active.into_iter().map(|d| d.lineage_id).collect();
+        occupied.extend(withdrawn.into_iter().map(|d| d.lineage_id));
+        occupied.extend(erased);
+        Ok(occupied)
+    }
+}
+
+// MARK: Phase 3 — strict-append assertion (pure)
+
+/// Strict-append assertion: any overlap between the file's record lineages
+/// and the estate is a hard error naming the FIRST colliding record in
+/// file order. Silent dedup is banned as a determinism hazard — a seed
+/// file either builds exactly what it says or builds nothing. (A
+/// withdrawn/erased overlap would otherwise resurrect or shadow a
+/// tombstoned lineage, so those count as collisions too.) Mirrors Swift
+/// `JsonImportBridge.assertStrictAppend`; the error message is pinned
+/// byte-identical.
+pub fn assert_strict_append(
+    file: &JsonSeedFile,
+    occupied: &HashSet<Uuid>,
+) -> Result<(), VaultKitError> {
+    for (index, record) in file.records.iter().enumerate() {
+        let lineage = DrawerMapping::lineage_id(&record.id);
+        if occupied.contains(&lineage) {
+            return Err(err(format!(
+                "record[{index}] (id \"{}\"): lineage collision — this id's lineage already exists in the estate (strict append: the JSON lane never dedups)",
+                record.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+// MARK: Phase 4 — pure frame build (file order)
+
+/// Build one `CaptureFrame` per record, in FILE ORDER, with explicit
+/// lineage (from the record id) and explicit `event_time` (validated at
+/// parse). Pure: no estate access, no clock — same input, same frames,
+/// every time, both ports. Mirrors Swift `JsonImportBridge.buildFrames`.
+///
+/// `default_wing` fills records that omit `wing`; `None` leaves the frame
+/// wing `None` so the estate default wing applies at capture.
+pub fn build_frames(file: &JsonSeedFile, default_wing: Option<&str>) -> Vec<CaptureFrame> {
+    file.records
+        .iter()
+        .map(|record| {
+            let mut frame = CaptureFrame::new(
+                record.content.as_str(),
+                CaptureChannel::ImportedFile,
+                record.room.as_str(),
+                // Sentinel UDC anchor exactly as build_chroma_frame does.
+                LatticeAnchor::udc(FALLBACK_UDC),
+                ADDED_BY,
+                EMBEDDING_MODEL_ID,
+            );
+            frame.sensitivity = record.sensitivity;
+            frame.exportability = record.exportability;
+            frame.kind = record.kind;
+            // Provenance: imported from a file (same stamps as
+            // DrawerMapping's vault import path).
+            frame.provenance_channel = Channel::FileImport;
+            frame.source_type = SourceType::Imported;
+            frame.lineage_id = Some(DrawerMapping::lineage_id(&record.id));
+            frame.event_time = Some(record.event_time_ms);
+            frame.wing = record
+                .wing
+                .clone()
+                .or_else(|| default_wing.map(str::to_string));
+            frame
+        })
+        .collect()
+}
+
 // MARK: - Tests (mirrors JsonImportBridgeTests.swift Part 1 suite 1:1)
 
 #[cfg(test)]
@@ -1024,5 +1185,166 @@ mod tests {
             ..Default::default()
         };
         expect_parse_error(&seed(ONE_RECORD, "[]", "[]"), &limits, &["byte ceiling", "16"]);
+    }
+
+    // MARK: Part 2 — strict append + frame build (mirrors Swift
+    // "JsonImportBridge strict append + frame build" suite 1:1)
+
+    use locus_kit::{
+        drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
+        estate_types::OwnerCredentials,
+    };
+    use std::sync::Arc;
+
+    /// Fixed operation instant (ms) used across the estate-backed tests.
+    const NOW: i64 = 1_000_000_000_000i64;
+
+    fn open_estate() -> (EstateCoordinator, EstateHandle) {
+        let mut coordinator = EstateCoordinator::new();
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(NOW, None).expect("InMemoryDrawerStore::new"));
+        let handle = coordinator
+            .open(store, OwnerCredentials::new("jsonimportbridge-rust-tests"), 0, 100)
+            .expect("open estate");
+        (coordinator, handle)
+    }
+
+    fn fixture_file() -> JsonSeedFile {
+        let data = std::fs::read(fixture_seed_path()).expect("fixture readable");
+        JsonSeedFile::parse(&data, &JsonImportLimits::default()).expect("valid")
+    }
+
+    #[test]
+    fn strict_append_passes_on_fresh_set() {
+        let file = fixture_file();
+        assert_strict_append(&file, &HashSet::new()).expect("no collision");
+    }
+
+    #[test]
+    fn strict_append_names_first_colliding_record() {
+        let file = fixture_file();
+        // Occupy r0002 and r0003 — the FIRST in file order (r0002) is named.
+        let occupied: HashSet<Uuid> = [
+            DrawerMapping::lineage_id("r0002"),
+            DrawerMapping::lineage_id("r0003"),
+        ]
+        .into_iter()
+        .collect();
+        match assert_strict_append(&file, &occupied) {
+            Ok(()) => panic!("expected lineage-collision error"),
+            Err(VaultKitError::AdapterError(message)) => {
+                assert!(message.contains("record[1]"), "got: {message}");
+                assert!(message.contains("\"r0002\""), "got: {message}");
+                assert!(message.contains("lineage collision"), "got: {message}");
+            }
+            Err(other) => panic!("expected AdapterError; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn occupied_covers_active_and_withdrawn() {
+        let (mut coordinator, handle) = open_estate();
+
+        // Active drawer at r0001's lineage.
+        let mut active_frame = CaptureFrame::new(
+            "occupies r0001",
+            CaptureChannel::ImportedFile,
+            "rm",
+            LatticeAnchor::udc("000"),
+            "test",
+            "no-embedding",
+        );
+        active_frame.lineage_id = Some(DrawerMapping::lineage_id("r0001"));
+        let active = coordinator
+            .capture(&handle, active_frame, NOW)
+            .expect("capture active");
+
+        // Withdrawn drawer at r0002's lineage.
+        let mut withdrawn_frame = CaptureFrame::new(
+            "occupies r0002",
+            CaptureChannel::ImportedFile,
+            "rm",
+            LatticeAnchor::udc("000"),
+            "test",
+            "no-embedding",
+        );
+        withdrawn_frame.lineage_id = Some(DrawerMapping::lineage_id("r0002"));
+        let withdrawn = coordinator
+            .capture(&handle, withdrawn_frame, NOW)
+            .expect("capture to withdraw");
+        coordinator
+            .withdraw(&handle, &withdrawn.id, Some("test-withdrawal"), NOW)
+            .expect("withdraw");
+
+        let bridge = JsonImportBridge::new(&mut coordinator);
+        let occupied = bridge
+            .occupied_lineage_ids(&handle, NOW)
+            .expect("snapshot");
+        assert!(occupied.contains(&active.lineage_id));
+        assert!(occupied.contains(&withdrawn.lineage_id));
+
+        // And the fixture file collides on record[0] (id r0001).
+        let file = fixture_file();
+        match assert_strict_append(&file, &occupied) {
+            Ok(()) => panic!("expected lineage-collision error against the estate snapshot"),
+            Err(VaultKitError::AdapterError(message)) => {
+                assert!(message.contains("record[0]"), "got: {message}");
+                assert!(message.contains("\"r0001\""), "got: {message}");
+            }
+            Err(other) => panic!("expected AdapterError; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frame_build_deterministic_file_ordered_explicit_lineage() {
+        let file = fixture_file();
+        let first = build_frames(&file, None);
+        let second = build_frames(&file, None);
+
+        assert_eq!(first.len(), 3);
+        // Field-by-field determinism.
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.content, b.content);
+            assert_eq!(a.lineage_id, b.lineage_id);
+            assert_eq!(a.event_time, b.event_time);
+            assert_eq!(a.wing, b.wing);
+            assert_eq!(a.room, b.room);
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.sensitivity, b.sensitivity);
+            assert_eq!(a.exportability, b.exportability);
+        }
+        // File order, not sorted: r0001, r0002, r0003.
+        let expected: Vec<Uuid> = ["r0001", "r0002", "r0003"]
+            .iter()
+            .map(|id| DrawerMapping::lineage_id(id))
+            .collect();
+        let got: Vec<Uuid> = first.iter().map(|f| f.lineage_id.unwrap()).collect();
+        assert_eq!(got, expected);
+        // Explicit event times ride through (no `now` in frames).
+        assert_eq!(
+            first[0].event_time,
+            Some(parse_utc_iso8601_ms("2026-01-03T09:00:00Z").unwrap())
+        );
+        // Sentinel UDC anchor exactly as build_chroma_frame: "000".
+        assert!(first.iter().all(|f| f.lattice_anchor.udc_code == "000"));
+        // Import provenance stamped.
+        assert!(first.iter().all(|f| f.channel == CaptureChannel::ImportedFile));
+        assert!(first.iter().all(|f| f.provenance_channel == Channel::FileImport));
+        assert!(first.iter().all(|f| f.source_type == SourceType::Imported));
+    }
+
+    #[test]
+    fn default_wing_fills_only_records_omitting_wing() {
+        let file = fixture_file();
+        let frames = build_frames(&file, Some("SeedWing"));
+        // r0001 and r0003 carry explicit "Benchmark"; r0002 omits wing.
+        assert_eq!(frames[0].wing.as_deref(), Some("Benchmark"));
+        assert_eq!(frames[1].wing.as_deref(), Some("SeedWing"));
+        assert_eq!(frames[2].wing.as_deref(), Some("Benchmark"));
+
+        // With no default wing, the omitted record's frame carries None
+        // (the estate default wing applies at capture).
+        let bare = build_frames(&file, None);
+        assert_eq!(bare[1].wing, None);
     }
 }

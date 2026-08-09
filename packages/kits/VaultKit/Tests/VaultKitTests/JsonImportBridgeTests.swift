@@ -315,3 +315,141 @@ struct JsonImportBridgeTests {
         expectParseError(seed(), limits: limits, contains: ["byte ceiling", "16"])
     }
 }
+
+// Part 2 — phase 3 (strict-append collision assertion) and phase 4 (pure
+// frame build in file order).
+@Suite("JsonImportBridge strict append + frame build")
+struct JsonImportPipelineTests {
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimportbridge-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    private func fixtureFile() throws -> JsonSeedFile {
+        let data = try Data(contentsOf: JsonImportBridgeTests.fixtureSeedURL)
+        return try JsonSeedFile.parse(data: data, limits: .default)
+    }
+
+    // MARK: - Phase 3: strict append
+
+    @Test("strict append passes when no file lineage exists in the estate")
+    func strictAppendFreshEstate() throws {
+        let file = try fixtureFile()
+        try JsonImportBridge.assertStrictAppend(file: file, occupied: [])
+    }
+
+    @Test("lineage collision is a hard error naming the first colliding record")
+    func strictAppendNamesFirstCollision() throws {
+        let file = try fixtureFile()
+        // Occupy r0002 and r0003 — the FIRST in file order (r0002) must be named.
+        let occupied: Set<UUID> = [
+            DrawerMapping.lineageID(forStableSourceKey: "r0002"),
+            DrawerMapping.lineageID(forStableSourceKey: "r0003"),
+        ]
+        do {
+            try JsonImportBridge.assertStrictAppend(file: file, occupied: occupied)
+            Issue.record("expected lineage-collision error; assertion passed")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("record[1]"), "first colliding record in file order; got: \(message)")
+            #expect(message.contains("\"r0002\""), "colliding id must be named; got: \(message)")
+            #expect(message.contains("lineage collision"), "got: \(message)")
+        }
+    }
+
+    @Test("occupied snapshot covers active AND withdrawn lineages")
+    func occupiedCoversActiveAndWithdrawn() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Active drawer at r0001's lineage.
+        let activeDrawer = try await kit.capture(handle, CaptureFrame(
+            content: "occupies r0001",
+            channel: .importedFile,
+            room: "rm",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "no-embedding",
+            lineageID: DrawerMapping.lineageID(forStableSourceKey: "r0001")))
+
+        // Withdrawn drawer at r0002's lineage.
+        let withdrawnDrawer = try await kit.capture(handle, CaptureFrame(
+            content: "occupies r0002",
+            channel: .importedFile,
+            room: "rm",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "no-embedding",
+            lineageID: DrawerMapping.lineageID(forStableSourceKey: "r0002")))
+        try await kit.withdraw(handle, WithdrawFrame(
+            rowID: withdrawnDrawer.id, reason: "test-withdrawal"))
+
+        let occupied = try await bridge.occupiedLineageIDs(handle: handle)
+        #expect(occupied.contains(activeDrawer.lineageID))
+        #expect(occupied.contains(withdrawnDrawer.lineageID))
+
+        // And the fixture file collides on record[0] (id r0001).
+        let file = try fixtureFile()
+        do {
+            try JsonImportBridge.assertStrictAppend(file: file, occupied: occupied)
+            Issue.record("expected lineage-collision error against the estate snapshot")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("record[0]"), "got: \(message)")
+            #expect(message.contains("\"r0001\""), "got: \(message)")
+        }
+    }
+
+    // MARK: - Phase 4: pure frame build
+
+    @Test("frame build is deterministic, file-ordered, and explicit-lineage")
+    func frameBuildDeterministic() throws {
+        let file = try fixtureFile()
+        let first = JsonImportBridge.buildFrames(file: file, defaultWing: nil)
+        let second = JsonImportBridge.buildFrames(file: file, defaultWing: nil)
+
+        #expect(first.count == 3)
+        // Field-by-field determinism (CaptureFrame is not Equatable).
+        for (a, b) in zip(first, second) {
+            #expect(a.content == b.content)
+            #expect(a.lineageID == b.lineageID)
+            #expect(a.eventTime == b.eventTime)
+            #expect(a.wing == b.wing)
+            #expect(a.room == b.room)
+            #expect(a.kind == b.kind)
+            #expect(a.sensitivity == b.sensitivity)
+            #expect(a.exportability == b.exportability)
+        }
+        // File order, not sorted: r0001, r0002, r0003.
+        let expectedLineages = ["r0001", "r0002", "r0003"]
+            .map { DrawerMapping.lineageID(forStableSourceKey: $0) }
+        #expect(first.map(\.lineageID) == expectedLineages)
+        // Explicit event times ride through (no `now` in frames).
+        #expect(first[0].eventTime == ISO8601DateFormatter().date(from: "2026-01-03T09:00:00Z"))
+        // Sentinel UDC anchor exactly as buildChromaFrame: "000".
+        #expect(first.allSatisfy { $0.latticeAnchor.udcCode == "000" })
+        // Import provenance stamped.
+        #expect(first.allSatisfy { $0.channel == .importedFile })
+        #expect(first.allSatisfy { $0.provenanceChannel == .fileImport })
+        #expect(first.allSatisfy { $0.sourceType == .imported })
+    }
+
+    @Test("default wing fills only records that omit wing")
+    func frameBuildDefaultWing() throws {
+        let file = try fixtureFile()
+        let frames = JsonImportBridge.buildFrames(file: file, defaultWing: "SeedWing")
+        // r0001 and r0003 carry explicit "Benchmark"; r0002 omits wing.
+        #expect(frames[0].wing == "Benchmark")
+        #expect(frames[1].wing == "SeedWing")
+        #expect(frames[2].wing == "Benchmark")
+
+        // With no default wing, the omitted record's frame carries nil
+        // (the estate default wing applies at capture).
+        let bare = JsonImportBridge.buildFrames(file: file, defaultWing: nil)
+        #expect(bare[1].wing == nil)
+    }
+}
