@@ -45,6 +45,42 @@ struct KeychainKeyStoreTests {
                 "standardized path → same account regardless of lexical form")
     }
 
+    /// loadExistingKey returns nil for a key that has never been minted, and
+    /// leaves the Keychain item count unchanged — the no-mint contract.
+    /// Probe uses a `keychainItemCount` helper that returns nil on Keychain
+    /// unavailability so the count assertion skips instead of failing in
+    /// restricted environments.
+    @Test func loadExistingKeyReturnsNilAndDoesNotMint() throws {
+        let service = "ai.mootx01.test.\(UUID().uuidString)"
+        let store = KeychainKeyStore(service: service)
+
+        let before = keychainItemCount(service: service)
+        let result = try store.loadExistingKey()
+        let after = keychainItemCount(service: service)
+
+        #expect(result == nil, "loadExistingKey must return nil for an absent key")
+        if let before, let after {
+            #expect(after == before, "loadExistingKey must not create a Keychain item")
+        }
+    }
+
+    /// loadExistingKey returns the identical key that loadOrCreateKey minted.
+    @Test func loadExistingKeyReturnsKeyAfterMint() throws {
+        let service = "ai.mootx01.test.\(UUID().uuidString)"
+        let store = KeychainKeyStore(service: service)
+        defer {
+            let q: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+            ]
+            SecItemDelete(q as CFDictionary)
+        }
+
+        let minted = try store.loadOrCreateKey()
+        let loaded = try store.loadExistingKey()
+        #expect(loaded == minted, "loadExistingKey must return the existing key after mint")
+    }
+
     /// Per-estate keys are independent, stable, and disposable: each estate gets
     /// its own key; disposing one leaves the other intact; and a disposed estate
     /// mints a fresh key on next open (the key never outlives the data).
@@ -73,6 +109,23 @@ struct KeychainKeyStoreTests {
         // A regenerates a fresh, different key after disposal.
         let a2 = try storeA.loadOrCreateKey()
         #expect(a2 != a1, "after disposal, a new key is generated — the old key did not survive")
+    }
+
+    // Count generic-password items for `service`. Returns nil when the probe
+    // itself fails so callers can skip the assertion in restricted environments.
+    private func keychainItemCount(service: String) -> Int? {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var out: CFTypeRef?
+        switch SecItemCopyMatching(q as CFDictionary, &out) {
+        case errSecItemNotFound: return 0
+        case errSecSuccess: return (out as? [Any])?.count ?? 0
+        default: return nil
+        }
     }
 }
 #endif
