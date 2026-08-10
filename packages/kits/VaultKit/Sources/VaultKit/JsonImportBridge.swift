@@ -558,20 +558,24 @@ public struct JsonImportBridge: Sendable {
     /// because only lineage ids are needed (the JSON lane has no
     /// content-idempotent guard to feed — overlap of any kind is an error).
     ///
-    /// The active scan explicitly overrides the three `insertDefaults` axes
-    /// so the snapshot covers ALL active lineages regardless of confirmation,
-    /// trust, or sensitivity state:
+    /// The active scan overrides three of the four `insertDefaults` axes so
+    /// the snapshot covers currently-believed lineages regardless of trust or
+    /// sensitivity state. The fourth axis — `recallTier(.currentAndVague)`,
+    /// which excludes absorbed Wave 2 constituents (`representedByVague = 1`,
+    /// bit 21) — is injected by the evaluator and intentionally left in place;
+    /// absorbed constituents do not hold an independent lineage in the estate.
     ///   - `.any([.trustworthy, .requiresConfirmation])` — all trust levels,
     ///     suppresses the `.trustworthy` default that would otherwise exclude
     ///     requiresConfirmation rows.
     ///   - `.sensitivityAtMost(.secret)` — all sensitivity tiers, suppresses
     ///     the `.sensitivityAtMost(.elevated)` default that would otherwise
     ///     exclude restricted and secret rows.
-    ///   - No confirmation filter — all confirmation states; the evaluator
-    ///     adds no confirmation default, so this is already the evaluator
-    ///     behaviour. The previous `.unconfirmed` filter restricted the scan
-    ///     to unconfirmed rows only, missing user-confirmed, automated-
-    ///     confirmed, and restricted/secret lineages.
+    ///   - `.currentlyBelieve` — explicit state gate replacing the same
+    ///     auto-injected default, making the chain self-documenting.
+    /// The previous `.unconfirmed` filter restricted the scan to unconfirmed
+    /// rows only, and the injected defaults further cut trust and sensitivity;
+    /// user-confirmed, automated-confirmed, restricted, and secret lineages
+    /// were all invisible to the collision gate.
     func occupiedLineageIDs(handle: EstateHandle) async throws -> Set<UUID> {
         let active = try await kit.recall(
             handle,

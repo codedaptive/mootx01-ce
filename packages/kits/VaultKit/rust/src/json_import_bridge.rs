@@ -787,13 +787,16 @@ impl<'a> JsonImportBridge<'a> {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<HashSet<Uuid>, VaultKitError> {
-        // Broadened active scan: override all three BitmapEvaluator defaults so
-        // the snapshot sees every currently-believed lineage regardless of trust
-        // level or sensitivity tier.
+        // Broadened active scan: override three of the four insert_defaults axes so
+        // the snapshot sees currently-believed lineages regardless of trust or
+        // sensitivity tier. The fourth axis — RecallTier::CurrentAndVague (injected
+        // when no RecallTier filter is present), which excludes absorbed Wave 2
+        // constituents (represented_by_vague = 1, bit 21) — is intentionally left
+        // in place; absorbed constituents do not hold an independent lineage.
         //   - Filter::CurrentlyBelieve: explicit state gate (Cluster A); replaces the
-        //     auto-injected default so the chain is clear, not implicit.
+        //     auto-injected default so the chain is self-documenting, not implicit.
         //   - Filter::Any([Trustworthy, RequiresConfirmation]): without this,
-        //     insert_defaults injects Filter::Trustworthy alone, which excludes
+        //     insert_defaults injects Trustworthy alone, which excludes
         //     requires-confirmation rows — lineages that should block import.
         //   - Filter::SensitivityAtMost(Secret): without this, insert_defaults
         //     injects SensitivityAtMost(Elevated), which excludes restricted and
