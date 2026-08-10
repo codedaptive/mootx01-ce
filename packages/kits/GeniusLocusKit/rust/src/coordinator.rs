@@ -10171,15 +10171,21 @@ impl EstateCoordinator {
                    + agreement_bonus * source_masks[i].count_ones() as f32 / 4.0;
             }
 
-            // Sort descending by final score; tie-break ordered_ids ascending.
-            // UUID-based tiebreak is accepted here: the gate study uses .rrf scoring,
-            // not .matrixAware, so this path is not exercised on the benchmark run.
-            // Revisit if a matrixAware gate is added.
+            // Sort descending by final score; content-derived tiebreak for determinism
+            // across replay runs. moot_recall_shaped uses mode=UnionBest + scoring=matrixAware
+            // (the default), so this path IS activated by the benchmark. UUID tiebreak is
+            // non-deterministic across estate imports; drawer content is stable for a given seed.
             let mut indexed: Vec<(usize, f32)> = (0..count).map(|i| (i, col_final[i])).collect();
             indexed.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(ordered_ids[a.0].cmp(&ordered_ids[b.0]))
+                    .then_with(|| {
+                        let ka = drawer_index.get(&ordered_ids[a.0])
+                            .map_or(ordered_ids[a.0].as_str(), |d| d.content.as_str());
+                        let kb = drawer_index.get(&ordered_ids[b.0])
+                            .map_or(ordered_ids[b.0].as_str(), |d| d.content.as_str());
+                        ka.cmp(kb)
+                    })
             });
             indexed.truncate(request.limit);
 

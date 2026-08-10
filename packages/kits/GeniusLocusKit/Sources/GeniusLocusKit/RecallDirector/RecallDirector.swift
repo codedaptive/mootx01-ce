@@ -2044,17 +2044,20 @@ public extension GeniusLocusKit {
             // happened to yield first — so the same query returned different
             // orderings across processes (the recall-jitter that made every
             // leaderboard comparison ±noise). The argmax must be a TOTAL order:
-            // higher MMR score wins, and on an exact tie the lower drawer id
-            // wins. That makes the selection independent of Set iteration order —
-            // the same stable (score, then id) tie-break VectorStore.findNearest
-            // already uses. `bestIdx == -1` seeds the first comparison.
+            // higher MMR score wins, and on an exact tie the lower drawer CONTENT
+            // wins (content is deterministic for a given seed; UUIDs are minted
+            // fresh per estate import and are not stable across replay runs).
+            // Falls back to UUID only when content is absent. `bestIdx == -1`
+            // seeds the first comparison.
             var bestIdx = -1
             var bestMMR = -Float.greatestFiniteMagnitude
             for i in unselected {
                 let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
                 if bestIdx == -1
                     || mmrScore > bestMMR
-                    || (mmrScore == bestMMR && buffer.ids[i] < buffer.ids[bestIdx]) {
+                    || (mmrScore == bestMMR
+                        && (mmrContentByID[buffer.ids[i]] ?? buffer.ids[i])
+                            < (mmrContentByID[buffer.ids[bestIdx]] ?? buffer.ids[bestIdx])) {
                     bestMMR = mmrScore
                     bestIdx = i
                 }
