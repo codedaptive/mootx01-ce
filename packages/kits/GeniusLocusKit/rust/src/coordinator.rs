@@ -9740,9 +9740,23 @@ impl EstateCoordinator {
         // (no forwarding signal raised it), so it carries no dense mass — its dense
         // column is 0 in the matrixAware score and its dense `final` contribution is
         // the consensus boost only (0 at N=1, mirroring Swift's `cosine + boost`).
+        //
+        // QUANTIZATION: cosines are rounded to 2 decimal places (0.01 precision) to
+        // absorb provider-training float variance (~0.003 in mean cosine across two
+        // estates built from the same seed via LAPACK SVD/NMF). Without quantization
+        // an item at the K-boundary can flip rank across replay runs because the
+        // float delta is larger than the score gap between adjacent items.
+        // 0.01 quantization collapses any pair of cosines within 0.005 to the same
+        // bucket, making the content-derived tiebreak the deciding factor. Mirrors
+        // Swift RecallDirector's `((denseCosineByID[id] ?? 0) * 100).rounded() / 100`.
         let mut dense_list: Vec<(String, f32)> = dense_order
             .iter()
-            .map(|id| (id.clone(), dense_cosine_by_id.get(id).copied().unwrap_or(0.0)))
+            .map(|id| {
+                let raw = dense_cosine_by_id.get(id).copied().unwrap_or(0.0);
+                // Quantize to 2dp to absorb provider-training float variance.
+                let quantized = (raw * 100.0).round() / 100.0;
+                (id.clone(), quantized)
+            })
             .collect();
 
         // --- Candidate set: collect unique IDs from all populated lanes ---

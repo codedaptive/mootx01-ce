@@ -1584,9 +1584,20 @@ public extension GeniusLocusKit {
             // w=1.0 → the single cosine, unchanged). `final` = that cosine PLUS the
             // consensus boost. An id whose every voting signal was excluded/suppressed
             // out has no positive cosine and no positive boost — it sinks accordingly.
+            //
+            // QUANTIZATION: cosine scores are rounded to 2 decimal places (0.01
+            // precision) before being stored. Provider training (LSA, NMF) uses
+            // LAPACK SVD/NMF whose floating-point results can vary by ~0.003 in
+            // mean cosine across two estates built from the same seed, making the
+            // dense lane intermittently flip a boundary item. 0.01 quantization
+            // collapses any pair of cosines within 0.005 to the same bucket,
+            // making the content-derived tiebreak the deciding factor instead of
+            // floating-point noise. Mission scope: "quantization" is explicitly
+            // listed as an acceptable determinism fix (not a semantics change).
             denseHits.reserveCapacity(denseOrder.count)
             for id in denseOrder {
-                let dense = denseCosineByID[id] ?? 0
+                // Quantize cosine to 2dp to absorb provider-training float variance.
+                let dense = ((denseCosineByID[id] ?? 0) * 100).rounded() / 100
                 let total = denseTotalRRF[id] ?? 0
                 let best = denseBestTerm[id] ?? 0
                 let boost = max(0, total - best)
