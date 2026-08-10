@@ -1341,9 +1341,9 @@ pub fn hook_capture(daemon: &dyn DaemonHttp) {
 /// Non-memory paths, malformed payloads, traversal-rejected paths, and
 /// unrecognised tools emit no output and let Claude Code decide.
 ///
-/// Returns `Some(json_string)` only for paths the harness governs: `deny` on
-/// successful estate capture, `allow` as a fallback when the daemon is
-/// unreachable or the estate write fails (so the session is never blocked).
+/// Returns `Some(json_string)` only for paths the harness fully governs (strict
+/// parse passes): `deny` on successful estate capture, `allow` as a fallback when
+/// the daemon is unreachable or the estate write fails so the session is not blocked.
 ///
 /// `now_secs`: Unix epoch seconds injected by the caller for determinism.
 fn hook_decide(daemon: &dyn DaemonHttp, payload: &Value, now_secs: u64) -> Option<String> {
@@ -1351,20 +1351,26 @@ fn hook_decide(daemon: &dyn DaemonHttp, payload: &Value, now_secs: u64) -> Optio
     let tool_input = payload.get("tool_input").cloned().unwrap_or_default();
     let path = tool_input.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Non-memory paths are not governed by this hook — fall through.
+    // Loose pre-filter: skip non-memory paths without the parse overhead.
     // An explicit allow here would auto-approve arbitrary writes under the Claude
     // Code hook contract, which is the security defect this fix addresses.
     if !is_harness_memory_path(path) {
-        // MXE-HM-2: harness_memory.capture.bypass metric emit point.
         return None;
     }
 
+    // Strict validation before any explicit decision is emitted. parse_harness_path
+    // rejects traversal sequences (`..`), dotfiles, and empty slug/filename. Failure
+    // here means the path is not safely governed — fall through, never allow.
+    // This guard must run BEFORE the daemon-down check: without it, a traversal
+    // path that passes the loose pre-filter would receive an explicit allow when
+    // the daemon is unreachable, bypassing the user's permission prompt.
+    let (project_slug, filename) = parse_harness_path(path)?;
+
     let port = crate::core::daemon_client::resolved_port();
 
-    // Daemon-down fallback: allow disk write so the session is not blocked.
-    // The next ingest sweep recovers any stray files.
+    // Daemon-down fallback: allow disk write so the session is not blocked. Only
+    // reached after strict parse — the path is fully governed, no traversal escape.
     if !daemon.alive(port) {
-        // MXE-HM-2: harness_memory.capture.fallback metric emit point.
         eprintln!("mootx01 daemon unreachable on port {port} — allowing disk write as fallback");
         return Some(allow_json());
     }
@@ -1375,14 +1381,15 @@ fn hook_decide(daemon: &dyn DaemonHttp, payload: &Value, now_secs: u64) -> Optio
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            // now_secs captured at the outermost call site (hook_capture) for
-            // determinism — no SystemTime::now() call inside capture_decision.
-            capture_decision(daemon, port, path, content, now_secs)
+            // Slug and filename pre-validated by parse_harness_path above; now_secs
+            // injected by hook_capture for determinism — no SystemTime::now() inside.
+            capture_decision(daemon, port, &project_slug, &filename, content, now_secs)
         }
         "Edit" | "MultiEdit" => {
             // Edit/MultiEdit against a nonexistent harness file: deny with teaching
             // message. Nothing is on disk to edit — files were moved to the estate.
-            Some(deny_json(teaching_message(path)))
+            let location = format!("harness/{project_slug}/{filename}");
+            Some(deny_json(teaching_message_with_location(&location)))
         }
         _ => {
             // Unrecognised tool targeting a memory path: fall through.
@@ -1395,32 +1402,27 @@ fn hook_decide(daemon: &dyn DaemonHttp, payload: &Value, now_secs: u64) -> Optio
 
 /// Capture a Write's content to the estate and return the hook decision.
 ///
-/// Returns `None` when path security checks reject the target (traversal,
-/// hidden file) — these fall through to the normal permission prompt.
+/// `project_slug` and `filename` are pre-validated by `hook_decide` via
+/// `parse_harness_path` — traversal and dotfile checks already ran before
+/// this call, so no path security checks are repeated here.
+///
 /// Returns `Some(deny json)` on successful estate capture.
-/// Returns `Some(allow json)` when the estate write fails so the session
-/// is not blocked (fallback).
+/// Returns `Some(allow json)` when the estate write fails (daemon reachable but
+/// write errored) — fallback so the session is not blocked.
 ///
 /// `now_secs` is passed from `hook_decide` for determinism — no
 /// `SystemTime::now()` inside this function.
 fn capture_decision(
     daemon: &dyn DaemonHttp,
     port: u16,
-    path: &str,
+    project_slug: &str,
+    filename: &str,
     content: &str,
     now_secs: u64,
 ) -> Option<String> {
-    let (project_slug, filename) = match parse_harness_path(path) {
-        Some(pair) => pair,
-        // parse_harness_path rejected the path (traversal, hidden file, missing
-        // filename) even though is_harness_memory_path accepted it. Fall through
-        // to the normal permission prompt — do not auto-allow.
-        None => return None,
-    };
-
     let location = format!("harness/{project_slug}/{filename}");
     let event_time = unix_secs_to_iso8601(now_secs);
-    let kind = memory_kind(&filename);
+    let kind = memory_kind(filename);
 
     match estate_file(daemon, port, &location, content, &event_time, kind) {
         Ok(()) => {
@@ -1465,6 +1467,11 @@ fn allow_json() -> String {
     })).unwrap_or_default()
 }
 
+/// JSON string for an explicit deny decision on a governed path.
+///
+/// Only emitted for Write calls that the estate successfully captured, and for
+/// Edit/MultiEdit calls on governed paths (nothing on disk to edit). Never
+/// emitted for non-memory paths — those fall through with no output.
 fn deny_json(reason: String) -> String {
     serde_json::to_string(&json!({
         "hookSpecificOutput": {
@@ -2114,6 +2121,28 @@ mod tests {
     }
 
     #[test]
+    fn hook_decide_emits_no_decision_for_traversal_with_daemon_down() {
+        // Regression: traversal path where the escape sequence comes AFTER a valid
+        // filename component (e.g. `memory/z/../../etc/passwd`). The loose
+        // is_harness_memory_path check accepts it; parse_harness_path rejects it
+        // because the filename contains "..". With the daemon down, the pre-fix code
+        // emitted allow (daemon-down check ran before parse_harness_path); the fixed
+        // code runs parse_harness_path first and falls through on rejection.
+        let daemon = MockDaemon::dead();
+        const INTERLEAVED_TRAVERSAL: &str =
+            "/home/bob/.claude/projects/slug/memory/z/../../etc/passwd";
+        let payload = json!({
+            "tool_name": "Write",
+            "tool_input": {"path": INTERLEAVED_TRAVERSAL, "content": "evil"}
+        });
+        let result = hook_decide(&daemon, &payload, 0);
+        assert!(
+            result.is_none(),
+            "traversal path must fall through even when daemon is down, got: {:?}", result
+        );
+    }
+
+    #[test]
     fn hook_decide_emits_deny_on_successful_memory_write() {
         let daemon = MockDaemon::alive(vec![
             (200, r#"{"result":{"content":[{"text":"ok"}]}}"#),
@@ -2495,7 +2524,7 @@ cross-session linking that the flat project-memory directory never had.\n";
         ]);
         let result = capture_decision(
             &daemon, 4242,
-            "/home/bob/.claude/projects/test-project/memory/note.md",
+            "test-project", "note.md",
             "test content",
             now_secs,
         );

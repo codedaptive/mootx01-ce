@@ -644,6 +644,10 @@ public enum HarnessMemoryMatcher {
     ///
     /// Matching is path-component based, not regex, so no traversal escapes.
     /// Hidden components (dotfiles) in the slug or filename are rejected.
+    /// The filename must be the final path component — paths with additional
+    /// segments after the filename (e.g. traversal sequences like `z/../../..`)
+    /// are rejected so the daemon-down allow fallback cannot fire for targets
+    /// the harness does not fully govern.
     public static func match(path: String) -> (projectSlug: String, fileName: String)? {
         let components = path.components(separatedBy: "/")
         // Minimum: ..., ".claude", "projects", "<slug>", "memory", "<name>"
@@ -652,6 +656,11 @@ public enum HarnessMemoryMatcher {
         // Walk backward to find "memory" with a filename after it.
         for i in stride(from: components.count - 2, through: 3, by: -1) {
             guard components[i] == "memory" else { continue }
+            // Require the filename to be the LAST component. If there are additional
+            // segments after it (e.g. `memory/z/../../settings.json`), the path
+            // resolves outside the governed tree and must not receive an explicit
+            // allow — fall through to normal permission handling.
+            guard i + 1 == components.count - 1 else { return nil }
             let fileName = components[i + 1]
             let slug = components[i - 1]
             // Sanity: the component before slug should be "projects", and before

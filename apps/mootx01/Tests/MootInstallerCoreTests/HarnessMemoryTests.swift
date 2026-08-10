@@ -480,6 +480,16 @@ struct HarnessMemoryMatcherTests {
         }
         // A nil match is also acceptable.
     }
+
+    @Test("match rejects traversal with valid filename prefix (daemon-down regression)")
+    func matchRejectsTraversalWithValidPrefix() {
+        // Regression: `memory/z/../../settings.json` — "z" looks like a valid filename
+        // but the path resolves outside the governed tree. match() must return nil so
+        // the daemon-down allow fallback in handleWrite never fires for this path.
+        let path = "/Users/alice/.claude/projects/myproject/memory/z/../../settings.json"
+        #expect(HarnessMemoryMatcher.match(path: path) == nil,
+                "traversal with valid filename prefix must be rejected")
+    }
 }
 
 // MARK: - HarnessMemoryIngest tests
