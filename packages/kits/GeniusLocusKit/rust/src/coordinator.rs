@@ -9807,15 +9807,22 @@ impl EstateCoordinator {
         // minted on each estate import, so UUID-only tiebreaks produce different rank
         // assignments for equal-score items across replay runs, causing meanStaleInTopK
         // drift. Drawer content text is stable for a given seed.
-        // drawer_index covers frame-admissible locus + extra items. Frame-excluded items
-        // (e.g. ContraSignal drawers) may still appear in bm25_list/vector_list from the
-        // corpus index. Their rank shifts RRF scores of frame-admissible items around them.
-        // Fetch their content unframed so every input item has a stable tiebreak key.
-        // Collect non-locus BM25/vector/dense hit IDs using owned Strings, then sort+dedup
-        // for deterministic ordering. HashSet iteration order is per-creation random in
-        // Rust's default hasher, which would cause non_index_id ordering to differ between
-        // two calls in the same process — breaking the leave-one-out determinism test.
-        // dense_list included so dense-only hits also get content keys for re-sort.
+        // Build a content-key map for stable tiebreak sorting before RRF fusion.
+        // Without a content tiebreak, equal-BM25-score items receive non-deterministic
+        // rank assignments across replay runs (UUID keys vary per-run), causing
+        // meanStaleInTopK drift. The map starts with drawer_index content (locus-window
+        // items), then extends with frame-admissible non-locus BM25/vector/dense hits.
+        //
+        // Frame-gating (RD-01 §F2): the non-locus extension uses get_drawers_matching_frame
+        // so frame-excluded drawers (e.g. restricted sensitivity) are NOT admitted to the
+        // map. Excluded non-locus IDs fall back to id-keyed tiebreak (UUID string), which
+        // is still deterministic within a single process but doesn't reveal their content
+        // to the scorer. Locus-window items always use their content key (from drawer_index)
+        // so determinism is preserved even when all BM25 hits are in the locus window.
+        //
+        // Collect non-locus IDs as sorted+deduped Vec<String>. HashSet iteration order is
+        // per-creation random in Rust's default hasher; a sorted Vec guarantees the
+        // get_drawers_matching_frame call is stable across two identical recall runs.
         let mut non_index_ids_owned: Vec<String> = bm25_list.iter()
             .map(|(id, _)| id.clone())
             .chain(vector_list.iter().map(|(id, _)| id.clone()))
@@ -9824,17 +9831,17 @@ impl EstateCoordinator {
             .collect();
         non_index_ids_owned.sort();
         non_index_ids_owned.dedup();
-        let non_index_id_refs: Vec<&str> = non_index_ids_owned.iter().map(|s| s.as_str()).collect();
         let mut locus_content_by_id: HashMap<String, String> = drawer_index
             .iter()
             .map(|(id, d)| (id.clone(), d.content.clone()))
             .collect();
-        if !non_index_id_refs.is_empty() {
-            if let Ok(extras) = estate.get_drawers(&non_index_id_refs) {
-                for d in extras {
+        if !non_index_ids_owned.is_empty() {
+            if let Ok(filtered) = estate.get_drawers_matching_frame(&non_index_ids_owned, &request.frame) {
+                for d in filtered.admissible {
                     locus_content_by_id.insert(d.id.clone(), d.content.clone());
                 }
             }
+            // degraded: frame-excluded non-locus IDs fall back to id-keyed tiebreak
         }
         // Re-sort bm25_list, vector_list, and dense_list with content-keyed tiebreak before
         // building score maps, so equal-score items receive deterministic rank assignments.

@@ -372,7 +372,7 @@ public extension GeniusLocusKit {
             from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
 
         // BM25 lane: top-frontierK source-level hits from the keyword index.
-        let bm25List: [(id: String, score: Float)]
+        var bm25List: [(id: String, score: Float)]
         if let text = sketch.queryText, !text.isEmpty {
             let hits = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25List = hits.map { (id: $0.sourceID, score: $0.score) }
@@ -470,6 +470,50 @@ public extension GeniusLocusKit {
                 Self.recallLog.debug(
                     "RecallDirector corpusOnly: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
             }
+        }
+
+        // Frame-gate + stable content-keyed tiebreak for BM25 and vector input lists
+        // (RD-01 §F2 — corpusOnly lane). Two oracle vectors exist in this lane:
+        //
+        //   SLOT-STEALING: bm25TopKBySource returns ALL indexed drawers, including
+        //   frame-excluded ones. A restricted drawer that matches the query occupies
+        //   a rank slot in bm25List before rrfFuseN's limit truncation, potentially
+        //   displacing an admissible drawer from the result set. Fix: pre-filter both
+        //   lists to frame-admissible IDs only. hydrateHits would drop excluded hits
+        //   anyway; filtering here prevents them from affecting the top-K selection.
+        //
+        //   ORDERING: Drawer UUIDs are freshly minted on each estate import, so
+        //   UUID-based tiebreaks produce different rank assignments for equal-score items
+        //   across replay runs and across different-estate comparison tests, causing
+        //   meanStaleInTopK drift. Fix: after pre-filtering, sort by (score DESC,
+        //   content ASC) so tied items enter RRF at deterministic, estate-invariant ranks.
+        //   Excluded drawers (not in corpusContentByID) never contribute content to the
+        //   map — they are simply absent from the filtered lists (RD-01 §F2).
+        //
+        //   Degraded path: if getDrawers fails (nil from try?), neither pre-filter nor
+        //   content-sort is applied — the original lists are used as-is, preserving the
+        //   pre-existing behaviour.
+        let corpusHitIDs = Array(Set(bm25List.map(\.id) + vectorList.map(\.id)))
+        var corpusContentByID: [String: String] = [:]
+        if !corpusHitIDs.isEmpty {
+            if let filtered = try? await estate.getDrawers(
+                ids: corpusHitIDs, matchingFrame: request.frame,
+                hydrationLevel: .full) {
+                let admissibleIDs = Set(filtered.admissible.map { $0.id })
+                for d in filtered.admissible { corpusContentByID[d.id] = d.content }
+                // Pre-filter: remove frame-excluded items so they cannot steal rank slots
+                // before rrfFuseN truncates to limit.
+                bm25List = bm25List.filter { admissibleIDs.contains($0.id) }
+                vectorList = vectorList.filter { admissibleIDs.contains($0.id) }
+            }
+        }
+        bm25List.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (corpusContentByID[x.id] ?? x.id) < (corpusContentByID[y.id] ?? y.id)
+        }
+        vectorList.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (corpusContentByID[x.id] ?? x.id) < (corpusContentByID[y.id] ?? y.id)
         }
 
         // Build the candidate list according to the requested scoring strategy.
@@ -705,21 +749,21 @@ public extension GeniusLocusKit {
         // Drawer UUIDs are freshly minted on each estate import, so UUID-based tiebreaks
         // produce different rank assignments across replay runs for tied items, flipping
         // candidates across the K boundary and causing meanStaleInTopK drift.
-        // locusRows provides content for frame-admissible locus items.  BM25/vector items
-        // outside the locus frame (e.g. drawers with ContraSignal set) are excluded from
-        // locusRows but still appear in bm25List/vectorList from the corpus index, and
-        // their rank position shifts RRF scores of frame-admissible items around them.
-        // We fetch their content unframed so every item in bm25List/vectorList has a
-        // stable, seed-derived tiebreak key.  Only fires when non-locus hits exist, which
-        // is zero in most production queries.
+        // locusRows provides content for frame-admissible locus items. BM25/vector items
+        // outside the locus window (not returned by the locus lane) are loaded THROUGH
+        // the recall frame — frame-excluded drawers never contribute content to this map
+        // and fall back to id-keyed tiebreak, which is deterministic for a given estate
+        // import. Only fires when non-locus hits exist, which is zero in most queries.
         let locusIDs = Set(locusRows.map(\.id))
         var contentByID: [String: String] = Dictionary(
             uniqueKeysWithValues: locusRows.map { ($0.id, $0.content) })
         let nonLocusHitIDs = Set(bm25List.map(\.id) + vectorList.map(\.id)).subtracting(locusIDs)
         if !nonLocusHitIDs.isEmpty {
-            let extras = (try? await estate.getDrawers(
-                ids: Array(nonLocusHitIDs), hydrationLevel: .full)) ?? []
-            for d in extras { contentByID[d.id] = d.content }
+            if let filtered = try? await estate.getDrawers(
+                ids: Array(nonLocusHitIDs), matchingFrame: request.frame,
+                hydrationLevel: .full) {
+                for d in filtered.admissible { contentByID[d.id] = d.content }
+            }
         }
         bm25List.sort { x, y in
             if x.score != y.score { return x.score > y.score }
@@ -1645,9 +1689,11 @@ public extension GeniusLocusKit {
             bm25Hits.map(\.id) + vectorHits.map(\.id) + denseHits.map(\.id)
         ).subtracting(locusIDsForSort)
         if !nonLocusUnionIDs.isEmpty {
-            let extras = (try? await estate.getDrawers(
-                ids: Array(nonLocusUnionIDs), hydrationLevel: .full)) ?? []
-            for d in extras { unionContentByID[d.id] = d.content }
+            if let filtered = try? await estate.getDrawers(
+                ids: Array(nonLocusUnionIDs), matchingFrame: request.frame,
+                hydrationLevel: .full) {
+                for d in filtered.admissible { unionContentByID[d.id] = d.content }
+            }
         }
         // Sort + cap BM25 (over-fetched 4×).
         bm25Hits.sort { x, y in
@@ -2051,7 +2097,12 @@ public extension GeniusLocusKit {
                 mmrResult = .failure(forcedError)
             } else {
                 do {
-                    let bodies = try await estate.hydrateBodies(ids: buffer.ids)
+                    // Hydrate only frame-admissible candidates. drawerIndex keys are
+                    // exactly the frame-admissible subset of the pool (built at step 5.5).
+                    // Frame-excluded entries must not reach mmrContentByID — their content
+                    // would influence MMR similarity comparisons for admissible candidates
+                    // (RD-01 §F1).
+                    let bodies = try await estate.hydrateBodies(ids: Array(drawerIndex.keys))
                     mmrResult = .success(bodies.map { ($0.id, $0.content, $0.distilled) })
                 } catch {
                     mmrResult = .failure(error)
@@ -2090,7 +2141,19 @@ public extension GeniusLocusKit {
         let lambda: Float = min(0.9, max(0.5, 0.7 - (weights.diversity - 0.1) * 0.5))
         var maxSim = [Float](repeating: 0, count: buffer.count)
         var selected: [Int] = []
-        var unselected = Set(0..<buffer.count)
+        // Admit only frame-admissible candidates into the MMR loop. drawerIndex is the
+        // frame-admissible subset (step 5.5). Frame-excluded entries must not participate
+        // — if selected, their content would update maxSim for all remaining candidates,
+        // changing which admissible items the oracle chooses (RD-01 §F1).
+        // Degraded path (poolLoadSucceeded == false): drawerIndex is empty; fall back to
+        // all indices so the query survives rather than returning zero results.
+        var unselected: Set<Int>
+        if poolLoadSucceeded {
+            let admissibleIDs = Set(drawerIndex.keys)
+            unselected = Set(buffer.ids.indices.filter { admissibleIDs.contains(buffer.ids[$0]) })
+        } else {
+            unselected = Set(0..<buffer.count)
+        }
         let limit = min(request.limit, buffer.count)
 
         while selected.count < limit, !unselected.isEmpty {
