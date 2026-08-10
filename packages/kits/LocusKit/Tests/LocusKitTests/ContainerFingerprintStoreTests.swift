@@ -309,8 +309,14 @@ struct ContainerFingerprintStoreTests {
         try await drawerStore.addDrawer(drawer(id: "2", adj: 0, op: 16 << 24, prov: 0, parentNodeId: roomNodeId))
 
         // Reopening runs the backfill, making the aggregate cover both.
-        let estate = try await Estate.open(storage: storage,
-                                           owner: OwnerCredentials(ownerIdentifier: "o"))
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "o"),
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert container-fingerprint behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         let r = try await estate.containerFP.get(wing: "w", room: "r")
         #expect(r?.operational == 17 << 24)
     }
