@@ -9803,10 +9803,6 @@ impl EstateCoordinator {
             }
         }
 
-        // Build content-key map for deterministic tiebreaking. Drawer UUIDs are freshly
-        // minted on each estate import, so UUID-only tiebreaks produce different rank
-        // assignments for equal-score items across replay runs, causing meanStaleInTopK
-        // drift. Drawer content text is stable for a given seed.
         // Build a content-key map for stable tiebreak sorting before RRF fusion.
         // Without a content tiebreak, equal-BM25-score items receive non-deterministic
         // rank assignments across replay runs (UUID keys vary per-run), causing
@@ -9815,10 +9811,12 @@ impl EstateCoordinator {
         //
         // Frame-gating (RD-01 §F2): the non-locus extension uses get_drawers_matching_frame
         // so frame-excluded drawers (e.g. restricted sensitivity) are NOT admitted to the
-        // map. Excluded non-locus IDs fall back to id-keyed tiebreak (UUID string), which
-        // is still deterministic within a single process but doesn't reveal their content
-        // to the scorer. Locus-window items always use their content key (from drawer_index)
-        // so determinism is preserved even when all BM25 hits are in the locus window.
+        // map. When the call succeeds, bm25_list/vector_list are also pre-filtered to
+        // admissible-only IDs to prevent frame-excluded items from stealing rank slots
+        // before rrfFuseN's limit truncation (slot-stealing oracle, §F2). Parity with
+        // Swift Fix 5 (recallCorpusOnly). Locus-window items always use their content key
+        // (from drawer_index) so determinism is preserved even when all BM25 hits are in
+        // the locus window. Degraded path (call fails) preserves prior behaviour.
         //
         // Collect non-locus IDs as sorted+deduped Vec<String>. HashSet iteration order is
         // per-creation random in Rust's default hasher; a sorted Vec guarantees the
@@ -9835,13 +9833,35 @@ impl EstateCoordinator {
             .iter()
             .map(|(id, d)| (id.clone(), d.content.clone()))
             .collect();
-        if !non_index_ids_owned.is_empty() {
-            if let Ok(filtered) = estate.get_drawers_matching_frame(&non_index_ids_owned, &request.frame) {
-                for d in filtered.admissible {
-                    locus_content_by_id.insert(d.id.clone(), d.content.clone());
+        // call_succeeded tracks whether the frame-gated load produced an admissible set.
+        // When true, locus_content_by_id = {drawer_index keys} ∪ {filtered.admissible IDs},
+        // which is exactly the pre-filter target. When false (degraded), bm25_list/vector_list
+        // are NOT pre-filtered — preserving prior behaviour at the cost of slot-stealing risk.
+        let call_succeeded: bool = if !non_index_ids_owned.is_empty() {
+            match estate.get_drawers_matching_frame(&non_index_ids_owned, &request.frame) {
+                Ok(filtered) => {
+                    for d in filtered.admissible {
+                        locus_content_by_id.insert(d.id.clone(), d.content.clone());
+                    }
+                    true
                 }
+                Err(_) => false,
+                // degraded: frame-excluded non-locus IDs fall back to id-keyed tiebreak
             }
-            // degraded: frame-excluded non-locus IDs fall back to id-keyed tiebreak
+        } else {
+            // No non-index IDs: bm25_list/vector_list contain only drawer_index items,
+            // which are already frame-admissible. Pre-filter is a safe no-op.
+            true
+        };
+        // Pre-filter: remove frame-excluded items from bm25_list/vector_list so they
+        // cannot steal rank slots before rrfFuseN's limit truncation (RD-01 §F2 —
+        // slot-stealing fix). After a successful call, locus_content_by_id contains
+        // exactly the admissible set; IDs absent from it are frame-excluded non-locus
+        // items. Degraded path skips the filter to avoid dropping admissible non-index
+        // items whose admissibility is unknown when the call fails.
+        if call_succeeded {
+            bm25_list.retain(|(id, _)| locus_content_by_id.contains_key(id.as_str()));
+            vector_list.retain(|(id, _)| locus_content_by_id.contains_key(id.as_str()));
         }
         // Re-sort bm25_list, vector_list, and dense_list with content-keyed tiebreak before
         // building score maps, so equal-score items receive deterministic rank assignments.

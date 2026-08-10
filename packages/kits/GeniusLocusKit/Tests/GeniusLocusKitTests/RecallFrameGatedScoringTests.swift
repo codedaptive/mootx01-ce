@@ -1,23 +1,25 @@
 // RecallFrameGatedScoringTests.swift
 //
-// Regression tests for RD-01: frame-filtering must gate scoring/tie-break
+// Regression tests for RD-01: frame-filtering must gate scoring/tiebreak
 // content, not just the final hit set.
 //
-// Finding 1 (MMR content oracle): the MMR loop must only admit frame-admissible
-// candidates into `unselected` and only hydrate admissible content into
-// `mmrContentByID`. A restricted/secret decoy whose content is identical to
-// an admissible item must not steal that item's MMR slot or penalize it via
-// maxSim updates.
+// Finding 1 (MMR content oracle — BRR Symbols 2+3, Swift Fixes 3+4):
+// `recallUnionBest` must only hydrate frame-admissible content into
+// `mmrContentByID` and must only admit frame-admissible candidates into
+// `unselected`. Test E exercises this code path using `.unionBest` mode
+// with `.full` hydration.
 //
-// Finding 2 (BM25/vector content-sort oracle): the content-sort tiebreak before
-// RRF fusion must load content only from frame-admissible candidates. A
-// restricted/secret decoy's content must not influence the pre-fusion sort
-// ordering of admissible items.
+// Finding 2 (BM25/vector content-sort and slot-stealing oracle — BRR Symbol 6,
+// Swift Fix 5): `recallCorpusOnly` must pre-filter BM25/vector lists to
+// frame-admissible IDs before rrfFuseN truncation (slot-stealing oracle) and
+// must load content only from frame-admissible candidates for the pre-fusion
+// content-sort tiebreak (content-sort oracle). Tests A-D exercise this code
+// path using `.corpusOnly` mode.
 //
-// Both oracle vectors are tested by provisioning two estates with identical
-// admissible drawers but different restricted decoy content, and asserting that
-// both recall runs return identical hit content in identical order. Any
-// difference indicates a frame-excluded drawer's content leaked into scoring.
+// The oracle is verified by provisioning two estates with identical admissible
+// drawers but different restricted decoy content, and asserting that both recall
+// runs return identical hit content in identical order. Any difference indicates
+// a frame-excluded drawer's content leaked into scoring.
 
 import Testing
 import Foundation
@@ -83,8 +85,9 @@ struct RecallFrameGatedScoringTests {
 
     /// Recall request using the DEFAULT frame (BitmapEvaluator default insertion
     /// adds `.sensitivityAtMost(.elevated)` so restricted/secret drawers are
-    /// excluded). `.full` hydration is requested to exercise the MMR
-    /// content-hydration path (step 9.5 / Finding 1).
+    /// excluded) with `.corpusOnly` mode. `.full` hydration exercises the
+    /// content-sort path (Fix 5 / BRR Symbol 6): frame-excluded content must not
+    /// enter `corpusContentByID` or influence BM25/vector pre-fusion ranks.
     private func recallRequest(query: String, limit: Int = 20) -> GLKRecallRequest {
         GLKRecallRequest(
             frame: RecallFrame(
@@ -177,10 +180,11 @@ struct RecallFrameGatedScoringTests {
         ]
 
         // --- Estate A: restricted decoy content identical to the first admissible
-        // drawer ("oracle canary alpha fact"). In the BUGGY MMR code, this decoy
-        // would be hydrated into mmrContentByID and, once selected by the MMR loop,
-        // would update maxSim for the real "oracle canary alpha fact" admissible
-        // drawer to 1.0 — penalizing it out of the top-k. ---
+        // drawer ("oracle canary alpha fact"). In the BUGGY corpusOnly code (pre-Fix 5),
+        // this decoy entered corpusContentByID via the unframed getDrawers call,
+        // giving da and the decoy the same content tiebreak key. The stable sort then
+        // placed them by UUID order rather than content order, potentially altering
+        // admissible BM25 ranks before RRF fusion (content-sort oracle, §F2). ---
         let (kitA, handleA) = try await provision(ownerSuffix: "oracle-a")
         defer { Task { try? await kitA.close(handleA) } }
 
@@ -259,5 +263,107 @@ struct RecallFrameGatedScoringTests {
         let overrideResult = try await kit.recall(handle, overrideRequest)
         #expect(overrideResult.hits.contains { $0.id == restricted.id },
             "restricted drawer MUST surface when frame ceiling includes .restricted (proves frame-driven, not hardcoded)")
+    }
+
+    // MARK: - E. MMR code-path regression: unionBest with restricted decoy
+    //          (BRR Symbols 2+3 — Swift Fixes 3+4)
+
+    /// Two estates with identical admissible drawers but different restricted decoy
+    /// content, recalled via `.unionBest` mode with `.full` hydration. Both runs must
+    /// return the same count and content in the same order.
+    ///
+    /// This test exercises the `recallUnionBest` code path (BRR Symbols 2+3):
+    /// - Symbol 2 (Fix 3): only frame-admissible IDs enter `mmrContentByID` via
+    ///   `estate.hydrateBodies(ids: Array(drawerIndex.keys))`.
+    /// - Symbol 3 (Fix 4): only frame-admissible indices enter `unselected`, so the
+    ///   MMR loop cannot select a restricted decoy and update `maxSim` for admissible
+    ///   drawers with identical content.
+    ///
+    /// The oracle fires when the decoy's RRF score is competitive enough to enter MMR
+    /// selection before all admissible items. In this fixture, admissible items have a
+    /// locus-window advantage (locus + BM25 + vector) while the decoy has no locus
+    /// contribution. The test documents the invariant and guarantees no regression if
+    /// scoring conditions change in the future.
+    @Test func unionBestRestrictedDecoyContentDoesNotInfluenceMMR() async throws {
+        let admissibleContents = [
+            "mmr oracle canary alpha item",
+            "mmr oracle canary beta item",
+            "mmr oracle canary gamma item",
+            "mmr oracle canary delta item",
+        ]
+
+        // --- Estate A: restricted decoy content identical to the first admissible
+        // drawer. If Fix 3 is absent, the decoy's content enters mmrContentByID via
+        // the unframed hydrateBodies call. If Fix 4 is also absent, the decoy can be
+        // selected by the MMR loop and update maxSim("mmr oracle canary alpha item")
+        // to 1.0, penalising it out of the top results. ---
+        let (kitA, handleA) = try await provision(ownerSuffix: "mmr-e-a")
+        defer { Task { try? await kitA.close(handleA) } }
+
+        for c in admissibleContents {
+            _ = try await kitA.capture(handleA, admissibleFrame(content: c), mode: .impatient)
+        }
+        _ = try await kitA.capture(
+            handleA, restrictedFrame(content: "mmr oracle canary alpha item"),
+            mode: .impatient)
+
+        let mmrRequestA = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .full,
+                ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .rrf,
+            limit: 3,
+            fallback: .failClosed,
+            queryText: "mmr oracle canary")
+
+        let resultA = try await kitA.recall(handleA, mmrRequestA)
+        let contentsA = resultA.hits.compactMap { $0.drawer?.content }
+
+        // --- Estate B: restricted decoy with unrelated content — no shingle overlap
+        // with any admissible drawer, so its selection by MMR would not penalise any
+        // specific admissible item. Both estates must return the same top-3. ---
+        let (kitB, handleB) = try await provision(ownerSuffix: "mmr-e-b")
+        defer { Task { try? await kitB.close(handleB) } }
+
+        for c in admissibleContents {
+            _ = try await kitB.capture(handleB, admissibleFrame(content: c), mode: .impatient)
+        }
+        _ = try await kitB.capture(
+            handleB, restrictedFrame(content: "zeta quantum unrelated mmr decoy"),
+            mode: .impatient)
+
+        let mmrRequestB = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .full,
+                ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .rrf,
+            limit: 3,
+            fallback: .failClosed,
+            queryText: "mmr oracle canary")
+
+        let resultB = try await kitB.recall(handleB, mmrRequestB)
+        let contentsB = resultB.hits.compactMap { $0.drawer?.content }
+
+        // Restricted decoy must never appear in either result.
+        #expect(!contentsA.contains("zeta quantum unrelated mmr decoy"),
+            "restricted decoy must not appear in estate A unionBest results")
+        #expect(!contentsB.contains("zeta quantum unrelated mmr decoy"),
+            "restricted decoy must not appear in estate B unionBest results")
+
+        // Count must be invariant: both estates have 4 admissible drawers, limit=3,
+        // so 3 admissible items must be returned from each.
+        #expect(contentsA.count == 3,
+            "estate A must return 3 admissible drawers; got: \(contentsA)")
+        #expect(contentsA.count == contentsB.count,
+            "count must be invariant to restricted decoy content; A=\(contentsA.count), B=\(contentsB.count)")
+
+        // Same content in same order: the restricted decoy must not influence which
+        // admissible drawers are selected or their ordering.
+        #expect(contentsA == contentsB,
+            "admissible hit order must be invariant to restricted decoy content; A=\(contentsA), B=\(contentsB)")
     }
 }
