@@ -467,6 +467,18 @@ public enum EncodeSpeed: Sendable {
     case background
 }
 
+/// Count summary returned by `CorpusContentEngine.rebuildAfterPhysicalRemoval`.
+@_spi(EstateMaintenance)
+public struct CorpusPhysicalRemovalRebuildSummary: Sendable, Equatable {
+    public let activeChunkCount: Int
+    public let indexedChunkCount: Int
+
+    public init(activeChunkCount: Int, indexedChunkCount: Int) {
+        self.activeChunkCount = activeChunkCount
+        self.indexedChunkCount = indexedChunkCount
+    }
+}
+
 public actor Corpus {
 
     /// `ingestBatch` transaction-window sizes. The corpus shares the estate's
