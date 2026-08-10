@@ -86,8 +86,14 @@ struct RecallPruningTests {
         try await drawerStore.addDrawer(drawer(id: "d2", parentNodeId: room2.id.uuidString, op: 1 << 14))  // hasImage only
 
         // Reopen so the backfill covers both containers.
-        let estate = try await Estate.open(storage: storage,
-                                           owner: OwnerCredentials(ownerIdentifier: "o"))
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "o"),
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert pruning behavior, not signing,
+            // so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Room r2's OR lacks the hasVoice bit, so it is pruned whole;
         // d1 is the only match.

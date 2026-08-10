@@ -41,8 +41,14 @@ struct RecallInternalReadFailureTests {
         let room = try await nodeStore.createNode(displayName: "r1", parentId: wing.id, now: Date())
         let drawerStore = try await DrawerStore(storage: storage)
         try await drawerStore.addDrawer(voiceDrawer(id: "d1", parentNodeId: room.id.uuidString))
-        return try await Estate.open(storage: storage,
-                                     owner: OwnerCredentials(ownerIdentifier: "o"))
+        return try await Estate.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "o"),
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert recall-failure surfacing, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     private func drain(_ stream: RecallStream) async -> [String] {
@@ -59,8 +65,14 @@ struct RecallInternalReadFailureTests {
         let storage = TestStorage.sqlite(url)
         _ = try await Estate.create(storage: storage,
                                     owner: OwnerCredentials(ownerIdentifier: "o"))
-        let estate = try await Estate.open(storage: storage,
-                                           owner: OwnerCredentials(ownerIdentifier: "o"))
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "o"),
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert recall-failure surfacing, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // No fault armed. An empty estate must return [] with no stages.
         let stream = await estate.recall(RecallFrame(filterChain: []))
