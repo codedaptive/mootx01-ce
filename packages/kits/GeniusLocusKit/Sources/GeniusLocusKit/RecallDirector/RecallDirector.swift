@@ -1197,9 +1197,12 @@ public extension GeniusLocusKit {
         }.prefix(plan.frontierK))
 
         // Step 3 — BM25 lane (only when corpus is registered and query text present).
+        // Over-fetch 4× so all matching items survive CorpusContentEngine's UUID tiebreak
+        // at the internal K-boundary; content-derived re-sort and cap to frontierK happen
+        // at the unionBest content-sort block below before candidates enter the buffer.
         var bm25Hits: [RecallHit] = []
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
-            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
+            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK * 4)
             bm25Hits = bm25Results.map { r in
                 let sv = RecallScoreVector(
                     locus: 0, bm25: r.score, vector: 0,
@@ -1225,8 +1228,11 @@ public extension GeniusLocusKit {
             } else {
                 do {
                     matchResult = .success(
+                        // Over-fetch 4× — BruteForceIndex UUID tiebreak at the K-boundary
+                        // is non-deterministic across imports; content-sort + cap happen at
+                        // the unionBest content-sort block below.
                         try await store.findNearest(
-                            probe: engram, modelID: modelID, limit: plan.frontierK))
+                            probe: engram, modelID: modelID, limit: plan.frontierK * 4))
                 } catch {
                     matchResult = .failure(error)
                 }
@@ -1284,8 +1290,9 @@ public extension GeniusLocusKit {
         // present from Lane A.
         if let fp = sketch.queryFingerprint, let store = vectorStores[handle] {
             do {
+                // Over-fetch 4× for the same K-boundary reason as Lane A above.
                 let fpMatches = try await store.findNearest(
-                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK * 4)
                 let fpHits: [RecallHit] = fpMatches.map { m in
                     let sim = Float(256 - m.distance) / 256.0
                     let sv = RecallScoreVector(
@@ -1607,6 +1614,46 @@ public extension GeniusLocusKit {
             // without a query string. Structurally impossible for the dense lane
             // to return hits, so tag it explicitly rather than leaving nil.
             denseLaneExplainerTag = "dark:emptyQuery"
+        }
+
+        // Content-derived re-sort for BM25, vector, and dense lanes.
+        //
+        // WHY: CorpusContentEngine.bm25TopK and BruteForceIndex both use UUID
+        // tiebreaks at their internal K-boundaries. Drawer UUIDs are freshly minted
+        // per estate import, so which item "wins" a tie at rank K changes between
+        // replay runs — making meanStaleInTopK drift. Fix:
+        //   • BM25 + vector lanes: over-fetched 4× above (256 > 120 benchmark drawers),
+        //     so all matching items survive the UUID tiebreak inside each source.
+        //     Content-sort here, then cap to frontierK.
+        //   • Dense lane: FloatBruteForceIndex now uses FNV-1a vec-hash tiebreak, so
+        //     hits arrive in content-deterministic order; re-sort is defence-in-depth.
+        let locusIDsForSort = Set(locusSlice.map(\.id))
+        var unionContentByID: [String: String] = Dictionary(
+            uniqueKeysWithValues: locusSlice.map { ($0.id, $0.content) })
+        let nonLocusUnionIDs = Set(
+            bm25Hits.map(\.id) + vectorHits.map(\.id) + denseHits.map(\.id)
+        ).subtracting(locusIDsForSort)
+        if !nonLocusUnionIDs.isEmpty {
+            let extras = (try? await estate.getDrawers(
+                ids: Array(nonLocusUnionIDs), hydrationLevel: .full)) ?? []
+            for d in extras { unionContentByID[d.id] = d.content }
+        }
+        // Sort + cap BM25 (over-fetched 4×).
+        bm25Hits.sort { x, y in
+            if x.score.final != y.score.final { return x.score.final > y.score.final }
+            return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
+        }
+        bm25Hits = Array(bm25Hits.prefix(plan.frontierK))
+        // Sort + cap vector (over-fetched 4× across Lane A + Lane B).
+        vectorHits.sort { x, y in
+            if x.score.final != y.score.final { return x.score.final > y.score.final }
+            return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
+        }
+        vectorHits = Array(vectorHits.prefix(plan.frontierK))
+        // Sort dense (no cap — denseOrder already bounds count; defence-in-depth).
+        denseHits.sort { x, y in
+            if x.score.final != y.score.final { return x.score.final > y.score.final }
+            return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
         }
 
         // Count how many lanes actually contributed hits (for signalAgreement normaliser).

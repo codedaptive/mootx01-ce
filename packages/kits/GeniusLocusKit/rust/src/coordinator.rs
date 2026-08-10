@@ -9325,10 +9325,12 @@ impl EstateCoordinator {
         // --- Lane 2: BM25 (active when corpus registered and query_text non-empty) ---
         // Returns (source_id, bm25_score) pairs. source_id == drawer_id per GLK
         // ingest convention (callers ingest with source_id = drawer_id).
+        // Over-fetch 4× so all matching items survive CorpusContentEngine's UUID tiebreak
+        // at its internal K-boundary; content-sort + cap happen at the content-sort block below.
         let query_str = request.query_text.as_deref().unwrap_or("").to_string();
         let mut bm25_list: Vec<(String, f32)> = if let Some(ref c) = corpus {
             if !query_str.is_empty() {
-                c.bm25_top_k_by_source(&query_str, plan.frontier_k)
+                c.bm25_top_k_by_source(&query_str, plan.frontier_k * 4)
             } else {
                 Vec::new()
             }
@@ -9368,11 +9370,12 @@ impl EstateCoordinator {
                         // find_nearest stage — may be forced by a test seam.
                         // The seam returns StoreUnavailable so type inference resolves to
                         // Result<Vec<VectorMatch>, VectorKitError>, matching find_nearest's signature.
+                        // Over-fetch 4× for the same K-boundary reason as BM25 above.
                         let nearest_result =
                             if let Some(ref err_msg) = force_vector_hamming_error {
                                 Err(vectorkit::VectorKitError::StoreUnavailable(err_msg.clone()))
                             } else {
-                                vs.find_nearest(&probe, &model, plan.frontier_k)
+                                vs.find_nearest(&probe, &model, plan.frontier_k * 4)
                             };
                         match nearest_result {
                             Ok(matches) => matches
@@ -9447,10 +9450,11 @@ impl EstateCoordinator {
                     DistillationPipeline::default_extractor,
                 );
                 if fp != Engram::ZERO {
+                    // Over-fetch 4× for the same K-boundary reason as Lanes A and BM25.
                     if let Ok(fp_matches) = vs.find_nearest(
                         &fp,
                         crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
-                        plan.frontier_k,
+                        plan.frontier_k * 4,
                     ) {
                         // Max-score merge: build id→score from Lane A, then walk Lane B.
                         let mut score_by_id: HashMap<String, f32> = vector_list
@@ -9736,7 +9740,7 @@ impl EstateCoordinator {
         // (no forwarding signal raised it), so it carries no dense mass — its dense
         // column is 0 in the matrixAware score and its dense `final` contribution is
         // the consensus boost only (0 at N=1, mirroring Swift's `cosine + boost`).
-        let dense_list: Vec<(String, f32)> = dense_order
+        let mut dense_list: Vec<(String, f32)> = dense_order
             .iter()
             .map(|id| (id.clone(), dense_cosine_by_id.get(id).copied().unwrap_or(0.0)))
             .collect();
@@ -9793,13 +9797,15 @@ impl EstateCoordinator {
         // (e.g. ContraSignal drawers) may still appear in bm25_list/vector_list from the
         // corpus index. Their rank shifts RRF scores of frame-admissible items around them.
         // Fetch their content unframed so every input item has a stable tiebreak key.
-        // Collect non-locus BM25/vector hit IDs using owned Strings, then sort+dedup
+        // Collect non-locus BM25/vector/dense hit IDs using owned Strings, then sort+dedup
         // for deterministic ordering. HashSet iteration order is per-creation random in
         // Rust's default hasher, which would cause non_index_id ordering to differ between
         // two calls in the same process — breaking the leave-one-out determinism test.
+        // dense_list included so dense-only hits also get content keys for re-sort.
         let mut non_index_ids_owned: Vec<String> = bm25_list.iter()
             .map(|(id, _)| id.clone())
             .chain(vector_list.iter().map(|(id, _)| id.clone()))
+            .chain(dense_list.iter().map(|(id, _)| id.clone()))
             .filter(|id| !drawer_index.contains_key(id.as_str()))
             .collect();
         non_index_ids_owned.sort();
@@ -9816,9 +9822,11 @@ impl EstateCoordinator {
                 }
             }
         }
-        // Re-sort bm25_list and vector_list with content-keyed tiebreak before building
-        // score maps, so equal-score items receive deterministic rank assignments.
-        // Mirrors Swift RecallDirector's locusContentByID re-sort before rrfFuseN.
+        // Re-sort bm25_list, vector_list, and dense_list with content-keyed tiebreak before
+        // building score maps, so equal-score items receive deterministic rank assignments.
+        // bm25_list and vector_list were over-fetched 4×; cap to frontier_k after sort.
+        // dense_list is already bounded by dense_order; re-sort is defence-in-depth.
+        // Mirrors Swift RecallDirector's unionBest content re-sort block.
         bm25_list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
@@ -9827,7 +9835,19 @@ impl EstateCoordinator {
                     ka.cmp(kb)
                 })
         });
+        bm25_list.truncate(plan.frontier_k);
         vector_list.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let ka = locus_content_by_id.get(&a.0).map_or(a.0.as_str(), |s| s.as_str());
+                    let kb = locus_content_by_id.get(&b.0).map_or(b.0.as_str(), |s| s.as_str());
+                    ka.cmp(kb)
+                })
+        });
+        vector_list.truncate(plan.frontier_k);
+        // Sort dense_list by (score DESC, content ASC) — defence-in-depth since
+        // FloatBruteForceIndex now uses vec-hash tiebreak (Symbol 6 in BRR).
+        dense_list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
                     let ka = locus_content_by_id.get(&a.0).map_or(a.0.as_str(), |s| s.as_str());
