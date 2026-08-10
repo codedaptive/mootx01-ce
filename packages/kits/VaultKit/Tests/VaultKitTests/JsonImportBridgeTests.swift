@@ -224,6 +224,24 @@ struct JsonImportBridgeTests {
             contains: ["record[0]", "event_time", "2026-02-30"])
     }
 
+    @Test("Unicode (non-ASCII) digits in event_time are rejected — no crash (VK-01 Finding 5)")
+    func eventTimeUnicodeDigitsRejected() {
+        // Fullwidth digit '２' (U+FF12) passes Character.isNumber but is not
+        // an ASCII digit. Before the fix this reached Int(String(...))! and
+        // crashed; now the ASCII-only guard rejects it cleanly. The Rust twin
+        // uses u8::is_ascii_digit() and was already correct.
+        // "２026" — fullwidth 2 in the year position.
+        let fullwidthYear = "２026-01-01T00:00:00Z"
+        expectParseError(
+            seed(records: #"[{"id":"r1","content":"c","event_time":"\#(fullwidthYear)","room":"rm"}]"#),
+            contains: ["record[0]", "event_time"])
+        // Arabic-Indic digit '١' (U+0661) in the month position.
+        let arabicMonth = "2026-١1-01T00:00:00Z"
+        expectParseError(
+            seed(records: #"[{"id":"r2","content":"c","event_time":"\#(arabicMonth)","room":"rm"}]"#),
+            contains: ["record[0]", "event_time"])
+    }
+
     @Test("missing or empty room is a hard error naming the record")
     func missingRoom() {
         expectParseError(
@@ -417,6 +435,53 @@ struct JsonImportPipelineTests {
             #expect(message.contains("record[0]"), "got: \(message)")
             #expect(message.contains("\"r0001\""), "got: \(message)")
         }
+    }
+
+    @Test("occupied snapshot includes requiresConfirmation-tier drawers (VK-01 Finding 4)")
+    func occupiedIncludesRequiresConfirmationDrawers() async throws {
+        // Before the fix, the collision scan used Filter.unconfirmed, which —
+        // after BitmapEvaluator.insertDefaults adds Filter.trustworthy — excluded
+        // drawers whose trust was raised to >= 4 (requiresConfirmation). A second
+        // import could then succeed on the same lineage, creating a duplicate.
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let lineageID = DrawerMapping.lineageID(forStableSourceKey: "rc1")
+        let drawer = try await kit.capture(handle, CaptureFrame(
+            content: "needs confirmation",
+            channel: .importedFile,
+            room: "rm",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "no-embedding",
+            lineageID: lineageID))
+        // Raise trust to .derived (raw 4) — the requiresConfirmation zone (trust >= 4).
+        try await kit.mutate(handle, MutateFrame(rowID: drawer.id, kind: .correctTrust(.derived)))
+        let occupied = try await bridge.occupiedLineageIDs(handle: handle)
+        #expect(occupied.contains(lineageID),
+                "requiresConfirmation-tier lineage must block import (collision scan missed it before VK-01 fix)")
+    }
+
+    @Test("occupied snapshot includes secret-sensitivity drawers (VK-01 Finding 4)")
+    func occupiedIncludesSecretDrawers() async throws {
+        // Before the fix, BitmapEvaluator.insertDefaults injected
+        // SensitivityAtMost(.elevated), which excluded .restricted and .secret
+        // rows from the occupied snapshot, allowing a duplicate import of a
+        // secret-tier lineage to silently succeed.
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+        let lineageID = DrawerMapping.lineageID(forStableSourceKey: "sec1")
+        try await kit.capture(handle, CaptureFrame(
+            content: "top secret",
+            channel: .importedFile,
+            room: "rm",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "test",
+            embeddingModelID: "no-embedding",
+            sensitivity: .secret,
+            lineageID: lineageID))
+        let occupied = try await bridge.occupiedLineageIDs(handle: handle)
+        #expect(occupied.contains(lineageID),
+                "secret-sensitivity lineage must block import (collision scan missed it before VK-01 fix)")
     }
 
     // MARK: - Phase 4: pure frame build
@@ -854,6 +919,50 @@ struct JsonImportSubjectTests {
             Issue.record("expected adapterError for empty subject")
         } catch let VaultKitError.adapterError(message) {
             #expect(message.contains("subject"), "got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.adapterError; got \(error)")
+        }
+    }
+
+    @Test("multiline subject is a hard error (VK-01 Finding 1)")
+    func subjectMultilineRejected() {
+        // A crafted multiline subject would render verbatim in MCP recall output
+        // as trusted compact text — the trimmed-single-line rule blocks it at
+        // parse time before any window commit. The Rust twin applies the same
+        // gate via subject_register::violations().
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":"Line one\\nLine two"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected adapterError for multiline subject")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("subject"), "got: \(message)")
+            #expect(message.contains("single line"), "got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.adapterError; got \(error)")
+        }
+    }
+
+    @Test("untrimmed subject is a hard error (VK-01 Finding 1)")
+    func subjectUntrimmedRejected() {
+        // Leading or trailing whitespace would make subjects appear inconsistent
+        // in recall output and breaks the intent of the 120-char contract.
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"r1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "subject":" leading space"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected adapterError for untrimmed subject")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("subject"), "got: \(message)")
+            #expect(message.contains("whitespace"), "got: \(message)")
         } catch {
             Issue.record("expected VaultKitError.adapterError; got \(error)")
         }

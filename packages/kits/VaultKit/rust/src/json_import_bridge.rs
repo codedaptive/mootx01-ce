@@ -1601,6 +1601,26 @@ mod tests {
         );
     }
 
+    // VK-01 Finding 5: Rust was already correct (uses is_ascii_digit), but the
+    // regression test documents the invariant and guards against future regressions.
+    #[test]
+    fn event_time_non_ascii_digit_is_hard_error() {
+        // Arabic-Indic digit U+0661 '١' in the year position. Rust's is_ascii_digit()
+        // correctly rejects non-ASCII digits, unlike Swift's Character.isNumber which
+        // accepted them and crashed the force-unwrap (VK-01 Finding 5 was Swift-only,
+        // but this test locks the Rust invariant against future drift).
+        // "٢026" — Arabic-Indic 2 (U+0662) as the first year digit.
+        let arabic_year = "\u{0662}026-01-01T00:00:00Z";
+        expect_error(
+            &seed(
+                &format!("[{{\"id\": \"r1\", \"content\": \"c\", \"event_time\": \"{arabic_year}\", \"room\": \"rm\"}}]"),
+                "[]",
+                "[]",
+            ),
+            &["record[0]", "event_time"],
+        );
+    }
+
     #[test]
     fn missing_room_names_the_record() {
         expect_error(
@@ -2629,6 +2649,40 @@ mod tests {
                 "[]",
             ),
             &["subject", "empty"],
+        );
+    }
+
+    // VK-01 Finding 1: SubjectRegister trimmed-single-line rule regressions.
+
+    #[test]
+    fn subject_multiline_is_hard_error() {
+        // A crafted multiline subject would render verbatim in MCP recall output
+        // as trusted compact text — the violations() gate rejects it at parse time
+        // before any window commit. Mirrors Swift test.
+        expect_error(
+            &seed(
+                "[{\"id\": \"r1\", \"content\": \"c1\", \"event_time\": \"2026-01-01T00:00:00Z\", \
+                   \"room\": \"rm\", \"subject\": \"Line one\\nLine two\"}]",
+                "[]",
+                "[]",
+            ),
+            &["subject", "single line"],
+        );
+    }
+
+    #[test]
+    fn subject_untrimmed_is_hard_error() {
+        // Leading whitespace is rejected via SubjectViolation::Untrimmed.
+        // Trailing whitespace would equally be rejected — one case is enough
+        // since both paths hit the same violations() arm.
+        expect_error(
+            &seed(
+                r#"[{"id": "r1", "content": "c1", "event_time": "2026-01-01T00:00:00Z",
+                   "room": "rm", "subject": " leading space"}]"#,
+                "[]",
+                "[]",
+            ),
+            &["subject", "whitespace"],
         );
     }
 
