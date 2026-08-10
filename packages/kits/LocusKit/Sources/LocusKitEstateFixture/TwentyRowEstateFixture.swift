@@ -318,7 +318,12 @@ public enum TwentyRowEstateFixture {
             let storage = try SQLiteStorage(configuration: configuration)
             let estate = try await Estate.open(
                 storage: storage,
-                owner: OwnerCredentials(ownerIdentifier: "twenty-row-fixture"))
+                owner: OwnerCredentials(ownerIdentifier: "twenty-row-fixture"),
+                // Temp-dir SQLite counts as durable, so the backend-keyed default
+                // would mint into the real login keychain — keep test identities
+                // in memory. (This fixture generates structural rows, not signing
+                // operations, so a fresh store per generate is fine.)
+                identityKeyStore: InMemoryEstateIdentityKeyStore())
 
             for spec in rowSpecs {
                 let frame = CaptureFrame(
