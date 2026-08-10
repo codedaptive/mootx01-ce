@@ -1,4 +1,7 @@
 // TunnelReviewLadder.swift
+import OSLog
+
+private let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 //
 // MXE-CT3 P2.5 — the model-reviewer half of the review ladder
 // (Rejected / Proposed / Endorsed / Accepted) on proposed `contradicts`
@@ -106,10 +109,21 @@ public extension GeniusLocusKit {
         if ledger.isContestedEvidence {
             updated = updated.withContested()
         }
-        try await estate.stampTunnelReview(
-            id: tunnelID,
-            operationalBitmap: updated.operationalBitmap,
-            ext: ledger.serialized())
+        do {
+            try await estate.stampTunnelReview(
+                id: tunnelID,
+                operationalBitmap: updated.operationalBitmap,
+                ext: ledger.serialized())
+        } catch LocusKitError.tunnelNoLongerProposed {
+            // Concurrent respondToTunnel moved the lifecycle between our read
+            // and this write — the model vote is a no-op; the user's decision prevails.
+            logger.info("stale model vote: tunnel \(tunnelID) no longer proposed — endorsement not applied")
+            return TunnelEndorsementOutcome(
+                tunnelID: tunnelID,
+                newEndorser: false,
+                distinctEndorsers: 0,
+                contested: false)
+        }
         return TunnelEndorsementOutcome(
             tunnelID: tunnelID,
             newEndorser: newEndorser,
@@ -169,10 +183,20 @@ public extension GeniusLocusKit {
             // the reopenable record.
             updated = tunnel.withLifecycle(.withdrawn)
         }
-        try await estate.stampTunnelReview(
-            id: tunnelID,
-            operationalBitmap: updated.operationalBitmap,
-            ext: ledger.serialized())
+        do {
+            try await estate.stampTunnelReview(
+                id: tunnelID,
+                operationalBitmap: updated.operationalBitmap,
+                ext: ledger.serialized())
+        } catch LocusKitError.tunnelNoLongerProposed {
+            // Concurrent respondToTunnel moved the lifecycle between our read
+            // and this write — the model vote is a no-op; the user's decision prevails.
+            logger.info("stale model vote: tunnel \(tunnelID) no longer proposed — objection not applied")
+            return TunnelObjectionOutcome(
+                tunnelID: tunnelID,
+                withdrawn: false,
+                contested: false)
+        }
         return TunnelObjectionOutcome(
             tunnelID: tunnelID,
             withdrawn: !contested,

@@ -3280,15 +3280,29 @@ impl DrawerStore for DrawerStoreCore {
     /// one update. Write primitive behind the GLK endorsement verbs —
     /// LocusKit owns the column, GLK owns the review policy. Mirrors
     /// Swift `DrawerStore.stampTunnelReview(id:operationalBitmap:ext:)`.
+    ///
+    /// Conditional write: if the tunnel is no longer `Proposed` at write
+    /// time (because a concurrent `respond_to_tunnel` accepted or withdrew it),
+    /// the write is rejected with `TunnelNoLongerProposed` so the caller can
+    /// treat the stale model vote as a no-op. The user's lifecycle decision
+    /// is always authoritative.
     fn stamp_tunnel_review(
         &self,
         tunnel_id: &str,
         operational_bitmap: i64,
         ext: Option<&str>,
     ) -> Result<(), LocusKitError> {
-        // Verify the tunnel exists first so we can return TunnelNotFound.
-        let _ = self.get_tunnel(tunnel_id)?
+        use crate::tunnel_operational::TunnelLifecycle;
+        let existing = self.get_tunnel(tunnel_id)?
             .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        // Conditional write: only apply when the tunnel is still Proposed.
+        // A concurrent respond_to_tunnel (accept or withdraw) moves the lifecycle
+        // — the stale bitmap from the model reviewer must not clobber that decision.
+        if existing.lifecycle() != TunnelLifecycle::Proposed {
+            return Err(LocusKitError::TunnelNoLongerProposed {
+                id: tunnel_id.to_string(),
+            });
+        }
         let mut vals = std::collections::BTreeMap::new();
         vals.insert(
             "operationalBitmap".to_string(),

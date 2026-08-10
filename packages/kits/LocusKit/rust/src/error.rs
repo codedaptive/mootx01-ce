@@ -106,6 +106,15 @@ pub enum LocusKitError {
     /// GLK `expunge`. Returned by `Estate::resolve_active_dataset_handle`
     /// (MX-TAB-4). Mirrors Swift `LocusKitError.withdrawnDatasetHandle`.
     WithdrawnDatasetHandle { dataset_id: uuid::Uuid },
+
+    /// The tunnel's lifecycle has moved beyond `Proposed` since the caller's
+    /// last read — a stale model-review write was rejected. The user's lifecycle
+    /// decision (accept or withdraw via `respond_to_tunnel`) prevails.
+    /// Returned by `DrawerStore::stamp_tunnel_review` when the tunnel is no
+    /// longer `Proposed` at write time. Callers treat this as a no-op: the vote
+    /// arrived after the user settled the question. Mirrors Swift
+    /// `LocusKitError.tunnelNoLongerProposed`.
+    TunnelNoLongerProposed { id: String },
 }
 
 impl std::fmt::Display for LocusKitError {
@@ -156,6 +165,9 @@ impl std::fmt::Display for LocusKitError {
             }
             LocusKitError::WithdrawnDatasetHandle { dataset_id } => {
                 write!(f, "WithdrawnDatasetHandle: dataset_id='{}'", dataset_id)
+            }
+            LocusKitError::TunnelNoLongerProposed { id } => {
+                write!(f, "TunnelNoLongerProposed: id='{}'", id)
             }
         }
     }
@@ -262,9 +274,10 @@ mod tests {
     }
 
     #[test]
-    fn all_twelve_cases_are_distinct() {
+    fn all_thirteen_cases_are_distinct() {
         // Confirm no two different cases compare equal — basic sanity check.
         // MX-TAB-4: count updated from 11 to 12 for WithdrawnDatasetHandle.
+        // GK-01: count updated from 12 to 13 for TunnelNoLongerProposed.
         let variants: Vec<LocusKitError> = vec![
             LocusKitError::DatabaseUnavailable("x".to_string()),
             LocusKitError::DrawerNotFound {
@@ -300,8 +313,12 @@ mod tests {
             LocusKitError::WithdrawnDatasetHandle {
                 dataset_id: uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
             },
+            // GK-01: new case 13
+            LocusKitError::TunnelNoLongerProposed {
+                id: "t-occ".to_string(),
+            },
         ];
-        assert_eq!(variants.len(), 12);
+        assert_eq!(variants.len(), 13);
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {
                 if i == j {

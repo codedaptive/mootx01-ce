@@ -4851,13 +4851,19 @@ impl EstateCoordinator {
         if ledger.is_contested_evidence() {
             updated = updated.with_contested();
         }
-        estate
-            .stamp_tunnel_review(
-                tunnel_id,
-                updated.operational_bitmap,
-                ledger.serialized().as_deref(),
-            )
-            .map_err(remap_err)?;
+        match estate.stamp_tunnel_review(
+            tunnel_id,
+            updated.operational_bitmap,
+            ledger.serialized().as_deref(),
+        ) {
+            Ok(()) => {}
+            Err(locus_kit::error::LocusKitError::TunnelNoLongerProposed { .. }) => {
+                // Concurrent respond_to_tunnel moved the lifecycle between our read and
+                // this write — the model vote is a no-op; the user's decision prevails.
+                return Ok((false, 0, false));
+            }
+            Err(e) => return Err(remap_err(e)),
+        }
         Ok((
             new_endorser,
             ledger.distinct_endorser_count(),
@@ -4930,13 +4936,19 @@ impl EstateCoordinator {
             // reopenable record.
             tunnel.with_lifecycle(TunnelLifecycle::Withdrawn)
         };
-        estate
-            .stamp_tunnel_review(
-                tunnel_id,
-                updated.operational_bitmap,
-                ledger.serialized().as_deref(),
-            )
-            .map_err(remap_err)?;
+        match estate.stamp_tunnel_review(
+            tunnel_id,
+            updated.operational_bitmap,
+            ledger.serialized().as_deref(),
+        ) {
+            Ok(()) => {}
+            Err(locus_kit::error::LocusKitError::TunnelNoLongerProposed { .. }) => {
+                // Concurrent respond_to_tunnel moved the lifecycle between our read and
+                // this write — the model vote is a no-op; the user's decision prevails.
+                return Ok((false, false));
+            }
+            Err(e) => return Err(remap_err(e)),
+        }
         Ok((!contested, contested))
     }
 
@@ -13389,5 +13401,67 @@ mod tests {
             "highest-content drawer must be rank 0 after sort-then-cap");
         assert_eq!(r[1].content, d_mid.content,
             "middle-content drawer must be rank 1 after sort-then-cap");
+    }
+
+    // GK-01: Regression test for the OCC guard in DrawerStoreCore::stamp_tunnel_review.
+    //
+    // Scenario: a model computes an endorsed bitmap from a proposed tunnel, but the
+    // user accepts the tunnel before the model's write lands. stamp_tunnel_review must
+    // reject the stale write with TunnelNoLongerProposed so the user's acceptance is
+    // not clobbered. Tested at the DrawerStore primitive level because the coordinator's
+    // endorse_tunnel / object_to_tunnel guards already check lifecycle before calling
+    // stamp_tunnel_review — the primitive guard is what closes the race window.
+    #[test]
+    fn stamp_tunnel_review_rejects_stale_write_after_user_accept() {
+        use locus_kit::estate::Estate;
+        use locus_kit::frames::TunnelCaptureFrame;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+        use locus_kit::error::LocusKitError;
+
+        // Stand up a bare LocusKit estate with a typed Arc so we can call
+        // stamp_tunnel_review directly — no GLK coordinator needed here.
+        let store = Arc::new(InMemoryDrawerStore::new(NOW, None).expect("store"));
+        let estate = Estate::create(
+            store.clone(),
+            OwnerCredentials::new("owner"),
+            None,
+        ).expect("estate");
+
+        // File a Proposed tunnel.
+        let mut frame = TunnelCaptureFrame::new(
+            "wing_a", "room_1", "wing_b", "room_2", "contradicts", "bilby",
+        );
+        frame.kind = TunnelKind::Contradicts;
+        frame.origin_class = TunnelOriginClass::Derived;
+        frame.lifecycle = TunnelLifecycle::Proposed;
+        let tunnel = estate.capture_tunnel(frame, NOW).expect("capture");
+
+        // Compute the endorsed bitmap that the model would compute before the user acts.
+        let endorsed_bitmap = tunnel.with_endorsed().operational_bitmap;
+
+        // User accepts the tunnel — lifecycle moves Proposed → Active.
+        estate
+            .respond_to_tunnel(&tunnel.id, true, "bob", None, NOW + 1)
+            .expect("accept");
+        let accepted = store.get_tunnel(&tunnel.id).expect("get ok").expect("exists");
+        assert_eq!(accepted.lifecycle(), TunnelLifecycle::Active, "must be active after accept");
+
+        // Model tries to write its stale endorsed bitmap — must be rejected.
+        let result = store.stamp_tunnel_review(&tunnel.id, endorsed_bitmap, None);
+        assert!(
+            matches!(result, Err(LocusKitError::TunnelNoLongerProposed { .. })),
+            "stale write must be rejected with TunnelNoLongerProposed; got {:?}", result
+        );
+
+        // Tunnel must remain Active with no endorsed bit set.
+        let after = store.get_tunnel(&tunnel.id).expect("get ok").expect("exists");
+        assert_eq!(
+            after.lifecycle(), TunnelLifecycle::Active,
+            "user acceptance must not be overwritten by stale model vote"
+        );
+        assert!(
+            !after.is_endorsed(),
+            "stale endorsed bit must not be applied by rejected write"
+        );
     }
 }

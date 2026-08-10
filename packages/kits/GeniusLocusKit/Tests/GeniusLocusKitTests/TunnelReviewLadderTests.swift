@@ -345,4 +345,44 @@ struct TunnelReviewLadderTests {
                 tierLens: .lexicalValue, now: Self.t0)
         }
     }
+
+    // MARK: - OCC guard (stale model-write rejection)
+
+    /// Regression test for the OCC guard added in GK-01.
+    ///
+    /// Scenario: a model computes an endorsed bitmap from a proposed tunnel,
+    /// but the user accepts the tunnel before the model's write lands.
+    /// `stampTunnelReview` must reject the stale write so the user's
+    /// acceptance is not clobbered.
+    @Test("stampTunnelReview rejects stale write after user accepts")
+    func stampTunnelReviewRejectsStaleWriteAfterUserAccepts() async throws {
+        let (kit, handle, estate, vectorStore) = try await makeKit(owner: "occ-guard")
+        _ = try await plant("the contract expires in 30 days",
+                            kit: kit, handle: handle, vectorStore: vectorStore)
+        _ = try await plant("the contract expires in 90 days",
+                            kit: kit, handle: handle, vectorStore: vectorStore)
+        let report = try await kit.proposeConflictTunnels(in: handle, now: Self.t0)
+        let id = try #require(report.proposedTier3IDs.first)
+
+        // Read the proposed tunnel to capture the bitmap a model would compute.
+        let proposed = try #require(try await estate.getTunnel(id: id))
+        #expect(proposed.lifecycle == .proposed)
+        let staleBitmap = proposed.withEndorsed().operationalBitmap
+
+        // User accepts — lifecycle moves proposed → active.
+        try await estate.respondToTunnel(id: id, accept: true, changedBy: "bob", now: Self.t0)
+        let accepted = try #require(try await estate.getTunnel(id: id))
+        #expect(accepted.lifecycle == .active)
+
+        // Model tries to write its stale endorsed bitmap — must be rejected.
+        await #expect(throws: LocusKitError.tunnelNoLongerProposed(id: id)) {
+            try await estate.stampTunnelReview(
+                id: id, operationalBitmap: staleBitmap, ext: nil)
+        }
+
+        // Tunnel must remain active with no endorsed bit set.
+        let after = try #require(try await estate.getTunnel(id: id))
+        #expect(after.lifecycle == .active, "user acceptance must not be overwritten")
+        #expect(!after.isEndorsed, "stale endorsed bit must not be applied")
+    }
 }

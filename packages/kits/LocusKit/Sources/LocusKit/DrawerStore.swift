@@ -2338,7 +2338,15 @@ public actor DrawerStore {
     /// bitmap and canonical ledger serialization; no interpretation
     /// happens here.
     ///
-    /// - Throws: `tunnelNotFound` if no tunnel with `tunnelId` exists.
+    /// Conditional write: if the tunnel is no longer `.proposed` at write
+    /// time (because a concurrent `respondToTunnel` accepted or withdrew it),
+    /// the write is rejected with `tunnelNoLongerProposed` so the caller can
+    /// treat the stale model vote as a no-op. The user's lifecycle decision
+    /// is always authoritative.
+    ///
+    /// - Throws: `tunnelNotFound` if no tunnel with `tunnelId` exists;
+    ///           `tunnelNoLongerProposed` if the tunnel has left the
+    ///           `.proposed` lifecycle since the caller's last read.
     ///
     /// Mirrors Rust `DrawerStore::stamp_tunnel_review`.
     public func stampTunnelReview(
@@ -2346,8 +2354,14 @@ public actor DrawerStore {
         operationalBitmap: Int64,
         ext: String?
     ) async throws {
-        guard try await getTunnel(id: tunnelId) != nil else {
+        guard let existing = try await getTunnel(id: tunnelId) else {
             throw LocusKitError.tunnelNotFound(id: tunnelId)
+        }
+        // Conditional write: only apply when the tunnel is still proposed.
+        // A concurrent respondToTunnel (accept or withdraw) moves the lifecycle
+        // — the stale bitmap from the model reviewer must not clobber that decision.
+        guard existing.lifecycle == .proposed else {
+            throw LocusKitError.tunnelNoLongerProposed(id: tunnelId)
         }
         _ = try await storage.rowStore.update(
             table: "tunnels",
