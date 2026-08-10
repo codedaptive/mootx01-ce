@@ -1144,7 +1144,9 @@ pub trait DrawerStore: Send + Sync {
     /// Persist a review-ladder state change: `operational_bitmap` (the
     /// endorsed/contested/lifecycle bits) and the `ext` review ledger, in
     /// one update (MXE-CT3). Write primitive behind the GLK endorsement
-    /// verbs. Returns `TunnelNotFound` when the tunnel does not exist.
+    /// verbs. Returns `TunnelNotFound` when the tunnel does not exist, or
+    /// `TunnelNoLongerProposed` when the tunnel's lifecycle has moved beyond
+    /// `Proposed` at write time (GK-01 OCC guard).
     ///
     /// Mirrors Swift `DrawerStore.stampTunnelReview(id:operationalBitmap:ext:)`.
     fn stamp_tunnel_review(

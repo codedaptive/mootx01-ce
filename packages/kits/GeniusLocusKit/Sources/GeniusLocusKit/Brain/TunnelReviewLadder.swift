@@ -1,7 +1,4 @@
 // TunnelReviewLadder.swift
-import OSLog
-
-private let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 //
 // MXE-CT3 P2.5 — the model-reviewer half of the review ladder
 // (Rejected / Proposed / Endorsed / Accepted) on proposed `contradicts`
@@ -32,6 +29,9 @@ private let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocus
 // `EstateCoordinator::object_to_tunnel` (coordinator.rs).
 
 import Foundation
+import OSLog
+
+private let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 import LocusKit
 
 /// Outcome of one `endorseTunnel` call.

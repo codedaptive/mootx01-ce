@@ -884,8 +884,13 @@ public actor Estate {
     /// review ledger) in one update. Estate-level surface over
     /// `DrawerStore.stampTunnelReview` — the write primitive behind the
     /// GLK endorsement verbs. LocusKit owns the column; GLK owns the
-    /// review policy. Throws `LocusKitError.tunnelNotFound` when the
-    /// tunnel does not exist. Mirrors Rust `Estate::stamp_tunnel_review`.
+    /// review policy.
+    ///
+    /// - Throws: `tunnelNotFound` if no tunnel with `tunnelId` exists;
+    ///           `tunnelNoLongerProposed` if the tunnel has left `.proposed`
+    ///           lifecycle since the caller's last read (GK-01 OCC guard).
+    ///
+    /// Mirrors Rust `Estate::stamp_tunnel_review`.
     public func stampTunnelReview(
         id tunnelId: String, operationalBitmap: Int64, ext: String?
     ) async throws {

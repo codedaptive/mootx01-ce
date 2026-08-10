@@ -1599,7 +1599,9 @@ impl Estate {
     /// `DrawerStore::stamp_tunnel_review` — the write primitive behind
     /// the GLK endorsement verbs. LocusKit owns the column; GLK owns the
     /// review policy. Returns `TunnelNotFound` when the tunnel does not
-    /// exist. Mirrors Swift `Estate.stampTunnelReview(id:operationalBitmap:ext:)`.
+    /// exist, or `TunnelNoLongerProposed` when the tunnel has left
+    /// `Proposed` lifecycle since the caller's last read (GK-01 OCC guard).
+    /// Mirrors Swift `Estate.stampTunnelReview(id:operationalBitmap:ext:)`.
     pub fn stamp_tunnel_review(
         &self,
         tunnel_id: &str,

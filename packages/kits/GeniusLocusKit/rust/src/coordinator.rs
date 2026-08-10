@@ -13408,9 +13408,10 @@ mod tests {
     // Scenario: a model computes an endorsed bitmap from a proposed tunnel, but the
     // user accepts the tunnel before the model's write lands. stamp_tunnel_review must
     // reject the stale write with TunnelNoLongerProposed so the user's acceptance is
-    // not clobbered. Tested at the DrawerStore primitive level because the coordinator's
-    // endorse_tunnel / object_to_tunnel guards already check lifecycle before calling
-    // stamp_tunnel_review — the primitive guard is what closes the race window.
+    // not clobbered. Tested at the DrawerStore primitive level — that is where the guard
+    // lives. The coordinator's endorse_tunnel / object_to_tunnel receive
+    // TunnelNoLongerProposed from stamp_tunnel_review and handle it as a no-op,
+    // exercised via their own return-value paths.
     #[test]
     fn stamp_tunnel_review_rejects_stale_write_after_user_accept() {
         use locus_kit::estate::Estate;
