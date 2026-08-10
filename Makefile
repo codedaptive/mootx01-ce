@@ -56,7 +56,7 @@ BASE    ?= origin/develop/1.0.x
         test-validation test-validation-swift test-validation-rust test-validation-python \
         test-one test-changed test-full test-all test-checks test-glk-latency test-topology-zoom \
         test-perf-bench test-apple-app-ios \
-        conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
+        conformance release pkg list clean clean-builds clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
 	@echo "mootx01 build targets:"
@@ -81,6 +81,7 @@ help:
 	@echo "  pkg          — build the host-arch macOS .pkg installer into $(DIST)/ (unsigned without identities)"
 	@echo "  list         — print discovered packages and crates"
 	@echo "  clean        — remove all build artifacts (clean-dry previews, clean-index also drops .codegraph)"
+	@echo "  clean-builds — remove .build caches + cargo incremental (keeps compiled deps)"
 
 # ── Build ───────────────────────────────────────────────────────────────
 build: build-swift build-rust
@@ -257,6 +258,7 @@ conformance:
 # .github/workflows/release.yml builds (mootx01 + moot-mgr). The full asset
 # matrix (macOS arm64/x86_64 .tar.gz, Linux .tar.gz, Windows .zip + checksums)
 # is built in CI on a v* tag; this is the local host-arch counterpart.
+release: export CARGO_INCREMENTAL=0
 release:
 	@mkdir -p "$(DIST)"
 	swift build -c release --package-path apps/mootx01 --product mootx01
@@ -350,6 +352,24 @@ clean-dry:
 	done
 	@find . -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' -o -name '*.test' \) -print
 	@if [ -d "$(CARGO_TARGET_DIR)" ]; then echo "$(CARGO_TARGET_DIR)"; fi
+
+# Light hygiene: reap the per-package .build caches and cargo's incremental
+# compilation state.  Keeps compiled deps in cargo-target/debug/deps/ so the
+# next build is warm.  Steady state after this is ~10-15G — the legitimate
+# price of per-package isolation.  Wire into worktree teardown so worker
+# builds never accumulate.
+clean-builds:
+	@echo "Reaping .build caches and cargo incremental ..."
+	@find . -type d -name .build -not -path './cargo-target/*' -prune -print -exec rm -rf {} +
+	@if [ -d "$(CARGO_TARGET_DIR)/debug/incremental" ]; then \
+		echo "$(CARGO_TARGET_DIR)/debug/incremental"; \
+		rm -rf "$(CARGO_TARGET_DIR)/debug/incremental"; \
+	fi
+	@if [ -d "$(CARGO_TARGET_DIR)/release/incremental" ]; then \
+		echo "$(CARGO_TARGET_DIR)/release/incremental"; \
+		rm -rf "$(CARGO_TARGET_DIR)/release/incremental"; \
+	fi
+	@echo "Done."
 
 # Also drops the codegraph index. Separate target so a routine `clean`
 # never forces an expensive re-index.
