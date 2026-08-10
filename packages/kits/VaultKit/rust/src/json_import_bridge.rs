@@ -39,6 +39,8 @@ use locus_kit::{
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
     frames::CaptureFrame,
     provenance::{Channel, SourceType},
+    subject_register,
+    subject_register::SubjectViolation,
     tunnel_operational::TunnelKind,
 };
 
@@ -381,26 +383,49 @@ fn parse_record(
         AdjectiveExportability::Private
     };
 
-    // Schema v1.1 — optional subject line. `None` = absent (subject debt);
-    // present = non-empty, ≤120 chars. Mirrors the Swift 120-char contract.
+    // Schema v1.1 — optional subject field. When present: validated by
+    // SubjectRegister's full trimmed-single-line rule (non-empty, single
+    // line, trimmed, ≤120 chars, no narrative-frame prefix). A crafted
+    // multiline subject would render verbatim in MCP recall output as
+    // trusted compact text — reject at parse time, not write time.
+    // Absent → None (subject-debt candidate for AI backfill).
     let subject: Option<String> = if object.contains_key("subject") {
         match object.get("subject").and_then(|v| v.as_str()) {
-            Some(s) if s.is_empty() => {
-                return Err(err(format!(
-                    "{at}: subject is empty (omit it to mark as subject-debt, or provide a non-empty string)"
-                )))
+            Some(s) => {
+                let vs = subject_register::violations(s);
+                for v in &vs {
+                    match v {
+                        SubjectViolation::Empty => {
+                            return Err(err(format!(
+                                "{at}: subject is empty (omit it or provide a non-empty string ≤120 chars)"
+                            )))
+                        }
+                        SubjectViolation::TooLong(n) => {
+                            return Err(err(format!(
+                                "{at}: subject exceeds the 120-character contract ({n} chars)"
+                            )))
+                        }
+                        SubjectViolation::Multiline => {
+                            return Err(err(format!(
+                                "{at}: subject must be a single line (no embedded newlines)"
+                            )))
+                        }
+                        SubjectViolation::Untrimmed => {
+                            return Err(err(format!(
+                                "{at}: subject has leading or trailing whitespace"
+                            )))
+                        }
+                        SubjectViolation::NarrativeFrame(prefix) => {
+                            return Err(err(format!(
+                                "{at}: subject starts with a narrative-frame prefix (\"{prefix}\")"
+                            )))
+                        }
+                    }
+                }
+                Some(s.to_string())
             }
-            Some(s) if s.chars().count() > 120 => {
-                return Err(err(format!(
-                    "{at}: subject exceeds 120-character contract ({} chars)",
-                    s.chars().count()
-                )))
-            }
-            Some(s) => Some(s.to_string()),
             None => {
-                return Err(err(format!(
-                    "{at}: subject is not a string"
-                )))
+                return Err(err(format!("{at}: subject is not a string")))
             }
         }
     } else {
@@ -762,8 +787,25 @@ impl<'a> JsonImportBridge<'a> {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<HashSet<Uuid>, VaultKitError> {
+        // Broadened active scan: override all three BitmapEvaluator defaults so
+        // the snapshot sees every currently-believed lineage regardless of trust
+        // level or sensitivity tier.
+        //   - Filter::CurrentlyBelieve: explicit state gate (Cluster A); replaces the
+        //     auto-injected default so the chain is clear, not implicit.
+        //   - Filter::Any([Trustworthy, RequiresConfirmation]): without this,
+        //     insert_defaults injects Filter::Trustworthy alone, which excludes
+        //     requires-confirmation rows — lineages that should block import.
+        //   - Filter::SensitivityAtMost(Secret): without this, insert_defaults
+        //     injects SensitivityAtMost(Elevated), which excludes restricted and
+        //     secret rows — lineages that should block import.
+        // The old filter_chain [Filter::Unconfirmed] only matched unconfirmed rows
+        // AND was further narrowed by the injected Trustworthy + Elevated defaults.
         let active_frame = RecallFrame {
-            filter_chain: vec![Filter::Unconfirmed],
+            filter_chain: vec![
+                Filter::CurrentlyBelieve,
+                Filter::Any(vec![Filter::Trustworthy, Filter::RequiresConfirmation]),
+                Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
+            ],
             hydration_level: HydrationLevel::Structured,
             limit: Some(10_000_000),
             ordering: Ordering::ByCaptureTimeDesc,

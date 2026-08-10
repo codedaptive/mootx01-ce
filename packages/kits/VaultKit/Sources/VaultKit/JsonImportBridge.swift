@@ -318,16 +318,30 @@ public struct JsonSeedFile: Sendable, Equatable {
             exportability = parsed
         }
 
-        // Schema v1.1 — optional subject field. When present: non-empty
-        // string, ≤ DrawerStore.subjectLengthContract (120) extended
-        // grapheme clusters. Absent → nil (subject-debt candidate).
+        // Schema v1.1 — optional subject field. When present: validated by
+        // SubjectRegister's full trimmed-single-line rule (non-empty, single
+        // line, trimmed, ≤120 chars, no narrative-frame prefix). A crafted
+        // multiline subject would render verbatim in MCP recall output as
+        // trusted compact text — reject at parse time, not write time.
+        // Absent → nil (subject-debt candidate for AI backfill).
         var subject: String?
         if object.keys.contains("subject") {
             guard let subjectValue = object["subject"] as? String, !subjectValue.isEmpty else {
                 throw err("\(at): subject is empty (omit it or provide a non-empty string ≤ \(DrawerStore.subjectLengthContract) chars)")
             }
-            guard subjectValue.count <= DrawerStore.subjectLengthContract else {
-                throw err("\(at): subject exceeds the \(DrawerStore.subjectLengthContract)-character contract (\(subjectValue.count) chars)")
+            for violation in SubjectRegister.violations(subjectValue) {
+                switch violation {
+                case .tooLong(let count):
+                    throw err("\(at): subject exceeds the \(DrawerStore.subjectLengthContract)-character contract (\(count) chars)")
+                case .multiline:
+                    throw err("\(at): subject must be a single line (no embedded newlines)")
+                case .untrimmed:
+                    throw err("\(at): subject has leading or trailing whitespace")
+                case .narrativeFrame(let prefix):
+                    throw err("\(at): subject starts with a narrative-frame prefix (\"\(prefix)\")")
+                case .empty:
+                    throw err("\(at): subject is empty (omit it or provide a non-empty string ≤ \(DrawerStore.subjectLengthContract) chars)")
+                }
             }
             subject = subjectValue
         }
@@ -464,12 +478,17 @@ public struct JsonSeedFile: Sendable, Equatable {
         // Shape pin: 20 chars plain, or 24 chars with ".fff" at index 19.
         guard s.hasSuffix("Z") else { return nil }
         let chars = Array(s)
+        // ASCII-only digit check — mirrors the Rust twin's `is_ascii_digit()`.
+        // Character.isNumber accepts Unicode numeric characters (fullwidth,
+        // Arabic-Indic, etc.) that then crash Int(String(...)) with a force-
+        // unwrap failure. The ASCII predicate is exact: only '0'–'9'.
+        let isASCIIDigit: (Character) -> Bool = { $0 >= "0" && $0 <= "9" }
         switch s.count {
         case 20:
             break
         case 24:
             guard chars[19] == "." else { return nil }
-            guard chars[20...22].allSatisfy(\.isNumber) else { return nil }
+            guard chars[20...22].allSatisfy(isASCIIDigit) else { return nil }
         default:
             return nil
         }
@@ -480,12 +499,13 @@ public struct JsonSeedFile: Sendable, Equatable {
         guard chars[4] == "-", chars[7] == "-", chars[10] == "T",
               chars[13] == ":", chars[16] == ":" else { return nil }
         let digitIndexes = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
-        guard digitIndexes.allSatisfy({ chars[$0].isNumber }) else { return nil }
-        func field(_ range: ClosedRange<Int>) -> Int {
-            Int(String(chars[range]))!
+        guard digitIndexes.allSatisfy({ isASCIIDigit(chars[$0]) }) else { return nil }
+        func field(_ range: ClosedRange<Int>) -> Int? {
+            Int(String(chars[range]))
         }
-        let year = field(0...3), month = field(5...6), day = field(8...9)
-        let hour = field(11...12), minute = field(14...15), second = field(17...18)
+        guard let year = field(0...3), let month = field(5...6), let day = field(8...9),
+              let hour = field(11...12), let minute = field(14...15), let second = field(17...18)
+        else { return nil }
         guard (1...12).contains(month), hour <= 23, minute <= 59, second <= 59 else {
             return nil
         }
@@ -537,11 +557,30 @@ public struct JsonImportBridge: Sendable {
     /// `existingTombstonedLineageIDs` use, at `.structured` hydration
     /// because only lineage ids are needed (the JSON lane has no
     /// content-idempotent guard to feed — overlap of any kind is an error).
+    ///
+    /// The active scan explicitly overrides the three `insertDefaults` axes
+    /// so the snapshot covers ALL active lineages regardless of confirmation,
+    /// trust, or sensitivity state:
+    ///   - `.any([.trustworthy, .requiresConfirmation])` — all trust levels,
+    ///     suppresses the `.trustworthy` default that would otherwise exclude
+    ///     requiresConfirmation rows.
+    ///   - `.sensitivityAtMost(.secret)` — all sensitivity tiers, suppresses
+    ///     the `.sensitivityAtMost(.elevated)` default that would otherwise
+    ///     exclude restricted and secret rows.
+    ///   - No confirmation filter — all confirmation states; the evaluator
+    ///     adds no confirmation default, so this is already the evaluator
+    ///     behaviour. The previous `.unconfirmed` filter restricted the scan
+    ///     to unconfirmed rows only, missing user-confirmed, automated-
+    ///     confirmed, and restricted/secret lineages.
     func occupiedLineageIDs(handle: EstateHandle) async throws -> Set<UUID> {
         let active = try await kit.recall(
             handle,
             RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [
+                    .currentlyBelieve,
+                    .any([.trustworthy, .requiresConfirmation]),
+                    .sensitivityAtMost(.secret),
+                ],
                 hydrationLevel: .structured,
                 limit: 10_000_000
             )
