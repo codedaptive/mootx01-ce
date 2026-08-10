@@ -116,17 +116,115 @@ struct ConflictCueTests {
         #expect(ConflictCue.evaluate(
             "Bob lives in Paris",
             "the deploy pipeline is not green").kind == .none)
-        // Both sides negated → same stance, not asymmetry.
+        // Both sides negated → same stance, not asymmetry; and the tail
+        // is a pure extension (one side has no divergent value phrase),
+        // so wordExclusion must not claim it either.
         #expect(ConflictCue.evaluate(
             "Bob does not live in Paris",
             "Bob does not live in Paris anymore").kind == .none)
         // Different word (non-value) in the same template must NOT fire
-        // valueDivergence — that judgment belongs to the agent.
+        // valueDivergence — but it IS the word-valued exclusion class,
+        // so cue 4 surfaces it as a borderline candidate for the agent.
         #expect(ConflictCue.evaluate(
             "Bob lives in Paris today",
-            "Bob lives in Rome today").kind == .none)
+            "Bob lives in Rome today").kind == .wordExclusion)
         // Empty inputs.
         #expect(ConflictCue.evaluate("", "Bob lives in Paris").kind == .none)
+    }
+
+    // MARK: - Word exclusion (mirrored vectors)
+
+    @Test("word exclusion fires on the four corpus attribute classes in the borderline band")
+    func wordExclusionCorpusClasses() {
+        // Full corpus-template sentences, same entity on both sides.
+        // Every score must sit in [borderline, ceiling] and strictly
+        // below strongThreshold — the cue can never auto-propose.
+        let pairs: [(String, String)] = [
+            // employer — 6 tokens each, 4-token anchor
+            ("Riley Nakamura works at Acme Robotics.",
+             "Riley Nakamura works at Northwind Analytics."),
+            // city — 5 tokens each, 4-token anchor
+            ("Riley Nakamura lives in Lisbon.",
+             "Riley Nakamura lives in Toronto."),
+            // role — 6 tokens each, 3-token anchor ("a" vs "an" diverges)
+            ("Riley Nakamura is a staff engineer.",
+             "Riley Nakamura is an engineering manager."),
+            // language — 5 tokens each, 4-token anchor
+            ("Riley Nakamura primarily writes Swift.",
+             "Riley Nakamura primarily writes Rust."),
+        ]
+        for (a, b) in pairs {
+            let r = ConflictCue.evaluate(a, b)
+            #expect(r.kind == .wordExclusion)
+            #expect(r.score >= ConflictCue.borderlineThreshold)
+            #expect(r.score <= ConflictCue.wordExclusionCeiling)
+            #expect(r.score < ConflictCue.strongThreshold)
+        }
+    }
+
+    @Test("word exclusion guards: digit tails, cross-entity digits, unrelated sentences stay none")
+    func wordExclusionGuards() {
+        // Digit-valued diff over a same-length template is
+        // valueDivergence's lane — unchanged by cue 4.
+        let timeout = ConflictCue.evaluate(
+            "the API timeout is 30 seconds",
+            "the API timeout is 90 seconds"
+        )
+        #expect(timeout.kind == .valueDivergence)
+
+        // Cross-entity pure-digit tails ("sarah chen 3" vs "sarah chen
+        // 7") — the RCA's false-positive class — must stay none.
+        #expect(ConflictCue.evaluate("Sarah Chen 3", "Sarah Chen 7").kind == .none)
+
+        // Single shared leading token is not a substantial anchor.
+        #expect(ConflictCue.evaluate(
+            "the deploy pipeline is green",
+            "the build server is fast").kind == .none)
+
+        // Shared two-token opening but anchor fraction below half of
+        // the longer stream — unrelated continuation, stays none.
+        #expect(ConflictCue.evaluate(
+            "the team met",
+            "the team shipped four features early today").kind == .none)
+
+        // Negation asymmetry present but claim similarity too low for
+        // cue 2 — the pair stays none, never downgrades to cue 4.
+        #expect(ConflictCue.evaluate(
+            "Bob lives in Paris",
+            "the deploy pipeline is not green").kind == .none)
+    }
+
+    @Test("negation and marker pairs are unchanged by cue 4 (regression)")
+    func wordExclusionDoesNotStealStrongerCues() {
+        // A word-exclusion-shaped pair with a negation on one side is
+        // still negation asymmetry, not word exclusion.
+        let negated = ConflictCue.evaluate(
+            "Riley Nakamura lives in Lisbon",
+            "Riley Nakamura does not live in Lisbon"
+        )
+        #expect(negated.kind == .negationAsymmetry)
+
+        // Marker pairs unchanged.
+        let marker = ConflictCue.evaluate(
+            "use the staging endpoint for uploads",
+            "the staging endpoint for uploads is deprecated"
+        )
+        #expect(marker.kind == .markerRevision)
+    }
+
+    // MARK: - Tier classifier
+
+    @Test("contradiction tier classifier maps cue kinds to tiers")
+    func contradictionTierClassifier() {
+        // Tier 1 is the typed-KGFact lane, produced elsewhere — this
+        // screen never emits it, so no kind maps to 1.
+        #expect(ConflictCueKind.valueDivergence.contradictionTier == 3)
+        #expect(ConflictCueKind.negationAsymmetry.contradictionTier == 2)
+        #expect(ConflictCueKind.markerRevision.contradictionTier == 2)
+        #expect(ConflictCueKind.wordExclusion.contradictionTier == 2)
+        #expect(ConflictCueKind.none.contradictionTier == nil)
+        // Wire-stable raw value, mirrored in Rust as_str.
+        #expect(ConflictCueKind.wordExclusion.rawValue == "word_exclusion")
     }
 
     // MARK: - Bit-pinned score vectors (cross-leg conformance)
@@ -151,5 +249,39 @@ struct ConflictCueTests {
         let expected = ShingleSimilarity.similarity(
             "bob lives in paris", "bob does live in paris")
         #expect(v2.score.bitPattern == expected.bitPattern)
+
+        // wordExclusion scores are borderline + bandWidth * anchorFraction
+        // (anchor tokens / longer stream length), computed in f32 in this
+        // exact op order in both legs. Pin the bits per corpus class.
+        func wordExclusionScore(anchor: Int, total: Int) -> Float {
+            min(
+                ConflictCue.borderlineThreshold
+                    + ConflictCue.wordExclusionBandWidth * (Float(anchor) / Float(total)),
+                ConflictCue.wordExclusionCeiling)
+        }
+        // employer: anchor 4 of 6 tokens.
+        let employer = ConflictCue.evaluate(
+            "Riley Nakamura works at Acme Robotics.",
+            "Riley Nakamura works at Northwind Analytics.")
+        #expect(employer.kind == .wordExclusion)
+        #expect(employer.score.bitPattern == wordExclusionScore(anchor: 4, total: 6).bitPattern)
+        // city: anchor 4 of 5 tokens.
+        let city = ConflictCue.evaluate(
+            "Riley Nakamura lives in Lisbon.",
+            "Riley Nakamura lives in Toronto.")
+        #expect(city.kind == .wordExclusion)
+        #expect(city.score.bitPattern == wordExclusionScore(anchor: 4, total: 5).bitPattern)
+        // role: anchor 3 of 6 tokens ("a" vs "an" diverges at index 3).
+        let role = ConflictCue.evaluate(
+            "Riley Nakamura is a staff engineer.",
+            "Riley Nakamura is an engineering manager.")
+        #expect(role.kind == .wordExclusion)
+        #expect(role.score.bitPattern == wordExclusionScore(anchor: 3, total: 6).bitPattern)
+        // language: anchor 4 of 5 tokens.
+        let language = ConflictCue.evaluate(
+            "Riley Nakamura primarily writes Swift.",
+            "Riley Nakamura primarily writes Rust.")
+        #expect(language.kind == .wordExclusion)
+        #expect(language.score.bitPattern == wordExclusionScore(anchor: 4, total: 5).bitPattern)
     }
 }

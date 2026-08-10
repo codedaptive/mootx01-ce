@@ -158,7 +158,7 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 71 tools.
+    /// VC-2: `tools/list` returns exactly 77 tools.
     ///
     /// The count is a snapshot of the v1.1 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
@@ -168,7 +168,9 @@ struct V1ConformanceTests {
     /// moot_dataset_query, moot_dataset_stats).
     /// 71 → 75: +4 packet tools (FAB5-I2: moot_file_packet, moot_packet_get,
     /// moot_packet_list, moot_packet_lineage).
-    @Test func v1ToolsListReturns75Tools() async throws {
+    /// 76 → 77: +1 seed-file JSON import tool (MXE-JI-1: moot_json_import,
+    /// vault-gated).
+    @Test func v1ToolsListReturns77Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -195,7 +197,8 @@ struct V1ConformanceTests {
         //   23rd lens = moot_lens_node_motion (diffusion node-layer lens).
         //   11th recipe = moot_hunt_contradictions (Wave 1: moot_recollect removed).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
-        #expect(tools.count == 75, "tools/list must return exactly 75 tools; got \(tools.count)")
+        // +1 (MXE-JI-1): moot_json_import — seed-file JSON lane, vault-gated.
+        #expect(tools.count == 77, "tools/list must return exactly 77 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Specification
-version: 1.4.0
+version: 1.8.1
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -755,6 +755,48 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 
 ## Changelog
 
+### 1.8.0 -- 2026-08-06
+
+- New recipe ConnectedRecall (`recall_connected`): scored anchor grab →
+  multi-seed walk-with-restart (FNV-seeded, deterministic) over
+  tunnels ∪ associations (both directions, drawer-endpoint edges) →
+  RRF fusion → late hydration. Degrades to plain scored recall on a
+  structureless estate, never below it. Rust twin
+  `connected_recall::run_connected_recall`.
+
+### 1.7.0 -- 2026-08-06
+
+- GroundedSynthesis grounding pool: the recipe OWNS both lanes. Lane A =
+  base frame + OR of contentMatches cue predicates; lane B = scored
+  search over the raw query (`Input.query`), both bounded by
+  `groundingPoolBound` (200). Lane weighting moved into hybridRecall
+  (the recency-shall-not-dominate invariant); the recipe passes caller
+  tuning through. Degraded contract: on an estate whose scored lane
+  yields no scoring-evidence hits, hybrid grounding behaves exactly like
+  lexical-only grounding.
+
+### 1.6.0 -- 2026-08-06
+
+- GroundedSynthesis keyInsights bound: cue-grounded runs excerpt EVERY
+  capped survivor (maxKeyInsights = post-cap drawer count); digest runs
+  keep the historical 3-row bound. Trial 3 measured 30/35 misses with
+  the answer ranked into the capped set but invisible behind the 3-row
+  excerpt.
+
+### 1.5.0 -- 2026-08-06
+`GroundedSynthesis.Input` gains `cueTerms: [String] = []` and `cap: Int? = nil`.
+When `cueTerms` is non-empty, recall is passed through `HybridRecallEngine.rerank`
+with the cue terms so the lexical lane is genuinely independent of the recency lane,
+and the recipe OWNS the lane weights: it overrides the tuning's lane split to
+lexical-dominant (1.0/0.0 — recency strictly a tie-break, which the lexical
+sort's input-order tie-break provides), because any blended weighting lets the
+recency lane's pool-size-scaled rank spread override a one-step relevance
+difference on large estates. The caller's `rrfK`, `mmrLambda`, and `pageSize`
+still apply. `cap` is applied after rerank so only the top-N ranked drawers feed
+synthesis — preventing a wide frame from overwhelming the synthesizer while still
+surfacing the most relevant drawer regardless of filing date. Rust port mirrors
+Swift.
+
 ### 1.4.0 -- 2026-07-16
 Closed missing DoS-bound invariants (verifier gap):
 
@@ -799,3 +841,14 @@ filters). Conformance: `ShapedRecallTests.swift` / `shaped_recall.rs`.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.8.1 -- 2026-08-06
+Added `session_hybrid` named preset support to `ShapedRecall`. When
+`input.preset == "session_hybrid"`, `run()` routes through `runSessionHybrid()`,
+which drives `hybridRecall` via the `scoredLane` seam and then applies
+`SessionHybridFusion` temporal-window + speaker-aware boosts as a secondary sort
+key. Three conformance invariants: (1) scoredLane enforces RECENCY-SHALL-NOT-DOMINATE;
+(2) max combined boost 0.006 < cross-group evidence gap at rank >= 36 (evidence gate);
+(3) no Date() inside boost math (determinism). Rust port uses an equivalent inline
+fusion path (no scored_lane on Rust hybrid_recall). New: SessionHybridFusion.swift,
+SessionHybridTests.swift (12 tests), session_hybrid_fusion.rs (9 tests).

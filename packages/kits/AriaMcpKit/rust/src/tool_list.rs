@@ -9,8 +9,8 @@
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
 //!   Monitoring (1) — moot_monitoring_status (out-of-band sensitivity grants, telemetry flag R/W)
-//!   Maintenance (3/4) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
-//!                       and vault-gated moot_palace_import
+//!   Maintenance (3/5) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
+//!                       and vault-gated moot_palace_import + moot_json_import
 //!   Federation (1) — moot_federated_search
 //!   Recipe (12) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
 //!                 recall_precise, recall_shaped, dream, hunt_contradictions,
@@ -22,13 +22,13 @@
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 71 tools (out-of-band sensitivity grants added moot_monitoring_status;
+//! Vault-on (default): 73 tools (out-of-band sensitivity grants added moot_monitoring_status;
 //! FDC reset added moot_reclassify_fdc; the contradiction hunter added
 //! moot_hunt_contradictions + moot_review_tunnel; MX-TAB-7 added 3 dataset
 //! tools moot_file_dataset/query/stats).
-//! Vault-off (MOOTX01_VAULT=0): 65 tools —
-//! the five moot_vault_* tools and moot_palace_import are hidden together
-//! because all open local SQLite files (filesystem import/export vector).
+//! Vault-off (MOOTX01_VAULT=0): the five moot_vault_* tools,
+//! moot_palace_import, and moot_json_import are hidden together because all
+//! open local files (filesystem import/export vector).
 //! Dataset tools are always present (not vault-gated).
 //! Memory adapter (opt-in, MOOTX01_MEMORY_TOOL=1): adds 1 tool (`memory`) above the
 //! base count — 72 vault-on or 66 vault-off when enabled. Default (absent / ≠ "1")
@@ -74,8 +74,8 @@ pub fn memory_enabled() -> bool {
 /// Produces 71 tools when vault is enabled (the default) or 65 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
 /// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
-/// `moot_palace_import` tool is hidden with the vault surface (same security
-/// posture). Dataset tools (moot_file_dataset, moot_dataset_query,
+/// `moot_palace_import` and `moot_json_import` tools are hidden with the vault
+/// surface (same security posture). Dataset tools (moot_file_dataset, moot_dataset_query,
 /// moot_dataset_stats) are always present and are NOT vault-gated.
 /// Out-of-band sensitivity grants added `moot_monitoring_status`; the FDC
 /// reset tool added `moot_reclassify_fdc`; the contradiction hunter added
@@ -103,10 +103,10 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
 /// e.g. `build_tool_list_with_flags(vault_enabled(), false)` to get the
 /// baseline 71/65 count without racing against memory-tool env mutations.
 pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json::Value {
-    // Vault-on: 71 tools. Vault-off: 65 tools (palace_import + 5 vault_* hidden).
-    // Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1: 72/66.
+    // Vault-on: 73 tools. Vault-off: 66 tools (palace_import + json_import
+    // + 5 vault_* hidden). Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1.
     // Dataset tools (3) are always present regardless of vault flag.
-    let capacity = if vault_on { 71 } else { 65 } + if memory_on { 1 } else { 0 };
+    let capacity = if vault_on { 73 } else { 66 } + if memory_on { 1 } else { 0 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1) — opt-in, prepended when
@@ -154,13 +154,14 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     tools.push(monitoring_status_tool());
 
     // Maintenance — index backfill and drain status are always available.
-    // Direct palace import opens arbitrary local SQLite files, so it is
-    // gated with the vault import/export surface.
+    // Direct palace import and seed-file JSON import open arbitrary local
+    // files, so both are gated with the vault import/export surface.
     tools.push(reindex_tool());
     tools.push(drain_status_tool());
     tools.push(reclassify_fdc_tool());
     if vault_on {
         tools.push(palace_import_tool());
+        tools.push(json_import_tool());
     }
 
     // Federation (1)
@@ -173,6 +174,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     tools.push(run_migration_tool());
     tools.push(confirm_migration_tool());
     tools.push(recall_precise_tool());
+    tools.push(recall_connected_tool());
     tools.push(recall_shaped_tool());
     // moot_dream: matrix rebuild + dreaming cycle. Schema mirrors Swift
     // `RecipeTools.dreamTool()`. The tool runs one on-demand cycle (accepts a
@@ -443,11 +445,12 @@ fn link_memories_tool() -> serde_json::Value {
 fn review_tunnel_tool() -> serde_json::Value {
     json!({
         "name": "moot_review_tunnel",
-        "description": "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+        "description": "Review a PROPOSED connection on the review ladder (e.g. an agent-derived contradiction from the hunter): accept activates it (user-only), reject withdraws it, endorse records a model endorsement without activating. A model reject is an objection — it withdraws only when no model endorsement exists (reopenable); otherwise the proposal stays and is marked contested. User-rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "tunnel_id": string_schema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
-                "verdict": string_schema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                "verdict": string_schema("\"accept\" to activate the link (user-only), \"reject\" to withdraw it, \"endorse\" to record an endorsement vote without activating."),
+                "reviewed_by": string_schema("Reviewer identity recorded in the review ledger (default \"user\"). Model reviewers pass their model id (e.g. \"claude\", \"apple-onboard\"). verdict \"accept\" requires the default — edge activation is user-only."),
                 "reason": string_schema("Optional note explaining the verdict.")
             }),
             json!(["tunnel_id", "verdict"])
@@ -694,6 +697,25 @@ fn palace_import_tool() -> serde_json::Value {
     })
 }
 
+/// moot_json_import — import a seed file (rigid versioned JSON, schema v1)
+/// directly into the estate: the bulk seeding lane. Total pre-write
+/// validation + strict append; vault-gated like moot_palace_import. Mirrors
+/// Swift `ToolProjection.estateTools()` seed-file-import section.
+fn json_import_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_json_import",
+        "description": "Import a seed file (rigid versioned JSON, schema v1) directly into the estate — the bulk seeding lane. The WHOLE file is validated before any write: any schema violation, or any lineage collision with memories already in the estate (strict append — this lane never dedups or updates), returns one error naming the first offending element and the estate is untouched (zero-partial-write contract). On success, records land in file order with explicit lineage (derived from each record's id) and explicit event times; facts and tunnels are wired through intra-file record ids; encode/index work is enqueued automatically (poll moot_drain_status to watch semantic recall come online); and an audit receipt carrying the seed file's SHA-256 digest is filed, so the estate is traceable to the exact seed file that built it. The canonical schema definition lives at packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "path": string_schema("Absolute filesystem path to the seed JSON file (schema v1: format_version, name, records[], facts[], tunnels[])."),
+                "wing": string_schema("Optional default wing for records that omit `wing`. Omit to use the estate default wing. null is invalid."),
+                "mode": string_schema("Optional encode SPEED for the deferred encoding: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large imports. SPEED only — the write strategy is always windowed bulk, not caller-chosen. Omit to use the default (foreground).")
+            }),
+            json!(["path"])
+        )))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Federation
 // ---------------------------------------------------------------------------
@@ -752,6 +774,7 @@ fn synthesize_tool() -> serde_json::Value {
         "description": "Behaviour recipe: hybrid-recall memories and synthesize them into a grounded context document (summary, patterns, success rate, recommendations, key insights).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
+                "query": string_schema("Free-text cue that grounds the synthesis: distinctive terms are extracted and matched (OR, case-insensitive) against memory content, so only cue-relevant memories feed the document. Omit to synthesize over the whole recalled set (an estate digest)."),
                 "filter": filter_schema(),
                 "limit": integer_schema("Max memories to recall.")
             }),
@@ -810,6 +833,32 @@ fn recall_precise_tool() -> serde_json::Value {
                 "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, dense-fused, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
+            }),
+            json!(["query"])
+        ))),
+        "outputSchema": recall_results_output_schema()
+    })
+}
+
+/// The connected-recall tool — multi-hop retrieval by graph diffusion.
+/// Mirrors Swift `RecipeTools.connectedRecallTool()` (description parity).
+fn recall_connected_tool() -> serde_json::Value {
+    // moot_recall_connected declares the SHARED recall-results output schema:
+    // it returns dense rows in the same shape as moot_memory_search, so it is
+    // the fifth member of the recall family alongside moot_memory_search,
+    // moot_memory_get, moot_recall_shaped, and moot_recall_precise. The Swift
+    // twin (RecipeTools.connectedRecallTool) declares the same schema; the
+    // recall_family_declares_one_shared_output_schema pin test enforces both
+    // membership and schema identity.
+    json!({
+        "name": "moot_recall_connected",
+        "description": "Connected recall: multi-hop retrieval by graph diffusion. A scored anchor search seeds a deterministic random walk with restart over the estate's connection structure (tunnels plus pending associations), reaching bridge-linked memories that share no words with the query; the walk's visit ranking is fused with the anchor ranking. This is the EXPENSIVE recall path — use it for hard bridge questions (\"what did X's sister study\" when the sister's name only appears in the estate) after the similarity lanes (moot_memory_search, moot_recall_precise, moot_recall_shaped) miss. Returns dense rows in the same shape as moot_memory_search plus a lane-provenance summary line.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The question text — drives the scored anchor search that seeds the walk."),
+                "wing": string_schema("Optional wing whose tunnel graph joins the walk. Omit to walk pending associations only (tunnels are wing-scoped; associations are estate-wide)."),
+                "limit": integer_schema("Max ranked matches to return. Default 20."),
+                "filter": filter_schema()
             }),
             json!(["query"])
         ))),
@@ -880,10 +929,11 @@ fn recall_shaped_tool() -> serde_json::Value {
 fn dream_tool() -> serde_json::Value {
     json!({
         "name": "moot_dream",
-        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
+        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review), file tier-labeled conflict-tunnel candidates across all three contradiction tiers (typed proof, structural lexical cue, value divergence — surviving the decline matrix), and optionally run one vector-similarity association sweep (proximity-based edge mining). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction, candidate-filing, and association counts plus a tiered synthesis digest.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock.")
+                "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
+                "associates": string_schema("Association sweep mode: 'all' = probe every item in the estate (full coverage, for post-import runs), 'recent' = probe the 50 most-recently-filed items (default, fast), 'off' = skip the association sweep entirely.")
             }),
             json!([])
         )))
@@ -898,10 +948,18 @@ fn dream_tool() -> serde_json::Value {
 fn hunt_contradictions_tool() -> serde_json::Value {
     json!({
         "name": "moot_hunt_contradictions",
-        "description": "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the corpus search index (run moot_reindex after bulk import).",
+        "description": "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. With tier absent or \"all\", the sweep report is followed by a tiered synthesis digest (TIER 1 typed proofs, TIER 2 structural lexical cues, TIER 3 value divergence); with tier 1, 2, or 3 the call is a read-only purpose search of that lane alone — nothing is filed. Requires the corpus search index (run moot_reindex after bulk import).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "probe_limit": integer_schema("Maximum vector-indexed memories probed this sweep (default 500). Repeated calls converge: settled pairs are skipped."),
+                // Union domain (integer 1|2|3 or the string "all"), so no
+                // "type" key — the description carries the domain and the
+                // dispatch boundary validates it. Declared IDENTICALLY in
+                // the Swift twin (RecipeTools.huntContradictionsTool).
+                "tier": {
+                    "description": "Optional tier filter: 1 (typed proven contradictions), 2 (structural lexical conflict candidates), 3 (value divergence), or \"all\" (default — legacy sweep plus tiered synthesis digest). A single tier runs a read-only purpose search of that lane alone."
+                },
+                "top_k": integer_schema("Findings per tier section in the tiered digest (default 5, valid 1...50)."),
                 "now": string_schema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock.")
             }),
             json!([])

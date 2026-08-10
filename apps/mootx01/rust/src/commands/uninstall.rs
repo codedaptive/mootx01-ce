@@ -134,6 +134,16 @@ pub fn run(
         }
     }
 
+    // Harness Memory Mode cleanup: remove our hook entry from settings.json,
+    // the hook script, and the CLAUDE.md sentinel. Runs on full uninstall only —
+    // a targeted uninstall leaves other wired clients (and their harness state)
+    // intact. Pure file ops; no daemon contact; no restore offer.
+    if full_uninstall {
+        if super::harness_memory::remove_harness_state(&home) {
+            println!("  ✓ Removed harness-memory hook and settings.");
+        }
+    }
+
     // Data-retention phase: only a FULL uninstall may touch user data. A
     // targeted uninstall unwires the named clients and must leave the
     // resident data alone (other clients may still be using it).

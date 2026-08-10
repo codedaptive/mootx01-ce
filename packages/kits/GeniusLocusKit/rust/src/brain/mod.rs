@@ -19,6 +19,8 @@
 
 pub mod conflict_projection_pass;
 pub mod conflict_projection_sweep;
+pub mod review_queue;
+pub mod tiered_contradiction_search;
 pub mod meeting_decision_capture;
 pub mod consolidation_cycle;
 pub mod distillation_cycle;

@@ -92,6 +92,23 @@ pub enum Command {
     Unlock { tier: String, db: Option<String> },
     /// out-of-band sensitivity grants lock — revoke all sensitivity grants (no auth required).
     Lock,
+    /// enable <feature> [--yes] [--ingest-all]
+    ///
+    /// Supported features:
+    ///   memory-tool      Anthropic memory_20250818 adapter — governed /memories backend
+    ///   harness-memory   Route Claude Code project-memory writes into the estate
+    Enable { feature: String, yes: bool, ingest_all: bool },
+    /// disable <feature> [--yes] [--restore-all | --no-restore]
+    ///
+    /// Supported features: same set as `enable`.
+    Disable { feature: String, yes: bool, restore_all: bool, no_restore: bool },
+    /// hook-capture — Claude Code PreToolUse hook entry point.
+    ///
+    /// Reads the tool-call JSON payload from stdin, captures memory writes to
+    /// the estate, and outputs an allow/deny JSON decision to stdout.  Called
+    /// by the hook script installed at ~/.mootx01/hooks/capture-harness-memory.sh.
+    /// Not intended for direct user invocation.
+    HookCapture,
     /// --version on the root command.
     Version,
     /// --help / help on the root command (prints usage, exits 0).
@@ -219,6 +236,15 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 return Ok(h);
             }
             Ok(Command::Lock)
+        }
+        "enable" => parse_enable(&mut it),
+        "disable" => parse_disable(&mut it),
+        "hook-capture" => {
+            // No flags — reads everything from stdin.
+            if let Some(h) = expect_help_or_end(&mut it, "hook-capture")? {
+                return Ok(h);
+            }
+            Ok(Command::HookCapture)
         }
         other => Err(UsageError(format!(
             "Error: unknown subcommand '{other}'.\n\n{}",
@@ -541,6 +567,67 @@ fn parse_unlock(it: &mut Args) -> Result<Command, UsageError> {
     Ok(Command::Unlock { tier, db })
 }
 
+fn parse_enable(it: &mut Args) -> Result<Command, UsageError> {
+    // First positional argument is the feature name.
+    let feature = match it.next() {
+        None => {
+            return Err(UsageError(
+                "Error: 'enable' requires a feature name: memory-tool, harness-memory.".into(),
+            ))
+        }
+        Some(v) if v == "--help" || v == "-h" => return Ok(Command::HelpFor("enable")),
+        Some(v) => v.to_string(),
+    };
+    let (mut yes, mut ingest_all) = (false, false);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--yes" | "-y" => yes = true,
+            "--ingest-all" => ingest_all = true,
+            "--help" | "-h" => return Ok(Command::HelpFor("enable")),
+            other => return Err(unexpected(other, "enable")),
+        }
+    }
+    Ok(Command::Enable { feature, yes, ingest_all })
+}
+
+fn parse_disable(it: &mut Args) -> Result<Command, UsageError> {
+    // First positional argument is the feature name.
+    let feature = match it.next() {
+        None => {
+            return Err(UsageError(
+                "Error: 'disable' requires a feature name: memory-tool, harness-memory.".into(),
+            ))
+        }
+        Some(v) if v == "--help" || v == "-h" => return Ok(Command::HelpFor("disable")),
+        Some(v) => v.to_string(),
+    };
+    let (mut yes, mut restore_all, mut no_restore) = (false, false, false);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--yes" | "-y" => yes = true,
+            "--restore-all" => {
+                if no_restore {
+                    return Err(UsageError(
+                        "Error: '--restore-all' and '--no-restore' are mutually exclusive.".into(),
+                    ));
+                }
+                restore_all = true;
+            }
+            "--no-restore" => {
+                if restore_all {
+                    return Err(UsageError(
+                        "Error: '--restore-all' and '--no-restore' are mutually exclusive.".into(),
+                    ));
+                }
+                no_restore = true;
+            }
+            "--help" | "-h" => return Ok(Command::HelpFor("disable")),
+            other => return Err(unexpected(other, "disable")),
+        }
+    }
+    Ok(Command::Disable { feature, yes, restore_all, no_restore })
+}
+
 fn unexpected(arg: &str, cmd: &str) -> UsageError {
     UsageError(format!("Error: unexpected argument '{arg}' for '{cmd}'."))
 }
@@ -559,6 +646,9 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "upgrade" => Ok("upgrade"),
         "unlock" => Ok("unlock"),
         "lock" => Ok("lock"),
+        "enable" => Ok("enable"),
+        "disable" => Ok("disable"),
+        "hook-capture" => Ok("hook-capture"),
         other => Err(UsageError(format!("Error: unknown subcommand '{other}'."))),
     }
 }
@@ -584,6 +674,8 @@ pub fn root_usage() -> &'static str {
      \x20 upgrade                 Upgrade mootx01 to the latest release or a local build.\n\
      \x20 unlock                  Authenticate and issue a sensitivity-tier grant (private → midnight; secret → 30 min).\n\
      \x20 lock                    Revoke all sensitivity grants immediately.\n\
+     \x20 enable                  Enable an optional feature (memory-tool, harness-memory).\n\
+     \x20 disable                 Disable an optional feature (memory-tool, harness-memory).\n\
      \n\
      \x20 See 'mootx01 help <subcommand>' for detailed help."
 }
@@ -694,6 +786,49 @@ pub fn subcommand_usage(cmd: &str) -> String {
             Calls the daemon's /api/control/lock endpoint and clears any active restricted\n\
             and secret grants for the current session. Reducing your own access is always\n\
             permitted — no identity verification is needed.".into(),
+        "enable" => "Enable an optional feature on mootx01.\n\
+            \n\
+            USAGE: mootx01 enable <feature> [--yes] [--ingest-all]\n\
+            \n\
+            FEATURES:\n\
+            \x20 memory-tool          Anthropic memory_20250818 adapter — governed /memories backend.\n\
+            \x20                      Linux/Windows: sets MOOTX01_MEMORY_TOOL=1 in ~/.mootx01/features.env.\n\
+            \x20 harness-memory       Harness Memory Mode — routes Claude Code memories into the MOOTx01 estate.\n\
+            \x20                      Disables Claude Code auto-memory, installs a PreToolUse capture hook,\n\
+            \x20                      and merges memory-governance text into ~/.claude/CLAUDE.md.\n\
+            \x20                      Requires a reachable estate daemon (mootx01 serve). Consent-gated.\n\
+            \n\
+            OPTIONS:\n\
+            \x20 -y, --yes            Skip confirmation prompts.\n\
+            \x20 --ingest-all         Ingest all existing ~/.claude/projects/*/memory/ files without\n\
+            \x20                      per-project prompts (harness-memory only). MOVE semantics:\n\
+            \x20                      estate write confirmed before source deletion.".into(),
+        "disable" => "Disable an optional feature on mootx01.\n\
+            \n\
+            USAGE: mootx01 disable <feature> [--yes] [--restore-all | --no-restore]\n\
+            \n\
+            FEATURES:\n\
+            \x20 memory-tool          Remove MOOTX01_MEMORY_TOOL from ~/.mootx01/features.env.\n\
+            \x20 harness-memory       Remove the capture hook, restore auto-memory setting, remove sentinel\n\
+            \x20                      block from CLAUDE.md. Offers per-project restore of estate memories\n\
+            \x20                      to ~/.claude/projects/*/memory/ (estate records kept forever).\n\
+            \n\
+            OPTIONS:\n\
+            \x20 -y, --yes            Skip confirmation prompts.\n\
+            \x20 --restore-all        Restore all harness memories to disk without per-project prompts.\n\
+            \x20 --no-restore         Skip the restore offer entirely.".into(),
+        "hook-capture" => "Claude Code PreToolUse hook entry point (not for direct use).\n\
+            \n\
+            USAGE: mootx01 hook-capture\n\
+            \n\
+            Reads a Claude Code PreToolUse JSON payload from stdin, intercepts writes\n\
+            targeting ~/.claude/projects/*/memory/, posts the content to the MOOTx01\n\
+            estate, then outputs an allow/deny JSON decision to stdout.\n\
+            \n\
+            Called automatically by the hook script installed at\n\
+            ~/.mootx01/hooks/capture-harness-memory.sh when Harness Memory Mode is\n\
+            enabled. Daemon-down fallback: ALLOW (estate write is preferred, but a\n\
+            stray disk file is recoverable via the next ingest sweep).".into(),
         other => format!("(no help for '{other}')"),
     }
 }
@@ -1011,5 +1146,96 @@ mod tests {
     #[test]
     fn lock_with_trailing_args_is_usage_error() {
         assert!(p(&["lock", "extra"]).is_err());
+    }
+
+    // enable / disable / hook-capture
+
+    #[test]
+    fn enable_harness_memory_parses() {
+        assert_eq!(
+            p(&["enable", "harness-memory"]).unwrap(),
+            Command::Enable { feature: "harness-memory".into(), yes: false, ingest_all: false }
+        );
+    }
+
+    #[test]
+    fn enable_harness_memory_with_flags() {
+        assert_eq!(
+            p(&["enable", "harness-memory", "--yes", "--ingest-all"]).unwrap(),
+            Command::Enable { feature: "harness-memory".into(), yes: true, ingest_all: true }
+        );
+    }
+
+    #[test]
+    fn enable_memory_tool_parses() {
+        assert_eq!(
+            p(&["enable", "memory-tool"]).unwrap(),
+            Command::Enable { feature: "memory-tool".into(), yes: false, ingest_all: false }
+        );
+    }
+
+    #[test]
+    fn enable_without_feature_is_usage_error() {
+        assert!(p(&["enable"]).is_err());
+    }
+
+    #[test]
+    fn disable_harness_memory_parses() {
+        assert_eq!(
+            p(&["disable", "harness-memory"]).unwrap(),
+            Command::Disable {
+                feature: "harness-memory".into(),
+                yes: false,
+                restore_all: false,
+                no_restore: false,
+            }
+        );
+    }
+
+    #[test]
+    fn disable_harness_memory_with_restore_all() {
+        assert_eq!(
+            p(&["disable", "harness-memory", "--yes", "--restore-all"]).unwrap(),
+            Command::Disable {
+                feature: "harness-memory".into(),
+                yes: true,
+                restore_all: true,
+                no_restore: false,
+            }
+        );
+    }
+
+    #[test]
+    fn disable_harness_memory_with_no_restore() {
+        assert_eq!(
+            p(&["disable", "harness-memory", "--no-restore"]).unwrap(),
+            Command::Disable {
+                feature: "harness-memory".into(),
+                yes: false,
+                restore_all: false,
+                no_restore: true,
+            }
+        );
+    }
+
+    #[test]
+    fn disable_restore_all_and_no_restore_mutually_exclusive() {
+        assert!(p(&["disable", "harness-memory", "--restore-all", "--no-restore"]).is_err());
+        assert!(p(&["disable", "harness-memory", "--no-restore", "--restore-all"]).is_err());
+    }
+
+    #[test]
+    fn disable_without_feature_is_usage_error() {
+        assert!(p(&["disable"]).is_err());
+    }
+
+    #[test]
+    fn hook_capture_parses() {
+        assert_eq!(p(&["hook-capture"]).unwrap(), Command::HookCapture);
+    }
+
+    #[test]
+    fn hook_capture_with_trailing_args_is_usage_error() {
+        assert!(p(&["hook-capture", "extra"]).is_err());
     }
 }

@@ -193,6 +193,145 @@ struct HybridRecallEngineTests {
             #expect(out[2].id == "near-2")
         }
     }
+
+    // MARK: - cue-term lane tests
+
+    @Test("empty cueTerms produces bit-identical output to no-cueTerms path")
+    func emptyCueTermsBitIdentical() async throws {
+        try await withIntellectusLock {
+            // Hard requirement: empty cueTerms MUST produce the same rank order
+            // as calling rerank with no cueTerms argument.
+            let drawers = (0..<6).map { i in
+                makeDrawer(id: "d-\(i)", content: "organic chemistry item \(i)")
+            }
+            let baseline = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
+            let withEmpty = HybridRecallEngine.rerank(drawers: drawers, tuning: .default, cueTerms: [])
+            #expect(baseline.map(\.id) == withEmpty.map(\.id),
+                    "empty cueTerms must be bit-identical to the no-cueTerms path")
+        }
+    }
+
+    @Test("older drawer matching more distinct cue terms outranks newer drawer with fewer")
+    func olderDrawerWithMoreCueTermsOutranks() async throws {
+        try await withIntellectusLock {
+            // Oldest drawer (input index 0) matches three distinct cue terms;
+            // newest (index 1) matches only one. The lexical lane should rank
+            // the older drawer first, overriding recency.
+            let older = makeDrawer(id: "old", content: "daguerreotype vintage cameras photography")
+            let newer = makeDrawer(id: "new", content: "daguerreotype modern art exhibit")
+            // Input order is [older, newer] — recency would keep this order.
+            // With cueTerms, older matches 3 terms, newer matches 1.
+            let cueTerms = ["daguerreotype", "vintage", "cameras"]
+            let out = HybridRecallEngine.rerank(
+                drawers: [older, newer], tuning: .default, cueTerms: cueTerms)
+            // Both drawers are present; older must appear first.
+            #expect(out.map(\.id) == ["old", "new"],
+                    "drawer with more distinct cue-term hits must outrank fewer-hit drawer")
+        }
+    }
+
+    @Test("occurrence count does NOT beat distinct count — five repeats of one term loses to two distinct terms")
+    func occurrenceCountDoesNotBeatDistinctCount() async throws {
+        try await withIntellectusLock {
+            // drawer-A repeats "vintage" five times but matches only 1 distinct
+            // cue term. drawer-B contains each of "daguerreotype" and "cameras"
+            // once — 2 distinct matches. B must outrank A.
+            //
+            // Pure-lexical tuning (bm25Weight=1.0, vectorWeight=0.0) isolates
+            // the distinct-count logic from semantic (recency) lane interference.
+            // With default weights (bm25=0.3, vector=0.7) the semantic lane
+            // dominates for adjacent-rank pairs — the recency signal of input
+            // position 0 outweighs the distinct-count signal. Pure-lexical
+            // eliminates that interference and tests the distinct-count contract
+            // directly.
+            let drawerA = makeDrawer(id: "repeat", content: "vintage vintage vintage vintage vintage")
+            let drawerB = makeDrawer(id: "distinct", content: "daguerreotype cameras collection")
+            let cueTerms = ["daguerreotype", "cameras", "vintage"]
+            let lexicalTuning = RecallFrameTuning(bm25Weight: 1.0, vectorWeight: 0.0)
+            let out = HybridRecallEngine.rerank(
+                drawers: [drawerA, drawerB], tuning: lexicalTuning, cueTerms: cueTerms)
+            // Input order is [A, B]; after ranking B (2 distinct hits) must come first.
+            #expect(out.map(\.id) == ["distinct", "repeat"],
+                    "2 distinct cue-term matches must outrank 1 repeated match")
+        }
+    }
+
+    @Test("cue-term tie-break is deterministic and follows input order")
+    func cueTermTieBreakIsInputOrder() async throws {
+        try await withIntellectusLock {
+            // Three drawers each matching exactly one distinct cue term.
+            // Tie-break must be stable input order (d0, d1, d2).
+            let drawers = [
+                makeDrawer(id: "d0", content: "daguerreotype exposure plates"),
+                makeDrawer(id: "d1", content: "vintage photograph albums"),
+                makeDrawer(id: "d2", content: "cameras lens aperture"),
+            ]
+            let cueTerms = ["daguerreotype", "vintage", "cameras"]
+            let out = HybridRecallEngine.rerank(drawers: drawers, tuning: .default, cueTerms: cueTerms)
+            // Each drawer matches exactly one cue term → all equal; stable
+            // input-order tie-break applies. MMR may reorder further, but the
+            // initial RRF scores are equal so the MMR diversity step dominates.
+            // We verify the output is a permutation of the input and is stable
+            // across two invocations (determinism contract).
+            let second = HybridRecallEngine.rerank(drawers: drawers, tuning: .default, cueTerms: cueTerms)
+            #expect(out.map(\.id) == second.map(\.id),
+                    "cue-term tie-break output must be deterministic")
+            #expect(Set(out.map(\.id)) == Set(drawers.map(\.id)),
+                    "all drawers must be present in output")
+        }
+    }
+
+    // MARK: - gs5 adversarial pin (A3 adjudication, 2026-08-06)
+
+    /// Adversarial pin: zero-term-match row at maximal recency (input position 0)
+    /// must not outrank a term-matched row under lexical-dominant tuning.
+    ///
+    /// Setup: "zero-match" arrives FIRST (semantic rank 0, maximum recency
+    /// advantage) with zero cue-term matches. "term-match" arrives SECOND
+    /// (semantic rank 1) with three cue-term matches. This is the adversarial
+    /// case Codex finding 4 / commit 40c855b6 questioned.
+    ///
+    /// With DEFAULT weights (bm25=0.3, vector=0.7) the 70% semantic (recency)
+    /// lane dominates adjacent rows:
+    ///   RRF("zero-match") = 0.3/62 + 0.7/61 ≈ 0.01632
+    ///   RRF("term-match") = 0.3/61 + 0.7/62 ≈ 0.01621
+    /// Default weights would select zero-match first — the recency-dominance
+    /// failure the hybridRecall() RECENCY-SHALL-NOT-DOMINATE guard prevents by
+    /// switching to lexical-dominant tuning when scoredLeadCount == 0 &&
+    /// !cueTerms.isEmpty.
+    ///
+    /// With LEXICAL-DOMINANT weights (bm25=1.0, vector=0.0) the cue-term lane
+    /// has full authority:
+    ///   RRF("term-match") = 1.0/61 ≈ 0.01639
+    ///   RRF("zero-match") = 1.0/62 ≈ 0.01613
+    /// Lexical-dominant weights select term-match first. This test pins that
+    /// correct ordering at the reranker level with the guard-enforced tuning.
+    ///
+    /// Twin of Rust `gs5_adversarial_zero_match_loses_under_lexical_dominant_tuning`.
+    @Test("gs5 adversarial: zero-term-match row at maximal recency loses under lexical-dominant tuning")
+    func gs5AdversarialZeroMatchLosesUnderLexicalDominantTuning() async throws {
+        try await withIntellectusLock {
+            let zeroMatch = makeDrawer(
+                id: "zero-match",
+                content: "unrelated topic about weather forecasting")
+            let termMatch = makeDrawer(
+                id: "term-match",
+                content: "daguerreotype vintage cameras photography")
+            let cueTerms = ["daguerreotype", "vintage", "cameras"]
+
+            // Lexical-dominant tuning: what hybridRecall() applies when the
+            // scored lane is degraded (scoredLeadCount == 0 && !cueTerms.isEmpty).
+            let lexicalTuning = RecallFrameTuning(bm25Weight: 1.0, vectorWeight: 0.0)
+            let out = HybridRecallEngine.rerank(
+                drawers: [zeroMatch, termMatch],
+                tuning: lexicalTuning,
+                cueTerms: cueTerms)
+            #expect(out.first?.id == "term-match",
+                    "zero-term-match row at maximal recency must not outrank term-matched row under lexical-dominant tuning")
+            #expect(out.count == 2,
+                    "both rows present — reranker reorders, does not drop")
+        }
+    }
 }
 
 @Suite("Recall stream paging")

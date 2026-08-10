@@ -112,7 +112,15 @@ public enum TunnelStrength: Int, Sendable, Codable, Comparable {
 //   bits 9–11  TunnelStrength     (3 bits, scale-gapped, raws 0/2/4/6)
 //   bit  12    has_inverse        (1 bit, exclusive)
 //   bit  13    is_retired         (1 bit, exclusive — /recall-driven dreaming)
-//   bits 14–63 reserved
+//   bit  14    is_endorsed        (1 bit — MXE-CT3 review ladder: a model
+//              reviewer endorsed this still-PROPOSED tunnel. Endorsed is
+//              NOT a lifecycle case; lifecycle stays .proposed and only
+//              the user moves it to .active via respondToTunnel.)
+//   bit  15    is_contested       (1 bit — MXE-CT3 review ladder: the ext
+//              ledger holds BOTH a model endorsement and a model
+//              objection. Genuine model disagreement — floats to the top
+//              of its tier band in the review queue.)
+//   bits 16–63 reserved
 // Unknown raw values fall back to the zero case of each axis,
 // matching the `Drawer` adjective accessors in `Adjectives.swift`.
 public extension Tunnel {
@@ -178,6 +186,47 @@ public extension Tunnel {
         operationalBitmap & Tunnel.isRetiredBit != 0
     }
 
+    /// Bit 14 of `operationalBitmap` — endorsed flag (MXE-CT3 review
+    /// ladder: Rejected / Proposed / Endorsed / Accepted).
+    ///
+    /// Set when a model reviewer endorses a `.proposed` tunnel via the GLK
+    /// endorsement verb. Endorsed is deliberately NOT a `TunnelLifecycle`
+    /// case: the tunnel remains `.proposed`, and edge activation stays
+    /// human-authoritative — only `respondToTunnel(accept: true)` (the
+    /// user path) moves lifecycle to `.active`. The endorsement ledger
+    /// (who endorsed, when, under which tier lens) lives in `ext`; this
+    /// bit is the cheap bitmap-tier filter over it.
+    ///
+    /// Mirrors Rust `Tunnel::IS_ENDORSED_BIT` (bit 14).
+    static let isEndorsedBit: Int64 = 1 << 14
+
+    /// True when at least one model reviewer has endorsed this proposed
+    /// tunnel. Computed from bit 14 of `operationalBitmap` — no Bool
+    /// stored property (schema invariant).
+    var isEndorsed: Bool {
+        operationalBitmap & Tunnel.isEndorsedBit != 0
+    }
+
+    /// Bit 15 of `operationalBitmap` — contested flag (MXE-CT3 review
+    /// ladder).
+    ///
+    /// Set when the `ext` ledger holds BOTH a model endorsement and a
+    /// model objection for this tunnel: one model reviewer endorsed the
+    /// claim and another rejected/objected. Genuine model disagreement is
+    /// the most user-worthy queue position, so the review-queue ranking
+    /// floats contested tunnels to the top of their tier band. The bit is
+    /// backed by `operationalBitmap`; no Bool stored property.
+    ///
+    /// Mirrors Rust `Tunnel::IS_CONTESTED_BIT` (bit 15).
+    static let isContestedBit: Int64 = 1 << 15
+
+    /// True when the ledger holds both a model endorsement and a model
+    /// objection. Computed from bit 15 of `operationalBitmap` — no Bool
+    /// stored property (schema invariant).
+    var isContested: Bool {
+        operationalBitmap & Tunnel.isContestedBit != 0
+    }
+
     /// Return a copy of this tunnel with the retired bit set (`isRetired = true`).
     ///
     /// Used internally by `DrawerStore.retireTunnel` and its Rust equivalent to
@@ -193,7 +242,8 @@ public extension Tunnel {
             operationalBitmap: operationalBitmap | Tunnel.isRetiredBit,
             provenanceBitmap: provenanceBitmap,
             addedBy: addedBy, filedAt: filedAt,
-            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey,
+            ext: ext
         )
     }
 
@@ -215,7 +265,51 @@ public extension Tunnel {
             ),
             provenanceBitmap: provenanceBitmap,
             addedBy: addedBy, filedAt: filedAt,
-            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey,
+            ext: ext
+        )
+    }
+
+    /// Return a copy of this tunnel with the endorsed bit (14) set.
+    ///
+    /// Used by the GLK endorsement verb to produce the updated tunnel value
+    /// before persisting via `DrawerStore.stampTunnelReview`. Lifecycle bits
+    /// are NOT touched: an endorsed tunnel stays `.proposed` — acceptance is
+    /// the user's alone. Mirrors Rust `Tunnel::with_endorsed`.
+    func withEndorsed() -> Tunnel {
+        Tunnel(
+            id: id,
+            sourceWing: sourceWing, sourceRoom: sourceRoom, sourceDrawerId: sourceDrawerId,
+            targetWing: targetWing, targetRoom: targetRoom, targetDrawerId: targetDrawerId,
+            label: label, kind: kind,
+            adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: operationalBitmap | Tunnel.isEndorsedBit,
+            provenanceBitmap: provenanceBitmap,
+            addedBy: addedBy, filedAt: filedAt,
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey,
+            ext: ext
+        )
+    }
+
+    /// Return a copy of this tunnel with the contested bit (15) set.
+    ///
+    /// Used by the GLK review verbs when the ext ledger holds both a model
+    /// endorsement and a model objection. The endorsed bit is left as-is —
+    /// a contested tunnel IS endorsed by someone; contested marks the
+    /// disagreement, it does not erase the endorsement. Mirrors Rust
+    /// `Tunnel::with_contested`.
+    func withContested() -> Tunnel {
+        Tunnel(
+            id: id,
+            sourceWing: sourceWing, sourceRoom: sourceRoom, sourceDrawerId: sourceDrawerId,
+            targetWing: targetWing, targetRoom: targetRoom, targetDrawerId: targetDrawerId,
+            label: label, kind: kind,
+            adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: operationalBitmap | Tunnel.isContestedBit,
+            provenanceBitmap: provenanceBitmap,
+            addedBy: addedBy, filedAt: filedAt,
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey,
+            ext: ext
         )
     }
 
@@ -233,7 +327,8 @@ public extension Tunnel {
             operationalBitmap: operationalBitmap & ~Tunnel.isRetiredBit,
             provenanceBitmap: provenanceBitmap,
             addedBy: addedBy, filedAt: filedAt,
-            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey,
+            ext: ext
         )
     }
 }
@@ -288,7 +383,8 @@ public extension Tunnel {
             operationalBitmap: operationalBitmap,
             provenanceBitmap: provenanceBitmap | Tunnel.isDreamedBit,
             addedBy: addedBy, filedAt: filedAt,
-            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey,
+            ext: ext
         )
     }
 }

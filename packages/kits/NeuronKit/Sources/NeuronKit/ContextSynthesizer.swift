@@ -89,10 +89,12 @@ public enum ContextSynthesizer {
     /// the invariant in code.
     public static func synthesize(
         from page: RecallStream.Page,
-        estate: EstateHandle
+        estate: EstateHandle,
+        maxKeyInsights: Int = 3
     ) async throws -> ContextDocument {
         _ = estate // C-9: reserved, never consulted. See header doc.
-        return ContextSynthesisEngine.synthesize(page: page)
+        return ContextSynthesisEngine.synthesize(
+            page: page, maxKeyInsights: maxKeyInsights)
     }
 }
 
@@ -102,7 +104,12 @@ public enum ContextSynthesizer {
 /// drawer rows.
 internal enum ContextSynthesisEngine {
 
-    static func synthesize(page: RecallStream.Page) -> ContextDocument {
+    /// `maxKeyInsights` bounds the excerpted rows. The historical default is
+    /// 3 (digest reading). A cue-grounded caller passes its post-rank cap so
+    /// every ranked survivor is VISIBLE in the document — trial 3 measured
+    /// 30/35 misses where the answer drawer was ranked into the capped set
+    /// but invisible because only the first 3 rows were excerpted.
+    static func synthesize(page: RecallStream.Page, maxKeyInsights: Int = 3) -> ContextDocument {
         let rows = page.rows
         if rows.isEmpty {
             return ContextDocument(
@@ -120,7 +127,7 @@ internal enum ContextSynthesisEngine {
         let successRate = currentlyBelievedRate(rows: rows)
         let averageReward: Float = 0 // No reward field on Drawer at v0.1 — see spec note.
         let recommendations = makeRecommendations(patterns: patterns)
-        let keyInsights = makeKeyInsights(rows: rows, maxCount: 3)
+        let keyInsights = makeKeyInsights(rows: rows, maxCount: max(1, maxKeyInsights))
 
         return ContextDocument(
             summary: summary,

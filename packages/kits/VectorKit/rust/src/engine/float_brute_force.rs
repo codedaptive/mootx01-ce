@@ -132,7 +132,10 @@ impl FloatBruteForceIndex {
         let probe_floats = decode_f32_le(&probe.bytes);
 
         // Collect scored candidates (shared scan — same cosine for both directions).
-        let mut scored: Vec<(f32, &VectorRecordKey)> = Vec::with_capacity(arr.count);
+        // vec_hash is FNV-1a over the raw slot bytes: same content → same embedding
+        // → same bytes → same hash, giving a content-derived tiebreak stable across
+        // estate imports (UUIDs are not stable across imports).
+        let mut scored: Vec<(f32, &VectorRecordKey, u64)> = Vec::with_capacity(arr.count);
         for i in 0..arr.count {
             if arr.is_tombstoned(i) {
                 continue;
@@ -156,10 +159,12 @@ impl FloatBruteForceIndex {
                 v
             };
             let dist = float_distance(&probe_floats, &candidate, float_metric);
-            scored.push((dist, key));
+            let hash = fnv1a64(slot_bytes);
+            scored.push((dist, key, hash));
         }
 
-        // Sort by direction; tie-break is key ascending in BOTH directions.
+        // Sort by direction; tie-break: vec_hash ascending (content-derived),
+        // then key ascending as final backstop for identical vectors.
         //   Nearest  → distance ascending  (smallest cosine distance first).
         //   Farthest → distance descending (largest cosine distance first =
         //              most dissimilar first, anti-similarity).
@@ -169,14 +174,14 @@ impl FloatBruteForceIndex {
                 SearchDirection::Farthest => b.0.partial_cmp(&a.0),
             }
             .unwrap_or(std::cmp::Ordering::Equal);
-            primary.then(a.1.cmp(b.1))
+            primary.then(a.2.cmp(&b.2)).then(a.1.cmp(b.1))
         });
 
         // Take top k and convert to DenseHit.
         let results: Vec<DenseHit> = scored
             .iter()
             .take(k)
-            .map(|(dist, key)| {
+            .map(|(dist, key, _hash)| {
                 let raw = float_to_raw(*dist);
                 DenseHit {
                     key: (*key).clone(),
@@ -402,6 +407,21 @@ fn float_to_raw(dist: f32) -> i32 {
         return if scaled > 0.0 { i32::MAX } else { i32::MIN };
     }
     (scaled as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// FNV-1a 64-bit hash of raw bytes. Deterministic for identical byte sequences.
+/// Used as a content-derived tiebreak: same content → same embedding → same bytes
+/// → same hash, stable across estate imports (UUIDs are not).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    // FNV-1a constants per the public-domain FNV specification.
+    const OFFSET: u64 = 14_695_981_039_346_656_037;
+    const PRIME: u64 = 1_099_511_628_211;
+    let mut hash = OFFSET;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 // MARK: - Model partition builder

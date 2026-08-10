@@ -75,6 +75,18 @@ def sub_once(rel: str, old: str, new: str, *, required: int = 1) -> int:
     return n
 
 
+def sub_once_re(rel: str, pattern: str, repl, *, required: int = 1) -> int:
+    """Regex-replace in a file; assert an exact occurrence count."""
+    text = rd(rel)
+    n = len(re.findall(pattern, text))
+    if n != required:
+        raise SystemExit(
+            f"bump: {rel}: expected {required} match(es) of {pattern!r}, found {n}"
+        )
+    wr(rel, re.sub(pattern, repl, text))
+    return n
+
+
 def sub_all(rel: str, old: str, new: str) -> int:
     """Literal-replace every `old`→`new`; return count (must be > 0)."""
     text = rd(rel)
@@ -156,7 +168,16 @@ def main() -> None:
 
     # --- Group 2: plugin manifests (version value only, format preserved) ---
     for rel in PLUGIN_MANIFESTS:
-        sub_once(rel, f'"version" : "{cur}"', f'"version" : "{new}"')
+        # Whitespace-tolerant around the colon. These manifests come from two
+        # writers: Foundation's prettyPrinted emits `"version" : "x"`, plain JSON
+        # writers emit `"version": "x"`. A literal match on the spaced form
+        # silently missed distribution/plugin/plugin.json on the 1.0.x line
+        # (2026-08-06), stamping four of five manifests and exiting non-zero with
+        # the tree half-bumped. Not json.load/dump: that would rewrite the whole
+        # file and normalise the very spacing that differs, turning a one-line
+        # version bump into a whole-file diff.
+        sub_once_re(rel, r'("version"\s*:\s*)"' + re.escape(cur) + '"',
+                    lambda m: f'{m.group(1)}"{new}"')
     sub_once(README, f"Version {cur}", f"Version {new}")
     sub_once(PLUGIN_CHANGELOG, f"## [{cur}]", f"## [{new}]")
 

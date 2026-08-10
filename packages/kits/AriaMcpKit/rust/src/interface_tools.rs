@@ -53,6 +53,7 @@ use genius_locus_kit_migrations::SharedContentMigrationExt;
 
 use substrate_types::{RowState, RowStateCluster};
 
+use vault_kit::json_import_bridge::JsonImportBridge;
 use vault_kit::palace_bridge::PalaceBridge;
 
 use crate::dispatch::{
@@ -125,14 +126,15 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     // Monitoring control (1) — out-of-band sensitivity grants: read/write daemon telemetry flag.
     // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
     "moot_monitoring_status",
-    // Maintenance (4)
+    // Maintenance (5)
     "moot_reindex",
     "moot_drain_status",
     "moot_reclassify_fdc",
     "moot_palace_import",
+    "moot_json_import",
 ];
 
-/// True when `name` is one of the 20 Tier 1–5 interface tools or the 4
+/// True when `name` is one of the Tier 1–5 interface tools or the 5
 /// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
@@ -404,6 +406,7 @@ pub fn dispatch(
         "moot_drain_status" => run_drain_status(args, registry),
         "moot_reclassify_fdc" => run_reclassify_fdc(args, registry),
         "moot_palace_import" => run_palace_import(args, registry),
+        "moot_json_import" => run_json_import(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown interface tool: {name}"),
@@ -1826,11 +1829,43 @@ fn run_link_memories(
     }
 }
 
-/// Settle a PROPOSED tunnel: accept activates it, reject withdraws it.
-/// Only tunnels in the proposed lifecycle (the contradiction hunter's
-/// findings and agent-filed proposed links) are reviewable; a settled edge
-/// cannot be rewritten by a stale review. Rejected pairs are never
-/// re-proposed by the hunter (durable dedup). Mirrors Swift `runReviewTunnel`.
+/// Map a proposal's label family to the tier lens recorded on a
+/// review-ladder vote. The label-family contract is GLK's
+/// (`rejection_tier_of_label`: "dcp: " → tier 1, "tier2:" → 2,
+/// "tier3:" → 3). Labels outside the matrix family (hunter-filed,
+/// agent-filed) default to tier 3 — the weakest epistemic class, so a
+/// vote on an unlabeled proposal never inflates its standing. Parity:
+/// Swift `ToolDispatcher.tierLens(forLabel:)`.
+fn tier_lens_for_label(
+    label: &str,
+) -> genius_locus_kit::brain::tiered_contradiction_search::ContradictionTier {
+    use genius_locus_kit::brain::conflict_projection_sweep::rejection_tier_of_label;
+    use genius_locus_kit::brain::tiered_contradiction_search::ContradictionTier;
+    match rejection_tier_of_label(label) {
+        Some(1) => ContradictionTier::TypedProven,
+        Some(2) => ContradictionTier::LexicalStructural,
+        _ => ContradictionTier::LexicalValue,
+    }
+}
+
+/// Review a PROPOSED tunnel on the MXE-CT3 review ladder (Rejected /
+/// Proposed / Endorsed / Accepted):
+///
+/// - `accept` (user-only): activates via the existing
+///   `respond_to_tunnel` path, recording `reviewed_by` in the review
+///   ledger. Edge activation is human-authoritative — a model reviewer
+///   can NEVER activate, no matter how many endorsements accumulate.
+/// - `reject` with `reviewed_by` "user": withdraws permanently
+///   (durable dedup — never re-proposed).
+/// - `reject` with a model `reviewed_by`: the AI-objection path
+///   (`object_to_tunnel`) — withdraws only when no model endorsement
+///   exists (reopenable); otherwise the tunnel stays proposed and is
+///   marked contested for user attention.
+/// - `endorse` (any reviewer, user included): records an endorsement
+///   vote (`endorse_tunnel`) without touching lifecycle; weight feeds
+///   review-queue ranking only.
+///
+/// Mirrors Swift `runReviewTunnel`.
 fn run_review_tunnel(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -1838,24 +1873,89 @@ fn run_review_tunnel(
     let estate = registry.resolve_direct(args)?;
     let tunnel_id = require_string(args, "tunnel_id")?;
     let verdict = require_string(args, "verdict")?;
-    if verdict != "accept" && verdict != "reject" {
+    if verdict != "accept" && verdict != "reject" && verdict != "endorse" {
         return Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
-            "verdict must be \"accept\" or \"reject\"".to_string(),
+            "verdict must be \"accept\", \"reject\", or \"endorse\"".to_string(),
+        ));
+    }
+    let reviewed_by = optional_string(args, "reviewed_by")?.unwrap_or("user");
+    if reviewed_by.is_empty() {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "reviewed_by must be a non-empty string".to_string(),
+        ));
+    }
+    // The ladder's one hard wall, enforced at the public boundary:
+    // edge activation is user-only. Models endorse or reject.
+    if verdict == "accept" && reviewed_by != "user" {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "edge activation is user-only — verdict \"accept\" requires reviewed_by \"user\"; model reviewers use \"endorse\" or \"reject\"".to_string(),
         ));
     }
     let reason = optional_string(args, "reason")?;
 
+    // Review timestamps are wall-clock: this tool is a live I/O surface
+    // (no `now` argument), and the deterministic engines receive the
+    // instant from here, the I/O boundary.
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
     let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
     })?;
 
+    // Tier lens for ladder votes, derived from the proposal's label
+    // family. A missing tunnel falls through to the GLK verb, which
+    // owns the not-found error (single validation source).
+    let label = locus_estate
+        .get_tunnel(tunnel_id)
+        .ok()
+        .flatten()
+        .map(|t| t.label)
+        .unwrap_or_default();
+    let lens = tier_lens_for_label(&label);
+
+    if verdict == "endorse" {
+        return match coord.endorse_tunnel(&estate.handle, tunnel_id, reviewed_by, lens, now) {
+            Ok((_new_endorser, distinct_endorsers, contested)) => {
+                let contested_note = if contested { ", contested" } else { "" };
+                Ok(text_result(&format!(
+                    "moot_review_tunnel: {tunnel_id} endorsed by {reviewed_by} (distinct endorsers: {distinct_endorsers}{contested_note})."
+                )))
+            }
+            // Not-found and not-proposed are caller errors, surfaced as
+            // clean tool-level messages rather than opaque failures.
+            Err(e) => Ok(error_result(&format!(
+                "moot_review_tunnel: {}",
+                describe_verb_dispatch_error(&e)
+            ))),
+        };
+    }
+    if verdict == "reject" && reviewed_by != "user" {
+        // AI rejection semantics: an objection, not a user verdict.
+        return match coord.object_to_tunnel(&estate.handle, tunnel_id, reviewed_by, lens, now) {
+            Ok((withdrawn, _contested)) => {
+                let text = if withdrawn {
+                    format!("objected by {reviewed_by} — withdrawn (no model endorsement on record; the user can reopen it)")
+                } else {
+                    format!("objected by {reviewed_by} — contested: a model endorsement exists, so the proposal stays for user review")
+                };
+                Ok(text_result(&format!("moot_review_tunnel: {tunnel_id} {text}.")))
+            }
+            Err(e) => Ok(error_result(&format!(
+                "moot_review_tunnel: {}",
+                describe_verb_dispatch_error(&e)
+            ))),
+        };
+    }
+
+    // User accept/reject — the existing settle path, now recording the
+    // reviewer identity in the review ledger.
     match locus_estate.respond_to_tunnel(
         tunnel_id,
         verdict == "accept",
-        registry.server_identity.as_str(),
+        reviewed_by,
         reason,
         now,
     ) {
@@ -3694,6 +3794,92 @@ fn run_palace_import(
         report.drawers_skipped_tombstoned,
         report.tunnels_created,
         report.items_skipped,
+    )))
+}
+
+/// `moot_json_import` — import a seed file (rigid versioned JSON, schema
+/// v1) into the estate: the bulk seeding lane. The whole file is validated
+/// before any write; any schema violation or lineage collision (strict
+/// append) is a tool-level error naming the offending element with the
+/// estate untouched — the zero-partial-write contract. Mirrors Swift
+/// `runJsonImport`. Vault-gating happens in `route_tool` (dispatch.rs),
+/// alongside `moot_palace_import`'s gate.
+fn run_json_import(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let path = require_string(args, "path")?;
+    let seed_path = std::path::Path::new(&path);
+    let now = wall_now();
+
+    // Optional default wing for records that omit `wing`. An explicit
+    // empty string is invalid rather than silently ignored.
+    let wing: Option<String> = match args.get("wing") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(s) if !s.is_empty() => Some(s.to_string()),
+            _ => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "wing must be non-empty; omit it to use the estate default wing".to_string(),
+                ))
+            }
+        },
+    };
+
+    // mode (encode SPEED, default foreground) — SPEED only, mirroring the
+    // palace tool's contract: the WRITE strategy is always windowed bulk,
+    // never caller-chosen. Fail-closed on an unknown value.
+    let mode = match args.get("mode").and_then(|v| v.as_str()).map(|s| s.to_lowercase()) {
+        None => EncodeSpeed::Foreground,
+        Some(ref s) if s == "foreground" => EncodeSpeed::Foreground,
+        Some(ref s) if s == "background" => EncodeSpeed::Background,
+        Some(_) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)".to_string(),
+            ))
+        }
+    };
+
+    let mut coord = estate.coord.lock().unwrap();
+    let mut bridge = JsonImportBridge::new(&mut coord);
+    let report = match bridge.import_seed(
+        seed_path,
+        &estate.handle,
+        wing.as_deref(),
+        now,
+        Some(&|processed, total| {
+            // Live progress to stderr, fired by the bridge every 10 records
+            // — the sole live-progress channel during a long import.
+            eprintln!("json import: {processed}/{total} drawers");
+        }),
+        mode,
+    ) {
+        Ok(report) => report,
+        // Validation / collision failures are tool-level errors: the estate
+        // is untouched (zero-partial-write contract) and the message names
+        // the first offending element.
+        Err(vault_kit::VaultKitError::AdapterError(message)) => {
+            return Ok(error_result(&message))
+        }
+        Err(e) => return Ok(error_result(&format!("json import failed: {e}"))),
+    };
+
+    Ok(text_result(&format!(
+        "json import complete: {} drawers, {} facts, {} tunnels from seed \"{}\" \
+         (strict append — every record is a fresh lineage). seedSha256={}. \
+         {} drawers enqueued for semantic encoding; keyword and structured recall work \
+         almost immediately, and full semantic/vector recall lights up after the encode \
+         work settles — poll moot_drain_status until idle before relying on semantic \
+         search over the imported memories.",
+        report.drawers_written,
+        report.facts_written,
+        report.tunnels_created,
+        report.seed_name,
+        report.seed_sha256,
+        report.enqueued_for_encode,
     )))
 }
 

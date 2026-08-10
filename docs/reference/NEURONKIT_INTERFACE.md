@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.5.0
+version: 1.8.1
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-07-16
+date: 2026-08-06
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -1987,6 +1987,27 @@ Three cases keyed on `confidence`:
 
 ## Changelog
 
+### 1.8.0 -- 2026-08-06
+
+- New public `ScoredLane` (frame, queryText, traceLimit);
+  `hybridRecall(_:handle:on:tuning:cueTerms:scoredLane:)` gains the
+  defaulted `scoredLane` parameter (nil = single-lane behavior).
+
+### 1.7.0 -- 2026-08-06
+
+- `ContextSynthesizer.synthesize(from:estate:)` gains defaulted
+  `maxKeyInsights: Int = 3` (Rust `synthesize` gains the positional
+  param) — bounds excerpted keyInsights rows; cue-grounded callers pass
+  their post-rank cap so every ranked survivor is visible.
+- `HybridRecallEngine.rerank` caches per-drawer shingle sets and
+  memoizes pairwise similarities (output bit-identical; the selection
+  loop's ~n³/6 evaluations measured 181 s over a 250-drawer pool).
+
+### 1.6.0 -- 2026-08-06
+`HybridRecallEngine.rerank` gains `cueTerms: [String] = []`. Added to § 3 Functions.
+When non-empty the L-lexical lane ranks by distinct-cue-term-match count descending;
+empty `cueTerms` is bit-identical to the previous output. Rust port mirrors Swift.
+
 ### 1.5.0 -- 2026-07-16
 Audit pass: added all surface items shipped since 1.4.0 that were absent
 from the doc. Additions:
@@ -2056,3 +2077,9 @@ feat/distillation-hmm-extractor.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.8.1 -- 2026-08-06
+Annotation: `hybridRecall(_:handle:on:tuning:cueTerms:scoredLane:)` — the
+`scoredLane: ScoredLane?` parameter is now documented as the public composition
+seam for caller-supplied secondary scoring passes. First consumer: the
+`session_hybrid` ShapedRecall path in CognitionKit (W1-session-hybrid).

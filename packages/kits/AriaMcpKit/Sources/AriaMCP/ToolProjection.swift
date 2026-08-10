@@ -162,17 +162,17 @@ public enum ToolProjection {
         raw.append(federationTool())
         raw.append(contentsOf: RecipeTools.tools())
         raw.append(contentsOf: LensTools.tools())
-        // Vault tools and the filesystem-importing palace import tool are gated:
-        // omitted from tools/list when MOOTX01_VAULT=0 (installed with
-        // --vault-off). Default (env absent or any value ≠ "0") is vault-on
-        //. `moot_palace_import` is an interface-shaped maintenance
-        // tool, but it reads from the local filesystem and opens arbitrary
-        // SQLite files, so it carries the same security posture as vault
-        // import/export and is hidden under the same gate.
+        // Vault tools and the filesystem-importing palace/JSON import tools
+        // are gated: omitted from tools/list when MOOTX01_VAULT=0 (installed
+        // with --vault-off). Default (env absent or any value ≠ "0") is
+        // vault-on. `moot_palace_import` and `moot_json_import` are
+        // interface-shaped maintenance tools, but they read from the local
+        // filesystem (arbitrary SQLite / JSON files), so they carry the same
+        // security posture as vault import/export and hide under the same gate.
         if vaultEnabled(environment: environment) {
             raw.append(contentsOf: VaultTools.tools())
         } else {
-            raw.removeAll { $0.name == "moot_palace_import" }
+            raw.removeAll { $0.name == "moot_palace_import" || $0.name == "moot_json_import" }
         }
         // Dataset tools (MX-TAB-7): file, query, stats. Always visible when the
         // estate supports datasets. Not vault-gated (dataset tables are a core storage
@@ -363,11 +363,12 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_review_tunnel",
-                description: "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+                description: "Review a PROPOSED connection on the review ladder (e.g. an agent-derived contradiction from the hunter): accept activates it (user-only), reject withdraws it, endorse records a model endorsement without activating. A model reject is an objection — it withdraws only when no model endorsement exists (reopenable); otherwise the proposal stays and is marked contested. User-rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "tunnel_id": stringSchema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
-                        "verdict": stringSchema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                        "verdict": stringSchema("\"accept\" to activate the link (user-only), \"reject\" to withdraw it, \"endorse\" to record an endorsement vote without activating."),
+                        "reviewed_by": stringSchema("Reviewer identity recorded in the review ledger (default \"user\"). Model reviewers pass their model id (e.g. \"claude\", \"apple-onboard\"). verdict \"accept\" requires the default — edge activation is user-only."),
                         "reason": stringSchema("Optional note explaining the verdict."),
                     ],
                     required: ["tunnel_id", "verdict"]
@@ -491,11 +492,11 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (8 total; palace_import vault-gated)
+    // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (9 total; palace_import + json_import vault-gated)
 
     // Internal so TeachmeGuides can derive per-tier counts at runtime.
-    // Returns 8 tools including moot_palace_import. tools() removes palace_import
-    // from the result when vault is off; the remaining 7 are always present.
+    // Returns 9 tools including moot_palace_import and moot_json_import.
+    // tools() removes both when vault is off; the remaining 7 are always present.
     static func estateTools() -> [ProjectedTool] {
         [
             ProjectedTool(
@@ -604,6 +605,24 @@ public enum ToolProjection {
                         "mode": stringSchema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard on the performance cores; \"background\" yields for very large imports so the drain does not saturate the machine. This sets SPEED only — the write strategy (bulk transaction vs stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground)."),
                     ],
                     required: ["palace_path"]
+                )),
+                provenance: .interface
+            ),
+            // Direct seed-file JSON import — the bulk seeding lane
+            // (schema v1, VaultKit JsonImportBridge). Total pre-write
+            // validation + strict append: a bad file or any lineage
+            // collision is one error and ZERO writes. Vault-gated like
+            // moot_palace_import (reads arbitrary local files).
+            ProjectedTool(
+                name: "moot_json_import",
+                description: "Import a seed file (rigid versioned JSON, schema v1) directly into the estate — the bulk seeding lane. The WHOLE file is validated before any write: any schema violation, or any lineage collision with memories already in the estate (strict append — this lane never dedups or updates), returns one error naming the first offending element and the estate is untouched (zero-partial-write contract). On success, records land in file order with explicit lineage (derived from each record's id) and explicit event times; facts and tunnels are wired through intra-file record ids; encode/index work is enqueued automatically (poll moot_drain_status to watch semantic recall come online); and an audit receipt carrying the seed file's SHA-256 digest is filed, so the estate is traceable to the exact seed file that built it. The canonical schema definition lives at packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "path": stringSchema("Absolute filesystem path to the seed JSON file (schema v1: format_version, name, records[], facts[], tunnels[])."),
+                        "wing": stringSchema("Optional default wing for records that omit `wing`. Omit to use the estate default wing. null is invalid."),
+                        "mode": stringSchema("Optional encode SPEED for the deferred encoding: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large imports. SPEED only — the write strategy is always windowed bulk, not caller-chosen. Omit to use the default (foreground)."),
+                    ],
+                    required: ["path"]
                 )),
                 provenance: .interface
             ),

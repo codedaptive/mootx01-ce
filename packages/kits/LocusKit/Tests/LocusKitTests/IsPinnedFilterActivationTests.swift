@@ -102,8 +102,14 @@ struct IsPinnedFilterActivationTests {
             makeDrawer(id: "d2", parentNodeId: room2.id.uuidString, op: 0))
 
         // Reopen so the container-fingerprint rollup covers both rooms.
-        let estate = try await Estate.open(storage: storage,
-                                           owner: OwnerCredentials(ownerIdentifier: "o"))
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "o"),
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert filter-activation behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         let frame = RecallFrame(filterChain: [.hasFeatureFlag(.isPinned)])
         let stream = await estate.recall(frame)
@@ -158,8 +164,14 @@ struct IsPinnedFilterActivationTests {
         try await drawerStore.addDrawer(
             makeDrawer(id: "d2", parentNodeId: room.id.uuidString, op: 0))
 
-        let estate = try await Estate.open(storage: storage,
-                                           owner: OwnerCredentials(ownerIdentifier: "o"))
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "o"),
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert filter-activation behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         let frame = RecallFrame(filterChain: [.hasFeatureFlag(.isPinned)])
         let stream = await estate.recall(frame)
         var ids: [String] = []

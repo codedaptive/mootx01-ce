@@ -213,6 +213,9 @@ struct InstallCommand: AsyncParsableCommand {
                 print("Linked   \(MootPaths.binarySymlinkURL(homeDirectory: home).path)")
             } catch {
                 print("Could not place binary: \(error)")
+                if let hint = Installer.permissionRepairHint(for: error, homeDirectory: home) {
+                    print(hint)
+                }
                 throw error
             }
         }

@@ -118,6 +118,16 @@ public struct KeychainKeyStore: Sendable {
         }
     }
 
+    /// Return the existing key if one has been minted, or nil if no key exists
+    /// for this estate. Never creates a new key — a nil return means the estate
+    /// has no Keychain entry, not that one was generated and discarded. Callers
+    /// that need read-without-mint semantics (e.g. inspection tools that must not
+    /// create key material as a side effect of opening an estate) use this method
+    /// instead of `loadOrCreateKey()`.
+    public func loadExistingKey() throws -> Data? {
+        try readKey()
+    }
+
     // MARK: - Internals
 
     private func baseQuery() -> [String: Any] {

@@ -74,7 +74,7 @@ const READ_TOOLS: &[&str] = &[
     "moot_list_lenses", "moot_list_recipes",
     "moot_vault_status", "moot_vault_job",
     "moot_memory_search", "moot_memory_get", "moot_memory_list",
-    "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled",
+    "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped", "moot_recall_distilled",
     "moot_recall_vague",
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",
@@ -102,6 +102,9 @@ const MUTATION_TOOLS: &[&str] = &[
     "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
     "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
     "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
+    // Seed-file JSON import (MXE-JI-1): reads a seed file from the filesystem
+    // and bulk-writes the estate — same Ask posture as palace/vault import.
+    "moot_json_import",
     // Dataset import (MX-TAB-7): creates a backend table and can read a
     // csv_path from the filesystem — same Ask posture as palace/vault import.
     "moot_file_dataset",
@@ -669,6 +672,7 @@ mod tests {
         assert_eq!(classify("moot_dream"), Tier::Ask);
         assert_eq!(classify("moot_reindex"), Tier::Ask);
         assert_eq!(classify("moot_palace_import"), Tier::Ask);
+        assert_eq!(classify("moot_json_import"), Tier::Ask);
         assert_eq!(classify("moot_vault_import"), Tier::Ask);
         // monitoring_status mutates daemon behaviour — ask tier.
         assert_eq!(classify("moot_monitoring_status"), Tier::Ask, "monitoring_status is mutating — ask tier");

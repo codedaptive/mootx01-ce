@@ -177,6 +177,7 @@ struct RecipeRunErrorTests {
                 case .userConfirmationRequired: return "recipe.userConfirmationRequired"
                 case .tooManyPlans: return "recipe.tooManyPlans"
                 case .tooManyOriginEntries: return "recipe.tooManyOriginEntries"
+                case .invalidCap: return "recipe.invalidCap"
                 }
             case .substrate:
                 return "substrate"

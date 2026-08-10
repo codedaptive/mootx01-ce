@@ -64,12 +64,43 @@ public typealias Drawer = LocusKit.Drawer
 /// the spec (k = 60, λ = 0.7). Pass a non-nil `tuning` to override
 /// either knob on a per-call basis.
 ///
+/// The scored second lane of hybrid recall: a `GLKRecallRequest` in
+/// `.unionBest`/`.raw` mode (BM25 + vector fusion — the same lane
+/// `moot_memory_search` and PreciseRecall's coarse grab use). When
+/// supplied, `hybridRecall` unions this lane's relevance-ordered hits
+/// with the frame lane's rows (scored hits first, frame-only extras
+/// after, deduplicated by id), so the reranker's semantic lane carries
+/// genuine relevance instead of recency. This is the lane the original
+/// RRF comment promised ("with future independent lists the weighting
+/// will reorder, which is the point").
+public struct ScoredLane: Sendable {
+    /// The BASE recall frame for the scored search — the caller's kind
+    /// filters WITHOUT any lexical cue predicate: the scored lane's
+    /// purpose is reaching relevant rows that share no cue terms.
+    public let frame: RecallFrame
+    /// The raw query text driving BM25 + vector scoring.
+    public let queryText: String
+    /// Reward-cycle trace budget: the caller's FINAL result size, so the
+    /// trace table records what the caller receives, not the wide pool
+    /// (same rationale as PreciseRecall's traceLimit).
+    public let traceLimit: Int
+
+    public init(frame: RecallFrame, queryText: String, traceLimit: Int) {
+        self.frame = frame
+        self.queryText = queryText
+        self.traceLimit = traceLimit
+    }
+}
+
 /// - Parameter frame: The estate recall frame (filter chain, ordering,
 ///   limit). Passed unchanged through `glk.recall`.
 /// - Parameter handle: Estate handle. The single legal substrate
 ///   entry point.
 /// - Parameter glk: The GeniusLocusKit actor that owns the estate.
 /// - Parameter tuning: RRF/MMR/page-size tuning. Defaults per spec.
+/// - Parameter cueTerms: Distinctive terms for the lexical rerank lane.
+/// - Parameter scoredLane: Optional scored second lane (see `ScoredLane`).
+///   nil preserves the single-lane behavior exactly.
 /// - Returns: A `RecallStream` over the MMR-reranked drawer set.
 /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is
 ///   stale, or any verb error raised by the boundary.
@@ -77,11 +108,87 @@ public func hybridRecall(
     _ frame: RecallFrame,
     handle: EstateHandle,
     on glk: GeniusLocusKit,
-    tuning: RecallFrameTuning = .default
+    tuning: RecallFrameTuning = .default,
+    cueTerms: [String] = [],
+    scoredLane: ScoredLane? = nil
 ) async throws -> RecallStream {
     let start = Date().timeIntervalSince1970
-    let drawers = try await glk.recall(handle, frame)
-    let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
+    let frameRows = try await glk.recall(handle, frame)
+
+    // Union the two lanes. Scored hits lead in THEIR relevance order —
+    // the reranker's semantic lane is input order, so the union's order
+    // is what makes the semantic lane mean relevance. Frame-lane rows the
+    // scored lane did not surface follow in their frame order (recency),
+    // deduplicated by id. With no scored lane the union is exactly the
+    // frame result and every downstream byte matches the single-lane path.
+    //
+    // SCORING-EVIDENCE GATE: a lane-B hit that arrived ONLY via the bitmap
+    // lane carries no relevance rank — under `.allowDegraded` (in-memory
+    // estates, absent providers) the scored request degrades to a bitmap
+    // scan whose order is recency, and treating that order as relevance
+    // would resurrect the recency-dominance failure the cue lane exists to
+    // fix. Only hits bearing scoring evidence (BM25 / Hamming / dense
+    // cosine) form the relevance lead block; bitmap-only lane-B hits are
+    // dropped — anything lexically relevant among them arrives through the
+    // frame lane anyway.
+    let scoringEvidence: Set<RecallEvidencePath> =
+        [.corpusBM25, .vectorHamming, .vectorDense]
+    var scoredLeadCount = 0
+    let drawers: [Drawer]
+    if let scoredLane {
+        let request = GLKRecallRequest(
+            frame: scoredLane.frame,
+            mode: .unionBest,
+            scoring: .raw,
+            limit: scoredLane.frame.limit ?? tuning.pageSize,
+            fallback: .allowDegraded,
+            queryText: scoredLane.queryText,
+            traceLimit: scoredLane.traceLimit)
+        let scored = try await glk.recall(handle, request)
+        var seen = Set<String>()
+        var union: [Drawer] = []
+        union.reserveCapacity(scored.hits.count + frameRows.count)
+        for hit in scored.hits {
+            // A hit whose drawer failed hydration carries no body for the
+            // synthesizer or the term lane — skip it rather than rank an
+            // empty row.
+            guard let drawer = hit.drawer,
+                  !hit.sources.isDisjoint(with: scoringEvidence) else { continue }
+            if seen.insert(drawer.id).inserted { union.append(drawer) }
+        }
+        scoredLeadCount = union.count
+        for row in frameRows where seen.insert(row.id).inserted {
+            union.append(row)
+        }
+        drawers = union
+    } else {
+        drawers = frameRows
+    }
+
+    // RECENCY-SHALL-NOT-DOMINATE invariant, owned here where both lanes are
+    // known: when cue terms exist but the semantic lane carries no genuine
+    // relevance (no scored lane requested, or it degraded to zero
+    // evidence-bearing hits), the fusion split must be lexical-dominant —
+    // recency strictly a tie-break. The default 0.3/0.7 split is honest
+    // two-relevance-lane weighting ONLY when the lead block is real: the
+    // recency lane's RRF spread grows with pool size while the
+    // adjacent-rank lexical gap stays constant, so any blended weight
+    // degrades to recency-first exactly on large estates (the measured
+    // trial-2 failure). rrfK, mmrLambda, and pageSize always come from the
+    // caller.
+    let effectiveTuning: RecallFrameTuning
+    if !cueTerms.isEmpty && scoredLeadCount == 0 {
+        effectiveTuning = RecallFrameTuning(
+            bm25Weight: 1.0,
+            vectorWeight: 0.0,
+            rrfK: tuning.rrfK,
+            mmrLambda: tuning.mmrLambda,
+            pageSize: tuning.pageSize)
+    } else {
+        effectiveTuning = tuning
+    }
+
+    let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: effectiveTuning, cueTerms: cueTerms)
     let stream = RecallStream(rows: reranked, pageSize: tuning.pageSize)
 
     // Emit hybrid-recall telemetry at the operation boundary. `start` is
@@ -243,27 +350,65 @@ public struct RecallStream: AsyncSequence, Sendable {
 internal enum HybridRecallEngine {
 
     /// Apply RRF fusion (k = `tuning.rrfK`) and MMR rerank
-    /// (λ = `tuning.mmrLambda`) to `drawers` and return the reranked
-    /// list. Pure function — deterministic across Swift and Rust versions.
-    static func rerank(drawers: [Drawer], tuning: RecallFrameTuning) -> [Drawer] {
+    /// (λ = `tuning.mmrLambda`) to `drawers` and return the reranked list.
+    /// Pure function — deterministic across Swift and Rust versions.
+    ///
+    /// When `cueTerms` is non-empty the two RRF lanes become genuinely
+    /// independent: L-lexical ranks drawers by distinct-cue-term-match count
+    /// descending (input-order tie-break); L-semantic is input order (recency).
+    /// When `cueTerms` is empty, both lanes equal input order — output is
+    /// bit-identical to the previous single-list path (hard requirement for
+    /// callers that pass no query).
+    static func rerank(drawers: [Drawer], tuning: RecallFrameTuning, cueTerms: [String] = []) -> [Drawer] {
         guard !drawers.isEmpty else { return [] }
 
-        // RRF over the single fused list returned by the verb. Today
-        // L₁ == L₂ == drawers; the RRF score still runs to keep the
-        // math identical to the day the estate surface widens. RRF
-        // score is monotonic-decreasing with rank, so the rank order
-        // does not change relative to the input, but the score is
-        // recorded for the MMR relevance term below.
+        // Build the lexical rank order.
+        // When cueTerms is non-empty: rank by DISTINCT cue-term-match count
+        // descending, input-order tie-break. Distinct count — not occurrence
+        // count — is intentional: generic terms that appear many times in one
+        // drawer award only +1, so they cannot inflate a drawer above one that
+        // matches more distinct cue terms. Ties break by input index (stable).
+        // When cueTerms is empty: lexical order == input order, so both lanes
+        // collapse to the same sequence and the RRF math produces the same
+        // score vector as before.
+        let lexicalOrder: [Int]
+        if cueTerms.isEmpty {
+            lexicalOrder = Array(drawers.indices)
+        } else {
+            let lowTerms = cueTerms.map { $0.lowercased() }
+            // (matchCount, originalIndex) pairs for stable sort.
+            let scored: [(Int, Int)] = drawers.indices.map { idx in
+                let lower = drawers[idx].content.lowercased()
+                let distinct = lowTerms.filter { lower.contains($0) }.count
+                return (distinct, idx)
+            }
+            // Sort by count DESC; input index ASC as stable tie-break.
+            let sorted = scored.sorted { a, b in
+                a.0 != b.0 ? a.0 > b.0 : a.1 < b.1
+            }
+            lexicalOrder = sorted.map { $0.1 }
+        }
+
+        // Map originalIndex → lexical rank for O(1) lookup.
+        var lexRank = [Int: Int]()
+        lexRank.reserveCapacity(drawers.count)
+        for (rank, idx) in lexicalOrder.enumerated() {
+            lexRank[idx] = rank
+        }
+
+        // RRF with genuinely independent lanes:
+        // L-lexical: ranked by distinct-cue-term count (or input order when
+        // cueTerms is empty).  L-semantic: input order (recency — the verb's
+        // natural ordering). When cueTerms is empty both lanes equal input
+        // order and the formula reduces to the previous single-list math —
+        // bit-identical output guaranteed.
         var rrfScore: [Int: Float] = [:]
         rrfScore.reserveCapacity(drawers.count)
-        for (idx, _) in drawers.enumerated() {
-            let lexical = 1.0 / Float(tuning.rrfK + idx + 1)
-            let semantic = 1.0 / Float(tuning.rrfK + idx + 1)
-            // Weighted sum matches the spec's two-path formulation.
-            // With equal lists the weighting collapses to a constant
-            // factor and does not reorder; with future independent
-            // lists the weighting will reorder, which is the point.
-            rrfScore[idx] = tuning.bm25Weight * lexical + tuning.vectorWeight * semantic
+        for semRank in drawers.indices {
+            let lRank = lexRank[semRank] ?? semRank
+            let lexical = 1.0 / Float(tuning.rrfK + lRank + 1)
+            let semantic = 1.0 / Float(tuning.rrfK + semRank + 1)
+            rrfScore[semRank] = tuning.bm25Weight * lexical + tuning.vectorWeight * semantic
         }
 
         // MMR rerank. Selects the next drawer that maximises
@@ -291,6 +436,25 @@ internal enum HybridRecallEngine {
         var selected: [Int] = []
         selected.reserveCapacity(drawers.count)
 
+        // Shingle each drawer ONCE and memoize pairwise similarities. The
+        // selection loop below evaluates candidate-vs-selected pairs across
+        // every step (~n³/6 evaluations); computing each from raw strings
+        // rebuilt both shingle sets per call and measured 181 s over a
+        // 250-drawer pool (the trial-3 synthesize timeouts). With cached
+        // sets and a pair memo the distinct work is at most n²/2 set
+        // intersections. Output is bit-identical — same substrate kernel,
+        // same values, computed once.
+        let shingleSets = drawers.map { ShingleSimilarity.shingles($0.content) }
+        var pairMemo: [Int: Float] = [:]
+        func pairSimilarity(_ a: Int, _ b: Int) -> Float {
+            let (lo, hi) = a < b ? (a, b) : (b, a)
+            let key = lo &* drawers.count &+ hi
+            if let cached = pairMemo[key] { return cached }
+            let value = ShingleSimilarity.similarity(shingleSets[lo], shingleSets[hi])
+            pairMemo[key] = value
+            return value
+        }
+
         while !remaining.isEmpty {
             var bestIdx = -1
             var bestScore: Float = -.infinity
@@ -304,7 +468,7 @@ internal enum HybridRecallEngine {
                 } else {
                     var m: Float = 0
                     for s in selected {
-                        let sim = shingleSimilarity(drawers[idx].content, drawers[s].content)
+                        let sim = pairSimilarity(idx, s)
                         if sim > m { m = sim }
                     }
                     maxSim = m

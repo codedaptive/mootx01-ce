@@ -66,13 +66,18 @@ struct EstateCloseFileLockTests {
         defer { cleanup(url) }
 
         let kit = GeniusLocusKit()
+        // lifetime: .ephemeral routes the identity key to InMemoryEstateIdentityKeyStore
+        // regardless of storage backend, so the SQLite-backed estate never touches the
+        // real Keychain. The test subject is close() file-lock behavior, not key lifetime,
+        // so .close() is kept as the assertion target.
         let params = EstateProvisionParams(
             estateName: "FileLockTest",
             kind: .locusOnly,
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "FileLockProfile",
-            syncMode: .none
+            syncMode: .none,
+            lifetime: .ephemeral
         )
 
         // Provision on the SQLite file so the connection is open and WAL is active.
@@ -140,7 +145,8 @@ struct EstateCloseStoragesMapTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "P",
-            syncMode: .none
+            syncMode: .none,
+            lifetime: .ephemeral
         )
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: params)
 
@@ -187,7 +193,8 @@ struct EstateCloseMapCensusTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "MapCensusProfile",
-            syncMode: .none
+            syncMode: .none,
+            lifetime: .ephemeral
         )
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: params)
 
@@ -286,7 +293,8 @@ struct EstateCloseDoubleCloseTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "P",
-            syncMode: .none
+            syncMode: .none,
+            lifetime: .ephemeral
         )
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: params)
 
@@ -327,7 +335,8 @@ struct EstateCloseStaleHandleVerbTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "P",
-            syncMode: .none
+            syncMode: .none,
+            lifetime: .ephemeral
         )
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: params)
         try await kit.close(handle)
@@ -363,7 +372,8 @@ struct EstateCloseStaleHandleVerbTests {
             zoomWindowLow: 0,
             zoomWindowHigh: 5,
             frameworkProfile: "P",
-            syncMode: .none
+            syncMode: .none,
+            lifetime: .ephemeral
         )
         let handle = try await kit.provision(storage: storage, owner: testOwner, params: params)
         try await kit.close(handle)
@@ -376,5 +386,62 @@ struct EstateCloseStaleHandleVerbTests {
         } else {
             Issue.record("expected .estateNotOpen, got \(String(describing: thrown))")
         }
+    }
+}
+
+// MARK: - Zero-residue regression
+
+/// Zero-residue regression guard: provisioned SQLite estates with `lifetime: .ephemeral`
+/// leave no Ed25519 identity key in the real Keychain after destroy.
+///
+/// `lifetime: .ephemeral` routes the identity key store to `InMemoryEstateIdentityKeyStore`
+/// regardless of the storage backend, so no Keychain item is ever written. Ten
+/// SQLite-backed provision + destroy cycles are probed for zero Keychain residue.
+/// This pins the fix for the Keychain-leak incident against future regressions in
+/// this specific package (GeniusLocusKit).
+@Suite("close() — zero-residue regression (SQLite + ephemeral lifetime)")
+struct EstateCloseZeroResidueTests {
+
+    @Test("provision+destroy of 10 SQLite estates with ephemeral lifetime leaves zero Keychain residue")
+    func provisionedSQLiteEstatesLeaveZeroKeychainResidue() async throws {
+        let kit = GeniusLocusKit()
+        var estateIDs: [UUID] = []
+        for i in 0..<10 {
+            let url = tempSQLitePath()
+            defer { cleanup(url) }
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(), backend: .sqlite(url: url)))
+            let params = EstateProvisionParams(
+                estateName: "ZeroResidueEstate\(i)",
+                kind: .locusOnly,
+                zoomWindowLow: 0,
+                zoomWindowHigh: 5,
+                frameworkProfile: "ZeroResidueProfile",
+                syncMode: .none,
+                lifetime: .ephemeral
+            )
+            let handle = try await kit.provision(
+                storage: storage, owner: testOwner, params: params)
+            estateIDs.append(handle.estateUUID)
+            try await kit.destroy(storage: storage, handle: handle)
+        }
+        #expect(estateIDs.count == 10)
+        #if canImport(Security)
+        // Zero-residue probe: each estate UUID must have NO identity key in the
+        // real Keychain. `lifetime: .ephemeral` routes to InMemoryEstateIdentityKeyStore
+        // so no Keychain item is ever written. loadPrivateKey returns nil for absent
+        // keys (not an error), so the probe is read-only and side-effect-free.
+        // Probe errors (Keychain unavailable in the test environment) skip silently;
+        // a present item fails loudly.
+        let probe = KeychainEstateIdentityKeyStore()
+        for estateID in estateIDs {
+            if let residue = try? probe.loadPrivateKey(forEstateID: estateID) {
+                #expect(
+                    residue == nil,
+                    "SQLite estate \(estateID) left a Keychain identity key — ephemeral lifetime must prevent this"
+                )
+            }
+        }
+        #endif
     }
 }

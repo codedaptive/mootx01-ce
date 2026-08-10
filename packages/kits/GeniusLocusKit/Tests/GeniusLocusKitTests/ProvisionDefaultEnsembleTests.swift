@@ -51,13 +51,16 @@ struct ProvisionDefaultEnsembleTests {
     }
 
     private func glkParams() -> EstateProvisionParams {
+        // lifetime: .ephemeral prevents the SQLite-backed estate from writing an
+        // Ed25519 identity key to the real Keychain during test runs.
         EstateProvisionParams(
             estateName: "EnsembleEstate",
             kind: .glk,
             zoomWindowLow: 1,
             zoomWindowHigh: 10,
             frameworkProfile: "KnowledgeWork",
-            syncMode: .none)
+            syncMode: .none,
+            lifetime: .ephemeral)
     }
 
     private func rankedIDs(_ outcome: FloatLaneOutcome) -> [String] {

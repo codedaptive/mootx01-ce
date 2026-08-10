@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Interface
-version: 1.1.2
+version: 1.2.0
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: Public API surface for SubstrateML in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -2288,6 +2288,11 @@ target dependencies (authority: `the package-dependency rule`).
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 
 ## Changelog
+
+### 1.2.0 -- 2026-08-06
+
+- `ShingleSimilarity.similarity(_:_:)` gains a `Set<String>` overload
+  (Rust: `similarity_sets`); the string overload delegates to it.
 
 ### 1.1.2 -- 2026-07-16
 Additive (audit): closed two CRITICAL gaps left after the 1.1.1 pass.

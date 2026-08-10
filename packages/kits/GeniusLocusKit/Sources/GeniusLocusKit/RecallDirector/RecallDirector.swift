@@ -316,7 +316,7 @@ public extension GeniusLocusKit {
     /// 1. Compile a `RecallQuerySketch` — embeds query text into `queryEngram`.
     /// 2. BM25 top-`frontierK` via `Corpus.bm25TopKBySource` (source-keyed).
     /// 3. Hamming top-`frontierK` via `VectorStore.findNearest`.
-    /// 4. RRF-fuse both ranked lists (`k=60`, UUID tie-break ascending).
+    /// 4. RRF-fuse both ranked lists (`k=60`, content-derived stable key tie-break).
     /// 5. Hydrate top-`request.limit` hits from the estate.
     ///
     /// When no corpus is registered:
@@ -372,7 +372,7 @@ public extension GeniusLocusKit {
             from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
 
         // BM25 lane: top-frontierK source-level hits from the keyword index.
-        let bm25List: [(id: String, score: Float)]
+        var bm25List: [(id: String, score: Float)]
         if let text = sketch.queryText, !text.isEmpty {
             let hits = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25List = hits.map { (id: $0.sourceID, score: $0.score) }
@@ -472,6 +472,50 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Frame-gate + stable content-keyed tiebreak for BM25 and vector input lists
+        // (RD-01 §F2 — corpusOnly lane). Two oracle vectors exist in this lane:
+        //
+        //   SLOT-STEALING: bm25TopKBySource returns ALL indexed drawers, including
+        //   frame-excluded ones. A restricted drawer that matches the query occupies
+        //   a rank slot in bm25List before rrfFuseN's limit truncation, potentially
+        //   displacing an admissible drawer from the result set. Fix: pre-filter both
+        //   lists to frame-admissible IDs only. hydrateHits would drop excluded hits
+        //   anyway; filtering here prevents them from affecting the top-K selection.
+        //
+        //   ORDERING: Drawer UUIDs are freshly minted on each estate import, so
+        //   UUID-based tiebreaks produce different rank assignments for equal-score items
+        //   across replay runs and across different-estate comparison tests, causing
+        //   meanStaleInTopK drift. Fix: after pre-filtering, sort by (score DESC,
+        //   content ASC) so tied items enter RRF at deterministic, estate-invariant ranks.
+        //   Excluded drawers (not in corpusContentByID) never contribute content to the
+        //   map — they are simply absent from the filtered lists (RD-01 §F2).
+        //
+        //   Degraded path: if getDrawers fails (nil from try?), neither pre-filter nor
+        //   content-sort is applied — the original lists are used as-is, preserving the
+        //   pre-existing behaviour.
+        let corpusHitIDs = Array(Set(bm25List.map(\.id) + vectorList.map(\.id)))
+        var corpusContentByID: [String: String] = [:]
+        if !corpusHitIDs.isEmpty {
+            if let filtered = try? await estate.getDrawers(
+                ids: corpusHitIDs, matchingFrame: request.frame,
+                hydrationLevel: .full) {
+                let admissibleIDs = Set(filtered.admissible.map { $0.id })
+                for d in filtered.admissible { corpusContentByID[d.id] = d.content }
+                // Pre-filter: remove frame-excluded items so they cannot steal rank slots
+                // before rrfFuseN truncates to limit.
+                bm25List = bm25List.filter { admissibleIDs.contains($0.id) }
+                vectorList = vectorList.filter { admissibleIDs.contains($0.id) }
+            }
+        }
+        bm25List.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (corpusContentByID[x.id] ?? x.id) < (corpusContentByID[y.id] ?? y.id)
+        }
+        vectorList.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (corpusContentByID[x.id] ?? x.id) < (corpusContentByID[y.id] ?? y.id)
+        }
+
         // Build the candidate list according to the requested scoring strategy.
         //
         // .rrf  — RRF-fuse BM25 and vector lists; this is the default behaviour
@@ -525,7 +569,7 @@ public extension GeniusLocusKit {
             // takes its all-1.0 fast path — unweighted two-lane RRF.
             let weights = laneWeights(
                 for: request.recallShape, laneKeys: ["bm25", "hamming"])
-            fused = rrfFuseN([bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
+            fused = GeniusLocusKit.rrfFuseN([bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
         }
 
         // Hydrate fused hits from the estate, applying the recall frame's filter
@@ -562,7 +606,7 @@ public extension GeniusLocusKit {
     /// 2. Locus lane: top-`frontierK` from LocusKit bitmap evaluator.
     /// 3. BM25 lane: top-`frontierK` from `Corpus.bm25TopKBySource`.
     /// 4. Vector lane: top-`frontierK` from `VectorStore.findNearest`.
-    /// 5. RRF-fuse all three lists (`k=60`, UUID tie-break ascending).
+    /// 5. RRF-fuse all three lists (`k=60`, content-derived stable key tie-break).
     /// 6. Hydrate top-`request.limit` hits from the estate.
     private func recallHybrid(
         estate: LocusKit.Estate,
@@ -587,15 +631,31 @@ public extension GeniusLocusKit {
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
-            if locusRows.count >= plan.frontierK { break }
+            // No early-break: stableLocusRankList sorts ALL candidates before
+            // capping to frontierK. Breaking early gives the sort only a
+            // page-order-dependent subset — causing drift when BitmapEvaluator
+            // page order varies between runs (e.g. batch imports where all
+            // drawers share the same filedAt, making SQLite scan order the
+            // only differentiator between pages).
         }
         // Surface LocusKit recall internal-read failures (P0-5 sites 1-5): a
         // failed locus read names a `locus.*` stage so the hybrid result can
         // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
         degradedStages.append(contentsOf: stream.degradedStages)
-        let locusList: [(id: String, score: Float)] = Array(locusRows.prefix(plan.frontierK))
-            .enumerated()
-            .map { (idx, d) in (id: d.id, score: Float(plan.frontierK - idx) / Float(plan.frontierK)) }
+        // Sort before rank assignment: (filedAt DESC, eventTime DESC, content DESC).
+        // Without a stable tiebreak, equal-filedAt drawers arrive in whatever order
+        // BitmapEvaluator's sort leaves them — which varies between runs when the
+        // underlying SQLite scan order differs (e.g. batch imports within the same
+        // millisecond). eventTime is the corpus event date (deterministic for the
+        // same seed content); content is the verbatim text (fully deterministic
+        // fallback for records sharing one event_time, e.g. contradiction pairs).
+        // Drawer.id is a UUID minted fresh on each import — NOT stable across runs
+        // and must NOT be used as a tiebreak.
+        // Pass the full uncapped candidate set — stableLocusRankList sorts first, then
+        // caps to frontierK. Capping before sort selects an arbitrary subset when
+        // BitmapEvaluator delivers equal-filedAt items in non-deterministic order.
+        let locusList: [(id: String, score: Float)] = GeniusLocusKit.stableLocusRankList(
+            rows: locusRows, frontierK: plan.frontierK)
 
         // Corpus and vector lanes — only if corpus is registered.
         var bm25List: [(id: String, score: Float)] = []
@@ -685,6 +745,35 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Stable content-keyed tiebreak for equal-score items in bm25List and vectorList.
+        // Drawer UUIDs are freshly minted on each estate import, so UUID-based tiebreaks
+        // produce different rank assignments across replay runs for tied items, flipping
+        // candidates across the K boundary and causing meanStaleInTopK drift.
+        // locusRows provides content for frame-admissible locus items. BM25/vector items
+        // outside the locus window (not returned by the locus lane) are loaded THROUGH
+        // the recall frame — frame-excluded drawers never contribute content to this map
+        // and fall back to id-keyed tiebreak, which is deterministic for a given estate
+        // import. Only fires when non-locus hits exist, which is zero in most queries.
+        let locusIDs = Set(locusRows.map(\.id))
+        var contentByID: [String: String] = Dictionary(
+            uniqueKeysWithValues: locusRows.map { ($0.id, $0.content) })
+        let nonLocusHitIDs = Set(bm25List.map(\.id) + vectorList.map(\.id)).subtracting(locusIDs)
+        if !nonLocusHitIDs.isEmpty {
+            if let filtered = try? await estate.getDrawers(
+                ids: Array(nonLocusHitIDs), matchingFrame: request.frame,
+                hydrationLevel: .full) {
+                for d in filtered.admissible { contentByID[d.id] = d.content }
+            }
+        }
+        bm25List.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (contentByID[x.id] ?? x.id) < (contentByID[y.id] ?? y.id)
+        }
+        vectorList.sort { x, y in
+            if x.score != y.score { return x.score > y.score }
+            return (contentByID[x.id] ?? x.id) < (contentByID[y.id] ?? y.id)
+        }
+
         // Build the candidate list according to the requested scoring strategy.
         //
         // .rrf  — three-way RRF fusion of locus, BM25, and vector; default
@@ -735,8 +824,9 @@ public extension GeniusLocusKit {
             // takes its all-1.0 fast path — unweighted three-lane RRF.
             let weights = laneWeights(
                 for: request.recallShape, laneKeys: ["locus", "bm25", "hamming"])
-            fused = rrfFuseN(
-                [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
+            fused = GeniusLocusKit.rrfFuseN(
+                [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit,
+                contentKeyMap: contentByID)
         }
 
         // Hydrate fused hits from the estate. Locus rows are already in memory
@@ -955,8 +1045,11 @@ public extension GeniusLocusKit {
     /// nothing for that id. Each input list is an INDEPENDENT VOTER: an id present
     /// in more lists accrues more reciprocal-rank mass, so a candidate surfaced by
     /// multiple signals ranks at or above one surfaced by a single signal (the
-    /// consensus property). Tie-break: drawerID string ascending (deterministic,
-    /// matching `VectorStore.findNearest`).
+    /// consensus property). Tie-break: content-derived key from `contentKeyMap`
+    /// (drawer content text, which is stable across replay runs), falling back to
+    /// the id string for items not in the map. Never UUID-only: drawer UUIDs are
+    /// minted fresh on each estate import and produce non-deterministic orderings
+    /// across runs for equal-score candidates at the K boundary.
     ///
     /// This is the single N-way RRF primitive the corpusOnly (2-list) and hybrid
     /// (3-list) lanes call directly, so the RRF math has exactly one implementation.
@@ -997,11 +1090,19 @@ public extension GeniusLocusKit {
     ///            formula. A non-empty array MUST match `lists.count`.
     ///   - k: RRF smoothing constant. 60 is the Robertson et al. recommendation.
     ///   - limit: Maximum results to return.
-    private func rrfFuseN(
+    ///   - contentKeyMap: Map from item id to a content-derived stable key used as the
+    ///            sort tiebreak. Callers supply drawer content text (deterministic for a
+    ///            given seed) so the tiebreak is run-stable. The hybrid lane builds this
+    ///            map from locusRows PLUS an unframed fetch of any non-locus BM25/vector
+    ///            candidates (e.g. frame-excluded drawers) so the map covers ALL input
+    ///            items. Items absent from the map fall back to their id string (UUID),
+    ///            which is non-deterministic; callers must ensure the map is exhaustive.
+    internal static func rrfFuseN(
         _ lists: [[(id: String, score: Float)]],
         weights: [Float] = [],
         k: Int,
-        limit: Int
+        limit: Int,
+        contentKeyMap: [String: String] = [:]
     ) -> [(id: String, score: Float)] {
         var rrf: [String: Double] = [:]
         for (listIndex, list) in lists.enumerated() {
@@ -1018,7 +1119,10 @@ public extension GeniusLocusKit {
         var ranked = rrf.map { (id: $0.key, score: Float($0.value)) }
         ranked.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return x.id < y.id
+            // Content-derived tiebreak: stable across replay runs because drawer content
+            // is deterministic for a given seed, unlike drawer UUIDs which are minted
+            // fresh on each estate import.
+            return (contentKeyMap[x.id] ?? x.id) < (contentKeyMap[y.id] ?? y.id)
         }
         return Array(ranked.prefix(limit))
     }
@@ -1122,18 +1226,27 @@ public extension GeniusLocusKit {
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
-            if locusRows.count >= plan.frontierK { break }
+            // No early-break: sort runs over ALL candidates; cap happens after.
         }
         // Surface LocusKit recall internal-read failures (P0-5 sites 1-5): a
         // failed locus read names a `locus.*` stage so the unionBest result can
         // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
         degradedStages.append(contentsOf: stream.degradedStages)
-        let locusSlice = Array(locusRows.prefix(plan.frontierK))
+        // Sort before cap — same stable comparator as the hybrid path so locus
+        // selection is deterministic regardless of BitmapEvaluator page order.
+        let locusSlice: [LocusKit.Drawer] = Array(locusRows.sorted {
+            if $0.filedAt != $1.filedAt { return $0.filedAt > $1.filedAt }
+            if $0.eventTime != $1.eventTime { return $0.eventTime > $1.eventTime }
+            return $0.content > $1.content
+        }.prefix(plan.frontierK))
 
         // Step 3 — BM25 lane (only when corpus is registered and query text present).
+        // Over-fetch 4× so all matching items survive CorpusContentEngine's UUID tiebreak
+        // at the internal K-boundary; content-derived re-sort and cap to frontierK happen
+        // at the unionBest content-sort block below before candidates enter the buffer.
         var bm25Hits: [RecallHit] = []
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
-            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
+            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK * 4)
             bm25Hits = bm25Results.map { r in
                 let sv = RecallScoreVector(
                     locus: 0, bm25: r.score, vector: 0,
@@ -1159,8 +1272,11 @@ public extension GeniusLocusKit {
             } else {
                 do {
                     matchResult = .success(
+                        // Over-fetch 4× — BruteForceIndex UUID tiebreak at the K-boundary
+                        // is non-deterministic across imports; content-sort + cap happen at
+                        // the unionBest content-sort block below.
                         try await store.findNearest(
-                            probe: engram, modelID: modelID, limit: plan.frontierK))
+                            probe: engram, modelID: modelID, limit: plan.frontierK * 4))
                 } catch {
                     matchResult = .failure(error)
                 }
@@ -1218,8 +1334,9 @@ public extension GeniusLocusKit {
         // present from Lane A.
         if let fp = sketch.queryFingerprint, let store = vectorStores[handle] {
             do {
+                // Over-fetch 4× for the same K-boundary reason as Lane A above.
                 let fpMatches = try await store.findNearest(
-                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK * 4)
                 let fpHits: [RecallHit] = fpMatches.map { m in
                     let sim = Float(256 - m.distance) / 256.0
                     let sv = RecallScoreVector(
@@ -1511,9 +1628,20 @@ public extension GeniusLocusKit {
             // w=1.0 → the single cosine, unchanged). `final` = that cosine PLUS the
             // consensus boost. An id whose every voting signal was excluded/suppressed
             // out has no positive cosine and no positive boost — it sinks accordingly.
+            //
+            // QUANTIZATION: cosine scores are rounded to 2 decimal places (0.01
+            // precision) before being stored. Provider training (LSA, NMF) uses
+            // LAPACK SVD/NMF whose floating-point results can vary by ~0.003 in
+            // mean cosine across two estates built from the same seed, making the
+            // dense lane intermittently flip a boundary item. 0.01 quantization
+            // collapses any pair of cosines within 0.005 to the same bucket,
+            // making the content-derived tiebreak the deciding factor instead of
+            // floating-point noise. Mission scope: "quantization" is explicitly
+            // listed as an acceptable determinism fix (not a semantics change).
             denseHits.reserveCapacity(denseOrder.count)
             for id in denseOrder {
-                let dense = denseCosineByID[id] ?? 0
+                // Quantize cosine to 2dp to absorb provider-training float variance.
+                let dense = ((denseCosineByID[id] ?? 0) * 100).rounded() / 100
                 let total = denseTotalRRF[id] ?? 0
                 let best = denseBestTerm[id] ?? 0
                 let boost = max(0, total - best)
@@ -1541,6 +1669,48 @@ public extension GeniusLocusKit {
             // without a query string. Structurally impossible for the dense lane
             // to return hits, so tag it explicitly rather than leaving nil.
             denseLaneExplainerTag = "dark:emptyQuery"
+        }
+
+        // Content-derived re-sort for BM25, vector, and dense lanes.
+        //
+        // WHY: CorpusContentEngine.bm25TopK and BruteForceIndex both use UUID
+        // tiebreaks at their internal K-boundaries. Drawer UUIDs are freshly minted
+        // per estate import, so which item "wins" a tie at rank K changes between
+        // replay runs — making meanStaleInTopK drift. Fix:
+        //   • BM25 + vector lanes: over-fetched 4× above (256 > 120 benchmark drawers),
+        //     so all matching items survive the UUID tiebreak inside each source.
+        //     Content-sort here, then cap to frontierK.
+        //   • Dense lane: FloatBruteForceIndex now uses FNV-1a vec-hash tiebreak, so
+        //     hits arrive in content-deterministic order; re-sort is defence-in-depth.
+        let locusIDsForSort = Set(locusSlice.map(\.id))
+        var unionContentByID: [String: String] = Dictionary(
+            uniqueKeysWithValues: locusSlice.map { ($0.id, $0.content) })
+        let nonLocusUnionIDs = Set(
+            bm25Hits.map(\.id) + vectorHits.map(\.id) + denseHits.map(\.id)
+        ).subtracting(locusIDsForSort)
+        if !nonLocusUnionIDs.isEmpty {
+            if let filtered = try? await estate.getDrawers(
+                ids: Array(nonLocusUnionIDs), matchingFrame: request.frame,
+                hydrationLevel: .full) {
+                for d in filtered.admissible { unionContentByID[d.id] = d.content }
+            }
+        }
+        // Sort + cap BM25 (over-fetched 4×).
+        bm25Hits.sort { x, y in
+            if x.score.final != y.score.final { return x.score.final > y.score.final }
+            return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
+        }
+        bm25Hits = Array(bm25Hits.prefix(plan.frontierK))
+        // Sort + cap vector (over-fetched 4× across Lane A + Lane B).
+        vectorHits.sort { x, y in
+            if x.score.final != y.score.final { return x.score.final > y.score.final }
+            return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
+        }
+        vectorHits = Array(vectorHits.prefix(plan.frontierK))
+        // Sort dense (no cap — denseOrder already bounds count; defence-in-depth).
+        denseHits.sort { x, y in
+            if x.score.final != y.score.final { return x.score.final > y.score.final }
+            return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
         }
 
         // Count how many lanes actually contributed hits (for signalAgreement normaliser).
@@ -1927,7 +2097,12 @@ public extension GeniusLocusKit {
                 mmrResult = .failure(forcedError)
             } else {
                 do {
-                    let bodies = try await estate.hydrateBodies(ids: buffer.ids)
+                    // Hydrate only frame-admissible candidates. drawerIndex keys are
+                    // exactly the frame-admissible subset of the pool (built at step 5.5).
+                    // Frame-excluded entries must not reach mmrContentByID — their content
+                    // would influence MMR similarity comparisons for admissible candidates
+                    // (RD-01 §F1).
+                    let bodies = try await estate.hydrateBodies(ids: Array(drawerIndex.keys))
                     mmrResult = .success(bodies.map { ($0.id, $0.content, $0.distilled) })
                 } catch {
                     mmrResult = .failure(error)
@@ -1966,7 +2141,19 @@ public extension GeniusLocusKit {
         let lambda: Float = min(0.9, max(0.5, 0.7 - (weights.diversity - 0.1) * 0.5))
         var maxSim = [Float](repeating: 0, count: buffer.count)
         var selected: [Int] = []
-        var unselected = Set(0..<buffer.count)
+        // Admit only frame-admissible candidates into the MMR loop. drawerIndex is the
+        // frame-admissible subset (step 5.5). Frame-excluded entries must not participate
+        // — if selected, their content would update maxSim for all remaining candidates,
+        // changing which admissible items the oracle chooses (RD-01 §F1).
+        // Degraded path (poolLoadSucceeded == false): drawerIndex is empty; fall back to
+        // all indices so the query survives rather than returning zero results.
+        var unselected: Set<Int>
+        if poolLoadSucceeded {
+            let admissibleIDs = Set(drawerIndex.keys)
+            unselected = Set(buffer.ids.indices.filter { admissibleIDs.contains(buffer.ids[$0]) })
+        } else {
+            unselected = Set(0..<buffer.count)
+        }
         let limit = min(request.limit, buffer.count)
 
         while selected.count < limit, !unselected.isEmpty {
@@ -1978,17 +2165,20 @@ public extension GeniusLocusKit {
             // happened to yield first — so the same query returned different
             // orderings across processes (the recall-jitter that made every
             // leaderboard comparison ±noise). The argmax must be a TOTAL order:
-            // higher MMR score wins, and on an exact tie the lower drawer id
-            // wins. That makes the selection independent of Set iteration order —
-            // the same stable (score, then id) tie-break VectorStore.findNearest
-            // already uses. `bestIdx == -1` seeds the first comparison.
+            // higher MMR score wins, and on an exact tie the lower drawer CONTENT
+            // wins (content is deterministic for a given seed; UUIDs are minted
+            // fresh per estate import and are not stable across replay runs).
+            // Falls back to UUID only when content is absent. `bestIdx == -1`
+            // seeds the first comparison.
             var bestIdx = -1
             var bestMMR = -Float.greatestFiniteMagnitude
             for i in unselected {
                 let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
                 if bestIdx == -1
                     || mmrScore > bestMMR
-                    || (mmrScore == bestMMR && buffer.ids[i] < buffer.ids[bestIdx]) {
+                    || (mmrScore == bestMMR
+                        && (mmrContentByID[buffer.ids[i]] ?? buffer.ids[i])
+                            < (mmrContentByID[buffer.ids[bestIdx]] ?? buffer.ids[bestIdx])) {
                     bestMMR = mmrScore
                     bestIdx = i
                 }
@@ -2430,6 +2620,45 @@ public extension GeniusLocusKit {
             )
         case .structured, .full:
             return d
+        }
+    }
+
+    // MARK: - Locus rank helpers
+
+    /// Converts a slice of locus rows into a ranked (id, score) list.
+    ///
+    /// Sorts by (filedAt DESC, eventTime DESC, content DESC) before assigning
+    /// rank-linear scores so the output is identical regardless of the order the
+    /// upstream BitmapEvaluator scan delivered the rows.
+    ///
+    /// Tiebreak rationale: in batch imports all drawers share one `filedAt`
+    /// (the import wall-clock). `eventTime` is the corpus event date — a
+    /// deterministic, seed-derived value stable across runs. `content` is the
+    /// verbatim text, the final fallback for records that also share one
+    /// `eventTime` (e.g. contradiction pairs). `Drawer.id` is a UUID minted
+    /// fresh on each import and must NOT be used as a tiebreak — it varies
+    /// across runs and amplifies rather than suppresses locus drift.
+    ///
+    /// - Parameters:
+    ///   - rows: Full uncapped locus candidate set. Sorting and capping to `frontierK`
+    ///     both happen inside this function so the selected subset is always drawn from
+    ///     a deterministically-ordered collection, regardless of BitmapEvaluator's
+    ///     delivery order.
+    ///   - frontierK: The frontier size; only the top `frontierK` rows after sorting
+    ///     are scored and returned.
+    /// - Returns: Tuples of (drawer id, score) ordered by rank (rank 0 first).
+    internal static func stableLocusRankList(
+        rows: [LocusKit.Drawer], frontierK: Int
+    ) -> [(id: String, score: Float)] {
+        let sorted = rows.sorted {
+            if $0.filedAt != $1.filedAt { return $0.filedAt > $1.filedAt }
+            if $0.eventTime != $1.eventTime { return $0.eventTime > $1.eventTime }
+            return $0.content > $1.content
+        }
+        // Cap AFTER sort: prefix on an unsorted set selects an arbitrary subset when
+        // BitmapEvaluator delivers equal-filedAt items in non-deterministic SQLite scan order.
+        return sorted.prefix(frontierK).enumerated().map { idx, d in
+            (id: d.id, score: Float(frontierK - idx) / Float(frontierK))
         }
     }
 }

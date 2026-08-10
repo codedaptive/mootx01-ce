@@ -234,6 +234,7 @@ fn sample_tunnel(source_label: &str, target_label: &str) -> Tunnel {
         added_by: "test-agent".to_string(),
         removed_by_batch: None,
         order_key: None,
+        ext: None,
     }
 }
 

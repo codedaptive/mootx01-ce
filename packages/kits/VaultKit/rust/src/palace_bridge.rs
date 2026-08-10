@@ -50,6 +50,7 @@ use genius_locus_kit::EncodeSpeed;
 use genius_locus_kit::handle::EstateHandle;
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
+    dataset_handle::IMPORT_EMBEDDING_MODEL_ID as EMBEDDING_MODEL_ID,
     diary_entry::DiaryEntry,
     diary_operational::{DiaryActorClass, DiaryEventClass, DiarySeverity},
     drawer_operational::{CaptureChannel, ContentKind},
@@ -77,8 +78,7 @@ const FALLBACK_UDC: &str = "000";
 /// `addedBy` tag on all PalaceBridge-imported rows.
 const ADDED_BY: &str = "palacebridge-import";
 
-/// Embedding model placeholder for rows with no vector. Non-empty by schema contract.
-const EMBEDDING_MODEL_ID: &str = "vaultkit-noembed-v1";
+// EMBEDDING_MODEL_ID is locus_kit::dataset_handle::IMPORT_EMBEDDING_MODEL_ID (aliased above).
 
 /// One tunnel record from `tunnels.json`.
 #[derive(Debug, Deserialize)]

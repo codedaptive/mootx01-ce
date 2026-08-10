@@ -223,23 +223,91 @@ pub fn run_sweep(
     }
 }
 
-/// One M5 pass's outcome (typed proposals). Mirrors Swift
+/// One M5/P2.5 pass's outcome. Mirrors Swift
 /// `ConflictTunnelProposalReport`.
 #[derive(Debug, Clone)]
 pub struct ConflictTunnelProposalReport {
     /// The sweep the proposals were derived from.
     pub sweep: ConflictProjectionSweepReport,
-    /// Tunnel ids proposed THIS pass, in sweep order.
+    /// TIER-1 (typed) tunnel ids proposed THIS pass, in sweep order.
+    /// Name kept from the tier-1-only era; the lexical tiers report
+    /// through the fields below.
     pub proposed_tunnel_ids: Vec<String>,
-    /// Proven findings suppressed by the dedup contract.
+    /// Tier-2 (structural lexical cue) tunnel ids proposed this pass,
+    /// in lane rank order (MXE-CT3 P2.5).
+    pub proposed_tier2_ids: Vec<String>,
+    /// Tier-3 (value divergence) tunnel ids proposed this pass, in lane
+    /// rank order (MXE-CT3 P2.5).
+    pub proposed_tier3_ids: Vec<String>,
+    /// Findings suppressed by the dedup contract, aggregated across all
+    /// three filing tiers (live-pair + decline-matrix suppressions).
     pub suppressed: usize,
-    /// Proven findings skipped because their sensitivity ceiling exceeds
-    /// Elevated. Counted apart from `suppressed`: "already on the books"
-    /// and "above the ceiling" are different facts, and folding the
-    /// second into the first would hide the gate's activity from anyone
-    /// reading the report — including from whoever has to notice it has
-    /// regressed.
+    /// Proven TIER-1 findings skipped because their sensitivity ceiling
+    /// exceeds Elevated. Counted apart from `suppressed`: "already on
+    /// the books" and "above the ceiling" are different facts, and
+    /// folding the second into the first would hide the gate's activity
+    /// from anyone reading the report — including from whoever has to
+    /// notice it has regressed. (The lexical lanes apply the same
+    /// ceiling per-endpoint INSIDE the shared lexical scan, before
+    /// candidates exist to count — typed-lane-only by construction.)
     pub ceiling_skipped: usize,
+}
+
+// ─── MXE-CT3 P2.5 — tier-labeled filing vocabulary + decline matrix ──
+// (Mirrors the Swift constants and pure helpers on GeniusLocusKit in
+// ConflictTunnelLifecycle.swift; see that header for the full ladder,
+// label-family, and matrix contracts.)
+
+/// Label prefix for typed-lane (tier-1) proposals; rule@version after
+/// it is the F15 renewal key.
+pub const CONFLICT_PROPOSAL_LABEL_PREFIX: &str = "dcp: ";
+/// Label prefixes for the P2.5 lexical-tier proposals; cueKind@cueVersion
+/// after each is the renewal key (F15 mirror).
+pub const TIER2_PROPOSAL_LABEL_PREFIX: &str = "tier2:";
+pub const TIER3_PROPOSAL_LABEL_PREFIX: &str = "tier3:";
+
+/// Version of the lexical cue engine as a REJECTION-RENEWAL key (mirror
+/// of F15's rule version). Bump when `conflict_cue`'s classification
+/// meaningfully evolves: a pair rejected under cueKind@1 files a NEW
+/// instance under cueKind@2 — the new engine is new evidence. Starts at
+/// 1 (MXE-CT3 P2.5). Mirrors Swift `GeniusLocusKit.conflictCueVersion`.
+pub const CONFLICT_CUE_VERSION: u32 = 1;
+
+/// Decline-matrix tier of a withdrawn tunnel's label family, or `None`
+/// when the label is outside the matrix (`hunter: …` and foreign
+/// labels — a rejected textual guess is not a rejection of a typed
+/// proof; the hunter's own dedup lives in the hunter).
+pub fn rejection_tier_of_label(label: &str) -> Option<u8> {
+    if label.starts_with(CONFLICT_PROPOSAL_LABEL_PREFIX) {
+        Some(1)
+    } else if label.starts_with(TIER2_PROPOSAL_LABEL_PREFIX) {
+        Some(2)
+    } else if label.starts_with(TIER3_PROPOSAL_LABEL_PREFIX) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// The decline matrix's suppression decision for one candidate filing.
+/// Pure — unit-tested directly for every direction of the tier
+/// ordering (tier1 > tier2 > tier3).
+///
+/// Rules:
+/// - a rejection at a HIGHER tier class (numerically lower) than the
+///   filing suppresses regardless of label — the rejected proof damns
+///   the maybe;
+/// - a rejection at the SAME tier suppresses only the same renewal key
+///   (F14; version bumps renew per F15);
+/// - a rejection at a LOWER tier class never suppresses.
+pub fn decline_matrix_suppresses(
+    filing_tier: u8,
+    renewal_key: &str,
+    withdrawn_records: &[(u8, String)],
+) -> bool {
+    withdrawn_records.iter().any(|(tier, label)| {
+        *tier < filing_tier || (*tier == filing_tier && label.starts_with(renewal_key))
+    })
 }
 
 /// Default bucket cap re-export for the coordinator seam.
@@ -755,5 +823,37 @@ mod tests {
         assert_eq!(report.counts.candidate_review, 1);
         assert_eq!(report.counts.proven_contradiction, 0);
         assert!(report.proven.is_empty());
+    }
+
+    // ── Decline matrix — MXE-CT3 P2.5 (mirrors Swift declineMatrixDirections) ──
+
+    #[test]
+    fn decline_matrix_every_direction_of_the_tier_ordering() {
+        let t1_reject = vec![(1u8, "dcp: rule@1 result=x".to_string())];
+        let t3_reject = vec![(3u8, "tier3:value_divergence@1 score=0.8".to_string())];
+
+        // HIGHER-tier rejection suppresses lower tiers of the pair —
+        // a user who rejected the proof does not want the maybe.
+        assert!(decline_matrix_suppresses(2, "tier2:word_exclusion@1", &t1_reject));
+        assert!(decline_matrix_suppresses(3, "tier3:value_divergence@1", &t1_reject));
+        // Same tier + same renewal key: durable (F14).
+        assert!(decline_matrix_suppresses(1, "dcp: rule@1", &t1_reject));
+        // Same tier, version bump: renews (F15 / cue-version mirror).
+        assert!(!decline_matrix_suppresses(1, "dcp: rule@2", &t1_reject));
+        assert!(!decline_matrix_suppresses(3, "tier3:value_divergence@2", &t3_reject));
+        // LOWER-tier rejection never suppresses a higher tier: a
+        // rejected lexical guess is not a rejection of a typed proof.
+        assert!(!decline_matrix_suppresses(1, "dcp: rule@1", &t3_reject));
+        assert!(!decline_matrix_suppresses(2, "tier2:word_exclusion@1", &t3_reject));
+    }
+
+    #[test]
+    fn rejection_tier_classifies_the_matrix_label_families_only() {
+        assert_eq!(rejection_tier_of_label("dcp: rule@1 result=x"), Some(1));
+        assert_eq!(rejection_tier_of_label("tier2:word_exclusion@1 score=1"), Some(2));
+        assert_eq!(rejection_tier_of_label("tier3:value_divergence@1 score=1"), Some(3));
+        // hunter:/foreign labels stay outside the matrix.
+        assert_eq!(rejection_tier_of_label("hunter: value_divergence score=0.9"), None);
+        assert_eq!(rejection_tier_of_label("supersedes"), None);
     }
 }

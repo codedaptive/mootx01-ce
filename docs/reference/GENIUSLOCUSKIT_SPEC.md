@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.22.0
+version: 1.25.0
 status: accepted-1.1-target
-date: 2026-08-04
-description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
+date: 2026-08-07
+description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -1088,16 +1088,22 @@ retrieval always routes through CorpusKit per the kit-roles doctrine.
 
 ### VectorSimilaritySignal real VectorKit queries
 
-`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)`
+`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:probeLimit:corpus:)`
 produces the production signal spec. The emit closure captures the
 `VectorStore` (and the estate's `Corpus`, when one is registered) and on
 each five-minute fire:
 
-1. Calls `VectorStore.recentItemIDs(limit: 50)` to sample the 50 most
-   recently filed candidate item IDs (newest-first — new captures are
-   what need association screening; the earlier ascending-item_id
-   enumeration was a static UUID-ordered window new content rarely
-   entered on a large estate).
+1. Calls `VectorStore.recentItemIDs(limit: probeLimit)` (default 50) to
+   sample the most recently filed candidate item IDs (newest-first — new
+   captures are what need association screening; the earlier
+   ascending-item_id enumeration was a static UUID-ordered window new
+   content rarely entered on a large estate).
+   **One-sided probe window:** probes are recency-sampled while neighbors
+   are searched across the whole estate. Two dormant old items will never
+   pair unless one was probed while recent. This is the documented
+   limitation the `probeLimit` / `probe_limit` parameter exists to
+   relieve — callers such as the dream associate step and benchmark
+   protocol v2 can widen the window when a full-estate sweep is warranted.
 2. Lane 1 — Drawer-keyed rows: for each candidate, retrieves its engram
    via `VectorStore.getVector(itemID:modelID:)` under the caller's
    `modelID` and calls `VectorStore.findNearest(probe:modelID:limit:5)`
@@ -1137,10 +1143,11 @@ GLK may orchestrate VectorKit directly for non-RAG vector work per the
 kit-roles doctrine; row-similarity is Brain math, not RAG.
 
 **Rust parity:** `VectorSimilaritySignal::spec(vector_store, model_id,
-proximity_threshold, corpus)` mirrors the Swift factory (the fourth
-parameter is `Option<Arc<Corpus>>` — `None` scans only the drawer-keyed
-lane). `default_standing_signal_specs` accepts an `Arc<VectorStore>` plus
-the optional corpus and forwards both to the signal.
+proximity_threshold, probe_limit, corpus, edge_checker)` mirrors the
+Swift factory. `probe_limit: usize` (default `DEFAULT_PROBE_LIMIT = 50`)
+is the fourth positional parameter after `proximity_threshold`.
+`default_standing_signal_specs` passes `DEFAULT_PROBE_LIMIT` to keep
+the registered default behavior identical to Swift.
 `ExternalCorpus::hybrid_recall` routes through `corpus_kit::Corpus::recall`.
 
 ## § RECALL_GRAPH — Graph cache + preference store cold-path signals
@@ -1914,7 +1921,148 @@ surface.
 
 *End of GeniusLocusKit Specification.*
 
+## § TIERED_CONTRADICTION — Tier taxonomy, tiered search, candidate filing, and the review ladder
+
+### Tier taxonomy
+
+Every contradiction finding carries one of three epistemic classes
+(`ContradictionTier`, raw values 1/2/3, from the SubstrateML
+`ConflictCueKind.contradictionTier` mapping):
+
+- **Tier 1 — typed proof** (`typedProven`): a `conflictProjectionSweep`
+  ProvenContradiction. Constraints proved the conflict; no lexical
+  score exists — the tier-1 lane ranks by endpoint-event recency, and
+  the absence of a score is load-bearing (nothing may fold tiers into
+  one ranked list by comparing across it).
+- **Tier 2 — structural lexical cue** (`lexicalStructural`):
+  negation_asymmetry, marker_revision, word_exclusion.
+- **Tier 3 — value divergence** (`lexicalValue`): same claim shape,
+  different value (value_divergence).
+
+Tiers are epistemic classes, not score bands: a strong tier-3 lexical
+cue never outranks a weak tier-1 typed proof.
+
+### Tiered search (`tieredContradictionSearch` / `tiered_contradiction_search`)
+
+One read-only search verb, two modes:
+
+- **Synthesis** (`tier` nil/None): all three lanes run, then the
+  assembler applies promote-to-highest-tier dedup on the
+  case-canonical unordered pair key, backfills lower tiers from their
+  over-fetch (fetch budgets K / 2K / 3K), and returns the three
+  sections in tier order 1-2-3 — never interleaved.
+- **Single tier**: ONLY that lane runs, with no cross-tier dedup — a
+  purpose-run answers its own question, so a pair that is also a
+  tier-1 proof still appears in a tier-3 run.
+
+Retrieval runs ONCE per search: tiers 2/3 share one lexical pass (the
+hunter's retrieval + ConflictCue screen, factored as
+`lexicalTierScan` / `lexical_tier_scan`); tier 1 reads the typed
+sweep. `topK` is clamped to 50 (`TieredContradictionCore.topKCeiling`
+/ `TIERED_TOP_K_CEILING`); non-positive returns a deterministic empty
+report. Tier-1 findings whose raw sensitivity ceiling exceeds
+Elevated are filtered out and counted (`tier1CeilingFiltered`) — the
+verb is an ungranted read surface. The search files nothing and
+writes nothing.
+
+### Candidate filing (`proposeConflictTunnels` / `propose_conflict_tunnels`)
+
+One typed sweep plus the SAME shared lexical pass files PROPOSED
+`contradicts` tunnels at every tier that survives the decline matrix.
+Labels are tier-keyed: `dcp: <rule>@<version> result=<id>` (tier 1),
+`tier2:<cue>@<cueVersion>` and `tier3:<cue>@<cueVersion>` (lexical
+tiers; `conflictCueVersion` = 1 is the rejection-renewal key — a
+version bump renews a rejected pair, the new engine is new evidence).
+`lexicalTopK` (clamped like the search verb; 0 disables lexical
+filing) budgets the lexical lanes. Typed findings above the Elevated
+raw ceiling are never proposed and are counted apart
+(`ceilingSkipped`).
+
+**Decline matrix** (suppression of re-filing after rejection):
+
+- a rejection at a HIGHER tier class (numerically lower) suppresses
+  regardless of label — the rejected proof damns the maybe;
+- a rejection at the SAME tier suppresses only the same renewal key;
+- a rejection at a LOWER tier class never suppresses.
+
+Live pairs (any label family) always dedupe. `hunter: `-labeled
+tunnels sit outside the matrix label families.
+
+### Review ladder (Rejected / Proposed / Endorsed / Accepted)
+
+Model (AI) reviewers may ENDORSE (`endorseTunnel`) and OBJECT
+(`objectToTunnel`). ONLY the user ACCEPTS: there is deliberately no
+path from endorsements to lifecycle `.active` — edge activation stays
+human-authoritative through `Estate.respondToTunnel(accept: true)`,
+and no vote total activates anything.
+
+- **Endorse**: one vote per distinct endorser (idempotent
+  re-endorsement refreshes its timestamp only), sets the endorsed bit
+  (14), sets the contested bit (15) when the ext ledger also holds a
+  model objection. Lifecycle untouched.
+- **Object**: with NO model endorsement on record the proposal
+  WITHDRAWS (the AI-rejected path — the ledger's objection entry
+  makes it reopenable; the decline matrix suppresses re-proposal at
+  this tier and below, never above). With a model endorsement present
+  the tunnel STAYS `.proposed` and the contested bit is set — genuine
+  model disagreement is the most user-worthy queue position.
+
+Both verbs fail loud on not-found, not-proposed, empty reviewer
+identity, and corrupt ext ledgers. Reviewer identity is recorded on
+every transition (including user accept/reject through
+`respondToTunnel`).
+
+**Review-queue ranking** (`ReviewQueueRanking` / `review_queue`):
+tier class first, contested-first within a tier band, endorser
+diversity weight (model family = the prefix before the first `-` or
+`:`), then recency. Endorsement weight feeds this ranking only.
+
+State lives on the tunnel (LocusKit): operational bits 14/15 and the
+`ext` review ledger — see LOCUSKIT_SPEC.md § tunnel review state.
+
 ## Changelog
+
+### 1.25.0 -- 2026-08-07
+
+New § TIERED_CONTRADICTION (MXE-CT3): the three-tier contradiction
+taxonomy (`ContradictionTier` 1/2/3 — typed proof, structural lexical
+cue, value divergence), the `tieredContradictionSearch` read verb
+(synthesis + single-tier modes, one shared lexical retrieval pass,
+topK clamp 50, Elevated ceiling filter), the extended
+`proposeConflictTunnels` all-tier filing pass with tier-keyed labels
+and the decline matrix, the review ladder
+(Rejected/Proposed/Endorsed/Accepted; `endorseTunnel` /
+`objectToTunnel`; endorse never activates — user-only activation),
+and `ReviewQueueRanking`.
+
+### 1.24.0 -- 2026-08-05
+
+Dream associate step: the vector-similarity pairing runs as an
+on-demand verb (`associateSweep` ↔ `associate_sweep`) sharing one
+implementation with the standing signal (ProximityScanCore ↔
+proximity_scan_candidates). Coverage: a probe limit, or None/nil for
+the full estate (post-import recovery for pairs the one-sided recency
+window can never examine — two dormant items associate only through a
+full-coverage sweep). A store-less estate reports zeros, never errors.
+Probe order is recency with id tiebreak, so same-seed estates write
+the same associations.
+
+### 1.23.0 -- 2026-08-05
+
+- **VectorSimilaritySignal probe window parameterized.**
+  `spec(...)` gains `probeLimit: Int = defaultProbeLimit` (Swift) /
+  `probe_limit: usize` (Rust) controlling how many item IDs are sampled
+  from the VectorStore on each five-minute pass. Default 50 keeps
+  resident behavior byte-unchanged. `defaultProbeLimit` (Swift) /
+  `DEFAULT_PROBE_LIMIT` (Rust) replace the formerly private
+  `maxProbeCount` / `MAX_PROBE_COUNT` constants.
+  **One-sided probe window documented:** probes are recency-sampled
+  (newest first) while neighbors are searched across the whole estate.
+  Two dormant old items never pair unless one was probed while recent —
+  widening `probeLimit` relieves this constraint. Expected callers:
+  dream associate step, benchmark protocol v2.
+  SPEC section §VectorSimilaritySignal updated to describe the
+  parameterized probe limit and one-sided window limitation.
 
 ### 1.22.0 -- 2026-08-04
 

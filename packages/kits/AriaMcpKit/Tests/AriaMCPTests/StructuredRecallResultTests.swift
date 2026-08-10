@@ -452,6 +452,7 @@ struct StructuredRecallResultTests {
         let family = [
             "moot_memory_search", "moot_memory_get",
             "moot_recall_shaped", "moot_recall_precise",
+            "moot_recall_connected",
         ]
         let expected = ToolProjection.recallResultsOutputSchema()
         for name in family {

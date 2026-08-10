@@ -88,6 +88,15 @@ public enum LocusKitError: Error, Sendable, Equatable {
     /// via `VerbSurface.expunge`. Thrown by
     /// `Estate.resolveActiveDatasetHandle(datasetId:)` (MX-TAB-4).
     case withdrawnDatasetHandle(datasetId: UUID)
+
+    /// The tunnel's lifecycle has moved beyond `.proposed` since the caller's
+    /// last read — a stale model-review write was rejected. The user's lifecycle
+    /// decision (accept or withdraw via `respondToTunnel`) prevails.
+    /// Thrown by `DrawerStore.stampTunnelReview` when the tunnel is no longer
+    /// `.proposed` at write time. Callers (e.g. `endorseTunnel`,
+    /// `objectToTunnel`) should treat this as a no-op: the vote arrived after
+    /// the user settled the question.
+    case tunnelNoLongerProposed(id: String)
 }
 
 extension LocusKitError: CustomStringConvertible {
@@ -127,6 +136,8 @@ extension LocusKitError: CustomStringConvertible {
             return "not supported: \(msg)"
         case .withdrawnDatasetHandle(let datasetId):
             return "dataset handle withdrawn: \(datasetId.uuidString)"
+        case .tunnelNoLongerProposed(let id):
+            return "tunnel no longer proposed: \(id)"
         }
     }
 }

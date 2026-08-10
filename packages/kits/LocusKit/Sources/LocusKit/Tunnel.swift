@@ -100,6 +100,15 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
     /// ascending `orderKey`. Nil for non-parent tunnel kinds.
     public let orderKey: Double?
 
+    /// Forward-compat JSON extension slot (nullable `ext` column, present
+    /// in the tunnels table since the one-`ext`-column-per-persistent-
+    /// entity convention landed). MXE-CT3 P2.5 is the first consumer: the
+    /// review-ladder endorsement ledger lives here as canonical JSON (see
+    /// `TunnelReviewLedger`). Nil for tunnels that have never carried a
+    /// review record. Decoded tolerantly from `.json`/`.text` read-back;
+    /// unknown keys inside the JSON are preserved on rewrite.
+    public let ext: String?
+
     /// Designated initializer.
     public init(
         id: String,
@@ -118,7 +127,8 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
         filedAt: Date,
         tombstonedAt: Date? = nil,
         removedByBatch: String? = nil,
-        orderKey: Double? = nil
+        orderKey: Double? = nil,
+        ext: String? = nil
     ) {
         self.id = id
         self.sourceWing = sourceWing
@@ -137,6 +147,7 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
         self.tombstonedAt = tombstonedAt
         self.removedByBatch = removedByBatch
         self.orderKey = orderKey
+        self.ext = ext
     }
 }
 

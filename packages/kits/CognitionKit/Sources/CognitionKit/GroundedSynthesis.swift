@@ -45,15 +45,54 @@ public struct GroundedSynthesis: Recipe {
         public let frame: RecallFrame
         /// Hybrid-recall tuning knobs. Defaults to `.default`.
         public let tuning: RecallFrameTuning
+        /// Cue terms for the lexical RRF lane. When non-empty, drawers are
+        /// reranked by distinct-cue-term-match count before synthesis,
+        /// surfacing the most query-relevant drawers over the most recent.
+        /// Default [] = input-order recency lane only (previous behaviour,
+        /// bit-identical output). Forwarded to `hybridRecall(cueTerms:)`.
+        public let cueTerms: [String]
+        /// Maximum drawers fed into synthesis, applied AFTER reranking.
+        /// The most cue-relevant drawers survive the cap, not the most
+        /// recent. nil = no truncation (previous behaviour). Trial 2
+        /// measured client timeouts when synthesis ran over a 200-drawer
+        /// pool; the cap bounds the synthesizer's work while the cue-pool
+        /// bound keeps the ranking lane wide.
+        public let cap: Int?
+        /// Raw query text for the SCORED second lane (BM25 + vector via
+        /// the GLK `.unionBest`/`.raw` request — the lane PreciseRecall's
+        /// coarse grab uses). The scored lane reaches relevant rows that
+        /// share NO cue terms with the question — the semantic gap that
+        /// capped the lexical-only pool at 34/50 misses in trial 4. nil =
+        /// lexical-only grounding (previous behaviour).
+        public let query: String?
+        /// Exclude rows gated by provenance sensitivity before synthesis.
+        /// MCP read surfaces enable this because recall-frame sensitivity
+        /// filters cover the adjective axis, not provenance bits 30...35.
+        public let excludeProvenanceSensitive: Bool
 
         public init(
             frame: RecallFrame,
-            tuning: RecallFrameTuning = .default
+            tuning: RecallFrameTuning = .default,
+            cueTerms: [String] = [],
+            cap: Int? = nil,
+            query: String? = nil,
+            excludeProvenanceSensitive: Bool = false
         ) {
             self.frame = frame
             self.tuning = tuning
+            self.cueTerms = cueTerms
+            self.cap = cap
+            self.query = query
+            self.excludeProvenanceSensitive = excludeProvenanceSensitive
         }
     }
+
+    /// Wide bound on each grounding lane's pool. The cue predicate (lane A)
+    /// and the scored search (lane B) both scope hard already; this bound
+    /// only guards pathological matches. 200 measured tolerable end-to-end
+    /// (0.1 s rerank after the shingle-cache fix); the user's `cap` bounds
+    /// what feeds synthesis, not this.
+    public static let groundingPoolBound = 200
 
     /// Recipe output: the synthesized context document and the number
     /// of drawers it was grounded on.
@@ -90,6 +129,20 @@ public struct GroundedSynthesis: Recipe {
         // Spec B-5: verify capabilities before any substrate touch.
         try verifyCapabilities(required: requiredCapabilities)
 
+        // Validate cap before the recipe begins work. Swift's
+        // `Array.prefix(_ maxLength: Int)` panics when `maxLength < 0`
+        // (the standard library asserts `maxLength >= 0` via a precondition).
+        // A zero cap produces an empty synthesis set, which is a vacuous
+        // result; treat it as a caller error consistent with the pattern
+        // established by `tooManyPlans` and `tooManyOriginEntries` (reject
+        // before any work begins). Mirrors Rust guard for `Some(0)` on the
+        // `usize` path where negative values are structurally impossible.
+        if let cap = input.cap {
+            guard cap > 0 else {
+                throw RecipeError.invalidCap(value: cap)
+            }
+        }
+
         // Capture the recipe-start timestamp once at the entry boundary for
         // paired start/complete telemetry. The clock is read unconditionally
         // regardless of whether monitoring is enabled; it does not affect the
@@ -112,11 +165,48 @@ public struct GroundedSynthesis: Recipe {
         //    Contradiction recipe.
         var fullFrame = input.frame
         fullFrame.hydrationLevel = .full
+        // Forward cueTerms so the lexical RRF lane ranks by distinct-term-match
+        // count. Empty cueTerms = input-order recency (previous behaviour).
+        //
+        // GROUNDED POOL CONSTRUCTION — the recipe owns both lanes:
+        //   Lane A (lexical): the base frame + an OR of contentMatches
+        //   predicates over the cue terms, wide-bounded. Reaches rows that
+        //   literally contain a distinctive question word.
+        //   Lane B (scored): the base frame WITHOUT the cue predicate,
+        //   driven by the raw query through the GLK scored search
+        //   (`.unionBest`/`.raw`, BM25 + vector). Reaches relevant rows
+        //   that share NO question words — the semantic gap measured as
+        //   34/50 pool misses in trial 4.
+        let grounded = !input.cueTerms.isEmpty
+        var laneAFrame = fullFrame
+        var scoredLane: ScoredLane? = nil
+        if grounded {
+            let poolBound = max(input.cap ?? 0, Self.groundingPoolBound)
+            laneAFrame.filterChain.append(
+                .any(input.cueTerms.map { .contentMatches($0) }))
+            laneAFrame.limit = poolBound
+            if let query = input.query {
+                var laneBFrame = fullFrame
+                laneBFrame.limit = poolBound
+                scoredLane = ScoredLane(
+                    frame: laneBFrame,
+                    queryText: query,
+                    traceLimit: input.cap ?? input.tuning.pageSize)
+            }
+        }
+
+        // Lane weighting lives in hybridRecall (the recency-shall-not-
+        // dominate invariant): with cue terms and no genuine relevance in
+        // the semantic lane it goes lexical-dominant; with a live scored
+        // lead block it honors the caller's fusion split. The recipe passes
+        // its tuning through untouched.
         let stream = try await hybridRecall(
-            fullFrame,
+            laneAFrame,
             handle: estate,
             on: kit,
-            tuning: input.tuning
+            tuning: input.tuning,
+            cueTerms: input.cueTerms,
+            scoredLane: scoredLane
         )
 
         // 2. Drain every page. hybridRecall reranks the FULL result
@@ -128,24 +218,41 @@ public struct GroundedSynthesis: Recipe {
         for await page in stream {
             pages.append(page)
         }
-        let allRows = pages.flatMap { $0.rows }
+        let recalledRows = pages.flatMap { $0.rows }
+        let allRows = input.excludeProvenanceSensitive
+            ? recalledRows.filter { $0.sensitivity != .restricted && $0.sensitivity != .secret }
+            : recalledRows
 
-        // 3. Synthesize over the full recalled set, presented as one
+        // Apply cap BEFORE synthesis so the synthesizer's work is bounded
+        // by the user limit, not the pool size. Cap is applied after reranking:
+        // the most cue-relevant drawers survive, not the most recent.
+        // Type inference retains the element type without spelling the ambiguous
+        // `Drawer` name (see file-header type-resolution note).
+        // nil cap = no truncation (previous behaviour).
+        let rowsToSynthesize = input.cap.map { Array(allRows.prefix($0)) } ?? allRows
+
+        // 3. Synthesize over the (capped, reranked) set, presented as one
         //    terminal page. Read-only (C-9): no estate write.
         let combined = RecallStream.Page(
-            rows: allRows, pageIndex: 0, isLast: true
+            rows: rowsToSynthesize, pageIndex: 0, isLast: true
         )
+        // Cue-grounded: every ranked survivor must be VISIBLE in the
+        // document, so keyInsights scales to the synthesized set (trial 3
+        // measured 30/35 misses with the answer ranked into the capped set
+        // but invisible behind the historical 3-row excerpt). Digest mode
+        // keeps the 3-row default.
         let context = try await ContextSynthesizer.synthesize(
-            from: combined, estate: estate
+            from: combined,
+            estate: estate,
+            maxKeyInsights: input.cueTerms.isEmpty ? 3 : rowsToSynthesize.count
         )
 
         // Emit cognitionkit.recipe.run with status "complete". The step_count
-        // tag is the number of recalled drawers that fed the synthesis —
-        // the meaningful unit of work for this recipe. Byte-identical to
-        // the output whether monitoring is on or off (C-Det: telemetry is
-        // additive; allRows.count is already computed above).
-        emitRecipeComplete(name: name, stepCount: allRows.count, ts: startTs)
+        // tag is the number of drawers that fed synthesis (post-cap) so the
+        // telemetry reflects the synthesizer's actual work. Byte-identical to
+        // the output whether monitoring is on or off (C-Det: additive telemetry).
+        emitRecipeComplete(name: name, stepCount: rowsToSynthesize.count, ts: startTs)
 
-        return Output(context: context, drawerCount: allRows.count)
+        return Output(context: context, drawerCount: rowsToSynthesize.count)
     }
 }

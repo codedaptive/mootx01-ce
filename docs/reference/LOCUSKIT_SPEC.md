@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.18.0
+version: 1.19.0
 status: active
-date: 2026-08-04
+date: 2026-08-07
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1030,7 +1030,50 @@ NULL-together lifecycle.
 
 *End of LocusKit Specification.*
 
+## § 15 — Tunnel review state (ext ledger + bits 14/15)
+
+The review ladder's per-tunnel state (MXE-CT3) lives in LocusKit;
+review POLICY (who may endorse, when an objection withdraws) lives in
+GeniusLocusKit (GENIUSLOCUSKIT_SPEC.md § TIERED_CONTRADICTION).
+
+**Storage.** `Tunnel.ext` is a JSON side-car column. Its review-ladder
+tenant is `TunnelReviewLedger`: endorsement votes (one per distinct
+endorser — a repeat endorsement by the same endorser refreshes its
+timestamp only), objections with reviewer identity, and `reviewedBy`
+recorded on every transition. Serialization is canonical and
+byte-identical across ports. Unknown ext tenants are preserved on
+parse/serialize; a corrupt ledger fails loud (`invalidContent`) rather
+than being overwritten.
+
+**Bitmap.** Bits 14 and 15 of `operationalBitmap`:
+- bit 14 `isEndorsed` — set on first model endorsement; lifecycle
+  stays `.proposed`.
+- bit 15 `isContested` — set when the ledger holds BOTH a model
+  endorsement and a model objection.
+Both are computed accessors; no Bool stored properties (schema
+invariant). `withEndorsed()` / `withContested()` return bit-setting
+copies.
+
+**Verbs.** `Estate.getTunnel(id:)` reads one tunnel by id.
+`Estate.stampTunnelReview(id:operationalBitmap:ext:)` persists the
+review state (bitmap + ledger) in ONE update — the write primitive
+behind the GLK endorse/object verbs; it throws `tunnelNotFound` for an
+unknown id and interprets nothing. `respondToTunnel` (accept →
+`.active`, reject → `.withdrawn`, `.proposed`-only) additionally
+records `changedBy` into the ledger's `reviewedBy` — reviewer identity
+is recorded on accept and reject alike.
+
 ## Changelog
+
+### 1.19.0 -- 2026-08-07
+
+- New § 15 — Tunnel review state (MXE-CT3): `Tunnel.ext` JSON side-car
+  column with the `TunnelReviewLedger` tenant (canonical byte-identical
+  serialization, unknown tenants preserved, corrupt ledgers fail loud),
+  operational bits 14 (`isEndorsed`) / 15 (`isContested`) as computed
+  accessors, `Estate.getTunnel` / `Estate.stampTunnelReview` (one-update
+  review-state persistence behind the GLK ladder verbs), and
+  `respondToTunnel` recording reviewer identity on every transition.
 
 ### 1.18.0 -- 2026-08-04
 

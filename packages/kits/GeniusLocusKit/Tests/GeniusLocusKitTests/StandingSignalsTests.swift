@@ -7,6 +7,11 @@ import PersistenceKitInMemory
 import SubstrateTypes
 @testable import GeniusLocusKit
 
+// Engram is a typealias for Fingerprint256 in EngramLib. Importing
+// SubstrateTypes gives us Fingerprint256; a local alias keeps test
+// code consistent with the VectorStore API vocabulary.
+private typealias Engram = Fingerprint256
+
 /// Firing tests for the default standing signals, including the training
 /// signal owned by the brain-layer governor.
 ///
@@ -273,6 +278,78 @@ struct StandingSignalsTests {
             }
         }.count
         #expect(associateCount == 0, "no pairs in empty store → no associate emissions")
+    }
+
+    /// Pins the default probe limit constant. Resident behavior must remain
+    /// byte-identical (50 item IDs per pass) when `probeLimit` is not
+    /// passed explicitly to `spec(...)`. Mirrors
+    /// `vector_similarity_signal_default_probe_limit_is_50` in the Rust
+    /// parity gate.
+    @Test
+    func vectorSimilaritySignalDefaultProbeLimitIs50() {
+        #expect(VectorSimilaritySignal.defaultProbeLimit == 50,
+            "defaultProbeLimit must be 50; resident behavior is byte-unchanged at this value")
+    }
+
+    /// Verifies that `probeLimit` is threaded to the `recentItemIDs(limit:)`
+    /// call inside the signal's emit closure. With `probeLimit: 0`, even a
+    /// non-empty store produces only the scan-summary diagnostic because no
+    /// item IDs are sampled and therefore no pairs are found. This
+    /// differentiates the wired limit from the empty-store baseline (where
+    /// the same result occurs for different reasons).
+    ///
+    /// Two identical Engrams (Hamming distance 0, well within the 64-bit
+    /// default threshold) are planted so that with the default `probeLimit`
+    /// the signal would emit an AssociateFrame — but with `probeLimit: 0`
+    /// it does not. Mirrors
+    /// `vector_similarity_signal_probe_limit_zero_emits_only_diagnostic_on_populated_store`
+    /// in the Rust parity gate.
+    @Test
+    func vectorSimilaritySignalProbeLimitZeroEmitsOnlyDiagnosticOnPopulatedStore() async throws {
+        let (kit, handle) = try await openOneEstate()
+
+        // Build a VectorStore and plant two identical Engrams (distance 0 ≤ 64).
+        // With the default probeLimit both items are sampled and the pair is
+        // found. With probeLimit = 0 the recentItemIDs call returns [] and the
+        // pair is never discovered.
+        let vsStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        try await vsStorage.open(schema: VectorStore.schemaDeclaration)
+        let vectorStore = VectorStore(storage: vsStorage)
+        let closeEngram = Engram.zero
+        try await vectorStore.addVector(
+            itemID: "probe-item-a", engram: closeEngram,
+            modelID: "test-model", modelVersion: "v1", filedAt: t0)
+        try await vectorStore.addVector(
+            itemID: "probe-item-b", engram: closeEngram,
+            modelID: "test-model", modelVersion: "v1", filedAt: t0)
+
+        let id = try await registerAndFire(
+            kit, in: handle,
+            spec: VectorSimilaritySignal.spec(
+                vectorStore: vectorStore,
+                modelID: "test-model",
+                probeLimit: 0),  // zero item IDs sampled → no pairs
+            cadence: VectorSimilaritySignal.defaultCadenceSeconds)
+
+        let report = try await report(kit, in: handle, for: id)
+        #expect(report.name == "vector-similarity")
+        // probeLimit = 0: even with two nearby vectors in the store, the signal
+        // must emit only the scan-summary diagnostic because no items are probed.
+        #expect(report.emissionCount == 1,
+            "probeLimit=0 on a populated store must produce only the scan-summary diagnostic")
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "vector_similarity.scan.summary")
+        // No associate outcomes: zero item IDs probed → zero candidate pairs.
+        let associateCount = report.recentOutcomes.filter { outcome in
+            switch outcome {
+            case .routed(let v), .routedButVerbStubbed(let v): return v == "associate"
+            case .routeFailed(let v, _): return v == "associate"
+            default: return false
+            }
+        }.count
+        #expect(associateCount == 0,
+            "probeLimit=0 must produce no associate emissions even on a populated store")
     }
 
     @Test

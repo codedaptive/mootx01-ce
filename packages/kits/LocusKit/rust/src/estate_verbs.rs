@@ -1586,6 +1586,31 @@ impl Estate {
         self.store.all_tunnels()
     }
 
+    /// Fetch one tunnel by id (`None` when absent). Read-only estate-level
+    /// pass-through over `DrawerStore::get_tunnel` — the GLK review-ladder
+    /// verbs (endorse/object) read the current bitmap and ext ledger
+    /// through this before stamping. Mirrors Swift `Estate.getTunnel(id:)`.
+    pub fn get_tunnel(&self, id: &str) -> Result<Option<crate::tunnel::Tunnel>, LocusKitError> {
+        self.store.get_tunnel(id)
+    }
+
+    /// Persist a review-ladder state change (operational bitmap + ext
+    /// review ledger) in one update. Estate-level surface over
+    /// `DrawerStore::stamp_tunnel_review` — the write primitive behind
+    /// the GLK endorsement verbs. LocusKit owns the column; GLK owns the
+    /// review policy. Returns `TunnelNotFound` when the tunnel does not
+    /// exist, or `TunnelNoLongerProposed` when the tunnel has left
+    /// `Proposed` lifecycle since the caller's last read (GK-01 OCC guard).
+    /// Mirrors Swift `Estate.stampTunnelReview(id:operationalBitmap:ext:)`.
+    pub fn stamp_tunnel_review(
+        &self,
+        tunnel_id: &str,
+        operational_bitmap: i64,
+        ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        self.store.stamp_tunnel_review(tunnel_id, operational_bitmap, ext)
+    }
+
     /// All non-tombstoned, non-retired tunnels estate-wide.
     ///
     /// Active-edge view: retired tunnels (bit 13 of `operational_bitmap` set) are

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.28.0
+version: 1.34.0
 status: accepted-1.1-target
-date: 2026-08-04
+date: 2026-08-07
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -229,13 +229,55 @@ Three tools plus one lens expose the content-driven contradiction hunter
   rejected pair is never re-proposed. Optional `probe_limit`
   (default 500, max 10000) and `now` (ISO8601, deterministic runs). With
   no vector index the report says so honestly and scans nothing.
-- `moot_review_tunnel` (Tier 2, ask tier) — settles a proposed tunnel:
-  `verdict: "accept"` → lifecycle `active`; `"reject"` → `withdrawn`.
-  Only proposed-lifecycle tunnels are reviewable; not-found and
+
+  Tier modes (optional `tier`: integer 1|2|3 or `"all"`, default
+  `"all"`; optional `top_k`: integer 1...50, default 5 — out-of-domain
+  values are `invalidParams` naming the valid domain):
+  - `tier` absent or `"all"` — the legacy sweep report above, byte
+    for byte, followed by an appended tiered synthesis digest
+    (GLK `tieredContradictionSearch` synthesis mode): sections
+    `TIER 1 — CONTRADICTION (proven)`, `TIER 2 — CONFLICT CANDIDATE`,
+    `TIER 3 — DIVERGENCE`, always in tier order, never interleaved.
+    The digest prints per-tier lane counts
+    (fetched/returned/promotedAway/backfilled) plus per-lane elapsed
+    seconds and a synthesis wall time, measured at the dispatch layer
+    (engines are deterministic; clocks live at the I/O boundary).
+    Tier-1 blocks render through the same gated dense-row +
+    redaction path as the typed projection section (secret → counted
+    only; restricted → coordinate-digest line only); tiers 2/3 render
+    drawer pair + cue kind + score, never content snippets.
+  - `tier` 1|2|3 — a READ-ONLY purpose search of that single lane
+    (no legacy sweep, no tunnels filed, no writes); renders only the
+    requested tier's section.
+- `moot_review_tunnel` (Tier 2, ask tier) — reviews a proposed tunnel
+  on the review ladder (Rejected / Proposed / Endorsed / Accepted).
+  `verdict: "accept" | "reject" | "endorse"`, optional `reviewed_by`
+  (reviewer identity, default `"user"`):
+  - `accept` (user-only) → lifecycle `active`; `accept` with a
+    non-`"user"` `reviewed_by` is `invalidParams` ("edge activation is
+    user-only") — no model verdict ever activates an edge.
+  - `reject` with `reviewed_by: "user"` → `withdrawn` (durable dedup).
+  - `reject` with a model `reviewed_by` → GLK `objectToTunnel`: with no
+    model endorsement on record the proposal withdraws (reopenable);
+    with one it stays `proposed` and is marked contested (bit 15).
+  - `endorse` (any reviewer, user included) → GLK `endorseTunnel`:
+    records an endorsement vote in the ext review ledger and sets the
+    endorsed bit (14) without touching lifecycle.
+  Reviewer identity is recorded in the tunnel's ext review ledger on
+  every transition. The tier lens recorded on ladder votes derives from
+  the proposal's label family (`dcp: ` → 1, `tier2:` → 2, `tier3:` → 3;
+  labels outside the matrix family default to tier 3). Only
+  proposed-lifecycle tunnels are reviewable; not-found and
   not-proposed return clean tool-level errors.
 - `moot_dream` — runs the same hunt sweep as its content-driven third
   phase (probe budget 500/call) and reports `contradictionsProposed` /
-  `contradictionCandidatesBorderline` in the cycle summary.
+  `contradictionCandidatesBorderline` in the cycle summary. After the
+  hunt phase it files tier-labeled conflict-tunnel candidates at all
+  three tiers via GLK `proposeConflictTunnels` (decline-matrix
+  suppression applies; filing never activates) and reports
+  `conflictTunnelsFiled: tier1 N, tier2 N, tier3 N (suppressed: N,
+  ceilingSkipped: N)`, then appends the tiered synthesis digest
+  (topK 5) through the same shared renderer the hunt tool uses.
 - `moot_lens_contradiction` — reports lifecycle tiers on contradicts
   edges: active (confirmed) and proposed (flagged
   `proposed (agent-derived, unreviewed)`, shown by default);
@@ -327,6 +369,35 @@ moot_lens_associations carries exemplar drawer ids capped at 5, so every
 lens claim is hydratable via moot_memory_get without a fresh search. For
 the full enumeration see
 ARIA_MCP_INTERFACE.md §2.
+
+`moot_synthesize` grounding contract: the optional `query` argument scopes
+the recalled pool before synthesis. Distinctive terms are extracted from
+the query by a deterministic pure function that MUST stay
+behavior-identical across ports (alphanumeric runs, lowercased; stopwords
+and fragments under 3 chars drop unless digit-bearing; first-appearance
+dedupe; capped at 12 terms) and become an OR of case-insensitive content
+predicates AND-composed with the optional `filter` kind. The response
+names the cue on a `query:` line — a grounded synthesis and a whole-estate
+digest are different measurements and MUST be distinguishable from the
+response text alone. A query whose every token is dropped MUST be rejected
+with invalidParams, never silently degraded to the unscoped digest. With
+`query` omitted the tool produces the whole-estate digest (the pre-1.34
+behavior, unchanged).
+
+Ranking rule (1.31, extended 1.32): when a cue is present the pool is
+HYBRID — a lexical lane (rows containing distinctive query terms) unioned
+with a scored lane (BM25 + vector over the raw query, reaching rows that
+share no query words) — and the user's `limit` MUST cap the pool AFTER
+ranking. Fusion weighting is legitimate ONLY while the scored lane
+carries genuine relevance (hits bearing scoring evidence); when the
+scored lane is absent or degrades to bitmap-only hits, ordering MUST be
+lexical-dominant with recency strictly a tie-break. Any weighting that
+lets a recency-ordered lane override a one-step relevance difference is
+non-conformant: the recency lane's rank spread grows with pool size while
+the adjacent-rank relevance gap stays constant, so blended weights degrade
+to recency-first exactly on the large estates where grounding matters. A
+zero-term-match row admitted by the scored lane must never outrank a
+term-matching row.
 
 ### Conformance contract
 
@@ -963,6 +1034,71 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.34.0 -- 2026-08-07
+
+- Tiered contradiction surface (MXE-CT3 P3). `moot_hunt_contradictions`
+  gains optional `tier` (1|2|3|"all", default "all") and `top_k`
+  (1...50, default 5): default mode appends a tiered synthesis digest
+  after the unchanged legacy report; a single tier is a read-only
+  purpose search. `moot_review_tunnel` gains `reviewed_by` (default
+  "user") and the `endorse` verdict — the review ladder: accept is
+  user-only, a model reject is an objection (withdraw or contest),
+  endorse records a vote without activating. `moot_dream` files
+  tier-labeled conflict-tunnel candidates (`proposeConflictTunnels`)
+  after its hunt phase and appends the tiered digest via the shared
+  renderer.
+
+### 1.33.0 -- 2026-08-06
+
+- New recipe tool `moot_recall_connected`: multi-hop retrieval by graph
+  diffusion — a scored anchor search seeds a deterministic
+  walk-with-restart over tunnels (validated) ∪ dream-produced pending
+  associations (Bob's 2026-08-06 ruling: pending edges are walkable,
+  ~2–3% less confident; the discount is recorded, not applied — below
+  Monte Carlo visit-count resolution). RRF fusion with the anchor
+  ranking; memory_search output shape + a `connected:` lane-provenance
+  line. The EXPENSIVE recall path; escalation is caller-side. Tool
+  totals: 76 vault-on / 70 vault-off (Swift), 72 / 66 (Rust surface).
+
+### 1.32.0 -- 2026-08-06
+
+- `moot_synthesize` grounding contract extended to HYBRID pool
+  acquisition: the raw query drives a scored BM25+vector lane beside the
+  lexical term lane; ranking-rule paragraph updated (fusion only while
+  the scored lane bears scoring evidence; lexical-dominant otherwise;
+  zero-term-match rows never outrank term matches).
+
+### 1.31.0 -- 2026-08-06
+Cue-ranking grounding contract extension for `moot_synthesize`:
+
+- When `query` is present, the recall frame is widened to
+  `max(limit, groundedSynthesisCuePoolBound=200)` so the full matched pool
+  is available for ranking. The user's `limit` is applied as a post-rank cap so
+  only the top-N cue-ranked drawers feed synthesis.
+- The dispatch layer extracts `cueTerms` from the grounding terms and passes
+  them through to `GroundedSynthesis.Input` so the HybridRecallEngine's
+  cue-term lane can rank the pool before the cap is applied.
+- Empty `cueTerms` (no query) preserves previous output exactly — no change
+  to the whole-estate digest path.
+
+### 1.30.0 -- 2026-08-06
+
+- `moot_synthesize` grounding contract: optional `query` scopes the
+  recalled pool via deterministic grounding-term extraction (port-identical
+  pure function) into OR'd case-insensitive content predicates, AND-composed
+  with `filter`; the response names the cue; all-stopword queries are
+  invalidParams. Query omitted = whole-estate digest, unchanged.
+
+### 1.29.0 -- 2026-08-05
+
+- moot_dream gains the association sweep (step 3.5): `associates`
+  argument `all` (full-estate coverage, for post-import runs) /
+  `recent` (default, the standing-signal window) / `off`. Report line
+  appends `associationsWritten: N (probed: P, deduplicated: D)` —
+  additive and zero-gated (silent when nothing was probed or written).
+  Dreaming now triggers every cognition layer: matrix, proposals,
+  contradiction hunt, associations, subject backfill.
 
 ### 1.28.0 -- 2026-08-04
 

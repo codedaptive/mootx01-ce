@@ -395,13 +395,30 @@ enum TeachmeGuides {
         """
 
     private static let reviewTunnelGuide = """
-        moot_review_tunnel — Settle a PROPOSED connection: accept or reject.
+        moot_review_tunnel — Review a PROPOSED connection on the review
+        ladder: accept (user-only), reject, or endorse.
 
         Proposed edges come from the contradiction hunter (background scout,
         moot_dream sweep, or moot_hunt_contradictions) and from agent-filed
-        moot_link_memories proposed:true links. Accept activates the edge;
-        reject withdraws it PERMANENTLY — a rejected pair is never
-        re-proposed by the hunter.
+        moot_link_memories proposed:true links.
+
+        The ladder (Rejected / Proposed / Endorsed / Accepted):
+          - accept — activates the edge. USER-ONLY: accept with a model
+            reviewed_by is refused (invalidParams). No number of model
+            endorsements ever activates an edge.
+          - endorse — records an endorsement vote (any reviewer, the user
+            included) WITHOUT activating. Endorsement weight feeds
+            review-queue ranking only.
+          - reject with reviewed_by "user" (the default) — withdraws
+            PERMANENTLY; the pair is never re-proposed.
+          - reject with a model reviewed_by — an OBJECTION: with no model
+            endorsement on record the proposal withdraws (the user can
+            reopen it); with one it stays proposed and is marked
+            CONTESTED — genuine model disagreement, ranked for user
+            attention.
+
+        reviewed_by is the reviewer identity recorded in the review
+        ledger (default "user"; models pass their model id).
 
         Only tunnels currently in the proposed lifecycle are reviewable;
         reviewing an already-settled edge is refused.
@@ -412,6 +429,8 @@ enum TeachmeGuides {
 
         Examples:
           { "tunnel_id": "<tunnel-uuid>", "verdict": "accept" }
+          { "tunnel_id": "<tunnel-uuid>", "verdict": "endorse",
+            "reviewed_by": "claude" }
           { "tunnel_id": "<tunnel-uuid>", "verdict": "reject",
             "reason": "not a real conflict — different services" }
 
@@ -419,8 +438,10 @@ enum TeachmeGuides {
           moot_review_tunnel: <tunnel-uuid> accepted — the contradicts link is now active.
 
         Common mistakes:
-          - Rejecting to "snooze" a finding. Rejection is durable; the pair
-            will never be re-proposed.
+          - Rejecting to "snooze" a finding. A user rejection is durable;
+            the pair will never be re-proposed.
+          - Passing verdict "accept" as a model reviewer. Activation is
+            the user's alone — endorse instead.
           - Reviewing an active or withdrawn tunnel; only proposed ones qualify.
         """
 
@@ -445,6 +466,25 @@ enum TeachmeGuides {
         borderline candidates (or not at all) — your judgment is the
         second stage.
 
+        The three-tier taxonomy (tier / top_k args):
+          TIER 1 — CONTRADICTION (proven): typed-lane proofs. Constraints
+            proved the conflict; no lexical score exists here.
+          TIER 2 — CONFLICT CANDIDATE: structural lexical cues (negation
+            asymmetry, revision markers, word exclusion).
+          TIER 3 — DIVERGENCE: same claim shape, different value — the
+            divergence word family (discrepancy, variance, disparity,
+            inconsistency, divergence) is this tier's class.
+        Tiers are epistemic classes, not score bands: sections always
+        render in tier order and are never interleaved into one ranked
+        list — a strong tier-3 cue never outranks a weak tier-1 proof.
+
+        tier absent or "all" (default): the legacy sweep report exactly
+        as before, followed by a tiered synthesis digest (duplicates
+        promote to their highest tier; lower tiers backfill; per-lane
+        counts and elapsed seconds included). tier 1|2|3: a READ-ONLY
+        purpose search of that lane alone — nothing is filed, no writes.
+        top_k (default 5, valid 1...50) bounds each tier section.
+
         Requires the corpus search index — run moot_reindex after bulk
         import. The same sweep runs inside moot_dream and hourly in the
         resident daemon's contradiction scout; this tool is the on-demand form.
@@ -454,18 +494,25 @@ enum TeachmeGuides {
         Example (full sweep, deterministic):
           { "probe_limit": 2000, "now": "2026-06-11T00:00:00Z" }
 
+        Example (read-only tier-3 purpose search):
+          { "tier": 3, "top_k": 10 }
+
         Response:
           moot_hunt_contradictions: probesScanned=N pairsScreened=N
           PROPOSED <n>: <src-id> contradicts <tgt-id> [cue score] (tunnel <uuid>)
           CANDIDATE <n>: <src-id> vs <tgt-id> [cue score]
             a: <snippet>
             b: <snippet>
+          TIER 1 — CONTRADICTION (proven) / TIER 2 — CONFLICT CANDIDATE /
+          TIER 3 — DIVERGENCE sections follow (synthesis digest).
 
         Common mistakes:
           - Running before moot_reindex on a fresh import; the report will
             say the vector index is unavailable and scan nothing.
           - Treating borderline candidates as findings. They are unjudged;
             adjudicate before recording.
+          - Expecting a single-tier run to file tunnels. It is a pure
+            read; only the default/"all" sweep persists findings.
         """
 
     private static let connectionSearchGuide = """
@@ -695,9 +742,12 @@ enum TeachmeGuides {
         let tier2 = ToolProjection.connectionTools().count
         let tier3 = ToolProjection.knowledgeGraphTools().count
         let tier4 = ToolProjection.journalTools().count
-        // estateTools() always includes moot_palace_import (8 total).
-        // The 7 non-vault-gated estate tools are always present.
-        let tier5Always  = ToolProjection.estateTools().filter { $0.name != "moot_palace_import" }.count
+        // estateTools() always includes moot_palace_import and
+        // moot_json_import (9 total). The 7 non-vault-gated estate tools
+        // are always present.
+        let tier5Always  = ToolProjection.estateTools().filter {
+            $0.name != "moot_palace_import" && $0.name != "moot_json_import"
+        }.count
         // Tier 6: 4 Tier-6 recipe tools + all lens tools (moot_list_lenses shows these 27).
         let tier6RecipeCount = 4  // list_lenses, synthesize, recall_precise, recall_shaped
         let tier6 = tier6RecipeCount + LensTools.tools().count
@@ -739,7 +789,7 @@ enum TeachmeGuides {
               moot_estate_status, moot_estate_map, moot_estate_ping,
               moot_monitoring_status, moot_reindex, moot_drain_status,
               moot_reclassify_fdc
-              [vault-on only: moot_palace_import]
+              [vault-on only: moot_palace_import, moot_json_import]
 
             Tier 6 — Cognition (\(tier6) tools):
               moot_list_lenses, moot_synthesize, moot_recall_precise,
@@ -946,15 +996,16 @@ enum TeachmeGuides {
 
         case "moot_reclassify_fdc":   return reclassifyFDCGuide
         case "moot_palace_import":    return palaceImportGuide
+        case "moot_json_import":      return jsonImportGuide
         default: return nil
         }
     }
 
     private static let dreamGuide = """
-        moot_dream — Dream the estate: matrix, dreaming cycle, and a
-        contradiction-hunt sweep.
+        moot_dream — Dream the estate: matrix, dreaming cycle, contradiction-hunt
+        sweep, and vector-similarity association sweep.
 
-        Three effects:
+        Four effects:
           1. Rebuilds the co-occurrence/temporal MATRIX TIER from the
              estate's audit log and registers it for recall scoring. The
              matrix is built by dreaming, NOT by capture — so a freshly
@@ -967,26 +1018,41 @@ enum TeachmeGuides {
              screens them for lexical conflict, and persists strong findings
              as PROPOSED contradicts links (review with
              moot_lens_contradiction, settle with moot_review_tunnel).
+          3.25. Files tier-labeled CONFLICT-TUNNEL CANDIDATES at all three
+             contradiction tiers (typed proof, structural lexical cue,
+             value divergence) that survive the decline matrix. Filing
+             never activates: candidates land as PROPOSED for the review
+             ladder, and the report counts filed/suppressed/ceilingSkipped.
+          3.5. Runs one ASSOCIATION SWEEP: mines kNN proximity pairs from
+             the estate's vector index and writes new association tunnels
+             directly. Dedup is durable — existing active associations are
+             skipped so re-running never duplicates edges. Three modes via
+             the `associates` argument:
+               "recent" (default) — probe the 50 most-recently-filed items
+               "all"              — probe every item (use after bulk import)
+               "off"              — skip this step entirely
 
-        HONEST SCOPE — dreaming-cycle proposals (effect 2) are
-        USAGE-DRIVEN: mined from recall co-occurrence (which memories the
+        Important scope note: dreaming-cycle proposals (effect 2) are
+        USAGE-DRIVEN — mined from recall co-occurrence (which memories the
         estate recalls together, accumulated over use), NOT from memory
         content. A freshly imported estate that has not been recalled
         against yet will legitimately report 0 cycle proposals — that is
-        expected, not a fault. Content is examined only by the
-        contradiction-hunt sweep (effect 3), which needs the corpus search
-        index (run moot_reindex after bulk import).
+        expected, not a fault. Content is examined by the
+        contradiction-hunt sweep (effect 3) and the association sweep
+        (effect 3.5), both of which need the vector index (run
+        moot_reindex after bulk import).
 
         When to use:
           - After bulk-loading an estate, before relying on matrix /
             association recall (moot_recall_precise composition=matrix,
-            text+matrix, weighted-all). Run moot_reindex first so the
-            hunt sweep has vectors to mine.
+            text+matrix, weighted-all). Run moot_reindex first so both
+            content sweeps have vectors to mine. Use associates="all" for
+            full-estate association coverage after import.
           - To trigger an association-mining + contradiction-hunt pass on
             demand rather than waiting for the resident governor's schedule.
 
-        Example (deterministic run):
-          { "now": "2026-06-11T00:00:00Z" }
+        Example (deterministic run, full association sweep):
+          { "now": "2026-06-11T00:00:00Z", "associates": "all" }
 
         Response:
           moot_dream: matrix rebuilt, dreaming cycle complete
@@ -996,6 +1062,10 @@ enum TeachmeGuides {
           belowThreshold: N
           contradictionsProposed: N
           contradictionCandidatesBorderline: N
+          associationsWritten: N (probed: N, deduplicated: N)
+          conflictTunnelsFiled: tier1 N, tier2 N, tier3 N (suppressed: N, ceilingSkipped: N)
+          TIER 1 — CONTRADICTION (proven) / TIER 2 — CONFLICT CANDIDATE /
+          TIER 3 — DIVERGENCE sections follow (tiered synthesis digest).
         """
 
     // MARK: - Maintenance
@@ -1043,6 +1113,48 @@ enum TeachmeGuides {
             the stored FDC/Q-ID lattice anchor.
           - Treating 000 as a bug. 000 is the intentional unclassified sentinel
             for content the classifier should not force into a knowledge class.
+        """
+
+    private static let jsonImportGuide = """
+        moot_json_import — import a seed file (JSON schema v1) into the estate.
+
+        The bulk seeding lane: a rigid, versioned JSON file carrying records
+        (content + explicit event times), facts, and tunnels. The canonical
+        format definition is packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.
+
+        The two guarantees that distinguish it from the other import lanes:
+          - ZERO-PARTIAL-WRITE: the WHOLE file is validated before any write.
+            A bad file (wrong format_version, duplicate ids, dangling
+            record_id/from/to references, empty content, bad event_time,
+            unknown keys) is ONE error naming the first offending element,
+            and the estate is untouched.
+          - STRICT APPEND: any lineage collision with memories already in
+            the estate is a hard error — this lane never dedups, never
+            updates, never resurrects. A seed file either builds exactly
+            what it says or builds nothing.
+
+        When to use vs siblings:
+          - moot_palace_import — when importing a MemPalace, not a seed file
+          - moot_vault_import — when importing a Markdown/Obsidian vault
+          - moot_file_memory — when adding a single memory, not a bulk seed
+
+        Arguments:
+          - path (required): absolute path to the seed JSON file.
+          - wing (optional): default wing for records that omit `wing`.
+          - mode (optional, encode SPEED only): foreground (default) or
+            background. The write strategy is always windowed bulk.
+
+        Post-import: encode/index work is enqueued automatically; keyword and
+        structured recall work almost immediately, and semantic/vector recall
+        lights up after the encode work settles — poll moot_drain_status
+        until idle. The audit receipt carries the seed file's SHA-256
+        (seedSha256), so the estate is traceable to its exact seed bytes.
+
+        Common mistakes:
+          - Re-importing the same seed into the same estate (strict append
+            makes that a lineage-collision error — use a fresh estate).
+          - Omitting the trailing Z on event_time (schema v1 pins UTC).
+          - Expecting count-and-skip behavior: this lane has no skips.
         """
 
     private static let palaceImportGuide = """

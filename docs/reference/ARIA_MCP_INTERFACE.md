@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.32.0
+version: 1.38.0
 status: accepted-1.1-target
-date: 2026-08-04
+date: 2026-08-07
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -211,10 +211,15 @@ not a ranked set); `subject`, `predicate`,
 not `content` — mirrors the `DiaryEntry.entry` substrate field); optional `query`
 for `moot_fact_search` (substring match across subject, predicate, and object;
 omit to return all active facts); `tunnel_id` + `verdict` (`"accept"` |
-`"reject"`, optional `reason`) for `moot_review_tunnel` (settles a PROPOSED
-tunnel: accept → active, reject → withdrawn — durable, the pair is never
-re-proposed by the contradiction hunter; only proposed-lifecycle tunnels are
-reviewable). `moot_link_memories` accepts an optional `proposed` (boolean,
+`"reject"` | `"endorse"`, optional `reviewed_by` — reviewer identity, default
+`"user"` — and optional `reason`) for `moot_review_tunnel` (the review
+ladder: accept → active, USER-ONLY — `accept` with a model `reviewed_by` is
+`invalidParams`; user reject → withdrawn — durable, the pair is never
+re-proposed by the contradiction hunter; model reject → objection (withdraw
+when no model endorsement exists, otherwise stays proposed and is marked
+contested); endorse → records an endorsement vote without activating; only
+proposed-lifecycle tunnels are reviewable). `moot_link_memories` accepts an
+optional `proposed` (boolean,
 default `false`) that files the link in the PROPOSED lifecycle instead of
 active — the agent-adjudication path for borderline candidates returned by
 `moot_hunt_contradictions`.
@@ -347,6 +352,17 @@ the 23 reasoning-lens tools below.
   `moot_distill`, `moot_recall_distilled`, `moot_recall_vague`,
   `moot_hunt_contradictions`
   (12 CognitionKit recipe tools)
+  - `moot_synthesize` — run the GroundedSynthesis recipe: hybrid-recall and
+    synthesize the recalled set into a grounded context document (summary,
+    patterns, success rate, recommendations, key insights). Optional `query`
+    grounds the synthesis: distinctive terms are extracted (stopwords and
+    <3-char fragments drop unless digit-bearing; lowercased; deduped; capped
+    at 12) and matched case-insensitively (OR) against memory content,
+    AND-composed with the optional `filter` kind, so only cue-relevant
+    memories feed the document; the response carries a `query:` line naming
+    the cue. A query whose every token is a stopword is rejected
+    (invalidParams) rather than silently degraded to an unscoped digest.
+    Omit `query` for the whole-estate digest (previous behavior, unchanged).
   - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
     required capabilities per entry. No estate args required.
   - `moot_recall_precise` — coarse-grab a generous candidate pool then re-rank by
@@ -361,12 +377,17 @@ the 23 reasoning-lens tools below.
     `filter` arg filters). Returns the same shape as `moot_memory_search`.
   - `moot_dream` — rebuild the co-occurrence/temporal matrix tier (the Brain's
     association layer the matrix recall lane scores against), run one dreaming
-    cycle (latent-alignment proposals + cycle diary), and run one
+    cycle (latent-alignment proposals + cycle diary), run one
     contradiction-hunt sweep (content screen over lexically-near memory
-    pairs; strong conflicts persist as PROPOSED contradicts links for review).
+    pairs; strong conflicts persist as PROPOSED contradicts links for review),
+    file tier-labeled conflict-tunnel candidates at all three contradiction
+    tiers (GLK `proposeConflictTunnels`; decline-matrix suppression applies,
+    filing never activates), and append the tiered synthesis digest (topK 5)
+    via the same shared renderer `moot_hunt_contradictions` uses.
     The matrix is built by dreaming, not by capture, so a freshly-loaded estate
     has an empty matrix until this runs. Returns a cycle summary including
-    contradiction counts.
+    contradiction counts plus a `conflictTunnelsFiled: tier1 N, tier2 N,
+    tier3 N (suppressed: N, ceilingSkipped: N)` line and the digest.
   - `moot_hunt_contradictions` — one bounded on-demand contradiction-hunt
     sweep: BM25 lexical candidate pairs from the corpus's inverted index
     (drawer-keyed Hamming kNN on the bespoke lane), screened by the
@@ -375,7 +396,15 @@ the 23 reasoning-lens tools below.
     `contradicts` tunnels (settle via `moot_review_tunnel`); borderline pairs
     return with content snippets for the calling agent to adjudicate via
     `moot_link_memories kind=contradicts proposed=true`. Optional
-    `probe_limit` (default 500, max 10000) and `now` (ISO8601). Requires the
+    `probe_limit` (default 500, max 10000) and `now` (ISO8601). Optional
+    `tier` (integer 1|2|3 or `"all"`, default `"all"`) and `top_k` (integer
+    1...50, default 5): the default mode appends a tiered synthesis digest
+    (`TIER 1 — CONTRADICTION (proven)` / `TIER 2 — CONFLICT CANDIDATE` /
+    `TIER 3 — DIVERGENCE` sections with per-lane counts and dispatch-layer
+    elapsed seconds) after the unchanged legacy report; a single tier is a
+    read-only purpose search of that lane alone (nothing filed).
+    Out-of-domain `tier`/`top_k` values are `invalidParams` naming the valid
+    domain. Requires the
     vector index (`moot_reindex` after bulk import). Dedup against ALL
     existing contradicts tunnels (any lifecycle) is durable — rejected pairs
     never re-propose. The same core pass runs inside `moot_dream` and hourly
@@ -1205,6 +1234,59 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.38.0 -- 2026-08-07
+
+- MXE-CT3 P3 tiered contradiction surface. `moot_hunt_contradictions`:
+  optional `tier` (1|2|3|"all", default "all") and `top_k` (1...50,
+  default 5); default mode appends the tiered synthesis digest, single
+  tier is a read-only purpose search. `moot_review_tunnel`: optional
+  `reviewed_by` (default "user"), `verdict` extended with `"endorse"`;
+  accept is user-only, a model reject is an objection. `moot_dream`:
+  files tier-labeled candidates after the hunt phase and appends the
+  tiered digest. Schemas declared identically in both ports.
+
+### 1.37.0 -- 2026-08-06
+
+- `moot_recall_connected` (recipe provenance, recall family, shares the
+  recall-results output schema): args query (required), wing, limit,
+  filter, estateID. Recipe tool roster 13.
+
+### 1.36.0 -- 2026-08-06
+
+- `moot_synthesize` grounding is now HYBRID: the raw query also drives a
+  scored BM25+vector lane (reaching memories that share no query words);
+  grounding becomes a ranking guarantee (term matches lead) rather than a
+  hard lexical exclusion. Dispatch passes the base frame + query + terms;
+  the recipe owns lanes and bounds.
+
+### 1.35.0 -- 2026-08-06
+Cue-ranking dispatch wiring for `moot_synthesize`:
+
+- `runGroundedSynthesis` (Swift) / `run_grounded_synthesis_tool` (Rust) compute
+  `frameLimit = max(userLimit, groundedSynthesisCuePoolBound=200)` and
+  `recipeCap = userLimit` when a query is present. Both are threaded through to
+  `GroundedSynthesis.Input` / `run_grounded_synthesis` so the cue-term reranker
+  sees the full matched pool before the user's limit caps the synthesis.
+- No change to the tool's public argument surface — this is an internal routing
+  contract change only.
+
+### 1.34.0 -- 2026-08-06
+
+- `moot_synthesize` gains optional `query`: grounding-term extraction
+  (stopword/short-fragment drop, digit exception, dedupe, cap 12) into an
+  OR of case-insensitive content predicates AND-composed with `filter`;
+  response names the cue with a `query:` line; all-stopword queries are
+  rejected as invalidParams. Both ports. Completes the GroundedSynthesis
+  recipe contract ("hybrid-recall a query and synthesize") at the ARIA
+  surface — previously the tool accepted no cue and always produced a
+  whole-estate recency digest.
+
+### 1.33.0 -- 2026-08-05
+
+- moot_dream `associates` argument (all|recent|off, default recent)
+  and the zero-gated `associationsWritten:` report line, both ports
+  (Swift step by the item-5 worker; Rust twin completes it).
 
 ### 1.32.0 -- 2026-08-04
 

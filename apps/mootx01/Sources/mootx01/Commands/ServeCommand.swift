@@ -164,14 +164,32 @@ struct ServeCommand: AsyncParsableCommand {
         // prompt and never migrate — migration is `mootx01 upgrade` only.
         let encryption: EstateEncryptionConfig
         if lifetimeIsEphemeral {
-            var keyBytes = [UInt8](repeating: 0, count: 32)
-            guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
-                Logging.stderr.log("mootx01 serve fatal: cannot generate ephemeral db key")
-                throw ExitCode.failure
+            // Lifetime and at-rest posture are ORTHOGONAL: ephemeral governs
+            // key RESIDENCE (everything in process memory, zero Keychain
+            // contact — identity store above is already in-memory), while
+            // the no-encrypt marker governs the DB posture. An ephemeral
+            // estate WITH the marker opens plaintext — the benchmark
+            // harness's unencrypted lane declares ephemeral for exactly this:
+            // before this branch honored the marker, unencrypted scratch
+            // estates could not declare ephemeral without silently flipping
+            // encrypted, so their Ed25519 identity keys landed in the REAL
+            // login Keychain — one orphan per scratch estate (971 measured,
+            // 2026-08-06). Marker checks are explicit, never path-inferred.
+            if FileManager.default.fileExists(
+                atPath: EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path) {
+                encryption = .plaintext
+                Logging.stderr.log(
+                    "mootx01 serve: EPHEMERAL lifetime + no-encrypt marker — plaintext throwaway estate, keys in-memory only, no Keychain writes.")
+            } else {
+                var keyBytes = [UInt8](repeating: 0, count: 32)
+                guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
+                    Logging.stderr.log("mootx01 serve fatal: cannot generate ephemeral db key")
+                    throw ExitCode.failure
+                }
+                encryption = .fullDatabase(key: Data(keyBytes))
+                Logging.stderr.log(
+                    "mootx01 serve: EPHEMERAL estate lifetime declared (MOOTX01_ESTATE_LIFETIME) — keys are in-memory only, no Keychain writes; estate is unrecoverable after this process exits.")
             }
-            encryption = .fullDatabase(key: Data(keyBytes))
-            Logging.stderr.log(
-                "mootx01 serve: EPHEMERAL estate lifetime declared (MOOTX01_ESTATE_LIFETIME) — keys are in-memory only, no Keychain writes; estate is unrecoverable after this process exits.")
         } else {
         do {
             let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)

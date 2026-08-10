@@ -90,8 +90,17 @@ fn seed_in_source(
 fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> String {
     // Subject is required at the file_memory boundary (PR-02); the capped
     // content prefix is a good-enough test subject.
+    //
+    // `impatient: true` mirrors the Swift twin's `file` helper: the write
+    // lands synchronously instead of parking in the encode queue, so a
+    // hunt that runs next actually screens the pair. Without it the
+    // planted drawers are invisible to the probe set (hunts do not drain
+    // the queue) and assertions pin an artifact of drain timing, not the
+    // wiring — the MXE-CT3 cue-"parity" false alarm came from
+    // exactly this asymmetry.
     let subject: String = content.chars().take(120).collect();
-    let a = args!["content" => content, "subject" => subject.as_str(), "location" => location];
+    let a = args!["content" => content, "subject" => subject.as_str(),
+                  "location" => location, "impatient" => true];
     let result = dispatch_tool("moot_file_memory", &a, registry, &SurfacedRecallLedger::new()).expect("file_memory must succeed");
     assert!(is_success(&result), "file_memory should succeed; got: {result:?}");
     let text = content_text(&result);
@@ -252,7 +261,7 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_71() {
+fn tools_list_count_is_73() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -277,20 +286,21 @@ fn tools_list_count_is_71() {
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     //    3  dataset tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats) — MX-TAB-7
     // ----
-    //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
+    //    5  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
+    //                          moot_palace_import, moot_json_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   71  total (memory adapter excluded — opt-in, off by default)
+    //   73  total (memory adapter excluded — opt-in, off by default)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 73.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 73, "expected 73 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_71_names() {
-    // Gate: all 70 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_73_names() {
+    // Gate: all 73 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -345,6 +355,7 @@ fn tools_list_name_set_matches_expected_71_names() {
         "moot_run_migration",
         "moot_confirm_migration",
         "moot_recall_precise",
+        "moot_recall_connected",
         "moot_recall_shaped",
         "moot_recall_vague",
         "moot_dream",
@@ -355,6 +366,7 @@ fn tools_list_name_set_matches_expected_71_names() {
         "moot_drain_status",
         "moot_reclassify_fdc",
         "moot_palace_import",
+        "moot_json_import",
         // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
         "moot_lens_constellation",
@@ -395,7 +407,7 @@ fn tools_list_name_set_matches_expected_71_names() {
     .collect();
 
     // Use build_tool_list_with_flags with memory_on=false: this test gates the
-    // baseline 71-name set; the `memory` tool's opt-in appearance is tested in
+    // baseline 73-name set; the `memory` tool's opt-in appearance is tested in
     // memory_adapter_tests.rs. Deterministic flag prevents racing the env-var
     // mutations in the three memory_env_lock()-gated tests below.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
@@ -462,9 +474,9 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate (3)
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-        // Monitoring + Maintenance / admin (4)
+        // Monitoring + Maintenance / admin (5)
         "moot_monitoring_status", "moot_reindex", "moot_drain_status",
-        "moot_reclassify_fdc", "moot_palace_import",
+        "moot_reclassify_fdc", "moot_palace_import", "moot_json_import",
     ];
     for name in &dispatch_cases {
         assert!(
@@ -2513,6 +2525,9 @@ fn insert_lifecycle_tunnel_for_drawer(
         tombstoned_at: None,
         removed_by_batch: None,
         order_key: None,
+        // No review-ledger state on a freshly filed test edge (the ext
+        // column carries the TunnelReviewLedger once a reviewer votes).
+        ext: None,
     };
     registry.default.store.add_tunnel(&t).expect("add_tunnel must succeed");
 }
@@ -6021,6 +6036,50 @@ fn dream_dispatch_rejects_malformed_now_as_invalid_params() {
     );
 }
 
+/// C1 — dream associates="all" uses a bounded probe limit, not unbounded None.
+///
+/// After the fix, `run_dream_tool` with `associates: "all"` passes
+/// `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE` (10_000) to `coord.associate_sweep`,
+/// not `None`. On a tiny estate (2 rows) the probe count equals the estate
+/// size (≤ 2) — well under the cap. The test verifies that the "all" path
+/// completes without error and the response body contains no association-error
+/// text, confirming the bounded path executed.
+///
+/// Parity: Swift `dreamAssociatesAllUsesBoundedProbeNotUnlimited`.
+#[test]
+fn dream_all_mode_uses_bounded_probe_limit_not_unlimited() {
+    let registry = EstateRegistry::new_inmemory();
+    // File two memories. The bounded path (Some(10_000)) must not crash here;
+    // on an estate with no VectorStore, the associate sweep returns a zero
+    // report — the important thing is the path completes without error.
+    file_one_memory(&registry, "boundary probe limit test item alpha", "study");
+    file_one_memory(&registry, "boundary probe limit test item beta", "study");
+
+    let result = dispatch_tool(
+        "moot_dream",
+        &args!["now" => "2026-07-01T00:00:00Z", "associates" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_dream associates=all must not throw a transport fault");
+
+    assert!(
+        is_success(&result),
+        "moot_dream associates=all must return isError:false; got: {result:?}"
+    );
+    let text = content_text(&result);
+    // The bounded path must not produce an error annotation in the body.
+    assert!(
+        !text.contains("association sweep error"),
+        "associates=all must not produce an error annotation; got body:\n{text}"
+    );
+    // The dreaming cycle must complete normally.
+    assert!(
+        text.contains("dreaming cycle complete"),
+        "moot_dream result must contain 'dreaming cycle complete' for associates=all; got:\n{text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Vault gating
 // ---------------------------------------------------------------------------
@@ -6046,7 +6105,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 71, "vault-on must produce 71 tools (66 + 2 contradiction-hunter + 3 dataset)");
+    assert_eq!(arr.len(), 73, "vault-on must produce 73 tools (67 + 2 contradiction-hunter + 3 dataset + moot_json_import; incl. moot_recall_connected)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6061,11 +6120,12 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 65, "vault-off must produce 65 tools (71 - 5 vault - palace import)");
+    assert_eq!(arr.len(), 66, "vault-off must produce 66 tools (73 - 5 vault - 2 gated import lanes)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
-                   "moot_vault_reconcile", "moot_vault_job", "moot_palace_import"] {
+                   "moot_vault_reconcile", "moot_vault_job", "moot_palace_import",
+                   "moot_json_import"] {
         assert!(!names.contains(name), "vault-off: {name} must NOT appear in tools/list");
     }
     // A sample of non-vault tools must still be present.
@@ -6087,6 +6147,7 @@ fn dispatch_vault_tool_when_vault_off_returns_clear_error() {
         "moot_vault_reconcile",
         "moot_vault_job",
         "moot_palace_import",
+        "moot_json_import",
     ];
     for name in &vault_names {
         let result = dispatch_tool_with_vault_flag(
@@ -7012,6 +7073,598 @@ fn grounded_synthesis_negative_limit_returns_invalid_params() {
     ).unwrap_err();
     assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS,
         "negative limit on moot_synthesize must yield invalidParams; message: {}", err.message);
+}
+
+/// `query` scopes the recalled pool: only memories whose content matches a
+/// distinctive term feed the synthesis, and the response names the cue (a
+/// grounded synthesis and an estate digest are different measurements).
+/// Twin of Swift `testGroundedSynthesisQueryScopesTheRecalledPool`.
+#[test]
+fn grounded_synthesis_query_ranks_cue_matches_first() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    for content in [
+        "carbon chemistry of organic compounds",
+        "carbon based biochemistry of life",
+        "quantum mechanics fundamentals",
+    ] {
+        file_one_memory(&registry, content, "recipe-tests");
+    }
+
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args!["query" => "carbon compounds", "filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    ).expect("query-grounded synthesize must dispatch");
+    assert!(is_success(&result), "synthesize should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("query: carbon compounds"),
+        "the response must name the cue; got: {text}");
+    // Two-lane grounding is a RANKING guarantee, not a hard exclusion: the
+    // scored lane (high-recall) may admit non-matching rows BELOW the term
+    // matches. The first keyInsight must be a cue-matched memory — a
+    // zero-term-match row must never outrank a term match.
+    let insights = text.split("keyInsights:").last().unwrap_or("");
+    let first_insight = insights
+        .lines()
+        .find(|l| l.trim_start().starts_with("- "))
+        .unwrap_or("");
+    assert!(first_insight.contains("carbon"),
+        "cue-matched memory must lead keyInsights; got '{first_insight}'");
+}
+
+/// Provenance Restricted/Secret is a separate axis from the adjective
+/// sensitivity enforced by RecallFrame. Synthesis must gate that axis before
+/// verbatim key-insight excerpts are produced.
+#[test]
+fn grounded_synthesis_does_not_expose_provenance_sensitive_rows() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SurfacedRecallLedger::new();
+    for tier in [
+        locus_kit::provenance::Sensitivity::Restricted,
+        locus_kit::provenance::Sensitivity::Secret,
+    ] {
+        file_one_memory_with_provenance_sensitivity(
+            &registry,
+            "classified aardvark synthesis token",
+            "vault",
+            tier,
+        );
+    }
+
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args!["query" => "aardvark synthesis", "filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    )
+    .expect("synthesis should succeed after gated rows are removed");
+    let text = content_text(&result);
+    assert!(is_success(&result));
+    assert!(
+        !text.contains("classified aardvark synthesis token"),
+        "provenance-sensitive content must not reach keyInsights: {text}"
+    );
+    assert!(text.contains("grounded_synthesis: 0 drawer(s)"));
+}
+
+/// Mixed-pool case: one normal row and one provenance-restricted row.
+/// The gate must silently remove the restricted row from synthesis and
+/// pass the normal row through into keyInsights. A gate that blocks
+/// everything (including normal rows) must FAIL this test — the gate
+/// covers provenance bits 30–35, not the adjective axis.
+/// Twin of Swift `testSynthesizeDoesNotExposeProvenanceSensitiveRows`.
+#[test]
+fn grounded_synthesis_mixed_pool_only_exposes_normal_rows() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Normal row — must survive into keyInsights.
+    file_one_memory_with_provenance_sensitivity(
+        &registry,
+        "classified aardvark synthesis normaltoken",
+        "vault",
+        locus_kit::provenance::Sensitivity::Normal,
+    );
+
+    // Restricted row — must be removed by the provenance gate.
+    file_one_memory_with_provenance_sensitivity(
+        &registry,
+        "classified aardvark synthesis restrictedtoken",
+        "vault",
+        locus_kit::provenance::Sensitivity::Restricted,
+    );
+
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args!["filter" => "unconfirmed"],
+        &registry,
+        &ledger,
+    )
+    .expect("synthesis must succeed with a mixed pool");
+    let text = content_text(&result);
+    assert!(is_success(&result), "synthesis must succeed; got: {text}");
+
+    // Only the normal row feeds synthesis — gate removes restricted before synthesize.
+    assert!(
+        text.contains("grounded_synthesis: 1 drawer(s)"),
+        "only the normal row must survive the gate; got: {text}"
+    );
+    assert!(
+        !text.contains("restrictedtoken"),
+        "provenance-restricted content must not reach keyInsights; got: {text}"
+    );
+    assert!(
+        text.contains("normaltoken"),
+        "normal row content must appear in keyInsights; got: {text}"
+    );
+}
+
+/// The bridge scenario recall_connected exists for: an answer memory
+/// sharing NO words with the query, reachable only through a
+/// moot_link_memories tunnel from the hop-1 memory. Plain similarity
+/// cannot surface it; the walk must. Twin of Swift
+/// `testConnectedRecallReachesBridgeLinkedAnswer`.
+#[test]
+fn connected_recall_reaches_bridge_linked_answer() {
+    use locus_kit::frames::TunnelCaptureFrame;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let hop1 = file_one_memory(
+        &registry, "Melanie mentioned her sister visited from Cambridge", "recipe-tests");
+    let answer = file_one_memory(
+        &registry, "Caroline finished the astrophysics degree this spring", "recipe-tests");
+    file_one_memory(&registry, "grocery shopping list for the weekend", "recipe-tests");
+    file_one_memory(&registry, "bicycle maintenance notes and tire pressure", "recipe-tests");
+
+    // Create the tunnel directly rather than via moot_link_memories: the MCP
+    // surface's ID-lookup calls coord.resolve_drawer_node_names, which requires a
+    // registered node topology provider. In the test in-memory estate that provider
+    // is absent, so names resolve to empty strings and the tunnel gets stored with
+    // source_wing = "" — making it invisible to recall_tunnels("recipe-tests").
+    // Direct estate.capture_tunnel with explicit wing names bypasses the lookup.
+    let now = aria_mcp::dispatch::wall_now();
+    {
+        let coord = registry.coord.lock().unwrap();
+        let locus_estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        let mut tunnel_frame = TunnelCaptureFrame::new(
+            "recipe-tests", "recipe-tests", "recipe-tests", "recipe-tests",
+            "sister identity bridge", "test",
+        );
+        tunnel_frame.source_drawer_id = Some(hop1.clone());
+        tunnel_frame.target_drawer_id = Some(answer.clone());
+        locus_estate.capture_tunnel(tunnel_frame, now)
+            .expect("tunnel capture must succeed");
+    }
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "Melanie sister Cambridge", "wing" => "recipe-tests",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        &registry,
+        &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.starts_with("found "), "memory_search-shaped header expected; got: {text}");
+    assert!(text.contains(&answer),
+        "the tunnel-linked answer must be reachable via the walk; got: {text}");
+    assert!(text.contains("connected: anchor="),
+        "the lane-provenance line must be present; got: {text}");
+}
+
+/// Gate invariant: a withdrawn memory linked by a tunnel to a live anchor must
+/// NOT appear in connected-recall results. The walk discovers the edge and
+/// attempts hydration; the gated RecallFrame (insert_defaults plus the
+/// caller's filter) excludes the withdrawn row via CurrentlyBelieve.
+/// Twin of Swift `testConnectedRecallExcludesTombstonedRows`.
+#[test]
+fn connected_recall_excludes_withdrawn_rows() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Dead memory — shares no words with the query; will be withdrawn.
+    let dead = file_one_memory(&registry, "XylophoneZebra secret project archive notes", "recipe-tests");
+    // Anchor — matches the query directly.
+    let anchor = file_one_memory(&registry, "Quarterly planning moved to Thursday confirmed", "recipe-tests");
+    // Distractor.
+    file_one_memory(&registry, "bicycle tire pressure maintenance schedule", "recipe-tests");
+
+    // Link dead → anchor so the walk can discover dead from anchor.
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => dead.as_str(), "to_id" => anchor.as_str(),
+               "kind" => "relates", "label" => "tombstone gate test link"],
+        &registry, &ledger,
+    ).expect("link must dispatch");
+    assert!(is_success(&link), "link_memories should succeed; got: {link:?}");
+
+    // Withdraw the dead memory — state transition to Withdrawn, excluded by
+    // CurrentlyBelieve default filter on walk hydration.
+    let withdraw = dispatch_tool(
+        "moot_withdraw_memory",
+        &args!["id" => dead.as_str()],
+        &registry, &ledger,
+    ).expect("withdraw must dispatch");
+    assert!(is_success(&withdraw), "withdraw should succeed; got: {withdraw:?}");
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "quarterly planning Thursday",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // The withdrawn memory's distinctive content must NOT appear.
+    assert!(!text.contains("XylophoneZebra"),
+        "withdrawn row content must be absent from connected recall; got: {text}");
+}
+
+/// Gate invariant: a sensitivity-restricted memory linked by a tunnel to a live
+/// anchor must NOT appear in connected-recall results. The walk discovers the edge;
+/// the gated RecallFrame applies the insert_defaults ceiling of
+/// SensitivityAtMost(Elevated), excluding Restricted rows.
+/// Twin of Swift `testConnectedRecallExcludesSensitivityRestrictedRows`.
+#[test]
+fn connected_recall_excludes_sensitivity_restricted_rows() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::{CaptureFrame, TunnelCaptureFrame};
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Anchor — matches the query.
+    let anchor = file_one_memory(
+        &registry, "Annual performance review scheduling confirmed", "recipe-tests");
+    // Distractor.
+    file_one_memory(&registry, "grocery run Saturday morning", "recipe-tests");
+
+    // Restricted memory — filed at Restricted sensitivity so the default
+    // SensitivityAtMost(Elevated) ceiling blocks it from walk hydration.
+    let restricted_content = "ConfidentialAardvark internal salary band information";
+    let mut capture_frame = CaptureFrame::new(
+        restricted_content,
+        CaptureChannel::Typed,
+        "recipe-tests",
+        LatticeAnchor::udc("004"),
+        "aria-mcp-tests",
+        "default",
+    );
+    capture_frame.sensitivity = AdjectiveSensitivity::Restricted;
+    // Subject required at the MCP surface for PR-02 dense rows.
+    capture_frame.subject = Some(restricted_content.chars().take(120).collect());
+    let now = aria_mcp::dispatch::wall_now();
+    let restricted_id = {
+        let coord = registry.coord.lock().unwrap();
+        coord.capture(&registry.default.handle, capture_frame, now)
+            .expect("restricted capture must succeed")
+            .id
+    };
+
+    // Link restricted → anchor bypassing moot_link_memories: that MCP tool's
+    // internal ID-lookup uses RecallFrame::new(vec![]) which receives the
+    // SensitivityAtMost(Elevated) default — it cannot see Restricted drawers
+    // and would fail with "from_id not found". For this test we need the tunnel
+    // edge to exist in the graph so the walk discovers it; we create it directly
+    // via Estate::capture_tunnel, which has no sensitivity gate on ID lookup.
+    {
+        let coord = registry.coord.lock().unwrap();
+        let locus_estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        // Wing/room display fields can be empty — the structural connection
+        // is carried by source_drawer_id / target_drawer_id.
+        let mut tunnel_frame = TunnelCaptureFrame::new(
+            "recipe-tests", "recipe-tests", "recipe-tests", "recipe-tests",
+            "sensitivity gate test link", "test",
+        );
+        tunnel_frame.source_drawer_id = Some(restricted_id.clone());
+        tunnel_frame.target_drawer_id = Some(anchor.clone());
+        locus_estate.capture_tunnel(tunnel_frame, now)
+            .expect("tunnel capture must succeed");
+    }
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "annual performance review scheduling",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // The restricted memory's distinctive content must NOT appear.
+    assert!(!text.contains("ConfidentialAardvark"),
+        "restricted row content must be absent from connected recall; got: {text}");
+}
+
+/// Shared setup for the Wave-3 G1 walk-filter tests: file an anchor (with
+/// optional exportability), file a walk-only target that shares no words
+/// with the query, capture a tunnel target→anchor directly (the MCP link
+/// tool cannot register wing names on the in-memory estate — see the bridge
+/// test above), and PROVE walk reachability with an unrestricted control
+/// query before any filtered assertion. A gate test whose walk never reaches
+/// the target passes vacuously; the control query removes that failure mode.
+fn g1_walk_fixture(
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    anchor_content: &str,
+    anchor_exportability: Option<&str>,
+    target_content: &str,
+    target_exportability: Option<&str>,
+    control_query: &str,
+) -> (String, String) {
+    use locus_kit::frames::TunnelCaptureFrame;
+
+    let file_with = |content: &str, exportability: Option<&str>| -> String {
+        let mut a = args!["content" => content, "subject" => content,
+                          "location" => "recipe-tests"];
+        if let Some(e) = exportability {
+            a.insert("exportability".to_owned(), JsonValue::String(e.to_owned()));
+        }
+        let filed = dispatch_tool("moot_file_memory", &a, registry, ledger)
+            .expect("file_memory must succeed");
+        assert!(is_success(&filed), "file_memory should succeed; got: {filed:?}");
+        content_text(&filed).lines().next()
+            .and_then(|l| l.strip_prefix("filed memory ")).unwrap_or("").to_owned()
+    };
+
+    // NOTE deliberate twin divergence from the Swift fixture: the Rust
+    // in-memory estate ships charter-hint seed drawers and does not rank
+    // the anchor pool by pure recency, so the Swift flood-and-reorder
+    // shape starves the walk of its seed here. This small fixture is
+    // proven non-vacuous for THIS port by the pre-fix counter-proof (all
+    // three walk tests fail on exactly the leak assertion when the filter
+    // propagation is reverted).
+    let anchor = file_with(anchor_content, anchor_exportability);
+    let target = file_with(target_content, target_exportability);
+    file_with("bicycle tire pressure maintenance schedule", None);
+
+    // Direct tunnel capture with explicit wing names, exactly as the bridge
+    // test does: the walk reads wing-scoped tunnels and the queries below
+    // pass wing:"recipe-tests".
+    let now = aria_mcp::dispatch::wall_now();
+    {
+        let coord = registry.coord.lock().unwrap();
+        let locus_estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        let mut tunnel_frame = TunnelCaptureFrame::new(
+            "recipe-tests", "recipe-tests", "recipe-tests", "recipe-tests",
+            "g1 walk gate test link", "test",
+        );
+        tunnel_frame.source_drawer_id = Some(target.clone());
+        tunnel_frame.target_drawer_id = Some(anchor.clone());
+        locus_estate.capture_tunnel(tunnel_frame, now)
+            .expect("tunnel capture must succeed");
+    }
+
+    // CONTROL: unrestricted filter must reach the target through the walk.
+    // If this fails the fixture is broken, not the gate.
+    let control = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => control_query, "wing" => "recipe-tests",
+               "filter" => "unconfirmed", "limit" => 10_i64],
+        registry, ledger,
+    ).expect("control connected recall must dispatch");
+    assert!(is_success(&control), "control query should succeed; got: {control:?}");
+    let control_text = content_text(&control);
+    assert!(control_text.contains(&target),
+        "FIXTURE: the walk must reach the linked target under an \
+         unrestricted filter; got: {control_text}");
+
+    (anchor, target)
+}
+
+/// Wave-3 G1 gate invariant: the CALLER's filter applies to walk hydration,
+/// not only to anchor recall. A non-exportable (born-private) drawer linked
+/// to an exportable anchor must NOT surface its content under
+/// filter:"exportable", while the exportable anchor itself must.
+/// Twin of Swift `testConnectedRecallWalkHonorsExportableFilter`.
+#[test]
+fn connected_recall_walk_honors_exportable_filter() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let (_anchor, _target) = g1_walk_fixture(
+        &registry, &ledger,
+        "Roadmap review moved to Friday afternoon confirmed", Some("public"),
+        "VelvetOctopus internal pricing draft numbers", None,
+        "roadmap review Friday",
+    );
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "roadmap review Friday", "wing" => "recipe-tests",
+               "filter" => "exportable", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // Over-gating check: the exportable anchor's content must be present.
+    assert!(text.contains("Roadmap review"),
+        "exportable anchor content must be present; got: {text}");
+    // The private drawer's content must NOT ride in through the walk.
+    assert!(!text.contains("VelvetOctopus"),
+        "non-exportable row content must be absent under filter:exportable; got: {text}");
+}
+
+/// Wave-3 G1 gate invariant, confirmation axis: an unconfirmed drawer linked
+/// to a user-confirmed anchor must NOT surface its content under
+/// filter:"userConfirmed".
+/// Twin of Swift `testConnectedRecallWalkHonorsUserConfirmedFilter`.
+#[test]
+fn connected_recall_walk_honors_user_confirmed_filter() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let (anchor, _target) = g1_walk_fixture(
+        &registry, &ledger,
+        "Sprint retro moved to Tuesday morning confirmed", None,
+        "CrimsonNarwhal draft merger term sheet notes", None,
+        "sprint retro Tuesday",
+    );
+    let confirm = dispatch_tool(
+        "moot_confirm_memory", &args!["id" => anchor.as_str()], &registry, &ledger,
+    ).expect("confirm must dispatch");
+    assert!(is_success(&confirm), "confirm_memory should succeed; got: {confirm:?}");
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "sprint retro Tuesday", "wing" => "recipe-tests",
+               "filter" => "userConfirmed", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("Sprint retro"),
+        "confirmed anchor content must be present; got: {text}");
+    assert!(!text.contains("CrimsonNarwhal"),
+        "unconfirmed row content must be absent under filter:userConfirmed; got: {text}");
+}
+
+/// Wave-3 G1 gate invariant, containment axis: a PUBLIC drawer linked to a
+/// contained (born-private) anchor must NOT surface its content under
+/// filter:"contained" — the inverse of the exportable test.
+/// Twin of Swift `testConnectedRecallWalkHonorsContainedFilter`.
+#[test]
+fn connected_recall_walk_honors_contained_filter() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let (_anchor, _target) = g1_walk_fixture(
+        &registry, &ledger,
+        "Standup notes archived for Thursday review", None,
+        "AmberFalcon public changelog draft for the release", Some("public"),
+        "standup notes Thursday",
+    );
+
+    let result = dispatch_tool(
+        "moot_recall_connected",
+        &args!["query" => "standup notes Thursday", "wing" => "recipe-tests",
+               "filter" => "contained", "limit" => 10_i64],
+        &registry, &ledger,
+    ).expect("connected recall must dispatch");
+    assert!(is_success(&result), "connected recall should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("Standup notes"),
+        "contained anchor content must be present; got: {text}");
+    assert!(!text.contains("AmberFalcon"),
+        "public row content must be absent under filter:contained; got: {text}");
+}
+
+/// A query whose every token is a stopword or too short must be rejected
+/// (invalidParams), never silently degraded to an unscoped digest.
+/// Twin of Swift `testGroundedSynthesisAllStopwordQueryThrowsInvalidParams`.
+#[test]
+fn grounded_synthesis_all_stopword_query_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    let err = dispatch_tool(
+        "moot_synthesize",
+        &args!["query" => "what did they do"],
+        &registry,
+        &ledger,
+    ).unwrap_err();
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS,
+        "all-stopword query must yield invalidParams; message: {}", err.message);
+}
+
+/// The term extractor's contract, pinned so both ports cannot drift:
+/// stopwords and short fragments drop, digit-bearing short tokens stay,
+/// tokens lowercase and dedupe in first-appearance order, cap at 12.
+/// Twin of Swift `testGroundingTermsContract` (identical fixtures).
+#[test]
+fn grounding_terms_contract() {
+    use aria_mcp::recipe_tools::grounding_terms;
+    assert_eq!(
+        grounding_terms("What did Melanie buy at Trader Joe's?"),
+        vec!["melanie", "buy", "trader", "joe"]
+    );
+    assert_eq!(grounding_terms("was it 46 or 3b"), vec!["46", "3b"]);
+    assert_eq!(
+        grounding_terms("carbon Carbon CARBON life"),
+        vec!["carbon", "life"]
+    );
+    assert!(grounding_terms("what did they do").is_empty());
+    let long: Vec<String> = (1..=20).map(|i| format!("uniqueterm{i}")).collect();
+    assert_eq!(grounding_terms(&long.join(" ")).len(), 12);
+}
+
+/// Ranking is driven by cue-term relevance, not recency. File 25 memories: the
+/// OLDEST contains distinctive answer terms; 24 newer memories share a generic
+/// word that also appears in the query but is dominated by the distinctive terms.
+/// With limit:5, recency alone evicts the answer drawer; cue-relevance ranking
+/// brings it to the top so it appears in keyInsights.
+/// Twin of Swift `testGroundedSynthesisCueRankingBringsOldAnswerToTop`.
+///
+/// Pool size of 5 (1 answer + 4 generic) is chosen so MMR diversity surfaces
+/// the answer at position 3: after the 2 most-recent generics are selected,
+/// all remaining generics carry a ~0.95 shingle-similarity penalty while the
+/// answer (very different content) carries only ~0.08. That penalty gap makes
+/// the answer's MMR score exceed every remaining generic. cap=3 captures it.
+#[test]
+fn grounded_synthesis_cue_ranking_brings_old_answer_to_top() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // File the answer memory FIRST (oldest). Contains four distinctive terms.
+    file_one_memory(
+        &registry,
+        "daguerreotype vintage cameras photography collection",
+        "recipe-tests",
+    );
+    // Sleep briefly so the 4 generic memories get a later filedAt timestamp,
+    // placing the answer at semRank=4 (oldest) in the (filedAt DESC, id DESC)
+    // recall order. Without this the in-memory store's UUID tie-break is random
+    // and the test becomes non-deterministic.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    // File 4 newer memories containing the generic word "collection" plus
+    // unrelated content. 4 generics + 1 answer = 5-drawer pool that makes the
+    // MMR math work at cap=3 (see module-level comment).
+    for i in 1..=4 {
+        file_one_memory(
+            &registry,
+            &format!("grocery store shopping collection item {i}"),
+            "recipe-tests",
+        );
+    }
+
+    // Query with distinctive terms + generic term. limit:3 — recency alone
+    // would pick the 3 newest grocery drawers (evicting the answer at position
+    // 5). The cue-pool bound widens the frame to 200, bringing all 5 drawers
+    // into ranking. MMR diversity places the answer 3rd; cap=3 includes it in
+    // keyInsights.
+    let result = dispatch_tool(
+        "moot_synthesize",
+        &args![
+            "query" => "daguerreotype vintage cameras collection",
+            "filter" => "unconfirmed",
+            "limit" => 3_i64
+        ],
+        &registry,
+        &ledger,
+    )
+    .expect("cue-ranked synthesize must dispatch");
+
+    assert!(is_success(&result), "cue-ranked synthesize should succeed; got: {result:?}");
+    let text = content_text(&result);
+    // The answer drawer must appear in keyInsights. It occupies the 3rd slot
+    // of the cap-3 output (positions 1 and 2 are the 2 most-recent generics).
+    assert!(
+        text.contains("daguerreotype"),
+        "answer drawer content must appear in keyInsights after cue ranking; got: {text}"
+    );
+    assert!(
+        text.contains("query: daguerreotype vintage cameras collection"),
+        "response must name the cue; got: {text}"
+    );
 }
 
 /// `moot_synthesize` with an over-ceiling `limit` must succeed (clamped).
@@ -8840,5 +9493,643 @@ fn dm_gated_endpoint_is_indistinguishable_from_absent_endpoint() {
         absent_body.replace(&absent_id, "<TARGET>"),
         "a gated endpoint must be indistinguishable from an absent one — \
          any difference is an existence oracle.\ngated:  {gated_body}\nabsent: {absent_body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dream associate step (item 5) — Rust twins of the Swift
+// DreamAssociatesDispatchTests. Registry estates are fully wired
+// (provisioned hint drawers + vector store), so the default and "all"
+// modes REALLY sweep: the report line appears with live counts, and
+// "off" suppresses the step entirely.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dream_associates_default_sweeps_and_reports() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool("moot_dream", &args![], &registry, &SurfacedRecallLedger::new())
+        .expect("dream must succeed");
+    let text = content_text(&result);
+    assert!(text.contains("moot_dream: matrix rebuilt"), "got: {text}");
+    assert!(text.contains("associationsWritten: "), "default mode must sweep: {text}");
+    assert!(!text.contains("association sweep error"), "got: {text}");
+}
+
+#[test]
+fn dream_associates_off_skips_the_step() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_dream",
+        &args!["associates" => "off"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dream must succeed");
+    let text = content_text(&result);
+    assert!(!text.contains("associationsWritten"), "off must skip: {text}");
+}
+
+#[test]
+fn dream_associates_all_sweeps_dedups_on_second_dream() {
+    let registry = EstateRegistry::new_inmemory();
+    let first = dispatch_tool(
+        "moot_dream", &args!["associates" => "all"], &registry, &SurfacedRecallLedger::new())
+        .expect("dream must succeed");
+    let t1 = content_text(&first);
+    assert!(t1.contains("associationsWritten: "), "all mode must sweep: {t1}");
+    // Second dream: the edges already exist — written drops to zero and
+    // the zero-gated line disappears, or reports deduplicated > 0.
+    let second = dispatch_tool(
+        "moot_dream", &args!["associates" => "all"], &registry, &SurfacedRecallLedger::new())
+        .expect("second dream must succeed");
+    let t2 = content_text(&second);
+    assert!(
+        !t2.contains("associationsWritten: 0 (probed: 0")
+            && !t2.contains("association sweep error"),
+        "got: {t2}"
+    );
+    if let Some(line) = t2.lines().find(|l| l.starts_with("associationsWritten")) {
+        assert!(line.contains("deduplicated: "), "got: {line}");
+        assert!(line.starts_with("associationsWritten: 0 "), "re-run writes nothing: {line}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MXE-CT3 P3 — tiered hunt modes, dream candidate filing, review ladder
+// ---------------------------------------------------------------------------
+//
+// Twin of Swift TieredContradictionSurfaceTests.swift: boundary
+// validation for the new hunt args, the legacy-report pin (everything
+// before the first TIER header is byte-for-byte today's report), the
+// read-only single-tier purpose search, the dream candidate-filing +
+// digest wiring, and the moot_review_tunnel review ladder.
+
+/// Invalid `tier` / `top_k` values are rejected at the public boundary
+/// with the valid domain named (b77ec03e8/b96c01617 precedent).
+#[test]
+fn hunt_rejects_invalid_tier_and_top_k() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    for bad in [
+        serde_json::json!(0),
+        serde_json::json!(4),
+        serde_json::json!(-1),
+        serde_json::json!("2"),
+        serde_json::json!("typed"),
+        serde_json::json!(true),
+    ] {
+        let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+        a.insert("tier".to_string(), JsonValue::from(bad.clone()));
+        let err = dispatch_tool("moot_hunt_contradictions", &a, &registry, &ledger)
+            .expect_err(&format!("tier {bad} must be rejected"));
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("tier must be 1, 2, 3, or \"all\""),
+            "message was: {}",
+            err.message
+        );
+    }
+    for bad in [
+        serde_json::json!(0),
+        serde_json::json!(51),
+        serde_json::json!(-3),
+        serde_json::json!("5"),
+        serde_json::json!(false),
+    ] {
+        let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+        a.insert("top_k".to_string(), JsonValue::from(bad.clone()));
+        let err = dispatch_tool("moot_hunt_contradictions", &a, &registry, &ledger)
+            .expect_err(&format!("top_k {bad} must be rejected"));
+        assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("top_k must be an integer in 1...50"),
+            "message was: {}",
+            err.message
+        );
+    }
+}
+
+/// With the new args ABSENT the hunt report's legacy portion is exactly
+/// today's report — no new vocabulary before the typed section ends —
+/// and the tiered synthesis digest is APPENDED after it. The benchmark
+/// parser matches the trimmed "PROPOSED "/"CANDIDATE " prefixes and the
+/// count lines, so this pin is load-bearing.
+#[test]
+fn hunt_without_new_args_keeps_legacy_report_and_appends_digest() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
+    file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
+
+    let result = dispatch_tool(
+        "moot_hunt_contradictions",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("hunt must not throw");
+    let text = content_text(&result);
+
+    // The digest is APPENDED: the report splits at the first tier header
+    // into legacy portion + digest.
+    let split = text
+        .find("TIER 1 — CONTRADICTION (proven)")
+        .unwrap_or_else(|| panic!("digest missing from: {text}"));
+    let (legacy, digest) = text.split_at(split);
+
+    assert!(
+        legacy.starts_with("moot_hunt_contradictions: sweep complete\n"),
+        "legacy portion: {legacy}"
+    );
+    assert!(legacy.contains("\nprobesScanned: "));
+    assert!(legacy.contains("\npairsScreened: "));
+    assert!(legacy.contains("\nalreadySettled: "));
+    assert!(legacy.contains("\nproposed: 1"), "legacy portion: {legacy}");
+    // Benchmark-parser contract: the two-space-indented emitter lines
+    // are unchanged.
+    let proposed_line = legacy
+        .lines()
+        .find(|l| l.starts_with("  PROPOSED "))
+        .unwrap_or_else(|| panic!("no PROPOSED line in: {legacy}"));
+    assert!(proposed_line.contains(" contradicts "));
+    assert!(proposed_line.contains("score"));
+    assert!(proposed_line.contains("tunnel"));
+    // Typed section still closes the legacy portion.
+    assert!(legacy.contains("\nproven: "));
+    assert!(legacy.contains("\ncoverage: "));
+    for new_token in [
+        "TIER ",
+        "lane:",
+        "lane_seconds:",
+        "synthesis_wall_seconds:",
+        "conflictTunnelsFiled:",
+    ] {
+        assert!(
+            !legacy.contains(new_token),
+            "new token {new_token} leaked into the legacy portion: {legacy}"
+        );
+    }
+
+    // Digest shape: all three sections in tier order, per-lane counts,
+    // and the dispatch-layer timing lines.
+    let t2 = digest
+        .find("TIER 2 — CONFLICT CANDIDATE")
+        .unwrap_or_else(|| panic!("no TIER 2 in: {digest}"));
+    let t3 = digest
+        .find("TIER 3 — DIVERGENCE")
+        .unwrap_or_else(|| panic!("no TIER 3 in: {digest}"));
+    assert!(t2 < t3, "sections must render in tier order");
+    assert!(digest.contains("  lane: fetched "));
+    assert!(digest.contains("lane_seconds: hunt="));
+    assert!(digest.contains(" synthesis="));
+    assert!(digest.contains("synthesis_wall_seconds: "));
+    // The planted value-divergent pair is a tier-3 finding.
+    assert!(
+        digest[t3..].contains("(value_divergence, score "),
+        "tier 3 section: {}",
+        &digest[t3..]
+    );
+}
+
+/// tier=N runs a read-only purpose search: its own header, only the
+/// requested section, no legacy sweep vocabulary, no synthesis-only
+/// counts/timing lines, and — the contract — no writes.
+#[test]
+fn hunt_single_tier_search_is_read_only() {
+    let registry = EstateRegistry::new_inmemory();
+    // Same two-document estate shape as
+    // hunt_without_new_args_keeps_legacy_report_and_appends_digest —
+    // ConflictCue is a pure function of the two content strings, so the
+    // impatient pair alone is sufficient and classifies value_divergence
+    // identically to the Swift twin.
+    file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
+    file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
+
+    let before = {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        estate.all_tunnels().expect("all_tunnels").len()
+    };
+
+    let result = dispatch_tool(
+        "moot_hunt_contradictions",
+        &args!["tier" => 3, "top_k" => 10],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("tier-3 search must not throw");
+    let text = content_text(&result);
+
+    assert!(
+        text.starts_with("moot_hunt_contradictions: tier 3 search complete\n"),
+        "got: {text}"
+    );
+    assert!(text.contains("TIER 3 — DIVERGENCE"));
+    assert!(
+        text.contains("(value_divergence, score "),
+        "tier-3 findings: {text}"
+    );
+    for absent in [
+        "sweep complete",
+        "probesScanned:",
+        "  PROPOSED ",
+        "  CANDIDATE ",
+        "TIER 1 —",
+        "TIER 2 —",
+        "lane:",
+        "lane_seconds:",
+        "synthesis_wall_seconds:",
+    ] {
+        assert!(!text.contains(absent), "unexpected {absent} in: {text}");
+    }
+
+    let after = {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        estate.all_tunnels().expect("all_tunnels").len()
+    };
+    assert_eq!(after, before, "single-tier search must not write");
+
+    // Tier 1 runs without a vector-store dependency and renders its
+    // header even when the typed lane finds nothing.
+    let t1 = dispatch_tool(
+        "moot_hunt_contradictions",
+        &args!["tier" => 1],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("tier-1 search must not throw");
+    let t1_text = content_text(&t1);
+    assert!(
+        t1_text.starts_with("moot_hunt_contradictions: tier 1 search complete\n"),
+        "got: {t1_text}"
+    );
+    assert!(t1_text.contains("TIER 1 — CONTRADICTION (proven)"));
+}
+
+/// moot_dream files tier-labeled candidates (step 3.25) and appends the
+/// tiered synthesis digest through the same shared renderer.
+#[test]
+fn dream_files_candidates_and_appends_digest() {
+    let registry = EstateRegistry::new_inmemory();
+    // Twin of the Swift test: two impatient documents, no args. The cue
+    // is a pure pairwise function — this pair is value_divergence in
+    // both ports regardless of surrounding estate content.
+    file_one_memory(&registry, "the api timeout is 30 seconds", "work/notes");
+    file_one_memory(&registry, "the api timeout is 90 seconds", "work/notes");
+
+    let result = dispatch_tool(
+        "moot_dream",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dream must not throw");
+    let text = content_text(&result);
+
+    // Step 3 runs the hunter — the planted pair is a strong
+    // value_divergence, so exactly one contradicts tunnel is proposed
+    // (Swift-twin-strength assertion). Step 3.25's all-tier filing then
+    // reports filed/suppressed/ceilingSkipped.
+    assert!(
+        text.contains("contradictionsProposed: 1"),
+        "dream: {text}"
+    );
+    let filed_line = text
+        .lines()
+        .find(|l| l.starts_with("conflictTunnelsFiled: "))
+        .unwrap_or_else(|| panic!("no conflictTunnelsFiled line in: {text}"));
+    assert!(filed_line.starts_with("conflictTunnelsFiled: tier1 0, tier2 "), "filed line: {filed_line}");
+    assert!(filed_line.contains("(suppressed: "), "filed line: {filed_line}");
+    assert!(filed_line.contains("ceilingSkipped: "), "filed line: {filed_line}");
+
+    assert!(text.contains("TIER 1 — CONTRADICTION (proven)"));
+    assert!(text.contains("TIER 2 — CONFLICT CANDIDATE"));
+    assert!(text.contains("TIER 3 — DIVERGENCE"));
+    // The planted pair surfaces as a tier-3 value divergence in the
+    // digest — the classification pin the false "corpus statistics"
+    // comment previously talked this test out of.
+    assert!(
+        text.contains("(value_divergence, score "),
+        "dream digest: {text}"
+    );
+    assert!(text.contains("lane_seconds: propose="));
+    assert!(text.contains("synthesis_wall_seconds: "));
+}
+
+/// Parse the tunnel id out of a `linked … (<id>)[ note]` response line.
+fn tunnel_id_from_link_response(text: &str) -> String {
+    let open = text.rfind('(').expect("no ( in link response");
+    let close = text[open..].find(')').expect("no ) in link response") + open;
+    text[open + 1..close].to_string()
+}
+
+/// The moot_review_tunnel review ladder: endorse records without
+/// activating, a model objection contests or withdraws, and edge
+/// activation stays user-only at the public boundary.
+#[test]
+fn review_ladder_endorse_object_and_user_only_activation() {
+    use locus_kit::tunnel_operational::TunnelLifecycle;
+
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let a = file_one_memory(&registry, "Bob lives in Paris", "work/notes");
+    let b = file_one_memory(&registry, "Bob lives in Lyon", "work/notes");
+
+    let link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => a.as_str(), "to_id" => b.as_str(),
+               "kind" => "contradicts", "proposed" => true],
+        &registry,
+        &ledger,
+    )
+    .expect("link must not throw");
+    let tunnel_id = tunnel_id_from_link_response(content_text(&link));
+
+    // accept by a model reviewer is refused at the boundary.
+    let err = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "accept",
+               "reviewed_by" => "claude"],
+        &registry,
+        &ledger,
+    )
+    .expect_err("model accept must be rejected");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("edge activation is user-only"),
+        "message was: {}",
+        err.message
+    );
+
+    // Unknown verdicts and empty reviewer ids are boundary errors too.
+    let err = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "snooze"],
+        &registry,
+        &ledger,
+    )
+    .expect_err("unknown verdict must be rejected");
+    assert!(
+        err.message
+            .contains("verdict must be \"accept\", \"reject\", or \"endorse\""),
+        "message was: {}",
+        err.message
+    );
+    let err = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "endorse",
+               "reviewed_by" => ""],
+        &registry,
+        &ledger,
+    )
+    .expect_err("empty reviewer must be rejected");
+    assert!(
+        err.message.contains("reviewed_by must be a non-empty string"),
+        "message was: {}",
+        err.message
+    );
+
+    // Model endorsement: recorded, lifecycle untouched.
+    let endorse = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "endorse",
+               "reviewed_by" => "claude"],
+        &registry,
+        &ledger,
+    )
+    .expect("endorse must not throw");
+    let endorse_text = content_text(&endorse);
+    assert!(
+        endorse_text.contains("endorsed by claude (distinct endorsers: 1)"),
+        "endorse: {endorse_text}"
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        let t = estate
+            .get_tunnel(&tunnel_id)
+            .expect("get_tunnel")
+            .expect("tunnel exists");
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Proposed, "endorse must never activate");
+    }
+
+    // Model objection AFTER a model endorsement: contested, stays
+    // proposed for user attention.
+    let object = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "reject",
+               "reviewed_by" => "gpt"],
+        &registry,
+        &ledger,
+    )
+    .expect("objection must not throw");
+    let object_text = content_text(&object);
+    assert!(
+        object_text.contains("objected by gpt — contested"),
+        "object: {object_text}"
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        let t = estate
+            .get_tunnel(&tunnel_id)
+            .expect("get_tunnel")
+            .expect("tunnel exists");
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Proposed);
+    }
+
+    // User accept (default reviewed_by) still activates.
+    let accept = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => tunnel_id.as_str(), "verdict" => "accept"],
+        &registry,
+        &ledger,
+    )
+    .expect("accept must not throw");
+    assert!(
+        content_text(&accept).contains("accepted — the contradicts link is now active"),
+        "accept: {}",
+        content_text(&accept)
+    );
+
+    // Second proposal: a model objection with NO endorsement on record
+    // withdraws (the AI-rejected, reopenable path).
+    let c = file_one_memory(&registry, "the deploy window is Tuesday", "work/notes");
+    let d = file_one_memory(&registry, "the deploy window is Friday", "work/notes");
+    let second_link = dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => c.as_str(), "to_id" => d.as_str(),
+               "kind" => "contradicts", "proposed" => true],
+        &registry,
+        &ledger,
+    )
+    .expect("second link must not throw");
+    let second_id = tunnel_id_from_link_response(content_text(&second_link));
+    let solo = dispatch_tool(
+        "moot_review_tunnel",
+        &args!["tunnel_id" => second_id.as_str(), "verdict" => "reject",
+               "reviewed_by" => "claude"],
+        &registry,
+        &ledger,
+    )
+    .expect("solo objection must not throw");
+    assert!(
+        content_text(&solo).contains("objected by claude — withdrawn"),
+        "solo objection: {}",
+        content_text(&solo)
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        let t = estate
+            .get_tunnel(&second_id)
+            .expect("get_tunnel")
+            .expect("tunnel exists");
+        assert_eq!(t.lifecycle(), TunnelLifecycle::Withdrawn);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// moot_json_import — seed-file JSON lane over the MCP dispatch surface
+// (MXE-JI-1 Part 5: registration round-trip both ports)
+// ---------------------------------------------------------------------------
+
+/// A seed fixture round-trips through a real moot_json_import dispatch call
+/// and the records are really in the estate the registry served.
+#[test]
+fn json_import_round_trips_seed_fixture_over_mcp() {
+    let registry = EstateRegistry::new_inmemory();
+    // Baseline BEFORE the import: the in-memory registry pre-seeds charter
+    // hints, so the assertion below is a delta, not an absolute count.
+    let before = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let baseline = active_memories(content_text(&before));
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-roundtrip-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "mcp-round-trip", "records": [
+             {"id": "m1", "content": "mcp round trip sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/roundtrip"},
+             {"id": "m2", "content": "mcp round trip sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/roundtrip"}],
+            "facts": [{"subject": "sentinel", "predicate": "counted", "object": "two", "record_id": "m1"}],
+            "tunnels": [{"from": "m2", "to": "m1", "kind": "references"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let result = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true, // vault_on
+    )
+    .expect("json import must dispatch");
+    std::fs::remove_file(&path).ok();
+
+    assert!(is_success(&result), "import must succeed; got: {result:?}");
+    let body = content_text(&result);
+    assert!(body.contains("2 drawers"), "got: {body}");
+    assert!(body.contains("1 facts"), "got: {body}");
+    assert!(body.contains("1 tunnels"), "got: {body}");
+    assert!(body.contains("seedSha256="), "got: {body}");
+
+    // The records are really in the estate: the estate summary counts them
+    // on top of whatever the in-memory registry pre-seeds (charter hints),
+    // and the seed's fact landed in the KG.
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let status_text = content_text(&status);
+    assert_eq!(
+        active_memories(status_text),
+        baseline + 2,
+        "both records must be active in the estate; got: {status_text}"
+    );
+    assert!(
+        status_text.contains("kg facts: 1 active"),
+        "the seed fact must land in the KG; got: {status_text}"
+    );
+}
+
+/// Parse the "memories: N active" count out of a moot_estate_status body.
+fn active_memories(status_text: &str) -> usize {
+    status_text
+        .lines()
+        .find_map(|l| l.strip_prefix("memories: "))
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .expect("estate status must report an active-memory count")
+}
+
+/// The zero-partial-write contract over MCP: an invalid seed is an isError
+/// tool result naming the offending element, and the estate stays empty.
+#[test]
+fn json_import_invalid_seed_is_error_result_with_zero_writes() {
+    let registry = EstateRegistry::new_inmemory();
+    // Baseline BEFORE the failed import (charter hints are pre-seeded).
+    let before = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let baseline = active_memories(content_text(&before));
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-invalid-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "bad", "records": [
+             {"id": "m1", "content": "c", "event_time": "2026-02-01T10:00:00Z", "room": "rm"}],
+            "tunnels": [{"from": "m1", "to": "m999", "kind": "references"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let result = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true, // vault_on
+    )
+    .expect("json import must dispatch");
+    std::fs::remove_file(&path).ok();
+
+    assert!(is_tool_error(&result), "validation failure must be isError; got: {result:?}");
+    let body = content_text(&result);
+    assert!(body.contains("\"m999\""), "offending element must be named; got: {body}");
+
+    // Zero writes — never a partial estate: the active count is exactly
+    // the pre-import baseline and no KG fact landed.
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    let status_text = content_text(&status);
+    assert_eq!(
+        active_memories(status_text),
+        baseline,
+        "estate must be untouched; got: {status_text}"
+    );
+    assert!(
+        status_text.contains("kg facts: 0 active"),
+        "no fact may land on a failed import; got: {status_text}"
     );
 }

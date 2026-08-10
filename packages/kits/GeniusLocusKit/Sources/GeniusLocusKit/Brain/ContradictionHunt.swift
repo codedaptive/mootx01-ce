@@ -10,7 +10,13 @@
 // Shape: sample up to `probeLimit` of the newest vector-indexed item
 // IDs, generate candidate pairs for each probe, canonicalize +
 // deduplicate them, then run the SubstrateML `ConflictCue` screen over
-// the pair's hydrated content. Candidate generation runs in two lanes:
+// the pair's hydrated content. The retrieval half (probe sampling +
+// two-lane candidate generation) is factored into
+// `contradictionCandidatePairs(in:modelID:probeLimit:proximityThreshold:)`
+// so the tiered contradiction search
+// (Brain/TieredContradictionSearch.swift) shares the SAME single
+// retrieval pass — never a second parallel path over the estate.
+// Candidate generation runs in two lanes:
 //
 //   Lane 1 (drawer-keyed) — binary Hamming kNN over the caller's
 //     `modelID`, for bespoke/test-planted drawer vectors.
@@ -159,32 +165,24 @@ public extension GeniusLocusKit {
         now: Date
     ) async throws -> ContradictionHuntReport {
         let estate = try estate(for: handle)
-        guard let vectorStore = registeredVectorStore(for: handle) else {
+        // One shared retrieval pass (probe sampling + both candidate
+        // lanes). Factored out so the tiered contradiction search reuses
+        // the identical pass — see `contradictionCandidatePairs` below.
+        let candidates = try await contradictionCandidatePairs(
+            in: handle, modelID: modelID, probeLimit: probeLimit,
+            proximityThreshold: proximityThreshold)
+        guard candidates.vectorStoreAvailable else {
             return ContradictionHuntReport(
                 vectorStoreAvailable: false, probesScanned: 0, pairsScreened: 0,
                 proposed: [], borderline: [], deduplicated: 0)
         }
-
-        // Probe sample: the NEWEST vector-indexed item IDs (filed_at
-        // descending, distinct). Recency-first is what makes a bounded
-        // sweep converge: new memories are the ones that need screening
-        // against the existing estate, so a probe_limit window always
-        // contains the latest captures — an ascending-item_id window was a
-        // UUID lottery that new content-addressed chunk IDs almost never
-        // entered on a large estate. Neighbours may be ANY age (findNearest
-        // searches the whole lane), so new-vs-old conflicts are found from
-        // the new side. Two row populations exist: DRAWER-keyed rows
-        // (bespoke lanes such as the distillation lane, and test-planted
-        // vectors) and CHUNK-keyed rows (the production encode pipeline —
-        // EstateLifecycle registers `corpus.sharedVectorStore`, and the
-        // drain writes itemID = chunk UUID under the corpus's own modelID).
-        // Both lanes are mined below.
-        let probeIDs = try await vectorStore.recentItemIDs(limit: probeLimit)
-        guard !probeIDs.isEmpty else {
+        guard !candidates.probeIDs.isEmpty else {
             return ContradictionHuntReport(
                 vectorStoreAvailable: true, probesScanned: 0, pairsScreened: 0,
                 proposed: [], borderline: [], deduplicated: 0)
         }
+        let candidatePairs = candidates.pairs
+        let probeIDs = candidates.probeIDs
 
         // Durable dedup set: every drawer pair already joined by a
         // contradicts tunnel, any lifecycle, tombstoned included.
@@ -192,63 +190,6 @@ public extension GeniusLocusKit {
         for tunnel in try await estate.allTunnels() where tunnel.kind == .contradicts {
             if let s = tunnel.sourceDrawerId, let t = tunnel.targetDrawerId {
                 settledPairs.insert(Self.pairKey(s, t))
-            }
-        }
-
-        // kNN candidate mining, canonical-pair deduplicated.
-        //
-        // Lane 1 — drawer-keyed rows under the caller's `modelID`. Rows
-        // whose item is not in this lane fail `getVector` and fall through.
-        var candidatePairs: [(a: String, b: String)] = []
-        var seenPairs: Set<String> = []
-        for probeID in probeIDs {
-            guard let probeEngram = try? await vectorStore.getVector(
-                itemID: probeID, modelID: modelID) else { continue }
-            guard let matches = try? await vectorStore.findNearest(
-                probe: probeEngram, modelID: modelID, limit: 5) else { continue }
-            for match in matches {
-                guard match.itemID != probeID,
-                      match.distance <= proximityThreshold else { continue }
-                let key = Self.pairKey(probeID, match.itemID)
-                guard seenPairs.insert(key).inserted else { continue }
-                candidatePairs.append((min(probeID, match.itemID),
-                                       max(probeID, match.itemID)))
-            }
-        }
-
-        // Lane 2 — the CorpusKit model population used by production. The
-        // encode drain writes Drawer-keyed rows under the corpus provider's
-        // modelID. Candidate generation here is LEXICAL, via the corpus's
-        // persistent BM25 inverted index — NOT vectors. A contradiction is two
-        // statements about the same thing that disagree; "about the same thing"
-        // is exactly what BM25 answers cheaply (sub-linear WAND/BMW over
-        // posting lists), and it is the same shared-term similarity ConflictCue
-        // screens on, so generator and screen agree on what a candidate is. The
-        // vector lanes were unusable at estate scale — the binary SimHash space
-        // is degenerate (109k estate: 748 items within Hamming ≤ 2, true twin
-        // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
-        // returns Drawer IDs directly, so no identity remap is required.
-        // `seenPairs` keys on drawer IDs, so both lanes dedupe together.
-        if let corpus = corpusKits[handle] {
-            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
-            // IDs are the probe Drawers directly.
-            let probeDrawerIDs = Array(Set(probeIDs))
-            // Hydrate probe drawers for their content — the BM25 query text.
-            var probeDrawers: [Drawer] = []
-            if !probeDrawerIDs.isEmpty {
-                probeDrawers = try await estate.hydrateBodies(ids: probeDrawerIDs)
-            }
-            for probeDrawer in probeDrawers where !probeDrawer.content.isEmpty {
-                let query = String(probeDrawer.content.prefix(Self.huntBM25QueryCharLimit))
-                guard let hits = try? await corpus.bm25TopKBySource(
-                    query: query, limit: Self.huntBM25CandidateK)
-                else { continue }
-                for hit in hits where hit.sourceID != probeDrawer.id {
-                    let key = Self.pairKey(probeDrawer.id, hit.sourceID)
-                    guard seenPairs.insert(key).inserted else { continue }
-                    candidatePairs.append((min(probeDrawer.id, hit.sourceID),
-                                           max(probeDrawer.id, hit.sourceID)))
-                }
             }
         }
 
@@ -342,5 +283,127 @@ public extension GeniusLocusKit {
     /// Canonical unordered pair key — lexicographically smaller ID first.
     internal static func pairKey(_ a: String, _ b: String) -> String {
         a < b ? "\(a)||\(b)" : "\(b)||\(a)"
+    }
+}
+
+/// One retrieval pass's candidate output — the shared front half of the
+/// lexical contradiction surfaces (`huntContradictions` and
+/// `tieredContradictionSearch`). Carrying `vectorStoreAvailable`
+/// distinct from "no probes" keeps the hunter's honest no-op reporting
+/// intact through the extraction.
+internal struct ContradictionCandidateSet: Sendable {
+    /// False when the estate has no registered VectorStore (semantic
+    /// indexing not wired) — the pass is a no-op, reported honestly
+    /// rather than as a silent zero.
+    let vectorStoreAvailable: Bool
+    /// The probe sample actually scanned (recency-ordered item IDs).
+    let probeIDs: [String]
+    /// Canonicalized (min, max) drawer-ID pairs, within-pass
+    /// deduplicated. Order follows probe/lane iteration and is NOT
+    /// deterministic across processes (lane 2's probe-ID set fold);
+    /// consumers that need a stable order must sort on their own key —
+    /// the tiered search ranks on (score, pairKey) for exactly this
+    /// reason.
+    let pairs: [(a: String, b: String)]
+}
+
+internal extension GeniusLocusKit {
+
+    /// The single retrieval pass shared by every lexical contradiction
+    /// surface: probe sampling plus two-lane candidate generation.
+    /// Runs ONCE per caller — the tiered search's tier-2 and tier-3
+    /// lanes both consume this one pass, never two passes over the
+    /// estate.
+    func contradictionCandidatePairs(
+        in handle: EstateHandle,
+        modelID: String,
+        probeLimit: Int,
+        proximityThreshold: Int
+    ) async throws -> ContradictionCandidateSet {
+        let estate = try estate(for: handle)
+        guard let vectorStore = registeredVectorStore(for: handle) else {
+            return ContradictionCandidateSet(
+                vectorStoreAvailable: false, probeIDs: [], pairs: [])
+        }
+
+        // Probe sample: the NEWEST vector-indexed item IDs (filed_at
+        // descending, distinct). Recency-first is what makes a bounded
+        // sweep converge: new memories are the ones that need screening
+        // against the existing estate, so a probe_limit window always
+        // contains the latest captures — an ascending-item_id window was a
+        // UUID lottery that new content-addressed chunk IDs almost never
+        // entered on a large estate. Neighbours may be ANY age (findNearest
+        // searches the whole lane), so new-vs-old conflicts are found from
+        // the new side. Two row populations exist: DRAWER-keyed rows
+        // (bespoke lanes such as the distillation lane, and test-planted
+        // vectors) and CHUNK-keyed rows (the production encode pipeline —
+        // EstateLifecycle registers `corpus.sharedVectorStore`, and the
+        // drain writes itemID = chunk UUID under the corpus's own modelID).
+        // Both lanes are mined below.
+        let probeIDs = try await vectorStore.recentItemIDs(limit: probeLimit)
+        guard !probeIDs.isEmpty else {
+            return ContradictionCandidateSet(
+                vectorStoreAvailable: true, probeIDs: [], pairs: [])
+        }
+
+        // kNN candidate mining, canonical-pair deduplicated.
+        //
+        // Lane 1 — drawer-keyed rows under the caller's `modelID`. Rows
+        // whose item is not in this lane fail `getVector` and fall through.
+        var candidatePairs: [(a: String, b: String)] = []
+        var seenPairs: Set<String> = []
+        for probeID in probeIDs {
+            guard let probeEngram = try? await vectorStore.getVector(
+                itemID: probeID, modelID: modelID) else { continue }
+            guard let matches = try? await vectorStore.findNearest(
+                probe: probeEngram, modelID: modelID, limit: 5) else { continue }
+            for match in matches {
+                guard match.itemID != probeID,
+                      match.distance <= proximityThreshold else { continue }
+                let key = Self.pairKey(probeID, match.itemID)
+                guard seenPairs.insert(key).inserted else { continue }
+                candidatePairs.append((min(probeID, match.itemID),
+                                       max(probeID, match.itemID)))
+            }
+        }
+
+        // Lane 2 — the CorpusKit model population used by production. The
+        // encode drain writes Drawer-keyed rows under the corpus provider's
+        // modelID. Candidate generation here is LEXICAL, via the corpus's
+        // persistent BM25 inverted index — NOT vectors. A contradiction is two
+        // statements about the same thing that disagree; "about the same thing"
+        // is exactly what BM25 answers cheaply (sub-linear WAND/BMW over
+        // posting lists), and it is the same shared-term similarity ConflictCue
+        // screens on, so generator and screen agree on what a candidate is. The
+        // vector lanes were unusable at estate scale — the binary SimHash space
+        // is degenerate (109k estate: 748 items within Hamming ≤ 2, true twin
+        // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
+        // returns Drawer IDs directly, so no identity remap is required.
+        // `seenPairs` keys on drawer IDs, so both lanes dedupe together.
+        if let corpus = corpusKits[handle] {
+            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
+            // IDs are the probe Drawers directly.
+            let probeDrawerIDs = Array(Set(probeIDs))
+            // Hydrate probe drawers for their content — the BM25 query text.
+            var probeDrawers: [Drawer] = []
+            if !probeDrawerIDs.isEmpty {
+                probeDrawers = try await estate.hydrateBodies(ids: probeDrawerIDs)
+            }
+            for probeDrawer in probeDrawers where !probeDrawer.content.isEmpty {
+                let query = String(probeDrawer.content.prefix(Self.huntBM25QueryCharLimit))
+                guard let hits = try? await corpus.bm25TopKBySource(
+                    query: query, limit: Self.huntBM25CandidateK)
+                else { continue }
+                for hit in hits where hit.sourceID != probeDrawer.id {
+                    let key = Self.pairKey(probeDrawer.id, hit.sourceID)
+                    guard seenPairs.insert(key).inserted else { continue }
+                    candidatePairs.append((min(probeDrawer.id, hit.sourceID),
+                                           max(probeDrawer.id, hit.sourceID)))
+                }
+            }
+        }
+
+        return ContradictionCandidateSet(
+            vectorStoreAvailable: true, probeIDs: probeIDs, pairs: candidatePairs)
     }
 }

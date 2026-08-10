@@ -106,13 +106,15 @@ struct VaultToolsTests {
         #expect(!names.contains("moot_vault_status"))
         #expect(!names.contains("moot_vault_reconcile"))
         #expect(!names.contains("moot_vault_job"))
-        // moot_palace_import is also hidden when vault is off: it opens
-        // arbitrary local SQLite files (same security posture as vault tools).
+        // moot_palace_import and moot_json_import are also hidden when vault
+        // is off: they open arbitrary local files (same security posture as
+        // vault tools).
         #expect(!names.contains("moot_palace_import"))
-        // Vault-off removes the five moot_vault_* tools plus palace import.
-        // 75 vault-on − 6 = 69 (dataset + packet + contradiction-hunter tools are not
-        // vault-gated).
-        #expect(toolsOff.count == 69)
+        #expect(!names.contains("moot_json_import"))
+        // Vault-off removes the five moot_vault_* tools plus the two gated
+        // import lanes. 77 vault-on − 7 = 70 (dataset + packet +
+        // contradiction-hunter tools are not vault-gated).
+        #expect(toolsOff.count == 70)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -120,8 +122,9 @@ struct VaultToolsTests {
         let toolsNoEnv = ToolProjection.tools(environment: [:])
         let names = Set(toolsNoEnv.map(\.name))
         #expect(names.contains("moot_vault_export"))
-        // 66 baseline + 2 contradiction-hunter + 3 dataset tools + 4 packet tools = 75.
-        #expect(toolsNoEnv.count == 75)
+        // 67 baseline + 2 contradiction-hunter + 3 dataset tools + 4 packet
+        // tools + moot_json_import (MXE-JI-1) = 77 (incl. moot_recall_connected).
+        #expect(toolsNoEnv.count == 77)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.

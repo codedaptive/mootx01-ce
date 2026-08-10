@@ -128,14 +128,21 @@ pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
 
 /// Pipeline-version tag for subjects produced by the on-device miniLLM
 /// rider (PR-10's producer; the Rust lane stays DARK until a model
-/// exists — seam compiled, gated off). Provenance tiers stored in
-/// `subject_pipeline_version`: ai-v1 (filing/backfill AI), minillm-v1
-/// (model rider), consolidation-v1 (deterministic vague writer),
-/// seed-v1 (structural seeds). A version differing from a requested
-/// producer contract marks the row a REGENERATION candidate
-/// (`count_missing_subject`) — the migration lever. Twin of Swift
-/// `DrawerStore.subjectPipelineMiniLLMV1`.
+/// exists — seam compiled, gated off). Trust ladder (highest first):
+/// ai-v1 (filing/backfill AI), minillm-v1 (model rider),
+/// consolidation-v1 (deterministic vague writer), seed-v1 (structural
+/// seeds), import-v1 (batch seed files, schema v1.1). A version
+/// differing from a requested producer contract marks the row a
+/// REGENERATION candidate (`count_missing_subject`) — the migration
+/// lever. Twin of Swift `DrawerStore.subjectPipelineMiniLLMV1`.
 pub const SUBJECT_PIPELINE_MINILLM_V1: &str = "minillm-v1";
+
+/// Pipeline-version tag for subjects provided by a batch seed file via
+/// the `moot_json_import` lane (schema v1.1). Sits at the bottom of the
+/// trust ladder — regenerable by every higher-tier producer. Records
+/// imported without a subject carry NULL and are ordinary subject-debt
+/// candidates. Twin of Swift `DrawerStore.subjectPipelineImportV1`.
+pub const SUBJECT_PIPELINE_IMPORT_V1: &str = "import-v1";
 
 /// Result of a lineage-wide gated expunge (`expunge_gated`). Twin of
 /// Swift `DrawerStore.ExpungeOutcome`.
@@ -1131,6 +1138,25 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<(), LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "stamp_tunnel_adjective_bitmap not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Persist a review-ladder state change: `operational_bitmap` (the
+    /// endorsed/contested/lifecycle bits) and the `ext` review ledger, in
+    /// one update (MXE-CT3). Write primitive behind the GLK endorsement
+    /// verbs. Returns `TunnelNotFound` when the tunnel does not exist, or
+    /// `TunnelNoLongerProposed` when the tunnel's lifecycle has moved beyond
+    /// `Proposed` at write time (GK-01 OCC guard).
+    ///
+    /// Mirrors Swift `DrawerStore.stampTunnelReview(id:operationalBitmap:ext:)`.
+    fn stamp_tunnel_review(
+        &self,
+        _tunnel_id: &str,
+        _operational_bitmap: i64,
+        _ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "stamp_tunnel_review not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2593,5 +2619,13 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         adj_bitmap: i64,
     ) -> Result<(), LocusKitError> {
         self.as_ref().stamp_tunnel_adjective_bitmap(tunnel_id, adj_bitmap)
+    }
+    fn stamp_tunnel_review(
+        &self,
+        tunnel_id: &str,
+        operational_bitmap: i64,
+        ext: Option<&str>,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().stamp_tunnel_review(tunnel_id, operational_bitmap, ext)
     }
 }

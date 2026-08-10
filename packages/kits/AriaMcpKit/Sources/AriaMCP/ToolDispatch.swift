@@ -1237,10 +1237,11 @@ extension ToolDispatcher {
 /// Static dispatch table for the five-tier AI-client interface tools plus the
 /// Maintenance tier.
 ///
-/// Each of the 20 Tier 1–5 interface tools plus 1 Maintenance tool (21 total)
-/// has a named `run*` function on `ToolDispatcher`; this type routes from name
-/// to function, isolating the dispatch logic from the tool-name string
-/// constants. Mirrors the Rust `INTERFACE_TOOLS` constant in `interface_tools.rs`.
+/// Each interface tool (the Tier 1–5 tools plus the Maintenance/admin
+/// tools, enumerated in `names` below) has a named `run*` function on
+/// `ToolDispatcher`; this type routes from name to function, isolating the
+/// dispatch logic from the tool-name string constants. Mirrors the Rust
+/// `INTERFACE_TOOLS` constant in `interface_tools.rs`.
 enum InterfaceTools {
 
     private static let names: Set<String> = [
@@ -1267,6 +1268,8 @@ enum InterfaceTools {
         "moot_reindex", "moot_drain_status", "moot_reclassify_fdc",
         // Direct palace import (bypass NoteIR)
         "moot_palace_import",
+        // Direct seed-file JSON import (schema v1, strict append)
+        "moot_json_import",
     ]
 
     static func isInterfaceTool(_ name: String) -> Bool {
@@ -1316,6 +1319,8 @@ enum InterfaceTools {
         case "moot_reclassify_fdc":    return try await dispatcher.runReclassifyFDC(args)
         // Direct palace import
         case "moot_palace_import":     return try await dispatcher.runPalaceImport(args)
+        // Direct seed-file JSON import
+        case "moot_json_import":       return try await dispatcher.runJsonImport(args)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -2340,37 +2345,122 @@ extension ToolDispatcher {
         return Self.textResult("linked \(fromID) → \(toID) via \(label) (\(tunnel.id))\(stateNote)")
     }
 
-    /// `moot_review_tunnel` — settle a PROPOSED tunnel: accept activates it,
-    /// reject withdraws it. Only tunnels in the proposed lifecycle (the
-    /// contradiction hunter's findings and agent-filed proposed links) are
-    /// reviewable; a settled edge cannot be rewritten by a stale review.
-    /// Rejected pairs are never re-proposed by the hunter (durable dedup).
+    /// Map a proposal's label family to the tier lens recorded on a
+    /// review-ladder vote. The label-family contract is GLK's
+    /// (ConflictTunnelLifecycle.swift: "dcp: " → tier 1, "tier2:" → 2,
+    /// "tier3:" → 3); this dispatch-layer mirror exists because those
+    /// prefixes are internal to GLK. Labels outside the matrix family
+    /// (hunter-filed, agent-filed) default to tier 3 — the weakest
+    /// epistemic class, so a vote on an unlabeled proposal never
+    /// inflates its standing. Parity: Rust `tier_lens_for_label`.
+    static func tierLens(forLabel label: String) -> ContradictionTier {
+        if label.hasPrefix("dcp: ") { return .typedProven }
+        if label.hasPrefix("tier2:") { return .lexicalStructural }
+        if label.hasPrefix("tier3:") { return .lexicalValue }
+        return .lexicalValue
+    }
+
+    /// `moot_review_tunnel` — review a PROPOSED tunnel on the MXE-CT3
+    /// review ladder (Rejected / Proposed / Endorsed / Accepted):
+    ///
+    /// - `accept` (user-only): activates the edge via the existing
+    ///   `respondToTunnel` path, recording `reviewed_by` in the review
+    ///   ledger. Edge activation is human-authoritative — a model
+    ///   reviewer can NEVER activate, no matter how many endorsements
+    ///   accumulate.
+    /// - `reject` with `reviewed_by` "user": withdraws permanently via
+    ///   `respondToTunnel` (durable dedup — never re-proposed).
+    /// - `reject` with a model `reviewed_by`: the AI-objection path
+    ///   (`objectToTunnel`) — withdraws only when no model endorsement
+    ///   exists (reopenable); otherwise the tunnel stays proposed and is
+    ///   marked contested for user attention.
+    /// - `endorse` (any reviewer, user included): records an endorsement
+    ///   vote (`endorseTunnel`) without touching lifecycle; weight feeds
+    ///   review-queue ranking only.
+    ///
+    /// Only tunnels in the proposed lifecycle are reviewable; a settled
+    /// edge cannot be rewritten by a stale review.
     func runReviewTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let tunnelID = try requireString(args, "tunnel_id")
         let verdict = try requireString(args, "verdict")
-        guard verdict == "accept" || verdict == "reject" else {
+        guard verdict == "accept" || verdict == "reject" || verdict == "endorse" else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
-                message: "verdict must be \"accept\" or \"reject\"")
+                message: "verdict must be \"accept\", \"reject\", or \"endorse\"")
+        }
+        let reviewedBy = try optionalString(args["reviewed_by"], argument: "reviewed_by") ?? "user"
+        guard !reviewedBy.isEmpty else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "reviewed_by must be a non-empty string")
+        }
+        // The ladder's one hard wall, enforced at the public boundary:
+        // edge activation is user-only. Models endorse or reject.
+        guard verdict != "accept" || reviewedBy == "user" else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "edge activation is user-only — verdict \"accept\" requires "
+                    + "reviewed_by \"user\"; model reviewers use \"endorse\" or \"reject\"")
         }
         let reason = try optionalString(args["reason"], argument: "reason")
         let estate = try await kit.estate(for: handle)
-        do {
-            try await estate.respondToTunnel(
-                id: tunnelID,
-                accept: verdict == "accept",
-                changedBy: serverIdentity,
-                reason: reason)
-        } catch let error as LocusKitError {
-            // Not-found and not-proposed are caller errors, surfaced as clean
-            // tool-level messages rather than opaque failures.
-            return Self.errorResult("moot_review_tunnel: \(error)")
+
+        // Tier lens for ladder votes, derived from the proposal's label
+        // family. A missing tunnel falls through to the GLK verb, which
+        // owns the not-found error (single validation source).
+        let label = try await estate.getTunnel(id: tunnelID)?.label ?? ""
+        let lens = Self.tierLens(forLabel: label)
+        // Review timestamps are wall-clock: this tool is a live I/O
+        // surface (no `now` argument), and the deterministic engines
+        // receive the instant from here, the I/O boundary.
+        let now = Date()
+
+        switch (verdict, reviewedBy) {
+        case ("endorse", _):
+            do {
+                let outcome = try await kit.endorseTunnel(
+                    in: handle, tunnelID: tunnelID,
+                    endorserID: reviewedBy, tierLens: lens, now: now)
+                let contestedNote = outcome.contested ? ", contested" : ""
+                return Self.textResult(
+                    "moot_review_tunnel: \(tunnelID) endorsed by \(reviewedBy) "
+                        + "(distinct endorsers: \(outcome.distinctEndorsers)\(contestedNote)).")
+            } catch let error as LocusKitError {
+                return Self.errorResult("moot_review_tunnel: \(error)")
+            }
+        case ("reject", let reviewer) where reviewer != "user":
+            // AI rejection semantics: an objection, not a user verdict.
+            do {
+                let outcome = try await kit.objectToTunnel(
+                    in: handle, tunnelID: tunnelID,
+                    reviewerID: reviewer, tierLens: lens, now: now)
+                let text = outcome.withdrawn
+                    ? "objected by \(reviewer) — withdrawn (no model endorsement on record; the user can reopen it)"
+                    : "objected by \(reviewer) — contested: a model endorsement exists, so the proposal stays for user review"
+                return Self.textResult("moot_review_tunnel: \(tunnelID) \(text).")
+            } catch let error as LocusKitError {
+                return Self.errorResult("moot_review_tunnel: \(error)")
+            }
+        default:
+            // User accept/reject — the existing settle path, now
+            // recording the reviewer identity in the review ledger.
+            do {
+                try await estate.respondToTunnel(
+                    id: tunnelID,
+                    accept: verdict == "accept",
+                    changedBy: reviewedBy,
+                    reason: reason)
+            } catch let error as LocusKitError {
+                // Not-found and not-proposed are caller errors, surfaced as clean
+                // tool-level messages rather than opaque failures.
+                return Self.errorResult("moot_review_tunnel: \(error)")
+            }
+            let outcome = verdict == "accept"
+                ? "accepted — the contradicts link is now active"
+                : "rejected — the link is withdrawn and this pair will never be re-proposed"
+            return Self.textResult("moot_review_tunnel: \(tunnelID) \(outcome).")
         }
-        let outcome = verdict == "accept"
-            ? "accepted — the contradicts link is now active"
-            : "rejected — the link is withdrawn and this pair will never be re-proposed"
-        return Self.textResult("moot_review_tunnel: \(tunnelID) \(outcome).")
     }
 
     /// `moot_connection_search` — find connections going out from a memory.
@@ -3565,6 +3655,82 @@ extension ToolDispatcher {
             "Keyword (exact-term) and structured (wing/room) recall work almost immediately. " +
             "Full SEMANTIC / vector recall — meaning-based RAG search — becomes available only AFTER background indexing completes: every drawer is chunked and embedded, then the corpus embedding-basis is retrained on the whole import and republished, so recently-imported terms enter the semantic vocabulary. On a large import that takes tens of seconds to a few minutes. " +
             "BE PATIENT: poll moot_drain_status until it reports idle before relying on semantic search over the imported memories, and tell the user that deep meaning-based recall over a fresh import becomes available shortly after import, not instantly."
+        )
+    }
+
+    /// `moot_json_import` — import a seed file (rigid versioned JSON,
+    /// schema v1) into the estate: the bulk seeding lane. The whole file is
+    /// validated BEFORE any write; any schema violation or lineage
+    /// collision (strict append) returns a tool-level error naming the
+    /// offending element with the estate untouched — the zero-partial-write
+    /// contract. Canonical format doc:
+    /// `packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md`.
+    ///
+    /// Gated behind `MOOTX01_VAULT` for the same reason as vault/palace
+    /// import: this tool reads arbitrary files from the local filesystem.
+    func runJsonImport(_ args: [String: JSONValue]) async throws -> JSONValue {
+        guard ToolProjection.vaultEnabled(environment: environment) else {
+            return Self.errorResult(
+                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
+            )
+        }
+        let handle = try resolveHandle(args)
+        let path = try requireString(args, "path")
+        let seedURL = URL(fileURLWithPath: path)
+        let now = Date()
+
+        // Optional default wing for records that omit `wing`. An explicit
+        // empty string is invalid rather than silently ignored.
+        let wing = try optionalString(args["wing"], argument: "wing")
+        if let wing, wing.isEmpty {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "wing must be non-empty; omit it to use the estate default wing")
+        }
+
+        // mode (encode SPEED, default foreground) — SPEED only, mirroring
+        // the palace tool's contract: the WRITE strategy is always windowed
+        // bulk, never caller-chosen. Fail-closed on an unknown value.
+        let modeStr = (try optionalString(args["mode"], argument: "mode")) ?? "foreground"
+        let mode: EncodeSpeed
+        switch modeStr.lowercased() {
+        case "foreground": mode = .foreground
+        case "background": mode = .background
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)"
+            )
+        }
+
+        let bridge = JsonImportBridge(kit: kit)
+        let report: JsonImportReport
+        do {
+            report = try await bridge.importSeed(
+                at: seedURL, into: handle, defaultWing: wing, now: now,
+                progress: { processed, total in
+                    // Live progress to stderr, fired by the bridge every 10
+                    // records — the sole live-progress channel during a
+                    // long import.
+                    fputs("json import: \(processed)/\(total) drawers\n", stderr)
+                },
+                mode: mode)
+        } catch let VaultKitError.adapterError(message) {
+            // Validation / collision failures are tool-level errors: the
+            // estate is untouched (zero-partial-write contract) and the
+            // message names the first offending element.
+            return Self.errorResult(message)
+        }
+
+        return Self.textResult(
+            "json import complete: \(report.drawersWritten) drawers, " +
+            "\(report.factsWritten) facts, \(report.tunnelsCreated) tunnels " +
+            "from seed \"\(report.seedName)\" (strict append — every record is a fresh lineage). " +
+            "seedSha256=\(report.seedSha256). " +
+            "\(report.enqueuedForEncode) drawers enqueued for semantic encoding; " +
+            "keyword and structured recall work almost immediately, and full semantic/vector " +
+            "recall lights up after the encode work settles — poll moot_drain_status until idle " +
+            "before relying on semantic search over the imported memories."
         )
     }
 }

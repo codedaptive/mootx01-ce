@@ -257,6 +257,7 @@ fn vector_similarity_signal_emits_only_diagnostic_when_store_is_empty() {
         store,
         "test-model".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        VectorSimilaritySignal::DEFAULT_PROBE_LIMIT,
         None,
         None, // edge_checker: None for this parity test
     );
@@ -286,6 +287,91 @@ fn vector_similarity_signal_emits_only_diagnostic_when_store_is_empty() {
         })
         .count();
     assert_eq!(associate_count, 0, "no pairs in empty store → no associate emissions");
+}
+
+/// Pin the default probe limit constant. Resident behavior must remain
+/// byte-identical (50 item IDs per pass) when `probe_limit` is not
+/// supplied explicitly. Mirrors Swift's
+/// `vectorSimilaritySignalDefaultProbeLimitIs50`.
+#[test]
+fn vector_similarity_signal_default_probe_limit_is_50() {
+    assert_eq!(
+        VectorSimilaritySignal::DEFAULT_PROBE_LIMIT, 50,
+        "DEFAULT_PROBE_LIMIT must be 50; resident behavior is byte-unchanged at this value"
+    );
+}
+
+/// Verify that a spec built with `probe_limit = 0` reaches the store call
+/// with that limit: even a non-empty store produces only the scan-summary
+/// diagnostic when the probe window is zero, because no item IDs are
+/// sampled and therefore no pairs are found. This distinguishes the wired
+/// limit from the empty-store baseline (where the same result occurs for
+/// different reasons). Mirrors Swift's
+/// `vectorSimilaritySignalProbeLimitZeroEmitsOnlyDiagnosticOnPopulatedStore`.
+#[test]
+fn vector_similarity_signal_probe_limit_zero_emits_only_diagnostic_on_populated_store() {
+    use engram_lib::Engram;
+
+    // Populate the store with two vectors that are within the proximity
+    // threshold (identical Engrams, Hamming distance = 0 ≤ 64). With the
+    // default probe limit, the signal would find this pair and emit an
+    // AssociateFrame. With probe_limit = 0, no item IDs are sampled and
+    // the pair is never found — only the scan-summary diagnostic is emitted.
+    let store = make_empty_vector_store();
+    let identical_engram = Engram::new(
+        0xAAAA_AAAA_AAAA_AAAA,
+        0xAAAA_AAAA_AAAA_AAAA,
+        0xAAAA_AAAA_AAAA_AAAA,
+        0xAAAA_AAAA_AAAA_AAAA,
+    );
+    // filed_at_unix_secs: i64 — mirrors the VectorStore.add_vector Swift Date parameter.
+    let t0_unix_secs: i64 = 1_700_000_000;
+    store
+        .add_vector("item-probe-a", &identical_engram, "test-model", "v1", t0_unix_secs)
+        .expect("add_vector item-probe-a");
+    store
+        .add_vector("item-probe-b", &identical_engram, "test-model", "v1", t0_unix_secs)
+        .expect("add_vector item-probe-b");
+
+    // probe_limit = 0: no items sampled → no pairs → only the scan-summary
+    // diagnostic. If probe_limit were not threaded to recent_item_ids, the
+    // signal would probe both items and emit an AssociateFrame.
+    let spec = VectorSimilaritySignal::spec(
+        store,
+        "test-model".to_string(),
+        VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        0, // probe_limit = 0: zero item IDs sampled
+        None,
+        None,
+    );
+    let report = fire(spec);
+    assert_eq!(report.name, "vector-similarity");
+    assert_eq!(
+        report.emission_count, 1,
+        "probe_limit=0 on a populated store must produce only the scan-summary diagnostic"
+    );
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title,
+        "vector_similarity.scan.summary"
+    );
+    // No associate outcomes: zero item IDs probed → zero candidate pairs.
+    let associate_count = report
+        .recent_outcomes
+        .iter()
+        .filter(|o| {
+            matches!(
+                o,
+                SignalRouteOutcome::Routed { verb }
+                | SignalRouteOutcome::RoutedButVerbStubbed { verb }
+                if verb == "associate"
+            )
+        })
+        .count();
+    assert_eq!(
+        associate_count, 0,
+        "probe_limit=0 must produce no associate emissions even on a populated store"
+    );
 }
 
 #[test]

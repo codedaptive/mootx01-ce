@@ -77,6 +77,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_distill") == .ask)
         #expect(PermissionsWriter.classify("moot_synthesize") == .ask)
         #expect(PermissionsWriter.classify("moot_palace_import") == .ask)
+        #expect(PermissionsWriter.classify("moot_json_import") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_import") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_export") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_reconcile") == .ask)
@@ -129,6 +130,7 @@ struct PermissionsWriterTests {
             "moot_lens_latent_themes", "moot_lens_moment", "moot_lens_node_motion",
             "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm",
             "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
+            "moot_json_import",
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
             "moot_memory_list", "moot_memory_search", "moot_monitoring_status", "moot_move_memory",
             "moot_palace_import",
@@ -148,7 +150,8 @@ struct PermissionsWriterTests {
         // A mismatch here means THIS PINNED LIST is stale relative to
         // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
         // before trusting the set-difference below.
-        #expect(realTools.count == 71, "pinned tool inventory drifted from the real surface count")
+        // +1 (MXE-JI-1): moot_json_import — seed-file JSON lane, Ask tier.
+        #expect(realTools.count == 72, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)

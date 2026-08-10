@@ -60,7 +60,18 @@ impl Default for DrawerRowMeta {
 /// Synthesize a `ContextDocument` from a recall page and the
 /// per-row metadata vector. The metadata vector may be empty, in
 /// which case every row is treated with `DrawerRowMeta::default()`.
-pub fn synthesize(page: &RecallPage, meta: &[DrawerRowMeta]) -> ContextDocument {
+///
+/// `max_key_insights` bounds the excerpted rows. The historical digest
+/// bound is 3. A cue-grounded caller passes its post-rank cap so every
+/// ranked survivor is VISIBLE in the document — trial 3 measured 30/35
+/// misses with the answer drawer ranked into the capped set but invisible
+/// behind the 3-row excerpt. Twin of Swift
+/// `ContextSynthesisEngine.synthesize(page:maxKeyInsights:)`.
+pub fn synthesize(
+    page: &RecallPage,
+    meta: &[DrawerRowMeta],
+    max_key_insights: usize,
+) -> ContextDocument {
     let rows = &page.rows;
     if rows.is_empty() {
         return ContextDocument {
@@ -78,7 +89,7 @@ pub fn synthesize(page: &RecallPage, meta: &[DrawerRowMeta]) -> ContextDocument 
     let success_rate = currently_believed_rate(rows, meta);
     let average_reward: f32 = 0.0; // No reward field on DrawerRow at v0.1 — see spec note.
     let recommendations = make_recommendations(&patterns);
-    let key_insights = make_key_insights(rows, 3);
+    let key_insights = make_key_insights(rows, max_key_insights.max(1));
 
     ContextDocument {
         summary,
@@ -296,7 +307,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[]);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(doc.summary, "");
         assert!(doc.patterns.is_empty());
         assert_eq!(doc.success_rate, 0.0);
@@ -318,7 +329,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &m);
+        let doc = synthesize(&page, &m, 3);
         assert_eq!(doc.summary, "3 drawers; dominant node node-x.");
     }
 
@@ -334,7 +345,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[]);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(
             doc.patterns,
             vec!["carbon", "organic", "compounds", "chemistry", "physics"]
@@ -349,7 +360,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[]);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(doc.recommendations.len(), doc.patterns.len());
     }
 
@@ -361,7 +372,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[]);
+        let doc = synthesize(&page, &[], 3);
         assert!(doc.patterns.is_empty());
         assert_eq!(doc.recommendations.len(), 1);
         assert!(doc.recommendations[0].contains("broadening the recall frame"));
@@ -380,7 +391,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[]);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(doc.key_insights, vec!["line one", "single line", "three"]);
     }
 
@@ -397,7 +408,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &m);
+        let doc = synthesize(&page, &m, 3);
         assert!((doc.success_rate - (2.0 / 3.0)).abs() < 1e-6);
     }
 }

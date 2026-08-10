@@ -807,7 +807,7 @@ struct VaultBridgeTests {
                 room: "export-regression",
                 latticeAnchor: LatticeAnchor(udcCode: "000"),
                 addedBy: "vaultkit-test",
-                embeddingModelID: "vaultkit-noembed-v1"
+                embeddingModelID: importEmbeddingModelID
             )
             _ = try await kit.capture(handle, frame)
         }

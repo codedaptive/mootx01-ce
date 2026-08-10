@@ -872,6 +872,32 @@ public actor Estate {
         try await store.addTunnel(t)
     }
 
+    /// Fetch one tunnel by id (nil when absent). Read-only estate-level
+    /// pass-through over `DrawerStore.getTunnel` — the GLK review-ladder
+    /// verbs (endorse/object) read the current bitmap and ext ledger
+    /// through this before stamping. Mirrors Rust `Estate::get_tunnel`.
+    public func getTunnel(id: String) async throws -> Tunnel? {
+        try await store.getTunnel(id: id)
+    }
+
+    /// Persist a review-ladder state change (operational bitmap + ext
+    /// review ledger) in one update. Estate-level surface over
+    /// `DrawerStore.stampTunnelReview` — the write primitive behind the
+    /// GLK endorsement verbs. LocusKit owns the column; GLK owns the
+    /// review policy.
+    ///
+    /// - Throws: `tunnelNotFound` if no tunnel with `tunnelId` exists;
+    ///           `tunnelNoLongerProposed` if the tunnel has left `.proposed`
+    ///           lifecycle since the caller's last read (GK-01 OCC guard).
+    ///
+    /// Mirrors Rust `Estate::stamp_tunnel_review`.
+    public func stampTunnelReview(
+        id tunnelId: String, operationalBitmap: Int64, ext: String?
+    ) async throws {
+        try await store.stampTunnelReview(
+            id: tunnelId, operationalBitmap: operationalBitmap, ext: ext)
+    }
+
     /// Flip bit 13 of `operationalBitmap` to retire a tunnel.
     ///
     /// Throws `LocusKitError.tunnelNotFound` if no non-tombstoned tunnel exists for

@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.22.0
+version: 1.23.0
 status: active
-date: 2026-08-04
+date: 2026-08-07
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -371,15 +371,19 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
     public let addedBy: String; public let filedAt: Date
     public let tombstonedAt: Date?; public let removedByBatch: String?
     public let orderKey: Double?  // fractional-index sibling ordering under parent edges (the node-integrity contract §11)
+    public let ext: String?  // JSON side-car column; review-ladder tenant is TunnelReviewLedger (MXE-CT3) — unknown tenants preserved on parse/serialize
     public init(id: String, sourceWing: String, sourceRoom: String, sourceDrawerId: String? = nil,
                 targetWing: String, targetRoom: String, targetDrawerId: String? = nil,
                 label: String, kind: TunnelKind = .references, adjectiveBitmap: Int64 = 0,
                 operationalBitmap: Int64 = 0, provenanceBitmap: Int64 = 0, addedBy: String,
                 filedAt: Date, tombstonedAt: Date? = nil, removedByBatch: String? = nil,
-                orderKey: Double? = nil)
+                orderKey: Double? = nil, ext: String? = nil)
     public var direction: TunnelDirection; public var lifecycle: TunnelLifecycle
     public var originClass: TunnelOriginClass; public var strength: TunnelStrength
     public var hasInverse: Bool   // bit 12, computed (I-2)
+    public var isEndorsed: Bool   // bit 14, computed — a model reviewer endorsed this proposed tunnel (MXE-CT3 review ladder); lifecycle untouched
+    public var isContested: Bool  // bit 15, computed — the ext ledger holds BOTH a model endorsement and a model objection
+    // withEndorsed() / withContested() return bit-setting copies (TunnelOperational.swift)
 }
 ```
 **Rust:** `pub struct KGFact`, `DiaryEntry`, `Tunnel` mirror these fields and
@@ -757,6 +761,17 @@ public actor DrawerStore {
     public func mutateAdjective(...) async throws; public func mutateOperational(...) async throws
     public func mutateProvenance(...) async throws; public func mutateState(...) async throws
     public func addTunnel(_ t: Tunnel) async throws; public func getTunnel(id: String) async throws -> Tunnel?
+    /// Review a .proposed tunnel: accept → .active, reject → .withdrawn; only
+    /// .proposed is reviewable (stale reviews cannot rewrite settled edges).
+    /// Records `changedBy` into the ext review ledger's `reviewedBy` on EVERY
+    /// transition (MXE-CT3 review ladder); fail-loud on a corrupt ext ledger.
+    public func respondToTunnel(id: String, accept: Bool, changedBy: String,
+                                reason: String? = nil, now: Date) async throws
+    /// Review-ladder write primitive behind the GLK endorse/object verbs:
+    /// persists operationalBitmap (endorsed/contested/lifecycle bits) and the
+    /// ext review ledger in ONE update. LocusKit owns the column; GLK owns the
+    /// review policy. Also surfaced at Estate level with getTunnel(id:).
+    public func stampTunnelReview(id: String, operationalBitmap: Int64, ext: String?) async throws
     public func addKGFact(_ f: KGFact) async throws; public func kgFacts(forDrawerID: String) async throws -> [KGFact]
     public func withdrawKGFact(id: String) async throws  // transitions adjectiveBitmap to State.withdrawn raw 18 (RowState Cluster B), exiting the active-recall filter (g_state_cluster < RowState.activeClusterUpperBoundRaw, 16)
     public func addDiaryEntry(_ e: DiaryEntry) async throws; public func readDiary(agentName: String, lastN: Int = 10) async throws -> [DiaryEntry]
@@ -1177,6 +1192,9 @@ Recurring sanctioned shapes:
 | Tunnel lifecycle | `TunnelLifecycle` (TunnelOperational.swift:64) | `TunnelLifecycle` (tunnel_operational.rs:131) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
 | Tunnel origin class | `TunnelOriginClass` (TunnelOperational.swift:74) | `TunnelOriginClass` (tunnel_operational.rs:163) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
 | Tunnel strength | `TunnelStrength` (TunnelOperational.swift:88) | `TunnelStrength` (tunnel_operational.rs:201) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
+| Tunnel review bits | `Tunnel.isEndorsed` / `isContested` + `withEndorsed()` / `withContested()` (TunnelOperational.swift) | `Tunnel::is_endorsed` / `is_contested` + `with_endorsed()` / `with_contested()` (tunnel_operational.rs) | public / pub | bits 14 (endorsed) and 15 (contested) of `operationalBitmap`, computed accessors — no Bool stored properties (schema invariant). Endorsed = a model reviewer endorsed the proposed tunnel; contested = the ext ledger holds both a model endorsement and a model objection (MXE-CT3 review ladder). | `TunnelBitmapTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed |
+| Tunnel review ledger | `TunnelReviewLedger` (TunnelReviewLedger.swift) | `TunnelReviewLedger` (tunnel_review_ledger.rs) | public / pub | the `ext` column's review-ladder tenant: endorsements (one per distinct endorser, idempotent timestamp refresh), objections with reviewer identity, `reviewedBy` on every transition. Canonical byte-identical serialization across ports; unknown ext tenants preserved; corrupt ledgers fail loud (`invalidContent`). `parse` / `serialized` / `recordEndorsement` / `recordObjection` / `recordReview` / `distinctEndorserCount` / `isContestedEvidence` (snake_case in Rust). | `TunnelReviewLedgerTests.swift` ↔ `capture_tunnel_tests.rs` ledger block | Confirmed |
+| Tunnel review write primitive | `Estate.getTunnel(id:)` + `Estate.stampTunnelReview(id:operationalBitmap:ext:)` (Estate.swift; store method DrawerStore.swift) | `Estate::get_tunnel` + `DrawerStore::stamp_tunnel_review` (estate_verbs.rs / drawer_store.rs, all backends) | public / pub | one-update persistence of the review-ladder state (bitmap + ext ledger) behind the GLK endorse/object verbs; LocusKit owns the column, GLK owns the review policy. `respondToTunnel` additionally records `changedBy` into the ledger's `reviewedBy` on every accept/reject. | `TunnelReviewLedgerTests.swift` ↔ `capture_tunnel_tests.rs` (`respond_to_tunnel_records_reviewer_identity_in_ext`, unknown-tenant + corrupt-ext blocks) | Confirmed |
 | Diary event class | `DiaryEventClass` (DiaryOperational.swift:34) | `DiaryEventClass` (diary_operational.rs:44) | public / pub | identical | `DiaryOperationalTests.swift` ↔ `diary_operational.rs` tests | Confirmed |
 | Diary severity | `DiarySeverity` (DiaryOperational.swift:55) | `DiarySeverity` (diary_operational.rs:94) | public / pub | identical | `DiaryOperationalTests.swift` | Confirmed |
 | Diary actor class | `DiaryActorClass` (DiaryOperational.swift:68) | `DiaryActorClass` (diary_operational.rs:135) | public / pub | identical | `DiaryOperationalTests.swift` | Confirmed |
@@ -1437,6 +1455,18 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.23.0 -- 2026-08-07
+
+- Tunnel review state (MXE-CT3): `Tunnel.ext` JSON side-car column
+  (review-ladder tenant `TunnelReviewLedger`; unknown tenants
+  preserved), computed bit accessors `isEndorsed` (14) / `isContested`
+  (15) with `withEndorsed()` / `withContested()` copies,
+  `Estate.getTunnel(id:)`, `Estate.stampTunnelReview(id:operationalBitmap:ext:)`
+  (one-update bitmap + ledger persistence behind the GLK endorse/object
+  verbs), and `respondToTunnel` recording `changedBy` into the ledger's
+  `reviewedBy` on every transition. Concordance rows added; Rust twins
+  at parity across all drawer-store backends.
 
 ### 1.22.0 -- 2026-08-04
 

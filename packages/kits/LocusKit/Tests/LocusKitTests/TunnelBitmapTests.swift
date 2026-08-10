@@ -218,4 +218,174 @@ struct TunnelBitmapTests {
         let tn = tunnel(operational: 0x200)
         #expect(tn.strength == .weak)
     }
+
+    // MARK: - Review-ladder bits 14/15 + ext (MXE-CT3 P2.5)
+
+    @Test("endorsed defaults false; withEndorsed sets exactly bit 14")
+    func endorsedDefaultAndSet() {
+        let fresh = tunnel(operational: 0)
+        #expect(!fresh.isEndorsed)
+        #expect(Tunnel.isEndorsedBit == 1 << 14)
+        let endorsed = fresh.withEndorsed()
+        #expect(endorsed.isEndorsed)
+        #expect(endorsed.operationalBitmap & (1 << 14) == 1 << 14)
+        // Endorsed is NOT a lifecycle case — lifecycle bits untouched.
+        #expect(endorsed.lifecycle == fresh.lifecycle)
+    }
+
+    @Test("contested defaults false; withContested sets exactly bit 15")
+    func contestedDefaultAndSet() {
+        let fresh = tunnel(operational: 0)
+        #expect(!fresh.isContested)
+        #expect(Tunnel.isContestedBit == 1 << 15)
+        let contested = fresh.withContested()
+        #expect(contested.isContested)
+        #expect(contested.operationalBitmap & (1 << 15) == 1 << 15)
+    }
+
+    @Test("endorsed/contested set and clear do not disturb other bits")
+    func reviewBitsPreserveNeighbours() {
+        // direction=bidirectional, lifecycle=proposed, retired set.
+        let bits: Int64 = 1 | (1 << 3) | (1 << 13)
+        let both = tunnel(operational: bits).withEndorsed().withContested()
+        #expect(both.direction == .bidirectional)
+        #expect(both.lifecycle == .proposed)
+        #expect(both.isRetired)
+        #expect(both.isEndorsed && both.isContested)
+        // Clear leg of the quad: dropping bit 14 leaves bit 15 and the
+        // original bits exactly intact.
+        let cleared = tunnel(operational: both.operationalBitmap & ~Tunnel.isEndorsedBit)
+        #expect(!cleared.isEndorsed)
+        #expect(cleared.isContested)
+        #expect(cleared.operationalBitmap & bits == bits)
+    }
+
+    @Test("review bits + ext persist and reload through SQLite")
+    func reviewStateSQLiteRoundTrip() async throws {
+        let store = try await DrawerStore(storage: TestStorage.sqlite(freshStoreURL()))
+        let proposed = Tunnel(
+            id: "t-review",
+            sourceWing: "w", sourceRoom: "r",
+            targetWing: "w2", targetRoom: "r2",
+            label: "tier2:word_exclusion@1 score=0.8",
+            kind: .contradicts,
+            operationalBitmap: Int64(TunnelLifecycle.proposed.rawValue) << 3,
+            addedBy: "conflict-projection", filedAt: t(1_700_000_000)
+        )
+        try await store.addTunnel(proposed)
+
+        var ledger = TunnelReviewLedger()
+        ledger.recordEndorsement(by: "claude", atISO: "2026-08-07T12:00:00Z", tier: 2)
+        let stamped = proposed.withEndorsed()
+        try await store.stampTunnelReview(
+            id: proposed.id,
+            operationalBitmap: stamped.operationalBitmap,
+            ext: ledger.serialized())
+
+        let loaded = try #require(try await store.getTunnel(id: proposed.id))
+        #expect(loaded.isEndorsed)
+        #expect(!loaded.isContested)
+        #expect(loaded.lifecycle == .proposed)
+        // Reopen after reload: the reparsed ledger continues accepting
+        // votes — persistence did not flatten it.
+        var reparsed = try TunnelReviewLedger.parse(loaded.ext)
+        #expect(reparsed.distinctEndorserCount == 1)
+        #expect(reparsed.endorsements.first?.by == "claude")
+        let addedSecond = reparsed.recordEndorsement(
+            by: "apple-onboard", atISO: "2026-08-07T13:00:00Z", tier: 2)
+        #expect(addedSecond)
+        #expect(reparsed.distinctEndorserCount == 2)
+    }
+
+    @Test("respondToTunnel records reviewer identity on both transitions")
+    func respondRecordsReviewerIdentity() async throws {
+        let store = try await DrawerStore(storage: TestStorage.sqlite(freshStoreURL()))
+        let base = Tunnel(
+            id: "t-reject",
+            sourceWing: "w", sourceRoom: "r",
+            targetWing: "w2", targetRoom: "r2",
+            label: "dcp: rule@1 result=x",
+            kind: .contradicts,
+            operationalBitmap: Int64(TunnelLifecycle.proposed.rawValue) << 3,
+            addedBy: "conflict-projection", filedAt: t(1_700_000_000)
+        )
+        try await store.addTunnel(base)
+        try await store.respondToTunnel(
+            id: base.id, accept: false, changedBy: "bob", now: t(1_700_000_100))
+        let rejected = try #require(try await store.getTunnel(id: base.id))
+        #expect(rejected.lifecycle == .withdrawn)
+        let rejectLedger = try TunnelReviewLedger.parse(rejected.ext)
+        #expect(rejectLedger.reviewedBy == "bob")
+        // User rejection carries NO objection entry — that entry is the
+        // model-rejection marker (reopenability distinction).
+        #expect(rejectLedger.objections.isEmpty)
+
+        let accepting = Tunnel(
+            id: "t-accept",
+            sourceWing: "w", sourceRoom: "r",
+            targetWing: "w2", targetRoom: "r2",
+            label: "dcp: rule@1 result=y",
+            kind: .contradicts,
+            operationalBitmap: Int64(TunnelLifecycle.proposed.rawValue) << 3,
+            addedBy: "conflict-projection", filedAt: t(1_700_000_000)
+        )
+        try await store.addTunnel(accepting)
+        try await store.respondToTunnel(
+            id: accepting.id, accept: true, changedBy: "bob", now: t(1_700_000_100))
+        let accepted = try #require(try await store.getTunnel(id: accepting.id))
+        #expect(accepted.lifecycle == .active)
+        #expect(try TunnelReviewLedger.parse(accepted.ext).reviewedBy == "bob")
+    }
+
+    @Test("respondToTunnel preserves unknown ext tenants and fails loud on corrupt ext")
+    func respondExtTolerance() async throws {
+        let store = try await DrawerStore(storage: TestStorage.sqlite(freshStoreURL()))
+        let base = Tunnel(
+            id: "t-tenant",
+            sourceWing: "w", sourceRoom: "r",
+            targetWing: "w2", targetRoom: "r2",
+            label: "dcp: rule@1 result=z",
+            kind: .contradicts,
+            operationalBitmap: Int64(TunnelLifecycle.proposed.rawValue) << 3,
+            addedBy: "conflict-projection", filedAt: t(1_700_000_000)
+        )
+        try await store.addTunnel(base)
+        try await store.stampTunnelReview(
+            id: base.id, operationalBitmap: base.operationalBitmap,
+            ext: "{\"zFuture\":{\"keep\":true}}")
+        try await store.respondToTunnel(
+            id: base.id, accept: false, changedBy: "bob", now: t(1_700_000_100))
+        let loaded = try #require(try await store.getTunnel(id: base.id))
+        #expect(loaded.ext == "{\"reviewedBy\":\"bob\",\"zFuture\":{\"keep\":true}}")
+
+        // Corrupt ext: structured error, nothing overwritten.
+        let corrupt = Tunnel(
+            id: "t-corrupt",
+            sourceWing: "w", sourceRoom: "r",
+            targetWing: "w2", targetRoom: "r2",
+            label: "dcp: rule@1 result=w",
+            kind: .contradicts,
+            operationalBitmap: Int64(TunnelLifecycle.proposed.rawValue) << 3,
+            addedBy: "conflict-projection", filedAt: t(1_700_000_000)
+        )
+        try await store.addTunnel(corrupt)
+        try await store.stampTunnelReview(
+            id: corrupt.id, operationalBitmap: corrupt.operationalBitmap, ext: "not json {")
+        await #expect(throws: LocusKitError.self) {
+            try await store.respondToTunnel(
+                id: corrupt.id, accept: false, changedBy: "bob", now: t(1_700_000_100))
+        }
+        let untouched = try #require(try await store.getTunnel(id: corrupt.id))
+        #expect(untouched.ext == "not json {")
+        #expect(untouched.lifecycle == .proposed)
+    }
+
+    @Test("stampTunnelReview on a missing tunnel throws tunnelNotFound")
+    func stampUnknownTunnelThrows() async throws {
+        let store = try await DrawerStore(storage: TestStorage.sqlite(freshStoreURL()))
+        await #expect(throws: LocusKitError.self) {
+            try await store.stampTunnelReview(
+                id: "no-such-tunnel", operationalBitmap: 0, ext: nil)
+        }
+    }
 }

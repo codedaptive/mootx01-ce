@@ -54,7 +54,7 @@ public struct DrawerMapping: Sendable {
 
     public init(
         addedBy: String = "vaultkit-import",
-        embeddingModelID: String = "vaultkit-noembed-v1",
+        embeddingModelID: String = importEmbeddingModelID,
         classifyOnImport: Bool = true
     ) {
         self.addedBy = addedBy

@@ -68,6 +68,14 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
     /// `RecipeError::TooManyOriginEntries`.
     case tooManyOriginEntries(count: Int, maximum: Int)
 
+    /// A `cap` parameter was non-positive (zero or negative). `cap` is
+    /// applied as `Array.prefix(cap)` — a negative value crashes the
+    /// process (Swift range formation panic); zero produces an empty
+    /// synthesis set, which is a vacuous result. Callers must pass
+    /// `cap > 0` or omit it (nil = no cap). Mirrors Rust
+    /// `RecipeError::InvalidCap`.
+    case invalidCap(value: Int)
+
     public var description: String {
         switch self {
         case .missingCapability(let cap):
@@ -86,6 +94,8 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
             return "RecipeError.tooManyPlans: \(count) plans exceeds the maximum of \(maximum)."
         case .tooManyOriginEntries(let count, let maximum):
             return "RecipeError.tooManyOriginEntries: \(count) origin entries exceeds the maximum of \(maximum)."
+        case .invalidCap(let value):
+            return "RecipeError.invalidCap: cap must be > 0, got \(value); pass nil to synthesize without a cap."
         }
     }
 }

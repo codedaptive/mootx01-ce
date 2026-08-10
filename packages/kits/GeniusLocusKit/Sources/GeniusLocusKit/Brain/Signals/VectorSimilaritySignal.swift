@@ -25,13 +25,20 @@ public typealias AssociationEdgeChecker =
 /// pairs whose embeddings have drifted into similarity proximity since
 /// the last pass, and emits `associate` proposals for each candidate pair.
 ///
-/// How pairs are found: the emit closure samples the 50 most recently
-/// filed item IDs via `VectorStore.recentItemIDs(limit:)`, retrieves each
-/// row's engram via `getVector(itemID:modelID:)`, and calls
+/// How pairs are found: the emit closure samples up to `probeLimit` most
+/// recently filed item IDs via `VectorStore.recentItemIDs(limit:)`,
+/// retrieves each row's engram via `getVector(itemID:modelID:)`, and calls
 /// `VectorStore.findNearest(probe:modelID:limit:)` to locate nearby
 /// vectors. Pairs within `proximityThreshold` Hamming distance (default
 /// 64 — 25% of 256 bits) are deduplicated and emitted as
 /// `AssociationFrame` values with weight = 1 − (distance / 256).
+///
+/// The probe window is one-sided: probes are recency-sampled (newest first),
+/// while neighbors are searched across the whole estate. Two dormant old
+/// items will never pair unless one of them was probed while recent. This
+/// is the documented limitation the `probeLimit` parameter exists to relieve
+/// — callers such as the dream associate step and the benchmark protocol v2
+/// can widen the window when a full-estate sweep is warranted.
 ///
 /// TWO model populations are mined (same lane split as the contradiction
 /// hunter): Drawer-keyed rows under the caller's `modelID` (bespoke lanes and
@@ -52,7 +59,7 @@ public typealias AssociationEdgeChecker =
 /// column, so the verb accepts and discards it (see `Verbs.associate`,
 /// the drop site). The value is computed and plumbed on purpose — a
 /// pre-2.0 gauntlet experiment will test whether feeding weight into
-/// recall improves results; until that runs, it is honestly carried and
+/// recall improves results; until that runs, it is faithfully carried and
 /// dropped, never persisted and never silently fabricated.
 ///
 /// Cadence: every five minutes — matches the cookbook §15.2 bucket-
@@ -73,16 +80,12 @@ public enum VectorSimilaritySignal {
     /// SimHash scale used by this substrate.
     public static let defaultProximityThreshold: Int = 64
 
-    /// Maximum drawer IDs sampled per pass from the VectorStore.
+    /// Default number of item IDs sampled per pass from the VectorStore.
     /// Bounded to keep each 5-minute fire O(N·K) in the number of
     /// stored vectors rather than quadratic: 50 probes × 5 neighbours
-    /// = 250 distance comparisons per pass.
-    private static let maxProbeCount = 50
-
-    /// Neighbours requested per probe via findNearest. Small limit keeps
-    /// the scan bounded; the signal's goal is proximity detection, not
-    /// exhaustive ranking.
-    private static let neighboursPerProbe = 5
+    /// = 250 distance comparisons per pass. Callers that need a wider
+    /// or narrower window pass an explicit `probeLimit` to `spec(...)`.
+    public static let defaultProbeLimit: Int = 50
 
     /// Build the VectorSimilaritySignal spec for production use.
     ///
@@ -104,6 +107,16 @@ public enum VectorSimilaritySignal {
     ///   - corpus: The estate's `CorpusContentEngine`, when registered.
     ///     Enables its Drawer-keyed model population. `nil` scans only the
     ///     caller-selected `modelID` population.
+    ///   - probeLimit: Maximum number of item IDs sampled from the
+    ///     VectorStore on each pass via `recentItemIDs(limit:)`. Default
+    ///     `defaultProbeLimit` (50). Resident behavior is byte-unchanged
+    ///     at the default. Widen for callers that need a broader recency
+    ///     window — the dream associate step and benchmark protocol v2
+    ///     are the expected non-default users. The probe window is
+    ///     one-sided: probes are recency-sampled (newest first), while
+    ///     neighbors search the whole estate; two dormant old items
+    ///     never pair unless one was probed while recent — this is
+    ///     the limitation widening `probeLimit` relieves.
     ///   - edgeChecker: Optional async closure that returns `true` when
     ///     a persisted (non-tombstoned) association already exists between
     ///     the two drawer IDs in either direction (FINDING-3 optimization).
@@ -115,6 +128,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int = defaultProximityThreshold,
+        probeLimit: Int = defaultProbeLimit,
         corpus: CorpusContentEngine? = nil,
         edgeChecker: AssociationEdgeChecker? = nil
     ) -> SignalSpec {
@@ -128,6 +142,7 @@ public enum VectorSimilaritySignal {
                     vectorStore: vectorStore,
                     modelID: modelID,
                     proximityThreshold: proximityThreshold,
+                    probeLimit: probeLimit,
                     corpus: corpus,
                     edgeChecker: edgeChecker,
                     context: context)
@@ -138,12 +153,18 @@ public enum VectorSimilaritySignal {
 
     /// Execute one proximity scan pass: sample probe drawer IDs, find
     /// nearby neighbours, deduplicate pairs, emit AssociateFrames.
+    ///
+    /// The two-lane kNN scan is delegated to `ProximityScanCore.candidates`
+    /// (shared with `GeniusLocusKit.associateSweep`) so the scan logic
+    /// lives in exactly one place.
+    ///
     /// If `edgeChecker` is provided, pairs with a persisted association
     /// are filtered out before emission (FINDING-3 optimization).
     private static func proximityPass(
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int,
+        probeLimit: Int,
         corpus: CorpusContentEngine?,
         edgeChecker: AssociationEdgeChecker?,
         context: SignalContext
@@ -152,11 +173,14 @@ public enum VectorSimilaritySignal {
 
         let itemIDs: [String]
         do {
-            // Newest-first probe sample: the 50 most recently filed items.
-            // New captures are what need association screening; the prior
-            // ascending-item_id enumeration was a static UUID-ordered window
-            // that new content rarely entered on a large estate.
-            itemIDs = try await vectorStore.recentItemIDs(limit: maxProbeCount)
+            // Newest-first probe sample bounded by `probeLimit`. New captures
+            // are what need association screening; the prior ascending-item_id
+            // enumeration was a static UUID-ordered window that new content
+            // rarely entered on a large estate. The probe window is one-sided:
+            // neighbors search the whole estate, so two dormant old items never
+            // pair unless one was probed while recent — widening `probeLimit`
+            // is how callers relieve that constraint.
+            itemIDs = try await vectorStore.recentItemIDs(limit: probeLimit)
         } catch {
             emissions.append(.diagnostic(DiagnosticReport(
                 title: "vector_similarity.scan.summary",
@@ -165,82 +189,17 @@ public enum VectorSimilaritySignal {
             return emissions
         }
 
-        var candidatePairs: [(a: String, b: String, weight: Double)] = []
-        // Track seen pairs as sorted (smaller, larger) string tuples
-        // to deduplicate (A,B) vs (B,A) from symmetric findNearest results.
-        // Both lanes below key on DRAWER ids, so they dedupe together.
-        var seenPairs: Set<String> = []
-
-        // Lane 1 — drawer-keyed rows under the caller's `modelID`. Rows
-        // whose item is not in this lane fail `getVector` and fall through.
-        for itemID in itemIDs {
-            // getVector returns Engram? — try? flattens to Engram? in Swift 5.7+,
-            // so guard let gives Engram (non-optional). Skip rows with no vector.
-            guard let probeEngram = try? await vectorStore.getVector(
-                itemID: itemID, modelID: modelID) else { continue }
-
-            let matches: [VectorMatch]
-            do {
-                matches = try await vectorStore.findNearest(
-                    probe: probeEngram,
-                    modelID: modelID,
-                    limit: neighboursPerProbe)
-            } catch {
-                continue
-            }
-
-            for match in matches {
-                guard match.itemID != itemID else { continue }
-                guard match.distance <= proximityThreshold else { continue }
-
-                // Canonical pair key: lexicographically smaller ID first
-                // so (A,B) and (B,A) map to the same set element.
-                let pairKey = itemID < match.itemID
-                    ? "\(itemID)||\(match.itemID)"
-                    : "\(match.itemID)||\(itemID)"
-
-                guard seenPairs.insert(pairKey).inserted else { continue }
-
-                // Weight is inverse-proportional to Hamming distance:
-                // distance=0 → weight=1.0 (identical), distance=256 → weight=0.0.
-                let weight = 1.0 - Double(match.distance) / 256.0
-                candidatePairs.append(
-                    (a: min(itemID, match.itemID),
-                     b: max(itemID, match.itemID),
-                     weight: weight))
-            }
-        }
-
-        // Lane 2 — the corpus provider's rows. Shared-content 1.1: the
-        // engine keys every vector row by the DRAWER ID itself, so a hit's
-        // itemID is the owning drawer directly — no chunk→drawer remap and
-        // no same-drawer chunk collapse (one row per drawer per lane).
-        // Mirrors the contradiction hunter's lane split.
-        if let corpus {
-            let corpusModelID = await corpus.modelID
-            for itemID in itemIDs {
-                guard let probeEngram = try? await vectorStore.getVector(
-                    itemID: itemID, modelID: corpusModelID) else { continue }
-                guard let matches = try? await vectorStore.findNearest(
-                    probe: probeEngram,
-                    modelID: corpusModelID,
-                    limit: neighboursPerProbe) else { continue }
-                for match in matches {
-                    guard match.itemID != itemID,
-                          match.distance <= proximityThreshold else { continue }
-                    let sourceA = itemID
-                    let sourceB = match.itemID
-                    let pairKey = sourceA < sourceB
-                        ? "\(sourceA)||\(sourceB)"
-                        : "\(sourceB)||\(sourceA)"
-                    guard seenPairs.insert(pairKey).inserted else { continue }
-                    candidatePairs.append(
-                        (a: min(sourceA, sourceB),
-                         b: max(sourceA, sourceB),
-                         weight: 1.0 - Double(match.distance) / 256.0))
-                }
-            }
-        }
+        // Two-lane kNN scan via shared core (also used by associateSweep verb).
+        // ProximityScanCore.candidates applies within-pass symmetric pair dedup
+        // and returns unique (a, b, weight) candidates.
+        let candidatePairs = await ProximityScanCore.candidates(
+            in: vectorStore,
+            itemIDs: itemIDs,
+            modelID: modelID,
+            proximityThreshold: proximityThreshold,
+            corpus: corpus,
+            neighboursPerProbe: ProximityScanCore.neighboursPerProbe
+        )
 
         // FINDING-3 optimization: filter out pairs that already have a
         // persisted association. The DB-level INSERT-OR-IGNORE in

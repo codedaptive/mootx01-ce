@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
+    dataset_handle::IMPORT_EMBEDDING_MODEL_ID,
     drawer_operational::CaptureChannel,
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
@@ -46,7 +47,7 @@ fn cap_frame(i: usize) -> CaptureFrame {
         "export-regression",
         LatticeAnchor::udc("000"),
         "vaultkit-test",
-        "vaultkit-noembed-v1",
+        IMPORT_EMBEDDING_MODEL_ID,
     )
 }
 

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
+    dataset_handle::IMPORT_EMBEDDING_MODEL_ID,
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::OwnerCredentials,
@@ -131,7 +132,7 @@ fn import_structured(
 fn structured_import_facts_land_as_kg_facts() {
     let (mut coord, handle) = open_one();
     let note = structured_note();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     let outcome = import_structured(&mapping, &note, &mut coord, &handle);
     assert!(
@@ -168,7 +169,7 @@ fn structured_import_facts_land_as_kg_facts() {
 fn structured_import_scope_entries_as_kg_facts() {
     let (mut coord, handle) = open_one();
     let note = structured_note();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     import_structured(&mapping, &note, &mut coord, &handle);
 
@@ -197,7 +198,7 @@ fn structured_import_scope_entries_as_kg_facts() {
 fn structured_import_hierarchy_as_full_room_path() {
     let (mut coord, handle) = open_one();
     let note = structured_note();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     import_structured(&mapping, &note, &mut coord, &handle);
 
@@ -236,7 +237,7 @@ fn structured_import_hierarchy_as_full_room_path() {
 fn import_filed_at_is_epoch_millis() {
     let (mut coord, handle) = open_one();
     let note = structured_note();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     import_structured(&mapping, &note, &mut coord, &handle);
 
@@ -276,7 +277,7 @@ fn import_filed_at_is_epoch_millis() {
 #[test]
 fn structured_import_facts_and_scope_not_in_fields_dropped() {
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     // Exercise import_note directly and confirm the outcome is Written with
     // no KG-structure fields in fields_dropped. The VaultBridge integration
@@ -305,7 +306,7 @@ fn frontmatter_room_wins_over_path_components() {
     let mut note = structured_note();
     // Insert an explicit room frontmatter key.
     note.frontmatter.insert("room".to_string(), "explicit-room".to_string());
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     import_structured(&mapping, &note, &mut coord, &handle);
 
@@ -339,7 +340,7 @@ fn single_component_path_uses_leaf_as_room() {
     let (mut coord, handle) = open_one();
     let mut note = structured_note();
     note.path_components = vec!["inbox".to_string()]; // single component
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     import_structured(&mapping, &note, &mut coord, &handle);
 
@@ -375,7 +376,7 @@ fn single_component_path_uses_leaf_as_room() {
 #[test]
 fn tags_import_as_kg_facts() {
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     let note = NoteIR::new(
         "notes/tagged-note",
@@ -415,7 +416,7 @@ fn tags_import_as_kg_facts() {
 #[test]
 fn tags_round_trip_import_export() {
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     let note = NoteIR::new(
         "notes/tagged-note",
@@ -451,7 +452,7 @@ fn tags_round_trip_import_export() {
 #[test]
 fn kind_fact_lands_as_kg_fact() {
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     let mut note = NoteIR::new(
         "notes/fact-record",
@@ -479,7 +480,7 @@ fn kind_fact_lands_as_kg_fact() {
 #[test]
 fn kind_journal_round_trips() {
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     let mut note = NoteIR::new(
         "notes/journal-entry",
@@ -509,7 +510,7 @@ fn kind_journal_round_trips() {
 #[test]
 fn kind_note_produces_no_kg_fact() {
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
 
     let note = NoteIR::new(
         "notes/plain-note",
@@ -541,7 +542,7 @@ fn fields_dropped_empty_for_fully_structured_note() {
     // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake
     // fix — import_notes routes through capture_with_mode, G7).
     let (mut coord, handle) = open_one();
-    let mapping = DrawerMapping::new("vaultkit-test", "vaultkit-noembed-v1", false);
+    let mapping = DrawerMapping::new("vaultkit-test", IMPORT_EMBEDDING_MODEL_ID, false);
     let mut bridge = VaultBridge::new(&mut coord, Box::new(ExchangeAdapter::new()), mapping);
 
     // The golden fixture has tags + non-"note" kind in drawer-001 and drawer-003.

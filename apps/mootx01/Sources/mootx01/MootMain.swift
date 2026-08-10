@@ -54,10 +54,10 @@ struct Mootx01: AsyncParsableCommand {
     /// SemVer for the installed binary. Development builds carry the beta
     /// pre-release component; stable builds use a bare numeric version.
     /// The human-facing --version string adds the date via `versionDisplay`.
-    static let currentVersion = "1.1.0-beta-12"
+    static let currentVersion = "1.1.0-beta-13"
 
     /// Release date stamp shown alongside the version by --version.
-    static let releaseDate = "2026-08-05"
+    static let releaseDate = "2026-08-10"
 
     /// The exact string --version prints. The Rust port must print an identical
     /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).
@@ -92,6 +92,9 @@ struct Mootx01: AsyncParsableCommand {
                 // Feature toggles (M-MEMTOOL-1).
                 EnableCommand.self,
                 DisableCommand.self,
+                // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
+                // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
+                HookCaptureCommand.self,
             ]
         )
         #else
@@ -107,6 +110,9 @@ struct Mootx01: AsyncParsableCommand {
                 QueryCommand.self,
                 EnableCommand.self,
                 DisableCommand.self,
+                // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
+                // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
+                HookCaptureCommand.self,
             ]
         )
         #endif

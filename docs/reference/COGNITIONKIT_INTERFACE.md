@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Interface
-version: 1.5.0
+version: 1.8.1
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1154,6 +1154,21 @@ disabled.
 
 ## Changelog
 
+### 1.8.0 -- 2026-08-06
+
+- `ConnectedRecall.run(kit:handle:query:wing:filter:limit:seeds:steps:
+  restartProbability:)` → `[ConnectedMatch]` (id, room, content,
+  source anchor|walk|both). Rust: `run_connected_recall(...)`.
+
+### 1.7.0 -- 2026-08-06
+
+- `GroundedSynthesis.Input` gains `query: String? = nil` (raw text for
+  the scored lane); `groundingPoolBound` published on the recipe type.
+
+### 1.6.0 -- 2026-08-06
+`GroundedSynthesis.Input` extended with `cueTerms: [String] = []` and `cap: Int? = nil`.
+Both Swift and Rust `run_grounded_synthesis` signatures updated accordingly.
+
 ### 1.5.0 -- 2026-07-16
 Closed two missing RecipeError cases in both ports (verifier gap):
 
@@ -1228,3 +1243,12 @@ tests.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.8.1 -- 2026-08-06
+Added `session_hybrid` as a named preset supported by `ShapedRecall.run()` in
+both Swift and Rust. The preset name routes through the hybridRecall scoredLane
+seam (Swift) / shaped recall + inline fusion (Rust) and applies
+`SessionHybridFusion` temporal-window + speaker-aware boosts post-processing.
+New types: `SessionHybridFusion` (Swift `enum`, Rust `session_hybrid_fusion` module).
+No change to `ShapedRecall.Input`/`Output` signatures or the `RecallShape` API —
+`session_hybrid` is a new name in `RecallShape.presetNames` only.

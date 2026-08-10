@@ -35,7 +35,8 @@ struct RecallShapePresetTests {
                 #expect(RecallShape.preset(name) != nil, "preset \(name) must resolve")
             }
         }
-        #expect(RecallShape.presetNames.count == 19)
+        // session_hybrid is the 20th preset (added in W1-session-hybrid).
+        #expect(RecallShape.presetNames.count == 20)
     }
 
     @Test("precise amplifies lexical + field and narrows the frontier")
@@ -145,6 +146,22 @@ struct RecallShapePresetTests {
         #expect(s.weight(for: "hamming") < 0)
         // Frontier narrowed to the floor so the engine does not haul a wide pool of duplicates.
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
+    }
+
+    @Test("session_hybrid amplifies bm25 + dense + temporal for session-granularity recall")
+    func sessionHybrid() throws {
+        let s = try #require(RecallShape.preset("session_hybrid"))
+        // bm25 amplified — keyword matching for conversation fragments.
+        #expect(s.weight(for: "bm25") > 1.0)
+        // dense amplified — semantic similarity within the session window.
+        #expect(s.weight(for: "dense") > 1.0)
+        // temporal amplified — recency within the session window.
+        #expect(s.weight(for: "temporal") > 1.0)
+        // No lanes are excluded — session_hybrid is additive over balanced.
+        #expect(s.weight(for: "locus") == 1.0)
+        #expect(s.weight(for: "hamming") == 1.0)
+        // Description is present in the catalog.
+        #expect(!RecallShape.presetDescription("session_hybrid").isEmpty)
     }
 
     @Test("leave-one-out is reachable by zeroing one dense lane")

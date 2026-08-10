@@ -2128,7 +2128,8 @@ public actor DrawerStore {
             addedBy: t.addedBy, filedAt: t.filedAt,
             tombstonedAt: t.tombstonedAt,
             removedByBatch: t.removedByBatch,
-            orderKey: t.orderKey
+            orderKey: t.orderKey,
+            ext: t.ext
         )
         _ = try await storage.rowStore.insert(
             table: "tunnels", values: Self.tunnelValues(tunnelWithSensitivity))
@@ -2277,19 +2278,24 @@ public actor DrawerStore {
     /// permanently and its endpoint pair is the dedup memory that keeps the
     /// contradiction hunter from re-proposing a rejected pair.
     ///
-    /// Audit: like `retireTunnel`, this performs only the bitmap update —
-    /// the caller (the ARIA review tool / dreaming diary) records who
-    /// reviewed and why. `changedBy`/`reason` are accepted here so the
-    /// verb's signature is stable when a tunnel audit trail lands.
+    /// Reviewer identity (MXE-CT3 review ladder): the transition records
+    /// `changedBy` into the ext review ledger's `reviewedBy` field —
+    /// reviewer identity is recorded on EVERY transition, accept and
+    /// reject alike. Accept/reject semantics are unchanged. A malformed
+    /// existing ext ledger throws (fail-loud) rather than being
+    /// overwritten. `reason` is accepted so the verb's signature is
+    /// stable when a fuller tunnel audit trail lands.
     ///
     /// - Parameters:
     ///   - tunnelId:  id of the proposed tunnel under review.
     ///   - accept:    true → `.active` (accepted); false → `.withdrawn` (rejected).
-    ///   - changedBy: agent or user performing the review.
-    ///   - reason:    optional reviewer note (not yet persisted; see Audit above).
+    ///   - changedBy: agent or user performing the review; recorded in
+    ///     the ext ledger's `reviewedBy`.
+    ///   - reason:    optional reviewer note (not yet persisted).
     ///   - now:       deterministic clock supplied by the caller.
     /// - Throws: `tunnelNotFound` if the tunnel does not exist;
-    ///   `invalidContent` if it is not in `.proposed` lifecycle.
+    ///   `invalidContent` if it is not in `.proposed` lifecycle or its
+    ///   ext ledger is corrupt.
     ///
     /// Mirrors Rust `DrawerStore::respond_to_tunnel`.
     public func respondToTunnel(
@@ -2307,9 +2313,62 @@ public actor DrawerStore {
                 "tunnel \(tunnelId) is \(existing.lifecycle) — only a proposed tunnel can be reviewed")
         }
         let reviewed = existing.withLifecycle(accept ? .active : .withdrawn)
+        // Record who reviewed (ladder: reviewer identity on every
+        // transition). Parse-tolerant of unknown ext tenants; fail-loud
+        // on corruption.
+        var ledger = try TunnelReviewLedger.parse(existing.ext)
+        ledger.recordReview(by: changedBy)
         _ = try await storage.rowStore.update(
             table: "tunnels",
-            values: ["operationalBitmap": .bitmap(reviewed.operationalBitmap)],
+            values: [
+                "operationalBitmap": .bitmap(reviewed.operationalBitmap),
+                "ext": ledger.serialized().map { TypedValue.json(Data($0.utf8)) } ?? .null
+            ],
+            where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
+        )
+    }
+
+    /// Persist a review-ladder state change: `operationalBitmap` (the
+    /// endorsed/contested/lifecycle bits) and the `ext` review ledger,
+    /// in one update.
+    ///
+    /// This is the write primitive behind the GLK endorsement verbs
+    /// (`endorseTunnel` / `objectToTunnel`) — LocusKit owns the column,
+    /// GLK owns the review policy. The caller supplies the fully-formed
+    /// bitmap and canonical ledger serialization; no interpretation
+    /// happens here.
+    ///
+    /// Conditional write: if the tunnel is no longer `.proposed` at write
+    /// time (because a concurrent `respondToTunnel` accepted or withdrew it),
+    /// the write is rejected with `tunnelNoLongerProposed` so the caller can
+    /// treat the stale model vote as a no-op. The user's lifecycle decision
+    /// is always authoritative.
+    ///
+    /// - Throws: `tunnelNotFound` if no tunnel with `tunnelId` exists;
+    ///           `tunnelNoLongerProposed` if the tunnel has left the
+    ///           `.proposed` lifecycle since the caller's last read.
+    ///
+    /// Mirrors Rust `DrawerStore::stamp_tunnel_review`.
+    public func stampTunnelReview(
+        id tunnelId: String,
+        operationalBitmap: Int64,
+        ext: String?
+    ) async throws {
+        guard let existing = try await getTunnel(id: tunnelId) else {
+            throw LocusKitError.tunnelNotFound(id: tunnelId)
+        }
+        // Conditional write: only apply when the tunnel is still proposed.
+        // A concurrent respondToTunnel (accept or withdraw) moves the lifecycle
+        // — the stale bitmap from the model reviewer must not clobber that decision.
+        guard existing.lifecycle == .proposed else {
+            throw LocusKitError.tunnelNoLongerProposed(id: tunnelId)
+        }
+        _ = try await storage.rowStore.update(
+            table: "tunnels",
+            values: [
+                "operationalBitmap": .bitmap(operationalBitmap),
+                "ext": ext.map { TypedValue.json(Data($0.utf8)) } ?? .null
+            ],
             where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
         )
     }
@@ -3648,7 +3707,10 @@ public actor DrawerStore {
             "adjectiveBitmap": .bitmap(t.adjectiveBitmap),
             "operationalBitmap": .bitmap(t.operationalBitmap),
             "provenanceBitmap": .bitmap(t.provenanceBitmap),
-            "order_key": t.orderKey.map { TypedValue.float($0) } ?? .null
+            "order_key": t.orderKey.map { TypedValue.float($0) } ?? .null,
+            // Forward-compat JSON slot (review ledger, MXE-CT3). Bound as
+            // .json bytes; the SQLite backend stores json columns as BLOB.
+            "ext": t.ext.map { TypedValue.json(Data($0.utf8)) } ?? .null
         ]
     }
 
@@ -3918,8 +3980,26 @@ public actor DrawerStore {
             filedAt: try date(table: "tunnels", column: "filedAt", row["filedAt"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"]),
-            orderKey: optDouble(row["order_key"])
+            orderKey: optDouble(row["order_key"]),
+            // SQLite read-back primitive decode: json columns come back
+            // as .json (BLOB storage), but legacy TEXT writes and the
+            // InMemory backend can surface .text — tolerate both.
+            ext: optJSONString(row["ext"])
         )
+    }
+
+    /// Decode a nullable JSON column into its String form, tolerating
+    /// every representation a backend can hand back: `.json` bytes (the
+    /// SQLite BLOB path), `.text` (legacy TEXT storage / InMemory), and
+    /// `.blob` (raw bytes). NULL/absent yields nil. Same read-back
+    /// tolerance discipline as the UUID/HLC/date decoders above.
+    private static func optJSONString(_ v: TypedValue?) -> String? {
+        switch v {
+        case .json(let d): return String(data: d, encoding: .utf8)
+        case .text(let s): return s
+        case .blob(let d): return String(data: d, encoding: .utf8)
+        default: return nil
+        }
     }
 
     private static func associationFromRow(_ row: StorageRow) throws -> Association {
@@ -5066,15 +5146,24 @@ public actor DrawerStore {
     /// Pipeline-version tag for subjects produced by the on-device
     /// miniLLM rider (PR-10's producer; the Rust lane stays dark until a
     /// model exists). The provenance tiers stored in
-    /// `subject_pipeline_version`:
+    /// `subject_pipeline_version` (trust ladder, highest first):
     ///   ai-v1            — the filing/backfill AI (capture + setSubject)
     ///   minillm-v1       — the model rider
     ///   consolidation-v1 — the deterministic vague-tier writer
     ///   seed-v1          — structural charter-hint seeds
+    ///   import-v1        — batch seed files (moot_json_import, schema v1.1)
     /// A version differing from a requested producer contract marks the
     /// row a REGENERATION candidate (`countMissingSubject`) — the
     /// migration lever. Twin: Rust `SUBJECT_PIPELINE_MINILLM_V1`.
     public static let subjectPipelineMiniLLMV1 = "minillm-v1"
+
+    /// Pipeline-version tag for subjects provided by a batch seed file
+    /// via the `moot_json_import` lane (schema v1.1). Sits at the bottom
+    /// of the trust ladder — regenerable by every higher-tier producer.
+    /// Records imported WITHOUT a subject carry NULL and are ordinary
+    /// subject-debt candidates for the AI backfill lane. Twin of Rust
+    /// `SUBJECT_PIPELINE_IMPORT_V1`.
+    public static let subjectPipelineImportV1 = "import-v1"
 
     /// The subject-debt predicate, optionally widened by regeneration
     /// tiers (PR-10): subject NULL, or produced under one of

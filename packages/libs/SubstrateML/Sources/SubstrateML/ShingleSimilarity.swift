@@ -94,12 +94,22 @@ public enum ShingleSimilarity {
     ///   - b: the second string.
     /// - Returns: similarity in `[0, 1]`.
     public static func similarity(_ a: String, _ b: String) -> Float32 {
-        let sa = shingles(a)
-        let sb = shingles(b)
+        similarity(shingles(a), shingles(b))
+    }
+
+    /// Jaccard over PRE-COMPUTED shingle sets — the same math as the
+    /// string overload, which delegates here (I-25: one implementation
+    /// per substrate atomic). Exists so a caller comparing one corpus
+    /// pairwise (e.g. NeuronKit's MMR rerank) can shingle each text ONCE
+    /// and reuse the sets: rebuilding both sets per pairwise call measured
+    /// 181 s over a 250-drawer pool. `|A ∩ B| / |A ∪ B|`, with the union
+    /// computed as |A| + |B| − |A ∩ B| (identical value, no set
+    /// materialization).
+    public static func similarity(_ sa: Set<String>, _ sb: Set<String>) -> Float32 {
         // Both empty: no shingles to compare, define as fully dissimilar.
         if sa.isEmpty && sb.isEmpty { return 0 }
         let inter = sa.intersection(sb).count
-        let union = sa.union(sb).count
+        let union = sa.count + sb.count - inter
         // Union can be zero only if both sets are empty, handled above;
         // the guard keeps the division provably safe for any future edit.
         guard union > 0 else { return 0 }

@@ -115,10 +115,26 @@ public struct ShapedRecall: Recipe {
         // recall runs with no shape, byte-identical to today's `.unionBest`. The
         // applied-preset echo reports "balanced" in that case so the caller sees
         // which shape actually ran.
-        let shape = RecallShape.preset(input.preset)
         let appliedPreset = RecallShape.presetNames.contains(input.preset)
             ? input.preset
             : "balanced"
+
+        // SESSION_HYBRID: special-case route through NeuronKit's hybridRecall
+        // scoredLane seam + SessionHybridFusion post-processing.
+        //
+        // hybridRecall is the ONLY path for session_hybrid — it enforces the
+        // RECENCY-SHALL-NOT-DOMINATE invariant and the scoring-evidence gate
+        // (only BM25/Hamming/dense-bearing hits form the relevance lead block).
+        // SessionHybridFusion then applies bounded temporal-window and speaker-
+        // aware boosts as a secondary sort key over hybridRecall's output, so
+        // the evidence gate is extended (not weakened): a zero-evidence hit
+        // can never displace a scored hit via the boost path alone.
+        if input.preset == "session_hybrid" {
+            return try await runSessionHybrid(input: input, estate: estate, kit: kit,
+                                              appliedPreset: appliedPreset)
+        }
+
+        let shape = RecallShape.preset(input.preset)
 
         // Run the estate recall verb through GLK in `.unionBest` / `.matrixAware`
         // — the only mode that activates the full weighted column set (locus,
@@ -152,6 +168,94 @@ public struct ShapedRecall: Recipe {
                 room: room,
                 content: content,
                 score: Double(hit.score.final))
+        }
+
+        return Output(matches: matches, appliedPreset: appliedPreset)
+    }
+
+    /// Session-hybrid recall path: hybridRecall scoredLane + temporal window
+    /// boost + speaker-aware weighting.
+    ///
+    /// Extracted into its own method to keep `run()` readable; same public
+    /// contract (ShapedRecall.Output, no new public surface).
+    private func runSessionHybrid(
+        input: Input,
+        estate: EstateHandle,
+        kit: GeniusLocusKit,
+        appliedPreset: String
+    ) async throws -> Output {
+        // Build the RecallFrame for hybridRecall's primary lane. The full
+        // filter chain passes through so the session window constraints
+        // (createdAfter/createdBefore if present) are enforced as hard
+        // filters at the substrate level; SessionHybridFusion then extracts
+        // the same bounds to also apply a SOFT boost for in-window hits.
+        let frame = LocusKit.RecallFrame(
+            filterChain: [input.filter],
+            hydrationLevel: .full,
+            limit: input.limit,
+            ordering: .byCaptureTimeDesc)
+
+        // ScoredLane: a second GLK recall in unionBest/raw mode driven by the
+        // query text. Evidence-bearing hits from this lane form the relevance
+        // lead block in hybridRecall's union, separating genuine relevance
+        // from pure recency (the RECENCY-SHALL-NOT-DOMINATE invariant).
+        let scoredLane = ScoredLane(
+            frame: frame,
+            queryText: input.query,
+            traceLimit: input.limit)
+
+        // Derive cue terms by splitting the query on whitespace — the same
+        // convention NeuronKit's lexical rerank lane uses. The cue terms drive
+        // the RECENCY-SHALL-NOT-DOMINATE fallback: when the scored lane
+        // produces zero evidence-bearing hits, hybridRecall switches to
+        // lexical-dominant fusion (bm25Weight 1.0, vectorWeight 0.0) so
+        // keyword-relevant recency wins cleanly rather than mixing with a
+        // degraded similarity signal.
+        //
+        // The conversion is bounded at SessionHybridFusion.cueTermsCap to prevent
+        // the hybridRecall rerank loop (O(|cueTerms| × |candidatePool|)) from
+        // becoming quadratic in query length. See SessionHybridFusion.cueTermsCap
+        // and SessionHybridFusion.cueTerms(from:) for the cap rationale.
+        let cueTerms = SessionHybridFusion.cueTerms(from: input.query)
+
+        let stream = try await hybridRecall(
+            frame,
+            handle: estate,
+            on: kit,
+            cueTerms: cueTerms,
+            scoredLane: scoredLane)
+
+        // Drain all pages from the stream into a flat drawer array. The
+        // hybridRecall stream pages are already MMR-reranked; we consume all
+        // of them before applying SessionHybridFusion boosts so the boost
+        // sees the complete candidate set (not just the first page).
+        // RecallStream.AsyncIterator.next() is non-throwing; use `for await`.
+        var allDrawers: [Drawer] = []
+        for await page in stream {
+            allDrawers.append(contentsOf: page.rows)
+        }
+
+        // Apply temporal and speaker boosts as a secondary sort key. The
+        // primary ranking from hybridRecall is preserved for equal scores;
+        // the boost can only reorder near-equal candidates. The evidence gate
+        // invariant is maintained because the max combined boost (0.006) is
+        // smaller than the base-score gap between the last evidence-bearing
+        // hit and the first frame-only hit in typical hybridRecall output
+        // (≥0.005 per SessionHybridFusion.temporalBoostMax documentation).
+        let boosted = SessionHybridFusion.boost(
+            drawers: allDrawers,
+            filter: input.filter,
+            query: input.query,
+            limit: input.limit)
+
+        // Project to PreciseMatch. The room is the drawer's parentNodeId
+        // (structural coordinate); content is the verbatim filed text.
+        let matches = boosted.map { pair -> PreciseMatch in
+            PreciseMatch(
+                id: pair.drawer.id,
+                room: pair.drawer.parentNodeId,
+                content: pair.drawer.content,
+                score: pair.score)
         }
 
         return Output(matches: matches, appliedPreset: appliedPreset)

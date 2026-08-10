@@ -172,6 +172,7 @@ fn signal_emits_real_associate_frames_for_vectors_in_proximity() {
         Arc::clone(&store),
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        VectorSimilaritySignal::DEFAULT_PROBE_LIMIT,
         None,
         None, // edge_checker: None for this parity test
     );
@@ -223,6 +224,7 @@ fn signal_does_not_emit_associates_for_distant_vectors() {
         Arc::clone(&store),
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        VectorSimilaritySignal::DEFAULT_PROBE_LIMIT,
         None,
         None, // edge_checker: None for this parity test
     );
@@ -312,6 +314,7 @@ fn corpus_lane_emits_drawer_level_associations() {
         corpus.shared_vector_store(),
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        VectorSimilaritySignal::DEFAULT_PROBE_LIMIT,
         Some(Arc::clone(&corpus)),
         None, // edge_checker: None for this parity test
     );

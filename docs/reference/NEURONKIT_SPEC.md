@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.7.0
+version: 1.9.1
 status: active
-date: 2026-07-16
+date: 2026-08-06
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1047,6 +1047,29 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 
 ## Changelog
 
+### 1.9.0 -- 2026-08-06
+
+- § 4.1/4.3 hybrid recall FINISHED: `hybridRecall` gains an optional
+  scored second lane (`ScoredLane` — a GLK `.unionBest`/`.raw` request
+  over the raw query, the lane PreciseRecall's coarse grab uses). Union:
+  evidence-bearing scored hits lead in relevance order, frame-lane extras
+  follow in recency order, deduplicated by id.
+- SCORING-EVIDENCE GATE: lane-B hits bearing no scoring evidence
+  (corpusBM25 / vectorHamming / vectorDense) are dropped — under
+  AllowDegraded their order is recency, not relevance.
+- RECENCY-SHALL-NOT-DOMINATE invariant (owned by hybridRecall): with cue
+  terms and zero evidence-bearing scored hits, the fusion split MUST be
+  lexical-dominant (1.0/0.0); with a live lead block the caller's split
+  (default 0.3/0.7) applies.
+
+### 1.8.0 -- 2026-08-06
+Added cue-term rerank contract (§ 4.3 cue-term lane). `HybridRecallEngine.rerank`
+gains an optional `cueTerms: [String]` parameter. When non-empty, the two RRF
+lanes become genuinely independent: L-lexical ranks drawers by distinct-cue-term-match
+count descending with input-order tie-break; L-semantic remains input order (recency).
+Empty `cueTerms` is bit-identical to the previous output. Swift and Rust ports both
+updated with four conformance tests each.
+
 ### 1.4.1 -- 2026-06-25
 Corrected § 12.2 to the recall-driven dreaming contract Decision 7: the dreaming work is a
 `stream_id="dreaming"` stream in the **one per-estate queue** (backend by
@@ -1139,3 +1162,12 @@ C-12 documents the ingress defence's unconditional-rejection guarantee
 and its counted observability. No change to the rejection defence itself
 — rejected entries are still never re-admitted; this is observability
 only.
+
+### 1.9.1 -- 2026-08-06
+Document the `scoredLane: ScoredLane?` seam on `hybridRecall` as the composition
+point for caller-supplied evidence-scoring passes. The `session_hybrid` preset in
+GLK RecallShape.presetNames (W1-session-hybrid) is the first consumer: it drives
+`hybridRecall` with a `ScoredLane` built from the query text, enforcing the
+RECENCY-SHALL-NOT-DOMINATE invariant while SessionHybridFusion applies bounded
+temporal-window + speaker-aware boosts as a secondary sort key. No invariant
+change; this is a conformance annotation only.

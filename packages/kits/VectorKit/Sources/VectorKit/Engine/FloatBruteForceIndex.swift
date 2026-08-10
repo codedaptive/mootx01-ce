@@ -195,18 +195,22 @@ public actor FloatBruteForceIndex: DenseIndex {
     /// slot. Shared verbatim by `search` (nearest) and `searchFarthest` so the
     /// distance arithmetic — the cosine itself — is identical for both
     /// directions; only the subsequent ordering differs.
+    ///
+    /// `vecHash` is an FNV-1a hash of the raw float vector bytes. Same content
+    /// → same embedding → same bytes → same hash, making it a content-derived
+    /// tiebreak that is stable across estate imports (UUIDs are not).
     private func scan(
         probe: VectorPayload,
         metric: FloatMetric,
         arr: ResidentVectorArray,
         filter: MetadataFilter?
-    ) throws -> [(distance: Float, key: VectorRecordKey)] {
+    ) throws -> [(distance: Float, key: VectorRecordKey, vecHash: UInt64)] {
         let probeFloats = try probe.asFloats()
         let dim = Int(probe.dim)
 
         // Collect scored candidates. We allocate once and sort in place.
         // No per-row allocation inside the hot loop.
-        var scored: [(distance: Float, key: VectorRecordKey)] = []
+        var scored: [(distance: Float, key: VectorRecordKey, vecHash: UInt64)] = []
         scored.reserveCapacity(Int(arr.count))
 
         for i in 0..<Int(arr.count) {
@@ -218,7 +222,9 @@ public actor FloatBruteForceIndex: DenseIndex {
             let slotFloats = floatSlice(from: slotBytes, count: dim)
 
             let dist = floatDistance(probe: probeFloats, candidate: slotFloats, metric: metric)
-            scored.append((distance: dist, key: key))
+            // FNV-1a over the raw float bytes: content-derived, stable across imports.
+            let hash = fnv1a64(slotBytes)
+            scored.append((distance: dist, key: key, vecHash: hash))
         }
         return scored
     }
@@ -229,10 +235,11 @@ public actor FloatBruteForceIndex: DenseIndex {
     /// `.farthest` — distance DESCENDING (largest cosine distance first =
     ///               most dissimilar first, anti-similarity).
     ///
-    /// In BOTH directions the tie-break is itemID ASCENDING (§0.3), so the
-    /// nearest path is byte-identical to the pre-antisim implementation.
+    /// Tie-break (equal distance, both directions): vecHash ascending (FNV-1a
+    /// of the raw vector bytes — content-derived and stable across estate imports),
+    /// then itemID ascending as a final determinism backstop.
     private func rank(
-        _ scored: [(distance: Float, key: VectorRecordKey)],
+        _ scored: [(distance: Float, key: VectorRecordKey, vecHash: UInt64)],
         k: Int,
         metric: DenseMetric,
         direction: SearchDirection
@@ -245,7 +252,9 @@ public actor FloatBruteForceIndex: DenseIndex {
                 case .farthest: return lhs.distance > rhs.distance
                 }
             }
-            // Tie-break is identical in both directions: itemID ascending.
+            // Content-derived tiebreak: same hash means identical vectors,
+            // so fall back to itemID ascending as the final backstop.
+            if lhs.vecHash != rhs.vecHash { return lhs.vecHash < rhs.vecHash }
             return lhs.key < rhs.key
         }
 
@@ -258,6 +267,18 @@ public actor FloatBruteForceIndex: DenseIndex {
             let raw  = Int32(bitPattern: bits)        // same bit pattern, reinterpreted
             return DenseHit(key: entry.key, rawDistance: raw, metric: metric)
         }
+    }
+
+    /// FNV-1a 64-bit hash of raw bytes. Deterministic for identical byte sequences.
+    private func fnv1a64(_ bytes: Data) -> UInt64 {
+        // FNV-1a constants per the public-domain FNV specification.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        let prime: UInt64 = 1_099_511_628_211
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= prime
+        }
+        return hash
     }
 
     /// Add a single float32 vector record to the index.

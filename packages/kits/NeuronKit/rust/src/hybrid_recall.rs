@@ -49,6 +49,7 @@ pub fn hybrid_recall(
     frame: RecallFrame,
     tuning: &RecallFrameTuning,
     now: i64,
+    cue_terms: &[String],
 ) -> Result<Vec<RecallPage>, VerbDispatchError> {
     let wall_start = Instant::now();
 
@@ -62,7 +63,7 @@ pub fn hybrid_recall(
         })
         .collect();
 
-    let reranked = rerank(&drawer_rows, tuning);
+    let reranked = rerank(&drawer_rows, tuning, cue_terms);
     let pages = page_recall(&reranked, tuning.page_size);
 
     let elapsed_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
@@ -179,25 +180,61 @@ pub fn page_recall(rows: &[DrawerRow], page_size: i32) -> Vec<RecallPage> {
     pages
 }
 
-/// Reranking engine. Pure data-in, data-out — no clocks, no
-/// randomness, no IO. The output must match the Swift
-/// `HybridRecallEngine.rerank` byte-for-byte against the shared
-/// conformance vectors.
-pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRow> {
+/// Reranking engine. Pure data-in, data-out — no clocks, no randomness, no IO.
+/// The output must match the Swift `HybridRecallEngine.rerank` byte-for-byte
+/// against the shared conformance vectors.
+///
+/// When `cue_terms` is non-empty the two RRF lanes become genuinely independent:
+/// L-lexical ranks drawers by distinct-cue-term-match count descending
+/// (input-order tie-break); L-semantic is input order (recency). When
+/// `cue_terms` is empty both lanes equal input order — output is bit-identical
+/// to the previous single-list path.
+pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning, cue_terms: &[String]) -> Vec<DrawerRow> {
     if drawers.is_empty() {
         return Vec::new();
     }
 
-    // RRF over the single fused list returned by the verb. Today L₁
-    // and L₂ collapse to the same ordering (the GLK verb returns one
-    // ranked array); the math still runs so the day the surface
-    // widens, only the fan-in changes. See the Swift file header for
-    // the full reasoning.
+    // Build lexical rank: sorted by distinct-cue-term-match count descending
+    // with input-order as a stable tie-break. Distinct count (not occurrence
+    // count) — generic terms that appear many times in one drawer award only
+    // +1, preventing inflation above drawers that match more distinct terms.
+    // When cue_terms is empty lexical_order == input order, collapsing both
+    // lanes to the same sequence (bit-identical to the previous path).
+    let lexical_order: Vec<usize> = if cue_terms.is_empty() {
+        (0..drawers.len()).collect()
+    } else {
+        let low_terms: Vec<String> = cue_terms.iter().map(|t| t.to_lowercase()).collect();
+        // (match_count, original_index) for stable sort.
+        let mut scored: Vec<(usize, usize)> = drawers
+            .iter()
+            .enumerate()
+            .map(|(idx, d)| {
+                let lower = d.content.to_lowercase();
+                let distinct = low_terms.iter().filter(|t| lower.contains(t.as_str())).count();
+                (distinct, idx)
+            })
+            .collect();
+        // Sort by count DESC; input index ASC as stable tie-break.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, idx)| idx).collect()
+    };
+
+    // Map original_index → lexical rank for O(1) lookup.
+    let mut lex_rank: Vec<usize> = vec![0; drawers.len()];
+    for (rank, &idx) in lexical_order.iter().enumerate() {
+        lex_rank[idx] = rank;
+    }
+
+    // RRF with genuinely independent lanes:
+    // L-lexical: ranked by distinct-cue-term count (or input order when empty).
+    // L-semantic: input order (recency — the verb's natural ordering).
+    // When cue_terms is empty both lanes equal input order — the formula
+    // reduces to the previous single-list math, bit-identical output.
     let mut rrf_score: Vec<f32> = Vec::with_capacity(drawers.len());
-    for idx in 0..drawers.len() {
-        let denom = (tuning.rrf_k as f32) + (idx as f32) + 1.0;
-        let lexical = 1.0 / denom;
-        let semantic = 1.0 / denom;
+    for sem_rank in 0..drawers.len() {
+        let l_rank = lex_rank[sem_rank];
+        let lexical = 1.0 / ((tuning.rrf_k as f32) + (l_rank as f32) + 1.0);
+        let semantic = 1.0 / ((tuning.rrf_k as f32) + (sem_rank as f32) + 1.0);
         rrf_score.push(tuning.bm25_weight * lexical + tuning.vector_weight * semantic);
     }
 
@@ -218,6 +255,26 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRo
     let mut remaining: Vec<bool> = vec![true; drawers.len()];
     let mut selected: Vec<usize> = Vec::with_capacity(drawers.len());
 
+    // Shingle each drawer ONCE and memoize pairwise similarities. The
+    // selection loop below evaluates candidate-vs-selected pairs across
+    // every step (~n³/6 evaluations); computing each from raw strings
+    // rebuilt both shingle sets per call and measured 181 s over a
+    // 250-drawer pool (the trial-3 synthesize timeouts). With cached sets
+    // and a pair memo the distinct work is at most n²/2 set intersections.
+    // Output is bit-identical — same substrate kernel, same values,
+    // computed once. Twin of the Swift pairSimilarity memo.
+    let shingle_sets: Vec<std::collections::BTreeSet<String>> =
+        drawers.iter().map(|d| shingles(&d.content)).collect();
+    let mut pair_memo: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+    let n = drawers.len();
+    let mut pair_similarity = |a: usize, b: usize| -> f32 {
+        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+        let key = lo * n + hi;
+        *pair_memo.entry(key).or_insert_with(|| {
+            substrate_shingle::similarity_sets(&shingle_sets[lo], &shingle_sets[hi])
+        })
+    };
+
     while selected.len() < drawers.len() {
         let mut best_idx: isize = -1;
         let mut best_score = f32::NEG_INFINITY;
@@ -233,7 +290,7 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRo
             } else {
                 let mut m: f32 = 0.0;
                 for &s in &selected {
-                    let sim = shingle_similarity(&drawers[idx].content, &drawers[s].content);
+                    let sim = pair_similarity(idx, s);
                     if sim > m {
                         m = sim;
                     }
@@ -368,13 +425,13 @@ mod tests {
 
     #[test]
     fn rerank_empty_is_empty() {
-        assert!(rerank(&[], &RecallFrameTuning::default()).is_empty());
+        assert!(rerank(&[], &RecallFrameTuning::default(), &[]).is_empty());
     }
 
     #[test]
     fn rerank_single_drawer_is_identity() {
         let drawers = vec![d("1", "chemistry")];
-        let out = rerank(&drawers, &RecallFrameTuning::default());
+        let out = rerank(&drawers, &RecallFrameTuning::default(), &[]);
         assert_eq!(
             out.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
             vec!["1"]
@@ -386,7 +443,7 @@ mod tests {
         let drawers: Vec<DrawerRow> = (1..=5)
             .map(|i| d(&format!("{}", i), &format!("drawer body number {}", i)))
             .collect();
-        let out = rerank(&drawers, &RecallFrameTuning::default());
+        let out = rerank(&drawers, &RecallFrameTuning::default(), &[]);
         let in_ids: std::collections::BTreeSet<_> = drawers.iter().map(|r| r.id.clone()).collect();
         let out_ids: std::collections::BTreeSet<_> = out.iter().map(|r| r.id.clone()).collect();
         assert_eq!(in_ids, out_ids);
@@ -403,8 +460,8 @@ mod tests {
                 )
             })
             .collect();
-        let first = rerank(&drawers, &RecallFrameTuning::default());
-        let second = rerank(&drawers, &RecallFrameTuning::default());
+        let first = rerank(&drawers, &RecallFrameTuning::default(), &[]);
+        let second = rerank(&drawers, &RecallFrameTuning::default(), &[]);
         let first_ids: Vec<_> = first.iter().map(|r| r.id.clone()).collect();
         let second_ids: Vec<_> = second.iter().map(|r| r.id.clone()).collect();
         assert_eq!(first_ids, second_ids);
@@ -419,7 +476,7 @@ mod tests {
             mmr_lambda: 1.0,
             ..Default::default()
         };
-        let out = rerank(&drawers, &tuning);
+        let out = rerank(&drawers, &tuning, &[]);
         let out_ids: Vec<_> = out.iter().map(|r| r.id.clone()).collect();
         let in_ids: Vec<_> = drawers.iter().map(|r| r.id.clone()).collect();
         assert_eq!(out_ids, in_ids);
@@ -436,7 +493,7 @@ mod tests {
             mmr_lambda: 0.0,
             ..Default::default()
         };
-        let out = rerank(&drawers, &tuning);
+        let out = rerank(&drawers, &tuning, &[]);
         let ids: Vec<_> = out.iter().map(|r| r.id.clone()).collect();
         assert_eq!(ids, vec!["near-1", "far", "near-2"]);
     }
@@ -528,7 +585,7 @@ mod tests {
             ..Default::default()
         };
 
-        let pages = hybrid_recall(&coord, &handle, frame, &tuning, 2000)
+        let pages = hybrid_recall(&coord, &handle, frame, &tuning, 2000, &[])
             .expect("hybrid_recall");
         assert_eq!(pages.len(), 2, "3 rows at page_size 2 → 2 pages");
         assert!(!pages[0].is_last);
@@ -555,10 +612,158 @@ mod tests {
             frame,
             &RecallFrameTuning::default(),
             1000,
+            &[],
         )
         .expect("hybrid_recall");
         assert_eq!(pages.len(), 1);
         assert!(pages[0].rows.is_empty());
         assert!(pages[0].is_last);
+    }
+
+    // ── cue-term lane ────────────────────────────────────────────────
+
+    /// Empty cue_terms must produce bit-identical output to no-cue call.
+    #[test]
+    fn rerank_empty_cue_terms_bit_identical_to_baseline() {
+        let drawers: Vec<DrawerRow> = (0..6)
+            .map(|i| d(&format!("d-{i}"), &format!("organic chemistry item {i}")))
+            .collect();
+        let baseline = rerank(&drawers, &RecallFrameTuning::default(), &[]);
+        let with_empty: Vec<String> = Vec::new();
+        let same = rerank(&drawers, &RecallFrameTuning::default(), &with_empty);
+        assert_eq!(
+            baseline.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            same.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            "empty cue_terms must produce identical output to empty-slice baseline"
+        );
+    }
+
+    /// Older drawer (input index 0) with 3 distinct cue-term hits must outrank
+    /// newer drawer (input index 1) with only 1 hit.
+    #[test]
+    fn rerank_older_drawer_more_cue_terms_outranks_newer() {
+        let drawers = vec![
+            d("old", "daguerreotype vintage cameras photography"),
+            d("new", "daguerreotype modern art exhibit"),
+        ];
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "vintage".to_string(),
+            "cameras".to_string(),
+        ];
+        let out = rerank(&drawers, &RecallFrameTuning::default(), &cue_terms);
+        assert_eq!(
+            out.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec!["old", "new"],
+            "drawer with more distinct cue-term hits must outrank fewer-hit drawer"
+        );
+    }
+
+    /// Occurrence count must NOT beat distinct count: 5 repeats of one term
+    /// must lose to 2 distinct terms matched once each.
+    ///
+    /// Pure-lexical tuning (bm25_weight=1.0, vector_weight=0.0) isolates the
+    /// distinct-count logic from semantic-lane interference. With default
+    /// weights (bm25=0.3, vector=0.7) the semantic lane dominates for
+    /// adjacent-rank pairs — the recency signal of input position 0
+    /// outweighs the distinct-count signal. Pure-lexical eliminates that
+    /// interference and tests the distinct-count contract directly.
+    #[test]
+    fn rerank_occurrence_count_does_not_beat_distinct_count() {
+        let drawers = vec![
+            d("repeat", "vintage vintage vintage vintage vintage"),
+            d("distinct", "daguerreotype cameras collection"),
+        ];
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "cameras".to_string(),
+            "vintage".to_string(),
+        ];
+        // distinct has 2 matches, repeat has 1 match; distinct must rank first.
+        // Pure-lexical tuning isolates distinct-count from recency weight.
+        let lexical_tuning = RecallFrameTuning {
+            bm25_weight: 1.0,
+            vector_weight: 0.0,
+            ..RecallFrameTuning::default()
+        };
+        let out = rerank(&drawers, &lexical_tuning, &cue_terms);
+        assert_eq!(
+            out.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec!["distinct", "repeat"],
+            "2 distinct cue-term matches must outrank 1 repeated match"
+        );
+    }
+
+    // ── gs5 adversarial pin (A3 adjudication, 2026-08-06) ────────────────────
+
+    /// Adversarial pin: zero-term-match row at maximal recency (input position 0)
+    /// must not outrank a term-matched row (input position 1) under
+    /// lexical-dominant tuning (bm25=1.0, vector=0.0).
+    ///
+    /// With DEFAULT weights (bm25=0.3, vector=0.7):
+    ///   RRF("zero-match") = 0.3/62 + 0.7/61 ≈ 0.01632
+    ///   RRF("term-match") = 0.3/61 + 0.7/62 ≈ 0.01621
+    /// Default weights select zero-match first — the recency-dominance failure
+    /// the hybrid_recall() guard prevents by switching to lexical-dominant tuning
+    /// when scored_lead_count == 0 && !cue_terms.is_empty().
+    ///
+    /// With LEXICAL-DOMINANT weights (bm25=1.0, vector=0.0):
+    ///   RRF("term-match") = 1.0/61 ≈ 0.01639
+    ///   RRF("zero-match") = 1.0/62 ≈ 0.01613
+    /// Lexical-dominant weights select term-match first. This test pins that
+    /// correct ordering at the reranker level under the guard-enforced tuning.
+    ///
+    /// Twin of Swift `gs5AdversarialZeroMatchLosesUnderLexicalDominantTuning`.
+    #[test]
+    fn gs5_adversarial_zero_match_loses_under_lexical_dominant_tuning() {
+        let drawers = vec![
+            d("zero-match", "unrelated topic about weather forecasting"), // pos 0, 0 cue matches
+            d("term-match", "daguerreotype vintage cameras photography"),  // pos 1, 3 cue matches
+        ];
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "vintage".to_string(),
+            "cameras".to_string(),
+        ];
+        // Lexical-dominant tuning: what hybrid_recall() applies when the scored
+        // lane is degraded (scored_lead_count == 0 && !cue_terms.is_empty()).
+        let lexical_dominant = RecallFrameTuning {
+            bm25_weight: 1.0,
+            vector_weight: 0.0,
+            ..RecallFrameTuning::default()
+        };
+        let out = rerank(&drawers, &lexical_dominant, &cue_terms);
+        assert_eq!(
+            out[0].id, "term-match",
+            "zero-term-match row at maximal recency must not outrank term-matched row under lexical-dominant tuning"
+        );
+        assert_eq!(out.len(), 2, "both rows present — reranker reorders, does not drop");
+    }
+
+    /// Tie-break is deterministic (stable input order wins); two calls produce
+    /// identical output.
+    #[test]
+    fn rerank_cue_term_tie_break_is_deterministic() {
+        let drawers = vec![
+            d("d0", "daguerreotype exposure plates"),
+            d("d1", "vintage photograph albums"),
+            d("d2", "cameras lens aperture"),
+        ];
+        let cue_terms = vec![
+            "daguerreotype".to_string(),
+            "vintage".to_string(),
+            "cameras".to_string(),
+        ];
+        let first = rerank(&drawers, &RecallFrameTuning::default(), &cue_terms);
+        let second = rerank(&drawers, &RecallFrameTuning::default(), &cue_terms);
+        assert_eq!(
+            first.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            second.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            "cue-term rerank must be deterministic across invocations"
+        );
+        // All drawers present.
+        let in_ids: std::collections::BTreeSet<_> = drawers.iter().map(|r| r.id.clone()).collect();
+        let out_ids: std::collections::BTreeSet<_> = first.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(in_ids, out_ids, "all drawers must be present in output");
     }
 }

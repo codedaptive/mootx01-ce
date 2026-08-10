@@ -63,6 +63,12 @@ enum RecipeTools {
     /// tools (one per shape) — the AI picks a deterministic recipe by name instead
     /// of simulating steering.
     static let shapedRecallToolName = "moot_recall_shaped"
+    /// Connected-recall tool: multi-hop retrieval by graph diffusion — a
+    /// scored anchor grab seeds a deterministic walk-with-restart over the
+    /// estate's tunnels ∪ pending associations, and the walk's visit ranking
+    /// fuses with the anchor ranking. The EXPENSIVE recall path: the caller
+    /// escalates here for hard bridge questions the similarity lanes miss.
+    static let connectedRecallToolName = "moot_recall_connected"
     static let runMigrationBenchmarkToolName = "moot_run_migration"
     static let confirmMigrationPromotionToolName = "moot_confirm_migration"
     /// On-demand dream tool: rebuild the estate's derived accelerators (the
@@ -117,6 +123,7 @@ enum RecipeTools {
             || name == preciseRecallToolName
             || name == vagueRecallToolName
             || name == shapedRecallToolName
+            || name == connectedRecallToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
@@ -138,6 +145,7 @@ enum RecipeTools {
             groundedSynthesisTool(),
             preciseRecallTool(),
             shapedRecallTool(),
+            connectedRecallTool(),
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
             dreamTool(),
@@ -233,7 +241,8 @@ enum RecipeTools {
             description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve, hasLinks. Omit for ordinary recall across any confirmation state. \"hasLinks\" scopes synthesis to drawers with links/citations — citation-scoped synthesis. null is invalid."),
+                    "query": stringSchema("Free-text cue that grounds the synthesis: distinctive terms are extracted and matched (OR, case-insensitive) against memory content, so only cue-relevant memories feed the document. Omit to synthesize over the whole recalled set (an estate digest); null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve, hasLinks. Omit for ordinary recall across any confirmation state. \"hasLinks\" scopes synthesis to drawers with links/citations — citation-scoped synthesis. Composes (AND) with query when both are given. null is invalid."),
                     "limit": integerSchema("Max drawers to recall. Omit for no explicit cap; null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
@@ -260,6 +269,28 @@ enum RecipeTools {
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
+    }
+
+    /// The connected-recall tool. Runs the ConnectedRecall recipe: a scored
+    /// anchor grab seeds a deterministic walk-with-restart over the estate's
+    /// connection graph — tunnels (validated) plus dream-produced pending
+    /// associations — and the walk's visit ranking fuses with the anchor
+    /// ranking. Same output shape as moot_memory_search.
+    private static func connectedRecallTool() -> ProjectedTool {
+        ProjectedTool(
+            name: connectedRecallToolName,
+            description: "Connected recall: multi-hop retrieval by graph diffusion. A scored anchor search seeds a deterministic random walk with restart over the estate's connection structure (tunnels plus pending associations), reaching bridge-linked memories that share no words with the query; the walk's visit ranking is fused with the anchor ranking. This is the EXPENSIVE recall path — use it for hard bridge questions (\"what did X's sister study\" when the sister's name only appears in the estate) after the similarity lanes (moot_memory_search, moot_recall_precise, moot_recall_shaped) miss. Returns dense rows in the same shape as moot_memory_search plus a lane-provenance summary line.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema("The question text — drives the scored anchor search that seeds the walk."),
+                    "wing": stringSchema("Optional wing whose tunnel graph joins the walk. Omit to walk pending associations only (tunnels are wing-scoped; associations are estate-wide). null is invalid."),
+                    "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -350,10 +381,11 @@ enum RecipeTools {
     private static func dreamTool() -> ProjectedTool {
         ProjectedTool(
             name: dreamToolName,
-            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
+            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review), file tier-labeled conflict-tunnel candidates across all three contradiction tiers (typed proof, structural lexical cue, value divergence — surviving the decline matrix), and optionally run one vector-similarity association sweep (proximity-based edge mining). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction, candidate-filing, and association counts plus a tiered synthesis digest.",
             inputSchema: objectSchema(
                 properties: [
                     "now": stringSchema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
+                    "associates": stringSchema("Association sweep mode: 'all' = probe every item in the estate (full coverage, for post-import runs), 'recent' = probe the 50 most-recently-filed items (default, fast), 'off' = skip the association sweep entirely."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
                 ],
                 required: []),
@@ -374,7 +406,7 @@ enum RecipeTools {
     private static func huntContradictionsTool() -> ProjectedTool {
         ProjectedTool(
             name: huntContradictionsToolName,
-            description: "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the corpus search index (run moot_reindex after bulk import).",
+            description: "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. With tier absent or \"all\", the sweep report is followed by a tiered synthesis digest (TIER 1 typed proofs, TIER 2 structural lexical cues, TIER 3 value divergence); with tier 1, 2, or 3 the call is a read-only purpose search of that lane alone — nothing is filed. Requires the corpus search index (run moot_reindex after bulk import).",
             inputSchema: objectSchema(
                 properties: [
                     "probe_limit": .object([
@@ -382,6 +414,24 @@ enum RecipeTools {
                         "description": .string(
                             "Maximum vector-indexed memories probed this sweep (default 500). "
                                 + "Repeated calls converge: settled pairs are skipped."),
+                    ]),
+                    // Union domain (integer 1|2|3 or the string "all"), so no
+                    // "type" key — the description carries the domain and the
+                    // dispatch boundary validates it. Declared IDENTICALLY in
+                    // the Rust twin (tool_list.rs hunt_contradictions_tool).
+                    "tier": .object([
+                        "description": .string(
+                            "Optional tier filter: 1 (typed proven contradictions), "
+                                + "2 (structural lexical conflict candidates), 3 (value "
+                                + "divergence), or \"all\" (default — legacy sweep plus "
+                                + "tiered synthesis digest). A single tier runs a "
+                                + "read-only purpose search of that lane alone."),
+                    ]),
+                    "top_k": .object([
+                        "type": .string("integer"),
+                        "description": .string(
+                            "Findings per tier section in the tiered digest "
+                                + "(default 5, valid 1...50)."),
                     ]),
                     "now": stringSchema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
@@ -525,6 +575,8 @@ enum RecipeTools {
             return try await runGroundedSynthesis(args, kit: kit, handle: handle)
         case preciseRecallToolName:
             return try await runPreciseRecall(args, kit: kit, handle: handle)
+        case connectedRecallToolName:
+            return try await runConnectedRecall(args, kit: kit, handle: handle)
         case vagueRecallToolName:
             return try await runVagueRecall(args, kit: kit, handle: handle)
         case shapedRecallToolName:
@@ -651,30 +703,82 @@ enum RecipeTools {
 
     // MARK: - grounded_synthesis
 
+    /// Maximum frame limit for grounded-synthesis cue-pool recall. When a
+    /// query is present the FRAME widens to this bound so the lexical RRF
+    /// lane can rank the full matched pool before the user limit caps synthesis.
+    /// The contentMatches filter already scopes the pool; this constant only
     private static func runGroundedSynthesis(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> JSONValue {
         let filterChain = try decodeFilterChain(args["filter"])
+        // query — the grounding cue the recipe contract promises
+        // ("hybrid-recall a QUERY and synthesize", GroundedSynthesis.swift).
+        // The dispatch layer extracts the distinctive terms and validates;
+        // the RECIPE owns both grounding lanes (the lexical cue predicate
+        // and the scored BM25+vector search over the raw query) plus the
+        // pool bounds — this layer passes the base kind-filter frame, the
+        // raw query, the terms, and the user limit as the post-rank cap.
+        // A query whose every token is a stopword is rejected rather than
+        // silently ignored — a caller who sent a cue must never receive an
+        // unscoped estate digest.
+        let query = try optionalString(args["query"], argument: "query")
+        var cueTerms: [String] = []
+        if let query {
+            let terms = groundingTerms(from: query)
+            guard !terms.isEmpty else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "query contains no usable terms (all tokens are "
+                    + "stopwords or too short); provide distinctive words to "
+                    + "ground on")
+            }
+            cueTerms = terms
+        }
         // Route through clampLimit so negative and over-ceiling values are
         // rejected/clamped at the MCP boundary. Parity: Rust recipe_tools.rs
         // run_grounded_synthesis_tool uses clamp_limit with the same ceiling.
-        let limit = try ToolDispatcher.clampLimit(
+        let userLimit = try ToolDispatcher.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        // Grounded runs pass the user limit as the recipe cap (synthesis is
+        // bounded even when the recipe widens its lane pools); digest runs
+        // keep the frame-limit semantics unchanged.
+        let recipeCap: Int? = cueTerms.isEmpty ? nil : userLimit
         let frame = LocusKit.RecallFrame(
             filterChain: filterChain,
             hydrationLevel: .structured,
-            limit: limit,
+            limit: userLimit,
             ordering: .byCaptureTimeDesc)
 
+        // excludeProvenanceSensitive: true silently removes rows whose
+        // provenance sensitivity (bits 30–35) is Restricted or Secret before
+        // the synthesizer runs. This is pool-removal, not redaction: the
+        // output count reflects only surviving rows, and no redaction marker
+        // appears in the response. This differs from the search surface
+        // (moot_memory_search / moot_recall_precise) which emits a visible
+        // "⛔ restricted" marker where a gated row would otherwise appear.
+        // The RecallFrame adjective filter (bits 6–11) does not cover
+        // provenance bits; this gate is the explicit provenance axis check.
+        // See ToolDispatch.swift near_anchor: comments for the near-anchor
+        // variant, which uses the same provenance-first ordering discipline.
         let out = try await GroundedSynthesis().run(
-            input: .init(frame: frame), estate: handle, kit: kit)
+            input: .init(
+                frame: frame,
+                cueTerms: cueTerms,
+                cap: recipeCap,
+                query: query,
+                excludeProvenanceSensitive: true),
+            estate: handle, kit: kit)
 
         let doc = out.context
+        // The cue is part of the document's identity: a grounded synthesis
+        // and an estate digest are different measurements, so the response
+        // names which one it is (line appears only when a query was given).
+        let queryLine = query.map { "query: \($0)\n" } ?? ""
         let body = """
         grounded_synthesis: \(out.drawerCount) drawer(s)
-        summary: \(doc.summary)
+        \(queryLine)summary: \(doc.summary)
         patterns: \(doc.patterns.joined(separator: ", "))
         successRate: \(doc.successRate)
         recommendations:
@@ -835,6 +939,68 @@ enum RecipeTools {
             lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
                 + "results may be imprecise. Refine with specific identifiers for higher confidence.")
         }
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
+    }
+
+    // MARK: - recall_connected
+
+    /// Run the ConnectedRecall recipe and serialize its matches in the SAME
+    /// plain-text shape `moot_memory_search` emits (found-N header + one
+    /// dense row per hit), so every mootText parser works unchanged. A
+    /// trailing `connected:` line names the lane provenance (anchor / walk /
+    /// both counts) — the walk lane is the tool's whole reason to exist, so
+    /// the response says whether it contributed.
+    private static func runConnectedRecall(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        let filter = try decodeSingleFilter(args["filter"])
+        // Wing scopes the TUNNEL side of the walk graph; associations are
+        // estate-wide. Omitted wing = association-only graph (tunnels are
+        // wing-scoped reads and there is no all-wings tunnel verb).
+        let wing = try optionalString(args["wing"], argument: "wing") ?? ""
+
+        let matches = try await ConnectedRecall.run(
+            kit: kit, handle: handle, query: query,
+            wing: wing, filter: filter, limit: limit)
+
+        // Same sensitivity-gated dense-row rendering the precise tool uses:
+        // the structured-tier fetch decides what may be shown; the recipe's
+        // in-hand content never bypasses the gate. The caller's filter rides
+        // in the frame (Wave-3 G1): walk-discovered ids arrive here without
+        // having passed the caller's filter at recall time, so render is the
+        // second gate that keeps e.g. a non-exportable bridge drawer opaque
+        // under filter:"exportable".
+        let estate = try await kit.estate(for: handle)
+        let shownMatches = Array(matches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: shownMatches.map { $0.id }, estate: estate, filterChain: [filter])
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
+
+        var lines: [String] = ["found \(matches.count) memory(s)"]
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in shownMatches {
+            if let d = drawersByID[match.id] {
+                lines.append(DenseRow.render(d))
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
+            } else {
+                lines.append(DenseRow.renderUnhydrated(id: match.id))
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
+        }
+        let anchorCount = matches.filter { $0.source == "anchor" }.count
+        let walkCount = matches.filter { $0.source == "walk" }.count
+        let bothCount = matches.filter { $0.source == "both" }.count
+        lines.append("connected: anchor=\(anchorCount) walk=\(walkCount) both=\(bothCount)")
         return ToolDispatcher.structuredTextResult(
             lines.joined(separator: "\n"), results: results)
     }
@@ -1049,20 +1215,25 @@ enum RecipeTools {
     }
 
     /// Typed-drawer twin of `denseRowsByID` (MXE-SS): the SAME by-id read
-    /// through the SAME empty-filter-chain `RecallFrame` — the load-bearing
-    /// default gate documented on `denseRowsByID` — returning the drawers
-    /// themselves so the structured block can take subject and provenance
-    /// sensitivity from the row. Structured hydration: content blobs are NOT
-    /// loaded here; recall-recipe content comes from the match and passes
-    /// through the redaction switch in `ToolDispatcher.structuredRecallRow`.
-    /// Gated ids are ABSENT from the map exactly as they are from
-    /// `denseRowsByID`, and callers fall through to the opaque row (the twin
-    /// of `DenseRow.renderUnhydrated`).
-    static func structuredDrawersByID(ids: [String], estate: Estate) async throws -> [String: Drawer] {
+    /// through the SAME gated `RecallFrame` — the load-bearing default gate
+    /// documented on `denseRowsByID` — returning the drawers themselves so
+    /// the structured block can take subject and provenance sensitivity from
+    /// the row. `filterChain` carries the CALLER's filter when the tool
+    /// surface accepts one (connected recall passes it so walk-reachable rows
+    /// cannot bypass it at render, Wave-3 G1); insertDefaults rides alongside
+    /// either way. Structured hydration: content blobs are NOT loaded here;
+    /// recall-recipe content comes from the match and passes through the
+    /// redaction switch in `ToolDispatcher.structuredRecallRow`. Gated ids
+    /// are ABSENT from the map exactly as they are from `denseRowsByID`, and
+    /// callers fall through to the opaque row (the twin of
+    /// `DenseRow.renderUnhydrated`).
+    static func structuredDrawersByID(
+        ids: [String], estate: Estate, filterChain: [Filter] = []
+    ) async throws -> [String: Drawer] {
         guard !ids.isEmpty else { return [:] }
         let fetched = try await estate.getDrawers(
             ids: ids,
-            matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .structured),
+            matchingFrame: RecallFrame(filterChain: filterChain, hydrationLevel: .structured),
             hydrationLevel: .structured)
         return Dictionary(uniqueKeysWithValues: fetched.admissible.map { ($0.id, $0) })
     }
@@ -1155,6 +1326,120 @@ enum RecipeTools {
             ids: Array(Set(visibleIDs)), estate: estate)
         return conflictProjectionSection(
             sweep, denseRows: denseRows, lexicalCandidates: lexicalCandidates)
+    }
+
+    // MARK: - tiered contradiction sections (MXE-CT3 P3)
+
+    /// Exact tier section headers — the wire contract for every surface
+    /// that renders a `TieredContradictionReport` (hunt and dream share
+    /// this ONE renderer, M4 pattern: one renderer, lines never drift).
+    /// Parity: Rust `recipe_tools::TIER1_HEADER` etc.
+    static let tier1Header = "TIER 1 — CONTRADICTION (proven)"
+    static let tier2Header = "TIER 2 — CONFLICT CANDIDATE"
+    static let tier3Header = "TIER 3 — DIVERGENCE"
+
+    /// Render a `TieredContradictionReport` as report lines. The ONE
+    /// tiered renderer: `moot_hunt_contradictions` (both modes) and
+    /// `moot_dream` (synthesis digest) both route through here so the
+    /// sections never drift between surfaces or ports.
+    ///
+    /// Tier-1 blocks reuse the typed lane's rendering contract
+    /// (`conflictProjectionSection`'s F13 redaction path): a secret
+    /// finding is counted by the lane counts only (no block), a
+    /// restricted finding renders ONLY the coordinate-digest line, and a
+    /// finding at or below elevated renders result essentials plus the
+    /// SAME gated dense rows (`denseRowsByID` — no parallel rendering
+    /// path to drawer content). The tiered verb already ceiling-filters
+    /// findings above elevated out of its tier-1 section
+    /// (`tier1CeilingFiltered`), so the secret/restricted arms here are
+    /// defense in depth, not the primary gate.
+    ///
+    /// Tiers 2/3 render the drawer pair plus cue kind and score — no
+    /// content snippets: the legacy CANDIDATE feed is the snippet
+    /// surface, and the digest must not become a second content
+    /// disclosure path.
+    ///
+    /// `laneSeconds` is non-nil in SYNTHESIS mode only: per-tier lane
+    /// counts (fetched/returned/promotedAway/backfilled) and the
+    /// elapsed-seconds lines render only for a synthesis digest. The
+    /// seconds are measured by the CALLER around each GLK call — the
+    /// engines are deterministic (no clock reads inside), so wall-clock
+    /// timing lives at this dispatch layer, the I/O boundary.
+    static func tieredSectionLines(
+        _ report: TieredContradictionReport,
+        denseRows: [String: String],
+        laneSeconds: [(label: String, seconds: Double)]?
+    ) -> [String] {
+        let synthesis = report.mode == .synthesis
+        var lines: [String] = []
+        let secretRaw = AdjectiveSensitivity.secret.rawValue
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+
+        for tier in ContradictionTier.allCases {
+            // Single-tier mode renders ONLY the requested lane's section;
+            // the other sections are structurally empty and would render
+            // as bare headers, which misreads as "lane ran, found none".
+            if case .single(let requested) = report.mode, requested != tier { continue }
+            switch tier {
+            case .typedProven: lines.append(Self.tier1Header)
+            case .lexicalStructural: lines.append(Self.tier2Header)
+            case .lexicalValue: lines.append(Self.tier3Header)
+            }
+            if synthesis {
+                let c = report.counts(for: tier)
+                lines.append("  lane: fetched \(c.fetched), returned \(c.returned), "
+                    + "promotedAway \(c.promotedAway), backfilled \(c.backfilled)")
+            }
+            for finding in report.findings(for: tier) {
+                switch tier {
+                case .typedProven:
+                    let ceiling = finding.sensitivityCeilingRaw ?? secretRaw
+                    if ceiling >= secretRaw { continue }
+                    if ceiling >= restrictedRaw {
+                        lines.append("  a conflicting claim exists at "
+                            + "\(finding.coordinateDigest ?? "?") [restricted]")
+                        continue
+                    }
+                    lines.append("  PROVEN \(finding.resultID ?? "?") "
+                        + "at \(finding.coordinateDigest ?? "?") "
+                        + "(rule \(finding.ruleID ?? "?"))")
+                    for id in [finding.drawerA, finding.drawerB] {
+                        lines.append("    \(denseRows[id] ?? "\(id) · - · - · - · -")")
+                    }
+                case .lexicalStructural, .lexicalValue:
+                    lines.append("  \(finding.drawerA) vs \(finding.drawerB) "
+                        + "(\(finding.cueKind ?? "?"), score \(finding.score ?? 0))")
+                }
+            }
+        }
+        if synthesis, let laneSeconds {
+            // Per-lane elapsed + synthesis wall time (the sum of the GLK
+            // calls this tool made). %.3f both ports for byte parity.
+            let parts = laneSeconds.map { "\($0.label)=\(String(format: "%.3f", $0.seconds))" }
+            lines.append("lane_seconds: " + parts.joined(separator: " "))
+            let total = laneSeconds.reduce(0.0) { $0 + $1.seconds }
+            lines.append("synthesis_wall_seconds: " + String(format: "%.3f", total))
+        }
+        return lines
+    }
+
+    /// Hydrate the gated dense rows for a tiered report's fully visible
+    /// tier-1 findings and render its sections. The dense rows come from
+    /// the SAME `denseRowsByID` fetch (structured hydration behind the
+    /// default-gated RecallFrame) the typed projection section uses.
+    static func renderTieredSections(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        report: TieredContradictionReport,
+        laneSeconds: [(label: String, seconds: Double)]?
+    ) async throws -> [String] {
+        let restrictedRaw = AdjectiveSensitivity.restricted.rawValue
+        let visibleIDs = report.tier1
+            .filter { ($0.sensitivityCeilingRaw ?? restrictedRaw) < restrictedRaw }
+            .flatMap { [$0.drawerA, $0.drawerB] }
+        let denseRows = try await denseRowsByID(
+            ids: Array(Set(visibleIDs)), estate: kit.estate(for: handle))
+        return tieredSectionLines(report, denseRows: denseRows, laneSeconds: laneSeconds)
     }
 
     // MARK: - run_migration_benchmark
@@ -1254,6 +1539,25 @@ enum RecipeTools {
 
     // MARK: - dream
 
+    /// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
+    ///
+    /// "all" mode is intended for post-import full-estate coverage: after a bulk
+    /// import the caller wants proximity associations mined across every item, not
+    /// just the 50 most-recent. Without a cap, `probeLimit: nil` passes `Int.max`
+    /// to `VectorStore.recentItemIDs(limit:)`, which scans the whole table and then
+    /// runs O(N × k) kNN probes — on a pathologically large estate that could run
+    /// for minutes inside an MCP tool call.
+    ///
+    /// 10_000 items is the bound:
+    ///   - At HNSW scale (k = 5, O(k·log N)): ~700K similarity ops, a few seconds.
+    ///   - Personal estates with >10K vector-indexed drawers are exceptional;
+    ///     repeated calls converge anyway (existing associations are skipped).
+    ///   - Consistent with the contradiction-hunt's 500-probe per-call bound:
+    ///     the associate sweep is the "full-coverage" companion, so 20× is generous.
+    ///
+    /// Parity constant: Rust `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE = 10_000`.
+    private static let dreamAssociateAllModeMaxProbe: Int = 10_000
+
     /// Run `moot_dream`: rebuild the estate's derived accelerators, then run one
     /// dreaming cycle. Two distinct effects, both required for a fully "dreamt"
     /// estate:
@@ -1331,6 +1635,52 @@ enum RecipeTools {
         let hunt = try await kit.huntContradictions(
             in: handle, probeLimit: 500, now: now)
 
+        // Step 3.25 — MXE-CT3 P3: file tier-labeled conflict-tunnel
+        // candidates at ALL three tiers (typed proof, structural lexical
+        // cue, value divergence) out of one typed sweep + one shared
+        // lexical pass, surviving the decline matrix (P2.5 contract:
+        // model filing never activates — the user settles proposals via
+        // moot_review_tunnel). Timed at this dispatch layer: the engine
+        // is deterministic, clocks live at the I/O boundary.
+        let proposeStart = Date()
+        let candidates = try await kit.proposeConflictTunnels(in: handle, now: now)
+        let proposeSeconds = Date().timeIntervalSince(proposeStart)
+
+        // Step 3.5 — vector-similarity association sweep.
+        //
+        // Mines proximity pairs from the estate's VectorStore and writes
+        // new associations directly (no scheduler round-trip). Dedup is
+        // durable: existing active associations are skipped. Mirrors the
+        // ContradictionHunt one-impl pattern: associateSweep is the same
+        // core used by the resident VectorSimilaritySignal, exposed here
+        // for on-demand coverage.
+        //
+        // Three modes decoded from the "associates" argument:
+        //   "all"    — probeLimit nil = all items (full estate coverage)
+        //   "recent" — probeLimit VectorSimilaritySignal.defaultProbeLimit (default)
+        //   "off"    — skip the step entirely
+        //
+        // Default is "recent" (fast, mirrors the standing-signal cadence).
+        // Use "all" after bulk imports for full-estate coverage.
+        let associatesMode = (try? optionalString(args["associates"], argument: "associates")) ?? "recent"
+        var assocLine = ""
+        if associatesMode != "off" {
+            // Server-side probe budget: "all" uses the named constant (10_000) rather
+            // than nil (unbounded) — an unbounded MCP probe is a DoS vector on large
+            // estates. "recent" uses the standing-signal default (50). Both are
+            // finite; the nil path is intentionally removed. Parity: Rust
+            // run_dream_tool uses DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE for "all".
+            let assocProbeLimit: Int = associatesMode == "all"
+                ? Self.dreamAssociateAllModeMaxProbe
+                : VectorSimilaritySignal.defaultProbeLimit
+            let assocReport = try await kit.associateSweep(
+                in: handle, probeLimit: assocProbeLimit, now: now)
+            if assocReport.probed > 0 || assocReport.written > 0 {
+                assocLine = "\nassociationsWritten: \(assocReport.written) "
+                    + "(probed: \(assocReport.probed), deduplicated: \(assocReport.deduplicated))"
+            }
+        }
+
         // Step 4 — subject backfill dispatch (rider-default ruling,
         // 2026-08-02): dreaming pays subject debt when a producer is
         // registered (on Apple the serve layer registers the miniLLM
@@ -1360,6 +1710,7 @@ enum RecipeTools {
         contradictionCandidatesBorderline: \(hunt.borderline.count)
         """
         body += backfillLine
+        body += assocLine
         if !hunt.vectorStoreAvailable {
             body += "\n(contradiction hunt skipped: no vector index for this estate — run moot_reindex first)"
         }
@@ -1372,6 +1723,23 @@ enum RecipeTools {
             estate: kit.estate(for: handle),
             lexicalCandidates: hunt.borderline.count)
         body += "\n" + typedSection.joined(separator: "\n")
+
+        // MXE-CT3 P3 — candidate-filing counts (step 3.25) and the
+        // tiered synthesis digest, rendered through the SAME shared
+        // renderer the hunt tool uses (one renderer, lines never drift).
+        body += "\nconflictTunnelsFiled: tier1 \(candidates.proposedTunnelIDs.count), "
+            + "tier2 \(candidates.proposedTier2IDs.count), "
+            + "tier3 \(candidates.proposedTier3IDs.count) "
+            + "(suppressed: \(candidates.suppressed), "
+            + "ceilingSkipped: \(candidates.ceilingSkipped))"
+        let tieredStart = Date()
+        let tiered = try await kit.tieredContradictionSearch(
+            in: handle, topK: 5, now: now)
+        let tieredSeconds = Date().timeIntervalSince(tieredStart)
+        let tieredLines = try await renderTieredSections(
+            kit: kit, handle: handle, report: tiered,
+            laneSeconds: [("propose", proposeSeconds), ("synthesis", tieredSeconds)])
+        body += "\n" + tieredLines.joined(separator: "\n")
         return ToolDispatcher.textResult(body)
     }
 
@@ -1381,6 +1749,13 @@ enum RecipeTools {
     /// Strong findings persist as proposed contradicts tunnels (the hunt does
     /// its own writes); borderline candidates come back with snippets for the
     /// calling agent to adjudicate.
+    ///
+    /// MXE-CT3 P3 tier modes:
+    /// - `tier` absent or `"all"` (the default): today's exact legacy sweep
+    ///   report, unchanged byte for byte, PLUS an appended tiered synthesis
+    ///   digest (`tieredContradictionSearch` synthesis mode).
+    /// - `tier` 1|2|3: a read-only purpose search of that single lane —
+    ///   no legacy sweep, no tunnels filed, no writes of any kind.
     private static func runHuntContradictions(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -1406,10 +1781,69 @@ enum RecipeTools {
             }
             probeLimit = Int(n)
         }
+        // `tier`: integer 1|2|3 or the string "all"; anything else is
+        // rejected at this public boundary with the valid domain named
+        // (b77ec03e8/b96c01617 precedent). nil = synthesis ("all").
+        var singleTier: ContradictionTier?
+        if let raw = args["tier"] {
+            switch raw {
+            case .string("all"):
+                singleTier = nil
+            case .integer(let n):
+                guard let t = ContradictionTier(rawValue: Int(n)) else {
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "tier must be 1, 2, 3, or \"all\"")
+                }
+                singleTier = t
+            default:
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "tier must be 1, 2, 3, or \"all\"")
+            }
+        }
+        // `top_k`: findings per tier section. 1...50 mirrors GLK's
+        // `TieredContradictionCore.topKCeiling` clamp — the boundary
+        // rejects what the engine would clamp, so the caller learns the
+        // domain instead of silently getting less.
+        var topK = 5
+        if let raw = args["top_k"] {
+            guard case .integer(let n) = raw, n >= 1, n <= 50 else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "top_k must be an integer in 1...50")
+            }
+            topK = Int(n)
+        }
 
+        // ---- Single-tier purpose search (read-only, nothing filed) ----
+        if let tier = singleTier {
+            let report = try await kit.tieredContradictionSearch(
+                in: handle, tier: tier, topK: topK,
+                probeLimit: probeLimit, now: now)
+            // The lexical lanes (2/3) need the vector index; the typed
+            // lane (1) does not — diagnostics report true for a
+            // tier-1-only run, so this guard cannot misfire there.
+            guard report.diagnostics.vectorStoreAvailable else {
+                return ToolDispatcher.textResult(
+                    "moot_hunt_contradictions: no vector index for this estate — "
+                        + "run moot_reindex first, then hunt again.")
+            }
+            var lines = ["moot_hunt_contradictions: tier \(tier.rawValue) search complete"]
+            lines += try await renderTieredSections(
+                kit: kit, handle: handle, report: report, laneSeconds: nil)
+            return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        }
+
+        // ---- Legacy sweep (tier absent / "all") — unchanged path ----
+        // Wall-clock timing wraps the GLK calls at this dispatch layer:
+        // the engines are deterministic (no Date() inside), so the I/O
+        // boundary is the only place elapsed time may be measured.
+        let huntStart = Date()
         // Sensitivity ceiling is hardcoded .elevated (fail-safe by design); huntContradictions does NOT consult SensitivityGrantLedger.
         let report = try await kit.huntContradictions(
             in: handle, probeLimit: probeLimit, now: now)
+        let huntSeconds = Date().timeIntervalSince(huntStart)
 
         guard report.vectorStoreAvailable else {
             return ToolDispatcher.textResult(
@@ -1447,6 +1881,19 @@ enum RecipeTools {
             kit: kit, handle: handle,
             estate: kit.estate(for: handle),
             lexicalCandidates: report.borderline.count)
+
+        // MXE-CT3 P3 — appended tiered synthesis digest. Everything above
+        // this line is the legacy report, byte-identical to the pre-P3
+        // output (the benchmark parser matches the trimmed "PROPOSED "/
+        // "CANDIDATE " prefixes and the count lines above — never touch
+        // those emitters). Timed at this dispatch layer (I/O boundary).
+        let tieredStart = Date()
+        let tiered = try await kit.tieredContradictionSearch(
+            in: handle, topK: topK, probeLimit: probeLimit, now: now)
+        let tieredSeconds = Date().timeIntervalSince(tieredStart)
+        lines += try await renderTieredSections(
+            kit: kit, handle: handle, report: tiered,
+            laneSeconds: [("hunt", huntSeconds), ("synthesis", tieredSeconds)])
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
@@ -1732,6 +2179,46 @@ enum RecipeTools {
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Unknown filter: \(name)")
         }
+    }
+
+    /// Stopwords excluded from grounding-term extraction: question scaffolding
+    /// and function words that would match nearly every memory and destroy the
+    /// cue's selectivity. Deliberately small — an over-eager list starts
+    /// eating content words. MUST stay byte-identical to Rust
+    /// `GROUNDING_STOPWORDS` in recipe_tools.rs (conformance-checked there).
+    private static let groundingStopwords: Set<String> = [
+        "the", "and", "for", "are", "was", "were", "has", "have", "had",
+        "did", "does", "not", "with", "that", "this", "from", "they",
+        "their", "them", "then", "than", "there", "these", "those", "you",
+        "your", "what", "when", "where", "which", "who", "whom", "why",
+        "how", "will", "would", "could", "should", "about", "been", "being",
+        "into", "over", "under", "after", "before", "between", "during",
+        "any", "all", "each", "most", "some", "such", "can", "may", "might",
+        "must", "shall", "its", "his", "her", "him", "she", "our", "out",
+        "but", "per", "via", "also", "just", "only", "very", "much", "more",
+    ]
+
+    /// Extracts the distinctive grounding terms from a free-text query:
+    /// alphanumeric runs, lowercased (content matching is case-insensitive on
+    /// both ports), dropping stopwords and short fragments (< 3 chars unless
+    /// they carry a digit — "42" or "3b" are distinctive, "at" is not),
+    /// deduplicated in first-appearance order, capped at 12 terms so a pasted
+    /// paragraph cannot degenerate into an unbounded OR. Deterministic pure
+    /// function of the query — MUST stay behavior-identical to Rust
+    /// `grounding_terms` in recipe_tools.rs.
+    static func groundingTerms(from query: String) -> [String] {
+        var seen = Set<String>()
+        var terms: [String] = []
+        for raw in query.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            let token = raw.lowercased()
+            let hasDigit = token.contains { $0.isNumber }
+            guard token.count >= 3 || hasDigit else { continue }
+            guard !groundingStopwords.contains(token) else { continue }
+            guard seen.insert(token).inserted else { continue }
+            terms.append(token)
+            if terms.count == 12 { break }
+        }
+        return terms
     }
 
     /// Shared single-filter decoder used by precise recall, shaped recall, and
