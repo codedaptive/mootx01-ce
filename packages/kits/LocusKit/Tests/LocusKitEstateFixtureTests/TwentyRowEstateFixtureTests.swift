@@ -14,6 +14,9 @@ import PersistenceKit
 import PersistenceKitSQLite
 import Testing
 @testable import LocusKitEstateFixture
+#if canImport(Security)
+import Security
+#endif
 
 @Suite("Twenty-row plaintext estate fixture")
 struct TwentyRowEstateFixtureTests {
@@ -246,5 +249,47 @@ struct TwentyRowEstateFixtureTests {
         // kind string onto .blocks, so that is the substrate shape asserted here.
         #expect(precedes.label == "precedes")
         #expect(precedes.kind == .blocks)
+    }
+
+    // MARK: - 7. Zero Keychain residue
+
+    /// Probe the `com.mootx01.estate.identity` Keychain service item count before
+    /// and after a complete generate+cleanup cycle. An unchanged count proves the
+    /// `identityKeyStore` injection in `TwentyRowEstateFixture.generate(at:)` is
+    /// effective — no Keychain item was created.
+    ///
+    /// Growth-detection mirrors `GeniusLocusKitTests/EstateKeyLifetimeTests.swift`
+    /// `bulkLoopLeavesZeroResidue`. Probe failures (Keychain unavailable in this
+    /// environment) skip silently; present items fail loudly.
+    @Test("TwentyRowEstateFixture.generate leaves zero Keychain identity residue")
+    func generateLeavesZeroKeychainResidue() async throws {
+        #if canImport(Security)
+        // Count items for the estate identity service. Returns nil when the
+        // Keychain probe itself fails — skip rather than fail in that case.
+        func identityItemCount() -> Int? {
+            let query: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: "com.mootx01.estate.identity",
+                kSecReturnAttributes: kCFBooleanTrue,
+                kSecMatchLimit: kSecMatchLimitAll,
+            ]
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            switch status {
+            case errSecSuccess:
+                return (result as? [[String: Any]])?.count ?? 0
+            case errSecItemNotFound:
+                return 0
+            default:
+                return nil
+            }
+        }
+        guard let countBefore = identityItemCount() else { return }
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        TwentyRowEstateFixture.cleanup(manifest)
+        guard let countAfter = identityItemCount() else { return }
+        #expect(countAfter == countBefore,
+                "TwentyRowEstateFixture must not create Keychain identity items — \(countAfter - countBefore) new item(s) found")
+        #endif
     }
 }
