@@ -18,12 +18,15 @@ import PersistenceKitInMemory
 ///       private key — `issueGrant` throws rather than silently producing a
 ///       bad signature.
 ///
-/// All tests inject `InMemoryEstateIdentityKeyStore` into the LocusKit open
-/// path. The GLK `kit.open` path uses the default `KeychainEstateIdentityKeyStore`
-/// for the initial LocusKit open; tests that need controlled injection open
-/// the estate directly via `LocusKit.Estate.open` with the injected store
-/// before calling `kit.open` on the same storage (which finds the public key
-/// already in the manifest and loads the private key from the injected store).
+/// All tests use `makeStorage()`, which returns `InMemoryStorage`. The
+/// `defaultIdentityKeyStore(for:)` resolution in `LocusKit.Estate.open` maps
+/// the `.inMemory` backend to `InMemoryEstateIdentityKeyStore` regardless of
+/// which layer (LocusKit or GeniusLocusKit) opens the estate, so no real
+/// Keychain item is ever created or read in this suite. Tests that need
+/// explicit injection pass an `InMemoryEstateIdentityKeyStore` directly and
+/// open via `LocusKit.Estate.open` before calling `kit.open` on the same
+/// storage (which finds the public key already in the manifest and loads the
+/// private key from the injected store).
 @Suite("GrantSigningSecureStoreTests")
 struct GrantSigningSecureStoreTests {
 
@@ -53,9 +56,10 @@ struct GrantSigningSecureStoreTests {
 
     /// When GeniusLocusKit opens an estate, the underlying `LocusKit.Estate.open`
     /// must not write the private signing key to `estate_meta`. This test opens
-    /// the estate via the standard GLK path (which uses the Keychain by default
-    /// on macOS) and then re-reads the manifest to confirm the private key row
-    /// is absent.
+    /// the estate via the standard GLK path on an in-memory-backed estate
+    /// (`makeStorage()` returns `InMemoryStorage`, so `defaultIdentityKeyStore(for:)`
+    /// resolves to `InMemoryEstateIdentityKeyStore` — no real Keychain is accessed)
+    /// and then re-reads the manifest to confirm the private key row is absent.
     @Test("estate_meta does not contain ed25519 private key after kit.open")
     func kitOpenDoesNotPersistPrivateKeyInMeta() async throws {
         let kit = GeniusLocusKit()
