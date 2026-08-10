@@ -1438,13 +1438,6 @@ fn capture_decision(
     }
 }
 
-fn teaching_message(path: &str) -> String {
-    let location = parse_harness_path(path)
-        .map(|(slug, file)| format!("harness/{slug}/{file}"))
-        .unwrap_or_else(|| "harness/<project>/<name>".to_string());
-    teaching_message_with_location(&location)
-}
-
 fn teaching_message_with_location(location: &str) -> String {
     format!(
         "Captured to the estate this time. File directly with \
