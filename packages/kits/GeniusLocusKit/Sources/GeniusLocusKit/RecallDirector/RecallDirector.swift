@@ -705,19 +705,29 @@ public extension GeniusLocusKit {
         // Drawer UUIDs are freshly minted on each estate import, so UUID-based tiebreaks
         // produce different rank assignments across replay runs for tied items, flipping
         // candidates across the K boundary and causing meanStaleInTopK drift.
-        // locusRows carries the drawer content field (verbatim, deterministic for the same
-        // seed); IDs not present in locusRows fall back to the UUID string — acceptable
-        // because non-locus-indexed items cannot be the boundary-crossing culprits
-        // (they appear in at most two lanes, accruing lower RRF mass than three-lane items).
-        let locusContentByID: [String: String] = Dictionary(
+        // locusRows provides content for frame-admissible locus items.  BM25/vector items
+        // outside the locus frame (e.g. drawers with ContraSignal set) are excluded from
+        // locusRows but still appear in bm25List/vectorList from the corpus index, and
+        // their rank position shifts RRF scores of frame-admissible items around them.
+        // We fetch their content unframed so every item in bm25List/vectorList has a
+        // stable, seed-derived tiebreak key.  Only fires when non-locus hits exist, which
+        // is zero in most production queries.
+        let locusIDs = Set(locusRows.map(\.id))
+        var contentByID: [String: String] = Dictionary(
             uniqueKeysWithValues: locusRows.map { ($0.id, $0.content) })
+        let nonLocusHitIDs = Set(bm25List.map(\.id) + vectorList.map(\.id)).subtracting(locusIDs)
+        if !nonLocusHitIDs.isEmpty {
+            let extras = (try? await estate.getDrawers(
+                ids: Array(nonLocusHitIDs), hydrationLevel: .full)) ?? []
+            for d in extras { contentByID[d.id] = d.content }
+        }
         bm25List.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return (locusContentByID[x.id] ?? x.id) < (locusContentByID[y.id] ?? y.id)
+            return (contentByID[x.id] ?? x.id) < (contentByID[y.id] ?? y.id)
         }
         vectorList.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return (locusContentByID[x.id] ?? x.id) < (locusContentByID[y.id] ?? y.id)
+            return (contentByID[x.id] ?? x.id) < (contentByID[y.id] ?? y.id)
         }
 
         // Build the candidate list according to the requested scoring strategy.
@@ -772,7 +782,7 @@ public extension GeniusLocusKit {
                 for: request.recallShape, laneKeys: ["locus", "bm25", "hamming"])
             fused = GeniusLocusKit.rrfFuseN(
                 [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit,
-                contentKeyMap: locusContentByID)
+                contentKeyMap: contentByID)
         }
 
         // Hydrate fused hits from the estate. Locus rows are already in memory
@@ -1036,12 +1046,13 @@ public extension GeniusLocusKit {
     ///            formula. A non-empty array MUST match `lists.count`.
     ///   - k: RRF smoothing constant. 60 is the Robertson et al. recommendation.
     ///   - limit: Maximum results to return.
-    ///   - contentKeyMap: Optional map from item id to a content-derived stable key used
-    ///            as the sort tiebreak. Callers supply drawer content text so the tiebreak
-    ///            is deterministic across replay runs. Items absent from the map fall back
-    ///            to their id string, which is UUID-based and may differ between runs —
-    ///            acceptable for items not indexed in the locus lane (they cannot be the
-    ///            equal-score boundary items that cause drift).
+    ///   - contentKeyMap: Map from item id to a content-derived stable key used as the
+    ///            sort tiebreak. Callers supply drawer content text (deterministic for a
+    ///            given seed) so the tiebreak is run-stable. The hybrid lane builds this
+    ///            map from locusRows PLUS an unframed fetch of any non-locus BM25/vector
+    ///            candidates (e.g. frame-excluded drawers) so the map covers ALL input
+    ///            items. Items absent from the map fall back to their id string (UUID),
+    ///            which is non-deterministic; callers must ensure the map is exhaustive.
     internal static func rrfFuseN(
         _ lists: [[(id: String, score: Float)]],
         weights: [Float] = [],
