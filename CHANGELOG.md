@@ -5,6 +5,71 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-13 — 2026-08-10
+
+76 commits backported from the Enterprise line since beta-12. The last beta
+before the benchmark harness lands — `benchmark/` is deliberately held back
+until its content has been reviewed for publication, so nothing in this release
+documents or depends on it.
+
+- **Installer (security, high).** The macOS `postinstall` script no longer
+  writes or changes ownership through a symlinked destination. `~/.mootx01`,
+  `~/.local` and `~/.local/bin` are each checked before use and skipped with a
+  message if they are a symlink or not a directory; `chown` on the PATH
+  symlinks uses `-h`, so the link is re-owned rather than its target. The
+  install user is derived from `$HOME` rather than `/dev/console`. beta-12
+  carried only the first half of this fix, which left the 1.1 line briefly
+  worse off than 1.0.40 — this completes it.
+- **JSON import (new).** VaultKit gains a v1.1 seed-file format: parser and
+  validator, collision assertion, file-order frame build, windowed bulk write
+  with an intra-file relationship pass, deferred encode enqueue and a
+  digest-bearing receipt. Records carry an optional `subject`, an `import-v1`
+  tier and a provide-or-debt contract. Exposed as `moot_json_import` on the MCP
+  surface. Format documented in `packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md`.
+- **Multi-hop retrieval (new).** `moot_recall_connected` retrieves by graph
+  diffusion across linked memories, both ports. Connected-walk hydration now
+  carries the caller's filter through every layer.
+- **Tiered contradiction.** GeniusLocusKit gains tiered contradiction lanes and
+  a synthesis assembler, a review ladder with an endorsement ledger, tier-labeled
+  candidate filing, a `wordExclusion` cue and a contradiction tier classifier,
+  with the tier surface and review-ladder verbs reachable over MCP.
+- **Harness memory (new).** `mootx01 enable harness-memory` wires estate-governed
+  memory into Claude Code. The `PreToolUse` hook falls through on non-memory
+  paths rather than implicitly allowing them, and parses strictly before the
+  daemon-down allow.
+- **Determinism.** RRF fusion tiebreaks, MMR tiebreak selection, the
+  `FloatBruteForceIndex` vector-hash tiebreak, locus candidate ordering and
+  `recallUnionBest` content sorting are all now content-derived and stable
+  across runs, both ports. Dense cosine is quantized to 2dp to absorb LSA/NMF
+  training float deltas. `corpusOnly` lane content-sort and slot-stealing are
+  frame-gated.
+- **Synthesis.** `moot_synthesize` accepts the grounding query its recipe
+  contract promised, ranks grounding by cue relevance, and gates
+  provenance-sensitive insights. Shingle caching removes a 181-second rerank.
+  The grounded-synthesis cap is validated at the public boundary.
+- **Dreaming.** `moot_dream` gains an associate step driven by a new
+  `associateSweep` verb over a refactored proximity scan; `all` mode is capped
+  at 10,000 probes.
+- **Recall.** A `session_hybrid` preset joins the RecallShape roster with
+  temporal/speaker fusion; query→cueTerms is capped at the grounding pool bound,
+  closing a quadratic rerank denial-of-service.
+- **Hardening.** Judge and rerank subprocesses are bounded by a shared timeout
+  and killable on expiry, with the command passed by environment variable so it
+  never appears in `ps` output and stderr drained concurrently. Scratch
+  directories are canonicalized and symlink-checked. Scratch estates never touch
+  the login Keychain.
+- **Probe window.** `VectorSimilaritySignal`'s probe window is now a parameter
+  (`probeLimit` / `probe_limit`), defaulting to 50 so resident behaviour is
+  byte-unchanged.
+
+Known issues. The 13 `MootGatewayTests` failures and the `LoopbackHTTP`
+cold-build race carried from beta-11 are both still present. New to this
+record, though not new to the code: one GeniusLocusKit test — "leave-one-out:
+nulling one signal removes only that signal's votes" — fails roughly one run in
+five under full-suite parallel load, returning the correct result set in the
+wrong order. It reproduces at the same rate on the Enterprise line, so it is not
+a backport artifact, and it passes every time when run on its own.
+
 ## 1.1.0-beta-12 — 2026-08-05
 
 Re-cut of beta-11 so CI builds green. No product change from beta-11 — the same
