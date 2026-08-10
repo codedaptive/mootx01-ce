@@ -2468,6 +2468,49 @@ public actor CorpusContentEngine {
         return digests
     }
 
+    /// Authoritative rebuild used only by offline estate maintenance after physical
+    /// drawer removal. Clears all BM25, counts, and basis derived state so
+    /// physically-removed content leaves no stale entries, then retrains and
+    /// re-indexes surviving content via `reindex(now:)`.
+    ///
+    /// Vector entries for removed drawers are orphaned in the vector store (no
+    /// longer returned by `activeContentIDs`) but otherwise harmless; a future
+    /// selective cleanup can remove them if needed.
+    ///
+    /// `countsAdmission` is NOT acquired here because estate maintenance operates
+    /// on a quiesced offline copy — no concurrent drain workers or ingest paths.
+    @_spi(EstateMaintenance)
+    public func rebuildAfterPhysicalRemoval(
+        now: Date
+    ) async throws -> CorpusPhysicalRemovalRebuildSummary {
+        // Clear persisted derived state so stale entries from removed drawers
+        // cannot survive the rebuild.
+        try await invertedIndex.deleteAll()
+        try await countsStore.deleteAll()
+        // Reset in-memory accumulators to factory state so trainTrainableSlots
+        // starts fresh without stale counts folded in.
+        for index in slots.indices {
+            guard let factoryBlob = slots[index].freshBasisBlob,
+                  let trainable = slots[index].provider as? any TrainableEmbeddingBasis,
+                  let accumulator = try trainable.reconstructBasis(from: factoryBlob)
+                    as? any TrainableEmbeddingBasis else {
+                slots[index].countsAccumulator = nil
+                slots[index].countsDocumentCount = 0
+                continue
+            }
+            slots[index].countsAccumulator = accumulator
+            slots[index].countsDocumentCount = 0
+        }
+        countsReloadRequired = false
+        try await basisStore.deleteAll()
+        let activeIDs = try await source.activeContentIDs()
+        // Retrain and re-embed all surviving content from scratch.
+        try await reindex(now: now)
+        return CorpusPhysicalRemovalRebuildSummary(
+            activeChunkCount: activeIDs.count,
+            indexedChunkCount: activeIDs.count)
+    }
+
     /// Retrain every trainable slot from scratch on the full active corpus
     /// and re-index every active content row. Deterministic ascending-ID
     /// streaming order. Training is streamed (bounded) and each provider's
