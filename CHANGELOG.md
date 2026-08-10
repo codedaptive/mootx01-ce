@@ -5,6 +5,22 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-14 — 2026-08-10
+
+Restores an Enterprise-side change that an earlier sync had removed. beta-13 is
+otherwise unchanged; if you are already on beta-13, this adds the maintenance
+SPI below and nothing else.
+
+- **Estate maintenance SPI (restored).** `GeniusLocusKit.EstateMaintenance` and
+  its CorpusKit entry points were lost when an earlier edition sync propagated
+  their absence rather than their content. The wave is restored intact —
+  `EstateMaintenance.swift` with its test suite, the `CorpusContentEngine` and
+  `CorpusKit` entry points, and the `EstateSurgery` call sites that depend on
+  them. This code had never reached the Community Edition at all, so it is new
+  here rather than a repair of something previously published.
+
+Known issues are unchanged from beta-13.
+
 ## 1.1.0-beta-13 — 2026-08-10
 
 76 commits backported from the Enterprise line since beta-12. The last beta
