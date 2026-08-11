@@ -5,6 +5,23 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-15 — 2026-08-10
+
+Completes the 1.0→1.1 migration. Estates upgraded on any earlier 1.1 beta
+stopped one step short of the end and stayed that way; this finishes them.
+
+- **Migration reclaim now runs (bug fix).** The shared-content migration ends by
+  returning the retired tables' pages to the filesystem and marking itself
+  complete. That final step had no caller in either port, so every upgraded
+  estate stalled at `reclaimPending` permanently — pages never returned, and the
+  migration record left holding a full legacy inventory (over a million entries
+  on a large estate). `mootx01 upgrade` now performs it, on both the Swift and
+  Rust ports. The step is idempotent and retryable: it needs a quiet estate and
+  enough free disk for the vacuum, and a failure leaves the record exactly where
+  it was for the next attempt.
+
+Known issues are unchanged from beta-13.
+
 ## 1.1.0-beta-14 — 2026-08-10
 
 Restores an Enterprise-side change that an earlier sync had removed. beta-13 is
