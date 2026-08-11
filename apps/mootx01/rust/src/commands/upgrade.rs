@@ -34,6 +34,7 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         let code = place_and_report(&src, &home, no_restart);
         if code == ExitCode::from(exit::OK) {
             run_kg_fact_identity_backfill();
+            run_shared_content_reclaim_if_pending();
             offer_estate_encryption_if_needed();
         }
         return code;
@@ -64,6 +65,7 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
             // and it converges whether or not a new version is available — so
             // the up-to-date early return still backfills and offers.
             run_kg_fact_identity_backfill();
+            run_shared_content_reclaim_if_pending();
             offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
         }
@@ -103,6 +105,7 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         // The backfill runs first: unattended correctness migration before
         // the TTY-gated opt-in offer.
         run_kg_fact_identity_backfill();
+        run_shared_content_reclaim_if_pending();
         offer_estate_encryption_if_needed();
     }
     code
@@ -200,6 +203,103 @@ fn run_kg_fact_identity_backfill() {
         Err(e) => {
             println!(
                 "  ✗ kg_facts identity backfill failed: {e}\n    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry."
+            );
+        }
+    }
+}
+
+/// P5 of the shared-content 1.0→1.1 migration: WAL checkpoint + VACUUM for
+/// any estate stranded in the `reclaimPending` state — typically because a
+/// previous `mootx01 upgrade` was interrupted before physical reclamation
+/// completed. Idempotent: estates already at `complete` (or not yet migrated
+/// to P4) are silently skipped. Retryable on failure.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling): no
+/// detection or prompting lives anywhere else. Unattended and
+/// non-interactive — a correctness migration must also converge
+/// scripted/service upgrades.
+///
+/// Opens through `EstateCoordinator` rather than `SqliteStorage` alone
+/// because `complete_shared_content_reclaim` uses the coordinator's
+/// migration-host seam. Encryption is handled automatically:
+/// `SqliteDrawerStore::from_path` → `SqliteStorage::new` adopts the sibling
+/// `db.key` on its own, so keyed and plaintext estates both open correctly.
+fn run_shared_content_reclaim_if_pending() {
+    use genius_locus_kit::EstateCoordinator;
+    use genius_locus_kit_migrations::SharedContentMigrationExt;
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+    use locus_kit::estate_types::OwnerCredentials;
+    use std::sync::Arc;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    // Absent estate means first run — serve creates new estates post-cutover;
+    // there is nothing to reclaim.
+    if !estate.exists() {
+        return;
+    }
+
+    // Quiesce first (single-writer discipline, same direction as the
+    // kg_facts identity backfill): if the daemon will not stop, skip —
+    // nothing is half-done, and the next `mootx01 upgrade` retries.
+    let was_running = daemon_is_running();
+    if was_running && !daemon_stop() {
+        println!(
+            "  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
+        );
+        return;
+    }
+
+    let now = wall_now_millis();
+    let result = (|| -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, String> {
+        let sqlite_store = SqliteDrawerStore::from_path(
+            &estate.display().to_string(),
+            now,
+            None,
+            5.0,
+        )
+        .map_err(|e| e.to_string())?;
+        let store: Arc<dyn DrawerStore> = Arc::new(sqlite_store);
+        let mut coord = EstateCoordinator::new();
+        // The upgrade tool is not the estate's real owner; the substrate
+        // validates only that ownerIdentifier is non-empty, so this
+        // sentinel is sufficient.
+        let handle = coord
+            .open(store, OwnerCredentials::new("mootx01-upgrade"), 0, 100)
+            .map_err(|e| format!("{e:?}"))?;
+        let report = coord
+            .complete_shared_content_reclaim(&handle, now)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(report)
+    })();
+
+    // Put the daemon back before reporting, mirroring the kg_facts
+    // identity backfill ordering.
+    if was_running {
+        let _ = daemon_start();
+    }
+
+    match result {
+        Ok(Some(report)) => {
+            if report.reclaimed_bytes > 0 {
+                println!(
+                    "  ✓ shared-content reclaim: {} bytes returned to filesystem",
+                    report.reclaimed_bytes
+                );
+            } else {
+                println!(
+                    "  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)"
+                );
+            }
+        }
+        Ok(None) => {
+            println!("  ✓ shared-content reclaim: not pending");
+        }
+        Err(e) => {
+            println!(
+                "  ✗ shared-content reclaim failed: {e}\n    The estate is unaffected. Run `mootx01 upgrade` to retry."
             );
         }
     }
@@ -358,6 +458,18 @@ fn offer_estate_encryption_if_needed() {
             }
         }
     }
+}
+
+/// Current wall-clock time as milliseconds since the Unix epoch.
+///
+/// Defined locally because `aria_mcp::estate_registry::wall_now_millis` is
+/// `pub(crate)` within `aria-mcp` and is not accessible from this crate.
+fn wall_now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// Platform daemon control for the migration's stop → swap → start

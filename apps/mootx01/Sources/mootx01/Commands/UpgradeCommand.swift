@@ -17,6 +17,8 @@
 import AriaMCP
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import MootInstallerCore
 import PersistenceKit
@@ -201,6 +203,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // and offers. The backfill may quiesce the daemon, so restore
                 // the installed agents before returning, as below.
                 await runKGFactIdentityBackfill(home: home)
+                await runSharedContentReclaimIfPending(home: home)
                 restartAgents(home: home)
                 offerEstateEncryptionIfNeeded(home: home)
                 return
@@ -291,6 +294,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // daemon hydrates the migrated rows instead of serving the pre-
         // migration shape from RAM until its next restart.
         await runKGFactIdentityBackfill(home: home)
+        await runSharedContentReclaimIfPending(home: home)
 
         restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
@@ -377,6 +381,79 @@ struct UpgradeCommand: AsyncParsableCommand {
             print("""
                   ✗ kg_facts identity backfill failed: \(error)
                     Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
+                """)
+        }
+        #endif
+    }
+
+    /// P5 of the shared-content 1.0→1.1 migration: WAL checkpoint + VACUUM
+    /// for any estate stranded in the `reclaimPending` state — typically
+    /// because a previous `mootx01 upgrade` was interrupted before physical
+    /// reclamation completed. Idempotent: estates already at `complete` (or
+    /// not yet migrated) are silently skipped. Retryable on failure.
+    ///
+    /// Opens the estate through GeniusLocusKit rather than raw storage because
+    /// `completeSharedContentReclaim` accesses the estate via the GLK
+    /// migration-host seam, which requires an open GLK handle.
+    private func runSharedContentReclaimIfPending(home: URL) async {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+        // Absent estate means first run — serve creates new estates
+        // post-cutover; there is nothing to reclaim.
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+
+        // Same key custody as serve's open path: existing key for an
+        // encrypted estate, plaintext posture preserved for a plaintext one.
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            print("  ✗ shared-content reclaim skipped — estate key unavailable: \(error)")
+            return
+        }
+
+        // Quiesce before VACUUM (single-writer discipline). The daemon is
+        // restarted by restartAgents(), the very next step in run().
+        if LaunchAgent.isDaemonRunning() && !LaunchAgent.stopDaemon() {
+            print("  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
+            return
+        }
+
+        do {
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: encryption
+            )
+            let storage = try SQLiteStorage(configuration: configuration)
+            let kit = GeniusLocusKit()
+            // The upgrade tool is not the estate's real owner; the substrate
+            // validates only that ownerIdentifier is non-empty, so this
+            // sentinel is sufficient.
+            let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+            let handle = try await kit.open(
+                storage: storage,
+                owner: owner,
+                identityKeyStore: InMemoryEstateIdentityKeyStore()
+            )
+            let report = try await kit.completeSharedContentReclaim(
+                handle: handle, now: Date())
+            try await kit.close(handle)
+            if let report {
+                if report.reclaimedBytes > 0 {
+                    print("  ✓ shared-content reclaim: \(report.reclaimedBytes) bytes returned to filesystem")
+                } else {
+                    print("  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)")
+                }
+            } else {
+                print("  ✓ shared-content reclaim: not pending")
+            }
+        } catch {
+            print("""
+                  ✗ shared-content reclaim failed: \(error)
+                    The estate is unaffected. Run `mootx01 upgrade` to retry.
                 """)
         }
         #endif
