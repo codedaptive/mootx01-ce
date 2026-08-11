@@ -16,7 +16,7 @@
 
 [package]
 name = "mootx01-cli"
-version = "1.1.0-beta-14"
+version = "1.1.0-beta-15"
 edition = "2021"
 rust-version = "1.75"
 description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
@@ -75,6 +75,13 @@ trash = "5.2.3"
 # integration gate in this crate's tests.
 locus-kit = { path = "../../../packages/kits/LocusKit/rust" }
 vault-kit = { path = "../../../packages/kits/VaultKit/rust" }
+# genius-locus-kit + genius-locus-kit-migrations: `mootx01 upgrade`
+# shared-content reclaim (MXE_RC_01). EstateCoordinator::open is the
+# migration-host seam; SharedContentMigrationExt provides the P5 step.
+# Both are already in the product graph via aria-mcp; naming them directly
+# keeps the upgrade wiring honest and removable.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
+genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/rust-migrations" }
 
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.

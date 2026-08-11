@@ -707,6 +707,46 @@ struct SharedContentMigrationTests {
             // Expected: a real migration attempt that failed on its own merits.
         }
     }
+
+    /// An estate stranded in `reclaimPending` — migration ran to completion
+    /// but WAL checkpoint + VACUUM was interrupted before the final state
+    /// flip — must complete cleanly on the next upgrade pass and settle at
+    /// `.complete`. This covers the `mootx01 upgrade` P5 convergence path
+    /// (MXE_RC_01: `runSharedContentReclaimIfPending`).
+    @Test func preStrandedEstateCompletesOnReclaim() async throws {
+        let (kit, handle, _, _, url) = try await makeLegacyEstate(
+            drawerContents: ["reclaim-pending fixture"])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Advance the migration to reclaimPending, then close — the estate
+        // is now stranded exactly as it would be after an interrupted upgrade.
+        let midResult = try await kit.runSharedContentMigration(handle: handle, now: now)
+        #expect(midResult.state == .reclaimPending)
+        try await kit.close(handle)
+
+        // Simulate the next `mootx01 upgrade` run: reopen from SQLite and
+        // call the P5 completion hook through a fresh kit instance.
+        let freshKit = GeniusLocusKit()
+        let freshStorage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
+        let freshHandle = try await freshKit.open(
+            storage: freshStorage,
+            owner: OwnerCredentials(ownerIdentifier: "scm-owner"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore()
+        )
+        let report = try await freshKit.completeSharedContentReclaim(
+            handle: freshHandle, now: now)
+        let finalState = try await freshKit.sharedContentMigrationState(
+            handle: freshHandle)
+        try await freshKit.close(freshHandle)
+
+        // The SQLite backend performed physical maintenance and the migration
+        // record must have flipped to complete.
+        #expect(report != nil, "SQLite estate must return a maintenance report")
+        // Confirm the report is from the SQLite backend (physical maintenance ran).
+        #expect(report?.backend == "sqlite")
+        #expect(finalState == .complete)
+    }
 }
 
 #endif

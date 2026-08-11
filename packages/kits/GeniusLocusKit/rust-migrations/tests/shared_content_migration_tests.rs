@@ -1069,3 +1069,60 @@ fn circuit_breaker_park_from_an_earlier_build_auto_clears() {
         "auto-clear failed: the parked guard fired under a stale token"
     );
 }
+
+/// Simulated interrupted upgrade: migration ran through P4 (ReclaimPending)
+/// in a prior invocation but the process was killed before the reclaim step
+/// completed — or the binary predated `run_shared_content_reclaim_if_pending`.
+/// A fresh `EstateCoordinator` (the next `mootx01 upgrade` run) must complete
+/// the reclaim from the stranded state without any additional migration steps.
+/// Rust twin of Swift `preStrandedEstateCompletesOnReclaim`.
+#[test]
+fn pre_stranded_estate_completes_on_reclaim() {
+    // Build a legacy estate, run P1–P4 migration, then drop the coordinator
+    // without calling reclaim — simulating an interrupted upgrade.
+    let path = {
+        let mut est = make_legacy_estate(&["stranded content for reclaim"], false, false);
+        let report = est
+            .coord
+            .run_shared_content_migration(&est.handle, NOW, default_ensemble())
+            .expect("migration to reclaimPending");
+        assert_eq!(
+            report.state,
+            SharedContentMigrationState::ReclaimPending,
+            "estate must reach ReclaimPending before the simulated interruption"
+        );
+        // Dropping est here: the SQLite file stays on disk, the coordinator
+        // releases its connection, simulating a process exit mid-upgrade.
+        est.path.clone()
+    };
+
+    // Reopen with a fresh coordinator — the next `mootx01 upgrade` invocation.
+    let mut fresh_coord = EstateCoordinator::new();
+    let sqlite_store =
+        SqliteDrawerStore::from_path(path.to_string_lossy().as_ref(), NOW, None, 5.0)
+            .expect("SqliteDrawerStore::from_path");
+    let store: Arc<dyn DrawerStore> = Arc::new(sqlite_store);
+    let fresh_handle = fresh_coord
+        .open(store, OwnerCredentials::new("scm-owner"), 0, 100)
+        .expect("reopen");
+
+    // The reclaim must succeed and report physical maintenance.
+    let maintenance = fresh_coord
+        .complete_shared_content_reclaim(&fresh_handle, NOW)
+        .expect("complete_shared_content_reclaim")
+        .expect("maintenance report: SQLite estate must return Some");
+    assert!(
+        maintenance.performed,
+        "SQLite reclaim must report performed=true"
+    );
+    assert_eq!(maintenance.backend, "sqlite");
+
+    // State machine must land at Complete.
+    assert_eq!(
+        fresh_coord.shared_content_migration_state(&fresh_handle),
+        Some(SharedContentMigrationState::Complete),
+        "estate must be Complete after reclaim on a stranded ReclaimPending estate"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

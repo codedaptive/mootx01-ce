@@ -954,9 +954,11 @@ dependencies = [
 
 [[package]]
 name = "mootx01-cli"
-version = "1.1.0-beta-14"
+version = "1.1.0-beta-15"
 dependencies = [
  "aria-mcp",
+ "genius-locus-kit",
+ "genius-locus-kit-migrations",
  "libc",
  "locus-kit",
  "persistence-kit",
