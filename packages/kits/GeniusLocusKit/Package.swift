@@ -242,6 +242,17 @@ let package = Package(
             path: "Tests/GeniusLocusKitTests"
         ),
         .testTarget(
+            name: "GeniusLocusKitMigrationsTests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/GeniusLocusKitMigrationsTests"
+        ),
+        .testTarget(
             name: "GLKMigrationV1_0ToV1_1Tests",
             dependencies: [
                 "GeniusLocusKit",
