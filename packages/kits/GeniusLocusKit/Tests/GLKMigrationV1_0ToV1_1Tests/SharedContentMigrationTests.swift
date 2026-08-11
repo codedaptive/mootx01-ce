@@ -743,6 +743,8 @@ struct SharedContentMigrationTests {
         // The SQLite backend performed physical maintenance and the migration
         // record must have flipped to complete.
         #expect(report != nil, "SQLite estate must return a maintenance report")
+        // Confirm the report is from the SQLite backend (physical maintenance ran).
+        #expect(report?.backend == "sqlite")
         #expect(finalState == .complete)
     }
 }

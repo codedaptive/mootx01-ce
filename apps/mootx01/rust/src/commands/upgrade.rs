@@ -462,14 +462,16 @@ fn offer_estate_encryption_if_needed() {
 
 /// Current wall-clock time as milliseconds since the Unix epoch.
 ///
-/// Defined locally because `aria_mcp::estate_registry::wall_now_millis` is
-/// `pub(crate)` within `aria-mcp` and is not accessible from this crate.
+/// Defined locally because `aria_mcp::estate_registry::wall_now_millis` is a
+/// bare private function (not accessible from this crate). The reference
+/// implementation's `i64::MAX` overflow guard is preserved here.
 fn wall_now_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 /// Platform daemon control for the migration's stop → swap → start
