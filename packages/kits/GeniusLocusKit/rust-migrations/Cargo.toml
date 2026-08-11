@@ -36,3 +36,8 @@ required-features = ["migration-v1-0-to-v1-1"]
 [[test]]
 name = "distillation_storage_migration_tests"
 required-features = ["migration-v1-0-to-v1-1"]
+
+# Geometry normalization is format-agnostic: runs on ANY plaintext estate with
+# nonzero reserve, regardless of migration floor. No required-features gate.
+[[test]]
+name = "geometry_normalization"

@@ -246,9 +246,15 @@ let package = Package(
             dependencies: [
                 "GeniusLocusKit",
                 "GeniusLocusKitMigrations",
+                .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // SQLCipher: test fixtures use the raw C API (sqlite3_file_control) to
+                // inject reserve=12 geometry before the first page write — the only way
+                // to set the reserve without an engine-path round-trip. Legitimate in
+                // tests only; production code never spawns raw connections to estate files.
+                .product(name: "SQLCipher", package: "PersistenceKit"),
             ],
             path: "Tests/GeniusLocusKitMigrationsTests"
         ),
