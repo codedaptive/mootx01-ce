@@ -450,7 +450,20 @@ struct UpgradeCommand: AsyncParsableCommand {
             } else {
                 print("  ✓ shared-content reclaim: not pending")
             }
+        } catch let err as StorageMaintenanceError {
+            // The inventory trim committed before performMaintenance ran — the
+            // estate IS affected: legacyVectorKeys are cleared, the freelist has
+            // grown, but the freed pages are not yet returned to the filesystem.
+            // State remains reclaimPending, so the next `mootx01 upgrade` retries.
+            print("""
+                  ✗ shared-content reclaim: VACUUM failed — \(err)
+                    The inventory trim completed (legacy vector keys cleared).
+                    Freed pages are on the freelist and not yet returned to the filesystem.
+                    Run `mootx01 upgrade` again to retry the VACUUM.
+                """)
         } catch {
+            // Failure before completeSharedContentReclaim commits the trim —
+            // estate state is unchanged.
             print("""
                   ✗ shared-content reclaim failed: \(error)
                     The estate is unaffected. Run `mootx01 upgrade` to retry.
