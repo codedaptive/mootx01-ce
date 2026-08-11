@@ -57,6 +57,7 @@ use genius_locus_kit::EstateCoordinator;
 // on genius_locus_kit directly. Gives them the type name for the T5 finisher
 // gate `DrainStatus::encode_settled` (PERF_W1_DRAIN_RIDER Finding 3).
 pub use genius_locus_kit::DrainStatus;
+use genius_locus_kit_migrations::run_geometry_normalization;
 use genius_locus_kit_migrations::SharedContentMigrationExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -782,6 +783,11 @@ fn wire_postgres_semantic_recall(
             .map_err(|e| format!("PostgresStorage for semantic recall at {conn_str:?}: {e}"))?,
     );
 
+    // Geometry normalization is SQLite-specific (file header byte 20 = reserved
+    // bytes per page). PostgreSQL manages its own storage geometry server-side
+    // and has no file header to normalize; this step is intentionally omitted
+    // for PostgreSQL estates (blast-radius INTENTIONALLY_LEFT classification).
+
     // This binary declares a 1.0 floor, so prepare the estate through the
     // separately compiled migration capsule before current-runtime wiring.
     // A crash leaves the persisted phase/cursor resumable on the next start.
@@ -863,6 +869,19 @@ fn wire_sqlite_semantic_recall(
     // DrawerStore opened the connection; Corpus::open_many runs idempotent schema
     // migrations (BundleStore + VectorStore tables) on the same connection.
     let storage = shared_storage;
+
+    // Geometry normalization must precede shared-content migration because VACUUM
+    // (called by the migration's physical reclamation step) fails on estates with
+    // nonzero SQLite reserved-bytes-per-page (file header byte 20 ≠ 0). Errors
+    // are parked — a geometry failure must not block the estate from opening;
+    // VACUUM will surface the original issue when the maintenance scheduler runs.
+    // PostgreSQL estates skip this call — geometry normalization is a SQLite
+    // file-header concern; PostgreSQL manages storage geometry server-side.
+    if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
+        eprintln!(
+            "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
+        );
+    }
 
     // This binary declares a 1.0 floor, so prepare the estate through the
     // separately compiled migration capsule before current-runtime wiring.

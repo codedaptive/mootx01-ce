@@ -17,6 +17,12 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 vectorkit = { path = "../../VectorKit/rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# rusqlite: required by geometry_normalization.rs (production code) for the
+# ATTACH ... KEY '' escape hatch and sqlcipher_export repair sequence.
+# Feature parity with persistence-kit's rusqlite dep — Cargo deduplicates to
+# one instance; the "limits" feature from persistence-kit is additive and
+# harmless in the union.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [dev-dependencies]
 corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
