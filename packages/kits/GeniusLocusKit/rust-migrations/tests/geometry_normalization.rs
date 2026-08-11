@@ -170,6 +170,49 @@ fn idempotence_second_call_no_work() {
     let _ = fs::remove_file(&path);
 }
 
+/// Verify that a sibling-creation failure (read-only parent directory) returns an error
+/// rather than panicking, so the estate_registry caller can park it with `let _ = ...`.
+#[test]
+fn sibling_creation_failure_returns_error() {
+    // Use a dedicated subdirectory so we can mark it read-only while the test-process
+    // user owns the directory — the already-created reserve=12 file stays readable
+    // (open descriptors are not affected), but creating any new file in the dir fails.
+    let dir = std::env::temp_dir().join(format!("glk-geo-sib-{}", Uuid::new_v4()));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("estate.sqlite3");
+
+    make_raw_reserve_estate(&path, 2).expect("make_raw_reserve_estate");
+
+    // Make the parent directory read-only — blocks the capsule from creating its
+    // .geo_normalize_tmp.sqlite3 sibling file (the Connection::open_with_flags call
+    // with SQLITE_OPEN_CREATE will fail if the directory is not writable).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
+            .expect("set dir read-only");
+    }
+
+    let result = genius_locus_kit_migrations::run_geometry_normalization(&path);
+
+    // Restore write permission before the test returns so `fs::remove_file` can clean up.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
+    }
+
+    // The function must return an error — not panic — when the sibling cannot be created.
+    // The estate_registry caller discards this error with `let _ = ...` (parking pattern).
+    assert!(
+        result.is_err(),
+        "run_geometry_normalization must return Err when sibling creation fails"
+    );
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_dir(&dir);
+}
+
 #[test]
 fn row_count_parity_after_normalization() {
     let path = scratch_path("parity");

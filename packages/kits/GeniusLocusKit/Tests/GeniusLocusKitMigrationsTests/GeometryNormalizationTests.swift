@@ -356,6 +356,36 @@ struct GeometryNormalizationTests {
         #expect(prep.migrated == false, "parked capsule must report migrated=false")
     }
 
+    // MARK: - §7b Precondition park: sibling-creation failure (insufficient-disk simulation)
+
+    @Test("Sibling-creation failure parks the capsule without throwing")
+    func preconditionParkSiblingCreationFailureNoThrow() async throws {
+        // Use a subdirectory so we can make it read-only — blocking the capsule from
+        // creating its sibling file (.geo_normalize_tmp.sqlite3) — while the already-open
+        // estate file itself remains readable (SQLite holds the open file descriptor).
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-geo-sib-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("estate.sqlite3")
+
+        defer {
+            // Restore write permission before cleanup so FileManager can remove the dir.
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 2)
+
+        // Make the parent directory read-only so the sibling cannot be created.
+        // The estate file is already open; blocking new file creation is sufficient
+        // to force the ATTACH step to fail inside normalizeGeometry().
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+
+        // Should not throw — the capsule catches the ATTACH/create error and parks.
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        #expect(prep.migrated == false, "parked capsule must report migrated=false")
+    }
+
     // MARK: - §8 Post-swap attributes (macOS only)
 
     @Test("Post-swap file has 0600 permissions and acceptable Data Protection class (macOS only)")

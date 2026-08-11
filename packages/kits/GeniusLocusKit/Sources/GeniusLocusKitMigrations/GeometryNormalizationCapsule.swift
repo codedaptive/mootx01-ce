@@ -17,6 +17,7 @@
 //     and leaves no persistent state beyond the normalized file.
 
 import Foundation
+import OSLog
 import PersistenceKit
 
 /// Geometry-normalization migration capsule.
@@ -26,6 +27,9 @@ import PersistenceKit
 /// `StorageMaintenance.normalizeGeometry()` and `SQLiteStorage+Geometry.swift`
 /// for the full repair sequence.
 public enum GeometryNormalizationCapsule {
+
+    private static let logger = Logger(
+        subsystem: "com.mootx01.kit", category: "GeniusLocusKitMigrations")
 
     /// Run geometry normalization on `storage`.
     ///
@@ -43,8 +47,10 @@ public enum GeometryNormalizationCapsule {
         do {
             return try await maintainable.normalizeGeometry()
         } catch {
-            // Park: log the failure and continue. VACUUM will surface this
-            // when the maintenance scheduler runs.
+            // Park: log the failure and return a no-op report so prepare() continues.
+            // VACUUM will surface the original error when the maintenance scheduler runs.
+            Self.logger.warning(
+                "geometry normalization parked: \(error.localizedDescription, privacy: .public)")
             return .noOp()
         }
     }

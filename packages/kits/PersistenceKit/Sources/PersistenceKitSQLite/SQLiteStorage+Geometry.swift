@@ -62,6 +62,9 @@ extension SQLiteBackend {
             return .noOp()
         }
 
+        // Date() is used here solely for wall-clock reporting (durationSeconds in the
+        // returned report). No deterministic logic branches on this value — the rule
+        // "pass now as a parameter" applies to engine decisions, not performance logging.
         let started = Date()
         let reserve = Self.readReserveBytes(at: connection.url)
         guard reserve != 0 else {
@@ -128,7 +131,7 @@ extension SQLiteBackend {
             try? FileManager.default.removeItem(atPath: connection.url.path + suffix)
         }
 
-        let elapsed = Date().timeIntervalSince(started)
+        let elapsed = Date().timeIntervalSince(started) // reporting-only; see comment at `started`
         Self.logger.info(
             "geometry normalization: complete in \(String(format: "%.3f", elapsed))s for \(self.connection.url.lastPathComponent, privacy: .private)")
 
