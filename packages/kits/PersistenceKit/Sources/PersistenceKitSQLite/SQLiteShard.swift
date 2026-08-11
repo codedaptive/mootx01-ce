@@ -121,6 +121,13 @@ extension SQLiteBackend {
         if let hex = keyHex, !hex.isEmpty, hex.allSatisfy({ $0.isHexDigit }) {
             keyLiteral = "\"x'\(hex)'\""
         } else {
+            // KEY '' bypasses the SQLCipher attachFunc null-key heuristic
+            // (sqlite3.c:131181): on the SQLITE_NULL branch, if the main
+            // database has reserve>0, sqlcipherCodecAttach fires even for a
+            // plaintext attachment. KEY '' routes to the SQLITE_TEXT/BLOB
+            // branch where nKey=0 causes sqlcipherCodecAttach to be skipped
+            // (sqlite3.c:131171: `if(nKey && zKey)`), regardless of reserve.
+            // Explicit empty string declares plaintext intent unambiguously.
             keyLiteral = "''"
         }
         let attach = try connection.prepare("ATTACH DATABASE ?1 AS shard KEY \(keyLiteral)")

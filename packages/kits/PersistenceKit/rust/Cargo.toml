@@ -62,3 +62,10 @@ native-tls = "0.2"
 # preflight (best-effort contract, mirrors Swift's optional volume probe).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# rusqlite is the approved production crate (see [dependencies] above).
+# Made available here so keyless_conformance.rs can open rusqlite::Connection
+# directly to test attach_with_install_key's no-key-file branch.
+# Version and features must match the production entry exactly.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl", "limits"] }
