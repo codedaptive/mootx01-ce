@@ -146,6 +146,12 @@ let package = Package(
             name: "GeniusLocusKitMigrations",
             dependencies: [
                 "GeniusLocusKit",
+                // PersistenceKit: GeometryNormalizationCapsule casts to
+                // `any StorageMaintenance` and uses `GeometryNormalizationReport` —
+                // both defined in PersistenceKit. The transitive dependency through
+                // GeniusLocusKit does not guarantee explicit module visibility in
+                // Swift 6 strict concurrency builds, so we declare it directly.
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .target(
                     name: "GLKMigrationV1_0ToV1_1",
                     condition: .when(traits: ["MigrationV1_0ToV1_1"])

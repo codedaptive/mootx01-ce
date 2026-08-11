@@ -131,6 +131,44 @@ public struct StorageMaintenanceReport: Sendable, Equatable, Codable {
     }
 }
 
+// MARK: - Geometry Normalization Report
+
+/// Outcome of the geometry-normalization surface operation.
+///
+/// Geometry normalization detects and corrects a nonzero SQLite per-page
+/// reserved-bytes field (file header byte 20). Apple's SEE-provisioned
+/// `/usr/bin/sqlite3` reserves 12 bytes per page for per-page IVs. On a
+/// plaintext estate this triggers SQLCipher's `attachFunc` heuristic, which
+/// calls `sqlcipherCodecAttach(nKey=0)` for any keyless ATTACH and fails with
+/// "unable to open database" — blocking VACUUM. The repair exports the estate
+/// content through the empty-key ATTACH escape hatch (`KEY ''`) to a fresh
+/// plaintext sibling and atomically renames it over the original. Encrypted
+/// estates (Mode 3 / fullDatabase) are skipped: their reserve bytes belong to
+/// SQLCipher's own per-page authentication layer.
+public struct GeometryNormalizationReport: Sendable, Equatable, Codable {
+    /// True when the normalization swap ran (reserve was nonzero and the
+    /// estate is plaintext). False for pass-through cases (reserve=0,
+    /// encrypted, non-SQLite backends).
+    public let normalized: Bool
+    /// The reserve value found before normalization; 0 when no work was done.
+    public let reserveBytesBefore: Int
+    /// Wall-clock duration of the operation in seconds; 0 for no-ops.
+    public let durationSeconds: Double
+
+    public init(normalized: Bool, reserveBytesBefore: Int, durationSeconds: Double) {
+        self.normalized = normalized
+        self.reserveBytesBefore = reserveBytesBefore
+        self.durationSeconds = durationSeconds
+    }
+
+    /// No-op report for plaintext estates already at reserve=0, encrypted
+    /// estates, and backends that do not implement this operation.
+    public static func noOp(reserveBytesBefore: Int = 0) -> GeometryNormalizationReport {
+        GeometryNormalizationReport(
+            normalized: false, reserveBytesBefore: reserveBytesBefore, durationSeconds: 0)
+    }
+}
+
 // MARK: - Error
 
 public enum StorageMaintenanceError: Error, Equatable, Sendable {
@@ -172,11 +210,24 @@ public protocol StorageMaintenance: Sendable {
         progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
         shouldCancel: (@Sendable () -> Bool)?
     ) async throws -> StorageMaintenanceReport
+
+    /// Detect and repair foreign SQLite geometry (nonzero reserved-bytes-per-page,
+    /// file header byte 20 ≠ 0). Returns a no-op report when the estate is already
+    /// at reserve=0 or is a Mode-3 encrypted estate (SQLCipher manages its own
+    /// reserve). Must be called BEFORE any capsule that invokes `performMaintenance`
+    /// — VACUUM fails on foreign geometry.
+    func normalizeGeometry() async throws -> GeometryNormalizationReport
 }
 
 extension StorageMaintenance {
     /// Convenience: run with no progress reporting and no cancellation.
     public func performMaintenance() async throws -> StorageMaintenanceReport {
         try await performMaintenance(progress: nil, shouldCancel: nil)
+    }
+
+    /// Default no-op for backends where geometry normalization is not applicable
+    /// (InMemory, PostgreSQL). SQLiteStorage overrides this in SQLiteStorage+Geometry.swift.
+    public func normalizeGeometry() async throws -> GeometryNormalizationReport {
+        .noOp()
     }
 }
