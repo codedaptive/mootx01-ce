@@ -298,8 +298,15 @@ fn run_shared_content_reclaim_if_pending() {
             println!("  ✓ shared-content reclaim: not pending");
         }
         Err(e) => {
+            // The inventory trim committed before maintenance ran — the estate IS
+            // affected: legacy vector keys are cleared, the freelist has grown,
+            // but freed pages are not yet returned to the filesystem.
+            // State remains reclaimPending; next `mootx01 upgrade` retries.
             println!(
-                "  ✗ shared-content reclaim failed: {e}\n    The estate is unaffected. Run `mootx01 upgrade` to retry."
+                "  ✗ shared-content reclaim: VACUUM failed — {e}\n    \
+                 The inventory trim completed (legacy vector keys cleared).\n    \
+                 Freed pages are on the freelist and not yet returned to the filesystem.\n    \
+                 Run `mootx01 upgrade` again to retry the VACUUM."
             );
         }
     }
@@ -655,6 +662,34 @@ fn restart_services() {
 mod tests {
     use super::*;
     use crate::core::depth::{self, InstallBundle, InstallDepth, ProcessClaudeCliRunner};
+
+    /// Source-invariant: the Err handler in `run_shared_content_reclaim_if_pending`
+    /// must name VACUUM as the failure site after the inventory trim commits.
+    /// The old misleading message (RC-01 defect) must be absent.
+    ///
+    /// Uses `concat!()` to build search patterns at compile time so the assembled
+    /// strings do not appear as literals in this file — preventing the assertion
+    /// text from self-matching when `include_str!` reads the file back.
+    #[test]
+    fn reclaim_failure_message_names_vacuum_not_estate_unaffected() {
+        let src = include_str!("upgrade.rs");
+        // Positive: Err handler must name VACUUM as the failure site.
+        assert!(
+            src.contains(concat!("VACUUM", " failed")),
+            "Err handler must name VACUUM as the failure site"
+        );
+        // Positive: message must confirm the inventory trim completed.
+        assert!(
+            src.contains(concat!("inventory trim", " completed")),
+            "Err handler must confirm the inventory trim completed"
+        );
+        // Negative: the old misleading claim must be gone from the Err handler.
+        // Assertion message phrased to avoid the literal target substring.
+        assert!(
+            !src.contains(concat!("estate is", " unaffected")),
+            "Err handler must report the VACUUM failure accurately — trim has committed"
+        );
+    }
 
     fn tmp_home(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mootx01-upgrade-rematerialize-{tag}-{}", std::process::id()));
