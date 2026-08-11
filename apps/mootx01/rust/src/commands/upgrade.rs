@@ -298,15 +298,14 @@ fn run_shared_content_reclaim_if_pending() {
             println!("  ✓ shared-content reclaim: not pending");
         }
         Err(e) => {
-            // The inventory trim committed before maintenance ran — the estate IS
-            // affected: legacy vector keys are cleared, the freelist has grown,
-            // but freed pages are not yet returned to the filesystem.
-            // State remains reclaimPending; next `mootx01 upgrade` retries.
+            // The closure covers storage open, coordinator open, and the actual
+            // complete_shared_content_reclaim call — Err is reachable from any
+            // step. When the trim committed before the failure, freed pages remain
+            // on the freelist; the next `mootx01 upgrade` retries the VACUUM.
             println!(
-                "  ✗ shared-content reclaim: VACUUM failed — {e}\n    \
-                 The inventory trim completed (legacy vector keys cleared).\n    \
-                 Freed pages are on the freelist and not yet returned to the filesystem.\n    \
-                 Run `mootx01 upgrade` again to retry the VACUUM."
+                "  ✗ shared-content reclaim failed: {e}\n    \
+                 If the inventory trim committed before this failure, freed pages remain\n    \
+                 on the freelist until a VACUUM completes. Run `mootx01 upgrade` to retry."
             );
         }
     }
@@ -664,8 +663,8 @@ mod tests {
     use crate::core::depth::{self, InstallBundle, InstallDepth, ProcessClaudeCliRunner};
 
     /// Source-invariant: the Err handler in `run_shared_content_reclaim_if_pending`
-    /// must name VACUUM as the failure site after the inventory trim commits.
-    /// The old misleading message (RC-01 defect) must be absent.
+    /// must provide accurate context for the operator — referencing the inventory
+    /// trim and freelist state — without asserting RC-01's misleading claim.
     ///
     /// Uses `concat!()` to build search patterns at compile time so the assembled
     /// strings do not appear as literals in this file — preventing the assertion
@@ -673,21 +672,21 @@ mod tests {
     #[test]
     fn reclaim_failure_message_names_vacuum_not_estate_unaffected() {
         let src = include_str!("upgrade.rs");
-        // Positive: Err handler must name VACUUM as the failure site.
+        // Positive: Err handler must reference the inventory trim for operator context.
         assert!(
-            src.contains(concat!("VACUUM", " failed")),
-            "Err handler must name VACUUM as the failure site"
+            src.contains(concat!("inventory trim", " committed")),
+            "Err handler must reference the inventory trim"
         );
-        // Positive: message must confirm the inventory trim completed.
+        // Positive: Err handler must mention freed pages on the freelist.
         assert!(
-            src.contains(concat!("inventory trim", " completed")),
-            "Err handler must confirm the inventory trim completed"
+            src.contains(concat!("freelist", " until a VACUUM")),
+            "Err handler must mention freed pages on the freelist"
         );
-        // Negative: the old misleading claim must be gone from the Err handler.
+        // Negative: the old misleading RC-01 phrase must be absent from the Err handler.
         // Assertion message phrased to avoid the literal target substring.
         assert!(
             !src.contains(concat!("estate is", " unaffected")),
-            "Err handler must report the VACUUM failure accurately — trim has committed"
+            "Err handler must report the reclaim failure accurately — trim has committed"
         );
     }
 
