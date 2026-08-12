@@ -375,10 +375,10 @@ struct GeometryNormalizationTests {
 
         // Make the parent directory read-only so the sibling cannot be created.
         // The estate file is already open; blocking new file creation is sufficient
-        // to force the ATTACH step to fail inside normalizeGeometry().
+        // to force the createFile step (Step 2) to fail inside normalizeGeometry().
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
 
-        // Should not throw — the capsule catches the ATTACH/create error and parks.
+        // Should not throw — the capsule catches the createFile error and parks.
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
         #expect(prep.migrated == false, "parked capsule must report migrated=false")
     }
