@@ -245,6 +245,37 @@ struct StorageMaintenanceTests {
         await storage.close()
     }
 
+    // MARK: - Production-sized estate regression gate
+
+    /// Regression gate for the VACUUM SQLITE_CANTOPEN failure on large estates.
+    /// Opens a .gitignored copy of the production estate (4.3 GB) and asserts
+    /// performMaintenance() does not throw.
+    /// Skips gracefully when the fixture is absent (CI, other machines).
+    @Test func vacuumSucceedsOnProductionSizedEstate() async throws {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let fixturesDir = testFileURL
+            .deletingLastPathComponent()            // PersistenceKitSQLiteTests/
+            .deletingLastPathComponent()            // Tests/
+            .appendingPathComponent("fixtures/production-estate")
+        let masterURL = fixturesDir.appendingPathComponent("master/estate.sqlite")
+        let cloneURL  = fixturesDir.appendingPathComponent("clone/estate.sqlite")
+        guard FileManager.default.fileExists(atPath: masterURL.path) else { return }
+        try? FileManager.default.removeItem(at: cloneURL)
+        try FileManager.default.createDirectory(
+            at: cloneURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: masterURL, to: cloneURL)
+        defer { try? FileManager.default.removeItem(at: cloneURL) }
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: cloneURL, busyTimeout: 30.0)))
+        // Regression gate: must not throw.
+        let report = try await storage.performMaintenance()
+        #expect(report.performed)
+        #expect(report.reclaimedBytes >= 0)
+        await storage.close()
+    }
+
     // MARK: - Explicit in-memory behaviour
 
     @Test func inMemoryBackendIsAnExplicitNoOp() async throws {
