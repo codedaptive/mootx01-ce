@@ -10,6 +10,7 @@ use crate::cli::Command;
 use crate::core::paths;
 
 pub mod db;
+pub mod codex_memory;
 pub mod drain;
 pub mod dream;
 /// `enable`/`disable` feature toggles and `hook-capture` entry point.
@@ -69,6 +70,7 @@ pub fn dispatch(command: Command) -> ExitCode {
         // PreToolUse capture hook entry point (called by the hook script installed
         // at ~/.mootx01/hooks/capture-harness-memory.sh).
         Command::HookCapture => enable::run_hook_capture(),
+        Command::CodexHook { event } => codex_memory::run_hook(&event),
         // Version/Help/HelpFor are handled in main before dispatch.
         Command::Version | Command::Help | Command::HelpFor(_) => {
             unreachable!("handled in main")

@@ -227,10 +227,14 @@ struct InstallCommand: AsyncParsableCommand {
 
         // plugins the CLI installer knows how to detect and
         // defer to. Keyed by client id → the plugin registry id
-        // (`installed_plugins.json`'s top-level key). Only Claude Code has a
-        // live plugin today; the table is intentionally small rather than
-        // guessed for hosts with no shipped plugin yet.
-        let pluginOwnedClients: [String: String] = ["claude-code": "mootx01@mootx01"]
+        // (`installed_plugins.json`'s top-level key for Claude, config.toml +
+        // package cache for Codex). Both shipped plugins own the same daemon
+        // connection and must not coexist with an installer-written direct MCP
+        // entry.
+        let pluginOwnedClients: [String: String] = [
+            "claude-code": "mootx01@mootx01",
+            "codex": "mootx01@mootx01",
+        ]
 
         for client in clients {
             // Adams #5: gate on installed AND enabled — Claude Code tracks
@@ -240,7 +244,9 @@ struct InstallCommand: AsyncParsableCommand {
             // entry in that state would leave the client with nothing.
             if !noDaemon,
                let pluginID = pluginOwnedClients[client.id],
-               PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
+               (client.id == "codex"
+                    ? PluginDetector.ownsCodexConnection(pluginID: pluginID, homeDirectory: home)
+                    : PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home)) {
                 // The plugin is the preferred connection owner (§1): still
                 // place the binary/daemon (done above, unconditionally) but
                 // skip writing a competing direct entry, and clean up any

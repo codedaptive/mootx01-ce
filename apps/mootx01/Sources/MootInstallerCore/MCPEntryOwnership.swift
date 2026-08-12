@@ -146,6 +146,63 @@ public enum MCPEntryClassifier {
 /// Detects whether a Claude-Code-family plugin is installed, by reading the
 /// user's own plugin registry. Read-only — never writes.
 public enum PluginDetector {
+    /// Codex keeps plugin enablement in config.toml and materializes marketplace
+    /// packages under ~/.codex/plugins/cache/<marketplace>/<name>/<version>.
+    /// Both signals are required before the installer lets the plugin own MCP.
+    public static func isCodexPluginEnabled(pluginID: String, homeDirectory: URL) -> Bool {
+        let config = homeDirectory.appendingPathComponent(".codex/config.toml")
+        guard let text = try? String(contentsOf: config, encoding: .utf8) else { return false }
+        let acceptedHeaders = ["[plugins.\"\(pluginID)\"]", "[plugins.'\(pluginID)']"]
+        var inTable = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                inTable = acceptedHeaders.contains(trimmed)
+                continue
+            }
+            guard inTable, !trimmed.hasPrefix("#"), let equal = trimmed.firstIndex(of: "=") else { continue }
+            let key = trimmed[..<equal].trimmingCharacters(in: .whitespaces)
+            let value = trimmed[trimmed.index(after: equal)...].trimmingCharacters(in: .whitespaces)
+            if key == "enabled" { return value == "true" }
+        }
+        return false
+    }
+
+    public static func codexInstalledVersion(
+        pluginID: String = "mootx01@mootx01", homeDirectory: URL
+    ) -> String? {
+        let parts = pluginID.split(separator: "@", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let root = homeDirectory
+            .appendingPathComponent(".codex/plugins/cache", isDirectory: true)
+            .appendingPathComponent(parts[1], isDirectory: true)
+            .appendingPathComponent(parts[0], isDirectory: true)
+        guard let versions = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]) else { return nil }
+        return versions.compactMap { directory -> String? in
+            // Codex can install a shared marketplace whose historical source
+            // exposes only the Claude discovery manifest. Prefer the native
+            // Codex manifest, but recognize that installed legacy package so
+            // upgrade-time ownership dedupe can converge it safely.
+            for relative in [".codex-plugin/plugin.json", ".claude-plugin/plugin.json"] {
+                let manifest = directory.appendingPathComponent(relative)
+                guard let data = try? Data(contentsOf: manifest),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+                if let version = object["version"] as? String { return version }
+            }
+            return nil
+        }.sorted(by: versionGreaterThan).first
+    }
+
+    public static func ownsCodexConnection(
+        pluginID: String, homeDirectory: URL
+    ) -> Bool {
+        isCodexPluginEnabled(pluginID: pluginID, homeDirectory: homeDirectory)
+            && codexInstalledVersion(pluginID: pluginID, homeDirectory: homeDirectory) != nil
+    }
+
     /// Returns `true` when `pluginID` (e.g. `"mootx01@mootx01"`) has at
     /// least one installed entry in `~/.claude/plugins/installed_plugins.json`.
     ///
@@ -221,6 +278,21 @@ public enum PluginDetector {
               let first = entries.first as? [String: Any]
         else { return nil }
         return first
+    }
+
+    private static func versionGreaterThan(_ a: String, _ b: String) -> Bool {
+        func parts(_ value: String) -> [Int] {
+            value.split(separator: ".").map {
+                Int($0.prefix(while: \.isNumber)) ?? 0
+            }
+        }
+        let lhs = parts(a), rhs = parts(b)
+        for index in 0..<max(lhs.count, rhs.count) {
+            let l = index < lhs.count ? lhs[index] : 0
+            let r = index < rhs.count ? rhs[index] : 0
+            if l != r { return l > r }
+        }
+        return a > b
     }
 }
 

@@ -109,6 +109,8 @@ pub enum Command {
     /// by the hook script installed at ~/.mootx01/hooks/capture-harness-memory.sh.
     /// Not intended for direct user invocation.
     HookCapture,
+    /// codex-hook <event> — Codex lifecycle adapter entry point.
+    CodexHook { event: String },
     /// --version on the root command.
     Version,
     /// --help / help on the root command (prints usage, exits 0).
@@ -245,6 +247,14 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 return Ok(h);
             }
             Ok(Command::HookCapture)
+        }
+        "codex-hook" => {
+            let event = it.next().ok_or_else(|| UsageError(
+                "Error: 'codex-hook' requires an event name.".into()))?.to_string();
+            if it.next().is_some() {
+                return Err(UsageError("Error: unexpected argument for 'codex-hook'.".into()));
+            }
+            Ok(Command::CodexHook { event })
         }
         other => Err(UsageError(format!(
             "Error: unknown subcommand '{other}'.\n\n{}",
