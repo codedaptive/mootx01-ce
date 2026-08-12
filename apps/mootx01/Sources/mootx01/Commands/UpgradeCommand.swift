@@ -231,13 +231,16 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // and offers. The backfill may quiesce the daemon, so restore
                 // the installed agents before returning, as below.
                 // No new binary was placed, so there is no newer code to
-                // re-execute into and converging in THIS image is correct. This
-                // path deliberately runs only the estate migrations + restart,
-                // NOT plugin rematerialization or permission tiering: those
-                // converge an install onto a NEW binary's shape and have nothing
-                // to do when the binary did not change.
+                // re-execute into and converging in THIS image is correct.
+                // Full plugin rematerialization and permission tiering are
+                // skipped here — those converge the install onto a NEW binary's
+                // shape and are handled by the binary-placement paths.
+                // Plugin manifest cache refresh IS included: a prior upgrade
+                // may have placed a new binary but left the Claude Code plugin
+                // cache stale (version_skew advisory firing on every ping).
                 await runKGFactIdentityBackfill(home: home)
                 await runSharedContentReclaimIfPending(home: home)
+                updatePluginManifestIfNeeded(home: home)
                 restartAgents(home: home)
                 offerEstateEncryptionIfNeeded(home: home)
                 return
@@ -296,15 +299,13 @@ struct UpgradeCommand: AsyncParsableCommand {
         // Gatekeeper quarantine is applied AFTER convergence, not here — see the
         // re-exec comment below.
 
-        // an upgrade alone never touches
-        // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
-        // this, a machine upgraded via `mootx01 upgrade` keeps a stranded
-        // plugin package (and Claude Code keeps a stranded cached snapshot)
-        // indefinitely. Rematerialize plugin-depth packages for every host
-        // that already has one on disk (never CREATES a new plugin-depth
-        // install for a host that never had one — upgrade only converges
-        // existing installs), and refresh Claude Code's cache the same way
-        // `mootx01 install` does.
+        // Targeted plugin manifest cache refresh before the main convergence.
+        // Covers the case where the binary being replaced already had a stale
+        // plugin cache (version_skew advisory firing before this upgrade);
+        // updatePluginManifestIfNeeded is a no-op when the cache is current.
+        // The main convergence below also rematerializes the full plugin package
+        // for the newly placed binary, so this is an additive safety step only.
+        updatePluginManifestIfNeeded(home: home)
         // Convergence runs in the binary we JUST INSTALLED, not in this image.
         // Re-execute the new binary with --converge-only and let it do the work;
         // otherwise every step below would run the version being replaced (see
@@ -640,6 +641,40 @@ struct UpgradeCommand: AsyncParsableCommand {
                 print("  ✓ \(host.displayName): plugin package rematerialized")
             } catch {
                 print("  ✗ \(host.displayName): could not rematerialize plugin package: \(error)")
+            }
+        }
+    }
+
+    /// Refresh the Claude Code plugin cache if the installed plugin version lags the
+    /// current binary version. This targets the case where a prior upgrade placed a
+    /// new binary but left the Claude Code plugin cache stale — causing the
+    /// version_skew advisory to fire on every estate ping until the cache is refreshed.
+    ///
+    /// The plugin ID "mootx01@mootx01" is the Claude Code plugin namespace used in
+    /// installed_plugins.json; it is distinct from the MCP server name. The check
+    /// reads installedVersion from installed_plugins.json; nil means the plugin is
+    /// not registered in any Claude Code client — silently skipped.
+    ///
+    /// Non-fatal: the upgrade continues if the refresh fails (same posture as the
+    /// other convergence steps). Hosts with no plugin directory on disk are silently
+    /// skipped — never creates a plugin-depth install for a host that never had one.
+    private func updatePluginManifestIfNeeded(home: URL) {
+        let pluginVersion = PluginDetector.installedVersion(
+            pluginID: "mootx01@mootx01", homeDirectory: home)
+        guard let pluginVersion else { return }
+        guard pluginVersion != Mootx01.currentVersion else {
+            print("  ✓ plugin manifest: already current (\(Mootx01.currentVersion))")
+            return
+        }
+        let binaryPath = MootPaths.installedBinaryURL(homeDirectory: home).path
+        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
+            do {
+                _ = try DepthInstaller.apply(
+                    clientID: host.id, depth: .plugin, homeDirectory: home, binaryPath: binaryPath
+                )
+                print("  ✓ \(host.displayName): plugin manifest updated to \(Mootx01.currentVersion)")
+            } catch {
+                print("  ✗ \(host.displayName): could not update plugin manifest (non-fatal): \(error)")
             }
         }
     }
