@@ -232,8 +232,11 @@ struct DreamCommand: AsyncParsableCommand {
                 do {
                     let debt = try await kit.estate(for: handle).countSubjectDebt()
                     if debt > 0 {
+                        // 256 items per cycle: the miniLLM writes subjects subsecond per item;
+                        // 32 was far below practical throughput and caused post-upgrade debt
+                        // to converge over days rather than hours on large estates.
                         let sweep = try await kit.subjectBackfillSweep(
-                            handle, batchLimit: 32, now: cycleNow)
+                            handle, batchLimit: 256, now: cycleNow)
                         Logging.stderr.log(
                             "mootx01 dream: subject backfill — \(sweep.written) written, "
                             + "\(sweep.skippedInadmissible) skipped, \(sweep.remainingDebt) remaining")
