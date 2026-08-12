@@ -423,8 +423,9 @@ struct ServeCommand: AsyncParsableCommand {
             //
             // This trigger does not race with the startup or on-exit spawns:
             // the first periodic fire is 6 hours after startup, so the startup
-            // spawn has already completed by then; the on-exit spawn fires after
-            // `server.run()` returns, by which point this Task is already cancelled.
+            // spawn has already completed; the on-exit spawn fires after
+            // `server.run()` returns, then the defer at scope exit cancels this
+            // Task — it is in a 6-hour sleep and cannot fire again before then.
             let periodicDreamer = Task {
                 while true {
                     do {
