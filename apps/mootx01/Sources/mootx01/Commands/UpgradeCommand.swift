@@ -433,10 +433,16 @@ struct UpgradeCommand: AsyncParsableCommand {
             // validates only that ownerIdentifier is non-empty, so this
             // sentinel is sufficient.
             let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+            // Durable estate: pass nil so LocusKit resolves the backend default
+            // (SQLite -> KeychainEstateIdentityKeyStore). Injecting an in-memory
+            // store here lets Estate.open mint an Ed25519 keypair, persist only
+            // the public half to the manifest, and drop the private half at
+            // process exit -- permanently disabling grant/federation signing for
+            // any estate whose identity had not yet been established.
             let handle = try await kit.open(
                 storage: storage,
                 owner: owner,
-                identityKeyStore: InMemoryEstateIdentityKeyStore()
+                identityKeyStore: nil
             )
             let report = try await kit.completeSharedContentReclaim(
                 handle: handle, now: Date())
