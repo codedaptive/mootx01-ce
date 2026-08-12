@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.38.0
+version: 1.39.0
 status: accepted-1.1-target
-date: 2026-08-07
+date: 2026-08-11
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -80,6 +80,19 @@ tool, `moot_vault_job`, exists for tool-surface parity: the Rust backend is
 synchronous, so the tool returns completed-job
 records from an in-process `VaultJobLedger` (bounded to 100 entries).
 Cargo.toml path deps: `vault-kit` (new), `sha2` (new), plus existing kit deps.
+
+**`apps/mootx01/Sources/mootx01/Commands/ProxyCommand.swift`** — the stdio→HTTP bridge for Claude Desktop. Reads newline-delimited JSON-RPC frames from stdin, POSTs each to the resident daemon over loopback HTTP, and writes the response to stdout. Pure logic (disposition decision, id extraction) lives in `MootInstallerCore/ProxyDispositionLogic.swift` so it can be exercised without importing the executable target.
+
+Bridge failure-response invariant (enforced at this surface): every id-bearing frame produces exactly one outbound frame with the same id. Failure conditions:
+
+- **Transport error** (`URLSession` throws) → synthesized -32603 error echoing the request id
+- **HTTP status 0** (daemon mid-restart; `post_frame` yields 0 on unparseable status line) → synthesized error
+- **Non-2xx with empty body** (daemon crash after TCP accept) → synthesized error  
+- **Non-2xx with non-empty body** (HTML/plain-text error page) → synthesized error; body is NOT relayed
+- **Notification (no id) on any failure** → silent; servers must not reply to notifications per MCP spec
+
+`MootInstallerCore.proxyDisposition(statusCode:bodyEmpty:) -> ProxyDisposition` is the pure decision function.  
+`MootInstallerCore.proxyRequestID(of:) -> String?` extracts the id as a JSON literal; returns nil for notifications, `id:null`, boolean ids, and unparseable frames.
 
 This is the external access surface above the substrate; it is not
 imported by any other package, so it is documented single-tier (its full
@@ -1234,6 +1247,10 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.39.0 -- 2026-08-11
+
+- Bridge failure-response invariant (px stream). §1 documents `ProxyCommand.swift` (the stdio→HTTP bridge), `ProxyDispositionLogic.swift` (pure disposition and id-extraction functions in MootInstallerCore), and the four failure conditions that yield a synthesized -32603 error with the original request id. `proxyDisposition(statusCode:bodyEmpty:)` and `proxyRequestID(of:)` are the testable public surface; both exercised in `MootInstallerCoreTests/ProxyDispositionTests.swift`.
 
 ### 1.38.0 -- 2026-08-07
 
