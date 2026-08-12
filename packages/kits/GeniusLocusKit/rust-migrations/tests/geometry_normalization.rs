@@ -172,6 +172,11 @@ fn idempotence_second_call_no_work() {
 
 /// Verify that a sibling-creation failure (read-only parent directory) returns an error
 /// rather than panicking, so the estate_registry caller can park it with `let _ = ...`.
+// Unix-only: the failure this test induces -- a read-only parent directory
+// blocking sibling creation -- has no portable equivalent. On Windows the
+// directory stays writable, a correct implementation creates the sibling and
+// returns Ok, and the assertion below fails spuriously.
+#[cfg(unix)]
 #[test]
 fn sibling_creation_failure_returns_error() {
     // Use a dedicated subdirectory so we can mark it read-only while the test-process
@@ -186,7 +191,6 @@ fn sibling_creation_failure_returns_error() {
     // Make the parent directory read-only — blocks the capsule from creating its
     // .geo_normalize_tmp.sqlite3 sibling file (the Connection::open_with_flags call
     // with SQLITE_OPEN_CREATE will fail if the directory is not writable).
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
@@ -196,7 +200,6 @@ fn sibling_creation_failure_returns_error() {
     let result = genius_locus_kit_migrations::run_geometry_normalization(&path);
 
     // Restore write permission before the test returns so `fs::remove_file` can clean up.
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
