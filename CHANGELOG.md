@@ -5,6 +5,35 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-18 — 2026-08-12
+
+Fixes the reason the last two releases each needed `mootx01 upgrade` run twice.
+
+- **An upgrade now converges in one run (bug fix).** `mootx01 upgrade` replaced
+  the binary and then did the rest of its work — plugin refresh, tool-permission
+  convergence, and the estate migrations including the shared-content reclaim —
+  using the version it had just replaced. Anything fixed in those steps could not
+  take effect on the run that installed the fix, so an estate needing the reclaim
+  reported failure, and the message you read came from the old build. The upgrade
+  now runs those steps in the binary it just installed. If that cannot be
+  launched it falls back to the previous behaviour and says so, so an upgrade is
+  never left less converged than before.
+
+  **This takes effect for upgrades starting from this release.** Upgrading from
+  beta-17 or earlier still needs a second `mootx01 upgrade`, because the older
+  installed build is the one doing the work — a release cannot repair the
+  installer that installs it. From here on, one run.
+
+- **Gatekeeper assessment no longer interrupts an upgrade.** The quarantine tag
+  is applied after the upgrade finishes its work rather than before, so macOS
+  assesses the new binary on your next run instead of raising an "app downloaded
+  from the Internet" dialog mid-upgrade and waiting for a click.
+
+- **Upgrade output is in order.** When the output is redirected to a file or a
+  CI log, the install lines no longer appear after the steps that followed them.
+
+Known issues are unchanged from beta-16.
+
 ## 1.1.0-beta-17 — 2026-08-12
 
 Completes the beta-16 fix. On a real estate the migration's final reclaim still
