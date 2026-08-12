@@ -61,6 +61,8 @@ public actor ProxyConcurrencyGate {
     /// `acquire()`, the first waiter is resumed (slot transfers, count
     /// unchanged); otherwise the slot count decrements.
     public func release() {
+        // Underflow guard: every release must pair with a prior acquire.
+        precondition(inFlight > 0 || !waiters.isEmpty, "ProxyConcurrencyGate.release() called without a matching acquire()")
         if let next = waiters.first {
             waiters.removeFirst()
             // Transfer the slot directly: inFlight stays the same so the

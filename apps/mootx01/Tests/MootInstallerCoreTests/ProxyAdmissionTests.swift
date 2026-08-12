@@ -18,13 +18,18 @@ struct ProxyFrameSizeCapTests {
         #expect(proxyMaxFrameBytes == 4 * 1024 * 1024)
     }
 
-    /// A frame at exactly the cap is admitted (boundary: inclusive).
+    /// Verifies the boundary predicate used by ProxyCommand: a frame at exactly
+    /// the cap satisfies `frame.count <= proxyMaxFrameBytes` (admitted). These
+    /// tests exercise constant boundary semantics only — ProxyCommand's stdin
+    /// loop is not invokable without a live daemon, so we verify the predicate
+    /// and its inverse rather than the dispatch behaviour.
     @Test func frameSizeAtCapIsAdmitted() {
         let atCap = Data(repeating: 0x20, count: proxyMaxFrameBytes)
         #expect(atCap.count <= proxyMaxFrameBytes)
     }
 
-    /// A frame one byte over the cap is rejected (boundary: exclusive).
+    /// Verifies the boundary predicate used by ProxyCommand: a frame one byte
+    /// over the cap satisfies `frame.count > proxyMaxFrameBytes` (rejected).
     @Test func frameSizeOneOverCapIsRejected() {
         let overCap = Data(repeating: 0x20, count: proxyMaxFrameBytes + 1)
         #expect(overCap.count > proxyMaxFrameBytes)
