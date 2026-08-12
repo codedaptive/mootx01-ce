@@ -318,6 +318,18 @@ mod tests {
         assert!(captured_frames(&buf).is_empty(), "202 notification must produce no output frame");
     }
 
+    /// 202 with a non-empty body must still produce no frame. The Ok((202, _)) arm
+    /// matches on status only — the body is intentionally ignored. A server that
+    /// sends a body on a 202 notification ack is spec-violating but harmless; the
+    /// proxy still stays silent, matching the Swift .silent arm's identical behavior.
+    #[test]
+    fn status_202_non_empty_body_produces_no_frame() {
+        let port = stub_server(vec![http_resp(202, "Accepted", VALID_BODY)]);
+        let buf = capture_buf();
+        forward_frame(port, REQUEST, &buf);
+        assert!(captured_frames(&buf).is_empty(), "202 + body must still produce no output frame");
+    }
+
     #[test]
     fn status_500_empty_body_produces_error_frame_echoing_id() {
         let port = stub_server(vec![http_resp(500, "Internal Server Error", b"")]);
