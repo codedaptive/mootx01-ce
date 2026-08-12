@@ -1,6 +1,6 @@
 // GeometryNormalizationTests.swift
 //
-// Failing fixtures for geometry normalization capsule (Part 2 RED step).
+// Test suite for the geometry normalization capsule (all tests GREEN).
 //
 // Covers:
 //   1. Injected-reserve fixture: SQLite file with reserve=12 (raw sqlite3_file_control
@@ -13,12 +13,9 @@
 //   6. Pass-through: encrypted and reserve=0 plaintext estates — lane returns migrated=false.
 //   7. Precondition park: read-only file path parks without throwing.
 //   8. Swift-only: post-swap file carries Data Protection class and 0600 permissions.
-//
-// RED state (before Part 3 lands): GLKMigrationCatalog.prepare() throws
-// noHistoricalMigrationsCompiled for fresh estates when the MigrationV1_0ToV1_1 trait
-// is not compiled. All tests in this file will fail until Part 3:
-//   (a) adds the geometry capsule call to prepare(), and
-//   (b) stamps fresh estates current without requiring historical migration code.
+//   9. Sibling has 0600 permissions at creation, before ATTACH (MXE-GZ).
+//  10. Estate file is 0600 after successful normalization, regression guard (MXE-GZ).
+//  11. Sibling removed by catch block on failure after creation (MXE-GZ).
 
 import Testing
 import Foundation
