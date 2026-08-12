@@ -12,12 +12,15 @@
 //! calls — and Claude Desktop read the stall as a dead server. Responses may
 //! interleave out of order; that is legal JSON-RPC (clients correlate by id).
 //!
-//! Failure policy: a failed REQUEST gets a synthesized JSON-RPC error that
-//! echoes the request's id (Desktop's MCP client rejects `id: null` frames at
-//! the schema level — an id-less error poisons the whole stream). A failed
-//! NOTIFICATION gets nothing (servers must not reply to notifications). The
+//! Failure policy: a failed REQUEST — transport error OR HTTP-level failure
+//! (empty body at a non-202 status, any non-2xx status, status 0 from an
+//! unparseable response line) — gets a synthesized JSON-RPC -32603 error that
+//! echoes the request's id. Desktop's MCP client rejects `id: null` frames at
+//! the schema level, so the error MUST echo the real id. A failed NOTIFICATION
+//! gets nothing (servers must not reply to notifications per MCP spec). The
 //! proxy itself only exits on stdin EOF or a stdin read error — never because
-//! one call failed.
+//! one call failed. Non-2xx response bodies are never relayed: they may not
+//! be JSON-RPC envelopes, and a malformed frame poisons the whole stream.
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
@@ -122,24 +125,53 @@ pub fn run(daemon_url: Option<String>) -> ExitCode {
     ExitCode::from(exit::OK)
 }
 
+/// Write a JSON-RPC error echoing the request's id. Notifications (no id,
+/// id:null, unparseable) get nothing, per spec. The id MUST be echoed:
+/// Claude Desktop rejects `id: null` frames at the schema level and the
+/// resulting parse error poisons the whole stream.
+fn respond_error(stdout: &Arc<Mutex<io::Stdout>>, line: &str, message: &str) {
+    let Some(id) = request_id(line) else { return };
+    let msg = message.replace('\\', "\\\\").replace('"', "'");
+    let frame = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32603,\"message\":\"{msg}\"}}}}"
+    );
+    write_frame(stdout, frame.as_bytes());
+}
+
 /// Forward one frame and write the response (or a synthesized, id-echoing
 /// error) to stdout. Never exits the proxy; stdout write failures are logged
 /// and dropped.
+///
+/// Guard: if this proxy ever gains an `Mcp-Session-Id` header, session
+/// recovery (clear + re-initialize + one-shot retry) must be added at the
+/// same time — a server restart without recovery becomes a permanent outage
+/// for the session.
 fn forward_frame(port: u16, line: &str, stdout: &Arc<Mutex<io::Stdout>>) {
     match daemon_client::post_frame(port, line.as_bytes()) {
-        Ok((202, _)) => {} // notification: no response frame
-        Ok((_, body)) if body.is_empty() => {}
+        // Notification acknowledged; per MCP spec there is no reply.
+        Ok((202, _)) => {}
+
+        // Any other empty body is a failure, not a notification — a daemon
+        // mid-restart (status 0: post_frame parses an unparseable status line
+        // as 0), a 500/503, or a request rejected before the handler. Reply
+        // with an id-echoing error so the client unblocks; silence hangs it
+        // forever with no visible error.
+        Ok((status, body)) if body.is_empty() => {
+            respond_error(stdout, line, &format!("proxy: empty response (HTTP {status})"));
+        }
+
+        // Non-2xx: do NOT relay the body. It may not be a JSON-RPC envelope
+        // (HTML error page, plain text), and a malformed frame poisons the
+        // stream for every later request.
+        Ok((status, _)) if !(200..300).contains(&status) => {
+            respond_error(stdout, line, &format!("proxy: HTTP {status}"));
+        }
+
         Ok((_, body)) => write_frame(stdout, &body),
+
         Err(e) => {
             eprintln!("mootx01 proxy: daemon request failed: {e}");
-            // Requests get an error echoing their id; notifications get none.
-            if let Some(id) = request_id(line) {
-                let msg = e.to_string().replace('\\', "\\\\").replace('"', "'");
-                let frame = format!(
-                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32603,\"message\":\"proxy: {msg}\"}}}}"
-                );
-                write_frame(stdout, frame.as_bytes());
-            }
+            respond_error(stdout, line, &format!("proxy: {e}"));
         }
     }
 }
