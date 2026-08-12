@@ -19,10 +19,19 @@ Fixes the reason the last two releases each needed `mootx01 upgrade` run twice.
   launched it falls back to the previous behaviour and says so, so an upgrade is
   never left less converged than before.
 
-  **This takes effect for upgrades starting from this release.** Upgrading from
-  beta-17 or earlier still needs a second `mootx01 upgrade`, because the older
-  installed build is the one doing the work — a release cannot repair the
-  installer that installs it. From here on, one run.
+  **This takes effect for upgrades performed BY this release onward** — the
+  installed build is the one doing the work, so a release cannot repair the
+  installer that installs it. To be clear about what this does and does not
+  change: if you are on beta-17 and your estate still reports a pending reclaim,
+  beta-17 already completes it in a single `mootx01 upgrade`. What this fixes is
+  every FUTURE correction to a post-install step, which until now could not take
+  effect on the run that delivered it.
+
+- **Estate access no longer breaks when the binary is replaced (bug fix).**
+  Replacing the running program invalidates its code-signing identity, so the
+  keychain refused it the estate identity key and the post-install steps failed
+  with an authentication error. Doing that work in the newly installed program —
+  a fresh process with a valid identity — avoids it.
 
 - **Gatekeeper assessment no longer interrupts an upgrade.** The quarantine tag
   is applied after the upgrade finishes its work rather than before, so macOS
