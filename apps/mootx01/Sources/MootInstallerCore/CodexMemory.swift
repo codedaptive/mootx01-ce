@@ -360,8 +360,10 @@ public enum CodexChronicleImporter {
             \(body)
             """
             do {
+                let subject = HarnessMemoryIngest.extractSubject(from: provenance, fileName: relative)
                 let ok = try await daemon.fileMemory(
                     location: "codex-chronicle/\(relative)", content: provenance,
+                    subject: subject,
                     eventTime: (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? now,
                     kind: "document")
                 if ok {

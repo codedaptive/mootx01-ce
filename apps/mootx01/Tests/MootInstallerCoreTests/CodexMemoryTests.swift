@@ -109,7 +109,7 @@ struct CodexMemoryTests {
 
 private final class CodexMemoryMockDaemon: DaemonClient, @unchecked Sendable {
     var filed: [(location: String, content: String)] = []
-    func fileMemory(location: String, content: String, eventTime: Date, kind: String?) async throws -> Bool {
+    func fileMemory(location: String, content: String, subject: String, eventTime: Date, kind: String?) async throws -> Bool {
         filed.append((location, content)); return true
     }
     func listMemories(locationPrefix: String) async throws -> [HarnessMemoryRecord] { [] }
