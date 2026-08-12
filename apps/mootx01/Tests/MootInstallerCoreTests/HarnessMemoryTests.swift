@@ -25,7 +25,7 @@ import Foundation
 final class MockDaemonClient: DaemonClient, @unchecked Sendable {
 
     // Recorded calls
-    var filedMemories: [(location: String, content: String, eventTime: Date, kind: String?)] = []
+    var filedMemories: [(location: String, content: String, subject: String, eventTime: Date, kind: String?)] = []
     var listedPrefixes: [String] = []
     var updatedMemories: [(id: String, mutation: String, note: String)] = []
     var pingCount = 0
@@ -43,10 +43,10 @@ final class MockDaemonClient: DaemonClient, @unchecked Sendable {
     }
 
     func fileMemory(
-        location: String, content: String, eventTime: Date, kind: String?
+        location: String, content: String, subject: String, eventTime: Date, kind: String?
     ) async throws -> Bool {
         if let err = fileMemoryError { throw err }
-        filedMemories.append((location: location, content: content, eventTime: eventTime, kind: kind))
+        filedMemories.append((location: location, content: content, subject: subject, eventTime: eventTime, kind: kind))
         return fileMemoryResult
     }
 
@@ -578,6 +578,7 @@ struct HarnessMemoryIngestTests {
         let filed = daemon.filedMemories[0]
         #expect(filed.location == "harness-import/myproject/notes.md")
         #expect(filed.content == "My note")
+        #expect(!filed.subject.isEmpty, "subject must be non-empty")
         // Event time must match the file mtime (within 1 second tolerance for
         // filesystem mtime precision).
         #expect(abs(filed.eventTime.timeIntervalSince(mtime)) < 1.0,
@@ -682,6 +683,7 @@ struct HarnessMemoryIngestTests {
         _ = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon, now: Date())
 
         #expect(daemon.filedMemories.first?.kind == "list")
+        #expect(!(daemon.filedMemories.first?.subject.isEmpty ?? true), "MEMORY.md ingest must carry a non-empty subject")
     }
 
     @Test("re-enable path: unchanged content revives superseded drawer, no duplicate")
@@ -751,6 +753,7 @@ struct HarnessMemoryIngestTests {
         // A new drawer must have been posted.
         #expect(daemon.filedMemories.count == 1)
         #expect(daemon.filedMemories[0].content == newContent)
+        #expect(!daemon.filedMemories[0].subject.isEmpty, "re-enable fresh-file must carry a non-empty subject")
     }
 }
 
@@ -906,6 +909,7 @@ struct HarnessMemoryRestoreTests {
         let filed = ingestDaemon.filedMemories[0]
         #expect(abs(filed.eventTime.timeIntervalSince(mtime)) < 1.0,
                 "event_time must equal file mtime")
+        #expect(!filed.subject.isEmpty, "ingest round-trip must carry a non-empty subject")
 
         // Source removed.
         #expect(!FileManager.default.fileExists(atPath: srcURL.path))
@@ -1022,5 +1026,62 @@ struct HarnessMemoryUninstallTests {
         let fm = FileManager.default
         #expect(!fm.fileExists(atPath: settingsURL.path), "settings.json must not be created")
         #expect(!fm.fileExists(atPath: hookURL.path), "hook script must not be created")
+    }
+}
+
+// MARK: - extractSubject tests
+
+@Suite("HarnessMemoryIngest.extractSubject")
+struct ExtractSubjectTests {
+
+    @Test("returns first non-blank non-heading line from multi-line markdown")
+    func returnsFirstContentLine() {
+        let content = """
+        # Project Notes
+
+        This is the first real line.
+        And another line.
+        """
+        let result = HarnessMemoryIngest.extractSubject(from: content, fileName: "notes.md")
+        #expect(result == "This is the first real line.")
+    }
+
+    @Test("truncates long first content line at 120 characters")
+    func truncatesAt120Chars() {
+        let longLine = String(repeating: "x", count: 200)
+        let content = "# Heading\n\(longLine)"
+        let result = HarnessMemoryIngest.extractSubject(from: content, fileName: "notes.md")
+        #expect(result.count == 120)
+        #expect(result == String(repeating: "x", count: 120))
+    }
+
+    @Test("falls back to filename stem when content is all headings")
+    func fallbackOnHeadingOnlyContent() {
+        let content = """
+        # Heading One
+        ## Heading Two
+        ### Heading Three
+        """
+        let result = HarnessMemoryIngest.extractSubject(from: content, fileName: "my-notes.md")
+        #expect(result == "my-notes")
+    }
+
+    @Test("falls back to filename stem when content is all blank lines")
+    func fallbackOnBlankContent() {
+        let result = HarnessMemoryIngest.extractSubject(from: "\n\n\n", fileName: "ideas.md")
+        #expect(result == "ideas")
+    }
+
+    @Test("falls back to filename stem for non-.md files")
+    func fallbackForNonMdFile() {
+        let result = HarnessMemoryIngest.extractSubject(from: "", fileName: "config.json")
+        #expect(result == "config.json")
+    }
+
+    @Test("trims whitespace from content line")
+    func trimsWhitespace() {
+        let content = "   leading and trailing spaces   "
+        let result = HarnessMemoryIngest.extractSubject(from: content, fileName: "notes.md")
+        #expect(result == "leading and trailing spaces")
     }
 }

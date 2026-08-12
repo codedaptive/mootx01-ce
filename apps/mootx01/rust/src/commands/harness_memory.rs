@@ -2340,6 +2340,7 @@ cross-session linking that the flat project-memory directory never had.\n";
             &daemon, 4242,
             "harness/test-slug/note.md",
             "hello world",
+            "test subject line",
             "2026-08-07T00:00:00Z",
             "prose",
         );
@@ -2350,11 +2351,11 @@ cross-session linking that the flat project-memory directory never had.\n";
         assert_eq!(calls[0]["params"]["name"], "moot_file_memory");
         assert_eq!(args["location"], "harness/test-slug/note.md");
         assert_eq!(args["content"], "hello world");
+        assert_eq!(args["subject"], "test subject line");
         assert_eq!(args["event_time"], "2026-08-07T00:00:00Z");
         assert_eq!(args["kind"], "prose");
-        // No legacy "command" or "subject" args — drift guard.
+        // No legacy "command" arg — drift guard.
         assert!(args.get("command").is_none(), "no command arg");
-        assert!(args.get("subject").is_none(), "no subject arg");
     }
 
     #[test]
@@ -2565,5 +2566,36 @@ cross-session linking that the flat project-memory directory never had.\n";
             "event_time must derive from injected now_secs, not SystemTime::now()"
         );
         assert_eq!(calls[0]["params"]["arguments"]["location"], "harness/test-project/note.md");
+    }
+
+    // ── extract_subject tests ────────────────────────────────────────────────
+
+    #[test]
+    fn extract_subject_returns_first_content_line() {
+        let content = "# Heading\n\nThis is the first real line.\nAnd another.";
+        let result = extract_subject(content, "notes.md");
+        assert_eq!(result, "This is the first real line.");
+    }
+
+    #[test]
+    fn extract_subject_truncates_at_120_chars() {
+        let long_line = "x".repeat(200);
+        let content = format!("# Heading\n{long_line}");
+        let result = extract_subject(&content, "notes.md");
+        assert_eq!(result.len(), 120);
+        assert_eq!(result, "x".repeat(120));
+    }
+
+    #[test]
+    fn extract_subject_falls_back_to_filename_stem_on_heading_only() {
+        let content = "# Heading One\n## Heading Two\n### Heading Three";
+        let result = extract_subject(content, "my-notes.md");
+        assert_eq!(result, "my-notes");
+    }
+
+    #[test]
+    fn extract_subject_falls_back_to_filename_stem_on_empty_content() {
+        let result = extract_subject("", "ideas.md");
+        assert_eq!(result, "ideas");
     }
 }
