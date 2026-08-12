@@ -45,8 +45,8 @@ pub fn dispatch(command: Command) -> ExitCode {
         Command::Proxy { daemon_url } => proxy::run(daemon_url),
         Command::Drain { db } => drain::run(db),
         Command::Dream { db } => dream::run(db),
-        Command::Upgrade { from, check, yes, no_restart } => {
-            upgrade::run(from, check, yes, no_restart)
+        Command::Upgrade { from, check, yes, no_restart, converge_only } => {
+            upgrade::run(from, check, yes, no_restart, converge_only)
         }
         // sensitivity unlock / lock.
         Command::Unlock { tier, db: _ } => {

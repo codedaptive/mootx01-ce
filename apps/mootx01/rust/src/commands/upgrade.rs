@@ -21,8 +21,21 @@ use crate::core::{permissions, release};
 use crate::exit;
 use crate::CURRENT_VERSION;
 
-pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> ExitCode {
+pub fn run(
+    from: Option<String>,
+    check: bool,
+    yes: bool,
+    no_restart: bool,
+    converge_only: bool,
+) -> ExitCode {
     let home = super::install::home_dir();
+
+    // --converge-only: we ARE the freshly installed binary, re-executed by the
+    // upgrade that placed us. Run the convergence steps and nothing else.
+    if converge_only {
+        run_convergence();
+        return ExitCode::from(exit::OK);
+    }
 
     // Local-build path: --from skips the online check entirely.
     if let Some(path) = from {
@@ -33,8 +46,7 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         }
         let code = place_and_report(&src, &home, no_restart);
         if code == ExitCode::from(exit::OK) {
-            run_kg_fact_identity_backfill();
-            run_shared_content_reclaim_if_pending();
+            converge_after_install(&home, no_restart);
             offer_estate_encryption_if_needed();
         }
         return code;
@@ -104,11 +116,77 @@ pub fn run(from: Option<String>, check: bool, yes: bool, no_restart: bool) -> Ex
         // converged install and an accept owns its own stop/start sequence.
         // The backfill runs first: unattended correctness migration before
         // the TTY-gated opt-in offer.
-        run_kg_fact_identity_backfill();
-        run_shared_content_reclaim_if_pending();
+        converge_after_install(&home, no_restart);
         offer_estate_encryption_if_needed();
     }
     code
+}
+
+/// The post-install convergence steps, run in the binary that was JUST
+/// INSTALLED rather than in this image.
+///
+/// Without the re-execution every step here would run the version being
+/// replaced, so a fix to any of them could never apply on the run that
+/// installed it — operators had to run `mootx01 upgrade` twice, and the
+/// messages they read came from the old binary.
+///
+/// Falls back to converging in THIS image when the installed binary cannot be
+/// executed or exits non-zero, so a failed re-exec never leaves an upgrade less
+/// converged than before.
+///
+/// NOTE ON REACH: this only helps when the ALREADY-INSTALLED binary carries it.
+/// Upgrading FROM a version without this logic still converges with that old
+/// version's code — the installer cannot be fixed from the release it installs.
+fn converge_after_install(home: &std::path::Path, no_restart: bool) {
+    // Same destination `release::place_binary` writes to.
+    #[cfg(not(target_os = "windows"))]
+    let installed = home.join(".mootx01/bin/mootx01");
+    #[cfg(target_os = "windows")]
+    let installed = home.join(".mootx01/bin/mootx01.exe");
+    if reexec_convergence(&installed, no_restart) {
+        return;
+    }
+    println!("Note: converging with the previous binary — the installed one could not run.");
+    run_convergence();
+}
+
+/// Re-execute `binary` with `--converge-only`. Returns false when it could not
+/// be launched or exited non-zero.
+///
+/// stdout/stderr are inherited so the child's progress appears inline as one
+/// continuous transcript; stdout is flushed first because it is block-buffered
+/// whenever it is not a TTY, which would otherwise place this process's lines
+/// after the child's. `--yes` is passed so the pass never waits on a prompt and
+/// `--no-restart` is forwarded so the flag keeps its meaning across the boundary.
+fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
+    use std::io::Write;
+    if !binary.exists() {
+        return false;
+    }
+    let mut args: Vec<&str> = vec!["upgrade", "--converge-only", "--yes"];
+    if no_restart {
+        args.push("--no-restart");
+    }
+    let _ = std::io::stdout().flush();
+    match std::process::Command::new(binary).args(&args).status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            println!("Note: the installed binary exited {status} during convergence.");
+            false
+        }
+        Err(e) => {
+            println!("Note: could not execute the installed binary ({e}).");
+            false
+        }
+    }
+}
+
+/// The convergence sequence itself, in order. The backfill and the reclaim both
+/// need a quiesced estate; the reclaim additionally repairs foreign SQLite
+/// geometry before its VACUUM.
+fn run_convergence() {
+    run_kg_fact_identity_backfill();
+    run_shared_content_reclaim_if_pending();
 }
 
 /// MXE-MI: move pre-MXE-KH `kg_facts.sourceDrawerID` identity values into

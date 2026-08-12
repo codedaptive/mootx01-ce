@@ -85,7 +85,7 @@ pub enum Command {
     /// when the dreaming queue has pending items;  / recall-driven dreaming).
     Dream { db: Option<String> },
     /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart]
-    Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool },
+    Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool },
     /// out-of-band sensitivity grants unlock <private|secret> [--db <name>]
     /// Authenticate and issue an in-RAM sensitivity-tier grant to the daemon.
     /// "private" maps to the restricted tier; "secret" to the secret tier.
@@ -519,18 +519,22 @@ fn parse_proxy(it: &mut Args) -> Result<Command, UsageError> {
 
 fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
     let mut from = None;
-    let (mut check, mut yes, mut no_restart) = (false, false, false);
+    let (mut check, mut yes, mut no_restart, mut converge_only) = (false, false, false, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--from" => from = Some(take_value(it, "--from")?),
             "--check" => check = true,
             "--yes" => yes = true,
             "--no-restart" => no_restart = true,
+            // Internal, deliberately absent from `upgrade --help`: the upgrade
+            // re-executes the binary it just installed with this flag so the
+            // convergence steps run the NEW code. See `upgrade::run`.
+            "--converge-only" => converge_only = true,
             "--help" | "-h" => return Ok(Command::HelpFor("upgrade")),
             other => return Err(unexpected(other, "upgrade")),
         }
     }
-    Ok(Command::Upgrade { from, check, yes, no_restart })
+    Ok(Command::Upgrade { from, check, yes, no_restart, converge_only })
 }
 
 fn parse_unlock(it: &mut Args) -> Result<Command, UsageError> {
@@ -1084,7 +1088,29 @@ mod tests {
     fn upgrade_flags() {
         assert_eq!(
             p(&["upgrade", "--check"]).unwrap(),
-            Command::Upgrade { from: None, check: true, yes: false, no_restart: false }
+            Command::Upgrade {
+                from: None,
+                check: true,
+                yes: false,
+                no_restart: false,
+                converge_only: false
+            }
+        );
+    }
+
+    /// `--converge-only` is internal (absent from `upgrade --help`) but must
+    /// still parse: the upgrade re-executes the installed binary with it.
+    #[test]
+    fn upgrade_converge_only_parses() {
+        assert_eq!(
+            p(&["upgrade", "--converge-only", "--yes"]).unwrap(),
+            Command::Upgrade {
+                from: None,
+                check: false,
+                yes: true,
+                no_restart: false,
+                converge_only: true
+            }
         );
     }
 
