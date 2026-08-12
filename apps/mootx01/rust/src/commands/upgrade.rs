@@ -252,6 +252,22 @@ fn run_shared_content_reclaim_if_pending() {
         return;
     }
 
+    // Geometry normalization must precede the estate connection, exactly as in
+    // `EstateRegistry::new_sqlite`. VACUUM fails on foreign geometry (file-header
+    // byte 20 != 0, as written by Apple's SEE-provisioned sqlite3) with
+    // SQLITE_CANTOPEN — "unable to open database: " with an empty filename — and
+    // this path never runs the migration catalog, whose Step 0 would otherwise
+    // normalize. Normalizing BEFORE the open (rather than mid-flight) is what keeps
+    // the connection on the canonical path: normalization swaps the file by rename,
+    // so a connection opened first would be left on the unlinked inode.
+    //
+    // No-op once the geometry is already correct. A failure here is logged and the
+    // reclaim proceeds: the VACUUM below surfaces the real error and leaves the
+    // record at ReclaimPending for the next `mootx01 upgrade`.
+    if let Err(e) = genius_locus_kit_migrations::run_geometry_normalization(&estate) {
+        println!("  ! geometry normalization did not run: {e:?}");
+    }
+
     let now = wall_now_millis();
     let result = (|| -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, String> {
         let sqlite_store = SqliteDrawerStore::from_path(

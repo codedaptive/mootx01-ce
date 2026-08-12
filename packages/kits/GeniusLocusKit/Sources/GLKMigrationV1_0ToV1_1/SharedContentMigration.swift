@@ -849,6 +849,18 @@ public extension GeniusLocusKit {
         try await store.save(record, now: now)
         var report: StorageMaintenanceReport?
         if let maintenance = storage as? any StorageMaintenance {
+            // Foreign geometry (file-header byte 20 != 0) makes VACUUM fail with
+            // SQLITE_CANTOPEN — "unable to open database: " with an empty filename.
+            // The migration lane normalizes at GLKMigrationCatalog.prepare() Step 0,
+            // but THIS entry point is reached without prepare(): `mootx01 upgrade`
+            // opens the estate and calls straight here, so an estate whose geometry
+            // was never normalized still carries reserve != 0 when the VACUUM runs.
+            // Normalize here too — it is a cheap no-op once the geometry is correct,
+            // and this is the operation that actually requires reserve == 0.
+            //
+            // A throw leaves the record at reclaimPending exactly as a VACUUM failure
+            // does, so the next `mootx01 upgrade` retries from the same state.
+            _ = try await maintenance.normalizeGeometry()
             report = try await maintenance.performMaintenance()
         }
         record.reclaimedBytes = report?.reclaimedBytes ?? 0

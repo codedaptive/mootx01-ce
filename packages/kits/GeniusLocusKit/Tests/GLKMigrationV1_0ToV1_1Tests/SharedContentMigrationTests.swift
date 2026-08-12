@@ -22,9 +22,20 @@ import VectorKit
 import EngramLib
 import SubstrateTypes
 import GeniusLocusKitMigrations
+import SQLCipher
 
 @testable import GeniusLocusKit
 @testable import GLKMigrationV1_0ToV1_1
+
+/// Raw-SQLite fixture failures (foreign-geometry file construction).
+private enum SCMFixtureError: Error, CustomStringConvertible {
+    case rawSQLite(String)
+    var description: String {
+        switch self {
+        case let .rawSQLite(step): return "raw SQLite fixture failed at: \(step)"
+        }
+    }
+}
 
 @Suite("SharedContentMigration", .serialized)
 struct SharedContentMigrationTests {
@@ -42,12 +53,48 @@ struct SharedContentMigrationTests {
 
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
-    private func scratchStorage() throws -> (any Storage, URL) {
-        let url = FileManager.default.temporaryDirectory
+    private func scratchStorage(at existing: URL? = nil) throws -> (any Storage, URL) {
+        let url = existing ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("glk-scm-\(UUID().uuidString).sqlite3")
         let storage = try SQLiteStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
         return (storage, url)
+    }
+
+    /// Pre-create an EMPTY plaintext SQLite file carrying per-page reserved
+    /// bytes = 12 — the geometry Apple's SEE-provisioned `/usr/bin/sqlite3`
+    /// writes for per-page IVs, and the geometry Bob's 4.3 GB estate carried.
+    ///
+    /// `SQLITE_FCNTL_RESERVE_BYTES` (opcode 38) must run before the first page
+    /// write for the value to land in file-header byte 20; there is no
+    /// equivalent PRAGMA. The estate is then built on top of this file by the
+    /// normal open path, so every page it writes carries the foreign geometry.
+    private func makeForeignGeometryFile() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-scm-geo-\(UUID().uuidString).sqlite3")
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(
+            url.path, &db,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil) == SQLITE_OK, let db
+        else { throw SCMFixtureError.rawSQLite("open") }
+        var reserve: Int32 = 12
+        guard sqlite3_file_control(db, nil, SQLITE_FCNTL_RESERVE_BYTES, &reserve) == SQLITE_OK
+        else { sqlite3_close_v2(db); throw SCMFixtureError.rawSQLite("reserve fcntl") }
+        // A table write commits page 1, recording reserve=12 in the header.
+        guard sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nil, nil, nil) == SQLITE_OK,
+              sqlite3_exec(db, "CREATE TABLE geo_seed (id INTEGER PRIMARY KEY);", nil, nil, nil) == SQLITE_OK,
+              sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE);", nil, nil, nil) == SQLITE_OK
+        else { sqlite3_close_v2(db); throw SCMFixtureError.rawSQLite("seed write") }
+        sqlite3_close_v2(db)
+        return url
+    }
+
+    /// Read file-header byte 20 (SQLite file format 3 §1.3.8, reserved space
+    /// per page). Returns nil when the file is shorter than the 100-byte header.
+    private func reserveBytes(at url: URL) throws -> UInt8? {
+        let data = try Data(contentsOf: url)
+        return data.count >= 100 ? data[20] : nil
     }
 
     @Test func estateFormatDistinguishesUnstampedFromRegisteredMissingRow() async throws {
@@ -82,12 +129,13 @@ struct SharedContentMigrationTests {
     private func makeLegacyEstate(
         drawerContents: [String],
         includeOrphanChunk: Bool = false,
-        seedProtectedVector: Bool = true
+        seedProtectedVector: Bool = true,
+        at existing: URL? = nil
     ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle,
                        storage: any Storage, drawerIDs: [String], url: URL) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "scm-owner")
-        let (storage, url) = try scratchStorage()
+        let (storage, url) = try scratchStorage(at: existing)
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         // In-memory identity key store: keep this file-backed estate's signing
         // key out of the Keychain (test-loop key-residue fix). File deletion does
@@ -746,6 +794,59 @@ struct SharedContentMigrationTests {
         // Confirm the report is from the SQLite backend (physical maintenance ran).
         #expect(report?.backend == "sqlite")
         #expect(finalState == .complete)
+    }
+
+    /// REGRESSION (beta-16, Bob's 4.3 GB estate, 2026-08-12): the same
+    /// `mootx01 upgrade` convergence path as above, but on an estate carrying
+    /// FOREIGN GEOMETRY (reserved-bytes-per-page = 12, as written by Apple's
+    /// SEE-provisioned sqlite3).
+    ///
+    /// VACUUM fails on foreign geometry with SQLITE_CANTOPEN — "unable to open
+    /// database: " with an empty filename. Geometry normalization is wired into
+    /// `GLKMigrationCatalog.prepare()` Step 0, but this path never calls
+    /// prepare(): `runSharedContentReclaimIfPending` opens the estate and calls
+    /// `completeSharedContentReclaim` directly. Reproduced against the real
+    /// estate: three `mootx01 upgrade` runs were needed, and the reclaim only
+    /// succeeded once an unrelated process had normalized the geometry first.
+    ///
+    /// The sibling test above uses a normal-geometry estate, which is why it
+    /// passed throughout.
+    @Test func preStrandedForeignGeometryEstateCompletesOnReclaim() async throws {
+        let geoURL = try makeForeignGeometryFile()
+        #expect(try reserveBytes(at: geoURL) == 12, "fixture must carry foreign geometry")
+
+        let (kit, handle, _, _, url) = try await makeLegacyEstate(
+            drawerContents: ["foreign-geometry reclaim fixture"], at: geoURL)
+        defer {
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
+            }
+        }
+
+        let midResult = try await kit.runSharedContentMigration(handle: handle, now: now)
+        #expect(midResult.state == .reclaimPending)
+        try await kit.close(handle)
+        // Geometry is still foreign — nothing on this path has normalized it.
+        #expect(try reserveBytes(at: url) == 12)
+
+        let freshKit = GeniusLocusKit()
+        let freshStorage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
+        let freshHandle = try await freshKit.open(
+            storage: freshStorage,
+            owner: OwnerCredentials(ownerIdentifier: "scm-owner"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore()
+        )
+        let report = try await freshKit.completeSharedContentReclaim(
+            handle: freshHandle, now: now)
+        let finalState = try await freshKit.sharedContentMigrationState(
+            handle: freshHandle)
+        try await freshKit.close(freshHandle)
+
+        #expect(report != nil, "SQLite estate must return a maintenance report")
+        #expect(report?.backend == "sqlite")
+        #expect(finalState == .complete, "reclaim must complete on a foreign-geometry estate")
+        #expect(try reserveBytes(at: url) == 0, "reclaim must leave the estate at reserve=0")
     }
 }
 
