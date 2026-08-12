@@ -5,6 +5,21 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-19 — 2026-08-12
+
+**No code changes from beta-18.** This release exists to publish corrected
+beta-18 release notes.
+
+The beta-18 notes said an upgrade from beta-17 would still need a second
+`mootx01 upgrade`. That is wrong for the migration reclaim: beta-17 already
+carries the layout repair, so a beta-17 estate completes its reclaim in a single
+run — verified against a copy of a 4.6 GB estate. The two-run behaviour applied
+to beta-16 upgrading to beta-17, where beta-16's unfixed code did the work. The
+beta-18 entry below now says what the change actually buys, and records a
+keychain fix that came with it.
+
+If you are already on beta-18 there is nothing here for you.
+
 ## 1.1.0-beta-18 — 2026-08-12
 
 Fixes the reason the last two releases each needed `mootx01 upgrade` run twice.
