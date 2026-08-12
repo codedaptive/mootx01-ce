@@ -658,6 +658,12 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// Non-fatal: the upgrade continues if the refresh fails (same posture as the
     /// other convergence steps). Hosts with no plugin directory on disk are silently
     /// skipped — never creates a plugin-depth install for a host that never had one.
+    ///
+    /// Testing: direct unit tests are architecturally infeasible — `PluginDetector`,
+    /// `DepthInstaller`, and `MootPaths` are all static with no injectable seams,
+    /// matching the constraint that applies to every other private helper in this
+    /// command class. The three helper functions this method calls are independently
+    /// covered in MootInstallerCoreTests (InstallerTests, InstallDepthTests).
     private func updatePluginManifestIfNeeded(home: URL) {
         let pluginVersion = PluginDetector.installedVersion(
             pluginID: "mootx01@mootx01", homeDirectory: home)
