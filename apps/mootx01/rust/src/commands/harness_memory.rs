@@ -570,7 +570,7 @@ fn estate_file(
 /// The 120-char cap matches the estate's subject length contract.
 ///
 /// Mirrors Swift `HarnessMemoryIngest.extractSubject(from:fileName:)`.
-fn extract_subject(content: &str, filename: &str) -> String {
+pub fn extract_subject(content: &str, filename: &str) -> String {
     if let Some(line) = content.lines().find(|l| {
         let trimmed = l.trim();
         !trimmed.is_empty() && !trimmed.starts_with('#')
