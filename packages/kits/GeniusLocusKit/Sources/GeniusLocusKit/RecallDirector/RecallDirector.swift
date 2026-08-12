@@ -509,11 +509,11 @@ public extension GeniusLocusKit {
         }
         bm25List.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return (corpusContentByID[x.id] ?? x.id) < (corpusContentByID[y.id] ?? y.id)
+            return Self.tiebreakKey(corpusContentByID[x.id], x.id) < Self.tiebreakKey(corpusContentByID[y.id], y.id)
         }
         vectorList.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return (corpusContentByID[x.id] ?? x.id) < (corpusContentByID[y.id] ?? y.id)
+            return Self.tiebreakKey(corpusContentByID[x.id], x.id) < Self.tiebreakKey(corpusContentByID[y.id], y.id)
         }
 
         // Build the candidate list according to the requested scoring strategy.
@@ -767,11 +767,11 @@ public extension GeniusLocusKit {
         }
         bm25List.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return (contentByID[x.id] ?? x.id) < (contentByID[y.id] ?? y.id)
+            return Self.tiebreakKey(contentByID[x.id], x.id) < Self.tiebreakKey(contentByID[y.id], y.id)
         }
         vectorList.sort { x, y in
             if x.score != y.score { return x.score > y.score }
-            return (contentByID[x.id] ?? x.id) < (contentByID[y.id] ?? y.id)
+            return Self.tiebreakKey(contentByID[x.id], x.id) < Self.tiebreakKey(contentByID[y.id], y.id)
         }
 
         // Build the candidate list according to the requested scoring strategy.
@@ -1097,6 +1097,22 @@ public extension GeniusLocusKit {
     ///            candidates (e.g. frame-excluded drawers) so the map covers ALL input
     ///            items. Items absent from the map fall back to their id string (UUID),
     ///            which is non-deterministic; callers must ensure the map is exhaustive.
+    /// Deterministic sort key for a fusion tiebreak.
+    ///
+    /// Drawer `content` is EMPTY on the recall path: `RecallFrame` defaults to
+    /// `.structured` hydration, which reads no blobs. The content maps are built
+    /// from those rows, so the key EXISTS with value `""` and `??` never fires —
+    /// every candidate compared equal, and tied scores fell through to dictionary
+    /// iteration order. Treat an empty key as absent and fall back to the id, which
+    /// is unique, so the comparator is a total order either way. Content still wins
+    /// wherever it IS populated (replay determinism across imports).
+    /// Rust twin: `coordinator.rs` `tiebreak_key`.
+    @inline(__always)
+    internal static func tiebreakKey(_ content: String?, _ id: String) -> String {
+        guard let content, !content.isEmpty else { return id }
+        return content
+    }
+
     internal static func rrfFuseN(
         _ lists: [[(id: String, score: Float)]],
         weights: [Float] = [],
@@ -1122,7 +1138,7 @@ public extension GeniusLocusKit {
             // Content-derived tiebreak: stable across replay runs because drawer content
             // is deterministic for a given seed, unlike drawer UUIDs which are minted
             // fresh on each estate import.
-            return (contentKeyMap[x.id] ?? x.id) < (contentKeyMap[y.id] ?? y.id)
+            return tiebreakKey(contentKeyMap[x.id], x.id) < tiebreakKey(contentKeyMap[y.id], y.id)
         }
         return Array(ranked.prefix(limit))
     }
