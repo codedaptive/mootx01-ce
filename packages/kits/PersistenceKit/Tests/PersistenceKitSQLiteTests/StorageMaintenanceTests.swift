@@ -9,6 +9,7 @@ import Testing
 import Foundation
 import PersistenceKit
 import PersistenceKitInMemory
+import SQLCipher
 @testable import PersistenceKitSQLite
 
 @Suite("StorageMaintenance", .serialized)
@@ -156,6 +157,91 @@ struct StorageMaintenanceTests {
         // After the transaction commits, maintenance proceeds normally.
         let report = try await storage.performMaintenance()
         #expect(report.performed)
+        await storage.close()
+    }
+
+    // MARK: - Geometry normalization followed by VACUUM, one session
+
+    /// Build a plaintext SQLite file with reserved-bytes-per-page = 12 (Apple's
+    /// SEE-provisioned sqlite3 sets this for per-page IVs) BEFORE any data write.
+    /// Byte 20 of the file header is only settable on an empty database, so the
+    /// PRAGMA runs first and a checkpoint materializes the header.
+    private func makeForeignGeometryFile(at url: URL, rows: Int) throws {
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+        guard sqlite3_open_v2(url.path, &handle, flags, nil) == SQLITE_OK, let handle else {
+            throw StorageError.backendError(underlying: "fixture: open failed")
+        }
+        defer { sqlite3_close(handle) }
+        // SQLITE_FCNTL_RESERVE_BYTES (opcode 38, sqlite3.h:1279) is the only way to
+        // set the per-page reserve, and it must run before the first page write so the
+        // value lands in file-header byte 20 — there is no equivalent PRAGMA. This is
+        // exactly what Apple's SEE-provisioned sqlite3 does.
+        var reserve: Int32 = 12
+        guard sqlite3_file_control(handle, nil, SQLITE_FCNTL_RESERVE_BYTES, &reserve) == SQLITE_OK else {
+            throw StorageError.backendError(underlying: "fixture: SQLITE_FCNTL_RESERVE_BYTES failed")
+        }
+        for sql in [
+            "PRAGMA journal_mode = WAL;",
+            "CREATE TABLE bulk (row_id TEXT PRIMARY KEY, payload TEXT);",
+        ] {
+            guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else {
+                throw StorageError.backendError(
+                    underlying: "fixture: \(sql) — \(String(cString: sqlite3_errmsg(handle)))")
+            }
+        }
+        // Enough payload that the WAL and the page cache are genuinely populated:
+        // the defect under test only bites when the connection holds live WAL/SHM
+        // state, which a handful of rows does not produce.
+        let blob = String(repeating: "x", count: 4096)
+        sqlite3_exec(handle, "BEGIN", nil, nil, nil)
+        for index in 0..<rows {
+            let sql = "INSERT INTO bulk VALUES ('row-\(index)', '\(blob)');"
+            guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else {
+                throw StorageError.backendError(underlying: "fixture: insert \(index)")
+            }
+        }
+        sqlite3_exec(handle, "COMMIT", nil, nil, nil)
+        sqlite3_exec(handle, "DELETE FROM bulk;", nil, nil, nil)  // pages → freelist
+        sqlite3_exec(handle, "PRAGMA wal_checkpoint(TRUNCATE);", nil, nil, nil)
+    }
+
+    /// Contract guard: `normalizeGeometry` must leave the connection it reopened
+    /// usable for a subsequent VACUUM, in the SAME session.
+    ///
+    /// Normalization swaps the estate file by rename and reopens the connection on
+    /// the new inode, then removes the pre-swap sidecars. Callers rely on being able
+    /// to run maintenance immediately afterwards — `completeSharedContentReclaim`
+    /// does exactly that — so the reopened connection must be fully live.
+    ///
+    /// Verified against a copy of a real 4.6 GB estate during the beta-16
+    /// investigation as well as at this fixture size; both pass. This test pins the
+    /// invariant so a future change to the swap/reopen/cleanup order cannot silently
+    /// break the reclaim path.
+    @Test func normalizeGeometryLeavesTheConnectionUsableForVacuum() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pk-geo-vacuum-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbURL = dir.appendingPathComponent("estate.sqlite")
+
+        try makeForeignGeometryFile(at: dbURL, rows: 500)
+        let reserveBefore = try Data(contentsOf: dbURL)[20]
+        #expect(reserveBefore == 12, "fixture must carry foreign geometry")
+
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: dbURL, busyTimeout: 5.0)))
+        try await storage.open(schema: schema)
+
+        let geometry = try await storage.normalizeGeometry()
+        #expect(geometry.normalized, "reserve=12 estate must be normalized")
+        #expect(try Data(contentsOf: dbURL)[20] == 0, "reserve must be 0 after normalization")
+
+        // The failure this test exists for: VACUUM on the same connection, in the
+        // same session, immediately after normalization.
+        let report = try await storage.performMaintenance()
+        #expect(report.performed, "VACUUM must run on the connection normalization reopened")
         await storage.close()
     }
 
