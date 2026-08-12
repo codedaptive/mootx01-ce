@@ -5,6 +5,49 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-16 — 2026-08-12
+
+beta-15 wired up the migration's final reclaim step, but on a real encrypted
+estate that step failed at the vacuum. This release makes it complete, and fixes
+two long-standing sources of non-repeatable results.
+
+- **Migration reclaim now finishes on encrypted estates (bug fix).** beta-15
+  ran the reclaim but the vacuum failed with an unhelpful "unable to open
+  database" on estates whose SQLite file carries a non-zero reserve — the layout
+  SQLCipher uses. The trim of the legacy inventory had already committed by that
+  point, so the estate was left changed while the message said it was
+  unaffected. Geometry normalization now runs as the first step of the migration
+  lane and repairs that layout in place before the vacuum, entirely in-process.
+  It is skipped for key-backed estates and for files that do not need it, parks
+  itself without throwing if the estate is read-only or a working file cannot be
+  created, and preserves row counts. The failure message is also accurate now: it
+  names the vacuum as the failure site, states that the trim completed, and says
+  the step can be retried with `mootx01 upgrade`.
+
+- **Recall is repeatable (bug fix).** Two documents with the same fused score
+  could come back in either order, so the same query run twice could return a
+  different top hit. The tie-break was keyed on drawer content, which recall does
+  not load — every candidate compared equal and the order fell out of hash
+  iteration, which varies per process. Ties now fall back to a stable key.
+  This closes the "leave-one-out" issue listed under beta-13.
+
+- **Local HTTP bridge no longer drops or mismatches responses.** An empty or
+  non-2xx upstream reply now produces a proper error frame carrying the original
+  request id, so a caller always gets exactly one response per request instead of
+  waiting on a dropped one — including across a daemon restart. Oversized frames
+  and excessive concurrent frames are also bounded on the way in, matching limits
+  the Rust side already enforced.
+
+- **Estate reclaim survives a fresh session.** The reclaim now reads the identity
+  key through the Keychain-backed store, so it works when run from an upgrade
+  that did not itself unlock the estate.
+
+Known issues. The 13 `MootGatewayTests` failures carried from beta-11 are still
+present. The `LoopbackHTTP` cold-build race listed since beta-11 is fixed — a
+test closed one end of a socket pair twice, which let a parallel test be handed
+the same descriptor. The "leave-one-out" ordering issue listed under beta-13 is
+fixed, as described above.
+
 ## 1.1.0-beta-15 — 2026-08-10
 
 Completes the 1.0→1.1 migration. Estates upgraded on any earlier 1.1 beta
