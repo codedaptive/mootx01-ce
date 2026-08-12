@@ -454,9 +454,11 @@ public protocol DaemonClient: Sendable {
     ///   - location: location hint, e.g. `harness/<slug>/<name>` or
     ///     `harness-import/<slug>/<name>`.
     ///   - content: verbatim file body (byte-exact for restore round-trips).
+    ///   - subject: one-line telegraphic assertion (≤120 chars) for recall result
+    ///     lists. Required by the estate since PR-02.
     ///   - eventTime: temporal anchor; for ingest this is the file mtime.
     ///   - kind: optional content kind hint (`"list"` for MEMORY.md index files).
-    func fileMemory(location: String, content: String, eventTime: Date, kind: String?) async throws -> Bool
+    func fileMemory(location: String, content: String, subject: String, eventTime: Date, kind: String?) async throws -> Bool
 
     /// List estate memories whose location begins with `prefix`.
     /// Returns active (non-superseded) AND superseded records; callers filter
@@ -531,12 +533,14 @@ public struct LiveDaemonClient: DaemonClient {
     public func fileMemory(
         location: String,
         content: String,
+        subject: String,
         eventTime: Date,
         kind: String?
     ) async throws -> Bool {
         var arguments: [String: Any] = [
             "location": location,
             "content": content,
+            "subject": subject,
             "event_time": formatISO8601(eventTime),
         ]
         if let kind { arguments["kind"] = kind }
@@ -836,9 +840,10 @@ public enum HarnessMemoryIngest {
 
         // File to estate — confirm — delete source.
         // (observability: harness.ingest.filed.count, harness.ingest.removed.count — MXE-HM-2)
+        let subject = extractSubject(from: content, fileName: fileName)
         do {
             let confirmed = try await daemon.fileMemory(
-                location: location, content: content, eventTime: mtime, kind: kind
+                location: location, content: content, subject: subject, eventTime: mtime, kind: kind
             )
             guard confirmed else {
                 return IngestResult(
@@ -868,6 +873,26 @@ public enum HarnessMemoryIngest {
             filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
             outcome: .filed
         )
+    }
+
+    /// Generate a subject line for estate filing from file content.
+    ///
+    /// Returns the first non-blank, non-heading (`#`) line of `content`, trimmed
+    /// and truncated to 120 characters. Falls back to the filename stem (dropping
+    /// `.md` extension) when the content contains only blank lines or headings.
+    /// The 120-char cap matches the estate's subject length contract.
+    public static func extractSubject(from content: String, fileName: String) -> String {
+        let lines = content.components(separatedBy: .newlines)
+        if let line = lines.first(where: {
+            let trimmed = $0.trimmingCharacters(in: .whitespaces)
+            return !trimmed.isEmpty && !trimmed.hasPrefix("#")
+        }) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return String(trimmed.prefix(120))
+        }
+        // Fallback: filename stem when content is all headings or blank lines.
+        let stem = fileName.hasSuffix(".md") ? String(fileName.dropLast(3)) : fileName
+        return String(stem.prefix(120))
     }
 
     /// Remove a project's `memory/` directory if it is empty (all files moved).

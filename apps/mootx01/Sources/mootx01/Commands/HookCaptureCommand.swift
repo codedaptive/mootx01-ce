@@ -129,10 +129,12 @@ struct HookCaptureCommand: AsyncParsableCommand {
         // ping+file failure would block Claude Code for up to 2s instead of 1s.
         let location = "harness/\(slug)/\(fileName)"
         let kind: String? = fileName.lowercased() == "memory.md" ? "list" : nil
+        let subject = HarnessMemoryIngest.extractSubject(from: content, fileName: fileName)
         do {
             let confirmed = try await daemon.fileMemory(
                 location: location,
                 content: content,
+                subject: subject,
                 eventTime: now,
                 kind: kind
             )
