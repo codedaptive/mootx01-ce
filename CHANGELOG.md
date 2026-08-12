@@ -5,6 +5,26 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-17 — 2026-08-12
+
+Completes the beta-16 fix. On a real estate the migration's final reclaim still
+failed at the vacuum, and took three `mootx01 upgrade` runs to get through.
+
+- **The reclaim completes in one upgrade run (bug fix).** beta-16 added the
+  layout repair that the vacuum needs, but wired it into the estate-open path
+  only. `mootx01 upgrade` reaches the reclaim without going through that path, so
+  an estate whose file still carried the old layout arrived at the vacuum
+  unrepaired and failed with "unable to open database". The repair now also runs
+  on the upgrade's own path, in both ports. Estates that succeeded on beta-16 did
+  so because something else — usually the background service restarting onto the
+  new binary — had already repaired the layout first; the retry advice in the
+  failure message was what carried those runs to completion.
+
+  If you are on beta-16 with an estate still reporting a pending reclaim, this
+  release finishes it in a single `mootx01 upgrade`.
+
+Known issues are unchanged from beta-16.
+
 ## 1.1.0-beta-16 — 2026-08-12
 
 beta-15 wired up the migration's final reclaim step, but on a real encrypted
