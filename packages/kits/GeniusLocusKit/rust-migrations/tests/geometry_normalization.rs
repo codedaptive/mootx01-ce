@@ -234,3 +234,183 @@ fn row_count_parity_after_normalization() {
 
     let _ = fs::remove_file(&path);
 }
+
+// MARK: - Part 4: key-backed skip, sibling permissions, cleanup
+
+/// An estate with a sibling `db.key` and nonzero reserve is left byte-identical.
+/// The guard fires and nothing is rewritten. No `#[cfg(unix)]` gate — the
+/// INSTALL_KEY_FILE predicate is platform-agnostic.
+#[test]
+fn key_backed_estate_skip_guard() {
+    let path = scratch_path("keybacked");
+
+    make_raw_reserve_estate(&path, 3).expect("make_raw_reserve_estate");
+
+    // Place a db.key sibling — marks this as a whole-file-encrypted estate.
+    // The normalization guard must detect this file and return a no-op report
+    // without touching the estate (normalizing would corrupt SQLCipher's per-page
+    // IV structure, which lives in the reserved bytes we would otherwise zero out).
+    let key_path = path.parent().unwrap().join("db.key");
+    fs::write(&key_path, b"sentinel").expect("write db.key");
+
+    let report = genius_locus_kit_migrations::run_geometry_normalization(&path)
+        .expect("run_geometry_normalization must succeed (no-op) on key-backed estate");
+
+    assert!(
+        !report.normalized,
+        "key-backed estate must not be normalized"
+    );
+    // Reserve must remain 12 — the guard must prevent any file modification.
+    assert_eq!(
+        read_reserve_bytes(&path),
+        Some(12),
+        "key-backed estate must remain at reserve=12 after guard fires"
+    );
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&key_path);
+}
+
+/// While normalization is running, the sibling is mode 0600.
+/// The pre-create step creates the sibling at 0600 before Connection::open_with_flags
+/// — this test asserts the sibling's mode directly, not the result's.
+#[cfg(unix)]
+#[test]
+fn sibling_mode_is_owner_only_while_normalizing() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    let path = scratch_path("sibmode");
+    // 1000 rows: gives the observer thread a reliable window to catch the sibling
+    // before normalization completes and renames it away.
+    make_raw_reserve_estate(&path, 1000).expect("make_raw_reserve_estate");
+
+    let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+    let sibling_path = path.parent().unwrap()
+        .join(format!("{stem}.geo_normalize_tmp.sqlite3"));
+
+    let observed_mode: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+
+    let mode_t = observed_mode.clone();
+    let sib_t = sibling_path.clone();
+    // Run normalization on a background thread so the observer can poll the
+    // sibling file while normalization is in progress.
+    let path_bg = path.clone();
+    let norm_handle = thread::spawn(move || {
+        genius_locus_kit_migrations::run_geometry_normalization(&path_bg)
+    });
+
+    // Poll the sibling path. Once it appears, record its mode. The sibling is
+    // pre-created at 0600 before Connection::open_with_flags, so it is 0600
+    // from the moment of first existence.
+    for _ in 0..10_000 {
+        if sib_t.exists() {
+            if let Ok(meta) = fs::metadata(&sib_t) {
+                *mode_t.lock().unwrap() = Some(meta.mode());
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    norm_handle.join().unwrap().expect("run_geometry_normalization");
+
+    let mode = observed_mode
+        .lock()
+        .unwrap()
+        .expect("sibling must have been observed during normalization — increase row count if this fails");
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "sibling must have mode 0o600 while normalization is running"
+    );
+
+    let _ = fs::remove_file(&path);
+}
+
+/// After normalization the canonical file is mode 0600.
+/// The step-9 permission block sets 0600 on the canonical path after the atomic
+/// rename — this test asserts the canonical's mode after a successful run.
+#[cfg(unix)]
+#[test]
+fn canonical_mode_is_owner_only_after_normalization() {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = scratch_path("canperm");
+    make_raw_reserve_estate(&path, 5).expect("make_raw_reserve_estate");
+
+    genius_locus_kit_migrations::run_geometry_normalization(&path)
+        .expect("run_geometry_normalization");
+
+    let mode = fs::metadata(&path)
+        .expect("canonical file must exist after normalization")
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "canonical file must have mode 0o600 after normalization"
+    );
+
+    let _ = fs::remove_file(&path);
+}
+
+/// A run that fails after the sibling exists leaves no `.geo_normalize_tmp.sqlite3`
+/// behind. The observer thread waits for the sibling to appear, then makes the
+/// canonical path a directory so fs::rename fails with EISDIR. Part 3's cleanup
+/// in the rename error path removes the sibling before returning Err.
+#[cfg(unix)]
+#[test]
+fn failed_run_leaves_no_sibling() {
+    use std::thread;
+    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("glk-geo-fail-{}", Uuid::new_v4()));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("estate.sqlite3");
+    let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+    let sibling_path = dir.join(format!("{stem}.geo_normalize_tmp.sqlite3"));
+
+    // 1000 rows: gives the observer thread time to fire before normalization
+    // completes and renames the sibling away.
+    make_raw_reserve_estate(&path, 1000).expect("make_raw_reserve_estate");
+
+    let disrupted = Arc::new(AtomicBool::new(false));
+    let disrupted_t = disrupted.clone();
+    let sibling_t = sibling_path.clone();
+    let path_t = path.clone();
+    // Observer: once the sibling exists, atomically replace the canonical file
+    // with a directory. fs::rename(sibling_file, directory) fails with EISDIR —
+    // the rename cleanup path in Part 3 must then remove the sibling.
+    let path_bg = path.clone();
+    let norm_handle = thread::spawn(move || {
+        genius_locus_kit_migrations::run_geometry_normalization(&path_bg)
+    });
+
+    for _ in 0..10_000 {
+        if sibling_t.exists() {
+            let _ = fs::remove_file(&path_t);
+            let _ = fs::create_dir(&path_t);
+            disrupted_t.store(true, Ordering::SeqCst);
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let _ = norm_handle.join().unwrap(); // Ok or Err, both are valid outcomes
+
+    // Whether normalization succeeded (sibling renamed away — disruption raced)
+    // or failed with EISDIR (Part 3 cleanup ran), no sibling must remain on disk.
+    assert!(
+        !sibling_path.exists(),
+        "sibling must not be left on disk after normalization completes (success or failure)"
+    );
+
+    // Cleanup: canonical might be a directory (if disruption fired) or absent.
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_dir(&path);
+    let _ = fs::remove_dir_all(&dir);
+}
