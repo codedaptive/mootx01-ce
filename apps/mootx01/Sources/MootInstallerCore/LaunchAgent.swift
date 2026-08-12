@@ -315,7 +315,7 @@ public enum LaunchAgent {
     /// Exists for the estate encryption migration (CE-1.0.35-08): the swap
     /// must run stop → rename → start, which `restart()` (bootout+bootstrap
     /// in one call) cannot express, and `uninstallDaemon` would delete the
-    /// plist the restart needs. Waits up to 5 s for the launchd teardown to
+    /// plist the restart needs. Waits up to 60 s for the launchd teardown to
     /// complete — a rename under a still-live daemon is the exact data race
     /// this method exists to prevent.
     ///
@@ -323,9 +323,11 @@ public enum LaunchAgent {
     public static func stopDaemon() -> Bool {
         let target = "gui/\(getuid())/\(MootPaths.daemonLabel)"
         _ = runLaunchctl(["bootout", target])
-        for _ in 0..<20 {
+        // Allow up to 60 s for the daemon to drain active MCP clients and exit.
+        // 5 s was insufficient when clients were attached at upgrade time.
+        for _ in 0..<120 {
             if runLaunchctl(["print", target]).code != 0 { return true }
-            usleep(250_000)
+            usleep(500_000)
         }
         return false
     }
