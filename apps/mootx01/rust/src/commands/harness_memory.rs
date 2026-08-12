@@ -536,15 +536,18 @@ fn call_tool(daemon: &dyn DaemonHttp, port: u16, tool_name: &str, args: Value) -
 /// - `location`: estate location hint, e.g. `harness-import/<slug>/<name>`.
 ///   No `/memories/` prefix — the ARIA tool accepts the bare location.
 /// - `content`: verbatim file body (byte-exact for restore round-trips)
+/// - `subject`: one-line telegraphic assertion (≤120 chars) for recall result
+///   lists. Required by the estate since PR-02.
 /// - `event_time`: ISO 8601 UTC string (typically the source file's mtime)
 /// - `kind`: `"list"` for MEMORY.md index files, `"prose"` otherwise
 ///
-/// Mirrors Swift `LiveDaemonClient.fileMemory(location:content:eventTime:kind:)`.
+/// Mirrors Swift `LiveDaemonClient.fileMemory(location:content:subject:eventTime:kind:)`.
 fn estate_file(
     daemon: &dyn DaemonHttp,
     port: u16,
     location: &str,
     content: &str,
+    subject: &str,
     event_time: &str,
     kind: &str,
 ) -> Result<(), String> {
@@ -552,10 +555,32 @@ fn estate_file(
     call_tool(daemon, port, "moot_file_memory", json!({
         "location": location,
         "content": content,
+        "subject": subject,
         "event_time": event_time,
         "kind": kind,
     }))?;
     Ok(())
+}
+
+/// Generate a subject line for estate filing from file content.
+///
+/// Returns the first non-blank, non-heading (`#`) line of `content`, trimmed
+/// and truncated to 120 characters. Falls back to the filename stem (dropping
+/// `.md` extension) when the content contains only blank lines or headings.
+/// The 120-char cap matches the estate's subject length contract.
+///
+/// Mirrors Swift `HarnessMemoryIngest.extractSubject(from:fileName:)`.
+fn extract_subject(content: &str, filename: &str) -> String {
+    if let Some(line) = content.lines().find(|l| {
+        let trimmed = l.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    }) {
+        let trimmed = line.trim();
+        return trimmed.chars().take(120).collect();
+    }
+    // Fallback: filename stem when content is all headings or blank lines.
+    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    stem.chars().take(120).collect()
 }
 
 /// Apply a mutation to an existing estate record via `moot_update_memory`.
@@ -792,10 +817,11 @@ fn ingest_project(
         // If absent, file fresh normally.
         let file_action = determine_ingest_action(daemon, port, &location, &content);
 
+        let subject = extract_subject(&content, fname);
         let file_result = match file_action {
             IngestAction::CreateFresh => {
                 // MXE-HM-2: harness_memory.ingest.filed metric emit point.
-                estate_file(daemon, port, &location, &content, &event_time, kind)
+                estate_file(daemon, port, &location, &content, &subject, &event_time, kind)
             }
             IngestAction::Revive(ref id) => {
                 // MXE-HM-2: harness_memory.restore.revived metric emit point.
@@ -1423,8 +1449,9 @@ fn capture_decision(
     let location = format!("harness/{project_slug}/{filename}");
     let event_time = unix_secs_to_iso8601(now_secs);
     let kind = memory_kind(filename);
+    let subject = extract_subject(content, filename);
 
-    match estate_file(daemon, port, &location, content, &event_time, kind) {
+    match estate_file(daemon, port, &location, content, &subject, &event_time, kind) {
         Ok(()) => {
             // MXE-HM-2: harness_memory.capture.ok metric emit point.
             Some(deny_json(teaching_message_with_location(&location)))
