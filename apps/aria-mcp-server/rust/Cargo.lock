@@ -658,6 +658,7 @@ dependencies = [
  "corpus-kit",
  "genius-locus-kit",
  "persistence-kit",
+ "rusqlite",
  "serde",
  "serde_json",
  "vectorkit",
