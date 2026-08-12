@@ -37,6 +37,11 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
     var http: Int?
 
+    /// Interval between periodic dream spawns in long-running stdio sessions (6 hours).
+    /// At 256 items/cycle a 36k-estate converges within a few cycles; the periodic
+    /// trigger ensures those cycles fire without requiring session restarts.
+    static let periodicDreamInterval: Duration = .seconds(6 * 3600)
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -403,6 +408,37 @@ struct ServeCommand: AsyncParsableCommand {
                 )
                 Self.spawnDetachedDream(estateName: estateName, environment: environment)
             }
+
+            // Periodic dream trigger: fire one dream spawn every 6 hours during
+            // long-running stdio sessions. The startup and on-exit triggers alone
+            // are insufficient for daemons that run for days — this ensures subject
+            // debt drains regardless of how long the session lasts or whether
+            // recall events enqueue dreaming jobs.
+            //
+            // Cancellation: `Task.sleep(for:)` throws `CancellationError` when the
+            // task is cancelled. The defer below cancels this Task after
+            // `server.run()` returns (i.e., when stdin closes), so the sleep is
+            // always interrupted cleanly. There is no pre-existing TaskGroup in the
+            // stdio path; this bare Task is the cancellation unit.
+            //
+            // This trigger does not race with the startup or on-exit spawns:
+            // the first periodic fire is 6 hours after startup, so the startup
+            // spawn has already completed by then; the on-exit spawn fires after
+            // `server.run()` returns, by which point this Task is already cancelled.
+            let periodicDreamer = Task {
+                while true {
+                    do {
+                        try await Task.sleep(for: Self.periodicDreamInterval)
+                    } catch {
+                        // CancellationError: the serve scope is winding down — exit cleanly.
+                        return
+                    }
+                    Logging.stderr.log(
+                        "mootx01 serve: periodic dream spawn (6-hour trigger — draining subject debt)")
+                    Self.spawnDetachedDream(estateName: estateName, environment: environment)
+                }
+            }
+            defer { periodicDreamer.cancel() }
 
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, stdio)")
