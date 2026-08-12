@@ -387,7 +387,23 @@ pub fn run_geometry_normalization(
     // Best-effort: remove a stale sibling left by a prior interrupted run.
     let _ = fs::remove_file(&sibling_path);
 
-    // Step 3: Open the DESTINATION first (fresh file, reserve=0 as main).
+    // Step 3: Pre-create the sibling at owner-read/write before SQLite opens
+    // it. A zero-length file is treated as a fresh empty database by SQLite —
+    // SQLITE_OPEN_CREATE on an existing zero-length file is safe, it opens the
+    // existing file without changing permissions or truncating it. This ensures
+    // the sibling is never briefly world-readable even transiently; the
+    // corresponding pattern in sqlite.rs calls set_permissions after open, but
+    // the pre-create approach is stronger because the permissive window is zero.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(&sibling_path)?;
+    }
+    // Open the DESTINATION first (fresh file, reserve=0 as main).
     // The SQLCipher attachFunc heuristic checks db->aDb[0].reserve — by making
     // the destination (reserve=0) the main connection, the condition `> 0` is
     // false and the heuristic does not fire when we ATTACH the source.
@@ -418,7 +434,11 @@ pub fn run_geometry_normalization(
     }
 
     // Step 6: DETACH source.
-    dest.execute_batch("DETACH source;")?;
+    if let Err(e) = dest.execute_batch("DETACH source;") {
+        drop(dest);
+        let _ = fs::remove_file(&sibling_path);
+        return Err(GeometryNormalizationError::Sqlite(e));
+    }
 
     // Step 7: Verify sibling reserve=0 (sibling has been checkpointed in
     // copy_schema_and_data, so the header is in the main file).
@@ -436,7 +456,23 @@ pub fn run_geometry_normalization(
 
     // Step 9: Atomic rename — replaces the original (reserve=12) with the
     // sibling (reserve=0). POSIX rename() is atomic on the same filesystem.
-    fs::rename(&sibling_path, path)?;
+    if let Err(e) = fs::rename(&sibling_path, path) {
+        let _ = fs::remove_file(&sibling_path);
+        return Err(GeometryNormalizationError::Io(e));
+    }
+    // Restrict the canonical file and any pre-existing sidecars to
+    // owner-read/write. Sidecars written after the engine reopens the estate
+    // inherit the process umask; this call tightens any that were already
+    // present at the canonical path before they are removed in step 10.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perm = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perm.clone()).ok();
+        for suffix in ["-wal", "-shm"] {
+            std::fs::set_permissions(format!("{path_str}{suffix}"), perm.clone()).ok();
+        }
+    }
 
     // Step 10: Remove stale WAL and SHM sidecars from the original path.
     for suffix in ["-wal", "-shm"] {
