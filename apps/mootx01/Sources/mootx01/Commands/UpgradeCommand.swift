@@ -73,6 +73,25 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
 
+    /// Internal: run ONLY the post-install convergence steps, skipping the
+    /// download and the binary placement.
+    ///
+    /// `mootx01 upgrade` re-executes the binary it just installed with this flag
+    /// so the convergence steps run the NEW code. Without it every post-install
+    /// step — plugin rematerialization, permission tiering, the kg_facts
+    /// backfill, and the shared-content reclaim — executed in the ALREADY-RUNNING
+    /// image, i.e. the version being replaced. A fix to any of them could never
+    /// apply on the run that installed it, so operators had to run
+    /// `mootx01 upgrade` twice; worse, the messages they read came from the old
+    /// binary, which is how a beta shipped a corrected reclaim message and still
+    /// printed the stale one.
+    ///
+    /// Hidden because it is not an operator-facing mode: running it by hand
+    /// converges against whatever binary is currently installed, which the plain
+    /// `mootx01 upgrade` no-op path already does.
+    @Flag(name: .customLong("converge-only"), help: .hidden)
+    var convergeOnly: Bool = false
+
     /// GitHub repo slug the upgrade queries and downloads from.
     ///
     /// Defaults to the public CE repo; MOOTX01_REPO overrides it — the same
@@ -96,6 +115,15 @@ struct UpgradeCommand: AsyncParsableCommand {
         let downloader = ReleaseDownloader(
             repo: Self.repoSlug(),
             currentVersion: Mootx01.currentVersion)
+
+        // --converge-only: we ARE the freshly installed binary, re-executed by the
+        // upgrade that placed us. Run the convergence steps and nothing else.
+        if convergeOnly {
+            await runConvergence(
+                home: home,
+                binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
+            return
+        }
 
         // --check: query GitHub and print the latest tag without downloading.
         // Query-only by contract, so the encryption offer does not run here.
@@ -202,6 +230,12 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // available — so the up-to-date early return still backfills
                 // and offers. The backfill may quiesce the daemon, so restore
                 // the installed agents before returning, as below.
+                // No new binary was placed, so there is no newer code to
+                // re-execute into and converging in THIS image is correct. This
+                // path deliberately runs only the estate migrations + restart,
+                // NOT plugin rematerialization or permission tiering: those
+                // converge an install onto a NEW binary's shape and have nothing
+                // to do when the binary did not change.
                 await runKGFactIdentityBackfill(home: home)
                 await runSharedContentReclaimIfPending(home: home)
                 restartAgents(home: home)
@@ -259,11 +293,8 @@ struct UpgradeCommand: AsyncParsableCommand {
                 print("Updated:        \(mgrPath)")
             }
         }
-        #if os(macOS)
-        if isRemoteDownload {
-            applyGatekeeperQuarantine(paths: [binaryPath, MootPaths.installedMgrBinaryURL(homeDirectory: home).path])
-        }
-        #endif
+        // Gatekeeper quarantine is applied AFTER convergence, not here — see the
+        // re-exec comment below.
 
         // an upgrade alone never touches
         // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
@@ -274,29 +305,36 @@ struct UpgradeCommand: AsyncParsableCommand {
         // install for a host that never had one — upgrade only converges
         // existing installs), and refresh Claude Code's cache the same way
         // `mootx01 install` does.
-        rematerializePluginDepth(home: home, binaryPath: binaryPath)
+        // Convergence runs in the binary we JUST INSTALLED, not in this image.
+        // Re-execute the new binary with --converge-only and let it do the work;
+        // otherwise every step below would run the version being replaced (see
+        // the --converge-only flag comment).
+        //
+        // This happens BEFORE the Gatekeeper quarantine tag is applied on
+        // purpose: executing a freshly quarantined binary makes the kernel hold
+        // it pre-`main` for assessment, which on an interactive machine surfaces
+        // an "app downloaded from the Internet" dialog and blocks until someone
+        // clicks. Tagging after the child exits keeps the assessment where it
+        // belongs — the operator's next run — and keeps the upgrade unattended.
+        let converged = await runConvergenceInNewBinary(
+            binaryPath: binaryPath, home: home)
+        if !converged {
+            // The new binary could not be executed, or exited non-zero. Fall
+            // back to converging in THIS image: the pre-existing behaviour, so a
+            // failed re-exec never leaves an upgrade less converged than before.
+            print("Note: converging with the previous binary — the installed one could not run.")
+            await runConvergence(home: home, binaryPath: binaryPath)
+        }
 
-        // Bob's re-tier ruling (2026-07-04): converge an EXISTING Claude
-        // Code integration's tool-permission tiering onto the current
-        // default the same way rematerializePluginDepth converges the
-        // plugin package above — never CREATES `~/.claude/settings.json`
-        // or a mootx01 integration for a user who never selected Claude
-        // Code as an install target. Gated on hasAnyMootEntries so a user
-        // who never ran `mootx01 install` with Claude Code selected sees no
-        // side effect at all from `mootx01 upgrade`.
-        migratePermissionTiers(home: home)
+        #if os(macOS)
+        if isRemoteDownload {
+            applyGatekeeperQuarantine(paths: [
+                binaryPath,
+                MootPaths.installedMgrBinaryURL(homeDirectory: home).path,
+            ])
+        }
+        #endif
 
-        // MXE-MI: converge pre-MXE-KH kg_facts rows whose sourceDrawerID
-        // holds a host identity, foreign palace key, or triple id into the
-        // identity columns those values belong in. Unattended, like the
-        // permission-tier migration above — a correctness migration with no
-        // user choice in it. Runs BEFORE restartAgents so the restarted
-        // daemon hydrates the migrated rows instead of serving the pre-
-        // migration shape from RAM until its next restart.
-        await runKGFactIdentityBackfill(home: home)
-        await runSharedContentReclaimIfPending(home: home)
-
-        restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
 
         // The encryption offer runs AFTER the services are back up so a
@@ -613,6 +651,65 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// installed binaries so Gatekeeper assesses Developer ID/notarization on
     /// first launch. This is best-effort, matching install.sh's non-fatal xattr
     /// behavior.
+    /// The post-install convergence sequence, in order.
+    ///
+    /// Extracted so it has exactly one definition shared by two callers: the
+    /// re-executed `--converge-only` pass (the normal route) and the fallback
+    /// when that re-exec cannot run. The "already up to date" path runs a
+    /// deliberately narrower sequence — see the comment there.
+    ///
+    /// Ordering is load-bearing: the kg_facts backfill and the shared-content
+    /// reclaim both need a quiesced estate and run BEFORE `restartAgents`, so the
+    /// restarted daemon hydrates migrated rows rather than serving the
+    /// pre-migration shape from RAM until its next restart.
+    private func runConvergence(home: URL, binaryPath: String) async {
+        rematerializePluginDepth(home: home, binaryPath: binaryPath)
+        migratePermissionTiers(home: home)
+        await runKGFactIdentityBackfill(home: home)
+        await runSharedContentReclaimIfPending(home: home)
+        restartAgents(home: home)
+    }
+
+    /// Re-execute the freshly installed binary to run `runConvergence` in the NEW
+    /// code. Returns false when the child could not be launched or exited
+    /// non-zero, so the caller can fall back to converging in this image.
+    ///
+    /// stdout/stderr are inherited, so the child's progress lines appear inline
+    /// and the operator sees one continuous upgrade transcript. `--yes` is passed
+    /// because the convergence pass must never wait on a prompt; `--no-restart`
+    /// is forwarded so the flag keeps its meaning across the boundary.
+    private func runConvergenceInNewBinary(binaryPath: String, home: URL) async -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: binaryPath) else { return false }
+        var arguments = ["upgrade", "--converge-only", "--yes"]
+        if noRestart { arguments.append("--no-restart") }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = arguments
+        // A child that inherits this process's environment inherits
+        // MOOTX01_DATA_DIR too, so a redirected data directory keeps applying
+        // across the re-exec.
+        process.environment = ProcessInfo.processInfo.environment
+        // Flush before handing the fd to the child. `print` writes to a
+        // block-buffered stdout whenever it is not a TTY (a redirect, a log file,
+        // CI), so the parent's "Installed: ..." lines would otherwise sit in this
+        // process's buffer until exit and land AFTER the child's output —
+        // producing a transcript that reads as though convergence happened before
+        // the install. The child writes to the inherited descriptor directly.
+        fflush(stdout)
+        do {
+            try process.run()
+        } catch {
+            print("Note: could not execute the installed binary (\(error)).")
+            return false
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            print("Note: the installed binary exited \(process.terminationStatus) during convergence.")
+            return false
+        }
+        return true
+    }
+
     private func applyGatekeeperQuarantine(paths: [String]) {
         let qts = String(Int(Date().timeIntervalSince1970), radix: 16)
         let qval = "0083;\(qts);mootx01-upgrade;"
