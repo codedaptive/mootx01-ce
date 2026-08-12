@@ -16,17 +16,22 @@
 //!
 //!   1. WAL checkpoint (TRUNCATE) via a short-lived source connection — close
 //!      the source connection before opening the destination.
-//!   2. Open the DESTINATION as the main connection (fresh file, reserve=0).
-//!   3. ATTACH the source to the destination — the heuristic checks
+//!   2. (unix) Pre-create the sibling at mode 0600 so it is never briefly
+//!      world-readable. SQLITE_OPEN_CREATE on an existing zero-length file
+//!      is a no-op for file creation; SQLite opens it normally.
+//!   3. Open the DESTINATION as the main connection (fresh file, reserve=0).
+//!   4. ATTACH the source to the destination — the heuristic checks
 //!      `db->aDb[0].reserve` (the DESTINATION's reserve = 0), so the condition
 //!      `> 0` is false and the heuristic does not fire.
-//!   4. Copy schema (DDL) and data (row-by-row INSERT) from source to dest.
+//!   5. Copy schema (DDL) and data (row-by-row INSERT) from source to dest.
 //!      Writing into the destination produces pages with reserve=0.
-//!   5. DETACH source.
-//!   6. Verify destination header byte 20 == 0.
-//!   7. Close destination connection (must precede rename on Windows).
-//!   8. Atomic `rename()` — replace the original with the destination.
-//!   9. Remove stale -wal/-shm sidecars from the original path.
+//!   6. DETACH source.
+//!   7. Verify destination header byte 20 == 0.
+//!   8. Close destination connection (must precede rename on Windows).
+//!   9. Atomic `rename()` — replace the original with the destination.
+//!      (unix) Set mode 0600 on the canonical path and any pre-existing
+//!      -wal/-shm sidecars.
+//!  10. Remove stale -wal/-shm sidecars from the original path.
 //!
 //! Key-backed (whole-file encrypted) estates are skipped automatically:
 //! a `db.key` sibling file ([`persistence_kit::INSTALL_KEY_FILE`]) marks an
@@ -373,7 +378,7 @@ pub fn run_geometry_normalization(
         // `src` drops here — closes the source connection.
     }
 
-    // Step 2: sibling destination path (same directory as the original).
+    // Sibling path — the temporary destination file used in steps 2–10.
     let path_str = path.to_string_lossy();
     let sibling_path = {
         let stem = path
@@ -387,12 +392,12 @@ pub fn run_geometry_normalization(
     // Best-effort: remove a stale sibling left by a prior interrupted run.
     let _ = fs::remove_file(&sibling_path);
 
-    // Step 3: Pre-create the sibling at owner-read/write before SQLite opens
-    // it. A zero-length file is treated as a fresh empty database by SQLite —
-    // SQLITE_OPEN_CREATE on an existing zero-length file is safe, it opens the
-    // existing file without changing permissions or truncating it. This ensures
-    // the sibling is never briefly world-readable even transiently; the
-    // corresponding pattern in sqlite.rs calls set_permissions after open, but
+    // Step 2: (unix) Pre-create the sibling at owner-read/write before SQLite
+    // opens it. A zero-length file is treated as a fresh empty database by
+    // SQLite — SQLITE_OPEN_CREATE on an existing zero-length file is safe, it
+    // opens the existing file without changing permissions or truncating it.
+    // This ensures the sibling is never briefly world-readable even transiently;
+    // the corresponding pattern in sqlite.rs sets permissions after open, but
     // the pre-create approach is stronger because the permissive window is zero.
     #[cfg(unix)]
     {
@@ -403,18 +408,28 @@ pub fn run_geometry_normalization(
             .mode(0o600)
             .open(&sibling_path)?;
     }
-    // Open the DESTINATION first (fresh file, reserve=0 as main).
+    // Step 3: Open the DESTINATION first (fresh file, reserve=0 as main).
     // The SQLCipher attachFunc heuristic checks db->aDb[0].reserve — by making
     // the destination (reserve=0) the main connection, the condition `> 0` is
     // false and the heuristic does not fire when we ATTACH the source.
-    let dest = Connection::open_with_flags(
+    let dest = match Connection::open_with_flags(
         &sibling_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
-    )?;
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = fs::remove_file(&sibling_path);
+            return Err(GeometryNormalizationError::Sqlite(e));
+        }
+    };
     // WAL mode on the destination (matches the source's journal mode).
-    dest.execute_batch("PRAGMA journal_mode = WAL;")?;
+    if let Err(e) = dest.execute_batch("PRAGMA journal_mode = WAL;") {
+        drop(dest);
+        let _ = fs::remove_file(&sibling_path);
+        return Err(GeometryNormalizationError::Sqlite(e));
+    }
 
     // Step 4: ATTACH the source — dest (reserve=0) is main, so the SQLCipher
     // attachFunc heuristic condition `reserve > 0` is false → attach succeeds.

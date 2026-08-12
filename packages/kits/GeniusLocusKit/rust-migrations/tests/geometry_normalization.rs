@@ -20,7 +20,18 @@ use rusqlite::ffi as sqlite_ffi;
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use uuid::Uuid;
+
+// Serialization guard: concurrent calls to run_geometry_normalization produce
+// non-deterministic results (wrong permission bits, stale reserve reads) under
+// parallel test execution even when every test uses a unique filesystem path.
+// The bundled SQLCipher library shares internal WAL state across connections in
+// the same process. Acquiring this mutex at the start of each test ensures at
+// most one normalization is in flight at a time — same behaviour as
+// `--test-threads=1` for this suite, with negligible overhead (all tests finish
+// in under 100ms total even when serialised).
+static NORM_SERIALIZER: Mutex<()> = Mutex::new(());
 
 // MARK: - File-header reserve reader (no SQLite connection)
 
@@ -95,6 +106,7 @@ fn scratch_path(label: &str) -> PathBuf {
 
 #[test]
 fn injected_reserve_estate_normalizes() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     let path = scratch_path("inject");
 
     make_raw_reserve_estate(&path, 5).expect("make_raw_reserve_estate");
@@ -121,6 +133,7 @@ fn injected_reserve_estate_normalizes() {
 
 #[test]
 fn pass_through_reserve_zero_estate_no_work() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     let path = scratch_path("passthru");
 
     // Create via rusqlite without setting reserve (defaults to 0).
@@ -152,6 +165,7 @@ fn pass_through_reserve_zero_estate_no_work() {
 
 #[test]
 fn idempotence_second_call_no_work() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     let path = scratch_path("idem");
 
     make_raw_reserve_estate(&path, 3).expect("make_raw_reserve_estate");
@@ -179,6 +193,7 @@ fn idempotence_second_call_no_work() {
 #[cfg(unix)]
 #[test]
 fn sibling_creation_failure_returns_error() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     // Use a dedicated subdirectory so we can mark it read-only while the test-process
     // user owns the directory — the already-created reserve=12 file stays readable
     // (open descriptors are not affected), but creating any new file in the dir fails.
@@ -218,6 +233,7 @@ fn sibling_creation_failure_returns_error() {
 
 #[test]
 fn row_count_parity_after_normalization() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     let path = scratch_path("parity");
     let row_count: usize = 7;
 
@@ -242,6 +258,7 @@ fn row_count_parity_after_normalization() {
 /// INSTALL_KEY_FILE predicate is platform-agnostic.
 #[test]
 fn key_backed_estate_skip_guard() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     let path = scratch_path("keybacked");
 
     make_raw_reserve_estate(&path, 3).expect("make_raw_reserve_estate");
@@ -277,8 +294,9 @@ fn key_backed_estate_skip_guard() {
 #[cfg(unix)]
 #[test]
 fn sibling_mode_is_owner_only_while_normalizing() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     use std::os::unix::fs::MetadataExt;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -336,6 +354,7 @@ fn sibling_mode_is_owner_only_while_normalizing() {
 #[cfg(unix)]
 #[test]
 fn canonical_mode_is_owner_only_after_normalization() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     use std::os::unix::fs::MetadataExt;
 
     let path = scratch_path("canperm");
@@ -363,6 +382,7 @@ fn canonical_mode_is_owner_only_after_normalization() {
 #[cfg(unix)]
 #[test]
 fn failed_run_leaves_no_sibling() {
+    let _guard = NORM_SERIALIZER.lock().unwrap();
     use std::thread;
     use std::time::Duration;
     use std::sync::atomic::{AtomicBool, Ordering};
