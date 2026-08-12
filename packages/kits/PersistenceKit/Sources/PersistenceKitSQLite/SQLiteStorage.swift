@@ -1753,15 +1753,39 @@ extension SQLiteBackend {
         }
         completed = 2
 
-        // Phase 3 — VACUUM. Atomic at the SQLite level; never interrupted
-        // mid-flight (cancellation was honoured at the phase boundary above).
+        // Phase 3 — VACUUM INTO + atomic file swap. `VACUUM INTO 'path'` passes
+        // a real file path to SQLite's internal ATTACH, bypassing the empty-string
+        // sentinel that sqlite3RunVacuum uses for its temp file (sqlite3.c line
+        // 166984). SQLCipher's SQLITE_HAS_CODEC pager hook fails on that sentinel
+        // with SQLITE_CANTOPEN on encrypted estates; a real path succeeds because
+        // sqlite3BtreeOpen handles it without the empty-path codec shortcut.
+        // After VACUUM INTO completes, the connection is closed to release the
+        // file lock, the compacted copy is atomically swapped in, and the
+        // connection is reopened so Phase 4 PRAGMAs operate on the new file.
         try enter(.vacuum)
+        let tempURL = connection.url
+            .deletingLastPathComponent()
+            .appendingPathComponent(".vacuum-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         do {
-            try connection.exec("VACUUM")
+            try connection.exec("VACUUM INTO '\(tempURL.path)'")
         } catch {
             throw StorageMaintenanceError.backendFailure(
                 reason: "VACUUM failed: \(error)")
         }
+        connection.close()
+        do {
+            try FileManager.default.replaceItem(
+                at: connection.url,
+                withItemAt: tempURL,
+                backupItemName: nil,
+                options: .usingNewMetadataOnly,
+                resultingItemURL: nil)
+        } catch {
+            throw StorageMaintenanceError.backendFailure(
+                reason: "VACUUM file swap failed: \(error)")
+        }
+        try connection.reopen()
         completed = 3
 
         // Phase 4 — post-operation introspection. VACUUM itself commits
