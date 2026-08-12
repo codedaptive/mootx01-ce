@@ -1768,7 +1768,11 @@ extension SQLiteBackend {
             .appendingPathComponent(".vacuum-\(UUID().uuidString).sqlite")
         defer { try? FileManager.default.removeItem(at: tempURL) }
         do {
-            try connection.exec("VACUUM INTO '\(tempURL.path)'")
+            // Single-quote-escape the path: estate directory names may legally
+            // contain apostrophes (e.g. "alice's files"). The UUID segment is
+            // hex+hyphens and is safe; only the directory component needs escaping.
+            let escapedPath = tempURL.path.replacingOccurrences(of: "'", with: "''")
+            try connection.exec("VACUUM INTO '\(escapedPath)'")
         } catch {
             throw StorageMaintenanceError.backendFailure(
                 reason: "VACUUM failed: \(error)")
@@ -1782,6 +1786,9 @@ extension SQLiteBackend {
                 options: .usingNewMetadataOnly,
                 resultingItemURL: nil)
         } catch {
+            // Original is intact; reopen the connection before surfacing the
+            // error so subsequent storage calls do not receive "connection closed".
+            try? connection.reopen()
             throw StorageMaintenanceError.backendFailure(
                 reason: "VACUUM file swap failed: \(error)")
         }

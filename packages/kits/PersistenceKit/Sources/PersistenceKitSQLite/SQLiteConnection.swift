@@ -161,10 +161,10 @@ final class SQLiteConnection: @unchecked Sendable {
 
     /// Reopen the connection after VACUUM INTO + atomic file swap.
     ///
-    /// Mirrors `init` exactly (symlink guard skipped — the file was just
-    /// created by VACUUM INTO and is not attacker-controlled). Re-applies
-    /// `PRAGMA key` for full-database encrypted estates, Data Protection,
-    /// the 0600 permissions lock, and all setup PRAGMAs.
+    /// Mirrors `init` exactly (symlink guard and `createDirectory` skipped —
+    /// the swapped-in file exists at `url` and its parent directory is already
+    /// established). Re-applies `PRAGMA key` for full-database encrypted
+    /// estates, Data Protection, the 0600 permissions lock, and all setup PRAGMAs.
     func reopen() throws {
         close() // idempotent: no-op when handle is already nil
 
