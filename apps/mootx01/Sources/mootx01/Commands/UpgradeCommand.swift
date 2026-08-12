@@ -663,7 +663,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// `DepthInstaller`, and `MootPaths` are all static with no injectable seams,
     /// matching the constraint that applies to every other private helper in this
     /// command class. The three helper functions this method calls are independently
-    /// covered in MootInstallerCoreTests (InstallerTests, InstallDepthTests).
+    /// covered in MootInstallerCoreTests (InstallDepthTests, PluginDedupeTests).
     private func updatePluginManifestIfNeeded(home: URL) {
         let pluginVersion = PluginDetector.installedVersion(
             pluginID: "mootx01@mootx01", homeDirectory: home)
