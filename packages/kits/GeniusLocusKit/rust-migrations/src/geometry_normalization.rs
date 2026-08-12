@@ -135,6 +135,19 @@ fn sql_path(path: &str) -> String {
 /// issues; re-enables it after COMMIT. Uses explicit DDL ordering: tables
 /// first (so indexes and triggers have a table to reference), then indexes,
 /// views, and triggers.
+///
+/// # ALTER TABLE column handling
+///
+/// SQLite's `sqlite_schema.sql` column stores the ORIGINAL `CREATE TABLE`
+/// statement. Columns added later via `ALTER TABLE ADD COLUMN` do not appear
+/// in that DDL, but they ARE returned by `SELECT *` and `PRAGMA table_info`.
+/// Without compensation, `INSERT INTO main.t SELECT * FROM source.t` fails
+/// with "table has N columns but M values" when M > N.
+///
+/// Compensation: after creating each table from its DDL we query
+/// `PRAGMA source.table_info(t)` to discover any extra columns and add them
+/// to the destination with `ALTER TABLE ADD COLUMN` before inserting data.
+/// The INSERT then uses an explicit column list built from the live column set.
 fn copy_schema_and_data(dest: &Connection) -> Result<(), rusqlite::Error> {
     // Disable foreign key enforcement during bulk copy — rows are inserted
     // before their referents are necessarily present.
@@ -142,43 +155,96 @@ fn copy_schema_and_data(dest: &Connection) -> Result<(), rusqlite::Error> {
     dest.execute_batch("BEGIN;")?;
 
     // 1. Collect user table names and DDL in rowid order (dependency order).
-    let table_names: Vec<String> = {
+    // name and sql fetched together so table ordering is consistent.
+    let tables: Vec<(String, String)> = {
         let mut stmt = dest.prepare(
-            "SELECT name FROM source.sqlite_schema \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
-             ORDER BY rowid",
-        )?;
-        let names: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        names
-    };
-    let table_ddls: Vec<String> = {
-        let mut stmt = dest.prepare(
-            "SELECT sql FROM source.sqlite_schema \
+            "SELECT name, sql FROM source.sqlite_schema \
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL \
              ORDER BY rowid",
         )?;
-        let ddls: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
+        let v: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
             .filter_map(|r| r.ok())
             .collect();
-        ddls
+        v
     };
-    // 2. Execute CREATE TABLE DDL in the destination.
-    for ddl in &table_ddls {
-        dest.execute_batch(ddl)?;
-    }
-    // 3. Copy rows for each user table.
-    for table in &table_names {
+
+    // 2. For each table: create from DDL, reconcile ALTER-TABLE columns, copy rows.
+    for (table, ddl) in &tables {
         let q_name = sql_ident(table);
-        dest.execute_batch(&format!(
-            "INSERT INTO main.{q_name} SELECT * FROM source.{q_name};"
-        ))?;
+        let table_escaped = table.replace('"', "\"\"");
+
+        // Create the table from the sqlite_schema DDL (preserves all original
+        // constraints: NOT NULL, CHECK, UNIQUE, REFERENCES).
+        dest.execute_batch(ddl)?;
+
+        // Discover all LIVE columns in the source (cid order = insertion order).
+        // PRAGMA table_info includes columns added via ALTER TABLE ADD COLUMN that
+        // are absent from the sqlite_schema DDL.
+        // PRAGMA columns: cid(0) name(1) type(2) notnull(3) dflt_value(4) pk(5)
+        let source_cols: Vec<(String, String, Option<String>)> = {
+            let mut stmt = dest.prepare(&format!(
+                "PRAGMA source.table_info(\"{table_escaped}\")"
+            ))?;
+            let v: Vec<(String, String, Option<String>)> = stmt
+                .query_map([], |r| Ok((
+                    r.get::<_, String>(1)?,          // name
+                    r.get::<_, String>(2)?,          // type
+                    r.get::<_, Option<String>>(4)?,  // dflt_value
+                )))?
+                .filter_map(|r| r.ok())
+                .collect();
+            v
+        };
+
+        // Discover which columns the DDL-created destination table has.
+        let dest_col_names: std::collections::HashSet<String> = {
+            let mut stmt = dest.prepare(&format!(
+                "PRAGMA table_info(\"{table_escaped}\")"
+            ))?;
+            let v: std::collections::HashSet<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            v
+        };
+
+        // Add columns from ALTER TABLE ADD COLUMN that are missing from the destination.
+        // SQLite requires ALTER-added columns to be nullable or carry a DEFAULT, so the
+        // ADD COLUMN here is always valid (the source schema enforces this invariant).
+        for (col_name, col_type, dflt) in &source_cols {
+            if dest_col_names.contains(col_name) {
+                continue;
+            }
+            let col_escaped = col_name.replace('"', "\"\"");
+            let q_col = format!("\"{}\"", col_escaped);
+            let dflt_clause = match dflt {
+                Some(d) => format!(" DEFAULT {d}"),
+                None => String::new(),
+            };
+            dest.execute_batch(&format!(
+                "ALTER TABLE main.{q_name} ADD COLUMN {q_col} {col_type}{dflt_clause};"
+            ))?;
+        }
+
+        // Copy rows with an explicit column list to avoid SELECT * mismatch.
+        let col_list = source_cols
+            .iter()
+            .map(|(n, _, _)| {
+                let e = n.replace('"', "\"\"");
+                format!("\"{}\"", e)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !col_list.is_empty() {
+            dest.execute_batch(&format!(
+                "INSERT INTO main.{q_name} ({col_list}) \
+                 SELECT {col_list} FROM source.{q_name};"
+            ))?;
+        }
     }
 
-    // 4. Handle sqlite_sequence (implicit AUTOINCREMENT tracker). Not in
+    // 3. Handle sqlite_sequence (implicit AUTOINCREMENT tracker). Not in
     //    sqlite_schema; check by name and copy if present in source.
     let has_seq: bool = dest
         .query_row(
@@ -198,7 +264,7 @@ fn copy_schema_and_data(dest: &Connection) -> Result<(), rusqlite::Error> {
         )?;
     }
 
-    // 5. Copy indexes (schema DDL only; data is rebuilt automatically).
+    // 4. Copy indexes (schema DDL only; data is rebuilt automatically).
     let index_ddls: Vec<String> = {
         let mut stmt = dest.prepare(
             "SELECT sql FROM source.sqlite_schema \
@@ -215,7 +281,7 @@ fn copy_schema_and_data(dest: &Connection) -> Result<(), rusqlite::Error> {
         dest.execute_batch(ddl)?;
     }
 
-    // 6. Copy views.
+    // 5. Copy views.
     let view_ddls: Vec<String> = {
         let mut stmt = dest.prepare(
             "SELECT sql FROM source.sqlite_schema \
@@ -232,7 +298,7 @@ fn copy_schema_and_data(dest: &Connection) -> Result<(), rusqlite::Error> {
         dest.execute_batch(ddl)?;
     }
 
-    // 7. Copy triggers (after tables, indexes, and views).
+    // 6. Copy triggers (after tables, indexes, and views).
     let trigger_ddls: Vec<String> = {
         let mut stmt = dest.prepare(
             "SELECT sql FROM source.sqlite_schema \

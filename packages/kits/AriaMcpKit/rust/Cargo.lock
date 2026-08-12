@@ -83,6 +83,7 @@ dependencies = [
  "observer-sink",
  "persistence-kit",
  "queuekit",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
