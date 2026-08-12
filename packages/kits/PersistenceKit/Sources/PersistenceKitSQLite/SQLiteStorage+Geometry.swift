@@ -15,6 +15,18 @@ import SQLCipher
 import PersistenceKit
 import OSLog
 
+// MARK: - Test hook (nil in production)
+
+/// Test-only hook: called immediately after the sibling file is created at 0600
+/// and before the ATTACH. Set this in a test to observe or modify the sibling
+/// during its creation window. Must remain nil in production.
+///
+/// nonisolated(unsafe) is correct here: the hook is set and cleared around
+/// each test in a serialized test suite, so no concurrent access occurs.
+/// A module-level global is used because Swift does not allow stored properties
+/// in extensions on actor types.
+public nonisolated(unsafe) var _geometryNormalizationTestHookAfterSiblingCreation: (@Sendable (URL) -> Void)? = nil
+
 // MARK: - SQLiteStorage: normalizeGeometry (StorageMaintenance override)
 
 extension SQLiteStorage {
@@ -43,7 +55,12 @@ extension SQLiteBackend {
     ///
     /// Repair sequence (V3 chain, proven):
     ///   1. WAL checkpoint (TRUNCATE) — consolidate all data in the main file.
-    ///   2. Create a fresh sibling file at `<url>.geo_normalize_tmp.sqlite3`.
+    ///   2. Create the sibling at `<url>.geo_normalize_tmp.sqlite3` explicitly with
+    ///      0600 permissions, before the ATTACH. SQLite's ATTACH would otherwise
+    ///      create it at 0644 (SQLITE_DEFAULT_FILE_PERMISSIONS adjusted by umask —
+    ///      sqlite3.c:40464), leaving a full plaintext copy world-readable until the
+    ///      0600 pass in reopenAfterGeometrySwap. The pre-created empty file is a
+    ///      valid SQLite database target: ATTACH opens it in place.
     ///   3. `ATTACH '<sibling>' AS heal KEY '';` — the empty-string KEY sets nKey=0
     ///      at the application layer, bypassing the heuristic that fires for codec
     ///      nKey=0 on the already-decoded main schema.
@@ -78,32 +95,52 @@ extension SQLiteBackend {
         // Step 1: checkpoint WAL so all committed pages are in the main file.
         try connection.exec("PRAGMA wal_checkpoint(TRUNCATE);")
 
-        // Step 2: create the sibling destination file.
+        // Step 2: derive sibling path; remove any stale sibling from a prior interrupted run.
         let siblingURL = connection.url
             .deletingLastPathComponent()
             .appendingPathComponent(
                 connection.url.deletingPathExtension().lastPathComponent
                 + ".geo_normalize_tmp.sqlite3"
             )
-        // Best-effort: remove a stale sibling left by a prior interrupted run.
         try? FileManager.default.removeItem(at: siblingURL)
+
+        // Create the sibling explicitly at owner-only permissions.
+        // ATTACH would otherwise create the file at SQLITE_DEFAULT_FILE_PERMISSIONS
+        // (0644 adjusted by umask — sqlite3.c:40464). Creating it here ensures
+        // the file is never readable by another OS user at any point in its life.
+        // An empty file is a valid SQLite database target: ATTACH opens it in place.
+        let siblingCreated = FileManager.default.createFile(
+            atPath: siblingURL.path, contents: nil,
+            attributes: [.posixPermissions: 0o600])
+        guard siblingCreated else {
+            throw StorageError.backendError(
+                underlying: "geometry normalization: could not create sibling at 0600")
+        }
+        // Notify any test hook registered to observe the sibling in this window.
+        _geometryNormalizationTestHookAfterSiblingCreation?(siblingURL)
 
         // Step 3-5: export through the empty-key ATTACH escape hatch.
         // KEY '' (empty string) sets nKey=0 at the application layer. This is
         // distinct from the codec path that fires when the main database has
         // nonzero reserve: the codec path is rejected; the application-layer empty
         // key is accepted and creates a standard plaintext ATTACH.
+        // On any failure in this block the sibling is removed — it was created by
+        // us and must not be left behind if the export or verification fails.
         let siblingSQL = sqlQuoted(siblingURL.path)
-        try connection.exec("ATTACH \(siblingSQL) AS heal KEY '';")
-        try connection.exec("SELECT sqlcipher_export('heal');")
-        try connection.exec("DETACH heal;")
+        do {
+            try connection.exec("ATTACH \(siblingSQL) AS heal KEY '';")
+            try connection.exec("SELECT sqlcipher_export('heal');")
+            try connection.exec("DETACH heal;")
 
-        // Step 6: verify the sibling has reserve=0.
-        let siblingReserve = Self.readReserveBytes(at: siblingURL)
-        guard siblingReserve == 0 else {
+            // Step 6: verify the sibling has reserve=0.
+            let siblingReserve = Self.readReserveBytes(at: siblingURL)
+            guard siblingReserve == 0 else {
+                throw StorageError.backendError(
+                    underlying: "geometry normalization: sibling has unexpected reserve=\(siblingReserve)")
+            }
+        } catch {
             try? FileManager.default.removeItem(at: siblingURL)
-            throw StorageError.backendError(
-                underlying: "geometry normalization: sibling has unexpected reserve=\(siblingReserve)")
+            throw error
         }
 
         // Step 7: close the connection before the atomic rename.
@@ -116,8 +153,13 @@ extension SQLiteBackend {
         let renameRC = rename(siblingURL.path, connection.url.path)
         guard renameRC == 0 else {
             let err = errno
-            // Best-effort: try to put the sibling back if rename failed.
-            try? FileManager.default.moveItem(at: siblingURL, to: connection.url)
+            // Best-effort: try to restore the sibling to the original path.
+            // If that also fails, remove the sibling so no stale copy remains.
+            do {
+                try FileManager.default.moveItem(at: siblingURL, to: connection.url)
+            } catch {
+                try? FileManager.default.removeItem(at: siblingURL)
+            }
             throw StorageError.backendError(
                 underlying: "geometry normalization: rename errno=\(err)")
         }
