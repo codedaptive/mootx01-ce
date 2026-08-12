@@ -67,6 +67,12 @@ struct ProxyCommand: AsyncParsableCommand {
         let session = URLSession(configuration: config)
         let writer = FrameWriter()
         var buffer = Data()
+        // Frame-size cap: matches Rust MAX_LINE_BYTES (#36, security finding:
+        // a single newline-terminated frame of arbitrary size can exhaust the
+        // proxy's address space from a malicious or malfunctioning stdio producer;
+        // a normal JSON-RPC frame is a few KB, so 4 MB is generous for any
+        // legitimate MCP tool call while closing the multi-GB stdin attack).
+        let maxFrameBytes = 4 * 1024 * 1024
         // Read stdin until EOF. Same availableData loop as StdioServer.run —
         // availableData blocks until bytes arrive at the pipe (non-blocking for
         // the buffer-fill, blocking at the OS read level), and returns empty
@@ -82,10 +88,27 @@ struct ProxyCommand: AsyncParsableCommand {
                 let chunk = FileHandle.standardInput.availableData
                 if chunk.isEmpty { break }
                 buffer.append(chunk)
+                // Buffer overflow guard (#36): if the accumulation buffer grows
+                // past the frame-size cap with no newline, the producer is
+                // writing a blob too large to forward — discard to prevent
+                // multi-GB memory growth from a newline-less stdin stream.
+                if buffer.count > maxFrameBytes, !buffer.contains(0x0A) {
+                    proxyStderrLog("mootx01 proxy: frame exceeds \(maxFrameBytes) byte limit, dropped")
+                    buffer = Data()
+                    continue
+                }
                 while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                     let frame = buffer.subdata(in: buffer.startIndex..<newlineIndex)
                     buffer.removeSubrange(buffer.startIndex...newlineIndex)
                     if frame.isEmpty { continue }
+                    // Per-frame size cap (#36): oversized frames are dropped, not
+                    // forwarded — parsing a multi-MB blob for a request id is
+                    // itself an attack surface; the client gets no synthesized
+                    // error because the frame is malformed input, not a request.
+                    if frame.count > maxFrameBytes {
+                        proxyStderrLog("mootx01 proxy: frame exceeds \(maxFrameBytes) byte limit, dropped")
+                        continue
+                    }
                     group.addTask {
                         await Self.forward(frame, to: url, session: session, writer: writer)
                     }
@@ -183,7 +206,7 @@ private actor FrameWriter {
 }
 
 /// Write a diagnostic line to stderr. stdout is reserved for JSON-RPC frames
-/// (ARIA_MCP_SPEC_v0.2 §5), so all ProxyCommand diagnostics go to stderr.
+/// (ARIA_MCP_SPEC §5), so all ProxyCommand diagnostics go to stderr.
 private func proxyStderrLog(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data("\(message)\n".utf8))
 }
