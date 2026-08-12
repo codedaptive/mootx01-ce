@@ -26,10 +26,14 @@ final class SQLiteConnection: @unchecked Sendable {
     var handle: OpaquePointer?
     let url: URL
     let busyTimeout: TimeInterval
+    // Stored for reopen() after VACUUM INTO + atomic file swap so encrypted
+    // estates can re-apply PRAGMA key on the freshly-swapped connection.
+    private let storedKeyHex: String?
 
     init(url: URL, busyTimeout: TimeInterval, keyHex: String? = nil) throws {
         self.url = url
         self.busyTimeout = busyTimeout
+        self.storedKeyHex = keyHex
         // Ensure parent directory exists.
         let parent = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -153,6 +157,58 @@ final class SQLiteConnection: @unchecked Sendable {
             sqlite3_close_v2(handle)
         }
         handle = nil
+    }
+
+    /// Reopen the connection after VACUUM INTO + atomic file swap.
+    ///
+    /// Mirrors `init` exactly (symlink guard skipped — the file was just
+    /// created by VACUUM INTO and is not attacker-controlled). Re-applies
+    /// `PRAGMA key` for full-database encrypted estates, Data Protection,
+    /// the 0600 permissions lock, and all setup PRAGMAs.
+    func reopen() throws {
+        close() // idempotent: no-op when handle is already nil
+
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        var newHandle: OpaquePointer?
+        let rc = sqlite3_open_v2(url.path, &newHandle, flags, nil)
+        guard rc == SQLITE_OK, let newHandle else {
+            let msg = newHandle.map { String(cString: sqlite3_errmsg($0)) } ?? "reopen failed"
+            sqlite3_close(newHandle)
+            throw StorageError.backendError(underlying: "reopen: \(msg)")
+        }
+        handle = newHandle
+
+        // Re-apply PRAGMA key for full-database (Mode 3) estates. Must be the
+        // first statement on the connection, matching the order in init.
+        if let keyHex = storedKeyHex {
+            let keySql = "PRAGMA key = \"x'\(keyHex)'\";"
+            var keyErrMsg: UnsafeMutablePointer<CChar>? = nil
+            let keyRc = sqlite3_exec(handle, keySql, nil, nil, &keyErrMsg)
+            if keyRc != SQLITE_OK {
+                let msg = keyErrMsg.map { String(cString: $0) } ?? "key pragma failed"
+                if let keyErrMsg { sqlite3_free(keyErrMsg) }
+                close()
+                throw StorageError.backendError(underlying: "reopen: PRAGMA key failed: \(msg)")
+            }
+        }
+
+        Self.applyDataProtection(to: url)
+
+        // Restore 0600 permissions. FileManager.replaceItem(.usingNewMetadataOnly)
+        // copies the temp file's permissions (SQLite default 0644) to the
+        // destination. Owner-only access must be re-established after the swap.
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path + suffix)
+        }
+
+        try exec("PRAGMA journal_mode = WAL;")
+        try exec("PRAGMA synchronous = NORMAL;")
+        try exec("PRAGMA wal_autocheckpoint = 1000;")
+        try exec("PRAGMA busy_timeout = \(Int(busyTimeout * 1000));")
+        try exec("PRAGMA foreign_keys = ON;")
+        try exec("PRAGMA mmap_size = 2147483648;")
+        _ = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 0x7ffffffd)
     }
 
     /// Best-effort application of Apple Data Protection to the database file.
