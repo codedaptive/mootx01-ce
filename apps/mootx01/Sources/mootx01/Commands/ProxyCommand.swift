@@ -67,12 +67,11 @@ struct ProxyCommand: AsyncParsableCommand {
         let session = URLSession(configuration: config)
         let writer = FrameWriter()
         var buffer = Data()
-        // Frame-size cap: matches Rust MAX_LINE_BYTES (#36, security finding:
-        // a single newline-terminated frame of arbitrary size can exhaust the
-        // proxy's address space from a malicious or malfunctioning stdio producer;
-        // a normal JSON-RPC frame is a few KB, so 4 MB is generous for any
-        // legitimate MCP tool call while closing the multi-GB stdin attack).
-        let maxFrameBytes = 4 * 1024 * 1024
+        // Concurrency gate (#12, security finding: prevents unbounded task count
+        // from a fast stdin producer). Matches Rust MAX_CONCURRENT = 16. Frame 17
+        // waits in gate.acquire() until a running frame calls gate.release().
+        // ProxyConcurrencyGate lives in MootInstallerCore for unit testability.
+        let gate = ProxyConcurrencyGate(maxConcurrent: 16)
         // Read stdin until EOF. Same availableData loop as StdioServer.run —
         // availableData blocks until bytes arrive at the pipe (non-blocking for
         // the buffer-fill, blocking at the OS read level), and returns empty
@@ -92,8 +91,8 @@ struct ProxyCommand: AsyncParsableCommand {
                 // past the frame-size cap with no newline, the producer is
                 // writing a blob too large to forward — discard to prevent
                 // multi-GB memory growth from a newline-less stdin stream.
-                if buffer.count > maxFrameBytes, !buffer.contains(0x0A) {
-                    proxyStderrLog("mootx01 proxy: frame exceeds \(maxFrameBytes) byte limit, dropped")
+                if buffer.count > proxyMaxFrameBytes, !buffer.contains(0x0A) {
+                    proxyStderrLog("mootx01 proxy: frame exceeds \(proxyMaxFrameBytes) byte limit, dropped")
                     buffer = Data()
                     continue
                 }
@@ -105,12 +104,14 @@ struct ProxyCommand: AsyncParsableCommand {
                     // forwarded — parsing a multi-MB blob for a request id is
                     // itself an attack surface; the client gets no synthesized
                     // error because the frame is malformed input, not a request.
-                    if frame.count > maxFrameBytes {
-                        proxyStderrLog("mootx01 proxy: frame exceeds \(maxFrameBytes) byte limit, dropped")
+                    if frame.count > proxyMaxFrameBytes {
+                        proxyStderrLog("mootx01 proxy: frame exceeds \(proxyMaxFrameBytes) byte limit, dropped")
                         continue
                     }
+                    await gate.acquire()
                     group.addTask {
                         await Self.forward(frame, to: url, session: session, writer: writer)
+                        await gate.release()
                     }
                 }
             }
