@@ -28,10 +28,12 @@
 //!   8. Atomic `rename()` — replace the original with the destination.
 //!   9. Remove stale -wal/-shm sidecars from the original path.
 //!
-//! Callers are responsible for filtering out Mode-3 encrypted estates before
-//! calling this function — their reserve bytes belong to SQLCipher's per-page
-//! authentication layer. The `estate_registry` SQLite arm calls this only for
-//! plaintext (non-encrypted) estates.
+//! Key-backed (whole-file encrypted) estates are skipped automatically:
+//! a `db.key` sibling file ([`persistence_kit::INSTALL_KEY_FILE`]) marks an
+//! estate as key-backed. Normalizing it would corrupt SQLCipher's per-page IV
+//! structure, which lives in the reserved bytes we would otherwise zero out.
+//! This matches the Swift port's `guard encryptionConfig.mode != .fullDatabase`
+//! check in `SQLiteBackend.normalizeGeometry()`.
 
 use rusqlite::{Connection, OpenFlags};
 use std::fs;
@@ -343,6 +345,18 @@ pub fn run_geometry_normalization(
 
     let reserve = read_reserve_bytes(path);
     if reserve == 0 {
+        return Ok(GeometryNormalizationReport::no_op());
+    }
+
+    // Skip key-backed (whole-file encrypted) estates. Their reserved bytes are
+    // SQLCipher's per-page IV space; zeroing them would corrupt every page.
+    // A `db.key` sibling marks an estate as key-backed — same predicate as
+    // the Swift port's `encryptionConfig.mode != .fullDatabase` guard.
+    if path
+        .parent()
+        .map(|parent| parent.join(persistence_kit::INSTALL_KEY_FILE).exists())
+        .unwrap_or(false)
+    {
         return Ok(GeometryNormalizationReport::no_op());
     }
 
