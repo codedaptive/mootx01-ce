@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.35.0
+version: 1.36.0
 status: accepted-1.1-target
 date: 2026-08-11
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -95,6 +95,11 @@ Remote/multi-tenant HTTP (the Custom Connector path: internet-hosted https, OAut
 **Notifications (frames without an `id`) produce no reply on any failure path.** This is MCP spec compliant — servers must not reply to notifications.
 
 **The bridge is stateless per-frame.** Each frame is an independent POST. There is no session recovery: if the daemon restarts, in-flight requests receive synthesized errors and the next request starts clean. If a future version of the bridge adds an `Mcp-Session-Id` header, session recovery (clear + re-initialize + one-shot retry) must be added at the same time — a restart without recovery becomes a permanent outage for the session.
+
+**Bridge input limits (both ports, security findings 012 and 036).** The bridge enforces two admission limits on all inbound frames. Both limits are byte-identical across the Swift (`ProxyCommand`) and Rust (`proxy.rs`) implementations:
+
+1. **Frame-size cap — 4 MB (`4 * 1024 * 1024` bytes).** Any newline-delimited frame exceeding this limit is dropped without forwarding. A dropped oversized frame produces no synthesized error: the frame is malformed input, not a failed request, and parsing a multi-megabyte blob for a request id is itself an attack surface. The drop is logged to stderr as `mootx01 proxy: frame exceeds 4194304 byte limit, dropped`. The accumulation buffer is also bounded: if the buffer exceeds the cap with no newline seen, content is discarded to prevent memory exhaustion from a newline-less stdin stream.
+2. **Concurrency cap — 16 frames in flight.** No more than 16 frames may be forwarded simultaneously. A 17th frame waits until one of the running frames completes; it is never dropped. This is the structured-concurrency equivalent of the Rust reap-and-wait loop.
 
 ## § 6. Client compatibility (verified 2026-05-22)
 
@@ -1051,6 +1056,10 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.36.0 -- 2026-08-11
+
+- Bridge input limits (pc stream, security findings 012/036). §5 gains the bridge input limits subsection documenting the two admission caps enforced by both ports: 4 MB per frame (oversized frames dropped with a stderr diagnostic, no synthesized error) and 16 frames in flight maximum (17th frame waits, never dropped). Both limits are byte-identical across the Swift `ProxyCommand` and Rust `proxy.rs` implementations.
 
 ### 1.35.0 -- 2026-08-11
 

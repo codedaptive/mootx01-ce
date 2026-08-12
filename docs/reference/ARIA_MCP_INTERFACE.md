@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.39.0
+version: 1.40.0
 status: accepted-1.1-target
 date: 2026-08-11
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -93,6 +93,14 @@ Bridge failure-response invariant (enforced at this surface): every id-bearing f
 
 `MootInstallerCore.proxyDisposition(statusCode:bodyEmpty:) -> ProxyDisposition` is the pure decision function.  
 `MootInstallerCore.proxyRequestID(of:) -> String?` extracts the id as a JSON literal; returns nil for notifications, `id:null`, boolean ids, and unparseable frames.
+
+Bridge input limits (security findings 012/036, pc stream): the bridge enforces two admission limits on inbound frames. Both are implemented in `ProxyCommand.run()` using primitives from `MootInstallerCore/ProxyAdmissionGate.swift`, and are byte-identical across the Swift and Rust ports:
+
+- **Frame-size cap — 4 MB (`proxyMaxFrameBytes = 4 * 1024 * 1024`).** Frames exceeding this limit are dropped without forwarding and without a synthesized error. Logged to stderr as `mootx01 proxy: frame exceeds 4194304 byte limit, dropped`. The stdin accumulation buffer is also bounded at the same cap to prevent memory exhaustion from newline-less streams.
+- **Concurrency cap — 16 frames (`ProxyConcurrencyGate(maxConcurrent: 16)`).** At most 16 frames are forwarded simultaneously. A 17th waits in `gate.acquire()` until a running frame calls `gate.release()`; it is never dropped.
+
+`MootInstallerCore.proxyMaxFrameBytes: Int` — the 4 MB frame-size cap constant.  
+`MootInstallerCore.ProxyConcurrencyGate` — the actor-based counting gate; `acquire()` suspends when all slots are occupied, `release()` hands the slot to the next waiter or decrements the count. Tested in `MootInstallerCoreTests/ProxyAdmissionTests.swift`.
 
 This is the external access surface above the substrate; it is not
 imported by any other package, so it is documented single-tier (its full
@@ -1247,6 +1255,10 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.40.0 -- 2026-08-11
+
+- Bridge input limits (pc stream, security findings 012/036). §1 gains the two admission caps for `ProxyCommand.swift` and their `MootInstallerCore` primitives: `proxyMaxFrameBytes` (4 MB frame-size cap) and `ProxyConcurrencyGate` (16-slot actor-based counting gate). Both are byte-identical across Swift and Rust. `ProxyAdmissionGate.swift` is new in MootInstallerCore; `ProxyAdmissionTests.swift` is the new test suite.
 
 ### 1.39.0 -- 2026-08-11
 

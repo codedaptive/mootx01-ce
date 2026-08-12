@@ -63,4 +63,13 @@ Rationale:
 
 ## Status
 
-Decided 2026-08-11. No timeout, no cap. Revisit when observability data is available.
+Decided 2026-08-11. No timeout, no cap (policy disposition). Revisit when observability data is available.
+
+## Amendment — 2026-08-11 (pc stream)
+
+**Security findings 012 and 036 override the "no cap" policy disposition for input admission.** The policy arguments above (cancellation head-of-line, low practical concurrency) govern *design-choice* caps (a cap chosen for ergonomics or resource policy). They do not govern *security-finding* caps (caps required to close a known attack surface). The distinction:
+
+- **Concurrency cap (finding 012):** 16 in-flight frames, matching Rust `MAX_CONCURRENT`. An unbounded task count from a fast stdin producer is a local DoS surface; the cap closes it. The cap is not the "notification head-of-line" cap this decision rejected — it is a hard limit at 16× the practical concurrency of Claude Desktop (1–3 calls), well above any legitimate load.
+- **Frame-size cap (finding 036):** 4 MB per frame, matching Rust `MAX_LINE_BYTES`. An unbounded accumulation buffer is a memory exhaustion surface; the cap closes it. Oversized frames are dropped (no synthesized error); the buffer is bounded against newline-less streams.
+
+The Rust port carried both caps before this decision was recorded. The Swift port now matches. Both ports agree on the values and semantics. This is parity closure, not a policy change — the design-choice questions (per-frame timeout, notification-reserved slots) remain open and governed by this record.
