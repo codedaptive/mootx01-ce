@@ -955,13 +955,27 @@ public struct ToolDispatcher: Sendable {
 
     /// MCP `tools/call` success result with a single text content block.
     public static func textResult(_ text: String) -> JSONValue {
+        textResultBlocks([text])
+    }
+
+    /// MCP `tools/call` success result carrying several text blocks, in order.
+    ///
+    /// Used where a machine-readable payload travels alongside the prose
+    /// receipt (`moot_json_import` with `return_id_map`): the reader parses one
+    /// block whole rather than scraping structure out of a sentence.
+    ///
+    /// Deliberately NOT an overload of `textResult(_:)`. Overloading on
+    /// `String` vs `[String]` forces the type-checker to weigh both candidates
+    /// at every call site, and the long `+`-chained receipt strings in this
+    /// file exceed its time budget when it has to.
+    public static func textResultBlocks(_ blocks: [String]) -> JSONValue {
         .object([
-            "content": .array([
+            "content": .array(blocks.map { block in
                 .object([
                     "type": .string("text"),
-                    "text": .string(text),
+                    "text": .string(block),
                 ])
-            ]),
+            }),
             "isError": .bool(false),
         ])
     }
@@ -3703,6 +3717,15 @@ extension ToolDispatcher {
             )
         }
 
+        // return_id_map: when true the receipt carries a second text block —
+        // a JSON object mapping each seed `record.id` to the drawer id capture
+        // minted for it. Off by default because the ordinary caller wants the
+        // one-line receipt, not N id pairs. A caller that must address what it
+        // imported (cross-referencing, per-record reporting, or any harness
+        // that scores retrieval against known records) needs this: drawer ids
+        // are minted at insert and cannot be derived client-side.
+        let returnIDMap = try optionalBool(args["return_id_map"], argument: "return_id_map") ?? false
+
         let bridge = JsonImportBridge(kit: kit)
         let report: JsonImportReport
         do {
@@ -3722,16 +3745,39 @@ extension ToolDispatcher {
             return Self.errorResult(message)
         }
 
-        return Self.textResult(
-            "json import complete: \(report.drawersWritten) drawers, " +
-            "\(report.factsWritten) facts, \(report.tunnelsCreated) tunnels " +
-            "from seed \"\(report.seedName)\" (strict append — every record is a fresh lineage). " +
-            "seedSha256=\(report.seedSha256). " +
-            "\(report.enqueuedForEncode) drawers enqueued for semantic encoding; " +
-            "keyword and structured recall work almost immediately, and full semantic/vector " +
-            "recall lights up after the encode work settles — poll moot_drain_status until idle " +
-            "before relying on semantic search over the imported memories."
-        )
+        // Built in parts: as one `+` chain of interpolations this exceeded the
+        // type-checker's time budget.
+        var receipt = "json import complete: \(report.drawersWritten) drawers, "
+        receipt += "\(report.factsWritten) facts, \(report.tunnelsCreated) tunnels "
+        receipt += "from seed \"\(report.seedName)\" (strict append — every record is a fresh lineage). "
+        receipt += "seedSha256=\(report.seedSha256). "
+        receipt += "\(report.enqueuedForEncode) drawers enqueued for semantic encoding; "
+        receipt += "keyword and structured recall work almost immediately, and full semantic/vector "
+        receipt += "recall lights up after the encode work settles — poll moot_drain_status until idle "
+        receipt += "before relying on semantic search over the imported memories."
+
+        guard returnIDMap else { return Self.textResult(receipt) }
+
+        // Second block: `{"id_map":{"<record id>":"<drawer id>",…}}`. Its own
+        // block, not appended prose, so a caller parses one whole JSON object
+        // instead of scraping the receipt sentence. Keys are sorted so the
+        // bytes are identical across runs of the same seed.
+        let mapObject = JSONValue.object([
+            "id_map": .object(report.drawerIDByRecordID.mapValues { JSONValue.string($0) })
+        ])
+        let mapJSON: String
+        do {
+            let data = try JSONSerialization.data(
+                withJSONObject: mapObject.foundationObject,
+                options: [.sortedKeys, .withoutEscapingSlashes])
+            mapJSON = String(decoding: data, as: UTF8.self)
+        } catch {
+            // Drawer ids are strings by construction, so this cannot fire; if
+            // it ever does, fail loudly rather than hand back a receipt whose
+            // map is silently missing.
+            return Self.errorResult("json import: could not serialize the id map — \(error)")
+        }
+        return Self.textResultBlocks([receipt, mapJSON])
     }
 }
 

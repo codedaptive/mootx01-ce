@@ -58,7 +58,7 @@ use vault_kit::palace_bridge::PalaceBridge;
 
 use crate::dispatch::{
     clamp_limit, decode_filter_chain, error_result, optional_bool, optional_integer, optional_string,
-    require_string, text_result, wall_now,
+    require_string, text_result, text_result_blocks, wall_now,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
@@ -3843,6 +3843,25 @@ fn run_json_import(
         }
     };
 
+    // return_id_map: when true the receipt carries a second text block — a JSON
+    // object mapping each seed `record.id` to the drawer id capture minted for
+    // it. Off by default because the ordinary caller wants the one-line
+    // receipt, not N id pairs. A caller that must address what it imported
+    // (cross-referencing, per-record reporting, or any harness that scores
+    // retrieval against known records) needs this: drawer ids are minted at
+    // insert and cannot be derived client-side.
+    // Explicit null is invalid, not "use the default" — parity with Swift
+    // optionalBool, whose message is pinned byte-identical here.
+    let return_id_map = match args.get("return_id_map") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "return_id_map must be a boolean; omit it to use the default".to_string(),
+            )
+        })?,
+    };
+
     let mut coord = estate.coord.lock().unwrap();
     let mut bridge = JsonImportBridge::new(&mut coord);
     let report = match bridge.import_seed(
@@ -3867,7 +3886,7 @@ fn run_json_import(
         Err(e) => return Ok(error_result(&format!("json import failed: {e}"))),
     };
 
-    Ok(text_result(&format!(
+    let receipt = format!(
         "json import complete: {} drawers, {} facts, {} tunnels from seed \"{}\" \
          (strict append — every record is a fresh lineage). seedSha256={}. \
          {} drawers enqueued for semantic encoding; keyword and structured recall work \
@@ -3880,7 +3899,19 @@ fn run_json_import(
         report.seed_name,
         report.seed_sha256,
         report.enqueued_for_encode,
-    )))
+    );
+
+    if !return_id_map {
+        return Ok(text_result(&receipt));
+    }
+
+    // Second block: `{"id_map":{"<record id>":"<drawer id>",…}}`. Its own block,
+    // not appended prose, so a caller parses one whole JSON object instead of
+    // scraping the receipt sentence. The report's map is a BTreeMap and
+    // serde_json preserves that order, so the bytes match Swift's sorted-key
+    // output for the same seed.
+    let map_json = serde_json::json!({ "id_map": report.drawer_id_by_record_id }).to_string();
+    Ok(text_result_blocks(&[receipt, map_json]))
 }
 
 // ===========================================================================

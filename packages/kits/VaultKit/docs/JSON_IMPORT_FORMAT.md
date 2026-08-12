@@ -1,8 +1,8 @@
 ---
 title: VaultKit JSON Seed-File Format
-version: 1.1.0
+version: 1.2.0
 status: active
-date: 2026-08-09
+date: 2026-08-12
 description: Canonical definition of seed-file schema v1.1 — the rigid, versioned JSON format consumed by the moot_json_import lane, both ports.
 ---
 
@@ -135,8 +135,44 @@ subject accrue debt for the backfill daemon) → intra-file relationship pass
 traceable to the exact seed file that built it. The importer returns after
 the encode enqueue; the drain barrier and dream are caller protocol steps.
 
+## Addressing what you imported (`return_id_map`)
+
+A record's lineage is deterministic (FNV-1a-128 of the record id), but the
+drawer id is minted fresh at insert and no recall surface addresses a drawer
+by lineage. A caller therefore cannot compute, client-side, which drawer a
+record became.
+
+`moot_json_import` accepts `return_id_map` (boolean, default `false`). When
+true the reply carries a SECOND text block — a JSON object — alongside the
+prose receipt:
+
+```json
+{"id_map": {"<record id>": "<drawer id>"}}
+```
+
+One entry per seeded record, keys sorted so the bytes are identical across
+runs of the same seed. `JsonImportReport.drawerIDByRecordID` (Swift) /
+`JsonImportReport.drawer_id_by_record_id` (Rust) carries the same map to
+in-process callers, always — the argument gates only what the MCP reply
+renders, because the ordinary caller wants the one-line receipt rather than
+N id pairs.
+
+Ask for the map whenever you must address what you imported: building
+cross-references, reporting per-record outcomes, or scoring retrieval
+against known records. The alternative — re-discovering each drawer by
+searching for its own content — cannot be made exact, because ranking
+decides what comes back and a room of near-identical records can bury the
+row you are looking for at any search limit.
+
 ## Changelog
 
+- **1.2.0 (2026-08-12)** — Added the `return_id_map` argument to
+  `moot_json_import` and `drawerIDByRecordID` / `drawer_id_by_record_id` to
+  `JsonImportReport`, both ports. The import pipeline already built the
+  record-id → drawer map to resolve fact and tunnel endpoints and then
+  discarded it; it is now carried out to the caller. Off by default, so the
+  ordinary receipt is unchanged (one text block); when requested the reply
+  carries a second block holding the map as JSON with sorted keys.
 - **1.1.0 (2026-08-09)** — Schema v1.1: added optional `subject` field on
   records (mission MXE-JI-4). Non-empty, ≤120 chars when present; empty
   string is a hard error; absent = subject debt. Written via

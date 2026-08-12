@@ -575,6 +575,22 @@ pub fn text_result(text: &str) -> serde_json::Value {
     })
 }
 
+/// MCP `tools/call` success result carrying several text blocks, in order.
+///
+/// Used where a machine-readable payload travels alongside the prose receipt
+/// (`moot_json_import` with `return_id_map`): the reader parses one block whole
+/// rather than scraping structure out of a sentence. Wire-identical to Swift
+/// `ToolDispatcher.textResultBlocks(_:)`.
+pub fn text_result_blocks(blocks: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "content": blocks
+            .iter()
+            .map(|b| serde_json::json!({ "type": "text", "text": b }))
+            .collect::<Vec<_>>(),
+        "isError": false
+    })
+}
+
 /// MCP `tools/call` failure result. Substrate refusals surface here so the
 /// client retains the call id and can render the message.
 /// Wire-identical to Swift `ToolDispatcher.errorResult(_:)`.

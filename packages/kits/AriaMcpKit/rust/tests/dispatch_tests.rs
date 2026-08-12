@@ -9995,6 +9995,111 @@ fn review_ladder_endorse_object_and_user_only_activation() {
 // (MXE-JI-1 Part 5: registration round-trip both ports)
 // ---------------------------------------------------------------------------
 
+/// `return_id_map` adds a second text block naming the drawer each seed record
+/// became, and omitting the argument leaves the reply exactly one block.
+/// Twin of Swift `returnIDMapNamesRealDrawerIDs` / `idMapIsOptInAndNullRejected`.
+#[test]
+fn json_import_return_id_map_names_drawer_ids() {
+    let registry = EstateRegistry::new_inmemory();
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-idmap-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "id-map", "records": [
+             {"id": "m1", "content": "id map sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/idmap"},
+             {"id": "m2", "content": "id map sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/idmap"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let result = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap(), "return_id_map" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true,
+    )
+    .expect("json import must dispatch");
+    std::fs::remove_file(&path).ok();
+
+    assert!(is_success(&result), "import must succeed; got: {result:?}");
+    let blocks = result["content"].as_array().expect("content array");
+    assert_eq!(blocks.len(), 2, "receipt block plus id-map block");
+    assert!(content_text(&result).contains("2 drawers"));
+
+    let map_json: serde_json::Value =
+        serde_json::from_str(blocks[1]["text"].as_str().expect("map text"))
+            .expect("id map block is JSON");
+    let map = map_json["id_map"].as_object().expect("id_map object");
+    assert_eq!(map.len(), 2);
+    // Each value must address the drawer that record became: read it back.
+    for (record_id, expected) in [("m1", "id map sentinel one"), ("m2", "id map sentinel two")] {
+        let drawer_id = map[record_id].as_str().expect("drawer id string");
+        let got = dispatch_tool(
+            "moot_memory_get",
+            &args!["id" => drawer_id],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("memory_get must dispatch");
+        assert!(
+            content_text(&got).contains(expected),
+            "id map for {record_id} must address its own drawer; got: {}",
+            content_text(&got)
+        );
+    }
+}
+
+/// Omitting `return_id_map` leaves the reply a single block, and an explicit
+/// null is rejected rather than read as "use the default" (Swift parity).
+#[test]
+fn json_import_id_map_is_opt_in_and_null_rejected() {
+    let registry = EstateRegistry::new_inmemory();
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-optin-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "opt-in", "records": [
+             {"id": "m1", "content": "opt in sentinel", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/optin"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let plain = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true,
+    )
+    .expect("json import must dispatch");
+    assert!(is_success(&plain), "got: {plain:?}");
+    assert_eq!(plain["content"].as_array().expect("content").len(), 1);
+
+    let path2 = std::env::temp_dir().join(format!(
+        "mcp-json-import-optin-null-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path2,
+        r#"{"format_version": 1, "name": "opt-in-null", "records": [
+             {"id": "m2", "content": "opt in null sentinel", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/optin"}]}"#,
+    )
+    .expect("temp seed writable");
+    let nulled = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path2.to_str().unwrap(), "return_id_map" => serde_json::Value::Null],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true,
+    );
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&path2).ok();
+    assert!(nulled.is_err(), "explicit null must be invalidParams");
+}
+
 /// A seed fixture round-trips through a real moot_json_import dispatch call
 /// and the records are really in the estate the registry served.
 #[test]

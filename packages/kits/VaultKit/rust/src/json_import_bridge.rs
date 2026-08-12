@@ -23,7 +23,7 @@
 //! The canonical schema definition ships with this code at
 //! `packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use uuid::Uuid;
 
@@ -938,6 +938,18 @@ pub struct JsonImportReport {
     /// debt to be resolved by the backfill daemon). Equals
     /// `drawers_written - subjects_provided`.
     pub subjects_debt: i64,
+    /// Seed `record.id` → the drawer id capture minted for it.
+    ///
+    /// Drawer ids cannot be derived client-side: a record's lineage is
+    /// deterministic (FNV-1a-128 of the record id) but `capture_batch` mints
+    /// the drawer id fresh at insert, and no recall surface addresses a drawer
+    /// by lineage. Without this map a caller that needs to address what it
+    /// just imported has to re-discover each drawer by searching for its own
+    /// content — which cannot be made exact, because ranking decides what
+    /// comes back. The pipeline already builds this map to resolve fact and
+    /// tunnel endpoints; carrying it out costs nothing. Mirrors Swift
+    /// `JsonImportReport.drawerIDByRecordID`.
+    pub drawer_id_by_record_id: BTreeMap<String, String>,
 }
 
 // MARK: - Import pipeline (phases 1–6)
@@ -1085,6 +1097,15 @@ impl JsonImportBridge<'_> {
             }
         }
         report.subjects_debt = file.records.len() as i64 - report.subjects_provided;
+
+        // Carry the record-id → drawer-id map out with the receipt. The map is
+        // already complete here (the write phase filled it; the relationship
+        // pass resolves fact and tunnel endpoints through it), so this is a
+        // projection, not new work.
+        report.drawer_id_by_record_id = drawers_by_record_id
+            .iter()
+            .map(|(record_id, drawer)| (record_id.clone(), drawer.id.clone()))
+            .collect();
 
         // Phase 6 — relationship pass. Facts and tunnels resolve their
         // endpoints through the id → drawer map (the validator guaranteed

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.40.0
+version: 1.41.0
 status: accepted-1.1-target
-date: 2026-08-11
+date: 2026-08-12
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1255,6 +1255,14 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.41.0 -- 2026-08-12
+
+- `moot_json_import` gains `return_id_map` (boolean, optional, default `false`; explicit `null` is invalidParams on both ports, message `"return_id_map must be a boolean; omit it to use the default"`). When true the reply carries a SECOND text block — `{"id_map":{"<record id>":"<drawer id>"}}`, one entry per seeded record, keys sorted so the bytes are identical across runs of the same seed. The prose receipt is block 0 and is unchanged, so every existing caller is unaffected.
+- Why the argument exists: a record's lineage is deterministic (FNV-1a-128 of the record id), but the drawer id is minted fresh at insert and no recall surface addresses a drawer by lineage. A caller that must address what it just imported — cross-references, per-record reporting, or scoring retrieval against known records — otherwise has to re-discover each drawer by searching for its own content, which cannot be made exact because ranking decides what comes back.
+- New dispatch primitive: `ToolDispatcher.textResultBlocks(_ blocks: [String])` (Swift) / `text_result_blocks(blocks: &[String])` (Rust), the multi-block success envelope. Deliberately NOT an overload of `textResult(_:)` — overloading on `String` vs `[String]` made the Swift type-checker weigh both candidates at every call site and it exceeded its time budget on this file's `+`-chained receipt strings.
+- Backing field: `JsonImportReport.drawerIDByRecordID` / `drawer_id_by_record_id` (see VAULTKIT_INTERFACE 1.17.0), carried to in-process callers always; the argument gates only what the MCP reply renders.
+- New tests: Swift `JsonImportToolTests` `returnIDMapNamesRealDrawerIDs` + `idMapIsOptInAndNullRejected`; Rust `dispatch_tests.rs` `json_import_return_id_map_names_drawer_ids` + `json_import_id_map_is_opt_in_and_null_rejected`. Both ports assert the mapped id addresses the drawer holding that record's content, not merely that the map is the right size. Tool count is unchanged.
 
 ### 1.40.0 -- 2026-08-11
 

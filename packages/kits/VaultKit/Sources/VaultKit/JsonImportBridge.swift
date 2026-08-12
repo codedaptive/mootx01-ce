@@ -691,6 +691,18 @@ public struct JsonImportReport: Sendable, Equatable {
     /// that built it.
     public var seedSha256 = ""
 
+    /// Seed `record.id` → the drawer id capture minted for it.
+    ///
+    /// Drawer ids cannot be derived client-side: a record's lineage is
+    /// deterministic (FNV-1a-128 of the record id) but `captureBatch` mints
+    /// the drawer id fresh at insert, and no recall surface addresses a
+    /// drawer by lineage. Without this map a caller that needs to address
+    /// what it just imported has to re-discover each drawer by searching for
+    /// its own content — which cannot be made exact, because ranking decides
+    /// what comes back. The pipeline already builds this map to resolve fact
+    /// and tunnel endpoints; carrying it out costs nothing.
+    public var drawerIDByRecordID: [String: String] = [:]
+
     public init() {}
 }
 
@@ -813,6 +825,11 @@ extension JsonImportBridge {
             }
         }
         report.subjectsDebt = file.records.count - report.subjectsProvided
+
+        // Carry the record-id → drawer-id map out with the receipt. The map is
+        // already complete here (phase 5 filled it; phase 6 resolves fact and
+        // tunnel endpoints through it), so this is a projection, not new work.
+        report.drawerIDByRecordID = drawersByRecordID.mapValues(\.id)
 
         // Phase 6 — relationship pass. Facts and tunnels resolve their
         // endpoints through the id → drawer map (the validator guaranteed

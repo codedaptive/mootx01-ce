@@ -621,6 +621,7 @@ public enum ToolProjection {
                         "path": stringSchema("Absolute filesystem path to the seed JSON file (schema v1: format_version, name, records[], facts[], tunnels[])."),
                         "wing": stringSchema("Optional default wing for records that omit `wing`. Omit to use the estate default wing. null is invalid."),
                         "mode": stringSchema("Optional encode SPEED for the deferred encoding: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large imports. SPEED only — the write strategy is always windowed bulk, not caller-chosen. Omit to use the default (foreground)."),
+                        "return_id_map": booleanSchema("When true, the reply carries a second text block — a JSON object {\"id_map\":{\"<record id>\":\"<drawer id>\"}} naming the drawer each seed record became. Drawer ids are minted at insert and cannot be derived client-side, so this is the only exact way to address what you just imported. Off by default (the ordinary caller wants the one-line receipt, not N id pairs). null is invalid."),
                     ],
                     required: ["path"]
                 )),
