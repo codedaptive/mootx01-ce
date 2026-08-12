@@ -422,4 +422,105 @@ struct GeometryNormalizationTests {
         }
         #endif
     }
+
+    // MARK: - §9 Sibling has 0600 permissions while it exists (MXE-GZ, test 1)
+
+    @Test("Sibling has 0600 permissions while it exists, before ATTACH")
+    func siblingHas0600PermissionsWhileItExists() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-geo-sib0600-\(UUID().uuidString).sqlite3")
+        defer {
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
+            }
+        }
+
+        let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 3)
+
+        // Capture the sibling's POSIX permissions at the exact moment it exists —
+        // between createFile(0600) and the ATTACH. The hook fires on the actor's
+        // executor synchronously, so the test resumes only after this closure returns.
+        // @unchecked Sendable box is safe here: the serialized suite prevents
+        // concurrent access, and the hook completes before the await resumes.
+        final class CapturedPerms: @unchecked Sendable { var value: Int = -1 }
+        let captured = CapturedPerms()
+        _geometryNormalizationTestHookAfterSiblingCreation = { @Sendable siblingURL in
+            captured.value = (try? FileManager.default.attributesOfItem(atPath: siblingURL.path))
+                .flatMap { $0[.posixPermissions] as? Int } ?? -1
+        }
+        defer { _geometryNormalizationTestHookAfterSiblingCreation = nil }
+
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+
+        #expect(captured.value == 0o600,
+                "sibling must be 0600 at creation; got \(String(format: "%o", max(0, captured.value)))")
+    }
+
+    // MARK: - §10 Estate file is 0600 after successful normalization (MXE-GZ, test 2)
+
+    @Test("Estate file is 0600 after successful normalization")
+    func estateIs0600AfterNormalization() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-geo-final0600-\(UUID().uuidString).sqlite3")
+        defer {
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
+            }
+        }
+
+        let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 3)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let perms = (attrs[.posixPermissions] as? Int) ?? -1
+        // Verifies the 0600 pass in reopenAfterGeometrySwap() is not accidentally
+        // removed — asserting the final file guards the existing belt-and-braces pass.
+        #expect(perms == 0o600,
+                "normalized estate must be 0600; got \(String(format: "%o", max(0, perms)))")
+    }
+
+    // MARK: - §11 Sibling removed on failure after creation (MXE-GZ, test 3)
+
+    @Test("Sibling is removed when a failure occurs after its creation")
+    func siblingRemovedOnFailureAfterCreation() async throws {
+        // Use a subdirectory so the estate URL is predictable and the sibling URL
+        // can be computed without accessing internals.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-geo-failclean-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("estate.sqlite3")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 2)
+
+        // Compute the sibling URL using the same derivation as normalizeGeometry().
+        let siblingURL = url
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                url.deletingPathExtension().lastPathComponent + ".geo_normalize_tmp.sqlite3")
+
+        // Hook: revoke all permissions on the newly-created sibling so the ATTACH
+        // step fails with SQLITE_CANTOPEN. unlink() (called by removeItem in the
+        // catch block) checks the parent directory's write bit, not the file's own
+        // mode, so the 0000-file can be removed by the cleanup path.
+        _geometryNormalizationTestHookAfterSiblingCreation = { @Sendable s in
+            try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: s.path)
+        }
+        defer {
+            // Restore mode so FileManager can remove it if cleanup somehow failed.
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: siblingURL.path)
+            _geometryNormalizationTestHookAfterSiblingCreation = nil
+        }
+
+        // The capsule catches the ATTACH failure and parks.
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        #expect(prep.migrated == false, "capsule must park on ATTACH failure")
+
+        // No stale sibling must remain after the failure path ran.
+        #expect(!FileManager.default.fileExists(atPath: siblingURL.path),
+                "sibling must be removed by the catch block — cleanup path missing or broken")
+    }
 }
