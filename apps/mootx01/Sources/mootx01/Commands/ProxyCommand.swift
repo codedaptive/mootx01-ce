@@ -17,6 +17,13 @@
 // client has useProxyBridge: true — see ClientConfig.swift and Installer.swift.
 //
 // The proxy owns transport adaptation only; the installer owns client wiring.
+//
+// Failure policy: a failed REQUEST — transport error OR HTTP-level failure
+// (non-HTTP response, empty body at non-202, any non-2xx status) — gets a
+// synthesized JSON-RPC -32603 error that echoes the request's id. A failed
+// NOTIFICATION gets nothing (servers must not reply to notifications per MCP
+// spec). Non-2xx response bodies are never relayed: they may not be JSON-RPC
+// envelopes, and a malformed frame poisons the whole stream.
 
 #if os(macOS)
 import Foundation
@@ -118,8 +125,45 @@ struct ProxyCommand: AsyncParsableCommand {
         throw ExitCode.failure
     }
 
+    /// Pure disposition decision, free of I/O and testable in isolation.
+    /// Maps the HTTP response envelope onto one of three outcomes:
+    ///   .silent — no frame written (202 notification ack, per MCP spec)
+    ///   .relay  — relay the body verbatim
+    ///   .error  — synthesize a JSON-RPC -32603 error with the given message
+    ///
+    /// statusCode is nil when the response is not an HTTPURLResponse — that
+    /// path is always an error regardless of body content.
+    enum Disposition {
+        case silent
+        case relay
+        case error(String)
+    }
+
+    static func disposition(statusCode: Int?, bodyEmpty: Bool) -> Disposition {
+        guard let status = statusCode else {
+            return .error("proxy: non-HTTP response")
+        }
+        // HTTP 202: notification acknowledged — per MCP spec, no reply.
+        if status == 202 { return .silent }
+        // Any other empty body is a failure, not a notification (daemon
+        // mid-restart, 500/503, rejected request). Without an id-echoing
+        // error the client hangs forever: FrameWriter would emit a bare
+        // newline, which carries no frame for the pending request id.
+        if bodyEmpty { return .error("proxy: empty response (HTTP \(status))") }
+        // Non-2xx: do NOT relay the body. It may not be a JSON-RPC envelope,
+        // and a malformed frame poisons the stream (see the id:null note in
+        // respondError).
+        if !(200..<300).contains(status) { return .error("proxy: HTTP \(status)") }
+        return .relay
+    }
+
     /// Forward one newline-delimited JSON-RPC frame to the resident daemon
     /// and relay the response to stdout.
+    ///
+    /// Guard: if this proxy ever gains an `Mcp-Session-Id` header, session
+    /// recovery (clear + re-initialize + one-shot retry) must be added at the
+    /// same time — a server restart without recovery becomes a permanent outage
+    /// for the session.
     private static func forward(_ frame: Data, to url: URL, session: URLSession, writer: FrameWriter) async {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -128,32 +172,39 @@ struct ProxyCommand: AsyncParsableCommand {
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else { return }
-            // HTTP 202: notification acknowledged — the daemon has no JSON-RPC reply
-            // to send (per MCP spec, servers must not reply to notifications).
-            if httpResponse.statusCode == 202 { return }
-            // Any other status: relay the response body to stdout so the client
-            // receives a valid JSON-RPC frame.
-            await writer.write(data)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            switch Self.disposition(statusCode: statusCode, bodyEmpty: data.isEmpty) {
+            case .silent:
+                return
+            case .relay:
+                await writer.write(data)
+            case .error(let message):
+                await Self.respondError(frame, message, writer)
+            }
         } catch {
-            // Network failure. Only synthesize an error for a REQUEST (a frame
-            // with an id) — notifications get no reply per spec. The error MUST
-            // echo the request's id: Claude Desktop's MCP client rejects
-            // `id: null` frames at the schema level, and the resulting parse
-            // error poisoned the whole stream ("Server disconnected").
-            guard let requestID = Self.requestID(of: frame) else { return }
             let msg = error.localizedDescription
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "'")
-            let errorJSON = "{\"jsonrpc\":\"2.0\",\"id\":\(requestID),\"error\":{\"code\":-32603,\"message\":\"proxy: \(msg)\"}}\n"
-            await writer.write(Data(errorJSON.utf8))
+            await Self.respondError(frame, "proxy: \(msg)", writer)
         }
+    }
+
+    /// Write a JSON-RPC error echoing the request's id. Notifications (no id,
+    /// id:null, unparseable) get nothing, per spec. The id MUST be echoed:
+    /// Claude Desktop rejects `id: null` frames at the schema level, and the
+    /// resulting parse error poisons the whole stream ("Server disconnected").
+    private static func respondError(_ frame: Data, _ message: String, _ writer: FrameWriter) async {
+        guard let id = Self.requestID(of: frame) else { return }
+        let msg = message
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "'")
+        let errorJSON = "{\"jsonrpc\":\"2.0\",\"id\":\(id),\"error\":{\"code\":-32603,\"message\":\"\(msg)\"}}\n"
+        await writer.write(Data(errorJSON.utf8))
     }
 
     /// Extract the JSON-RPC `id` of a request frame, re-encoded as a JSON
     /// literal (quoted string or bare number). Returns nil for notifications
-    /// (no id) and unparseable frames — both get no synthesized reply.
-    private static func requestID(of frame: Data) -> String? {
+    /// (no id), id:null, boolean ids (not valid JSON-RPC ids — aligns with Rust
+    /// which rejects Value::Bool), and unparseable frames — all get no reply.
+    static func requestID(of frame: Data) -> String? {
         guard let obj = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
               let id = obj["id"] else { return nil }
         if let s = id as? String {
@@ -162,7 +213,14 @@ struct ProxyCommand: AsyncParsableCommand {
                 .replacingOccurrences(of: "\"", with: "\\\"")
             return "\"\(escaped)\""
         }
-        if let n = id as? NSNumber { return "\(n)" }
+        if let n = id as? NSNumber {
+            // Reject boolean NSNumbers: JSONSerialization represents true/false as
+            // the CFBoolean singletons, which bridge to NSNumber. A boolean id is
+            // not a valid JSON-RPC id, and the Rust port rejects Value::Bool —
+            // both ports must agree on shared disposition vectors.
+            if n === (true as NSNumber) || n === (false as NSNumber) { return nil }
+            return "\(n)"
+        }
         return nil
     }
 }
