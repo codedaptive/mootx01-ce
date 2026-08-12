@@ -146,6 +146,12 @@ let package = Package(
             name: "GeniusLocusKitMigrations",
             dependencies: [
                 "GeniusLocusKit",
+                // PersistenceKit: GeometryNormalizationCapsule casts to
+                // `any StorageMaintenance` and uses `GeometryNormalizationReport` —
+                // both defined in PersistenceKit. The transitive dependency through
+                // GeniusLocusKit does not guarantee explicit module visibility in
+                // Swift 6 strict concurrency builds, so we declare it directly.
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .target(
                     name: "GLKMigrationV1_0ToV1_1",
                     condition: .when(traits: ["MigrationV1_0ToV1_1"])
@@ -240,6 +246,23 @@ let package = Package(
                 .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
             ],
             path: "Tests/GeniusLocusKitTests"
+        ),
+        .testTarget(
+            name: "GeniusLocusKitMigrationsTests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // SQLCipher: test fixtures use the raw C API (sqlite3_file_control) to
+                // inject reserve=12 geometry before the first page write — the only way
+                // to set the reserve without an engine-path round-trip. Legitimate in
+                // tests only; production code never spawns raw connections to estate files.
+                .product(name: "SQLCipher", package: "PersistenceKit"),
+            ],
+            path: "Tests/GeniusLocusKitMigrationsTests"
         ),
         .testTarget(
             name: "GLKMigrationV1_0ToV1_1Tests",

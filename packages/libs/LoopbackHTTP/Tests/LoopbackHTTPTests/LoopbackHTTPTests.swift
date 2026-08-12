@@ -27,7 +27,12 @@ private struct SocketPair {
         b = fds[1]
     }
 
-    func closeAll() { close(a); close(b) }
+    // No closeAll(): every test here closes `a` itself to signal EOF, so a
+    // helper that closes BOTH invites a double close. An fd closed twice frees
+    // its number for reuse, and a parallel test's socketpair() can be handed
+    // that same number in between — the second close then lands on the OTHER
+    // test's socket, which reads EOF with no data (empty wire) or takes SIGPIPE
+    // on its next write. Close `a` explicitly, defer `close(b)`.
 }
 
 /// Drain a fd to EOF into a String (UTF-8). The peer must be closed for EOF.
@@ -45,7 +50,7 @@ struct LoopbackHTTPTests {
     @Test("parses a GET with query, headers, and the convenience accessors")
     func parseGet() {
         let pair = SocketPair()
-        defer { pair.closeAll() }
+        defer { close(pair.b) }  // `a` is closed below to signal EOF — never twice
         let raw = "GET /api/events?stream=1 HTTP/1.1\r\n" +
             "Host: 127.0.0.1\r\n" +
             "Accept: text/event-stream\r\n" +
@@ -67,7 +72,7 @@ struct LoopbackHTTPTests {
     @Test("reads a POST body up to Content-Length")
     func parsePostBody() {
         let pair = SocketPair()
-        defer { pair.closeAll() }
+        defer { close(pair.b) }  // `a` is closed below to signal EOF — never twice
         let body = #"{"seconds":3600}"#
         let raw = "POST /api/control/retention HTTP/1.1\r\n" +
             "Content-Length: \(body.utf8.count)\r\n\r\n" + body
@@ -83,7 +88,7 @@ struct LoopbackHTTPTests {
     @Test("the per-listener body cap bounds the body read")
     func bodyCapTruncates() {
         let pair = SocketPair()
-        defer { pair.closeAll() }
+        defer { close(pair.b) }  // `a` is closed below to signal EOF — never twice
         let body = String(repeating: "x", count: 100)
         let raw = "POST /big HTTP/1.1\r\nContent-Length: \(body.utf8.count)\r\n\r\n" + body
         _ = POSIXSocket.sendAll(pair.a, Data(raw.utf8))

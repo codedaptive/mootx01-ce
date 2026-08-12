@@ -17,10 +17,18 @@
 // client has useProxyBridge: true — see ClientConfig.swift and Installer.swift.
 //
 // The proxy owns transport adaptation only; the installer owns client wiring.
+//
+// Failure policy: a failed REQUEST — transport error OR HTTP-level failure
+// (non-HTTP response, empty body at non-202, any non-2xx status) — gets a
+// synthesized JSON-RPC -32603 error that echoes the request's id. A failed
+// NOTIFICATION gets nothing (servers must not reply to notifications per MCP
+// spec). Non-2xx response bodies are never relayed: they may not be JSON-RPC
+// envelopes, and a malformed frame poisons the whole stream.
 
 #if os(macOS)
 import Foundation
 import ArgumentParser
+import MootInstallerCore
 
 struct ProxyCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -59,6 +67,11 @@ struct ProxyCommand: AsyncParsableCommand {
         let session = URLSession(configuration: config)
         let writer = FrameWriter()
         var buffer = Data()
+        // Concurrency gate (#12, security finding: prevents unbounded task count
+        // from a fast stdin producer). Matches Rust MAX_CONCURRENT = 16. Frame 17
+        // waits in gate.acquire() until a running frame calls gate.release().
+        // ProxyConcurrencyGate lives in MootInstallerCore for unit testability.
+        let gate = ProxyConcurrencyGate(maxConcurrent: 16)
         // Read stdin until EOF. Same availableData loop as StdioServer.run —
         // availableData blocks until bytes arrive at the pipe (non-blocking for
         // the buffer-fill, blocking at the OS read level), and returns empty
@@ -74,12 +87,31 @@ struct ProxyCommand: AsyncParsableCommand {
                 let chunk = FileHandle.standardInput.availableData
                 if chunk.isEmpty { break }
                 buffer.append(chunk)
+                // Buffer overflow guard (#36): if the accumulation buffer grows
+                // past the frame-size cap with no newline, the producer is
+                // writing a blob too large to forward — discard to prevent
+                // multi-GB memory growth from a newline-less stdin stream.
+                if buffer.count > proxyMaxFrameBytes, !buffer.contains(0x0A) {
+                    proxyStderrLog("mootx01 proxy: frame exceeds \(proxyMaxFrameBytes) byte limit, dropped")
+                    buffer = Data()
+                    continue
+                }
                 while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                     let frame = buffer.subdata(in: buffer.startIndex..<newlineIndex)
                     buffer.removeSubrange(buffer.startIndex...newlineIndex)
                     if frame.isEmpty { continue }
+                    // Per-frame size cap (#36): oversized frames are dropped, not
+                    // forwarded — parsing a multi-MB blob for a request id is
+                    // itself an attack surface; the client gets no synthesized
+                    // error because the frame is malformed input, not a request.
+                    if frame.count > proxyMaxFrameBytes {
+                        proxyStderrLog("mootx01 proxy: frame exceeds \(proxyMaxFrameBytes) byte limit, dropped")
+                        continue
+                    }
+                    await gate.acquire()
                     group.addTask {
                         await Self.forward(frame, to: url, session: session, writer: writer)
+                        await gate.release()
                     }
                 }
             }
@@ -120,6 +152,11 @@ struct ProxyCommand: AsyncParsableCommand {
 
     /// Forward one newline-delimited JSON-RPC frame to the resident daemon
     /// and relay the response to stdout.
+    ///
+    /// Guard: if this proxy ever gains an `Mcp-Session-Id` header, session
+    /// recovery (clear + re-initialize + one-shot retry) must be added at the
+    /// same time — a server restart without recovery becomes a permanent outage
+    /// for the session.
     private static func forward(_ frame: Data, to url: URL, session: URLSession, writer: FrameWriter) async {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -128,42 +165,34 @@ struct ProxyCommand: AsyncParsableCommand {
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else { return }
-            // HTTP 202: notification acknowledged — the daemon has no JSON-RPC reply
-            // to send (per MCP spec, servers must not reply to notifications).
-            if httpResponse.statusCode == 202 { return }
-            // Any other status: relay the response body to stdout so the client
-            // receives a valid JSON-RPC frame.
-            await writer.write(data)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            // Pure disposition logic lives in MootInstallerCore so tests can
+            // exercise it without importing the executable target.
+            switch proxyDisposition(statusCode: statusCode, bodyEmpty: data.isEmpty) {
+            case .silent:
+                return
+            case .relay:
+                await writer.write(data)
+            case .error(let message):
+                await Self.respondError(frame, message, writer)
+            }
         } catch {
-            // Network failure. Only synthesize an error for a REQUEST (a frame
-            // with an id) — notifications get no reply per spec. The error MUST
-            // echo the request's id: Claude Desktop's MCP client rejects
-            // `id: null` frames at the schema level, and the resulting parse
-            // error poisoned the whole stream ("Server disconnected").
-            guard let requestID = Self.requestID(of: frame) else { return }
             let msg = error.localizedDescription
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "'")
-            let errorJSON = "{\"jsonrpc\":\"2.0\",\"id\":\(requestID),\"error\":{\"code\":-32603,\"message\":\"proxy: \(msg)\"}}\n"
-            await writer.write(Data(errorJSON.utf8))
+            await Self.respondError(frame, "proxy: \(msg)", writer)
         }
     }
 
-    /// Extract the JSON-RPC `id` of a request frame, re-encoded as a JSON
-    /// literal (quoted string or bare number). Returns nil for notifications
-    /// (no id) and unparseable frames — both get no synthesized reply.
-    private static func requestID(of frame: Data) -> String? {
-        guard let obj = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
-              let id = obj["id"] else { return nil }
-        if let s = id as? String {
-            let escaped = s
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            return "\"\(escaped)\""
-        }
-        if let n = id as? NSNumber { return "\(n)" }
-        return nil
+    /// Write a JSON-RPC error echoing the request's id. Notifications (no id,
+    /// id:null, unparseable) get nothing, per spec. The id MUST be echoed:
+    /// Claude Desktop rejects `id: null` frames at the schema level, and the
+    /// resulting parse error poisons the whole stream ("Server disconnected").
+    private static func respondError(_ frame: Data, _ message: String, _ writer: FrameWriter) async {
+        guard let id = proxyRequestID(of: frame) else { return }
+        let msg = message
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "'")
+        let errorJSON = "{\"jsonrpc\":\"2.0\",\"id\":\(id),\"error\":{\"code\":-32603,\"message\":\"\(msg)\"}}\n"
+        await writer.write(Data(errorJSON.utf8))
     }
 }
 
@@ -178,7 +207,7 @@ private actor FrameWriter {
 }
 
 /// Write a diagnostic line to stderr. stdout is reserved for JSON-RPC frames
-/// (ARIA_MCP_SPEC_v0.2 §5), so all ProxyCommand diagnostics go to stderr.
+/// (ARIA_MCP_SPEC §5), so all ProxyCommand diagnostics go to stderr.
 private func proxyStderrLog(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data("\(message)\n".utf8))
 }

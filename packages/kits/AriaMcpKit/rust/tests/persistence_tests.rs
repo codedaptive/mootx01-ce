@@ -414,3 +414,144 @@ fn precedence_whitespace_sqlite_path_is_non_empty() {
 fn precedence_whitespace_postgres_url_routes_to_postgres_branch() {
     assert_eq!(precedence_branch("   ", ""), "postgres");
 }
+
+// ---------------------------------------------------------------------------
+// Geometry normalization — write-survival regression (test 5, MXE-GY)
+//
+// Verifies that writes through an `EstateRegistry::new_sqlite` handle survive
+// a geometry normalization that fires during estate construction.
+//
+// The bug: when normalization ran AFTER `SqliteDrawerStore::from_path`, the
+// connection pointed to the pre-normalization inode (atomically unlinked by
+// the rename). All subsequent writes went to the unlinked inode and were
+// silently discarded when the fd was closed on registry drop.
+//
+// RED before Part 1 (normalization after open → data lost).
+// GREEN after Part 1 (normalization before open → writes reach canonical file).
+// ---------------------------------------------------------------------------
+
+/// Build a SQLite file with per-page reserved bytes = 12 before the first write.
+///
+/// Uses `SQLITE_FCNTL_RESERVE_BYTES` (opcode 38) so the file header
+/// (byte 20) records reserve=12, matching the value Apple SEE sqlite3 sets
+/// for per-page IV allocation. Must be called on a fresh path — the reserve
+/// cannot be changed after the first page is written.
+fn make_reserve12_estate(path: &std::path::Path) -> rusqlite::Result<()> {
+    use rusqlite::ffi as sqlite_ffi;
+    use rusqlite::{Connection, OpenFlags};
+    use std::ffi::c_void;
+
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
+    // SQLITE_FCNTL_RESERVE_BYTES (opcode 38): must be called before any write
+    // so the page-size calculation in the file header picks up reserve=12.
+    let mut reserve_bytes: i32 = 12;
+    let rc = unsafe {
+        sqlite_ffi::sqlite3_file_control(
+            conn.handle(),
+            std::ptr::null(), // NULL = "main" database
+            38,               // SQLITE_FCNTL_RESERVE_BYTES
+            &mut reserve_bytes as *mut i32 as *mut c_void,
+        )
+    };
+    if rc != sqlite_ffi::SQLITE_OK {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rc),
+            Some(format!("SQLITE_FCNTL_RESERVE_BYTES rc={rc}")),
+        ));
+    }
+    // Write and checkpoint so the reserve propagates from the WAL into the
+    // main file header (byte 20) before we close the connection.
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    conn.execute_batch(
+        "CREATE TABLE fixture_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL);",
+    )?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(())
+}
+
+/// Write-survival regression: writes through a `new_sqlite` handle must
+/// survive a geometry normalization that fires during estate construction.
+///
+/// Before Part 1 (MXE-GY): normalization renamed the file after `from_path`
+/// had already opened a connection. The connection held an fd to the
+/// now-unlinked original inode; writes went to that inode and were lost when
+/// the fd closed. RED before Part 1, GREEN after.
+#[test]
+fn new_sqlite_on_reserve12_estate_survives_write_through() {
+    // Build a reserve=12 fixture at the canonical path BEFORE calling new_sqlite.
+    let path = temp_sqlite_path("reserve12");
+    make_reserve12_estate(std::path::Path::new(&path))
+        .expect("reserve=12 fixture creation must succeed");
+
+    // Confirm the fixture header before handing the path to EstateRegistry.
+    {
+        let header = std::fs::read(&path).expect("read fixture");
+        assert_eq!(
+            header[20], 12,
+            "fixture byte 20 must be 12 before calling new_sqlite"
+        );
+    }
+
+    // Pass 1: open via new_sqlite and file a memory through the returned handle.
+    let filed_id = {
+        let registry = EstateRegistry::new_sqlite(&path, "test-owner")
+            .expect("new_sqlite must open a reserve=12 estate without error");
+        let a = args![
+            "content" => "geo-norm write-survival regression marker",
+            "subject" => "geo-norm write-survival regression marker",
+            "location" => "geo-norm-room"
+        ];
+        let result = dispatch_tool(
+            "moot_file_memory",
+            &a,
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("moot_file_memory must succeed on the reserve=12 estate");
+        let text = content_text(&result);
+        assert!(
+            text.starts_with("filed memory "),
+            "moot_file_memory must return an id; got: {text}"
+        );
+        let id_line = text.lines().next().unwrap_or("");
+        let id = id_line
+            .strip_prefix("filed memory ")
+            .unwrap_or("")
+            .to_owned();
+        assert!(!id.is_empty(), "filed memory id must be non-empty");
+        id
+        // registry drops here — WAL is flushed to the main file on drop.
+    };
+
+    // Pass 2: reopen at the same canonical path and assert the write survived.
+    // After Part 1 the file is reserve=0 and the connection received the writes.
+    {
+        let registry2 = EstateRegistry::new_sqlite(&path, "test-owner")
+            .expect("pass-2 reopen must succeed on the normalized estate");
+        let search_a = args!["query" => "geo-norm write-survival regression"];
+        let result = dispatch_tool(
+            "moot_memory_search",
+            &search_a,
+            &registry2,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("moot_memory_search must succeed on reopen");
+        let text = content_text(&result);
+        assert!(
+            text.contains(&filed_id),
+            "write must survive geometry normalization and registry drop: \
+             expected id={filed_id} in search result; got: {text}"
+        );
+        assert!(
+            text.contains("geo-norm write-survival regression marker"),
+            "write content must survive geometry normalization; got: {text}"
+        );
+    }
+
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::remove_dir_all(parent);
+    }
+}

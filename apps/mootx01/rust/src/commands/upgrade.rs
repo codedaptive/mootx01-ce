@@ -298,8 +298,14 @@ fn run_shared_content_reclaim_if_pending() {
             println!("  ✓ shared-content reclaim: not pending");
         }
         Err(e) => {
+            // The closure covers storage open, coordinator open, and the actual
+            // complete_shared_content_reclaim call — Err is reachable from any
+            // step. When the trim committed before the failure, freed pages remain
+            // on the freelist; the next `mootx01 upgrade` retries the VACUUM.
             println!(
-                "  ✗ shared-content reclaim failed: {e}\n    The estate is unaffected. Run `mootx01 upgrade` to retry."
+                "  ✗ shared-content reclaim failed: {e}\n    \
+                 If the inventory trim committed before this failure, freed pages remain\n    \
+                 on the freelist until a VACUUM completes. Run `mootx01 upgrade` to retry."
             );
         }
     }
@@ -655,6 +661,34 @@ fn restart_services() {
 mod tests {
     use super::*;
     use crate::core::depth::{self, InstallBundle, InstallDepth, ProcessClaudeCliRunner};
+
+    /// Source-invariant: the Err handler in `run_shared_content_reclaim_if_pending`
+    /// must provide accurate context for the operator — referencing the inventory
+    /// trim and freelist state — without asserting RC-01's misleading claim.
+    ///
+    /// Uses `concat!()` to build search patterns at compile time so the assembled
+    /// strings do not appear as literals in this file — preventing the assertion
+    /// text from self-matching when `include_str!` reads the file back.
+    #[test]
+    fn reclaim_failure_message_names_vacuum_not_estate_unaffected() {
+        let src = include_str!("upgrade.rs");
+        // Positive: Err handler must reference the inventory trim for operator context.
+        assert!(
+            src.contains(concat!("inventory trim", " committed")),
+            "Err handler must reference the inventory trim"
+        );
+        // Positive: Err handler must mention freed pages on the freelist.
+        assert!(
+            src.contains(concat!("freelist", " until a VACUUM")),
+            "Err handler must mention freed pages on the freelist"
+        );
+        // Negative: the old misleading RC-01 phrase must be absent from the Err handler.
+        // Assertion message phrased to avoid the literal target substring.
+        assert!(
+            !src.contains(concat!("estate is", " unaffected")),
+            "Err handler must report the reclaim failure accurately — trim has committed"
+        );
+    }
 
     fn tmp_home(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mootx01-upgrade-rematerialize-{tag}-{}", std::process::id()));

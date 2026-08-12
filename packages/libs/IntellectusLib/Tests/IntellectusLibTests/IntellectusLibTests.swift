@@ -44,6 +44,24 @@ final class CountingSink: StatsSink, @unchecked Sendable {
     }
 }
 
+// MARK: - Process-global Intellectus suites
+
+/// §1 and §8 install sinks and flip the enable gate on the PROCESS-GLOBAL
+/// `Intellectus`. They cannot run concurrently with each other: one suite's
+/// teardown (`install(sink: NoOpSink.shared)` + `setEnabled(false)`) lands
+/// between the other's `report` and its assertion, so the sample is delivered
+/// to the wrong sink and the window reads empty.
+///
+/// `.serialized` on each suite individually is NOT sufficient — that orders
+/// tests within a suite, not between sibling suites. One serialized parent
+/// containing both is what serialises them against each other, which is why
+/// §8 lives here rather than at the end of the file.
+///
+/// §2, §4 and §7 are deliberately NOT nested here: they drive a local
+/// `_IntellectusHolder()` and touch no global state, so they stay parallel.
+@Suite("Process-global Intellectus", .serialized)
+struct ProcessGlobalIntellectusTests {
+
 // MARK: - §1 Gating: disabled → closure never evaluated
 
 @Suite("§1 Gating — disabled path")
@@ -115,6 +133,116 @@ struct DisabledGatingTests {
         Intellectus.install(sink: NoOpSink.shared)
         Intellectus.setEnabled(false)
     }
+}
+
+// MARK: - §8 RecentWindowSink — bounded recent window
+
+@Suite("§8 RecentWindowSink")
+struct RecentWindowSinkTests {
+
+    @Test("window records received samples, snapshot returns them oldest-first")
+    func recordsAndSnapshots() {
+        let window = RecentWindowSink(capacity: 4)
+        window.receive(.metric(name: "a", value: 1.0, tags: [:], ts: 1.0))
+        window.receive(.metric(name: "b", value: 2.0, tags: [:], ts: 2.0))
+        #expect(window.count == 2)
+        #expect(window.totalReceived == 2)
+        let snap = window.snapshot()
+        #expect(snap.count == 2)
+        #expect(snap[0].ts == 1.0)
+        #expect(snap[1].ts == 2.0)
+    }
+
+    @Test("bounded window evicts oldest on overflow; bound holds")
+    func boundedOverflowEvictsOldest() {
+        let window = RecentWindowSink(capacity: 3)
+        // Push 5 samples into a 3-slot window. The first two must be evicted.
+        for i in 0..<5 {
+            window.receive(.metric(name: "m", value: Double(i), tags: [:], ts: Double(i)))
+        }
+        // Bound holds: never more than capacity retained.
+        #expect(window.count == 3)
+        // Total received counts every sample, ignoring eviction.
+        #expect(window.totalReceived == 5)
+        let snap = window.snapshot()
+        #expect(snap.count == 3)
+        // Oldest retained is sample 2 (0 and 1 evicted); newest is 4.
+        #expect(snap.first?.ts == 2.0)
+        #expect(snap.last?.ts == 4.0)
+    }
+
+    @Test("capacity clamps to a minimum of 1")
+    func capacityClampsToOne() {
+        let window = RecentWindowSink(capacity: 0)
+        #expect(window.capacity == 1)
+        window.receive(.metric(name: "x", value: 1.0, tags: [:], ts: 1.0))
+        window.receive(.metric(name: "y", value: 2.0, tags: [:], ts: 2.0))
+        #expect(window.count == 1)
+        #expect(window.snapshot().first?.ts == 2.0)
+    }
+
+    @Test("forward sink receives every sample after the window records it")
+    func forwardSinkReceivesAll() {
+        let downstream = CountingSink()
+        let window = RecentWindowSink(capacity: 2, forward: downstream)
+        // Overflow the window — the forward sink must still see ALL samples,
+        // not just the retained two (forwarding is independent of eviction).
+        for i in 0..<5 {
+            window.receive(.metric(name: "f", value: Double(i), tags: [:], ts: Double(i)))
+        }
+        #expect(window.count == 2)        // bounded
+        #expect(downstream.count == 5)    // all forwarded
+    }
+
+    @Test("empty window snapshot is empty and totalReceived is zero")
+    func emptyWindow() {
+        let window = RecentWindowSink(capacity: 8)
+        #expect(window.count == 0)
+        #expect(window.totalReceived == 0)
+        #expect(window.snapshot().isEmpty)
+    }
+
+    @Test("window installed as Intellectus sink: enabled records, disabled does not")
+    func windowViaGate() {
+        let window = RecentWindowSink(capacity: 16)
+        Intellectus.install(sink: window)
+
+        // FORCE: observer disabled → no sample recorded + explicit off state.
+        Intellectus.setEnabled(false)
+        #expect(Intellectus.isEnabled == false)
+        Intellectus.report(.metric(name: "off", value: 1.0, tags: [:], ts: 0.0))
+        #expect(window.count == 0)
+
+        // FORCE: observer enabled → sample recorded in window.
+        Intellectus.setEnabled(true)
+        #expect(Intellectus.isEnabled == true)
+        Intellectus.report(.metric(name: "on", value: 1.0, tags: [:], ts: 1.0))
+        #expect(window.count == 1)
+        #expect(window.snapshot().first?.ts == 1.0)
+
+        // Restore defaults so later tests are not polluted.
+        Intellectus.install(sink: NoOpSink.shared)
+        Intellectus.setEnabled(false)
+    }
+
+    @Test("concurrent receive does not crash and bound holds")
+    func concurrentReceiveBounded() async {
+        let window = RecentWindowSink(capacity: 32)
+        await withTaskGroup(of: Void.self) { group in
+            for t in 0..<8 {
+                group.addTask {
+                    for i in 0..<100 {
+                        window.receive(.metric(
+                            name: "c", value: Double(t * 100 + i), tags: [:], ts: 0.0))
+                    }
+                }
+            }
+        }
+        // Bound holds under concurrency; total counts every receive.
+        #expect(window.count == 32)
+        #expect(window.totalReceived == 800)
+    }
+}
 }
 
 // MARK: - §2 Gating: enabled → sink receives exact sample
@@ -347,115 +475,6 @@ struct EventKindTests {
     func eventKindRawValues() {
         #expect(EventKind.capture.rawValue == "capture")
         #expect(EventKind.think.rawValue == "think")
-    }
-}
-
-// MARK: - §8 RecentWindowSink — bounded recent window
-
-@Suite("§8 RecentWindowSink")
-struct RecentWindowSinkTests {
-
-    @Test("window records received samples, snapshot returns them oldest-first")
-    func recordsAndSnapshots() {
-        let window = RecentWindowSink(capacity: 4)
-        window.receive(.metric(name: "a", value: 1.0, tags: [:], ts: 1.0))
-        window.receive(.metric(name: "b", value: 2.0, tags: [:], ts: 2.0))
-        #expect(window.count == 2)
-        #expect(window.totalReceived == 2)
-        let snap = window.snapshot()
-        #expect(snap.count == 2)
-        #expect(snap[0].ts == 1.0)
-        #expect(snap[1].ts == 2.0)
-    }
-
-    @Test("bounded window evicts oldest on overflow; bound holds")
-    func boundedOverflowEvictsOldest() {
-        let window = RecentWindowSink(capacity: 3)
-        // Push 5 samples into a 3-slot window. The first two must be evicted.
-        for i in 0..<5 {
-            window.receive(.metric(name: "m", value: Double(i), tags: [:], ts: Double(i)))
-        }
-        // Bound holds: never more than capacity retained.
-        #expect(window.count == 3)
-        // Total received counts every sample, ignoring eviction.
-        #expect(window.totalReceived == 5)
-        let snap = window.snapshot()
-        #expect(snap.count == 3)
-        // Oldest retained is sample 2 (0 and 1 evicted); newest is 4.
-        #expect(snap.first?.ts == 2.0)
-        #expect(snap.last?.ts == 4.0)
-    }
-
-    @Test("capacity clamps to a minimum of 1")
-    func capacityClampsToOne() {
-        let window = RecentWindowSink(capacity: 0)
-        #expect(window.capacity == 1)
-        window.receive(.metric(name: "x", value: 1.0, tags: [:], ts: 1.0))
-        window.receive(.metric(name: "y", value: 2.0, tags: [:], ts: 2.0))
-        #expect(window.count == 1)
-        #expect(window.snapshot().first?.ts == 2.0)
-    }
-
-    @Test("forward sink receives every sample after the window records it")
-    func forwardSinkReceivesAll() {
-        let downstream = CountingSink()
-        let window = RecentWindowSink(capacity: 2, forward: downstream)
-        // Overflow the window — the forward sink must still see ALL samples,
-        // not just the retained two (forwarding is independent of eviction).
-        for i in 0..<5 {
-            window.receive(.metric(name: "f", value: Double(i), tags: [:], ts: Double(i)))
-        }
-        #expect(window.count == 2)        // bounded
-        #expect(downstream.count == 5)    // all forwarded
-    }
-
-    @Test("empty window snapshot is empty and totalReceived is zero")
-    func emptyWindow() {
-        let window = RecentWindowSink(capacity: 8)
-        #expect(window.count == 0)
-        #expect(window.totalReceived == 0)
-        #expect(window.snapshot().isEmpty)
-    }
-
-    @Test("window installed as Intellectus sink: enabled records, disabled does not")
-    func windowViaGate() {
-        let window = RecentWindowSink(capacity: 16)
-        Intellectus.install(sink: window)
-
-        // FORCE: observer disabled → no sample recorded + explicit off state.
-        Intellectus.setEnabled(false)
-        #expect(Intellectus.isEnabled == false)
-        Intellectus.report(.metric(name: "off", value: 1.0, tags: [:], ts: 0.0))
-        #expect(window.count == 0)
-
-        // FORCE: observer enabled → sample recorded in window.
-        Intellectus.setEnabled(true)
-        #expect(Intellectus.isEnabled == true)
-        Intellectus.report(.metric(name: "on", value: 1.0, tags: [:], ts: 1.0))
-        #expect(window.count == 1)
-        #expect(window.snapshot().first?.ts == 1.0)
-
-        // Restore defaults so later tests are not polluted.
-        Intellectus.install(sink: NoOpSink.shared)
-        Intellectus.setEnabled(false)
-    }
-
-    @Test("concurrent receive does not crash and bound holds")
-    func concurrentReceiveBounded() async {
-        let window = RecentWindowSink(capacity: 32)
-        await withTaskGroup(of: Void.self) { group in
-            for t in 0..<8 {
-                group.addTask {
-                    for i in 0..<100 {
-                        window.receive(.metric(
-                            name: "c", value: Double(t * 100 + i), tags: [:], ts: 0.0))
-                    }
-                }
-            }
-        }
-        // Bound holds under concurrency; total counts every receive.
-        #expect(window.count == 32)
-        #expect(window.totalReceived == 800)
     }
 }
 

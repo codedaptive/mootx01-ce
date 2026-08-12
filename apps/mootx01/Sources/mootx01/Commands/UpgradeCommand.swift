@@ -433,10 +433,16 @@ struct UpgradeCommand: AsyncParsableCommand {
             // validates only that ownerIdentifier is non-empty, so this
             // sentinel is sufficient.
             let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+            // Durable estate: pass nil so LocusKit resolves the backend default
+            // (SQLite -> KeychainEstateIdentityKeyStore). Injecting an in-memory
+            // store here lets Estate.open mint an Ed25519 keypair, persist only
+            // the public half to the manifest, and drop the private half at
+            // process exit -- permanently disabling grant/federation signing for
+            // any estate whose identity had not yet been established.
             let handle = try await kit.open(
                 storage: storage,
                 owner: owner,
-                identityKeyStore: InMemoryEstateIdentityKeyStore()
+                identityKeyStore: nil
             )
             let report = try await kit.completeSharedContentReclaim(
                 handle: handle, now: Date())
@@ -450,7 +456,20 @@ struct UpgradeCommand: AsyncParsableCommand {
             } else {
                 print("  ✓ shared-content reclaim: not pending")
             }
+        } catch let err as StorageMaintenanceError {
+            // The inventory trim committed before performMaintenance ran — the
+            // estate IS affected: legacyVectorKeys are cleared, the freelist has
+            // grown, but the freed pages are not yet returned to the filesystem.
+            // State remains reclaimPending, so the next `mootx01 upgrade` retries.
+            print("""
+                  ✗ shared-content reclaim: VACUUM failed — \(err)
+                    The inventory trim completed (legacy vector keys cleared).
+                    Freed pages are on the freelist and not yet returned to the filesystem.
+                    Run `mootx01 upgrade` again to retry the VACUUM.
+                """)
         } catch {
+            // Failure before completeSharedContentReclaim commits the trim —
+            // estate state is unchanged.
             print("""
                   ✗ shared-content reclaim failed: \(error)
                     The estate is unaffected. Run `mootx01 upgrade` to retry.

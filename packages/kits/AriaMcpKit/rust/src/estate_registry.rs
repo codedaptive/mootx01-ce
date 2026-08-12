@@ -57,6 +57,7 @@ use genius_locus_kit::EstateCoordinator;
 // on genius_locus_kit directly. Gives them the type name for the T5 finisher
 // gate `DrainStatus::encode_settled` (PERF_W1_DRAIN_RIDER Finding 3).
 pub use genius_locus_kit::DrainStatus;
+use genius_locus_kit_migrations::run_geometry_normalization;
 use genius_locus_kit_migrations::SharedContentMigrationExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -258,6 +259,20 @@ impl EstateRegistry {
     /// The caller should print this to stderr and exit with a nonzero code.
     pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
+        // Geometry normalization must precede the estate connection so VACUUM and
+        // all maintenance paths receive a reserve-0 file. SQLCipher's `attachFunc`
+        // calls `sqlcipherCodecAttach(nKey=0)` for any keyless ATTACH when the main
+        // database has nonzero reserved-bytes-per-page (file header byte 20 ≠ 0),
+        // failing with SQLITE_ERROR. Running normalization here — before
+        // `SqliteDrawerStore::from_path` opens its connection — ensures the
+        // connection is always opened on the canonical normalized path; no stale fd
+        // survives the atomic rename. Errors are parked so a geometry failure never
+        // blocks the estate from opening (VACUUM will surface the issue later).
+        if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
+            eprintln!(
+                "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
+            );
+        }
         let store: Arc<dyn DrawerStore> = Arc::new(
             SqliteDrawerStore::from_path(path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
                 .map_err(|e| format!("aria-mcp: cannot open SQLite estate at {path:?}: {e}"))?,
@@ -367,6 +382,13 @@ impl EstateRegistry {
     /// wired** — same as `new_sqlite`. Returns `Err(String)` on open failure or
     /// if semantic-recall wiring fails.
     pub fn register_sqlite(&mut self, path: &str, owner: &str) -> Result<Uuid, String> {
+        // Same normalization-before-connection contract as `new_sqlite` — see that
+        // function's comment for the full rationale. Errors parked identically.
+        if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
+            eprintln!(
+                "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
+            );
+        }
         let store: Arc<dyn DrawerStore> = Arc::new(
             SqliteDrawerStore::from_path(path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
                 .map_err(|e| format!("aria-mcp: cannot open SQLite estate at {path:?}: {e}"))?,
@@ -781,6 +803,11 @@ fn wire_postgres_semantic_recall(
         PostgresStorage::new(config)
             .map_err(|e| format!("PostgresStorage for semantic recall at {conn_str:?}: {e}"))?,
     );
+
+    // Geometry normalization is SQLite-specific (file header byte 20 = reserved
+    // bytes per page). PostgreSQL manages its own storage geometry server-side
+    // and has no file header to normalize; this step is intentionally omitted
+    // for PostgreSQL estates (blast-radius INTENTIONALLY_LEFT classification).
 
     // This binary declares a 1.0 floor, so prepare the estate through the
     // separately compiled migration capsule before current-runtime wiring.

@@ -55,12 +55,21 @@ public enum GLKMigrationCatalog {
     /// without creating a migration record. Historical estates run the
     /// contiguous compiled chain and return only after the five-signal lane is
     /// verified; physical reclamation remains separately retryable.
+    ///
+    /// Geometry normalization runs FIRST — before the format check — because
+    /// VACUUM (called by later capsules) fails on estates with nonzero SQLite
+    /// reserved-bytes-per-page. Errors are parked by the capsule so a geometry
+    /// failure never blocks the estate from opening.
     public static func prepare(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         now: Date = Date()
     ) async throws -> GLKMigrationPreparation {
         let storage = try await kit.migrationStorage(for: handle)
+
+        // Step 0: geometry normalization (format-agnostic, must precede VACUUM).
+        _ = await GeometryNormalizationCapsule.run(storage: storage)
+
         let formatStore = EstateFormatStore(storage: storage)
         if let found = try await formatStore.readIfPresent() {
             if found == .current {
@@ -75,6 +84,13 @@ public enum GLKMigrationCatalog {
                 throw GLKMigrationCatalogError.belowCompiledFloor(
                     found: found, floor: floor)
             }
+            // Fall through: found is in (floor, current) — run historical chain.
+        } else {
+            // Fresh estate (nil stamp): provisioned without migration. Stamp current
+            // and return — no historical capsules need to run.
+            try await formatStore.stamp(.current, now: now)
+            return GLKMigrationPreparation(
+                format: .current, migrated: false, migrationState: nil)
         }
 
         #if GLK_MIGRATION_V1_0_TO_V1_1

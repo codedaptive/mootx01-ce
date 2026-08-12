@@ -651,6 +651,7 @@ dependencies = [
  "corpus-kit",
  "genius-locus-kit",
  "persistence-kit",
+ "rusqlite",
  "serde",
  "serde_json",
  "vectorkit",
@@ -954,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "mootx01-cli"
-version = "1.1.0-beta-15"
+version = "1.1.0-beta-16"
 dependencies = [
  "aria-mcp",
  "genius-locus-kit",

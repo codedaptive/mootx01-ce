@@ -87,3 +87,9 @@ queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 # depending on internal transitive crate names. App→kit layering, no inversion.
 # Per in-repository dependency direction (Rust no-inversion rule).
 convergence-kit  = { path = "../../ConvergenceKit/rust" }
+# rusqlite: dev-only, used by persistence_tests.rs test 5 (write-survival
+# regression) to create a reserve=12 SQLite fixture via SQLITE_FCNTL_RESERVE_BYTES
+# (opcode 38) before handing the path to EstateRegistry::new_sqlite. Features and
+# version match persistence-kit's entry exactly — Cargo deduplicates to one
+# compiled instance, adding zero build cost.
+rusqlite         = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }

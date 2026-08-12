@@ -9883,8 +9883,8 @@ impl EstateCoordinator {
         bm25_list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    let ka = locus_content_by_id.get(&a.0).map_or(a.0.as_str(), |s| s.as_str());
-                    let kb = locus_content_by_id.get(&b.0).map_or(b.0.as_str(), |s| s.as_str());
+                    let ka = tiebreak_key(locus_content_by_id.get(&a.0).map(|s| s.as_str()), a.0.as_str());
+                    let kb = tiebreak_key(locus_content_by_id.get(&b.0).map(|s| s.as_str()), b.0.as_str());
                     ka.cmp(kb)
                 })
         });
@@ -9892,8 +9892,8 @@ impl EstateCoordinator {
         vector_list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    let ka = locus_content_by_id.get(&a.0).map_or(a.0.as_str(), |s| s.as_str());
-                    let kb = locus_content_by_id.get(&b.0).map_or(b.0.as_str(), |s| s.as_str());
+                    let ka = tiebreak_key(locus_content_by_id.get(&a.0).map(|s| s.as_str()), a.0.as_str());
+                    let kb = tiebreak_key(locus_content_by_id.get(&b.0).map(|s| s.as_str()), b.0.as_str());
                     ka.cmp(kb)
                 })
         });
@@ -9903,8 +9903,8 @@ impl EstateCoordinator {
         dense_list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    let ka = locus_content_by_id.get(&a.0).map_or(a.0.as_str(), |s| s.as_str());
-                    let kb = locus_content_by_id.get(&b.0).map_or(b.0.as_str(), |s| s.as_str());
+                    let ka = tiebreak_key(locus_content_by_id.get(&a.0).map(|s| s.as_str()), a.0.as_str());
+                    let kb = tiebreak_key(locus_content_by_id.get(&b.0).map(|s| s.as_str()), b.0.as_str());
                     ka.cmp(kb)
                 })
         });
@@ -10253,10 +10253,10 @@ impl EstateCoordinator {
                 b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
-                        let ka = drawer_index.get(&ordered_ids[a.0])
-                            .map_or(ordered_ids[a.0].as_str(), |d| d.content.as_str());
-                        let kb = drawer_index.get(&ordered_ids[b.0])
-                            .map_or(ordered_ids[b.0].as_str(), |d| d.content.as_str());
+                        let ka = tiebreak_key(drawer_index.get(&ordered_ids[a.0])
+                            .map(|d| d.content.as_str()), ordered_ids[a.0].as_str());
+                        let kb = tiebreak_key(drawer_index.get(&ordered_ids[b.0])
+                            .map(|d| d.content.as_str()), ordered_ids[b.0].as_str());
                         ka.cmp(kb)
                     })
             });
@@ -10420,8 +10420,8 @@ impl EstateCoordinator {
                         // Content-derived tiebreak: stable across replay runs because drawer
                         // content is deterministic for a given seed, unlike drawer UUIDs which
                         // are minted fresh on each estate import.
-                        let ka = drawer_index.get(&a.0).map_or(a.0.as_str(), |d| d.content.as_str());
-                        let kb = drawer_index.get(&b.0).map_or(b.0.as_str(), |d| d.content.as_str());
+                        let ka = tiebreak_key(drawer_index.get(&a.0).map(|d| d.content.as_str()), a.0.as_str());
+                        let kb = tiebreak_key(drawer_index.get(&b.0).map(|d| d.content.as_str()), b.0.as_str());
                         ka.cmp(kb)
                     })
             });
@@ -10749,6 +10749,29 @@ impl EstateCoordinator {
             degraded_stages,
             hits,
         })
+    }
+}
+
+// MARK: - Fusion tiebreak helper
+
+/// Deterministic sort key for a fusion tiebreak.
+///
+/// Drawer `content` is EMPTY on the recall path: `RecallFrame` defaults to
+/// `HydrationLevel::Structured`, which reads no blobs. Keying a tiebreak on it
+/// therefore gave every candidate the same `""` key, so tied scores compared
+/// `Equal` and the stable sort preserved `all_ids` HashSet iteration order —
+/// randomly seeded per instance, so two identical calls in one process returned
+/// different orders (leave_one_out_nulls_single_signal).
+///
+/// Treat an empty key as absent and fall back to the id. Content still wins
+/// wherever it IS populated (replay determinism across imports); the id is
+/// unique, so the comparator is a total order either way.
+/// Mirrors the Swift `RecallDirector.tiebreakKey`.
+#[inline]
+fn tiebreak_key<'a>(content: Option<&'a str>, id: &'a str) -> &'a str {
+    match content {
+        Some(c) if !c.is_empty() => c,
+        _ => id,
     }
 }
 

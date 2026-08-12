@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.34.0
+version: 1.36.0
 status: accepted-1.1-target
-date: 2026-08-07
+date: 2026-08-11
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -78,6 +78,28 @@ ARIA is always the MCP server; it never acts as a client of another MCP server. 
 **Fallback transport: local stdio.** The same server, launched by a client as a subprocess, speaking JSON-RPC over stdin/stdout (newline-delimited, a dependency-free pattern: tool registry; dispatcher over initialize, ping, notifications, tools/list, tools/call; read-write loop). stdio is the simple path — proof-of-concept, testing, and the fallback for operations like migrations — and is ephemeral: it lives only while the client holds it, so it does **not** pump the Brain. The tool/JSON-RPC surface is byte-identical to the HTTP transport.
 
 Remote/multi-tenant HTTP (the Custom Connector path: internet-hosted https, OAuth, scoped tokens) remains v1.1; only the *local* loopback HTTP transport is v1.0.
+
+**stdio→HTTP bridge (Claude Desktop compatibility path).** Because Claude Desktop cannot address a native HTTP URL entry in its config it must launch a subprocess over stdio. The `mootx01 proxy` command adapts the stdio transport to the resident HTTP daemon: it reads newline-delimited JSON-RPC frames from stdin, POSTs each frame to the daemon over loopback HTTP, and writes the daemon's response back to stdout. The bridge owns transport adaptation only; the daemon handles every ARIA verb the same way regardless of whether the original client was a direct HTTP caller or came through the bridge.
+
+**Bridge failure-response invariant.** Every inbound JSON-RPC frame with an `id` (a request) MUST produce exactly one outbound frame with that same `id`. A failed request — transport error OR HTTP-level failure — is answered with a synthesized JSON-RPC -32603 error that echoes the request's id. The cases that trigger a synthesized error are:
+
+| Condition | Details |
+|---|---|
+| Transport error | `URLSession` throws (connection refused, reset, timeout) |
+| HTTP status 0 | Daemon mid-restart accepts TCP then resets; HTTP status line unparseable → `unwrap_or(0)` in Rust `post_frame` |
+| Non-2xx with empty body | Daemon accepted then crashed; a bare newline carries no frame and would leave the client hanging |
+| Non-2xx with non-empty body | HTML error pages and plain-text bodies are not JSON-RPC envelopes; relaying them poisons the stream |
+
+**The synthesized error frame carries the original request's `id`.** MCP clients reject `id: null` error frames at schema level, and the resulting parse error poisons the whole stream — this was the root cause of the "Server disconnected" failure mode fixed in the px stream. The id is never fabricated; it is extracted verbatim from the inbound request.
+
+**Notifications (frames without an `id`) produce no reply on any failure path.** This is MCP spec compliant — servers must not reply to notifications.
+
+**The bridge is stateless per-frame.** Each frame is an independent POST. There is no session recovery: if the daemon restarts, in-flight requests receive synthesized errors and the next request starts clean. If a future version of the bridge adds an `Mcp-Session-Id` header, session recovery (clear + re-initialize + one-shot retry) must be added at the same time — a restart without recovery becomes a permanent outage for the session.
+
+**Bridge input limits (both ports, security findings 012 and 036).** The bridge enforces two admission limits on all inbound frames. Both limits are byte-identical across the Swift (`ProxyCommand`) and Rust (`proxy.rs`) implementations:
+
+1. **Frame-size cap — 4 MB (`4 * 1024 * 1024` bytes).** Any newline-delimited frame exceeding this limit is dropped without forwarding. A dropped oversized frame produces no synthesized error: the frame is malformed input, not a failed request, and parsing a multi-megabyte blob for a request id is itself an attack surface. The drop is logged to stderr as `mootx01 proxy: frame exceeds 4194304 byte limit, dropped`. The accumulation buffer is also bounded: if the buffer exceeds the cap with no newline seen, content is discarded to prevent memory exhaustion from a newline-less stdin stream.
+2. **Concurrency cap — 16 frames in flight.** No more than 16 frames may be forwarded simultaneously. A 17th frame waits until one of the running frames completes; it is never dropped. This is the structured-concurrency equivalent of the Rust reap-and-wait loop.
 
 ## § 6. Client compatibility (verified 2026-05-22)
 
@@ -1034,6 +1056,14 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.36.0 -- 2026-08-11
+
+- Bridge input limits (pc stream, security findings 012/036). §5 gains the bridge input limits subsection documenting the two admission caps enforced by both ports: 4 MB per frame (oversized frames dropped with a stderr diagnostic, no synthesized error) and 16 frames in flight maximum (17th frame waits, never dropped). Both limits are byte-identical across the Swift `ProxyCommand` and Rust `proxy.rs` implementations.
+
+### 1.35.0 -- 2026-08-11
+
+- Bridge failure-response invariant (px stream). §5 gains the stdio→HTTP bridge subsection documenting the proxy adapter, the per-frame id-echoing error contract, the four conditions that trigger a synthesized error frame, and the stateless-per-frame session model. Root cause documented: `id: null` synthesized errors caused "Server disconnected" failures in Claude Desktop (MCP client schema-rejects `id: null` at parse time, poisoning the whole stream). Fix: all failure paths on id-bearing frames now echo the original request id via a -32603 synthesized error; notifications and `id: null` frames produce no reply per spec.
 
 ### 1.34.0 -- 2026-08-07
 
