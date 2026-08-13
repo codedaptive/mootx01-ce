@@ -620,6 +620,12 @@ public extension GeniusLocusKit {
     internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
         await corpus.setOnEncoded { [weak self] drawerIDs, unitSessionID in
             guard let self else { return }
+            // Marker timestamp is captured at CALLBACK ENTRY — the moment the
+            // drain unit's encode work completed — never after rollup or
+            // distillation, so the A2 marker anchors on encode-end in BOTH
+            // ports (the C3 INGEST derivation depends on this alignment;
+            // Rust twin captures its now_ms at the same boundary).
+            let encodeCompletedAt = Date()
             guard let estate = try? await self.estate(for: handle) else { return }
             try? await estate.rollupRoomsForDrawers(drawerIDs)
             // A2 encode-completion audit marker: exactly one per drain unit,
@@ -627,14 +633,20 @@ public extension GeniusLocusKit {
             // id and row count in the reason column. Flag-gated ON by default
             // (MOOTX01_ENCODE_MARKERS=off disables); "markers present" is a
             // provenance input to the artifact build (B2). Best-effort like
-            // the rollup above: a marker failure must never fail the drain.
+            // the rollup above — but a swallowed failure is still LOGGED:
+            // silent forever-failure would make artifacts unmeasurable with
+            // no operator signal (the B7 hard-fail depends on markers existing).
             if Self.encodeMarkersEnabled, let firstID = drawerIDs.first {
-                try? await estate.appendEncodeCompleteMarker(
-                    firstDrawerID: firstID,
-                    rowCount: drawerIDs.count,
-                    unitSessionID: unitSessionID,
-                    at: Date()
-                )
+                do {
+                    try await estate.appendEncodeCompleteMarker(
+                        firstDrawerID: firstID,
+                        rowCount: drawerIDs.count,
+                        unitSessionID: unitSessionID,
+                        at: encodeCompletedAt
+                    )
+                } catch {
+                    Self.intakeLog.warning("encode-completion marker failed for unit \(unitSessionID, privacy: .public): \(error, privacy: .public)")
+                }
             }
             // Drain-stage distillation (§7.1): distill each encoded drawer
             // that is still eligible. The clock is the wall clock at drain

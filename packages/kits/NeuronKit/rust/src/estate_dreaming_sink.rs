@@ -163,6 +163,10 @@ impl<'a> DreamingProposalSink for EstateDreamingSink<'a> {
             session_id,
             (now_epoch_secs * 1000.0) as i64,
         ) {
+            // Best-effort, but LOGGED to stderr as well as write_errors — the
+            // accumulator is not read on the production path, and a silently
+            // failing marker facility defeats the audit purpose.
+            eprintln!("[neuronkit] dream_cycle_will_start marker failed: {e:?}");
             self.write_errors.push(format!("dream_cycle_will_start: {e:?}"));
         }
     }
@@ -175,6 +179,10 @@ impl<'a> DreamingProposalSink for EstateDreamingSink<'a> {
             session_id,
             (now_epoch_secs * 1000.0) as i64,
         ) {
+            // Best-effort, but LOGGED to stderr as well as write_errors — the
+            // accumulator is not read on the production path, and a silently
+            // failing marker facility defeats the audit purpose.
+            eprintln!("[neuronkit] dream_cycle_did_end marker failed: {e:?}");
             self.write_errors.push(format!("dream_cycle_did_end: {e:?}"));
         }
     }

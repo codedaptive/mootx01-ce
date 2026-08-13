@@ -18,19 +18,6 @@ import LocusKit
 /// so writes are serialised at the `Storage` layer.
 public extension GeniusLocusKit {
 
-    /// Write a diary entry to the estate addressed by `handle`.
-    ///
-    /// Used by `EstateDreamingSink` to record the dreaming daemon's per-cycle
-    /// summary (NEURONKIT_SPEC § 3.1 step 7). Builds a `DrawerStore` lazily
-    /// from the estate's retained `Storage` on first use and caches it per
-    /// handle so repeated calls do not re-open schema.
-    ///
-    /// - Parameters:
-    ///   - handle: the estate to write to. Must be open in this kit.
-    ///   - entry: the diary entry to store.
-    /// - Throws:
-    ///   - `GeniusLocusKitError.estateNotOpen` if the handle is stale.
-    ///   - Any `LocusKitError` raised by `DrawerStore.addDiaryEntry`.
     /// Append a dream-cycle bracket marker to the estate audit log (A3,
     /// benchmark reset 2026-08-13). Flag-gated with the A2 encode markers
     /// (`MOOTX01_ENCODE_MARKERS=off` disables both — they are one recording
@@ -48,6 +35,19 @@ public extension GeniusLocusKit {
             phase: phase, unitSessionID: sessionID, at: now)
     }
 
+    /// Write a diary entry to the estate addressed by `handle`.
+    ///
+    /// Used by `EstateDreamingSink` to record the dreaming daemon's per-cycle
+    /// summary (NEURONKIT_SPEC § 3.1 step 7). Builds a `DrawerStore` lazily
+    /// from the estate's retained `Storage` on first use and caches it per
+    /// handle so repeated calls do not re-open schema.
+    ///
+    /// - Parameters:
+    ///   - handle: the estate to write to. Must be open in this kit.
+    ///   - entry: the diary entry to store.
+    /// - Throws:
+    ///   - `GeniusLocusKitError.estateNotOpen` if the handle is stale.
+    ///   - Any `LocusKitError` raised by `DrawerStore.addDiaryEntry`.
     func addDiaryEntry(in handle: EstateHandle, _ entry: DiaryEntry) async throws {
         let store = try await ensureDiaryStore(for: handle)
         // Dreaming-daemon diary entries carry no embedding (the daemon emits

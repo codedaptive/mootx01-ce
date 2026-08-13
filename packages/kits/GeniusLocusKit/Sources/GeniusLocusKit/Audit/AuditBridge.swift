@@ -200,6 +200,13 @@ enum AuditBridge {
         case "sensitivityGrantDenied":     return .sensitivityGrantDenied
         case "sensitivityGrantRevoked":    return .sensitivityGrantRevoked
         case "sensitivityReadUnderGrant":  return .sensitivityReadUnderGrant
+        // Informational markers (encodeComplete, dreamStart, dreamEnd — A2/A3,
+        // benchmark reset 2026-08-13) reach this default deliberately. They
+        // carry before == after bitmaps, so the column-diff loop below emits
+        // ZERO UnifiedAuditEntry values for them — intentional isolation from
+        // the matrix/enrichment pipeline. Their payload lives in the estate
+        // audit table's reason column, read by the C3 timing derivation, not
+        // by this bridge.
         default:                  return .mutate
         }
     }

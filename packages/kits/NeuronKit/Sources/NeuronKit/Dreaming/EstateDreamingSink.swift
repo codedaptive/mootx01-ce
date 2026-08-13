@@ -27,6 +27,7 @@
 // handle.
 
 import Foundation
+import OSLog
 import GeniusLocusKit
 import IntellectusLib
 import SubstrateTypes
@@ -115,13 +116,26 @@ public struct EstateDreamingSink: DreamingProposalSink {
     /// marker through the GLK seam. Best-effort — a marker failure must
     /// never fail the cycle (mirrors the drain worker's marker posture).
     public func dreamCycleWillStart(sessionID: String, now: Date) async {
-        try? await kit.appendDreamCycleMarker(
-            in: handle, phase: .start, sessionID: sessionID, now: now)
+        do {
+            try await kit.appendDreamCycleMarker(
+                in: handle, phase: .start, sessionID: sessionID, now: now)
+        } catch {
+            // Best-effort, but LOGGED: a silently failing marker facility
+            // defeats the audit purpose with no operator signal.
+            Self.sinkLog.warning("dreamStart marker failed for session \(sessionID, privacy: .public): \(error, privacy: .public)")
+        }
     }
 
     /// A3 dream-cycle bracket, end side — same session id as the start.
     public func dreamCycleDidEnd(sessionID: String, now: Date) async {
-        try? await kit.appendDreamCycleMarker(
-            in: handle, phase: .end, sessionID: sessionID, now: now)
+        do {
+            try await kit.appendDreamCycleMarker(
+                in: handle, phase: .end, sessionID: sessionID, now: now)
+        } catch {
+            Self.sinkLog.warning("dreamEnd marker failed for session \(sessionID, privacy: .public): \(error, privacy: .public)")
+        }
     }
+
+    /// Marker-failure logger (subsystem/category per the fleet logging rule).
+    private static let sinkLog = Logger(subsystem: "com.mootx01.kit", category: "NeuronKit")
 }

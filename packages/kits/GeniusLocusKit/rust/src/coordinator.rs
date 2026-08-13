@@ -527,6 +527,23 @@ fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError {
     }
 }
 
+/// Whether encode-completion audit markers are recorded (A2, benchmark
+/// reset 2026-08-13). ON by default; `MOOTX01_ENCODE_MARKERS=off` disables.
+/// Because recording is flag-gated, "markers present" is a BUILD INPUT for
+/// benchmark artifacts (B2 provenance manifest): an artifact built with
+/// recording off cannot yield INGEST/CYCLE timings and must fail loudly at
+/// measurement. Read once per process (OnceLock) so both ports share the
+/// same read-once semantics — Swift's `static let encodeMarkersEnabled` is
+/// evaluated at first use and never again; a per-call re-read here would
+/// let the two ports diverge if the environment changed mid-process.
+/// Twin of Swift `GeniusLocusKit.encodeMarkersEnabled`.
+fn encode_markers_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MOOTX01_ENCODE_MARKERS").map(|v| v != "off").unwrap_or(true)
+    })
+}
+
 /// Convert a raw `[u8; 16]` estate UUID to a hyphenated lowercase UUID string.
 ///
 /// Used by telemetry emit sites to produce a human-readable `estate_id` tag
@@ -534,17 +551,6 @@ fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError {
 /// The Uuid crate is already in Cargo.toml dependencies (required by EstateCoordinator
 /// for `Uuid::new_v4()` elsewhere in this file).
 #[inline]
-/// Whether encode-completion audit markers are recorded (A2, benchmark
-/// reset 2026-08-13). ON by default; `MOOTX01_ENCODE_MARKERS=off` disables.
-/// Because recording is flag-gated, "markers present" is a BUILD INPUT for
-/// benchmark artifacts (B2 provenance manifest): an artifact built with
-/// recording off cannot yield INGEST/CYCLE timings and must fail loudly at
-/// measurement. Read per call — cheap, and avoids process-global state.
-/// Twin of Swift `GeniusLocusKit.encodeMarkersEnabled`.
-fn encode_markers_enabled() -> bool {
-    std::env::var("MOOTX01_ENCODE_MARKERS").map(|v| v != "off").unwrap_or(true)
-}
-
 fn uuid_to_str(bytes: &[u8; 16]) -> String {
     Uuid::from_bytes(*bytes).to_string()
 }
@@ -8588,6 +8594,17 @@ impl EstateCoordinator {
                         corpus.set_on_encoded(move |drawer_ids, unit_session_id| {
                             use substrate_ml::token_compaction;
 
+                            // Marker timestamp is captured at CALLBACK ENTRY — the
+                            // moment the drain unit's encode work completed — never
+                            // after rollup or distillation, so the A2 marker anchors
+                            // on encode-end in BOTH ports (the C3 INGEST derivation
+                            // depends on this alignment; Swift twin captures its
+                            // encodeCompletedAt at the same boundary).
+                            let encode_completed_at_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+
                             // (1) Room-rollup — always best-effort.
                             let _ = estate.rollup_rooms_for_drawers(drawer_ids);
 
@@ -8655,12 +8672,20 @@ impl EstateCoordinator {
                             // wireCorpusRoomRollup marker block.
                             if encode_markers_enabled() {
                                 if let Some(first_id) = drawer_ids.first() {
-                                    let _ = estate.append_encode_complete_marker(
+                                    // Best-effort, but a swallowed failure is still
+                                    // LOGGED: silent forever-failure would make
+                                    // artifacts unmeasurable with no operator signal
+                                    // (B7's hard-fail depends on markers existing).
+                                    if let Err(e) = estate.append_encode_complete_marker(
                                         first_id,
                                         drawer_ids.len(),
                                         unit_session_id,
-                                        now_ms,
-                                    );
+                                        encode_completed_at_ms,
+                                    ) {
+                                        eprintln!(
+                                            "[glk] encode-completion marker failed for unit {unit_session_id}: {e:?}"
+                                        );
+                                    }
                                 }
                             }
                         });
