@@ -152,3 +152,11 @@ AuthKey_*.p8
 # never be published. Synced here from the docs repo; not CE deliverables.
 .agents/
 .codex/
+
+# Tier-3 agent project profile. Tracked deliberately: .claude/ is otherwise
+# ignored, and an untracked profile drifts per-machine (see settings.json
+# drift, 2026-08-13). Git cannot re-include a file inside an excluded
+# directory, so the directory is re-included and its contents re-excluded.
+!.claude/
+.claude/*
+!.claude/PROJECT.md
