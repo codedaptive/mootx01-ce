@@ -140,13 +140,13 @@ struct PluginPackageShapeTests {
                 """)
     }
 
-    /// The two keys are deliberately different (7f64973aa): a plugin entry is
-    /// namespaced under the plugin id by the host, so it reads as
-    /// `plugin:mootx01:memory`; a direct entry has no such namespace and keeps
-    /// `mootx01`. Collapsing them would break the plugin-ownership hook's
-    /// ability to spot a competing direct entry.
-    @Test("the plugin server key and the direct-entry server key stay distinct")
-    func pluginAndDirectServerKeysAreDistinct() {
-        #expect(MCPClients.pluginServerName != MCPClients.serverName)
+    /// The two keys are intentionally the same: both the plugin and the direct
+    /// install entry use `"mootx01"` so MOOT tools surface under a single
+    /// `mcp__mootx01__*` prefix regardless of install path. The upgrade-time
+    /// Codex config.toml cleanup step (UpgradeCommand) replaces the role that
+    /// deliberate-distinctness previously served for ownership detection.
+    @Test("the plugin server key and the direct-entry server key are now identical")
+    func pluginAndDirectServerKeysAreIdentical() {
+        #expect(MCPClients.pluginServerName == MCPClients.serverName)
     }
 }

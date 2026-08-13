@@ -774,7 +774,7 @@ mod tests {
     /// gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
     #[test]
     fn inject_vault_env_shape_check() {
-        let command_entry = r#"{"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}"#;
+        let command_entry = r#"{"mcpServers":{"mootx01":{"command":"mootx01","args":["proxy"]}}}"#;
         let patched = inject_vault_env(".mcp.json", command_entry);
         let patched_json: serde_json::Value = serde_json::from_str(&patched).unwrap();
         assert_eq!(
@@ -782,7 +782,7 @@ mod tests {
             "a command-shaped entry must still get MOOTX01_VAULT=0 injected"
         );
 
-        let http_entry = r#"{"mcpServers":{"memory":{"type":"http","url":"http://127.0.0.1:4242"}}}"#;
+        let http_entry = r#"{"mcpServers":{"mootx01":{"type":"http","url":"http://127.0.0.1:4242"}}}"#;
         let unchanged = inject_vault_env(".mcp.json", http_entry);
         let unchanged_json: serde_json::Value = serde_json::from_str(&unchanged).unwrap();
         assert!(
@@ -1106,13 +1106,11 @@ mod tests {
         );
     }
 
-    /// The two keys are deliberately different (7f64973aa): a plugin entry is
-    /// namespaced under the plugin id by the host, so it reads as
-    /// `plugin:mootx01:memory`; a direct entry has no such namespace and keeps
-    /// `mootx01`. Collapsing them would break the plugin-ownership hook's
-    /// ability to spot a competing direct entry.
+    /// The two keys are intentionally the same: both the plugin and the direct
+    /// install entry use `"mootx01"` so MOOT tools surface under a single
+    /// `mcp__mootx01__*` prefix regardless of install path.
     #[test]
-    fn plugin_and_direct_server_keys_are_distinct() {
-        assert_ne!(clients::PLUGIN_SERVER_NAME, clients::SERVER_NAME);
+    fn plugin_and_direct_server_keys_are_identical() {
+        assert_eq!(clients::PLUGIN_SERVER_NAME, clients::SERVER_NAME);
     }
 }
