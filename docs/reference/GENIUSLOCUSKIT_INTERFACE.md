@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-08-13
-version: 1.32.0
+version: 1.33.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
@@ -2121,6 +2121,18 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.33.0 -- 2026-08-13
+
+- `auditEvents(_ handle:after:limit:)` (Rust
+  `EstateCoordinator::audit_events(handle, after, limit)`): estate-wide
+  HLC-ordered audit page — handle validation plus the LocusKit
+  `Estate.auditEvents` pass-through. The C3/A6 timing-derivation paging
+  seam consumed by `moot_timing_report`.
+- Reindex completion now seals a C3 `reindexComplete` marker at the
+  chokepoint (Swift `EncodeIntake.reindexMissing` tail; Rust
+  `EstateCoordinator::append_reindex_complete_marker` called from the
+  `moot_reindex` tool tail), gated by `MOOTX01_ENCODE_MARKERS`.
 
 ### 1.32.0 -- 2026-08-13
 

@@ -573,6 +573,24 @@ public enum ToolProjection {
                 provenance: .interface
             ),
             // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
+            // C3+A6 (benchmark reset 2026-08-13): derives INGEST and CYCLE
+            // timing metrics from the A2/A3/C3 audit markers via NeuronKit's
+            // single derivation engine — the same derivation the performance-
+            // health duty consumes (§6b one-derivation-two-consumers). Read-
+            // only; the caller keeps the returned watermark for incremental
+            // scans.
+            ProjectedTool(
+                name: "moot_timing_report",
+                description: "Maintenance: derive memory-timing metrics from the estate's audit log — INGEST time per single-row encode unit, bulk encode throughput, and the CYCLE tiers (vector = encode completion, novel-term = next basis retrain, dreamt = next dream cycle end). Rows with no subsequent retrain or dream are reported as unbounded counts, not dropped. Read-only. Pass since_ms (a previous call's watermark_ms) to scan only newer activity; omit for a full-history scan. Returns sample counts, p50/p95 milliseconds per metric, unbounded counts, and the new watermark_ms.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "since_ms": integerSchema("Optional watermark from a previous call's watermark_ms (epoch milliseconds). Only captures strictly after it are measured, so successive calls never double-count. Omit or 0 for a full-history scan."),
+                    ],
+                    required: []
+                )),
+                provenance: .interface
+            ),
+            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
             // Recomputes stored FDC lattice anchors with the current deterministic
             // classifier. Dry-run by default. `mode: suspectOnly` restricts changes
             // to stale false positives/empty anchors; `mode: all` intentionally

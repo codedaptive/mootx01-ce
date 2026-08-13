@@ -30,7 +30,7 @@ public extension GeniusLocusKit {
         now: Date
     ) async throws {
         guard Self.encodeMarkersEnabled else { return }
-        let estate = try await estate(for: handle)
+        let estate = try estate(for: handle)
         try await estate.appendDreamCycleMarker(
             phase: phase, unitSessionID: sessionID, at: now)
     }

@@ -2789,6 +2789,53 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    /// Append a reindex-completion marker (C3, benchmark reset 2026-08-13):
+    /// estate-anchored informational event sealing when a full-corpus basis
+    /// retrain FINISHED — the CYCLE tier-3 boundary. Verb `reindexComplete`,
+    /// actor `reindex_worker`, reason `session=<id> rows=<n>`. Mirrors Swift
+    /// `DrawerStore.appendReindexCompleteMarker`.
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        if unit_session_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "unitSessionID must not be empty".to_string(),
+            ));
+        }
+        let stamp = self.hlc.lock().unwrap().send(completed_at);
+        let zero = (0i64, 0i64, 0i64);
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc("000");
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+                &stamp,
+                "reindexComplete",
+                zero,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+            hlc: stamp,
+            verb: "reindexComplete".to_string(),
+            before_bitmaps: Some(zero),
+            after_bitmaps: zero,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: "reindex_worker".to_string(),
+            reason: Some(format!("session={unit_session_id} rows={row_count}")),
+        };
+        let audit_row = pk_audit_event_from(&event);
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(map_storage_err)
+    }
+
     /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13):
     /// an informational audit event anchored on the ESTATE itself
     /// (`row_id == estate_uuid` — a dream cycle belongs to no single drawer),
@@ -4399,6 +4446,19 @@ impl DrawerStore for DrawerStoreCore {
         Ok(pk_events.iter().map(substrate_audit_event_from).collect())
     }
 
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        let pk_events = self
+            .storage
+            .audit_log()
+            .iterate(after, None, limit)
+            .map_err(map_storage_err)?;
+        Ok(pk_events.iter().map(substrate_audit_event_from).collect())
+    }
+
     fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         // Step 1: fetch all tombstoned drawers (tombstonedAt IS NOT NULL),
         // ordered by tombstonedAt ascending so the result is deterministic.
@@ -5750,6 +5810,22 @@ impl DrawerStore for InMemoryDrawerStore {
         marked_at: i64,
     ) -> Result<(), LocusKitError> {
         self.inner.append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.inner.audit_events(after, limit)
     }
     fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
         self.inner.count_subject_debt()
@@ -9798,5 +9874,36 @@ mod tests {
         assert_eq!(brackets[1].verb, "dreamEnd");
         assert!(brackets.iter().all(|e| e.actor == "dreaming_daemon"));
         assert!(brackets[0].hlc.physical_time < brackets[1].hlc.physical_time);
+    }
+
+    /// C3: the reindex-completion marker seals verb/actor/reason on the
+    /// ESTATE anchor row with before == after bitmaps (informational).
+    #[test]
+    fn reindex_marker_seals_event_on_estate_row() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        store
+            .append_reindex_complete_marker(512, "reindex-9", NOW + 5_000)
+            .unwrap();
+
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        let marker = events.last().unwrap();
+        assert_eq!(marker.verb, "reindexComplete");
+        assert_eq!(marker.actor, "reindex_worker");
+        assert_eq!(marker.reason.as_deref(), Some("session=reindex-9 rows=512"));
+        assert_eq!(marker.before_bitmaps, Some(marker.after_bitmaps));
+    }
+
+    /// C3: an empty session id is refused, same contract as the A2 marker.
+    #[test]
+    fn reindex_marker_empty_session_refused() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        assert!(store
+            .append_reindex_complete_marker(1, "", NOW + 100)
+            .is_err());
     }
 }

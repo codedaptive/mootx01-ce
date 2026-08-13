@@ -2251,6 +2251,24 @@ public extension Estate {
         try await store.auditEventsForRow(rowID)
     }
 
+    /// Estate-wide audit page in HLC order, strictly after `after` (nil =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Mirrors Rust `Estate::audit_events`.
+    public func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+        try await store.auditEvents(after: after, limit: limit)
+    }
+
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// Mirrors Rust `Estate::append_reindex_complete_marker`.
+    public func appendReindexCompleteMarker(
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try await store.appendReindexCompleteMarker(
+            rowCount: rowCount, unitSessionID: unitSessionID, at: completedAt)
+    }
+
     /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13).
     /// A cycle emits `.start` when it begins and `.end` when it completes,
     /// both with the same session id, so CYCLE-dreamt time is attributable

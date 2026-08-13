@@ -12,6 +12,12 @@ import VaultKit
 // just the two enums the fact-timeline tag needs.
 import enum SubstrateTypes.RowState
 import enum SubstrateTypes.RowStateCluster
+// C3/A6 timing derivation: scoped imports for the same LatticeAnchor-collision
+// reason as above — the tool needs only the pure engine and its input tuple,
+// plus the HLC cursor type for audit paging.
+import struct SubstrateTypes.HLC
+import struct NeuronKit.TimingAuditEvent
+import func NeuronKit.deriveTimings
 
 /// Dispatch a parsed `tools/call` against one or more GeniusLocusKit
 /// estates opened in the same kit instance.
@@ -1280,6 +1286,7 @@ enum InterfaceTools {
         "moot_monitoring_status",
         // Maintenance / admin
         "moot_reindex", "moot_drain_status", "moot_reclassify_fdc",
+        "moot_timing_report",
         // Direct palace import (bypass NoteIR)
         "moot_palace_import",
         // Direct seed-file JSON import (schema v1, strict append)
@@ -1331,6 +1338,7 @@ enum InterfaceTools {
         case "moot_reindex":           return try await dispatcher.runReindex(args)
         case "moot_drain_status":      return try await dispatcher.runDrainStatus(args)
         case "moot_reclassify_fdc":    return try await dispatcher.runReclassifyFDC(args)
+        case "moot_timing_report":     return try await dispatcher.runTimingReport(args)
         // Direct palace import
         case "moot_palace_import":     return try await dispatcher.runPalaceImport(args)
         // Direct seed-file JSON import
@@ -3330,6 +3338,76 @@ extension ToolDispatcher {
             }
             lines.append(line)
         }
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// `moot_timing_report` — derive INGEST and CYCLE timing metrics from
+    /// the estate's audit log (C3+A6, benchmark reset 2026-08-13).
+    ///
+    /// ONE derivation, TWO consumers (§6b): this tool and the future
+    /// performance-health duty both call NeuronKit's `deriveTimings`, so the
+    /// benchmark and the product can never disagree about what "INGEST time"
+    /// means. Read-only: the audit log is append-only and the derivation is
+    /// pure; no timing state is stored server-side. The CALLER keeps the
+    /// returned `watermark_ms` and passes it back as `since_ms` for
+    /// incremental scans (A6 — a daily full scan is O(corpus) on exactly the
+    /// estates the duty exists to protect).
+    ///
+    /// Like `moot_drain_status`, no orientation block: this tool is called
+    /// repeatedly by harnesses and duties, and the protocol would bloat
+    /// every poll.
+    func runTimingReport(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let sinceMs = Int64(try optionalInt(args["since_ms"], argument: "since_ms") ?? 0)
+
+        // Page the whole window through the GLK audit seam. 4096 events per
+        // page bounds peak memory without measurable extra latency (the
+        // cursor resume is an indexed scan on SQL backends). The FULL window
+        // must be collected before deriving — tier 3/4 pair captures with
+        // markers that can arrive many pages later.
+        var events: [NeuronKit.TimingAuditEvent] = []
+        var cursor: HLC? = nil
+        let pageSize = 4096
+        while true {
+            let page = try await kit.auditEvents(handle, after: cursor, limit: pageSize)
+            events.append(contentsOf: page.map {
+                NeuronKit.TimingAuditEvent(
+                    verb: $0.verb,
+                    physicalTimeMs: $0.hlc.physicalTime,
+                    rowID: $0.rowId,
+                    reason: $0.reason)
+            })
+            guard page.count == pageSize, let last = page.last else { break }
+            cursor = last.hlc
+        }
+
+        let d = NeuronKit.deriveTimings(events: events, sinceExclusiveMs: sinceMs)
+
+        // Percentiles over ascending-sorted samples (nearest-rank).
+        func pct(_ sorted: [Int64], _ p: Double) -> String {
+            guard !sorted.isEmpty else { return "-" }
+            let idx = min(sorted.count - 1, Int(Double(sorted.count) * p))
+            return "\(sorted[idx])ms"
+        }
+        func line(_ label: String, _ sorted: [Int64], unbounded: Int? = nil) -> String {
+            var s = "  \(label): n=\(sorted.count), p50=\(pct(sorted, 0.5)), p95=\(pct(sorted, 0.95))"
+            if let u = unbounded { s += ", unbounded=\(u)" }
+            return s
+        }
+        var lines = ["timing report (audit-derived, since_ms=\(sinceMs)):"]
+        lines.append(line("ingest_exact", d.ingestExactMs))
+        if d.ingestBulk.isEmpty {
+            lines.append("  ingest_bulk: n=0")
+        } else {
+            let rows = d.ingestBulk.reduce(0) { $0 + $1.rows }
+            let wall = d.ingestBulk.reduce(Int64(0)) { $0 + $1.wallMs }
+            let rate = wall > 0 ? String(format: "%.1f", Double(rows) / (Double(wall) / 1000.0)) : "-"
+            lines.append("  ingest_bulk: n=\(d.ingestBulk.count) units, rows=\(rows), rows_per_sec=\(rate)")
+        }
+        lines.append(line("cycle_vector", d.cycleVectorMs))
+        lines.append(line("cycle_novel", d.cycleNovelMs, unbounded: d.cycleNovelUnbounded))
+        lines.append(line("cycle_dreamt", d.cycleDreamtMs, unbounded: d.cycleDreamtUnbounded))
+        lines.append("  watermark_ms: \(d.watermarkMs)")
         return Self.textResult(lines.joined(separator: "\n"))
     }
 

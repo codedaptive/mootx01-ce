@@ -75,6 +75,7 @@ pub mod solver_bandit;
 pub mod spreading_activation;
 pub mod structure_graph;
 pub mod theme_weather;
+pub mod timing_derivation;
 pub mod topology_analysis;
 mod topology_projection;
 pub mod tournament;

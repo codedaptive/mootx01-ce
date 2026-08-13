@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.20.0
+version: 1.21.0
 status: active
 date: 2026-08-13
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1064,6 +1064,19 @@ records `changedBy` into the ledger's `reviewedBy` — reviewer identity
 is recorded on accept and reject alike.
 
 ## Changelog
+
+### 1.21.0 -- 2026-08-13
+
+- C3 reindex-completion marker: a third informational audit event family —
+  `reindexComplete` (estate-anchored like the dream brackets, actor
+  `reindex_worker`, reason `session=<id> rows=<n>`), sealed when a
+  full-corpus basis retrain finishes. This is the CYCLE tier-3 boundary
+  (a row's own novel terms become recallable at the retrain that follows
+  its capture). Same no-gate, before == after bitmap contract as A2/A3.
+  Alongside it, the audit log gains a public estate-wide page read
+  (`auditEvents(after:limit:)` both ports) so the C3/A6 timing derivation
+  can scan incrementally from a caller-held watermark instead of
+  re-reading an append-only log from zero. See LOCUSKIT_INTERFACE § 17.
 
 ### 1.20.0 -- 2026-08-13
 

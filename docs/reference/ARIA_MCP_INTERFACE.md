@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.41.0
+version: 1.42.0
 status: accepted-1.1-target
 date: 2026-08-12
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1255,6 +1255,18 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.42.0 -- 2026-08-13
+
+- `moot_timing_report` (maintenance, both ports): argument `since_ms`
+  (optional integer — a previous call's `watermark_ms`; omit or 0 for a
+  full-history scan). Text report lines: `ingest_exact` /
+  `cycle_vector` / `cycle_novel` / `cycle_dreamt` each as
+  `n=<count>, p50=<ms>, p95=<ms>` (novel/dreamt add `unbounded=<count>`),
+  `ingest_bulk` as `n=<units>, rows=<total>, rows_per_sec=<rate>`, and a
+  final `watermark_ms: <ms>`. Line shapes are byte-compatible across
+  ports so harness parsers read either. Registered in the maintenance
+  tool family (now 6 tools).
 
 ### 1.41.0 -- 2026-08-12
 

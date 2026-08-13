@@ -71,6 +71,8 @@ pub fn permission_entries() -> Vec<String> {
 /// Reads: no estate content is created, changed, or removed.
 const READ_TOOLS: &[&str] = &[
     "moot_estate_status", "moot_estate_ping", "moot_drain_status",
+    // C3/A6: audit-derived timing metrics — pure audit-log read.
+    "moot_timing_report",
     "moot_list_lenses", "moot_list_recipes",
     "moot_vault_status", "moot_vault_job",
     "moot_memory_search", "moot_memory_get", "moot_memory_list",

@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.36.0
+version: 1.37.0
 status: accepted-1.1-target
 date: 2026-08-11
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -1056,6 +1056,18 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.37.0 -- 2026-08-13
+
+- New maintenance tool `moot_timing_report` (C3+A6, benchmark reset):
+  derives INGEST and CYCLE timing metrics from the estate's audit markers
+  via NeuronKit's single derivation engine — the same derivation the
+  performance-health duty will consume (§6b one-derivation-two-consumers).
+  Read-only and stateless server-side: the caller keeps the returned
+  `watermark_ms` and passes it back as `since_ms` for incremental scans.
+  Rows with no subsequent retrain or dream are reported as unbounded
+  counts, never dropped. Both ports; no orientation block (pollable, like
+  `moot_drain_status`).
 
 ### 1.36.0 -- 2026-08-11
 

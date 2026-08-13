@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.24.0
+version: 1.25.0
 status: active
 date: 2026-08-13
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -1465,9 +1465,13 @@ carries the machine-parseable payload; no schema change.
 |---|---|---|---|
 | `appendEncodeCompleteMarker(drawerId:rowCount:unitSessionID:at:)` | `String, Int, String, Date` | — | One per encode drain unit, anchored on the unit's FIRST drawer. Verb `encodeComplete`, actor `encode_worker`, reason `session=<id> rows=<n>`. Absent row = silent no-op. |
 | `appendDreamCycleMarker(phase:unitSessionID:at:)` | `DreamCyclePhase, String, Date` | — | Estate-anchored (`rowId == estateUuid`), verbs `dreamStart` / `dreamEnd`, actor `dreaming_daemon`, reason `session=<id>`. |
+| `appendReindexCompleteMarker(rowCount:unitSessionID:at:)` | `Int, String, Date` | — | C3: estate-anchored, verb `reindexComplete`, actor `reindex_worker`, reason `session=<id> rows=<n>` — the CYCLE tier-3 boundary. Empty session id refused. |
+| `auditEvents(after:limit:)` | `HLC?, Int` | `[AuditEvent]` | Estate-wide HLC-ordered audit page (pass-through to `AuditLog.iterate`); the C3/A6 timing-derivation watermark-paging seam. |
 | `Estate.appendEncodeCompleteMarker(firstDrawerID:rowCount:unitSessionID:at:)` | — | — | Pass-through. |
 | `Estate.appendDreamCycleMarker(phase:unitSessionID:at:)` | — | — | Pass-through. |
+| `Estate.appendReindexCompleteMarker(rowCount:unitSessionID:at:)` | — | — | Pass-through. |
 | `Estate.auditEventsForRow(_:)` | `UUID` | `[AuditEvent]` | Public audit read pass-through (marker readers, C3 derivation). |
+| `Estate.auditEvents(after:limit:)` | `HLC?, Int` | `[AuditEvent]` | Pass-through. |
 
 Constants: `DrawerStore.encodeCompleteVerb`, `DrawerStore.encodeWorkerActor`,
 `DrawerStore.DreamCyclePhase` (`.start` = `dreamStart`, `.end` = `dreamEnd`).
@@ -1478,6 +1482,8 @@ Constants: `DrawerStore.encodeCompleteVerb`, `DrawerStore.encodeWorkerActor`,
 |---|---|---|---|
 | `append_encode_complete_marker` | `&str, usize, &str, i64` | `Result<(), LocusKitError>` | `completed_at` epoch ms. Default: DatabaseUnavailable. |
 | `append_dream_cycle_marker` | `verb: &str, &str, i64` | `Result<(), LocusKitError>` | Verb string `dreamStart` / `dreamEnd`. |
+| `append_reindex_complete_marker` | `usize, &str, i64` | `Result<(), LocusKitError>` | C3: estate-anchored `reindexComplete` / `reindex_worker`, reason `session=<id> rows=<n>`. Default: DatabaseUnavailable. |
+| `audit_events` | `Option<HLC>, usize` | `Result<Vec<AuditEvent>, LocusKitError>` | Estate-wide HLC-ordered page (`AuditLog::iterate` pass-through); C3/A6 paging seam. Default: DatabaseUnavailable. `Estate::audit_events` mirrors. |
 
 Constants: `ENCODE_COMPLETE_VERB`, `ENCODE_WORKER_ACTOR`. Backend coverage
 identical to the trace-reward verbs (Core live; SQLite/Postgres delegate;
@@ -1485,15 +1491,26 @@ InMemory inherits).
 
 ### Test suites
 
-- Swift: `Tests/LocusKitTests/EncodeMarkerTests.swift` — 4 tests.
+- Swift: `Tests/LocusKitTests/EncodeMarkerTests.swift` — 6 tests
+  (A2 encode ×3, A3 dream ×1, C3 reindex ×2).
 - Rust: `drawer_store_inmemory.rs` tests `encode_marker_*`,
-  `dream_brackets_share_session` — 4 tests.
+  `dream_brackets_share_session`, `reindex_marker_*` — 6 tests.
 
 ---
 
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.25.0 -- 2026-08-13
+
+- C3 reindex-completion marker (benchmark reset): `appendReindexCompleteMarker`
+  / `append_reindex_complete_marker` (estate-anchored `reindexComplete`
+  informational event, reason `session=<id> rows=<n>` — the CYCLE tier-3
+  boundary) and the estate-wide audit page `auditEvents(after:limit:)` /
+  `audit_events` (HLC-cursor pass-through to `AuditLog.iterate`, the C3/A6
+  timing-derivation watermark-paging seam), both ports, with `Estate`
+  pass-throughs.
 
 ### 1.24.0 -- 2026-08-13
 

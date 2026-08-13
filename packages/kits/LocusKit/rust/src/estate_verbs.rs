@@ -1475,6 +1475,29 @@ impl Estate {
         )
     }
 
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// Mirrors Swift `Estate.appendReindexCompleteMarker`.
+    pub fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store
+            .append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (None =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Mirrors Swift `Estate.auditEvents(after:limit:)`.
+    pub fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.store.audit_events(after, limit)
+    }
+
     /// Append a dream-cycle bracket marker (A3). `verb` is `dreamStart` or
     /// `dreamEnd`; both ends of a cycle carry the same session id so
     /// CYCLE-dreamt time is attributable from the audit log alone.

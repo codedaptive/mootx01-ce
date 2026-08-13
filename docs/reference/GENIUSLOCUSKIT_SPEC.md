@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.26.0
+version: 1.27.0
 status: accepted-1.1-target
 date: 2026-08-13
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
@@ -2021,6 +2021,18 @@ State lives on the tunnel (LocusKit): operational bits 14/15 and the
 `ext` review ledger — see LOCUSKIT_SPEC.md § tunnel review state.
 
 ## Changelog
+
+### 1.27.0 -- 2026-08-13
+
+- C3 reindex-completion marker: the reindex chokepoint (`reindexMissing`
+  tail in Swift `EncodeIntake`; the `moot_reindex` completion tail in the
+  Rust vertical) seals one estate-anchored `reindexComplete` marker per
+  completed backfill, flag-gated with the A2/A3 markers
+  (`MOOTX01_ENCODE_MARKERS`). Marker failure warns and never fails the
+  reindex. Alongside it, the composition layer exposes the estate-wide
+  audit page (`auditEvents(_:after:limit:)` / `audit_events`) — handle
+  validation plus the LocusKit pass-through — as the C3/A6
+  timing-derivation paging seam for `moot_timing_report`.
 
 ### 1.26.0 -- 2026-08-13
 

@@ -9,8 +9,9 @@
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
 //!   Monitoring (1) — moot_monitoring_status (out-of-band sensitivity grants, telemetry flag R/W)
-//!   Maintenance (3/5) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
-//!                       and vault-gated moot_palace_import + moot_json_import
+//!   Maintenance (4/6) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
+//!                       moot_timing_report, and vault-gated
+//!                       moot_palace_import + moot_json_import
 //!   Federation (1) — moot_federated_search
 //!   Recipe (12) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
 //!                 recall_precise, recall_shaped, dream, hunt_contradictions,
@@ -159,6 +160,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     tools.push(reindex_tool());
     tools.push(drain_status_tool());
     tools.push(reclassify_fdc_tool());
+    tools.push(timing_report_tool());
     if vault_on {
         tools.push(palace_import_tool());
         tools.push(json_import_tool());
@@ -658,6 +660,24 @@ fn drain_status_tool() -> serde_json::Value {
         "name": "moot_drain_status",
         "description": "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
         "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+    })
+}
+
+// Maintenance / admin tool — NOT one of the nine ARIA grammar verbs. C3+A6
+// (benchmark reset 2026-08-13): derives INGEST and CYCLE timing metrics from
+// the A2/A3/C3 audit markers via neuron-kit's single derivation engine (§6b
+// one-derivation-two-consumers). Read-only; the caller keeps the returned
+// watermark for incremental scans. Mirrors Swift `ToolProjection` timing entry.
+fn timing_report_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_timing_report",
+        "description": "Maintenance: derive memory-timing metrics from the estate's audit log — INGEST time per single-row encode unit, bulk encode throughput, and the CYCLE tiers (vector = encode completion, novel-term = next basis retrain, dreamt = next dream cycle end). Rows with no subsequent retrain or dream are reported as unbounded counts, not dropped. Read-only. Pass since_ms (a previous call's watermark_ms) to scan only newer activity; omit for a full-history scan. Returns sample counts, p50/p95 milliseconds per metric, unbounded counts, and the new watermark_ms.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "since_ms": integer_schema("Optional watermark from a previous call's watermark_ms (epoch milliseconds). Only captures strictly after it are measured, so successive calls never double-count. Omit or 0 for a full-history scan.")
+            }),
+            json!([])
+        )))
     })
 }
 

@@ -31,6 +31,11 @@ eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 # always built byte-compatible anticipating exactly this wiring.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# substrate-lib: locus-kit's audit seam (Estate::audit_events, the C3/A6
+# timing-derivation paging surface) returns substrate_lib::verbs::AuditEvent,
+# so the coordinator pass-through names that type directly. In-repo layering:
+# composition → substrate lib, no inversion.
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 # SubstrateML (Layer 3 algorithms) is required so `MatrixTier::rebuild_temporal`
 # can delegate to `temporal_causality_fold::fold` — the canonical T-matrix engine
 # (cookbook §6.4). Mirrors the Swift dependency added 2026-06-04 per

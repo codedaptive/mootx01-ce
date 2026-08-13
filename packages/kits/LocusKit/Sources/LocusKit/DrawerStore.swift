@@ -2041,6 +2041,15 @@ public actor DrawerStore {
         try await storage.auditLog.eventsForRow(rowID).count
     }
 
+    /// Estate-wide audit-log page in HLC order, starting strictly after
+    /// `after` (nil = from the beginning), capped at `limit` events. Thin
+    /// pass-through to PersistenceKit's `AuditLog.iterate` — the C3/A6
+    /// timing derivation pages the log through this seam with a persisted
+    /// watermark instead of rescanning an append-only log from zero.
+    public func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+        try await storage.auditLog.iterate(after: after, rowID: nil, limit: limit)
+    }
+
     /// Read a single bitmap column for a drawer inside a transaction,
     /// throwing drawerNotFound when the row is absent. Centralizes
     /// the prior-value read shared by every mutation path.
@@ -5212,6 +5221,41 @@ public actor DrawerStore {
     /// drain worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`.
     /// Shared by both legs (Rust `ENCODE_WORKER_ACTOR`).
     public static let encodeWorkerActor = "encode_worker"
+
+    /// Append a reindex-completion marker (C3, benchmark reset 2026-08-13):
+    /// an informational estate-anchored audit event sealing when a
+    /// full-corpus basis retrain FINISHED — the CYCLE tier-3 boundary (a
+    /// row's own novel vocabulary becomes semantically findable only after
+    /// the first retrain that follows it). Verb `reindexComplete`, actor
+    /// `reindex_worker`, reason `session=<id> rows=<n>`. Same no-gate,
+    /// before==after shape as the other markers.
+    /// Mirrors Rust `append_reindex_complete_marker`.
+    public func appendReindexCompleteMarker(
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let nowMillis = Int64(completedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estate,
+            rowId: estate,
+            hlc: stamp,
+            verb: "reindexComplete",
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: "reindex_worker",
+            reason: "session=\(unitSessionID) rows=\(rowCount)")
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await txn.auditLog.append(event)
+        }
+    }
 
     /// Dream-cycle bracket phase (A3, benchmark reset 2026-08-13). A dream
     /// cycle emits one `dreamStart` marker when it begins and one `dreamEnd`

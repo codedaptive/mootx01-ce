@@ -743,7 +743,7 @@ enum TeachmeGuides {
         let tier3 = ToolProjection.knowledgeGraphTools().count
         let tier4 = ToolProjection.journalTools().count
         // estateTools() always includes moot_palace_import and
-        // moot_json_import (9 total). The 7 non-vault-gated estate tools
+        // moot_json_import (10 total). The 8 non-vault-gated estate tools
         // are always present.
         let tier5Always  = ToolProjection.estateTools().filter {
             $0.name != "moot_palace_import" && $0.name != "moot_json_import"
@@ -788,7 +788,7 @@ enum TeachmeGuides {
             Tier 5 — Estate (\(tier5Always) tools + 1 vault-gated):
               moot_estate_status, moot_estate_map, moot_estate_ping,
               moot_monitoring_status, moot_reindex, moot_drain_status,
-              moot_reclassify_fdc
+              moot_reclassify_fdc, moot_timing_report
               [vault-on only: moot_palace_import, moot_json_import]
 
             Tier 6 — Cognition (\(tier6) tools):

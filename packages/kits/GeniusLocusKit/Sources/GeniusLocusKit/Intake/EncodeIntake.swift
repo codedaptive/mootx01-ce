@@ -588,6 +588,26 @@ public extension GeniusLocusKit {
         // O(N) full-tree pass is safe on an already-current tree (idempotent).
         try await estate.rollupAllMerkleRoots(now: now)
 
+        // C3 reindex-completion marker: the CYCLE tier-3 boundary — a row's
+        // own novel vocabulary is semantically findable only after the first
+        // basis retrain that follows it, and this is the one chokepoint every
+        // reindex driver (moot_reindex tool, import tail, settle) flows
+        // through. Estate-anchored like the dream brackets; same flag, same
+        // best-effort-but-logged posture as the A2 markers. Sealed even on
+        // the small-delta path (the live-basis embed still completes encode
+        // coverage; the marker's rows count says what this pass indexed).
+        if Self.encodeMarkersEnabled {
+            do {
+                try await estate.appendReindexCompleteMarker(
+                    rowCount: total,
+                    unitSessionID: UUID().uuidString.lowercased(),
+                    at: Date()
+                )
+            } catch {
+                Self.intakeLog.warning("reindexComplete marker failed: \(error, privacy: .public)")
+            }
+        }
+
         return total
     }
 

@@ -1,6 +1,6 @@
 ---
 title: NeuronKit Specification
-version: 1.10.0
+version: 1.11.0
 status: active
 date: 2026-08-13
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
@@ -1046,6 +1046,20 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.11.0 -- 2026-08-13
+
+- Timing derivation engine (C3+A6, one-derivation-two-consumers): a pure,
+  deterministic function from one HLC-ordered window of audit events
+  (capture / `encodeComplete` / `reindexComplete` / `dreamEnd`) plus a
+  caller-held watermark to the INGEST samples (exact for rows=1 units,
+  bulk throughput otherwise) and the four CYCLE tiers (lexical 0 by
+  construction; vector == INGEST; novel-term = first retrain after the
+  capture; dreamt = first dream end after the capture). Rows with no
+  qualifying marker are counted as UNBOUNDED, never dropped or averaged.
+  Consumers: the `moot_timing_report` MCP tool today; the
+  performance-health duty (A7) later. No clock, no I/O; the watermark
+  makes successive scans measure each row exactly once.
 
 ### 1.10.0 -- 2026-08-13
 

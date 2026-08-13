@@ -1,7 +1,7 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.9.0
+version: 1.10.0
 spec_type: kit
 authors: MOOTx01 maintainers
 date: 2026-08-13
@@ -1986,6 +1986,19 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.10.0 -- 2026-08-13
+
+- Timing derivation (C3+A6): Swift `TimingAuditEvent` (verb,
+  `physicalTimeMs`, `rowID: UUID`, `reason?`) and
+  `deriveTimings(events:sinceExclusiveMs:) -> TimingDerivation`
+  (`ingestExactMs`, `ingestBulk`, `cycleVectorMs`, `cycleNovelMs` +
+  `cycleNovelUnbounded`, `cycleDreamtMs` + `cycleDreamtUnbounded`,
+  `watermarkMs`); Rust twin `timing_derivation::{TimingAuditEvent,
+  TimingDerivation, derive_timings}` (`row_id: String`). Pure engine, no
+  storage deps — callers map their port's audit-event type and keep the
+  watermark. Tests: Swift `TimingDerivationTests` (5) and the mirrored
+  Rust module tests (5).
 
 ### 1.9.0 -- 2026-08-13
 

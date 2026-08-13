@@ -126,15 +126,16 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     // Monitoring control (1) — out-of-band sensitivity grants: read/write daemon telemetry flag.
     // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
     "moot_monitoring_status",
-    // Maintenance (5)
+    // Maintenance (6)
     "moot_reindex",
     "moot_drain_status",
     "moot_reclassify_fdc",
+    "moot_timing_report",
     "moot_palace_import",
     "moot_json_import",
 ];
 
-/// True when `name` is one of the Tier 1–5 interface tools or the 5
+/// True when `name` is one of the Tier 1–5 interface tools or the 6
 /// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
@@ -405,6 +406,7 @@ pub fn dispatch(
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
         "moot_reclassify_fdc" => run_reclassify_fdc(args, registry),
+        "moot_timing_report" => run_timing_report(args, registry),
         "moot_palace_import" => run_palace_import(args, registry),
         "moot_json_import" => run_json_import(args, registry),
         _ => Err(JSONRPCError::new(
@@ -3247,6 +3249,17 @@ fn run_reindex_responsive(
             .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
         c.rollup_after_reindex(handle, now)
             .map_err(|e| describe_verb_dispatch_error(&e))?;
+
+        // C3 reindex-completion marker: the CYCLE tier-3 boundary — this is
+        // the chokepoint every Rust reindex driver flows through. Estate-
+        // anchored like the dream brackets; flag-gated with the A2 marker
+        // facility; best-effort but LOGGED. Swift twin: reindexMissing tail.
+        if c.encode_markers_on() {
+            let session = format!("reindex-{now}-{total}");
+            if let Err(e) = c.append_reindex_complete_marker(handle, total, &session, now) {
+                eprintln!("[glk] reindexComplete marker failed: {e:?}");
+            }
+        }
     }
     Ok(total)
 }
@@ -3327,6 +3340,100 @@ fn run_drain_status(
         }
         lines.push(line);
     }
+    Ok(text_result(&lines.join("\n")))
+}
+
+/// `moot_timing_report` — derive INGEST and CYCLE timing metrics from the
+/// estate's audit log (C3+A6, benchmark reset 2026-08-13).
+///
+/// ONE derivation, TWO consumers (§6b): this tool and the future
+/// performance-health duty both call neuron-kit's `derive_timings`, so the
+/// benchmark and the product can never disagree about what "INGEST time"
+/// means. Read-only and stateless server-side: the CALLER keeps the returned
+/// `watermark_ms` and passes it back as `since_ms` for incremental scans (A6).
+/// Like `run_drain_status`, no orientation block — harnesses and duties call
+/// this repeatedly. Mirrors Swift `runTimingReport`.
+fn run_timing_report(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let since_ms = optional_integer(args, "since_ms")?.unwrap_or(0);
+
+    // Page the whole window through the GLK audit seam. 4096 events per page
+    // bounds peak memory; the FULL window must be collected before deriving —
+    // tier 3/4 pair captures with markers that can arrive many pages later.
+    let coord = estate.coord.lock().unwrap();
+    let mut events: Vec<neuron_kit::timing_derivation::TimingAuditEvent> = Vec::new();
+    let mut cursor: Option<substrate_types::hlc::HLC> = None;
+    const PAGE: usize = 4096;
+    loop {
+        let page = match coord.audit_events(&estate.handle, cursor, PAGE) {
+            Ok(p) => p,
+            Err(e) => return Ok(error_result(&format!("{e:?}"))),
+        };
+        let full = page.len() == PAGE;
+        let last_hlc = page.last().map(|e| e.hlc);
+        events.extend(page.into_iter().map(|e| {
+            neuron_kit::timing_derivation::TimingAuditEvent {
+                verb: e.verb,
+                physical_time_ms: e.hlc.physical_time,
+                row_id: uuid::Uuid::from_u128(e.row_id.0).to_string(),
+                reason: e.reason,
+            }
+        }));
+        match (full, last_hlc) {
+            (true, Some(h)) => cursor = Some(h),
+            _ => break,
+        }
+    }
+    drop(coord);
+
+    let d = neuron_kit::timing_derivation::derive_timings(&events, since_ms);
+
+    // Percentiles over ascending-sorted samples (nearest-rank). Twin of the
+    // Swift renderer — field names and line shapes must match so harness
+    // parsers read either port's report.
+    fn pct(sorted: &[i64], p: f64) -> String {
+        if sorted.is_empty() {
+            return "-".to_string();
+        }
+        let idx = ((sorted.len() as f64 * p) as usize).min(sorted.len() - 1);
+        format!("{}ms", sorted[idx])
+    }
+    fn line(label: &str, sorted: &[i64], unbounded: Option<usize>) -> String {
+        let mut s = format!(
+            "  {label}: n={}, p50={}, p95={}",
+            sorted.len(),
+            pct(sorted, 0.5),
+            pct(sorted, 0.95)
+        );
+        if let Some(u) = unbounded {
+            s.push_str(&format!(", unbounded={u}"));
+        }
+        s
+    }
+    let mut lines = vec![format!("timing report (audit-derived, since_ms={since_ms}):")];
+    lines.push(line("ingest_exact", &d.ingest_exact_ms, None));
+    if d.ingest_bulk.is_empty() {
+        lines.push("  ingest_bulk: n=0".to_string());
+    } else {
+        let rows: usize = d.ingest_bulk.iter().map(|(r, _)| r).sum();
+        let wall: i64 = d.ingest_bulk.iter().map(|(_, w)| w).sum();
+        let rate = if wall > 0 {
+            format!("{:.1}", rows as f64 / (wall as f64 / 1000.0))
+        } else {
+            "-".to_string()
+        };
+        lines.push(format!(
+            "  ingest_bulk: n={} units, rows={rows}, rows_per_sec={rate}",
+            d.ingest_bulk.len()
+        ));
+    }
+    lines.push(line("cycle_vector", &d.cycle_vector_ms, None));
+    lines.push(line("cycle_novel", &d.cycle_novel_ms, Some(d.cycle_novel_unbounded)));
+    lines.push(line("cycle_dreamt", &d.cycle_dreamt_ms, Some(d.cycle_dreamt_unbounded)));
+    lines.push(format!("  watermark_ms: {}", d.watermark_ms));
     Ok(text_result(&lines.join("\n")))
 }
 

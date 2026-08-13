@@ -6977,6 +6977,47 @@ impl EstateCoordinator {
     /// recording facility). `marked_at` is epoch MILLISECONDS (the HLC
     /// boundary's unit). Mirrors Swift
     /// `GeniusLocusKit.appendDreamCycleMarker(in:phase:sessionID:now:)`.
+    /// Whether the A2/A3/C3 marker facility is recording (the
+    /// MOOTX01_ENCODE_MARKERS read-once flag) — exposed so the tool layer
+    /// can gate marker writes without duplicating the env read.
+    pub fn encode_markers_on(&self) -> bool {
+        encode_markers_enabled()
+    }
+
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// `completed_at` is epoch SECONDS at this seam (the tool layer's wall
+    /// clock); converted to the HLC boundary's milliseconds here. Mirrors
+    /// Swift `GeniusLocusKit` reindexMissing's marker tail.
+    pub fn append_reindex_complete_marker(
+        &self,
+        handle: &EstateHandle,
+        row_count: usize,
+        session_id: &str,
+        completed_at_secs: i64,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .append_reindex_complete_marker(row_count, session_id, completed_at_secs * 1000)
+            .map_err(|e| remap("append_reindex_complete_marker", session_id, e).into())
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (None =
+    /// from the beginning), capped at `limit` — the C3/A6 timing
+    /// derivation's paging seam for `moot_timing_report`. GLK adds handle
+    /// validation only; the scan is LocusKit's `Estate::audit_events`.
+    /// Mirrors Swift `GeniusLocusKit.auditEvents(_:after:limit:)`.
+    pub fn audit_events(
+        &self,
+        handle: &EstateHandle,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .audit_events(after, limit)
+            .map_err(|e| remap("audit_events", "", e).into())
+    }
+
     pub fn append_dream_cycle_marker(
         &self,
         handle: &EstateHandle,
