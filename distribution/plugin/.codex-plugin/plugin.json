@@ -4,8 +4,22 @@
     "url" : "https://mootx01.ai"
   },
   "description" : "Long-term memory for your AI: recall, analyze, cross-check linked facts, and write back durable knowledge. Requires the mootx01 binary (brew install codedaptive/mootx01-ce/mootx01).",
-  "displayName" : "MOOTx01 Memory",
   "homepage" : "https://mootx01.ai",
+  "hooks" : "./.codex/hooks.json",
+  "interface" : {
+    "capabilities" : [
+      "mcp",
+      "skills",
+      "hooks"
+    ],
+    "category" : "developer-tools",
+    "defaultPrompt" : "Use MOOTx01 to recall relevant prior context, then write back durable decisions.",
+    "developerName" : "Codedaptive",
+    "displayName" : "MOOTx01 Memory",
+    "longDescription" : "Long-term memory for your AI: recall, analyze, cross-check linked facts, and write back durable knowledge. Requires the mootx01 binary (brew install codedaptive/mootx01-ce/mootx01).",
+    "shortDescription" : "Durable, private memory for Codex",
+    "websiteURL" : "https://mootx01.ai"
+  },
   "keywords" : [
     "memory",
     "mcp",
@@ -14,7 +28,9 @@
     "knowledge-graph"
   ],
   "license" : "AGPL-3.0",
+  "mcpServers" : "./.mcp.json",
   "name" : "mootx01",
   "repository" : "https://github.com/codedaptive/mootx01-ce",
+  "skills" : "./skills/",
   "version" : "1.1.0-beta-19"
 }

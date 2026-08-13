@@ -2,13 +2,61 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "printf '%s\\n' 'MOOTx01 reminder: if this task depends on prior context, call moot_estate_ping, moot_estate_status, and moot_read_journal before answering.'",
-            "timeout": 5,
-            "statusMessage": "MOOTx01 session reminder"
+            "command": "mootx01 codex-hook SessionStart",
+            "timeout": 3,
+            "statusMessage": "MOOTx01 session orientation"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mootx01 codex-hook UserPromptSubmit",
+            "timeout": 3,
+            "statusMessage": "MOOTx01 bounded recall"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__mootx01__.*|moot_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mootx01 codex-hook PostToolUse",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mootx01 codex-hook PreCompact",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mootx01 codex-hook PostCompact",
+            "timeout": 2
           }
         ]
       }
@@ -18,9 +66,21 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '%s' '{\"systemMessage\": \"MOOTx01 reminder: if durable knowledge changed this session, write memories, facts, links, and a journal entry before finalizing.\"}'",
-            "timeout": 5,
-            "statusMessage": "MOOTx01 writeback reminder"
+            "command": "mootx01 codex-hook Stop",
+            "timeout": 2,
+            "statusMessage": "MOOTx01 writeback gate"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mootx01 codex-hook SessionEnd",
+            "timeout": 2
           }
         ]
       }
