@@ -793,9 +793,9 @@ fn run_reconcile(
     modified.sort();
     deleted.sort();
 
-    // Candidate paths: added + modified. In dry-run mode these are reported
-    // only. In apply mode these drive the path-scoped filtered import so
-    // drawers_updated reports M (candidates), not N (vault size).
+    // Candidate paths: added + modified. Used for dry-run candidate listing
+    // only. Apply mode imports the full vault (all notes), letting import
+    // idempotency skip drawers that are already up to date.
     let candidate_paths: std::collections::HashSet<String> =
         added.iter().chain(modified.iter()).cloned().collect();
 
@@ -819,10 +819,18 @@ fn run_reconcile(
     }
 
     if apply {
-        // Apply mode: import only the candidate set (added + modified paths)
-        // so drawers_updated reports M (candidates actioned), not N (vault size).
-        // candidate_paths drives the path-scoped import_vault_filtered — non-
-        // candidate notes never enter the capture loop.
+        // Apply mode: import ALL notes in the vault, not just the candidate
+        // (added + modified) subset. Using import_vault_filtered with candidate_paths
+        // was the V1 bug: when the operator runs export then reconcile --apply true,
+        // the manifest exactly matches the current vault so candidate_paths is empty →
+        // nothing is imported → success reported but estate is unchanged (silent data loss).
+        //
+        // Passing all notes to import_vault is correct and safe: import is idempotent
+        // per stable_source_key (drawers already present with identical content are
+        // skipped; those with changed content are updated). The drift report above
+        // (added/modified/deleted counts) still accurately describes what has changed
+        // since the last export — it is independent of the import call below.
+        //
         // mut: VaultBridge::new requires &mut EstateCoordinator (import routes
         // through capture_with_mode — dual-path intake fix, G7).
         let mut coord = open.coord.lock().map_err(|_| {
@@ -839,7 +847,7 @@ fn run_reconcile(
         let now_ms = wall_now_ms();
         // VaultKitError has Display — use it so no internal type names leak.
         let report = bridge
-            .import_vault_filtered(vault_path, &candidate_paths, &open.handle, now_ms, None, EncodeSpeed::Foreground)
+            .import_vault(vault_path, &open.handle, now_ms, None, EncodeSpeed::Foreground)
             .map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::INTERNAL_ERROR,

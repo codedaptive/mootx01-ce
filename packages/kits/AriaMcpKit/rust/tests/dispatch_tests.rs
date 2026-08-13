@@ -4523,7 +4523,7 @@ fn vault_reconcile_apply_deleted_files_are_never_expunged() {
 }
 
 // ---------------------------------------------------------------------------
-// Vault reconcile defect fixes (B2-3)
+// Vault reconcile defect fixes (B2-3 / VAULT-FIX-01 V1)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -4555,12 +4555,12 @@ fn vault_reconcile_dryrun_malformed_estate_id_errors_before_manifest_io() {
 }
 
 #[test]
-fn vault_reconcile_apply_actions_candidates_only_not_full_vault() {
-    // Defect B2-3 fix 2 (apply over-import): apply=true must import only the M
-    // candidate notes, not the full N-note vault. With 1 note filed, exported,
-    // and then modified on disk, drawers_updated must be 1 — not the total note
-    // count. Previously the full vault was passed to import_vault, so a vault of
-    // N notes would report N actioned instead of M.
+fn vault_reconcile_apply_modified_note_reports_updated_count() {
+    // Verify apply=true with a single modified note reports exactly 1 actioned
+    // drawer. With 1 note filed, exported, and then modified on disk, the import
+    // must report drawersUpdated: 1 (the modified note was already in the estate
+    // with a different content hash). Formerly named "candidates_only_not_full_vault"
+    // — corrected to match the actual invariant: the modified note lands in the estate.
     //
     // The Rust dispatch layer is synchronous (no async estate recall by count),
     // so we verify the counts from the reconcile apply text directly:
@@ -10236,5 +10236,92 @@ fn json_import_invalid_seed_is_error_result_with_zero_writes() {
     assert!(
         status_text.contains("kg facts: 0 active"),
         "no fact may land on a failed import; got: {status_text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VAULT-FIX-01 V1 regression: reconcile apply after fresh export ingests
+// foreign vault notes (silent data-loss fix).
+// ---------------------------------------------------------------------------
+//
+// Root cause: run_reconcile passed only candidate_paths (added + modified
+// vs the manifest) to import_vault_filtered. After vault_export stamps the
+// manifest from the current vault contents, a reconcile apply immediately
+// following sees zero drift → candidate_paths = {} → nothing imported →
+// success reported, but notes that were in the vault before export (and not
+// yet in the estate) were never ingested.
+//
+// Fix: apply mode calls import_vault (all notes), letting import idempotency
+// skip drawers already in the estate with identical content.
+//
+// Test scenario:
+//   1. Bare estate (no notes — only the .moot/.moot-log receipt files).
+//   2. A "foreign" note is written to the vault directory manually
+//      (simulating a pre-existing Obsidian note that predates the estate).
+//   3. vault_export runs on the bare estate: exports nothing, but
+//      build_manifest hashes all .md files currently in the vault —
+//      including the pre-existing ForeignNote.md.
+//   4. vault_reconcile apply=true: current vault matches manifest →
+//      zero drift → OLD code: nothing imported. NEW code: import_vault
+//      runs → ForeignNote.md is captured → drawersWritten: 1.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vault_reconcile_apply_after_fresh_export_ingests_foreign_note() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let vault = temp_vault_dir();
+
+    // Write a "foreign" note into the vault. This note predates the estate —
+    // the estate has never seen it and it is not produced by vault_export.
+    std::fs::write(
+        vault.join("ForeignNote.md"),
+        "# Foreign note\n\nThis note exists in the vault but not in the estate.",
+    )
+    .expect("write ForeignNote.md");
+
+    // vault_export on the bare estate exports zero estate notes but stamps the
+    // manifest from whatever .md files exist in the vault directory —
+    // which includes ForeignNote.md (hash recorded, no drift expected next).
+    dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("export must succeed on a bare estate");
+
+    // vault_reconcile apply=true: the manifest was just stamped from ForeignNote.md,
+    // so the hash matches and candidate_paths = {} (zero drift). The V1 fix
+    // bypasses the candidate filter and runs import_vault (all notes), so
+    // ForeignNote.md is ingested into the estate regardless.
+    let apply_result = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap(), "apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("reconcile apply must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&apply_result),
+        "reconcile apply must be isError:false; got: {apply_result:?}"
+    );
+    let text = content_text(&apply_result);
+    assert!(
+        text.contains("apply: true"),
+        "must confirm apply mode; got: {text}"
+    );
+    // Zero drift detected (manifest was stamped from the vault files).
+    assert!(
+        text.contains("0 added, 0 modified, 0 deleted"),
+        "zero drift expected between freshly-stamped manifest and vault; got: {text}"
+    );
+    // The V1 fix: despite zero candidates, the full-vault import must have
+    // ingested the foreign note. drawersWritten ≥ 1 proves it landed.
+    assert!(
+        text.contains("drawersWritten: 1"),
+        "ForeignNote.md must be ingested even when manifest shows zero drift; got: {text}"
     );
 }

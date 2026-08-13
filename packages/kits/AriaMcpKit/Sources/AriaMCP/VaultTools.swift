@@ -516,9 +516,9 @@ enum VaultTools {
         let deletedSorted = deleted.sorted()
 
         // Candidate paths: the added and modified notes whose content has drifted
-        // from the export stamp. In dry-run mode these are reported only. In apply
-        // mode these drive the path-scoped import so only M candidates are
-        // actioned, not the entire N-note vault.
+        // from the export stamp. Used for the dry-run candidate listing only.
+        // Apply mode imports the full vault (all notes), letting import idempotency
+        // skip drawers that are already up to date.
         let candidatePaths = Set(added + modified)
         let candidatePathsSorted = candidatePaths.sorted()
 
@@ -533,13 +533,22 @@ enum VaultTools {
         lines += deletedSorted.map { "  - \($0)" }
 
         if apply {
-            // Apply mode: import only the candidate set (added + modified paths)
-            // so drawersUpdated reports M (candidates actioned), not N (vault
-            // size). candidatePaths drives the path-scoped import overload —
-            // non-candidate notes never enter the capture loop.
+            // Apply mode: import ALL notes in the vault, not just the candidate
+            // (added + modified) subset. Using importVault(at:includingPaths:into:)
+            // with candidatePaths was the V1 bug: when the operator runs export then
+            // reconcile --apply true, the manifest exactly matches the current vault
+            // so candidatePaths is empty → nothing is imported → success reported but
+            // the estate is unchanged (silent data loss).
+            //
+            // Passing all notes to importVault(at:into:) is correct and safe: import
+            // is idempotent per stableSourceKey (drawers already present with
+            // byte-identical content are skipped; those with changed content are
+            // updated). The drift report above (added/modified/deleted counts) still
+            // accurately describes what has changed since the last export — it is
+            // independent of the import call below.
             let bridge = VaultBridge(kit: kit)
             let report = try await bridge.importVault(
-                at: vaultURL, includingPaths: candidatePaths, into: handle, now: now, mode: .foreground)
+                at: vaultURL, into: handle, now: now, mode: .foreground)
             lines.append("apply: true — candidates actioned via vault import")
             lines.append("  drawersWritten: \(report.drawersWritten)")
             lines.append("  drawersUpdated: \(report.drawersUpdated)")
