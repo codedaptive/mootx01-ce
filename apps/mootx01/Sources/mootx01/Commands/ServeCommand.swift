@@ -20,6 +20,7 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
+import PersistenceKitInMemory
 import PersistenceKitSQLite
 import MootInstallerCore
 import AriaResident
@@ -145,7 +146,10 @@ struct ServeCommand: AsyncParsableCommand {
 
         // The SQLite backend creates parent dirs and the file on first open;
         // check pre-existence to decide whether to call create (first-run only).
+        // An in-memory estate is ALWAYS first-run: nothing persists between
+        // processes, so create-then-open every time.
         let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path)
+            || (ProcessInfo.processInfo.environment["MOOTX01_BACKEND"] ?? "").lowercased() == "inmemory"
 
         // Estate key-material lifetime (estate-key-lifetime fix, 2026-07-29).
         // MOOTX01_ESTATE_LIFETIME=ephemeral is the DECLARED throwaway posture for
@@ -217,17 +221,39 @@ struct ServeCommand: AsyncParsableCommand {
         }
         }
 
-        let configuration = EstateConfiguration(
-            estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-            encryptionConfig: encryption
-        )
-        let storage: SQLiteStorage
-        do {
-            storage = try SQLiteStorage(configuration: configuration)
-        } catch {
-            Logging.stderr.log("mootx01 serve fatal: SQLite open failed: \(error)")
-            throw ExitCode.failure
+        // C1 (benchmark reset, RAM accuracy shape): MOOTX01_BACKEND=inmemory
+        // serves the estate from PersistenceKit's InMemory backend — same
+        // protocol, same algorithms, no filesystem in the measurement path.
+        // The estate lives and dies with this process (accuracy sweeps only;
+        // timing always measures the real disk path). No Keychain contact:
+        // the .inMemory backend resolves the in-memory identity key store,
+        // and no db key exists to mint. Intended for the benchmark harness;
+        // a durable estate never selects it.
+        let inMemoryBackend =
+            (ProcessInfo.processInfo.environment["MOOTX01_BACKEND"] ?? "")
+                .lowercased() == "inmemory"
+        let storage: any Storage
+        if inMemoryBackend {
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .inMemory
+            )
+            storage = InMemoryStorage(configuration: configuration)
+            Logging.stderr.log(
+                "mootx01 serve: IN-MEMORY backend (MOOTX01_BACKEND=inmemory) — "
+                + "estate exists only for this process; accuracy-measurement posture.")
+        } else {
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: encryption
+            )
+            do {
+                storage = try SQLiteStorage(configuration: configuration)
+            } catch {
+                Logging.stderr.log("mootx01 serve fatal: SQLite open failed: \(error)")
+                throw ExitCode.failure
+            }
         }
 
         let owner = OwnerCredentials(

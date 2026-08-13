@@ -13,6 +13,8 @@
 //!   --http auto   → hunt 4242 upward to the first free port (§3)
 //!   --http <port> → exact; busy means exit 1, never hunt (§3)
 //!   (neither)     → MOOTX01_HTTP_PORT env if the caller set it, else stdio
+//!   MOOTX01_BACKEND=inmemory → skip SQLite path resolution; the runtime's
+//!                   from_env selects InMemory (C1 RAM accuracy shape)
 //!
 //! Whatever port the daemon binds is written to `<data>/daemon.port` and
 //! best-effort removed when the runtime returns (§3).
@@ -79,7 +81,22 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     // resolve the named (or active) estate to a SQLite path.
     let postgres_set = env_nonempty("ARIA_MCP_POSTGRES_URL");
     let sqlite_set = env_nonempty("ARIA_MCP_SQLITE_PATH");
-    if !postgres_set && !sqlite_set {
+    // C1 (benchmark reset, RAM accuracy shape): MOOTX01_BACKEND=inmemory
+    // skips the SQLite path resolution entirely — the aria-mcp runtime's
+    // from_env then selects its InMemory backend (its documented default
+    // when neither path env is set). Same env contract as the Swift
+    // ServeCommand's in-memory branch; intended for the benchmark harness,
+    // never for a durable estate.
+    let in_memory = std::env::var("MOOTX01_BACKEND")
+        .map(|v| v.to_lowercase() == "inmemory")
+        .unwrap_or(false);
+    if in_memory {
+        eprintln!(
+            "mootx01 serve: IN-MEMORY backend (MOOTX01_BACKEND=inmemory) — \
+             estate exists only for this process; accuracy-measurement posture."
+        );
+    }
+    if !postgres_set && !sqlite_set && !in_memory {
         let name = db.unwrap_or_else(|| paths::active_estate(&data));
         let estate = paths::estate_sqlite_path(&data, &name);
         if let Some(dir) = estate.parent() {
