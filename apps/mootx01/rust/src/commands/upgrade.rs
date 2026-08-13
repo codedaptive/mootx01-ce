@@ -443,9 +443,13 @@ fn remove_redundant_codex_direct_entry_from(home: &std::path::Path) {
         return;
     }
 
-    // Backup before mutating so the user can recover manually if needed.
+    // Backup before mutating. Fail closed: if the backup cannot be written,
+    // leave the config untouched rather than mutating without a recovery copy.
     let backup_path = join_rel(home, ".codex/config.toml.mootx01-backup");
-    let _ = std::fs::copy(&config_path, &backup_path);
+    if let Err(e) = std::fs::copy(&config_path, &backup_path) {
+        println!("  ! Could not back up Codex config before cleanup: {e}");
+        return;
+    }
 
     match crate::core::merge::remove_from_toml_config(&config_path, "mootx01") {
         Ok(true) => {
@@ -1084,6 +1088,46 @@ mod tests {
 
         let backup = codex_dir.join("config.toml.mootx01-backup");
         assert!(!backup.exists(), "no backup when table was already absent");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// When the backup write fails (backup path is a pre-existing directory,
+    /// so `fs::copy` cannot overwrite it), the function must leave the
+    /// config file untouched. Fail-closed: never mutate without a recovery copy.
+    #[test]
+    fn leaves_config_untouched_when_backup_fails() {
+        let home = tmp_codex_home("backup-fail");
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let config = codex_dir.join("config.toml");
+        let original = "[plugins.\"mootx01@mootx01\"]\nenabled = true\n\n[mcp_servers.mootx01]\ncommand = \"mootx01\"\nargs = [\"proxy\"]\n";
+        std::fs::write(&config, original).unwrap();
+
+        // Seed the plugin cache.
+        let cache_version = codex_dir
+            .join("plugins")
+            .join("cache")
+            .join("mootx01")
+            .join("mootx01")
+            .join("1.0.0");
+        let codex_plugin_dir = cache_version.join(".codex-plugin");
+        std::fs::create_dir_all(&codex_plugin_dir).unwrap();
+        std::fs::write(codex_plugin_dir.join("plugin.json"), r#"{"version":"1.0.0"}"#).unwrap();
+
+        // Block the backup by placing a DIRECTORY at the backup path —
+        // fs::copy cannot overwrite a directory with a file, so the write fails.
+        let backup_path = codex_dir.join("config.toml.mootx01-backup");
+        std::fs::create_dir_all(&backup_path).unwrap();
+
+        remove_redundant_codex_direct_entry_from(&home);
+
+        // Config must be unchanged — the mcp_servers table stays in place.
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert_eq!(
+            after, original,
+            "config must be untouched when backup write fails"
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }
