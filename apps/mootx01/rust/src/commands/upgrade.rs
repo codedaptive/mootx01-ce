@@ -187,6 +187,7 @@ fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
 fn run_convergence() {
     run_kg_fact_identity_backfill();
     run_shared_content_reclaim_if_pending();
+    remove_redundant_codex_direct_entry();
 }
 
 /// MXE-MI: move pre-MXE-KH `kg_facts.sourceDrawerID` identity values into
@@ -403,6 +404,127 @@ fn run_shared_content_reclaim_if_pending() {
             );
         }
     }
+}
+
+/// MXE-NS-CODEX: at upgrade time, when the Codex plugin owns the MCP
+/// connection (plugin enabled + version installed), remove the redundant
+/// direct `[mcp_servers.mootx01]` entry from `~/.codex/config.toml`.
+/// Thin wrapper that resolves the home directory and delegates to
+/// `remove_redundant_codex_direct_entry_from`.
+fn remove_redundant_codex_direct_entry() {
+    let home = super::install::home_dir();
+    remove_redundant_codex_direct_entry_from(&home);
+}
+
+/// Core logic for the Codex direct-entry cleanup, with an injected home
+/// directory for testability. The plugin wiring is sufficient; keeping both
+/// opens a second connection under the same `mootx01` key. A
+/// `.mootx01-backup` copy is made before the removal. Idempotent: absent
+/// file or absent table are both silent no-ops.
+fn remove_redundant_codex_direct_entry_from(home: &std::path::Path) {
+    let config_path = join_rel(home, ".codex/config.toml");
+    if !config_path.exists() {
+        return;
+    }
+
+    // Plugin must own the Codex connection before we touch anything. An
+    // enabled-but-not-installed entry is stale config; installed-but-not-enabled
+    // means the plugin is inactive and the direct entry is the live connection.
+    if !codex_plugin_owns_connection(home) {
+        return;
+    }
+
+    // Fast path: nothing to remove if the table is absent.
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if !content.lines().any(|l| l.trim() == "[mcp_servers.mootx01]") {
+        return;
+    }
+
+    // Backup before mutating so the user can recover manually if needed.
+    let backup_path = join_rel(home, ".codex/config.toml.mootx01-backup");
+    let _ = std::fs::copy(&config_path, &backup_path);
+
+    match crate::core::merge::remove_from_toml_config(&config_path, "mootx01") {
+        Ok(true) => {
+            println!(
+                "  ✓ Removed redundant direct MCP entry from Codex config (plugin owns connection)."
+            );
+        }
+        // Ok(false) means the table was absent — should not happen given the
+        // check above, but safe to ignore (idempotent by design).
+        Ok(false) => {}
+        Err(e) => {
+            println!("  ! Could not clean Codex config: {e}");
+        }
+    }
+}
+
+/// True when the `mootx01@mootx01` Codex plugin is both enabled in config
+/// and has at least one installed version under the Codex plugin cache.
+/// Mirrors Swift's `PluginDetector.ownsCodexConnection`.
+fn codex_plugin_owns_connection(home: &std::path::Path) -> bool {
+    codex_plugin_is_enabled(home) && codex_plugin_is_installed(home)
+}
+
+/// Scan `~/.codex/config.toml` line-by-line for the
+/// `[plugins."mootx01@mootx01"]` section. Returns true only when that
+/// section contains `enabled = true`. Fails closed on any read or parse
+/// error — keeping a redundant direct entry is far less harmful than
+/// removing the only working connection.
+fn codex_plugin_is_enabled(home: &std::path::Path) -> bool {
+    let config_path = join_rel(home, ".codex/config.toml");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // Codex accepts both double- and single-quoted section headers.
+    let accepted = [
+        r#"[plugins."mootx01@mootx01"]"#,
+        r#"[plugins.'mootx01@mootx01']"#,
+    ];
+    let mut in_table = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_table = accepted.contains(&trimmed);
+            continue;
+        }
+        if !in_table || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim();
+            let value = trimmed[eq_pos + 1..].trim();
+            if key == "enabled" {
+                return value == "true";
+            }
+        }
+    }
+    false
+}
+
+/// True when at least one version directory containing a plugin manifest
+/// exists under `~/.codex/plugins/cache/mootx01/mootx01/`. Recognises
+/// both `.codex-plugin/plugin.json` (native) and `.claude-plugin/plugin.json`
+/// (shared marketplace legacy format).
+fn codex_plugin_is_installed(home: &std::path::Path) -> bool {
+    let cache = join_rel(home, ".codex/plugins/cache/mootx01/mootx01");
+    let entries = match std::fs::read_dir(&cache) {
+        Ok(rd) => rd,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let base = entry.path();
+        if base.join(".codex-plugin").join("plugin.json").exists()
+            || base.join(".claude-plugin").join("plugin.json").exists()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// CE-1.0.35-08 (Rust leg): offer to encrypt an unencrypted active estate.
@@ -845,6 +967,124 @@ mod tests {
         rematerialize_plugin_depth(&home);
 
         assert!(manifest.exists(), "a bare pre-existing plugin dir must still be rematerialized");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ── MXE-NS-CODEX: Codex direct-entry cleanup (Part 6) ──────────────────
+
+    fn tmp_codex_home(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "mootx01-upgrade-codex-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Write a minimal Codex config.toml containing the plugin section and an
+    /// mcp_servers entry, then populate the plugin cache so ownership is
+    /// detected. Expect the mcp_servers table to be removed and a backup to
+    /// be created.
+    #[test]
+    fn removes_mcp_servers_entry_when_plugin_owns_connection() {
+        let home = tmp_codex_home("remove");
+
+        // Seed the config.toml with both the plugin section and the MCP entry.
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let config = codex_dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "[plugins.\"mootx01@mootx01\"]\nenabled = true\n\n[mcp_servers.mootx01]\ncommand = \"mootx01\"\nargs = [\"proxy\"]\n",
+        )
+        .unwrap();
+
+        // Seed the plugin cache with a version directory and a native manifest.
+        let cache_version = codex_dir
+            .join("plugins")
+            .join("cache")
+            .join("mootx01")
+            .join("mootx01")
+            .join("1.0.0");
+        let codex_plugin_dir = cache_version.join(".codex-plugin");
+        std::fs::create_dir_all(&codex_plugin_dir).unwrap();
+        std::fs::write(codex_plugin_dir.join("plugin.json"), r#"{"version":"1.0.0"}"#).unwrap();
+
+        // Verify ownership is detected.
+        assert!(codex_plugin_owns_connection(&home), "plugin must own connection");
+
+        remove_redundant_codex_direct_entry_from(&home);
+
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            !after.contains("[mcp_servers.mootx01]"),
+            "mcp_servers table must be removed"
+        );
+        assert!(
+            after.contains("[plugins.\"mootx01@mootx01\"]"),
+            "plugin section must be preserved"
+        );
+        let backup = codex_dir.join("config.toml.mootx01-backup");
+        assert!(backup.exists(), "backup must be created before removal");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// When the plugin section is absent, `remove_redundant_codex_direct_entry`
+    /// must leave the config file untouched.
+    #[test]
+    fn skips_when_plugin_not_installed() {
+        let home = tmp_codex_home("skip-no-plugin");
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let config = codex_dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "[mcp_servers.mootx01]\ncommand = \"mootx01\"\nargs = [\"proxy\"]\n",
+        )
+        .unwrap();
+
+        remove_redundant_codex_direct_entry_from(&home);
+
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("[mcp_servers.mootx01]"),
+            "config must be untouched when plugin is absent"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// When config.toml has no `[mcp_servers.mootx01]` table, the function
+    /// must be a clean no-op even when the plugin is present.
+    #[test]
+    fn no_op_when_mcp_table_absent() {
+        let home = tmp_codex_home("noop");
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let config = codex_dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "[plugins.\"mootx01@mootx01\"]\nenabled = true\nmodel = \"o3\"\n",
+        )
+        .unwrap();
+
+        // Seed the plugin cache.
+        let cache_version = codex_dir
+            .join("plugins")
+            .join("cache")
+            .join("mootx01")
+            .join("mootx01")
+            .join("1.0.0");
+        let codex_plugin_dir = cache_version.join(".codex-plugin");
+        std::fs::create_dir_all(&codex_plugin_dir).unwrap();
+        std::fs::write(codex_plugin_dir.join("plugin.json"), r#"{"version":"1.0.0"}"#).unwrap();
+
+        remove_redundant_codex_direct_entry_from(&home);
+
+        let backup = codex_dir.join("config.toml.mootx01-backup");
+        assert!(!backup.exists(), "no backup when table was already absent");
+
         let _ = std::fs::remove_dir_all(&home);
     }
 }
