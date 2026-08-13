@@ -591,6 +591,90 @@ struct VaultToolsTests {
         #expect(recall.count == 1)
     }
 
+    // MARK: - V1 regression (reconcile apply on fresh export ingests foreign vault notes)
+
+    /// V1 regression test for commit 0136baf12 (VAULT-FIX-01 V1).
+    ///
+    /// Root cause: vault_reconcile --apply true passed only candidate_paths
+    /// (notes added/modified vs the manifest) to importVault. After vault_export
+    /// stamps the manifest by hashing all .md files currently in the vault
+    /// directory (including notes that predated the export), a reconcile that
+    /// immediately follows sees zero drift — candidate_paths = {} → importVault
+    /// never called → success reported, estate unchanged (silent data loss).
+    ///
+    /// Fix: apply mode calls importVault on ALL vault notes. Import is idempotent
+    /// per stableSourceKey: drawers already in the estate with byte-identical
+    /// content are skipped. The drift report (added/modified/deleted counts) is
+    /// unchanged and still accurately describes manifest drift.
+    ///
+    /// Scenario mirrors the Rust twin (dispatch_tests.rs:
+    /// vault_reconcile_apply_after_fresh_export_ingests_foreign_note):
+    ///   1. Fresh bare estate (no captured notes).
+    ///   2. A "foreign" note is written manually to the vault directory —
+    ///      simulating a pre-existing Obsidian note that predates the estate.
+    ///   3. vault_export: the bridge exports zero estate notes (estate is bare)
+    ///      but buildManifest hashes all .md files in the vault directory and
+    ///      fingerprints ForeignNote.md into the manifest.
+    ///   4. vault_reconcile apply=true: vault matches manifest exactly →
+    ///      zero drift (0 added, 0 modified, 0 deleted). The V1 fix bypasses
+    ///      the candidate filter and calls importVault on all vault notes, so
+    ///      ForeignNote.md is ingested despite zero candidates.
+    ///
+    /// Assertion is RETRIEVABILITY (kit.recall returns 1 drawer), not just
+    /// the receipt text. Retrievability proves the drawer landed in the estate;
+    /// a receipt count proves only that importVault was invoked.
+    @Test func reconcileApplyAfterFreshExportIngestsForeignNote() async throws {
+        let kit = GeniusLocusKit()
+        // Bare estate: no notes captured — nothing for the export bridge to write.
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "v1-foreign-note-regression"))
+        let vault = makeTempVault()
+        // Create the vault directory explicitly so ForeignNote.md can be written
+        // before vault_export runs.
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Write the foreign note BEFORE export. It lives in the vault but the
+        // estate has never seen it — no capture, no prior import.
+        let foreignNote = vault.appendingPathComponent("ForeignNote.md")
+        try "# Foreign note\n\nThis note exists in the vault but not in the estate.".write(
+            to: foreignNote, atomically: true, encoding: .utf8)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Export on the bare estate. The bridge writes zero notes from the estate
+        // (no captures). buildManifest then hashes all .md files in the vault
+        // directory — which includes ForeignNote.md — and writes the manifest.
+        // After this call the manifest records ForeignNote.md with its SHA-256.
+        try await runExportAndAwait(vault: vault, via: dispatcher)
+
+        // Pre-condition: estate is still empty. Export reads from the estate and
+        // writes to the vault — it does not read from the vault and write to the
+        // estate. The foreign note has not been imported.
+        let before = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+        #expect(before.count == 0)
+
+        // Reconcile apply=true. The manifest was just stamped from ForeignNote.md
+        // so the file's hash matches — zero drift detected (0 added, 0 modified,
+        // 0 deleted). The V1 fix bypasses the candidate filter and calls importVault
+        // on all vault notes, so ForeignNote.md is ingested despite zero candidates.
+        let applyResult = try text(try await dispatcher.dispatch(
+            name: "moot_vault_reconcile",
+            arguments: reconcileArgs(vaultPath: vault.path, apply: true)))
+
+        // Primary assertion: retrievability from the estate. This distinguishes
+        // content-landed from command-succeeded — a receipt count proves importVault
+        // was invoked; kit.recall confirms the drawer is in the estate.
+        let after = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+        #expect(after.count == 1, "ForeignNote.md must be retrievable from the estate after reconcile apply; got \(after.count) drawers. Receipt: \(applyResult)")
+
+        // Secondary assertions on the receipt.
+        #expect(applyResult.contains("0 added, 0 modified, 0 deleted"), "Zero drift expected — manifest was stamped immediately before reconcile; got: \(applyResult)")
+        #expect(applyResult.contains("apply: true"), "Receipt must confirm apply mode; got: \(applyResult)")
+    }
+
     // MARK: - Async job helpers
 
     /// Scan the plain-text result body for a `job_id: <UUID>` line and
