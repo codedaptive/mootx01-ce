@@ -793,9 +793,9 @@ fn run_reconcile(
     modified.sort();
     deleted.sort();
 
-    // Candidate paths: added + modified. Used for dry-run candidate listing
-    // only. Apply mode imports the full vault (all notes), letting import
-    // idempotency skip drawers that are already up to date.
+    // Candidate paths: added + modified — what the manifest diff can establish.
+    // Listed as-is in dry-run mode; in apply mode they are the base of the
+    // import set, which also picks up the notes the estate does not hold.
     let candidate_paths: std::collections::HashSet<String> =
         added.iter().chain(modified.iter()).cloned().collect();
 
@@ -819,17 +819,23 @@ fn run_reconcile(
     }
 
     if apply {
-        // Apply mode: import ALL notes in the vault, not just the candidate
-        // (added + modified) subset. Using import_vault_filtered with candidate_paths
-        // was the V1 bug: when the operator runs export then reconcile --apply true,
-        // the manifest exactly matches the current vault so candidate_paths is empty →
-        // nothing is imported → success reported but estate is unchanged (silent data loss).
+        // Apply mode imports the candidates UNION the notes the estate does not
+        // hold. Candidates alone was the V1 bug: they come from diffing the
+        // vault against the export manifest, and vault_export is what writes
+        // that manifest, so export-then-reconcile diffs the vault against
+        // itself — zero candidates, nothing imported, success reported, estate
+        // unchanged (silent data loss).
         //
-        // Passing all notes to import_vault is correct and safe: import is idempotent
-        // per stable_source_key (drawers already present with identical content are
-        // skipped; those with changed content are updated). The drift report above
-        // (added/modified/deleted counts) still accurately describes what has changed
-        // since the last export — it is independent of the import call below.
+        // The missing set closes that blind spot without discarding the
+        // manifest. It is computed, never scanned for: import_vault_reconciling
+        // takes the paths already hashed above and tests each against the estate
+        // snapshot it needs for the import anyway. Notes that are neither
+        // changed nor missing are never read from disk, so a recurring sync
+        // costs what changed rather than vault size.
+        //
+        // The drift report above (added/modified/deleted counts) still describes
+        // what changed since the last export — it is independent of the import
+        // call below, which actions a superset.
         //
         // mut: VaultBridge::new requires &mut EstateCoordinator (import routes
         // through capture_with_mode — dual-path intake fix, G7).
@@ -846,8 +852,17 @@ fn run_reconcile(
         );
         let now_ms = wall_now_ms();
         // VaultKitError has Display — use it so no internal type names leak.
+        let all_paths: std::collections::HashSet<String> = current.keys().cloned().collect();
         let report = bridge
-            .import_vault(vault_path, &open.handle, now_ms, None, EncodeSpeed::Foreground)
+            .import_vault_reconciling(
+                vault_path,
+                &all_paths,
+                &candidate_paths,
+                &open.handle,
+                now_ms,
+                None,
+                EncodeSpeed::Foreground,
+            )
             .map_err(|e| {
                 JSONRPCError::new(
                     JSONRPCErrorCode::INTERNAL_ERROR,

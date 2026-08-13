@@ -43,7 +43,7 @@
 use crate::error::VaultKitError;
 use crate::note_ir::{Block, NoteIR, OccurredAt, WikiLink};
 use crate::vault_adapter::VaultAdapter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 /// The first `VaultAdapter`: Obsidian-flavoured Markdown ⇄ `NoteIR`.
@@ -87,8 +87,23 @@ impl VaultAdapter for ObsidianAdapter {
     // MARK: - Read: vault → IR
 
     fn to_ir(&self, vault_path: &Path) -> Result<Vec<NoteIR>, VaultKitError> {
+        self.to_ir_filtered(vault_path, None)
+    }
+
+    /// The directory walk still visits every entry — it is a stat-level scan
+    /// and is what establishes the symlink and navigation-file guards — but a
+    /// file outside `including` is never read from disk and never parsed. The
+    /// read, the frontmatter split, and the link/tag scans are the per-note
+    /// cost, so selection here is what makes a reconcile proportional to the
+    /// notes that actually need importing rather than to vault size.
+    /// Mirrors Swift `ObsidianAdapter.toIR(vaultURL:includingPaths:)`.
+    fn to_ir_filtered(
+        &self,
+        vault_path: &Path,
+        including: Option<&HashSet<String>>,
+    ) -> Result<Vec<NoteIR>, VaultKitError> {
         let mut notes: Vec<NoteIR> = Vec::new();
-        collect_md_files(vault_path, vault_path, &mut notes)?;
+        collect_md_files(vault_path, vault_path, &mut notes, including)?;
         // Deterministic order so repeated reads and round-trip equality are
         // stable regardless of filesystem enumeration order.
         // Mirrors Swift: `notes.sort { $0.stableSourceKey < $1.stableSourceKey }`.
@@ -298,6 +313,7 @@ fn collect_md_files(
     dir: &Path,
     vault_root: &Path,
     out: &mut Vec<NoteIR>,
+    including: Option<&HashSet<String>>,
 ) -> Result<(), VaultKitError> {
     let entries = std::fs::read_dir(dir).map_err(VaultKitError::Io)?;
     for entry in entries {
@@ -320,7 +336,7 @@ fn collect_md_files(
             continue;
         }
         if file_type.is_dir() {
-            collect_md_files(&path, vault_root, out)?;
+            collect_md_files(&path, vault_root, out, including)?;
         } else if file_type.is_file() && name.ends_with(".md") {
             // Skip OKF navigation files — index.md and log.md are emitted by
             // from_ir for OKF progressive disclosure; they are not notes.
@@ -330,8 +346,14 @@ fn collect_md_files(
                 continue;
             }
 
-            let raw = std::fs::read_to_string(&path).map_err(VaultKitError::Io)?;
             let relative = relative_path(&path, vault_root);
+            // Selection gate — placed before the read so an unselected note
+            // costs a directory entry, not a file read plus a full parse.
+            if including.is_some_and(|selected| !selected.contains(&relative)) {
+                continue;
+            }
+
+            let raw = std::fs::read_to_string(&path).map_err(VaultKitError::Io)?;
             let stable_key = drop_md_extension(&relative);
             // Folder portion only (the note's directory inside the vault).
             // Mirrors Swift: `(relativePath as NSString).deletingLastPathComponent`.

@@ -24,6 +24,25 @@ public protocol VaultAdapter: Sendable {
     ///   round-trip equality `toIR(fromIR(x)) == x` are stable.
     func toIR(vaultURL: URL) throws -> [NoteIR]
 
+    /// Read a vault directory into canonical notes, restricted to a selected
+    /// set of vault-relative paths.
+    ///
+    /// This is a protocol requirement rather than only an extension default so
+    /// a concrete adapter can skip the per-note read and parse for unselected
+    /// notes, and so the override is reached through a `VaultAdapter`
+    /// existential. Conformers that cannot narrow their read do NOT need to
+    /// implement it — the default extension below reads everything and filters,
+    /// which is correct but pays full source cost.
+    ///
+    /// - Parameters:
+    ///   - vaultURL: the root directory of the vault.
+    ///   - includingPaths: vault-relative paths with forward slashes and the
+    ///     source's file extension (e.g. `"Chem/Benzene.md"`). Paths absent
+    ///     from the source are ignored. `nil` reads the whole vault.
+    /// - Returns: the selected notes, in the same deterministic
+    ///   `stableSourceKey` order `toIR(vaultURL:)` produces.
+    func toIR(vaultURL: URL, includingPaths: Set<String>?) throws -> [NoteIR]
+
     /// Write canonical notes back out to a vault directory, mirroring
     /// the folder tree carried in each note's wing/room frontmatter.
     ///
@@ -52,6 +71,17 @@ public protocol VaultAdapter: Sendable {
 }
 
 extension VaultAdapter {
+
+    /// Default implementation: read the whole source, then filter. A note's
+    /// vault-relative path is `stableSourceKey + ".md"` — the inverse of what
+    /// a Markdown adapter constructs on read. Correct for every conformer, but
+    /// it pays the full read-and-parse cost; adapters that can narrow the read
+    /// itself override this.
+    public func toIR(vaultURL: URL, includingPaths: Set<String>?) throws -> [NoteIR] {
+        let notes = try toIR(vaultURL: vaultURL)
+        guard let selected = includingPaths else { return notes }
+        return notes.filter { selected.contains($0.stableSourceKey + ".md") }
+    }
 
     /// Default implementation: delegates to `fromIR(_:to:)` and ignores progress.
     /// Adapters that support per-item reporting provide their own implementation.

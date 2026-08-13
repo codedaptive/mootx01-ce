@@ -77,6 +77,23 @@ public struct ObsidianAdapter: VaultAdapter {
     // MARK: - Read: vault → IR
 
     public func toIR(vaultURL: URL) throws -> [NoteIR] {
+        try toIR(vaultURL: vaultURL, includingPaths: nil)
+    }
+
+    /// Read a vault directory into canonical notes, optionally restricted to
+    /// a selected set of vault-relative paths.
+    ///
+    /// The directory walk still visits every entry — it is a stat-level scan
+    /// and is what establishes the symlink and navigation-file guards — but a
+    /// file outside `includingPaths` is never read from disk and never parsed.
+    /// The read, the frontmatter split, and the link/tag scans are the per-note
+    /// cost, so selection here is what makes a reconcile proportional to the
+    /// notes that actually need importing rather than to vault size.
+    ///
+    /// - Parameter includingPaths: vault-relative paths with forward slashes
+    ///   and the `.md` extension (e.g. `"Chem/Benzene.md"`), matching the
+    ///   export manifest's key format. `nil` reads the whole vault.
+    public func toIR(vaultURL: URL, includingPaths: Set<String>?) throws -> [NoteIR] {
         let fm = FileManager.default
         // Request isSymbolicLinkKey and isDirectoryKey in addition to
         // isRegularFileKey so we can detect and skip symbolic links before
@@ -116,9 +133,15 @@ public struct ObsidianAdapter: VaultAdapter {
                 continue
             }
 
-            let raw = try String(contentsOf: fileURL, encoding: .utf8)
             // Vault-relative path with forward slashes, e.g. "Area/Note.md".
             let relativePath = ObsidianAdapter.relativePath(of: fileURL, under: vaultURL)
+            // Selection gate — placed before the read so an unselected note
+            // costs a directory entry, not a file read plus a full parse.
+            if let selected = includingPaths, !selected.contains(relativePath) {
+                continue
+            }
+
+            let raw = try String(contentsOf: fileURL, encoding: .utf8)
             let stableKey = ObsidianAdapter.dropMarkdownExtension(relativePath)
             // Folder portion only (the note's directory inside the vault).
             let folder = (relativePath as NSString).deletingLastPathComponent

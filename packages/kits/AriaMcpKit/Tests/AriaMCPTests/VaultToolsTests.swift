@@ -480,6 +480,20 @@ struct VaultToolsTests {
         // modified on disk, drawersUpdated must be exactly 1 — not 10.
         // This guards against the over-import regression where import of the
         // full vault would report N (vault size) not M (candidates).
+        //
+        // The drawersSkippedUnchanged assertion below is what makes this a
+        // proof of WORK DONE rather than of outcome. Importing the whole vault
+        // and letting idempotence sort it out also yields drawersUpdated: 1 —
+        // it reads the other nine, finds them identical, and reports
+        // drawersSkippedUnchanged: 9. Only the narrowed import leaves that
+        // count at zero, because those nine are never read from disk.
+        //
+        // These notes came out of an export, so they carry the estate's own
+        // moot_id and are held under that UUID rather than under a hash of
+        // their path — this exercises the export-path arm of the
+        // missing-set computation. The Rust twin
+        // (vault_reconcile_apply_reads_only_changed_and_missing_notes)
+        // exercises the lineage arm with foreign notes.
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "v-apply-10notes"))
@@ -524,6 +538,9 @@ struct VaultToolsTests {
         // not 10 (the full vault). drawersWritten must be 0.
         #expect(applyResult.contains("drawersUpdated: 1"))
         #expect(applyResult.contains("drawersWritten: 0"))
+        // The narrowing proof: the nine unchanged notes are already held by the
+        // estate, so they are never read and never reach the content check.
+        #expect(applyResult.contains("drawersSkippedUnchanged: 0"))
 
         // The estate still has 10 drawers — no new ones were created.
         let postRecall = try await kit.recall(
@@ -616,13 +633,13 @@ struct VaultToolsTests {
     ///      but buildManifest hashes all .md files in the vault directory and
     ///      fingerprints ForeignNote.md into the manifest.
     ///   4. vault_reconcile apply=true: vault matches manifest exactly →
-    ///      zero drift (0 added, 0 modified, 0 deleted). The V1 fix bypasses
-    ///      the candidate filter and calls importVault on all vault notes, so
-    ///      ForeignNote.md is ingested despite zero candidates.
+    ///      zero drift (0 added, 0 modified, 0 deleted). The estate holds no
+    ///      drawer answering to ForeignNote.md, so the missing-set computation
+    ///      adds it to the import set and it is ingested despite zero candidates.
     ///
     /// Assertion is RETRIEVABILITY (kit.recall returns 1 drawer), not just
     /// the receipt text. Retrievability proves the drawer landed in the estate;
-    /// a receipt count proves only that importVault was invoked.
+    /// a receipt count proves only that an import ran.
     @Test func reconcileApplyAfterFreshExportIngestsForeignNote() async throws {
         let kit = GeniusLocusKit()
         // Bare estate: no notes captured — nothing for the export bridge to write.
@@ -657,15 +674,15 @@ struct VaultToolsTests {
 
         // Reconcile apply=true. The manifest was just stamped from ForeignNote.md
         // so the file's hash matches — zero drift detected (0 added, 0 modified,
-        // 0 deleted). The V1 fix bypasses the candidate filter and calls importVault
-        // on all vault notes, so ForeignNote.md is ingested despite zero candidates.
+        // 0 deleted). The estate holds no drawer under ForeignNote.md's lineage or
+        // export path, so it joins the import set despite the empty diff.
         let applyResult = try text(try await dispatcher.dispatch(
             name: "moot_vault_reconcile",
             arguments: reconcileArgs(vaultPath: vault.path, apply: true)))
 
         // Primary assertion: retrievability from the estate. This distinguishes
-        // content-landed from command-succeeded — a receipt count proves importVault
-        // was invoked; kit.recall confirms the drawer is in the estate.
+        // content-landed from command-succeeded — a receipt count proves an import
+        // ran; kit.recall confirms the drawer is in the estate.
         let after = try await kit.recall(
             handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
         #expect(after.count == 1, "ForeignNote.md must be retrievable from the estate after reconcile apply; got \(after.count) drawers. Receipt: \(applyResult)")

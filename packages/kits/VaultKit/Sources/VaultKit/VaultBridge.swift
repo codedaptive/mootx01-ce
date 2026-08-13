@@ -264,10 +264,11 @@ public struct VaultBridge: Sendable {
     /// candidates land in the estate and `drawersUpdated` reports the
     /// candidate count (M), not the full vault size (N).
     ///
-    /// The adapter reads all notes from disk; the filter is applied before
-    /// the capture loop — non-candidate notes never enter the estate at all.
-    /// Idempotence per `stableSourceKey` is preserved: a candidate already
-    /// present in the estate is updated, not duplicated.
+    /// The selection is pushed into the adapter, so a note outside
+    /// `includingPaths` is never read from disk and never parsed — the import
+    /// costs the candidate count, not the vault size. Idempotence per
+    /// `stableSourceKey` is preserved: a candidate already present in the
+    /// estate is updated, not duplicated.
     ///
     /// - Parameters:
     ///   - vaultURL: the vault root directory to read.
@@ -291,15 +292,84 @@ public struct VaultBridge: Sendable {
         progress: VaultProgress? = nil,
         mode: EncodeSpeed = .foreground
     ) async throws -> ImportReport {
-        let allNotes = try adapter.toIR(vaultURL: vaultURL)
-        // Restrict to the candidate set. A note's vault-relative path is
-        // stableSourceKey + ".md" (the inverse of what ObsidianAdapter uses
-        // on read). Notes whose path is not in the candidate set are skipped
-        // without entering the capture loop.
-        let filteredNotes = allNotes.filter { note in
-            candidatePaths.contains(note.stableSourceKey + ".md")
+        let notes = try adapter.toIR(vaultURL: vaultURL, includingPaths: candidatePaths)
+        return try await importNotes(notes, into: handle, source: vaultURL.path, now: now, mode: mode)
+    }
+
+    /// Import the notes a reconcile must action: the caller's candidate set
+    /// union the notes the estate does not hold.
+    ///
+    /// Reconcile's candidate set comes from diffing the vault against the
+    /// export manifest, which answers "what CHANGED since the export" and
+    /// structurally cannot answer "what does the estate NOT HAVE" — the
+    /// manifest is written by the export, so a vault exported and then
+    /// reconciled diffs against itself and yields no candidates at all. That
+    /// blind spot is the whole reason reconcile could report success while
+    /// importing nothing.
+    ///
+    /// Rather than rescan the vault to cover the gap, the missing set is
+    /// COMPUTED. Both signals are already in hand: the caller supplies every
+    /// vault path (it just hashed them to build the diff), and the estate
+    /// snapshot taken for the import itself carries the identity of every
+    /// drawer it holds. A vault path is missing when the estate holds it under
+    /// neither identity it could have been imported under:
+    ///
+    /// - **lineage** — `DrawerMapping.lineageID(forStableSourceKey:)` of the path's stable key.
+    ///   This is the identity a foreign note (one that never came from an
+    ///   export) is captured under, derived from the path alone with no file
+    ///   read.
+    /// - **export path** — the `wing/room/slug` path the export would assign
+    ///   the drawer. This is what a round-tripped note matches, since such a
+    ///   note carries the estate's own `moot_id` in frontmatter and is
+    ///   captured under that UUID rather than under the path hash.
+    ///
+    /// Failing both tests means no drawer answers to that path, so the note is
+    /// selected. The tests err toward selecting: an unusual note may be read
+    /// when it did not need to be, and the content-idempotent check then skips
+    /// it without a write. Erring the other way would drop a note, which is
+    /// the defect this path exists to prevent.
+    ///
+    /// - Parameters:
+    ///   - vaultURL: the vault root directory to read.
+    ///   - allPaths: every vault-relative note path currently on disk
+    ///     (`"Chem/Benzene.md"` form) — the key set of the caller's hash scan.
+    ///   - candidatePaths: the added and modified paths from the manifest diff.
+    ///   - handle: the estate to import into.
+    ///   - now: the operation instant, supplied by the caller (determinism
+    ///     rule) and stamped on the audit receipt.
+    ///   - mode: encode SPEED (`.foreground` default / `.background`).
+    /// - Returns: an `ImportReport` reflecting only the selected notes.
+    public func importVaultReconciling(
+        at vaultURL: URL,
+        allPaths: Set<String>,
+        candidatePaths: Set<String>,
+        into handle: EstateHandle,
+        now: Date,
+        progress: VaultProgress? = nil,
+        mode: EncodeSpeed = .foreground
+    ) async throws -> ImportReport {
+        // One snapshot serves both the selection below and the import itself —
+        // it is a full-hydration scan of every drawer, so taking it twice would
+        // cost more than the rescan this method exists to avoid.
+        let drawerState = try await existingDrawerState(handle: handle)
+        let exportPaths = Set(drawerState.stableSourceKeyByLineage.values)
+        var selected = candidatePaths
+        for path in allPaths where !candidatePaths.contains(path) {
+            let stableKey = ObsidianAdapter.dropMarkdownExtension(path)
+            let pathLineage = DrawerMapping.lineageID(forStableSourceKey: stableKey)
+            if !drawerState.lineageIDs.contains(pathLineage), !exportPaths.contains(stableKey) {
+                selected.insert(path)
+            }
         }
-        return try await importNotes(filteredNotes, into: handle, source: vaultURL.path, now: now, mode: mode)
+        let notes = try adapter.toIR(vaultURL: vaultURL, includingPaths: selected)
+        return try await importNotes(
+            notes,
+            into: handle,
+            source: vaultURL.path,
+            now: now,
+            mode: mode,
+            precomputedDrawerState: drawerState
+        )
     }
 
     /// Import one MemPalace palace directly into an estate — all three
@@ -349,7 +419,8 @@ public struct VaultBridge: Sendable {
         source: String,
         now: Date,
         progress: VaultProgress? = nil,
-        mode: EncodeSpeed = .foreground
+        mode: EncodeSpeed = .foreground,
+        precomputedDrawerState: DrawerState? = nil
     ) async throws -> ImportReport {
         // Declare the encode SPEED for this import's background drain before any
         // encode work is enqueued — the same gate-agnostic policy PalaceBridge
@@ -360,8 +431,18 @@ public struct VaultBridge: Sendable {
         // existingContentByLineage: the verbatim content of every active
         // drawer keyed by lineageID — used by the content-idempotent check
         // (FINDING-1a) to skip re-imports where nothing changed.
+        //
+        // precomputedDrawerState: a caller that already needed this snapshot to
+        // decide WHICH notes to read hands it over rather than paying a second
+        // full-hydration scan of every drawer (importVaultReconciling).
+        let drawerState: DrawerState
+        if let precomputedDrawerState {
+            drawerState = precomputedDrawerState
+        } else {
+            drawerState = try await existingDrawerState(handle: handle)
+        }
         let (existingLineageIDs, existingWings, existingContentByLineage, existingStableSourceKeyByLineage) =
-            try await existingDrawerState(handle: handle)
+            drawerState
         // The current tier of every believed drawer across ALL sensitivity
         // levels, so the import sensitivity floor can never be lowered by a
         // re-import (supersession-downgrade defense — see importNote).
@@ -641,9 +722,17 @@ public struct VaultBridge: Sendable {
     /// Hydration: `.full` is required to populate `drawer.content`; the
     /// `.structured` hydration level reads metadata rows only and leaves
     /// content blank.
-    private func existingDrawerState(
-        handle: EstateHandle
-    ) async throws -> (lineageIDs: Set<UUID>, wings: Set<String>, contentByLineage: [UUID: String], stableSourceKeyByLineage: [UUID: String]) {
+    /// The existing-drawer snapshot every import entry point needs. Named so a
+    /// caller that must consult it BEFORE deciding which notes to read can hold
+    /// it and hand it back to `importNotes` instead of scanning twice.
+    typealias DrawerState = (
+        lineageIDs: Set<UUID>,
+        wings: Set<String>,
+        contentByLineage: [UUID: String],
+        stableSourceKeyByLineage: [UUID: String]
+    )
+
+    private func existingDrawerState(handle: EstateHandle) async throws -> DrawerState {
         // limit: 10_000_000 means "all drawers" — the same full-scan intent
         // as the sibling existingSensitivityByLineage call below. Without an
         // explicit limit the estate scan caps at 256, silently truncating

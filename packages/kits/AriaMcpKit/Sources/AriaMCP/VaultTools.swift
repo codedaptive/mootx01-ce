@@ -516,9 +516,9 @@ enum VaultTools {
         let deletedSorted = deleted.sorted()
 
         // Candidate paths: the added and modified notes whose content has drifted
-        // from the export stamp. Used for the dry-run candidate listing only.
-        // Apply mode imports the full vault (all notes), letting import idempotency
-        // skip drawers that are already up to date.
+        // from the export stamp — what the manifest diff can establish. Listed
+        // as-is in dry-run mode; in apply mode they are the base of the import
+        // set, which also picks up the notes the estate does not hold.
         let candidatePaths = Set(added + modified)
         let candidatePathsSorted = candidatePaths.sorted()
 
@@ -533,22 +533,31 @@ enum VaultTools {
         lines += deletedSorted.map { "  - \($0)" }
 
         if apply {
-            // Apply mode: import ALL notes in the vault, not just the candidate
-            // (added + modified) subset. Using importVault(at:includingPaths:into:)
-            // with candidatePaths was the V1 bug: when the operator runs export then
-            // reconcile --apply true, the manifest exactly matches the current vault
-            // so candidatePaths is empty → nothing is imported → success reported but
-            // the estate is unchanged (silent data loss).
+            // Apply mode imports the candidates UNION the notes the estate does
+            // not hold. Candidates alone was the V1 bug: they come from diffing
+            // the vault against the export manifest, and vault_export is what
+            // writes that manifest, so export-then-reconcile diffs the vault
+            // against itself — zero candidates, nothing imported, success
+            // reported, estate unchanged (silent data loss).
             //
-            // Passing all notes to importVault(at:into:) is correct and safe: import
-            // is idempotent per stableSourceKey (drawers already present with
-            // byte-identical content are skipped; those with changed content are
-            // updated). The drift report above (added/modified/deleted counts) still
-            // accurately describes what has changed since the last export — it is
-            // independent of the import call below.
+            // The missing set closes that blind spot without discarding the
+            // manifest. It is computed, never scanned for: importVaultReconciling
+            // takes the paths already hashed above and tests each against the
+            // estate snapshot it needs for the import anyway. Notes that are
+            // neither changed nor missing are never read from disk, so a
+            // recurring sync costs what changed rather than vault size.
+            //
+            // The drift report above (added/modified/deleted counts) still
+            // describes what changed since the last export — it is independent
+            // of the import call below, which actions a superset.
             let bridge = VaultBridge(kit: kit)
-            let report = try await bridge.importVault(
-                at: vaultURL, into: handle, now: now, mode: .foreground)
+            let report = try await bridge.importVaultReconciling(
+                at: vaultURL,
+                allPaths: Set(current.keys),
+                candidatePaths: candidatePaths,
+                into: handle,
+                now: now,
+                mode: .foreground)
             lines.append("apply: true — candidates actioned via vault import")
             lines.append("  drawersWritten: \(report.drawersWritten)")
             lines.append("  drawersUpdated: \(report.drawersUpdated)")
