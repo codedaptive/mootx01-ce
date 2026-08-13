@@ -149,12 +149,17 @@ pub fn run_doctor() -> ExitCode {
     let codex_detected = codex_client.as_ref().map_or(false, |c| c.detected(&home));
     println!("Codex plugin: {}", if codex_detected { "enabled" } else { "not enabled" });
 
-    // MCP ownership: is mootx01 wired into Codex's config?
+    // MCP ownership: mirrors Swift's four-way branch (CodexMemoryCommand.swift:149–158).
+    // `detected` = plugin-style install present; `wired` = direct mcp_servers entry present.
     let codex_wired = codex_client.as_ref().map_or(false, |c| c.wired(&home));
-    if codex_wired {
-        println!("MCP ownership: direct config");
-    } else {
-        println!("MCP ownership: not wired");
+    match (codex_detected, codex_wired) {
+        (true, true) => {
+            println!("MCP ownership: \u{26a0} duplicate plugin + direct [mcp_servers.mootx01]");
+            println!("  Run `mootx01 install --target codex --mode plugin` to remove an installer-owned default duplicate.");
+        }
+        (true, false) => println!("MCP ownership: plugin-owned"),
+        (false, true) => println!("MCP ownership: direct config"),
+        (false, false) => println!("MCP ownership: not wired"),
     }
 
     // Native memory settings: read ~/.codex/config.toml with the hand-rolled
@@ -301,15 +306,17 @@ pub fn run_import_chronicle(yes: bool) -> ExitCode {
         }
 
         // Derive relative path from chronicle root.
+        // Guards that the canonical file path is actually inside the root — mirrors
+        // Swift's guard filePath.hasPrefix(prefix) else { summary.failed += 1; continue }.
+        // A TOCTOU move between walk and read could produce a path outside the root;
+        // filing such a path under a wrong location would corrupt the dedup index.
         let file_canonical = file.canonicalize().unwrap_or(file.clone());
         let file_str = file_canonical.to_string_lossy().to_string();
-        let relative = if file_str.starts_with(&root_str) {
-            file_str[root_str.len()..].to_string()
-        } else {
-            file.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
+        if !file_str.starts_with(&root_str) {
+            failed += 1;
+            continue;
+        }
+        let relative = file_str[root_str.len()..].to_string();
 
         // Build provenance header matching Swift format.
         let provenance = format!(
@@ -484,14 +491,16 @@ struct ChronicleIndex {
 fn write_chronicle_index(path: &Path, index: &ChronicleIndex) {
     let Some(dir) = path.parent() else { return };
     if fs::create_dir_all(dir).is_err() { return; }
-    if let Ok(data) = serde_json::to_vec_pretty(index) {
-        if fs::write(path, data).is_ok() {
-            #[cfg(unix)] {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-            }
-        }
+    let Ok(data) = serde_json::to_vec_pretty(index) else { return };
+    // Write to a sibling temp file then rename for atomic replacement — mirrors
+    // Swift's `data.write(to: indexURL, options: .atomic)`.
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, &data).is_err() { return; }
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
+    let _ = fs::rename(&tmp, path);
 }
 
 /// Convert `SystemTime` to ISO 8601 UTC string (e.g. `2026-08-12T14:05:00Z`).
