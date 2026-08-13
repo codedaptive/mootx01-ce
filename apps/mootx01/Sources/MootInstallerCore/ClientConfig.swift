@@ -237,19 +237,15 @@ public enum MCPClients {
     public static let serverName: String = "mootx01"
 
     /// The server-name key inside a generated **plugin package**'s MCP
-    /// manifest. Deliberately different from `serverName`: the host
-    /// namespaces a plugin's servers under the plugin id, so the plugin
-    /// entry surfaces to the user as `plugin:mootx01:memory` — the
-    /// plainest naming for someone meeting the tool for the first time.
-    /// A direct entry has no such namespace and keeps `serverName`, so
-    /// the two keys are not interchangeable and the plugin-ownership
-    /// hook can still tell a competing direct entry apart from ours.
+    /// manifest. Now identical to `serverName`: both the plugin and the
+    /// direct-install entry use `"mootx01"` so MOOT tools appear under
+    /// a single `mcp__mootx01__*` prefix regardless of install path.
     ///
     /// The generated packages are the authority for this value; it is
     /// mirrored here so the installer has one place to read it instead
     /// of a literal at each call site. `PluginPackageShapeTests` asserts
     /// the mirror still matches what the packager emits.
-    public static let pluginServerName: String = "memory"
+    public static let pluginServerName: String = "mootx01"
 
     /// Clients the installer wires up on macOS. Order matches the
     /// install.sh merge sequence so the progress output is stable.

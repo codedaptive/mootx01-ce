@@ -62,19 +62,15 @@ pub struct McpClient {
 pub const SERVER_NAME: &str = "mootx01";
 
 /// The server entry name inside a generated **plugin package**'s MCP
-/// manifest. Deliberately different from `SERVER_NAME`: the host
-/// namespaces a plugin's servers under the plugin id, so the plugin entry
-/// surfaces to the user as `plugin:mootx01:memory` — the plainest naming
-/// for someone meeting the tool for the first time. A direct entry has no
-/// such namespace and keeps `SERVER_NAME`, so the two keys are not
-/// interchangeable and the plugin-ownership hook can still tell a
-/// competing direct entry apart from ours.
+/// manifest. Now identical to `SERVER_NAME`: both the plugin and the
+/// direct-install entry use `"mootx01"` so MOOT tools appear under a
+/// single `mcp__mootx01__*` prefix regardless of install path.
 ///
 /// The generated packages are the authority for this value; it is mirrored
 /// here so the installer has one place to read it instead of a literal at
 /// each call site. `core::depth`'s `plugin_server_name_matches_generated_packages`
 /// asserts the mirror still matches what the packager emits.
-pub const PLUGIN_SERVER_NAME: &str = "memory";
+pub const PLUGIN_SERVER_NAME: &str = "mootx01";
 
 impl McpClient {
     /// Whether this client appears to be installed on this machine.
