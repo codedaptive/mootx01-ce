@@ -111,6 +111,10 @@ pub enum Command {
     HookCapture,
     /// codex-hook <event> — Codex lifecycle adapter entry point.
     CodexHook { event: String },
+    /// codex-memory doctor — Codex/MOOT posture diagnostics.
+    CodexMemoryDoctor,
+    /// codex-memory import-chronicle [--yes] — Chronicle Markdown importer.
+    CodexMemoryImportChronicle { yes: bool },
     /// --version on the root command.
     Version,
     /// --help / help on the root command (prints usage, exits 0).
@@ -255,6 +259,37 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 return Err(UsageError("Error: unexpected argument for 'codex-hook'.".into()));
             }
             Ok(Command::CodexHook { event })
+        }
+        "codex-memory" => {
+            let sub = it.next().ok_or_else(|| UsageError(
+                "Error: 'codex-memory' requires a subcommand: doctor | import-chronicle".into()))?;
+            match sub.as_str() {
+                "doctor" => {
+                    if let Some(a) = it.next() {
+                        if a == "--help" || a == "-h" {
+                            return Ok(Command::HelpFor("codex-memory doctor"));
+                        }
+                        return Err(UsageError(
+                            "Error: 'codex-memory doctor' takes no arguments.".into()));
+                    }
+                    Ok(Command::CodexMemoryDoctor)
+                }
+                "import-chronicle" => {
+                    let mut yes = false;
+                    while let Some(arg) = it.next() {
+                        match arg.as_str() {
+                            "--yes" | "-y" => yes = true,
+                            "--help" | "-h" => return Ok(Command::HelpFor("codex-memory import-chronicle")),
+                            other => return Err(UsageError(format!(
+                                "Error: unknown flag '{other}' for 'codex-memory import-chronicle'."))),
+                        }
+                    }
+                    Ok(Command::CodexMemoryImportChronicle { yes })
+                }
+                "--help" | "-h" => Ok(Command::HelpFor("codex-memory")),
+                other => Err(UsageError(format!(
+                    "Error: unknown subcommand '{other}' for 'codex-memory'. Use: doctor | import-chronicle"))),
+            }
         }
         other => Err(UsageError(format!(
             "Error: unknown subcommand '{other}'.\n\n{}",
@@ -663,6 +698,7 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "enable" => Ok("enable"),
         "disable" => Ok("disable"),
         "hook-capture" => Ok("hook-capture"),
+        "codex-memory" | "codex-memory doctor" | "codex-memory import-chronicle" => Ok("codex-memory"),
         other => Err(UsageError(format!("Error: unknown subcommand '{other}'."))),
     }
 }
@@ -843,6 +879,16 @@ pub fn subcommand_usage(cmd: &str) -> String {
             ~/.mootx01/hooks/capture-harness-memory.sh when Harness Memory Mode is\n\
             enabled. Daemon-down fallback: ALLOW (estate write is preferred, but a\n\
             stray disk file is recoverable via the next ingest sweep).".into(),
+        "codex-memory" => "Codex memory diagnostics and Chronicle import.\n\
+            \n\
+            USAGE: mootx01 codex-memory <subcommand>\n\
+            \n\
+            SUBCOMMANDS:\n\
+            \x20 doctor               Report Codex/MOOT ownership, native memory settings, Chronicle, and estate posture.\n\
+            \x20 import-chronicle     Import Codex Chronicle Markdown files as unconfirmed MOOT memories.\n\
+            \n\
+            OPTIONS (import-chronicle):\n\
+            \x20 -y, --yes            Skip the confirmation prompt.".into(),
         other => format!("(no help for '{other}')"),
     }
 }

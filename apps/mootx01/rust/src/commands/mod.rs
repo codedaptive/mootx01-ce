@@ -71,6 +71,8 @@ pub fn dispatch(command: Command) -> ExitCode {
         // at ~/.mootx01/hooks/capture-harness-memory.sh).
         Command::HookCapture => enable::run_hook_capture(),
         Command::CodexHook { event } => codex_memory::run_hook(&event),
+        Command::CodexMemoryDoctor => codex_memory::run_doctor(),
+        Command::CodexMemoryImportChronicle { yes } => codex_memory::run_import_chronicle(yes),
         // Version/Help/HelpFor are handled in main before dispatch.
         Command::Version | Command::Help | Command::HelpFor(_) => {
             unreachable!("handled in main")
