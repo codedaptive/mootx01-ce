@@ -56,15 +56,44 @@ VectorKit, WorkPacketKit.
 
 There is no RagKit. If a doc references one, the doc is stale.
 
-## Math surfaces
+## Math surfaces (Newton)
 
-Bitmap columns, Filter algebra, the bitmap evaluator, and the
-GeniusLocus matrix layer are the math-heavy areas. Reference material is
-in `docs/engineering/substrate_reference`. Read it before writing
-algorithm code.
+Math-heavy areas here: bitmap columns, Filter algebra, the bitmap
+evaluator, and the GeniusLocus matrix layer.
 
-Swift/Rust conformance is four-way: both ports must agree on behavior
-and on test coverage.
+**Reference material, read before writing algorithm code:**
+- `docs/engineering/substrate_reference`
+- `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §§ 5.4-5.7
+- `.claude/skills/bitmap-patterns/SKILL.md`
+
+**Primitive operations.** Build on these, do not roll custom bit
+arithmetic. Defined in `BitmapOps.swift` with Rust equivalents:
+
+| Primitive | Purpose |
+| :--- | :--- |
+| `andMask` | field equality |
+| `thresholdCompare` | cluster membership |
+| `xor` / `isIdentical` / `hammingDistance` | change detection |
+| `shiftExtract` | field read |
+| `simdBallot` | batch filter |
+
+These are what the bitmap evaluator compiles Filter chains into.
+
+**Conformance.** Four-way: both ports must agree on behavior and on test
+coverage. Shared seed `0xCAFEBABEDEADBEEF`. Run the conformance harness
+at `docs/engineering/substrate_reference/test-harness/`, not only your
+own tests.
+
+## Security review surfaces (Perkins)
+
+The Simple Machines BYOAI threat model applies to this repo: the user
+owns their credentials, and their data does not leave their control
+without explicit opt-in.
+
+Sensitive surfaces here: SQLite schema and columns storing user content,
+entity privacy/sensitivity fields, encryption boundaries, API key
+handling, AI call construction, and any path where data leaves the
+device.
 
 ## Security review triggers
 
@@ -74,8 +103,8 @@ moves data off the device.
 
 ## Editions
 
-Community edition. `EDITION_BOUNDARY.md` governs what may cross between
-editions. EE-only code must not land here.
+Community edition. `EDITION_BOUNDARY.md` governs what may cross into
+CE. Check it before moving code between editions.
 
 ## Estate
 
