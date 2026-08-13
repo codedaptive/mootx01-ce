@@ -17,10 +17,10 @@
 //   The YAML is a simple two-key object; we write it directly rather than
 //   round-tripping a full YAML parser.
 //
-// Codex (Desktop & CLI) (TOML):
-//   ~/.codex/config.toml is shared by Codex CLI and Codex Desktop, so a
-//   single "codex" entry covers both. The installer merges the
-//   `[mcp_servers.mootx01]` table with a line-based pass that preserves all
+// TOML clients (Codex Desktop & CLI, Grok CLI):
+//   Codex uses ~/.codex/config.toml (shared by CLI and Desktop). Grok CLI uses
+//   ~/.grok/config.toml with the same `[mcp_servers.mootx01]` + `url` shape.
+//   The installer merges that table with a line-based pass that preserves all
 //   unrelated content (other tables, top-level keys), rather than writing JSON
 //   into a TOML file — which silently corrupted the file in earlier builds.
 //   Install dispatches on the config file extension so a .toml never reaches
@@ -843,10 +843,10 @@ public enum Installer {
 
     // MARK: - TOML client helpers
 
-    /// Merge the mootx01 MCP entry into a TOML config file (Codex CLI / Desktop).
+    /// Merge the mootx01 MCP entry into a TOML config file (Codex, Grok CLI).
     ///
-    /// Codex stores MCP servers as `[mcp_servers.<name>]` tables in
-    /// `~/.codex/config.toml`. There is no Foundation TOML codec and the kit
+    /// Codex and Grok CLI store MCP servers as `[mcp_servers.<name>]` tables
+    /// (`~/.codex/config.toml`, `~/.grok/config.toml`). There is no Foundation TOML codec and the kit
     /// ships zero external dependencies, so this is a deliberate line-based
     /// merge rather than a parse/re-emit round-trip: it replaces only the
     /// `[mcp_servers.<serverName>]` table (and any of its child subtables) and

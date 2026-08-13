@@ -144,7 +144,10 @@ public enum MCPClients {
     public static let serverName: String           // "mootx01" — DIRECT entries
     public static let pluginServerName: String     // "memory"  — PLUGIN packages
     public static let supported: [MCPClient]       // claude-desktop, claude-code,
-                                                   // cursor, cline, continue
+                                                   // cursor, cline, continue,
+                                                   // codex, opencode, hermes,
+                                                   // gemini-cli, antigravity,
+                                                   // kiro, grok
 }
 ```
 

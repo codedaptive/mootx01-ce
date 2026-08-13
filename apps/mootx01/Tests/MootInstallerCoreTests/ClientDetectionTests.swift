@@ -52,6 +52,12 @@ struct ClientDetectionTests {
         #expect(client.detectPath == ".continue")
     }
 
+    @Test("grok detectPath is .grok")
+    func grokDetectPath() throws {
+        let client = try requiredClient("grok")
+        #expect(client.detectPath == ".grok")
+    }
+
     // MARK: - isPresent: nil detectPath
 
     @Test("nil detectPath always returns true regardless of home")
@@ -88,6 +94,31 @@ struct ClientDetectionTests {
         )
 
         let client = try requiredClient("continue")
+        #expect(client.isPresent(homeDirectory: home))
+    }
+
+    // MARK: - isPresent: Grok CLI (.grok directory)
+
+    @Test("grok isPresent returns false in empty sandbox")
+    func grokAbsentInEmptySandbox() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let client = try requiredClient("grok")
+        #expect(!client.isPresent(homeDirectory: home))
+    }
+
+    @Test("grok isPresent returns true when .grok directory exists")
+    func grokPresentWhenDirectoryExists() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        try FileManager.default.createDirectory(
+            at: home.appendingPathComponent(".grok"),
+            withIntermediateDirectories: true
+        )
+
+        let client = try requiredClient("grok")
         #expect(client.isPresent(homeDirectory: home))
     }
 

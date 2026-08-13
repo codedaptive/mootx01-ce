@@ -1133,6 +1133,29 @@ struct InstallerTests {
         #expect(text.contains("[mcp_servers.mootx01]"), "Codex config must carry the TOML server table")
     }
 
+    @Test("install routes the Grok CLI entry (.toml) to the TOML writer, not JSON")
+    func installRoutesGrokToTOML() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let client = MCPClients.supported.first { $0.id == "grok" }!
+        try Installer.install(
+            client: client,
+            binaryPath: "/usr/local/bin/mootx01",
+            daemonURL: MootPaths.residentEndpointURL,
+            homeDirectory: home,
+            workingDirectory: home,
+            local: false
+        )
+
+        let configURL = home.appendingPathComponent(".grok/config.toml")
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+        #expect(text.first != "{", "Grok CLI config must be TOML, not JSON")
+        #expect(text.contains("[mcp_servers.mootx01]"), "Grok CLI config must carry the TOML server table")
+        #expect(text.contains("url = \"\(MootPaths.residentEndpointURL)\""),
+                "Grok CLI url entry must target the resident daemon")
+    }
+
     // MARK: - Parall integration
 
     @Test("Parall integration: parallConfigPaths + mergeIntoJSONConfig wires all matching instances")

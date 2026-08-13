@@ -6,8 +6,8 @@
 // itself is Installer.swift (the earlier bash + Python install.sh path is
 // retired).
 //
-// Supported clients (11): Claude Desktop, Claude Code, Cursor, Cline, Continue,
-// Codex (Desktop & CLI), Opencode, Hermes, Gemini CLI, Antigravity, Kiro.
+// Supported clients (12): Claude Desktop, Claude Code, Cursor, Cline, Continue,
+// Codex (Desktop & CLI), Opencode, Hermes, Gemini CLI, Antigravity, Kiro, Grok CLI.
 //
 // Transport: every client uses native HTTP (supportsLocalHTTP: true) where
 // their config schema accepts a local HTTP url, or the proxy bridge
@@ -264,6 +264,7 @@ public enum MCPClients {
     ///   Gemini CLI      → .gemini (config directory created on first run)
     ///   Antigravity     → /Applications/Antigravity.app (macOS app bundle)
     ///   Kiro            → /Applications/Kiro.app (macOS app bundle)
+    ///   Grok CLI        → .grok (config directory created on first CLI run)
     public static let supported: [MCPClient] = [
         // Transport per client (see bounded loopback HTTP): clients are wired to the resident
         // daemon over HTTP where their config schema accepts a local HTTP/url entry, so
@@ -410,6 +411,21 @@ public enum MCPClients {
             detectPath: "/Applications/Kiro.app",
             supportsLocalHTTP: true,
             httpEntryIncludesType: false  // bare url field; Kiro accepts url for remote servers
+        ),
+
+        // Grok CLI — xAI's terminal coding assistant.
+        // Config: ~/.grok/config.toml (TOML, same shape as Codex).
+        // Detection: ~/.grok directory created on first CLI run.
+        // Do NOT treat /Applications/Grok Bot.app as this client — that is a
+        // different Anysphere product.
+        MCPClient(
+            id: "grok",
+            displayName: "Grok CLI",
+            configPath: ".grok/config.toml",
+            serverName: serverName,
+            detectPath: ".grok",
+            supportsLocalHTTP: true,
+            httpEntryIncludesType: false  // TOML url field; no explicit type needed
         ),
     ]
 }
