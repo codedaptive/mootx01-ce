@@ -47,7 +47,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// GLK's room-rollup coordination callback (fired with Drawer IDs).
-pub type ContentOnEncoded = Box<dyn Fn(&[String]) + Send + Sync>;
+/// Post-encode coordination callback. Second parameter is the queue session
+/// id that tagged the drain unit's batch claim — the A2 encode-completion
+/// marker's `session=<id>` bracket. Twin of Swift `CorpusContentEngine.onEncoded`.
+pub type ContentOnEncoded = Box<dyn Fn(&[String], &str) + Send + Sync>;
 /// Test-only drain failure-injection hook (transient failure when Err).
 pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
 use vectorkit::{
@@ -590,17 +593,17 @@ impl CorpusContentEngine {
     /// Install (or clear) the `on_encoded` coordination callback.
     pub fn set_on_encoded<F>(&self, callback: F)
     where
-        F: Fn(&[String]) + Send + Sync + 'static,
+        F: Fn(&[String], &str) + Send + Sync + 'static,
     {
         if let Ok(mut guard) = self.on_encoded.lock() {
             *guard = Some(Box::new(callback));
         }
     }
 
-    pub(crate) fn fire_on_encoded(&self, ids: &[String]) {
+    pub(crate) fn fire_on_encoded(&self, ids: &[String], unit_session_id: &str) {
         if let Ok(guard) = self.on_encoded.lock() {
             if let Some(cb) = guard.as_ref() {
-                cb(ids);
+                cb(ids, unit_session_id);
             }
         }
     }

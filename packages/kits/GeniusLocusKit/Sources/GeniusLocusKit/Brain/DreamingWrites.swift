@@ -31,6 +31,23 @@ public extension GeniusLocusKit {
     /// - Throws:
     ///   - `GeniusLocusKitError.estateNotOpen` if the handle is stale.
     ///   - Any `LocusKitError` raised by `DrawerStore.addDiaryEntry`.
+    /// Append a dream-cycle bracket marker to the estate audit log (A3,
+    /// benchmark reset 2026-08-13). Flag-gated with the A2 encode markers
+    /// (`MOOTX01_ENCODE_MARKERS=off` disables both — they are one recording
+    /// facility). Called by `EstateDreamingSink`'s lifecycle hooks; the
+    /// daemon mints one session id per cycle and both ends carry it.
+    public func appendDreamCycleMarker(
+        in handle: EstateHandle,
+        phase: DrawerStore.DreamCyclePhase,
+        sessionID: String,
+        now: Date
+    ) async throws {
+        guard Self.encodeMarkersEnabled else { return }
+        let estate = try await estate(for: handle)
+        try await estate.appendDreamCycleMarker(
+            phase: phase, unitSessionID: sessionID, at: now)
+    }
+
     func addDiaryEntry(in handle: EstateHandle, _ entry: DiaryEntry) async throws {
         let store = try await ensureDiaryStore(for: handle)
         // Dreaming-daemon diary entries carry no embedding (the daemon emits

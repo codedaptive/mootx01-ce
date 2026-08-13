@@ -618,10 +618,24 @@ public extension GeniusLocusKit {
     /// estates). The closure captures the GLK actor weakly so a torn-down estate
     /// leaves no retain cycle through the Corpus.
     internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
-        await corpus.setOnEncoded { [weak self] drawerIDs in
+        await corpus.setOnEncoded { [weak self] drawerIDs, unitSessionID in
             guard let self else { return }
             guard let estate = try? await self.estate(for: handle) else { return }
             try? await estate.rollupRoomsForDrawers(drawerIDs)
+            // A2 encode-completion audit marker: exactly one per drain unit,
+            // anchored on the unit's first drawer, carrying the queue session
+            // id and row count in the reason column. Flag-gated ON by default
+            // (MOOTX01_ENCODE_MARKERS=off disables); "markers present" is a
+            // provenance input to the artifact build (B2). Best-effort like
+            // the rollup above: a marker failure must never fail the drain.
+            if Self.encodeMarkersEnabled, let firstID = drawerIDs.first {
+                try? await estate.appendEncodeCompleteMarker(
+                    firstDrawerID: firstID,
+                    rowCount: drawerIDs.count,
+                    unitSessionID: unitSessionID,
+                    at: Date()
+                )
+            }
             // Drain-stage distillation (§7.1): distill each encoded drawer
             // that is still eligible. The clock is the wall clock at drain
             // time — `distilled_at` is audit-only and carries no behavioral
@@ -704,4 +718,15 @@ public extension GeniusLocusKit {
     ///
     /// Rust parity: `UNCLASSIFIED_SENTINEL` in `intake.rs`.
     static let unclassifiedSentinel: String = "000"
+
+    /// Whether encode-completion audit markers are recorded (A2, benchmark
+    /// reset 2026-08-13). ON by default; `MOOTX01_ENCODE_MARKERS=off`
+    /// disables. Because recording is flag-gated, "markers present" is a
+    /// BUILD INPUT for benchmark artifacts (B2 provenance manifest): an
+    /// artifact built with recording off cannot yield INGEST/CYCLE timings
+    /// and must fail loudly at measurement, not report nothing.
+    /// Read once per process — the flag is an operator decision, not a
+    /// per-unit one. Twin of Rust `encode_markers_enabled()`.
+    static let encodeMarkersEnabled: Bool =
+        ProcessInfo.processInfo.environment["MOOTX01_ENCODE_MARKERS"] != "off"
 }

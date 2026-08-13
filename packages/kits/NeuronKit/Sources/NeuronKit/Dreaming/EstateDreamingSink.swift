@@ -110,4 +110,18 @@ public struct EstateDreamingSink: DreamingProposalSink {
     public func retireTunnel(id tunnelId: String, changedBy: String, now: Date) async throws {
         try await kit.retireTunnel(in: handle, id: tunnelId, changedBy: changedBy, now: now)
     }
+
+    /// A3 dream-cycle bracket, start side: appends a `dreamStart` audit
+    /// marker through the GLK seam. Best-effort — a marker failure must
+    /// never fail the cycle (mirrors the drain worker's marker posture).
+    public func dreamCycleWillStart(sessionID: String, now: Date) async {
+        try? await kit.appendDreamCycleMarker(
+            in: handle, phase: .start, sessionID: sessionID, now: now)
+    }
+
+    /// A3 dream-cycle bracket, end side — same session id as the start.
+    public func dreamCycleDidEnd(sessionID: String, now: Date) async {
+        try? await kit.appendDreamCycleMarker(
+            in: handle, phase: .end, sessionID: sessionID, now: now)
+    }
 }

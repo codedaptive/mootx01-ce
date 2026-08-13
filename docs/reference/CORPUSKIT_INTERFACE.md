@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-30
+date: 2026-08-13
 spec_type: kit
-version: 1.19.0
+version: 1.20.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.19.0: MXE-BB — chunked BasisStore persistence (multi-row, 256 MiB parts) on both ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -2156,6 +2156,16 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.20.0 -- 2026-08-13
+
+- `CorpusContentEngine.onEncoded` callback signature extended from
+  `([String]) async -> Void` to `([String], String) async -> Void`
+  (Rust `ContentOnEncoded`: `Fn(&[String], &str)`): the second parameter
+  is the queue session id that tagged the drain unit's batch claim,
+  brackets the unit end-to-end, and feeds the A2 encode-completion audit
+  marker written by the GLK orchestrator. Fired once per drain unit from
+  `drainContentQueueOnce` (Rust `content_engine_queue.rs`).
 
 ### 1.19.0 -- 2026-07-30
 

@@ -534,6 +534,17 @@ fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError {
 /// The Uuid crate is already in Cargo.toml dependencies (required by EstateCoordinator
 /// for `Uuid::new_v4()` elsewhere in this file).
 #[inline]
+/// Whether encode-completion audit markers are recorded (A2, benchmark
+/// reset 2026-08-13). ON by default; `MOOTX01_ENCODE_MARKERS=off` disables.
+/// Because recording is flag-gated, "markers present" is a BUILD INPUT for
+/// benchmark artifacts (B2 provenance manifest): an artifact built with
+/// recording off cannot yield INGEST/CYCLE timings and must fail loudly at
+/// measurement. Read per call — cheap, and avoids process-global state.
+/// Twin of Swift `GeniusLocusKit.encodeMarkersEnabled`.
+fn encode_markers_enabled() -> bool {
+    std::env::var("MOOTX01_ENCODE_MARKERS").map(|v| v != "off").unwrap_or(true)
+}
+
 fn uuid_to_str(bytes: &[u8; 16]) -> String {
     Uuid::from_bytes(*bytes).to_string()
 }
@@ -6953,6 +6964,29 @@ impl EstateCoordinator {
             .map_err(|e| remap("retire_tunnel", tunnel_id, e).into())
     }
 
+    /// Append a dream-cycle bracket marker to the estate audit log (A3,
+    /// benchmark reset 2026-08-13). `verb` is `dreamStart` or `dreamEnd`;
+    /// both ends of a cycle carry the same session id. Flag-gated with the
+    /// A2 encode markers (`MOOTX01_ENCODE_MARKERS=off` disables both — one
+    /// recording facility). `marked_at` is epoch MILLISECONDS (the HLC
+    /// boundary's unit). Mirrors Swift
+    /// `GeniusLocusKit.appendDreamCycleMarker(in:phase:sessionID:now:)`.
+    pub fn append_dream_cycle_marker(
+        &self,
+        handle: &EstateHandle,
+        verb: &str,
+        session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), VerbDispatchError> {
+        if !encode_markers_enabled() {
+            return Ok(());
+        }
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .append_dream_cycle_marker(verb, session_id, marked_at)
+            .map_err(|e| remap("append_dream_cycle_marker", session_id, e).into())
+    }
+
     // MARK: - mine_apriori_rules
 
     /// Hard ceiling on the number of audit entries materialized for Apriori
@@ -8551,7 +8585,7 @@ impl EstateCoordinator {
                         // VectorStore for fingerprint lane (§8); may be absent.
                         let vector_store_for_callback =
                             self.vector_stores.get(&handle).cloned();
-                        corpus.set_on_encoded(move |drawer_ids| {
+                        corpus.set_on_encoded(move |drawer_ids, unit_session_id| {
                             use substrate_ml::token_compaction;
 
                             // (1) Room-rollup — always best-effort.
@@ -8607,6 +8641,26 @@ impl EstateCoordinator {
                                     // Swift parity: on_encoded in wireCorpusRoomRollup.
                                     let _ = corpus_for_callback
                                         .recompose_dense_vector(&drawer.id, now_ms);
+                                }
+                            }
+
+                            // (4) A2 encode-completion audit marker: exactly one
+                            // per drain unit, anchored on the unit's first drawer,
+                            // carrying the queue session id and row count in the
+                            // reason column. Flag-gated ON by default
+                            // (MOOTX01_ENCODE_MARKERS=off disables); "markers
+                            // present" is a provenance input to the artifact
+                            // build (B2). Best-effort like the rollup: a marker
+                            // failure must never fail the drain. Swift parity:
+                            // wireCorpusRoomRollup marker block.
+                            if encode_markers_enabled() {
+                                if let Some(first_id) = drawer_ids.first() {
+                                    let _ = estate.append_encode_complete_marker(
+                                        first_id,
+                                        drawer_ids.len(),
+                                        unit_session_id,
+                                        now_ms,
+                                    );
                                 }
                             }
                         });

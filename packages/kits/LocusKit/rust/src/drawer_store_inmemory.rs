@@ -83,7 +83,7 @@ use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::node::Node;
 use crate::node_store::T_NODES;
-use crate::drawer_store::{DrawerStore, SUBJECT_LENGTH_CONTRACT};
+use crate::drawer_store::{DrawerStore, ENCODE_COMPLETE_VERB, ENCODE_WORKER_ACTOR, SUBJECT_LENGTH_CONTRACT};
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
@@ -2704,6 +2704,139 @@ impl DrawerStore for DrawerStoreCore {
             })
             .map_err(map_storage_err)?;
         Ok(updated)
+    }
+
+    /// Append an encode-completion audit marker: one event per encode drain
+    /// unit, anchored on the unit's first drawer (A2, benchmark reset
+    /// 2026-08-13). Mirrors Swift `DrawerStore.appendEncodeCompleteMarker`.
+    ///
+    /// Closes finding P2's gap: capture supplies a start timestamp, nothing
+    /// supplied an encode end, so INGEST time could not be derived from the
+    /// audit log. A single production write is its own drain unit (exact
+    /// per-row marker); a bulk pass emits ONE marker carrying `rows=N`.
+    ///
+    /// Shape follows the `set_subject_representation` precedent: an
+    /// informational event with before == after on every value field,
+    /// appended WITHOUT `audit_gate::admit` (the gate validates bitmap
+    /// FieldWrites; this event mutates nothing). The `reason` column
+    /// carries the machine-parseable payload (`session=<id> rows=<n>`) —
+    /// no schema change. An absent drawer row is a silent no-op: the row
+    /// may be expunged between encode completion and the marker write,
+    /// and a marker must never fail the drain worker.
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "drawerId must not be empty".to_string(),
+            ));
+        }
+        if unit_session_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "unitSessionID must not be empty".to_string(),
+            ));
+        }
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else {
+            return Ok(());
+        };
+        let bitmaps = (
+            i64_value_of(row.get("adjectiveBitmap")),
+            i64_value_of(row.get("operationalBitmap")),
+            i64_value_of(row.get("provenance")),
+        );
+        let anchor =
+            substrate_lib::verbs::LatticeAnchor::udc(&string_value_of(row.get("udcCode")));
+        let stamp = self.hlc.lock().unwrap().send(completed_at);
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                &stamp,
+                ENCODE_COMPLETE_VERB,
+                bitmaps,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            hlc: stamp,
+            verb: ENCODE_COMPLETE_VERB.to_string(),
+            before_bitmaps: Some(bitmaps),
+            after_bitmaps: bitmaps,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: ENCODE_WORKER_ACTOR.to_string(),
+            reason: Some(format!("session={unit_session_id} rows={row_count}")),
+        };
+        let audit_row = pk_audit_event_from(&event);
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(map_storage_err)
+    }
+
+    /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13):
+    /// an informational audit event anchored on the ESTATE itself
+    /// (`row_id == estate_uuid` — a dream cycle belongs to no single drawer),
+    /// with zero bitmaps, the unclassified lattice anchor, actor
+    /// `dreaming_daemon`, and reason `session=<id>`. `verb` is one of
+    /// `dreamStart` / `dreamEnd` (callers pass the phase's verb string).
+    /// Same no-gate rationale as the encode marker: nothing mutates.
+    /// Mirrors Swift `DrawerStore.appendDreamCycleMarker`.
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        if unit_session_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "unitSessionID must not be empty".to_string(),
+            ));
+        }
+        let stamp = self.hlc.lock().unwrap().send(marked_at);
+        let zero = (0i64, 0i64, 0i64);
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc("000");
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+                &stamp,
+                verb,
+                zero,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+            hlc: stamp,
+            verb: verb.to_string(),
+            before_bitmaps: Some(zero),
+            after_bitmaps: zero,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: "dreaming_daemon".to_string(),
+            reason: Some(format!("session={unit_session_id}")),
+        };
+        let audit_row = pk_audit_event_from(&event);
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(map_storage_err)
     }
 
     /// Count of active drawers still awaiting a subject line (PR-01
@@ -5598,6 +5731,25 @@ impl DrawerStore for InMemoryDrawerStore {
             changed_by,
             reason,
         )
+    }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.append_dream_cycle_marker(verb, unit_session_id, marked_at)
     }
     fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
         self.inner.count_subject_debt()
@@ -9551,5 +9703,100 @@ mod tests {
             events.iter().all(|e| e.verb != "setSubject"),
             "no setSubject custody event may survive the rollback"
         );
+    }
+
+    // ── A2/A3 audit markers (benchmark reset 2026-08-13) ────────────────
+    // Twin of Swift `EncodeMarkerTests` case-for-case.
+
+    /// A2: the encode-completion marker seals verb/actor/reason on the
+    /// anchor row with before == after bitmaps (informational, no gate).
+    #[test]
+    fn encode_marker_seals_event() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        let id = tid("marker-a2");
+        let mut d = Drawer::new(
+            &id,
+            "Marker test content: one drawer standing in for a drain unit.",
+            "test-parent",
+            "bilby",
+            NOW,
+            "test-v1",
+        );
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+        let before = store.audit_events_for_row(&id).unwrap().len();
+
+        store
+            .append_encode_complete_marker(&id, 37, "unit-abc", NOW + 100)
+            .unwrap();
+
+        let events = store.audit_events_for_row(&id).unwrap();
+        assert_eq!(events.len(), before + 1);
+        let marker = events.last().unwrap();
+        assert_eq!(marker.verb, ENCODE_COMPLETE_VERB);
+        assert_eq!(marker.actor, ENCODE_WORKER_ACTOR);
+        assert_eq!(marker.reason.as_deref(), Some("session=unit-abc rows=37"));
+        assert_eq!(marker.before_bitmaps, Some(marker.after_bitmaps));
+    }
+
+    /// A2: an absent drawer row is a silent no-op — the row may be expunged
+    /// between encode completion and the marker write, and a marker must
+    /// never fail the drain worker.
+    #[test]
+    fn encode_marker_absent_row_no_op() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        let ghost = Uuid::new_v4().to_string();
+        store
+            .append_encode_complete_marker(&ghost, 1, "unit-x", NOW + 100)
+            .unwrap();
+        assert!(store.audit_events_for_row(&ghost).unwrap().is_empty());
+    }
+
+    /// A2: an empty session id is refused — the marker's whole purpose is
+    /// the session bracket.
+    #[test]
+    fn encode_marker_empty_session_refused() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        let id = tid("marker-a2-empty");
+        let mut d = Drawer::new(&id, "content", "test-parent", "bilby", NOW, "test-v1");
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+        assert!(store
+            .append_encode_complete_marker(&id, 1, "", NOW + 100)
+            .is_err());
+    }
+
+    /// A3: dream brackets share a session id on the estate anchor row,
+    /// start before end under HLC ordering.
+    #[test]
+    fn dream_brackets_share_session() {
+        let estate_uuid = Uuid::new_v4();
+        let storage = Arc::new(InMemoryStorage::with_estate(estate_uuid));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        store
+            .append_dream_cycle_marker("dreamStart", "cycle-7", NOW + 1_000)
+            .unwrap();
+        store
+            .append_dream_cycle_marker("dreamEnd", "cycle-7", NOW + 61_000)
+            .unwrap();
+
+        // Query by the store's own estate uuid (the anchor the marker used)
+        // rather than re-deriving it from the fixture value.
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        let brackets: Vec<_> = events
+            .iter()
+            .filter(|e| e.reason.as_deref() == Some("session=cycle-7"))
+            .collect();
+        assert_eq!(brackets.len(), 2);
+        assert_eq!(brackets[0].verb, "dreamStart");
+        assert_eq!(brackets[1].verb, "dreamEnd");
+        assert!(brackets.iter().all(|e| e.actor == "dreaming_daemon"));
+        assert!(brackets[0].hlc.physical_time < brackets[1].hlc.physical_time);
     }
 }

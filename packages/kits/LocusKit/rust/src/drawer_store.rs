@@ -126,6 +126,16 @@ pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
 /// `DrawerStore.subjectPipelineAIV1`.
 pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
 
+/// Audit verb for encode-completion markers (A2, benchmark reset
+/// 2026-08-13). Sits beside the mutation verbs but is informational —
+/// it never changes a bitmap. Twin of Swift `DrawerStore.encodeCompleteVerb`.
+pub const ENCODE_COMPLETE_VERB: &str = "encodeComplete";
+
+/// Audit actor for encode-completion markers: the background encode drain
+/// worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`. Twin of
+/// Swift `DrawerStore.encodeWorkerActor`.
+pub const ENCODE_WORKER_ACTOR: &str = "encode_worker";
+
 /// Pipeline-version tag for subjects produced by the on-device miniLLM
 /// rider (PR-10's producer; the Rust lane stays DARK until a model
 /// exists — seam compiled, gated off). Trust ladder (highest first):
@@ -742,6 +752,36 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "set_subject_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append an encode-completion audit marker: one informational event per
+    /// encode drain unit, anchored on the unit's first drawer, carrying
+    /// `session=<id> rows=<n>` in the reason column (A2). Mirrors Swift
+    /// `DrawerStore.appendEncodeCompleteMarker`. Absent row = silent no-op.
+    fn append_encode_complete_marker(
+        &self,
+        _drawer_id: &str,
+        _row_count: usize,
+        _unit_session_id: &str,
+        _completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_encode_complete_marker not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append a dream-cycle bracket marker (A3): estate-anchored
+    /// informational event, verb `dreamStart`/`dreamEnd`, reason
+    /// `session=<id>`. Mirrors Swift `DrawerStore.appendDreamCycleMarker`.
+    fn append_dream_cycle_marker(
+        &self,
+        _verb: &str,
+        _unit_session_id: &str,
+        _marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_dream_cycle_marker not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2255,6 +2295,25 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
             changed_by,
             reason,
         )
+    }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_dream_cycle_marker(verb, unit_session_id, marked_at)
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_missing_subject(pipeline_version)

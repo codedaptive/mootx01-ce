@@ -2223,4 +2223,49 @@ public extension Estate {
         try await store.updateTunnelAdjBitmap(id: tunnelId, adjBitmap: adjBitmap)
     }
 
+    /// Append an encode-completion audit marker for one encode drain unit
+    /// (A2, benchmark reset 2026-08-13). Called by the GLK drain worker's
+    /// onEncoded hook; delegates to `DrawerStore.appendEncodeCompleteMarker`,
+    /// which seals an informational audit event (verb `encodeComplete`,
+    /// actor `encode_worker`, `reason: "session=<id> rows=<n>"`) with no
+    /// bitmap change. Mirrors Rust `Estate::append_encode_complete_marker`.
+    public func appendEncodeCompleteMarker(
+        firstDrawerID: String,
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try await store.appendEncodeCompleteMarker(
+            drawerId: firstDrawerID,
+            rowCount: rowCount,
+            unitSessionID: unitSessionID,
+            at: completedAt
+        )
+    }
+
+    /// All audit events for one row, HLC-ascending. Public pass-through to
+    /// `DrawerStore.auditEventsForRow` so audit consumers (the A2/A3 marker
+    /// readers, the C3 timing derivation) read through the Estate seam
+    /// rather than reaching into the store.
+    public func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
+        try await store.auditEventsForRow(rowID)
+    }
+
+    /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13).
+    /// A cycle emits `.start` when it begins and `.end` when it completes,
+    /// both with the same session id, so CYCLE-dreamt time is attributable
+    /// from the audit log alone. Mirrors Rust
+    /// `Estate::append_dream_cycle_marker`.
+    public func appendDreamCycleMarker(
+        phase: DrawerStore.DreamCyclePhase,
+        unitSessionID: String,
+        at markedAt: Date
+    ) async throws {
+        try await store.appendDreamCycleMarker(
+            phase: phase,
+            unitSessionID: unitSessionID,
+            at: markedAt
+        )
+    }
+
 }

@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.8.1
+version: 1.9.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-06
+date: 2026-08-13
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -1986,6 +1986,16 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.9.0 -- 2026-08-13
+
+- `DreamingProposalSink` gains A3 lifecycle hooks with default no-ops:
+  `dreamCycleWillStart(sessionID:now:)` / `dreamCycleDidEnd(sessionID:now:)`
+  (Rust: `dream_cycle_will_start` / `dream_cycle_did_end`, infallible per
+  the sync-port convention). The daemon mints one session id per cycle
+  and calls start before step 1 and end after the cycle's last write.
+  `EstateDreamingSink` overrides both to seal `dreamStart`/`dreamEnd`
+  audit markers through the GLK seam; test fakes compile unchanged.
 
 ### 1.8.0 -- 2026-08-06
 

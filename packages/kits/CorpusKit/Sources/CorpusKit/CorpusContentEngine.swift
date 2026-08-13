@@ -324,7 +324,7 @@ public actor CorpusContentEngine {
     var ingestHLC = HLCGenerator(nodeID: 1)
     /// Invoked AFTER a drained batch indexes, with the affected canonical
     /// content IDs (Drawer IDs) — GLK's room-rollup coordination hook.
-    public var onEncoded: (@Sendable ([String]) async -> Void)?
+    public var onEncoded: (@Sendable ([String], String) async -> Void)?
 
     /// Cancel the drain worker and release the lease on teardown (mirror of
     /// `Corpus.deinit`; the explicit path is `dropIngestQueue()`).

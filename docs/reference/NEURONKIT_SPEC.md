@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.9.1
+version: 1.10.0
 status: active
-date: 2026-08-06
+date: 2026-08-13
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1046,6 +1046,14 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.10.0 -- 2026-08-13
+
+- Dream-cycle bracketing (A3): every cycle is bracketed by a minted
+  session id delivered through the sink's lifecycle hooks. An aborted
+  cycle (throw) emits no end marker, which honestly records the abort in
+  the audit trail. CYCLE-dreamt time becomes attributable from the audit
+  log alone (benchmark reset C3/C4 derivation input).
 
 ### 1.9.0 -- 2026-08-06
 

@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-07
-version: 1.31.0
+date: 2026-08-13
+version: 1.32.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
@@ -2121,6 +2121,20 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.32.0 -- 2026-08-13
+
+- `appendDreamCycleMarker(in:phase:sessionID:now:)` (Rust
+  `EstateCoordinator::append_dream_cycle_marker(handle, verb, session_id,
+  marked_at_ms)`): dream-cycle bracket pass-through to the estate audit
+  log, flag-gated with the A2 encode markers. Called by
+  `EstateDreamingSink`'s A3 lifecycle hooks.
+- Encode-completion markers (A2): `wireCorpusRoomRollup`'s onEncoded
+  closure now also seals one `encodeComplete` audit marker per drain
+  unit (first drawer anchor, row count, unit session id), flag-gated by
+  `MOOTX01_ENCODE_MARKERS` (default ON). Because recording is
+  flag-gated, "markers present" is a BUILD INPUT for benchmark artifacts
+  (B2 provenance manifest).
 
 ### 1.31.0 -- 2026-08-07
 

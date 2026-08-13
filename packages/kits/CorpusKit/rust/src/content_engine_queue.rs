@@ -267,6 +267,12 @@ impl CorpusContentEngine {
         if claimed.is_empty() {
             return Ok(0);
         }
+        // Keep the batch session: one session tags the whole single-pass claim,
+        // so it brackets this drain unit end-to-end (A2 marker input).
+        let unit_session_id = claimed
+            .first()
+            .map(|(_, session)| session.0.clone())
+            .unwrap_or_default();
         let batch: Vec<Job> = claimed.into_iter().map(|(job, _session)| job).collect();
 
         // One resident-index rebuild per burst.
@@ -403,7 +409,7 @@ impl CorpusContentEngine {
         // barrier instead of a race. Mirrors the Swift
         // drainContentQueueOnce ordering.
         if !encoded_ids.is_empty() {
-            self.fire_on_encoded(&encoded_ids);
+            self.fire_on_encoded(&encoded_ids, &unit_session_id);
         }
         // Post-ingest young-basis settle: fires only when nothing further is
         // pending (this batch is committed above; it may still be in-flight

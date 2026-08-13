@@ -117,6 +117,27 @@ public protocol DreamingProposalSink: Sendable {
     ///   - changedBy: agent name performing the retirement.
     ///   - now:       deterministic clock value from the caller.
     func retireTunnel(id: String, changedBy: String, now: Date) async throws
+
+    /// A3 (benchmark reset 2026-08-13): dream-cycle lifecycle bracket,
+    /// start side. The daemon mints one session id per cycle and calls this
+    /// before step 1. Production adapters append a `dreamStart` audit
+    /// marker so CYCLE-dreamt time is attributable from the audit log.
+    /// Non-throwing by design: a marker failure must never fail the cycle.
+    func dreamCycleWillStart(sessionID: String, now: Date) async
+
+    /// A3: dream-cycle lifecycle bracket, end side — same session id as the
+    /// matching `dreamCycleWillStart`. Called after the cycle's last write;
+    /// an aborted cycle (throw) emits no end marker, which honestly records
+    /// the abort in the audit trail.
+    func dreamCycleDidEnd(sessionID: String, now: Date) async
+}
+
+/// Default no-ops so existing sinks and test fakes compile unchanged —
+/// same compatibility pattern as the T13 reader defaults below. Production
+/// (`EstateDreamingSink`) overrides both with audit-marker writes.
+public extension DreamingProposalSink {
+    func dreamCycleWillStart(sessionID: String, now: Date) async {}
+    func dreamCycleDidEnd(sessionID: String, now: Date) async {}
 }
 
 // MARK: - Protocol default implementations for test-fake compatibility
@@ -593,6 +614,14 @@ public actor DreamingDaemon {
         // is off (the default), the autoclosure is never evaluated.
         // `neuronkit.dream.cycle` with status "start" marks the boundary where
         // the daemon begins reading the substrate (Activity view, GUI §4.4).
+        // A3 dream-cycle bracket: one session id per cycle, start marker
+        // before step 1, end marker after the last write. The id is minted
+        // here (identity, not computation — same rationale as QueueKit's
+        // SessionID.mint()); determinism of the cycle's outputs is a
+        // function of `now` and the substrate, unaffected by the id.
+        let cycleSessionID = UUID().uuidString.lowercased()
+        await sink.dreamCycleWillStart(sessionID: cycleSessionID, now: now)
+
         let cycleStartTs = now.timeIntervalSince1970
         Intellectus.report(.metric(
             name: "neuronkit.dream.cycle",
@@ -880,6 +909,9 @@ public actor DreamingDaemon {
         // the cadence tracks only timer fires; the event path leaves it
         // unchanged so event fires in `.hybrid` mode do not reset the
         // timer countdown. The two paths are fully independent.
+        // A3 end bracket — same session id as the start marker above.
+        await sink.dreamCycleDidEnd(sessionID: cycleSessionID, now: now)
+
         return DreamingCycleReport(
             tickedAt: now,
             candidatesConsidered: observations.count,

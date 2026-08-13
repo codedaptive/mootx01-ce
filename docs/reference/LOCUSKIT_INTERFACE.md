@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.23.0
+version: 1.24.0
 status: active
-date: 2026-08-07
+date: 2026-08-13
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1452,9 +1452,58 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 
 ---
 
+## Audit markers (§ 17 — A2/A3, benchmark reset 2026-08-13)
+
+Informational audit events with `beforeBitmaps == afterBitmaps`, appended
+directly (no `AuditGate` — the gate governs bitmap mutations and these
+mutate nothing; same precedent as `setSubject`). The `reason` column
+carries the machine-parseable payload; no schema change.
+
+### Swift: `DrawerStore` (actor) and `Estate` wrappers
+
+| Method | Parameters | Returns | Notes |
+|---|---|---|---|
+| `appendEncodeCompleteMarker(drawerId:rowCount:unitSessionID:at:)` | `String, Int, String, Date` | — | One per encode drain unit, anchored on the unit's FIRST drawer. Verb `encodeComplete`, actor `encode_worker`, reason `session=<id> rows=<n>`. Absent row = silent no-op. |
+| `appendDreamCycleMarker(phase:unitSessionID:at:)` | `DreamCyclePhase, String, Date` | — | Estate-anchored (`rowId == estateUuid`), verbs `dreamStart` / `dreamEnd`, actor `dreaming_daemon`, reason `session=<id>`. |
+| `Estate.appendEncodeCompleteMarker(firstDrawerID:rowCount:unitSessionID:at:)` | — | — | Pass-through. |
+| `Estate.appendDreamCycleMarker(phase:unitSessionID:at:)` | — | — | Pass-through. |
+| `Estate.auditEventsForRow(_:)` | `UUID` | `[AuditEvent]` | Public audit read pass-through (marker readers, C3 derivation). |
+
+Constants: `DrawerStore.encodeCompleteVerb`, `DrawerStore.encodeWorkerActor`,
+`DrawerStore.DreamCyclePhase` (`.start` = `dreamStart`, `.end` = `dreamEnd`).
+
+### Rust: `DrawerStore` trait (`rust/src/drawer_store.rs`)
+
+| Method | Parameters | Returns | Notes |
+|---|---|---|---|
+| `append_encode_complete_marker` | `&str, usize, &str, i64` | `Result<(), LocusKitError>` | `completed_at` epoch ms. Default: DatabaseUnavailable. |
+| `append_dream_cycle_marker` | `verb: &str, &str, i64` | `Result<(), LocusKitError>` | Verb string `dreamStart` / `dreamEnd`. |
+
+Constants: `ENCODE_COMPLETE_VERB`, `ENCODE_WORKER_ACTOR`. Backend coverage
+identical to the trace-reward verbs (Core live; SQLite/Postgres delegate;
+InMemory inherits).
+
+### Test suites
+
+- Swift: `Tests/LocusKitTests/EncodeMarkerTests.swift` — 4 tests.
+- Rust: `drawer_store_inmemory.rs` tests `encode_marker_*`,
+  `dream_brackets_share_session` — 4 tests.
+
+---
+
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.24.0 -- 2026-08-13
+
+- Audit markers (A2/A3, benchmark reset): `appendEncodeCompleteMarker`
+  (one informational event per encode drain unit; verb `encodeComplete`,
+  actor `encode_worker`, reason `session=<id> rows=<n>`) and
+  `appendDreamCycleMarker` (`dreamStart`/`dreamEnd` estate-anchored cycle
+  brackets), both ports, plus `Estate` pass-throughs. No schema change;
+  markers close finding P2's missing encode-end timestamp so INGEST and
+  CYCLE-dreamt become derivable from the audit log.
 
 ### 1.23.0 -- 2026-08-07
 

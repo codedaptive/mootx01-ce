@@ -5132,6 +5132,130 @@ public actor DrawerStore {
     /// (Rust `SUBJECT_PIPELINE_AI_V1`).
     public static let subjectPipelineAIV1 = "ai-v1"
 
+    /// Append an encode-completion audit marker: one event per encode drain
+    /// unit, anchored on the unit's first drawer, recording when that unit's
+    /// background encode work finished (A2, benchmark reset 2026-08-13).
+    ///
+    /// This closes the gap named in finding P2: capture supplies a start
+    /// timestamp but nothing supplied an end, so INGEST time (write-ack to
+    /// encode-idle) could not be derived from the audit log. A production
+    /// single write is its own drain unit, so the marker is exact per-row;
+    /// a bulk pass emits ONE marker carrying `rows=N`, giving throughput.
+    ///
+    /// Shape follows the `setSubject` precedent exactly: an informational
+    /// event with `beforeBitmaps == afterBitmaps`, appended directly to the
+    /// audit log WITHOUT `AuditGate.admit` — the gate governs bitmap
+    /// mutations, and this event mutates nothing. The `reason` column
+    /// carries the machine-parseable payload (`session=<id> rows=<n>`),
+    /// which needs no schema change and propagates through observer sync
+    /// like every other audit row (G-Set CRDT).
+    ///
+    /// An absent drawer row is a silent no-op (mirrors setSubject's
+    /// historical contract): the drawer may have been expunged between
+    /// encode completion and the marker write, and a marker must never
+    /// fail the drain worker.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The FIRST drawer id of the drain unit — the event's
+    ///     row anchor. The remaining rows of the unit are represented by
+    ///     the count, not by per-row events.
+    ///   - rowCount: Number of rows the drain unit encoded (`rows=N`).
+    ///   - unitSessionID: The queue session id that tagged the drain unit's
+    ///     batch claim (`session=<id>`), bracketing the unit end-to-end.
+    ///   - completedAt: Wall-clock completion time, passed in by the drain
+    ///     worker (the process boundary where "now" legitimately enters).
+    public func appendEncodeCompleteMarker(
+        drawerId: String,
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let nowMillis = Int64(completedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            guard let row = rows.first else { return }
+            let bitmaps = (
+                adjective: Self.int64(row["adjectiveBitmap"]),
+                operational: Self.int64(row["operationalBitmap"]),
+                provenance: Self.int64(row["provenance"])
+            )
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let event = AuditEvent(
+                estateUuid: estate,
+                rowId: rowUuid,
+                hlc: stamp,
+                verb: Self.encodeCompleteVerb,
+                beforeBitmaps: bitmaps,
+                afterBitmaps: bitmaps,
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: Self.encodeWorkerActor,
+                reason: "session=\(unitSessionID) rows=\(rowCount)")
+            try await txn.auditLog.append(event)
+        }
+    }
+
+    /// Audit verb for encode-completion markers (A2). Sits beside the
+    /// mutation verbs (`capture`, `mutate.*`, `withdraw`, `expunge`,
+    /// `setSubject`) but is informational: it never changes a bitmap.
+    /// Shared by both legs (Rust `ENCODE_COMPLETE_VERB`).
+    public static let encodeCompleteVerb = "encodeComplete"
+
+    /// Audit actor for encode-completion markers: the background encode
+    /// drain worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`.
+    /// Shared by both legs (Rust `ENCODE_WORKER_ACTOR`).
+    public static let encodeWorkerActor = "encode_worker"
+
+    /// Dream-cycle bracket phase (A3, benchmark reset 2026-08-13). A dream
+    /// cycle emits one `dreamStart` marker when it begins and one `dreamEnd`
+    /// when it completes, both carrying the same session id, so CYCLE-dreamt
+    /// time can be attributed from the audit log alone.
+    public enum DreamCyclePhase: String, Sendable {
+        case start = "dreamStart"
+        case end   = "dreamEnd"
+    }
+
+    /// Append a dream-cycle bracket marker (A3): an informational audit
+    /// event anchored on the ESTATE itself (`rowId == estateUuid` — a dream
+    /// cycle belongs to no single drawer), with zero bitmaps, the
+    /// unclassified lattice anchor, actor `dreaming_daemon`, and
+    /// `reason: "session=<id>"`. Same no-gate rationale as
+    /// `appendEncodeCompleteMarker`: nothing mutates, the gate governs
+    /// bitmap writes. Mirrors Rust `append_dream_cycle_marker`.
+    public func appendDreamCycleMarker(
+        phase: DreamCyclePhase,
+        unitSessionID: String,
+        at markedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let nowMillis = Int64(markedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estate,
+            rowId: estate,
+            hlc: stamp,
+            verb: phase.rawValue,
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: "dreaming_daemon",
+            reason: "session=\(unitSessionID)")
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await txn.auditLog.append(event)
+        }
+    }
+
     /// Count of active drawers still awaiting a subject line — the
     /// backfill-eligibility predicate as an aggregate (PR-01): not
     /// tombstoned, non-empty content, and subject absent OR produced

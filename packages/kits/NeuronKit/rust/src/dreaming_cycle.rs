@@ -442,6 +442,18 @@ pub trait DreamingProposalSink {
         // Default: no-op. Production adapters override; test fakes that do not
         // test OMEGA retirement inherit this and compile without changes.
     }
+
+    /// A3 (benchmark reset 2026-08-13): dream-cycle lifecycle bracket, start
+    /// side. The cycle mints one session id and calls this before step 1;
+    /// production adapters append a `dreamStart` audit marker. Default no-op
+    /// (fake compatibility). Infallible per the sync-port convention.
+    /// Mirrors Swift `DreamingProposalSink.dreamCycleWillStart`.
+    fn dream_cycle_will_start(&mut self, _session_id: &str, _now_epoch_secs: f64) {}
+
+    /// A3: end bracket — same session id as the matching start. An aborted
+    /// cycle emits no end marker, honestly recording the abort.
+    /// Mirrors Swift `DreamingProposalSink.dreamCycleDidEnd`.
+    fn dream_cycle_did_end(&mut self, _session_id: &str, _now_epoch_secs: f64) {}
 }
 
 /// Recall-trace retention window in calendar days. Rows older than this are
@@ -1347,6 +1359,13 @@ impl DreamingDaemon {
         // — the same instant the caller observed. This keeps telemetry
         // deterministic in tests (no wall-clock jitter) and enforces the
         // conformance contract (cycle timestamps are not sourced from SystemTime).
+        // A3 dream-cycle bracket: one session id per cycle, start marker
+        // before step 1, end marker after the last write. Identity, not
+        // computation — cycle outputs stay a function of `now` and the
+        // substrate. Mirrors Swift runCycle's cycleSessionID.
+        let cycle_session_id = uuid::Uuid::new_v4().simple().to_string();
+        sink.dream_cycle_will_start(&cycle_session_id, now_epoch_secs);
+
         let cycle_start_ts = now_epoch_secs;
         {
             let mut start_tags = std::collections::HashMap::new();
@@ -1553,6 +1572,9 @@ impl DreamingDaemon {
         // corpus was just trained on first ingest or opened from a persisted basis.
         // See `autoReindexGrowthThreshold` in Swift for the vocabulary rationale.
 
+        // A3 end bracket — same session id as the start marker above.
+        sink.dream_cycle_did_end(&cycle_session_id, now_epoch_secs);
+
         let report = DreamingCycleReport {
             candidates_considered,
             proposals_emitted,
@@ -1713,6 +1735,55 @@ mod tests {
         fn prune_recall_traces(&mut self, cutoff_iso: &str) {
             self.prune_cutoffs.push(cutoff_iso.to_string());
         }
+    }
+
+    /// A3: records lifecycle hook calls, mirroring Swift BracketRecordingSink.
+    #[derive(Default)]
+    struct BracketRecordingSink {
+        events: Vec<(String, String, f64)>,
+    }
+    impl DreamingProposalSink for BracketRecordingSink {
+        fn propose(&mut self, _frame: ProposeFrameOut) {}
+        fn record_cycle_diary(&mut self, _entry: DreamingDiaryEntry) {}
+        fn prune_recall_traces(&mut self, _cutoff_iso: &str) {}
+        fn dream_cycle_will_start(&mut self, session_id: &str, now_epoch_secs: f64) {
+            self.events.push(("start".to_string(), session_id.to_string(), now_epoch_secs));
+        }
+        fn dream_cycle_did_end(&mut self, session_id: &str, now_epoch_secs: f64) {
+            self.events.push(("end".to_string(), session_id.to_string(), now_epoch_secs));
+        }
+    }
+
+    /// A3: one cycle emits exactly one start/end pair sharing a session id,
+    /// both hooks receiving the cycle's deterministic `now`. Twin of Swift
+    /// `DreamCycleBracketTests.cycleBracketsShareSession`.
+    #[test]
+    fn dream_cycle_brackets_share_session() {
+        let reader = FakeReaderMut::new(vec![], vec![], vec![]);
+        let mut sink = BracketRecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        let _ = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
+
+        assert_eq!(sink.events.len(), 2, "exactly one start and one end per cycle");
+        assert_eq!(sink.events[0].0, "start");
+        assert_eq!(sink.events[1].0, "end");
+        assert_eq!(sink.events[0].1, sink.events[1].1, "both ends carry the same session id");
+        assert!(!sink.events[0].1.is_empty());
+        assert!(sink.events.iter().all(|e| e.2 == 1_000_000.0));
+    }
+
+    /// A3: two cycles mint distinct session ids. Twin of Swift
+    /// `DreamCycleBracketTests.cyclesMintDistinctSessions`.
+    #[test]
+    fn dream_cycle_brackets_distinct_sessions() {
+        let reader = FakeReaderMut::new(vec![], vec![], vec![]);
+        let mut sink = BracketRecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        let _ = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
+        let _ = d.run_cycle(1_000_060.0, &reader, &RecallTraceRewardSource, &mut sink);
+
+        assert_eq!(sink.events.len(), 4);
+        assert_ne!(sink.events[0].1, sink.events[2].1, "each cycle has its own session id");
     }
 
     fn trace(target: &str, used: bool) -> RecallTraceItem {

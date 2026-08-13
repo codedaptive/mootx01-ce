@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.19.0
+version: 1.20.0
 status: active
-date: 2026-08-07
+date: 2026-08-13
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1064,6 +1064,20 @@ records `changedBy` into the ledger's `reviewedBy` — reviewer identity
 is recorded on accept and reject alike.
 
 ## Changelog
+
+### 1.20.0 -- 2026-08-13
+
+- Audit markers (A2/A3): two informational audit event families join the
+  trail — `encodeComplete` (one per encode drain unit, anchored on the
+  unit's first drawer, actor `encode_worker`, reason
+  `session=<id> rows=<n>`) and `dreamStart`/`dreamEnd` (estate-anchored
+  dream-cycle brackets, actor `dreaming_daemon`, reason `session=<id>`).
+  Both write `before == after` bitmaps and bypass `AuditGate` by the
+  `setSubject` precedent (the gate governs bitmap mutations). The reason
+  column carries the payload; no schema change. Closes the P2 gap: the
+  audit log now records when background encode work ENDS, making INGEST
+  time (write-ack to encode-idle) and CYCLE-dreamt derivable from audit
+  rows alone. See LOCUSKIT_INTERFACE § 17.
 
 ### 1.19.0 -- 2026-08-07
 

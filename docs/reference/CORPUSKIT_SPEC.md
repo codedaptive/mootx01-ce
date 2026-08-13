@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.16.0
+version: 1.17.0
 status: accepted-1.1-target
-date: 2026-07-30
+date: 2026-08-13
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.16.0: MXE-BB — chunked BasisStore persistence; SQLITE_LIMIT_LENGTH defense-in-depth in PersistenceKit."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -815,6 +815,14 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.17.0 -- 2026-08-13
+
+- Drain-unit identity (A2): a drain unit's queue session id is now part
+  of the post-encode coordination contract — the engine hands
+  `(encodedIDs, unitSessionID)` to the orchestrator, one callback per
+  drain unit. The session id is claim-scoped (single-pass batch claim),
+  so it brackets the unit end-to-end for audit-marker derivation.
 
 ### 1.16.0 -- 2026-07-30
 

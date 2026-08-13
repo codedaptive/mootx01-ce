@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.25.0
+version: 1.26.0
 status: accepted-1.1-target
-date: 2026-08-07
+date: 2026-08-13
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -2021,6 +2021,17 @@ State lives on the tunnel (LocusKit): operational bits 14/15 and the
 `ext` review ledger — see LOCUSKIT_SPEC.md § tunnel review state.
 
 ## Changelog
+
+### 1.26.0 -- 2026-08-13
+
+- Audit-marker recording (A2/A3): the encode drain worker seals one
+  `encodeComplete` marker per drain unit and the dreaming seam brackets
+  each cycle with `dreamStart`/`dreamEnd`, both flag-gated by
+  `MOOTX01_ENCODE_MARKERS` (default ON; `off` disables both — one
+  recording facility). Markers are best-effort: a marker failure never
+  fails the drain or the cycle. An artifact built with recording off
+  cannot yield INGEST/CYCLE timings and must fail loudly at measurement
+  rather than report nothing.
 
 ### 1.25.0 -- 2026-08-07
 

@@ -95,8 +95,10 @@ public extension CorpusContentEngine {
         ingestQueue = nil
     }
 
-    /// Install (or clear) the `onEncoded` coordination callback.
-    func setOnEncoded(_ callback: (@Sendable ([String]) async -> Void)?) {
+    /// Install (or clear) the `onEncoded` coordination callback. The second
+    /// parameter is the queue session id that tagged the drain unit's batch
+    /// claim — the A2 encode-completion marker's `session=<id>` bracket.
+    func setOnEncoded(_ callback: (@Sendable ([String], String) async -> Void)?) {
         onEncoded = callback
     }
 
@@ -262,7 +264,10 @@ public extension CorpusContentEngine {
         // callback is bounded by the same lease-reclaim discipline that
         // covers a hung encode.
         if !result.encodedIDs.isEmpty, let callback = onEncoded {
-            await callback(result.encodedIDs)
+            // claimed[0].1 is the session that tagged this drain unit's batch
+            // claim — one session per unit, so it brackets the unit end-to-end
+            // (A2 encode-completion marker input).
+            await callback(result.encodedIDs, claimed[0].1.rawValue)
         }
         // Post-ingest young-basis settle: fires only when nothing further is
         // pending (this batch is committed above; it may still be in-flight

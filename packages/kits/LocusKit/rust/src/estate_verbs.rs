@@ -1453,6 +1453,41 @@ impl Estate {
         )
     }
 
+    /// Append an encode-completion audit marker for one encode drain unit
+    /// (A2, benchmark reset 2026-08-13). Called by the GLK drain worker's
+    /// on_encoded hook; delegates to
+    /// `DrawerStore::append_encode_complete_marker`, which seals an
+    /// informational audit event (verb `encodeComplete`, actor
+    /// `encode_worker`, reason `session=<id> rows=<n>`) with no bitmap
+    /// change. Mirrors Swift `Estate.appendEncodeCompleteMarker`.
+    pub fn append_encode_complete_marker(
+        &self,
+        first_drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.append_encode_complete_marker(
+            first_drawer_id,
+            row_count,
+            unit_session_id,
+            completed_at,
+        )
+    }
+
+    /// Append a dream-cycle bracket marker (A3). `verb` is `dreamStart` or
+    /// `dreamEnd`; both ends of a cycle carry the same session id so
+    /// CYCLE-dreamt time is attributable from the audit log alone.
+    /// Mirrors Swift `Estate.appendDreamCycleMarker`.
+    pub fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
     /// Count of active drawers still awaiting a subject line (PR-01
     /// backfill-eligibility aggregate — the estate-status subject-debt
     /// counter's source). Estate-level pass-through over
