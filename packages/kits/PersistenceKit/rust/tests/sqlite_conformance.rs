@@ -395,3 +395,97 @@ fn sqlite_audit_same_millisecond_burst_orders_chronologically() {
     let tail_verbs: Vec<&str> = tail.iter().map(|e| e.verb.as_str()).collect();
     assert_eq!(tail_verbs, ["mutate"], "after-cursor must resume chronologically");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// V2 regression: transaction nesting via SAVEPOINT.
+//
+// Before the fix, any code that called begin_transaction() or append_rows()
+// while already inside a transaction() block issued a second BEGIN IMMEDIATE
+// on the same SQLite connection, which fails immediately with
+// "cannot start a transaction within a transaction". The fix: a per-connection
+// tx_depth counter in Inner drives SAVEPOINT nesting at depth ≥ 1.
+//
+// These two tests reproduce the exact call sequences that vault_import uses:
+// an outer transaction() bracket with begin_transaction/commit_transaction
+// and with append_rows called on the shared dataset store.
+// ─────────────────────────────────────────────────────────────────────
+
+fn make_sqlite_nesting_storage() -> SqliteStorage {
+    let path = std::env::temp_dir()
+        .join(format!("pk_nesting_{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage = SqliteStorage::new(config).expect("open sqlite storage");
+    let schema = persistence_kit::SchemaDeclaration::new("nesting-test", 1, vec![]);
+    storage.open(&schema).expect("open schema");
+    storage
+}
+
+#[test]
+fn sqlite_nested_begin_transaction_uses_savepoint() {
+    // Verifies that begin_transaction() called inside a transaction() block
+    // succeeds via SAVEPOINT (depth 0→1→2→1→0) rather than failing with
+    // "cannot start a transaction within a transaction". This reproduces the
+    // vault_import capture path where capture_batch calls begin_transaction
+    // while already inside an outer transaction bracket.
+    let storage = make_sqlite_nesting_storage();
+    use persistence_kit::IsolationLevel;
+    storage
+        .transaction(IsolationLevel::Serializable, &mut |txn| {
+            // At this point tx_depth = 1 (BEGIN IMMEDIATE was issued).
+            // begin_transaction must issue SAVEPOINT tx_1 (depth 1→2),
+            // not a second BEGIN IMMEDIATE.
+            let rs = txn.row_store();
+            rs.begin_transaction()?;
+            // SAVEPOINT tx_1 is open; tx_depth = 2.
+            rs.commit_transaction()?;
+            // RELEASE SAVEPOINT tx_1; tx_depth = 1.
+            Ok(())
+        })
+        .expect("begin_transaction inside transaction() must succeed via SAVEPOINT");
+}
+
+#[test]
+fn sqlite_nested_append_rows_uses_savepoint() {
+    // Verifies that append_rows() called inside a transaction() block
+    // succeeds via SAVEPOINT. append_rows issues its own nest_begin; at
+    // tx_depth = 1 (outer transaction open) it gets SAVEPOINT instead of
+    // a second BEGIN IMMEDIATE, which is what broke vault_import in the
+    // field ("captureBatch: cannot start a transaction within a transaction").
+    use persistence_kit::dataset_store::DatasetSchema;
+    use persistence_kit::ColumnDeclaration;
+
+    let storage = make_sqlite_nesting_storage();
+    let ds = storage.dataset_store().expect("dataset_store");
+    let id = Uuid::new_v4();
+    let schema = DatasetSchema {
+        columns: vec![ColumnDeclaration::text("label").nullable()],
+        primary_key_column: None,
+    };
+    ds.create_dataset(id, &schema, &[]).expect("create_dataset");
+
+    let mut row_map = std::collections::BTreeMap::new();
+    row_map.insert("label".to_string(), persistence_kit::TypedValue::Text("test".to_string()));
+    let rows = vec![row_map];
+
+    use persistence_kit::IsolationLevel;
+    storage
+        .transaction(IsolationLevel::Serializable, &mut |_txn| {
+            // ds shares the same Inner Arc as storage. At tx_depth = 1,
+            // append_rows must issue SAVEPOINT tx_1 instead of BEGIN IMMEDIATE.
+            ds.append_rows(id, &rows)?;
+            Ok(())
+        })
+        .expect("append_rows inside transaction() must succeed via SAVEPOINT");
+
+    // Confirm the row landed: the outer transaction committed it.
+    let result = ds
+        .query_rows(id, None, &[], None, None, None)
+        .expect("query_rows");
+    assert_eq!(result.len(), 1, "row appended inside nested transaction must be visible after commit");
+}

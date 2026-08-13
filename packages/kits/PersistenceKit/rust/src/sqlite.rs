@@ -672,6 +672,83 @@ impl ObserverRegistry {
 struct Inner {
     conn: Connection,
     schema: Option<SchemaDeclaration>,
+    /// Per-connection transaction nesting depth.
+    ///
+    /// Depth 0 means no active transaction. Depth 1 means inside a `BEGIN
+    /// IMMEDIATE` bracket. Depth 2+ means inside nested SAVEPOINTs
+    /// (`SAVEPOINT tx_1`, `SAVEPOINT tx_2`, …) opened on top of the outer
+    /// `BEGIN IMMEDIATE`. Each SAVEPOINT name is `tx_{depth_at_open}`.
+    ///
+    /// Re-entrant callers (same thread, same call stack) are the only case
+    /// this counter handles — concurrent callers on different threads are
+    /// already serialized by `tx_lock` (in `transaction`) or by the
+    /// coordinator's own lock in the GLK layer.
+    tx_depth: usize,
+}
+
+impl Inner {
+    /// Open a transaction or a nested savepoint, depending on current depth.
+    ///
+    /// Depth 0 → `BEGIN IMMEDIATE` (acquires the SQLite write lock up front).
+    /// Depth ≥ 1 → `SAVEPOINT tx_{depth}`, which is re-entrant-safe on the
+    /// same connection: a SAVEPOINT nested inside an open `BEGIN` is legal
+    /// and uses the outer transaction's write lock.
+    fn nest_begin(&mut self) -> rusqlite::Result<()> {
+        if self.tx_depth == 0 {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        } else {
+            let sp = format!("SAVEPOINT tx_{}", self.tx_depth);
+            self.conn.execute_batch(&sp)?;
+        }
+        self.tx_depth += 1;
+        Ok(())
+    }
+
+    /// Commit the innermost transaction bracket.
+    ///
+    /// Depth 1 → `COMMIT` (closes the outer `BEGIN IMMEDIATE`).
+    /// Depth ≥ 2 → `RELEASE SAVEPOINT tx_{depth-1}` (merges the innermost
+    /// savepoint into its parent bracket without closing the outer transaction).
+    fn nest_commit(&mut self) -> rusqlite::Result<()> {
+        if self.tx_depth == 0 {
+            // Mismatched commit — defensive no-op; the caller has a bug.
+            return Ok(());
+        }
+        self.tx_depth -= 1;
+        if self.tx_depth == 0 {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            let sp = format!("RELEASE SAVEPOINT tx_{}", self.tx_depth);
+            self.conn.execute_batch(&sp)?;
+        }
+        Ok(())
+    }
+
+    /// Roll back the innermost transaction bracket.
+    ///
+    /// Depth 1 → `ROLLBACK` (discards the entire outer `BEGIN IMMEDIATE`).
+    /// Depth ≥ 2 → `ROLLBACK TO SAVEPOINT tx_{depth-1}` followed by
+    /// `RELEASE SAVEPOINT tx_{depth-1}`, which discards only the innermost
+    /// savepoint's changes and collapses it back into its parent bracket.
+    ///
+    /// `ROLLBACK TO` alone re-opens the savepoint (SQLite spec § 3.5.3);
+    /// `RELEASE` is required to fully close it, leaving the parent
+    /// transaction open for subsequent work.
+    fn nest_rollback(&mut self) {
+        if self.tx_depth == 0 {
+            // Mismatched rollback — defensive no-op; the caller has a bug.
+            return;
+        }
+        self.tx_depth -= 1;
+        if self.tx_depth == 0 {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        } else {
+            let rollback_to = format!("ROLLBACK TO SAVEPOINT tx_{}", self.tx_depth);
+            let release = format!("RELEASE SAVEPOINT tx_{}", self.tx_depth);
+            let _ = self.conn.execute_batch(&rollback_to);
+            let _ = self.conn.execute_batch(&release);
+        }
+    }
 }
 
 pub struct SqliteStorage {
@@ -844,7 +921,7 @@ impl SqliteStorage {
         conn.set_prepared_statement_cache_capacity(128);
         Ok(SqliteStorage {
             config,
-            inner: Arc::new(Mutex::new(Inner { conn, schema: None })),
+            inner: Arc::new(Mutex::new(Inner { conn, schema: None, tx_depth: 0 })),
             observers: Arc::new(ObserverRegistry::default()),
             tx_lock: Arc::new(Mutex::new(())),
         })
@@ -1161,29 +1238,28 @@ impl Storage for SqliteStorage {
         // lock, but shared side-stores (the per-estate queue.sqlite) are
         // driven outside it — hence the self-serialization here.
         //
-        // No re-entrancy hazard: nothing calls `transaction` from inside a
-        // transaction block — same-connection BEGIN nesting always errored,
-        // so such a caller could never have worked.
+        // Re-entrant callers (a block that itself calls `begin_transaction` or
+        // reaches `append_rows`) use the SAVEPOINT path via `Inner::nest_begin`:
+        // when `tx_depth` is already ≥ 1 the nested call issues a SAVEPOINT
+        // instead of a second BEGIN, which is legal on the same connection.
         let _tx_guard = self.tx_lock.lock().unwrap();
         self.inner
             .lock()
             .unwrap()
-            .conn
-            .execute_batch("BEGIN IMMEDIATE")
+            .nest_begin()
             .map_err(|e| map_sql_err(e, "transaction"))?;
         match block(self) {
             Ok(()) => {
                 self.inner
                     .lock()
                     .unwrap()
-                    .conn
-                    .execute_batch("COMMIT")
+                    .nest_commit()
                     .map_err(|e| map_sql_err(e, "transaction"))?;
                 Ok(())
             }
             Err(e) => {
                 // Best-effort rollback; surface the block's error regardless.
-                let _ = self.inner.lock().unwrap().conn.execute_batch("ROLLBACK");
+                self.inner.lock().unwrap().nest_rollback();
                 Err(e)
             }
         }
@@ -2797,33 +2873,41 @@ impl RowStore for SqliteRowStore {
     // Explicit transaction boundary (GLK_BATCH1)
     // ----------------------------------------------------------------
 
-    /// Open a serializable write transaction.
+    /// Open a serializable write transaction, or a nested SAVEPOINT when
+    /// already inside one (re-entrant-safe).
     ///
-    /// Issues `BEGIN IMMEDIATE` so the write lock is acquired upfront,
-    /// preventing "cannot start a transaction within a transaction" under WAL
-    /// mode. The `inner` `Mutex` serializes concurrent calls.
+    /// Delegates to `Inner::nest_begin`: depth 0 → `BEGIN IMMEDIATE`;
+    /// depth ≥ 1 → `SAVEPOINT tx_{depth}`. The depth counter is
+    /// per-connection, stored in `Inner`, so nesting is tracked correctly
+    /// across all three transaction-opening sites on the same connection.
     fn begin_transaction(&self) -> StorageResult<()> {
-        let guard = self.inner.lock().unwrap();
-        guard
-            .conn
-            .execute_batch("BEGIN IMMEDIATE")
+        self.inner
+            .lock()
+            .unwrap()
+            .nest_begin()
             .map_err(|e| map_sql_err(e, "<transaction>"))
     }
 
-    /// Commit the transaction opened by `begin_transaction`.
+    /// Commit or release the innermost transaction bracket.
+    ///
+    /// Delegates to `Inner::nest_commit`: depth 1 → `COMMIT`; depth ≥ 2 →
+    /// `RELEASE SAVEPOINT tx_{depth-1}`.
     fn commit_transaction(&self) -> StorageResult<()> {
-        let guard = self.inner.lock().unwrap();
-        guard
-            .conn
-            .execute_batch("COMMIT")
+        self.inner
+            .lock()
+            .unwrap()
+            .nest_commit()
             .map_err(|e| map_sql_err(e, "<transaction>"))
     }
 
-    /// Roll back the transaction opened by `begin_transaction`.
+    /// Roll back or undo the innermost transaction bracket.
+    ///
+    /// Delegates to `Inner::nest_rollback`: depth 1 → `ROLLBACK`; depth ≥ 2
+    /// → `ROLLBACK TO SAVEPOINT tx_{depth-1}` then `RELEASE SAVEPOINT
+    /// tx_{depth-1}`, which discards only the innermost savepoint's changes
+    /// and collapses it back into its parent bracket.
     fn rollback_transaction(&self) -> StorageResult<()> {
-        let guard = self.inner.lock().unwrap();
-        // Use execute_batch; ignore the result (best-effort rollback).
-        let _ = guard.conn.execute_batch("ROLLBACK");
+        self.inner.lock().unwrap().nest_rollback();
         Ok(())
     }
 }
@@ -3248,7 +3332,7 @@ impl DatasetStore for SqliteDatasetStoreShim {
         }
 
         let table_name = dataset_table_name(id);
-        let guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
 
         // Validate column names from the first row.
         if let Some(first) = rows.first() {
@@ -3277,13 +3361,13 @@ impl DatasetStore for SqliteDatasetStoreShim {
             });
         }
 
-        // BEGIN IMMEDIATE / INSERT all rows / COMMIT — GLK_BATCH1 pattern.
-        guard
-            .conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| StorageError::BackendError {
-                underlying: format!("append_rows BEGIN: {e}"),
-            })?;
+        // GLK_BATCH1 pattern: wrap all inserts in a single transaction bracket.
+        // Uses Inner::nest_begin / nest_commit / nest_rollback so callers that
+        // already hold an outer transaction (depth ≥ 1) get a SAVEPOINT instead
+        // of a second BEGIN IMMEDIATE, which would fail on the same connection.
+        guard.nest_begin().map_err(|e| StorageError::BackendError {
+            underlying: format!("append_rows BEGIN: {e}"),
+        })?;
 
         let result = (|| -> StorageResult<()> {
             for row in &sorted_rows {
@@ -3294,16 +3378,13 @@ impl DatasetStore for SqliteDatasetStoreShim {
 
         match result {
             Ok(()) => {
-                guard
-                    .conn
-                    .execute_batch("COMMIT")
-                    .map_err(|e| StorageError::BackendError {
-                        underlying: format!("append_rows COMMIT: {e}"),
-                    })?;
+                guard.nest_commit().map_err(|e| StorageError::BackendError {
+                    underlying: format!("append_rows COMMIT: {e}"),
+                })?;
                 Ok(())
             }
             Err(e) => {
-                let _ = guard.conn.execute_batch("ROLLBACK");
+                guard.nest_rollback();
                 Err(e)
             }
         }
