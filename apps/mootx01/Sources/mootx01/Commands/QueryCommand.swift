@@ -268,6 +268,14 @@ struct QueryCommand: AsyncParsableCommand {
 
     /// Parse `["--key", "value", "--key2", "value2"]` into a dictionary.
     /// Values that parse as JSON integers or booleans are decoded as such.
+    ///
+    /// ## Conformance rules (parity with Rust `parse_kv_args`)
+    ///
+    /// - A leading bare `--` is skipped (bash-style option terminator). This
+    ///   lets `mootx01 query moot_tool -- --key value` work correctly.
+    /// - Non-`--` tokens (positional args) are silently skipped.
+    /// - Flag-style: `--key` followed by another `--` arg or end-of-args
+    ///   sets `key = true`.
     private func parseArguments(_ args: [String]) -> [String: Any] {
         var result: [String: Any] = [:]
         var i = 0
@@ -275,6 +283,10 @@ struct QueryCommand: AsyncParsableCommand {
             let arg = args[i]
             guard arg.hasPrefix("--") else { i += 1; continue }
             let key = String(arg.dropFirst(2))
+            // Skip a bare "--" separator (bash-style option terminator). Without
+            // this guard, `dropFirst(2)` produces an empty key that inserts
+            // `result[""] = true`, silently polluting the argument dictionary.
+            guard !key.isEmpty else { i += 1; continue }
             if i + 1 < args.count && !args[i + 1].hasPrefix("--") {
                 let raw = args[i + 1]
                 result[key] = decodeValue(raw)
