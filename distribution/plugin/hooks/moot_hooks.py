@@ -9,8 +9,8 @@ One script, four modes (argv[1]):
                                 the next SessionStart can trigger recovery.
   session     SessionStart      Orientation reminder on startup/resume/clear;
                                 continuity-recovery injection after compaction;
-                                warns (never edits) if a competing direct
-                                `mootx01` MCP entry is also wired.
+                                warns (never edits) if a stale direct
+                                `memory` MCP entry is still wired.
   stop        Stop              If MOOTx01 tools were used this session but no
                                 durable writeback happened, asks Claude (once)
                                 to file memories before finishing.
@@ -91,11 +91,10 @@ ORIENT_MESSAGE = (
 )
 
 COMPETING_ENTRY_MESSAGE = (
-    "[MOOTx01] Direct MCP entry \"{name}\" found in {path} in addition to the "
-    "MOOTx01 plugin's own \"memory\" server — Claude Code may open two "
-    "connections to the same estate. Run `mootx01 install` to remove the "
-    "redundant direct entry (or remove it by hand); the plugin's own wiring is "
-    "enough."
+    "[MOOTx01] Stale direct MCP entry \"{name}\" found in {path}. This entry "
+    "predates the unified server name (mootx01) and may open a second "
+    "connection to the same estate. Run `mootx01 upgrade` to remove it "
+    "automatically, or remove it by hand; the plugin's own wiring is enough."
 )
 
 RECOVERY_MESSAGE = (
@@ -227,11 +226,12 @@ def mode_precompact(data):
 
 def warn_competing_direct_entry():
     """Warn, but never edit, if the user's own ~/.claude.json also carries a
-    direct `mcpServers.mootx01` entry alongside this plugin. That
-    entry is the CLI installer's wiring (a stdio `serve`/`proxy` command, or
-    an HTTP entry) written before or after the plugin was installed; either
-    order can leave two live connections to the same estate. Read-only: this
-    function never writes to the config file.
+    stale direct `mcpServers.memory` entry alongside this plugin. That entry
+    predates the unified server-name change (MXE-NS-CODEX) where both the
+    plugin and the direct installer were aligned to use `"mootx01"`. A
+    leftover `"memory"` entry may open a second connection to the same estate
+    under the old `mcp__memory__*` tool prefix. Read-only: this function
+    never writes to the config file.
     Every failure path is silent — a broken hook must never break a session.
     """
     path = os.path.expanduser("~/.claude.json")
@@ -243,9 +243,9 @@ def warn_competing_direct_entry():
     if not isinstance(config, dict):
         return
     servers = config.get("mcpServers")
-    if not isinstance(servers, dict) or "mootx01" not in servers:
+    if not isinstance(servers, dict) or "memory" not in servers:
         return
-    print(COMPETING_ENTRY_MESSAGE.format(name="mootx01", path=path))
+    print(COMPETING_ENTRY_MESSAGE.format(name="memory", path=path))
 
 
 def mode_session(data):
