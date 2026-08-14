@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.12.0
+version: 1.13.0
 status: active
-date: 2026-08-13
+date: 2026-08-14
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -996,6 +996,50 @@ coordinator guard (Rust).
 **Invariant:** `now` is always caller-injected (the cycle's deterministic
 timestamp); the hook MUST NOT read the system clock internally.
 
+#### § 12.6.2 — Performance-health duty (v1.13.0)
+
+Each 24 h window, a timing-derivation health duty runs inside the maintenance
+daemon (`MaintenanceDaemon`), gated on `lastPerformanceHealthAt` /
+`last_performance_health_epoch_secs`. It pages the estate audit log from a
+persisted watermark, derives INGEST and CYCLE timing samples via
+`NeuronKit.deriveTimings`, and emits the results through the existing
+`Intellectus.report(.metric(...))` path — the same `PersistenceStatsSink` write
+path the resident observer uses for live samples (D6 boundary expansion;
+see `docs/decisions/DECISION_OBSERVER_AGGREGATION_2026-08-14.md`).
+
+**Metrics emitted** (11 total, all under `neuronkit.perf_health.*`):
+
+| Metric | What it measures |
+|---|---|
+| `ingest_p50_ms` / `ingest_p95_ms` | INGEST p50 / p95, epoch ms |
+| `cycle_vector_p50_ms` / `cycle_vector_p95_ms` | CYCLE_VECTOR p50 / p95 |
+| `cycle_novel_p50_ms` / `cycle_novel_p95_ms` | CYCLE_NOVEL p50 / p95 |
+| `cycle_novel_unbounded` | rows with no novel-term marker |
+| `cycle_dreamt_p50_ms` / `cycle_dreamt_p95_ms` | CYCLE_DREAMT p50 / p95 |
+| `cycle_dreamt_unbounded` | rows with no dream-end marker |
+| `ingest_sample_count` | count of rows measured in the window |
+
+**Watermark discipline:** the HLC physical-time watermark is persisted in
+`MaintenanceDaemonState.performanceHealthWatermarkMs` /
+`performance_health_watermark_ms`. Each successful duty call advances the
+watermark to the last event's HLC physical time; each event is measured
+exactly once across restarts (A6 contract, `deriveTimings`'s
+`sinceExclusiveMs` guard handles the overlap at the cursor millisecond).
+
+**Seam:** `PerformanceHealthDuty` (Swift protocol / Rust trait) — injected
+into `MaintenanceDaemon` at construction time (nil/None-defaulted). Failures
+are caught and logged; they do NOT abort the maintenance cycle; the watermark
+is NOT advanced on failure so the next due cycle retries the same window.
+
+**Production adapter:** `EstatePerformanceHealthDuty` (wired in
+`AutonomicGovernor`). Page size 2 000 events, max 10 pages per duty call.
+
+**Cadence constant:** `healthDutyCadenceSecs = 86_400` (24 h), matching the
+`thetaCadenceSecs` constant used by the DreamingDaemon THETA gate.
+
+**Invariant:** `now` is always caller-injected; the duty MUST NOT read the
+system clock internally.
+
 ### § 12.7 — Trigger modes and the forked dreamer
 
 The trigger mode selects **who drives** dreaming, decoupled from § 12.6:
@@ -1073,6 +1117,19 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.13.0 -- 2026-08-14
+Add § 12.6.2 documenting the performance-health duty (A7 from Phase 4).
+`PerformanceHealthDuty` protocol (Swift) / trait (Rust) injected into
+`MaintenanceDaemon` via a nil-defaulted parameter (same seam pattern as
+THETA). Fires once per 24 h, pages the estate audit log from a persisted
+watermark, calls `deriveTimings`, emits 11 `neuronkit.perf_health.*`
+metrics via `Intellectus.report`. Watermark persisted in
+`MaintenanceDaemonState` with `#[serde(default)]` / `decodeIfPresent`
+backward compat. Production adapter `EstatePerformanceHealthDuty` wired
+in `AutonomicGovernor`. Failures are non-fatal; watermark not advanced on
+failure. D6 boundary expansion approved in
+`docs/decisions/DECISION_OBSERVER_AGGREGATION_2026-08-14.md`.
 
 ### 1.12.0 -- 2026-08-13
 Add § 12.6.1 documenting the THETA basis-retrain duty (A1 from Phase 4).

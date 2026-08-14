@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.11.0
+version: 1.12.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-13
+date: 2026-08-14
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -731,6 +731,86 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     public func reindex(now: Date) async throws
 }
 ```
+
+### `PerformanceHealthDuty` / `EstatePerformanceHealthDuty` (v1.12.0)
+
+Seam for the maintenance daemon's daily timing-derivation performance-health
+duty (NEURONKIT_SPEC § 12.6.2). Injected into `MaintenanceDaemon` as a
+nil-defaulted optional parameter. The daemon calls `runHealthDuty(watermarkMs:now:)`
+once per 24 h (gated on `lastPerformanceHealthAt`). Failures are caught and
+logged by the daemon (non-fatal); the watermark is not advanced on failure.
+
+Mirrors the `ThetaBasisRetrainHook` seam pattern: the protocol is pure (no GLK
+import in the daemon); `EstatePerformanceHealthDuty` imports GeniusLocusKit and
+pages `GeniusLocusKit.auditEvents(_:after:limit:)`.
+
+**Swift (both protocol and adapter in NeuronKit):**
+
+```swift
+public protocol PerformanceHealthDuty: Sendable {
+    /// Run the daily timing-derivation health duty.
+    /// - `watermarkMs`: HLC physical-time watermark (epoch ms). 0 = start of log.
+    /// - `now`: deterministic timestamp from the caller.
+    /// - Returns: new watermark (physical-time ms of the last event consumed).
+    func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64
+}
+
+public struct EstatePerformanceHealthDuty: PerformanceHealthDuty {
+    public static let pageSize = 2_000
+    public static let maxPages = 10
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+    public func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64
+}
+```
+
+**Rust (trait in `maintenance_cycle.rs`):**
+
+```rust
+pub trait PerformanceHealthDuty {
+    fn run_health_duty(
+        &mut self,
+        watermark_ms: i64,
+        now_epoch_secs: f64,
+    ) -> Result<i64, Box<dyn std::error::Error>>;
+}
+```
+
+**`MaintenanceDaemon` wiring (Swift) — new parameter:**
+
+```swift
+public init(reader: MaintenanceSubstrateReader, sink: MaintenanceProposalSink,
+            policyStore: MaintenancePolicyStore,
+            performanceHealthDuty: (any PerformanceHealthDuty)? = nil)
+```
+
+**`MaintenanceDaemon` wiring (Rust) — builder method:**
+
+```rust
+impl MaintenanceDaemon {
+    pub fn with_duty(mut self, duty: Box<dyn PerformanceHealthDuty>) -> Self
+}
+```
+
+`performanceHealthDuty` / `with_duty` defaults to nil/None so all existing call
+sites are unaffected. `AutonomicGovernor` passes
+`EstatePerformanceHealthDuty(handle:kit:)` at production construction time.
+
+**`MaintenanceDaemonState` additions:**
+
+```swift
+public var lastPerformanceHealthAt: Date?             // decodeIfPresent: nil
+public var performanceHealthWatermarkMs: Int64         // decodeIfPresent: 0
+```
+
+```rust
+#[serde(default)]
+pub last_performance_health_epoch_secs: Option<f64>,  // absent → None
+#[serde(default)]
+pub performance_health_watermark_ms: i64,             // absent → 0
+```
+
+Both fields use backward-compat decode so states persisted before A7 load
+cleanly without migration.
 
 ### `ThetaBasisRetrainHook` / `EstateThetaBasisRetrainHook` (v1.11.0)
 
@@ -2045,6 +2125,19 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.12.0 -- 2026-08-14
+
+- `PerformanceHealthDuty` protocol (Swift) / trait (Rust) — 24 h
+  timing-derivation health duty seam for `MaintenanceDaemon`. Injected via
+  nil-defaulted `performanceHealthDuty` parameter (Swift) / `with_duty()`
+  builder (Rust). `EstatePerformanceHealthDuty` production adapter (Swift,
+  pages `GeniusLocusKit.auditEvents`, pageSize=2 000, maxPages=10).
+  `MaintenanceDaemonState` gains `lastPerformanceHealthAt` /
+  `performanceHealthWatermarkMs` (Swift: `decodeIfPresent` backward compat;
+  Rust: `#[serde(default)]`). `AutonomicGovernor` wired.
+  See NEURONKIT_SPEC § 12.6.2 and
+  `docs/decisions/DECISION_OBSERVER_AGGREGATION_2026-08-14.md`.
 
 ### 1.11.0 -- 2026-08-13
 
