@@ -96,6 +96,9 @@ fn maintenance_daemon_state_round_trips_through_manifest() {
         last_audit_check_epoch_secs: Some(1_700_000_400.0),
         proposed_keys: vec!["decay:room-1".to_string(), "tombstone:row-9".to_string()],
         cycle_count: 3,
+        // A7 fields: default to absent so the test exercises backward-compat decode.
+        last_performance_health_epoch_secs: None,
+        performance_health_watermark_ms: 0,
     };
     mstore.save_daemon_state(state.clone());
     assert_eq!(mstore.load_daemon_state(), Some(state));

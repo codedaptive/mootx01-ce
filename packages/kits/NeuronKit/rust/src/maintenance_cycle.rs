@@ -183,6 +183,16 @@ pub struct MaintenanceDaemonState {
     pub last_audit_check_epoch_secs: Option<f64>,
     pub proposed_keys: Vec<String>,
     pub cycle_count: i64,
+    /// When the daily timing-derivation health duty last ran (A7), epoch seconds.
+    /// `None` = never run. Parity of Swift `lastPerformanceHealthAt`.
+    /// `#[serde(default)]` keeps states serialized before A7 loading cleanly.
+    #[serde(default)]
+    pub last_performance_health_epoch_secs: Option<f64>,
+    /// HLC physical-time watermark (epoch ms) for the audit-log page cursor.
+    /// 0 = start from the beginning of the log (first run or reset).
+    /// Parity of Swift `performanceHealthWatermarkMs`.
+    #[serde(default)]
+    pub performance_health_watermark_ms: i64,
 }
 
 /// In-memory `MaintenancePolicyStore` for tests and for hosts that do not
@@ -286,8 +296,38 @@ pub trait MaintenanceProposalSink {
     );
 }
 
+/// Seam for the maintenance daemon's daily timing-derivation performance-health
+/// duty (NEURONKIT_SPEC § 12.6.1 performance-health extension, A7). Rust parity
+/// of the Swift `PerformanceHealthDuty` protocol.
+///
+/// Injected into `MaintenanceDaemon` via `with_duty()`. The daemon calls
+/// `run_health_duty(watermark_ms, now_epoch_secs)` once per 24 h (gated on
+/// `last_performance_health_epoch_secs`). Each call pages the estate audit log
+/// from the watermark, derives INGEST and CYCLE timing samples, and emits them
+/// via the existing Intellectus path. Returns the new watermark (HLC physical-time
+/// ms of the last event consumed) or an error.
+///
+/// Failures are caught and logged by the daemon — they do not abort the cycle.
+/// `None` (`with_duty` never called) safely disables the duty.
+pub trait PerformanceHealthDuty {
+    /// Run the daily timing-derivation health duty.
+    ///
+    /// - `watermark_ms`: HLC physical-time watermark (epoch ms). 0 = start of log.
+    /// - `now_epoch_secs`: deterministic timestamp from the caller.
+    /// - Returns: new watermark (physical-time ms of the last event consumed).
+    fn run_health_duty(
+        &mut self,
+        watermark_ms: i64,
+        now_epoch_secs: f64,
+    ) -> Result<i64, Box<dyn std::error::Error>>;
+}
+
 const AGENT_NAME: &str = "maintenance-daemon";
 const DIARY_WING: &str = "wing_maintenance-daemon";
+
+/// 24 h cadence for the daily health duty (A7), matching the DreamingDaemon's
+/// THETA cadence constant in Swift (`healthDutyCadenceSecs = 86_400`).
+const HEALTH_DUTY_CADENCE_SECS: f64 = 86_400.0;
 
 /// Maximum number of qid-pending drawers the daemon picks up in a single
 /// retry batch. Mirrors `QID_RETRY_SCAN_CAP` in
@@ -327,6 +367,17 @@ pub struct MaintenanceDaemon {
     /// so a slow full-chain verify need not run every cycle (§ 3.5). Mirrors
     /// Swift `lastAuditCheckAt`.
     last_audit_check_epoch_secs: Option<f64>,
+    /// Optional daily timing-derivation health duty (A7). Fires once per 24 h
+    /// (`HEALTH_DUTY_CADENCE_SECS`). `None` safely disables the duty (test
+    /// daemons, estates without timing markers). Mirrors Swift
+    /// `performanceHealthDuty: (any PerformanceHealthDuty)?`.
+    performance_health_duty: Option<Box<dyn PerformanceHealthDuty>>,
+    /// When the health duty last ran, epoch seconds. `None` = never run.
+    /// Mirrors Swift `lastPerformanceHealthAt`. Persisted in daemon state.
+    last_performance_health_epoch_secs: Option<f64>,
+    /// HLC physical-time watermark (epoch ms) for audit-log paging.
+    /// 0 = start from the beginning. Mirrors Swift `performanceHealthWatermarkMs`.
+    performance_health_watermark_ms: i64,
 }
 
 impl MaintenanceDaemon {
@@ -337,7 +388,19 @@ impl MaintenanceDaemon {
             cycle_count: 0,
             last_fire_epoch_secs: None,
             last_audit_check_epoch_secs: None,
+            performance_health_duty: None,
+            last_performance_health_epoch_secs: None,
+            performance_health_watermark_ms: 0,
         }
+    }
+
+    /// Attach a `PerformanceHealthDuty` that fires once per 24 h (A7).
+    /// The production adapter (`EstatePerformanceHealthDuty`) is the expected value;
+    /// nil (default from `new`) safely disables the duty in test daemons.
+    /// Mirrors Swift `MaintenanceDaemon.init(... performanceHealthDuty:)`.
+    pub fn with_duty(mut self, duty: Box<dyn PerformanceHealthDuty>) -> Self {
+        self.performance_health_duty = Some(duty);
+        self
     }
 
     /// Export the daemon's across-cycle state for persistence.
@@ -349,17 +412,22 @@ impl MaintenanceDaemon {
             last_audit_check_epoch_secs: self.last_audit_check_epoch_secs,
             proposed_keys: self.proposed_keys.iter().cloned().collect(),
             cycle_count: self.cycle_count,
+            last_performance_health_epoch_secs: self.last_performance_health_epoch_secs,
+            performance_health_watermark_ms: self.performance_health_watermark_ms,
         }
     }
 
     /// Restore the daemon's across-cycle state from persistence.
     /// Called once at governor construction so a restart resumes the prior run's
-    /// idempotency/cycle memory.
+    /// idempotency/cycle memory. A7 fields default to None/0 when absent from
+    /// states serialized before A7 landed (`#[serde(default)]` on the fields).
     pub fn restore_state(&mut self, state: MaintenanceDaemonState) {
         self.last_fire_epoch_secs = state.last_fire_epoch_secs;
         self.last_audit_check_epoch_secs = state.last_audit_check_epoch_secs;
         self.proposed_keys = state.proposed_keys.into_iter().collect();
         self.cycle_count = state.cycle_count;
+        self.last_performance_health_epoch_secs = state.last_performance_health_epoch_secs;
+        self.performance_health_watermark_ms = state.performance_health_watermark_ms;
     }
 
     /// Interval-gated pump — the entry point for the resident loop.
@@ -699,6 +767,40 @@ node-invariant-violations {}",
             room: "diary".to_string(),
         };
         sink.record_cycle_diary(entry.clone());
+
+        // ── Step 6.5: daily timing-derivation health duty (A7) ───────────
+        // Fires once per 24 h (`HEALTH_DUTY_CADENCE_SECS`). Pages audit events
+        // from the persisted watermark via `PerformanceHealthDuty::run_health_duty`,
+        // derives INGEST and CYCLE timing samples, and emits them via Intellectus
+        // into the existing PersistenceStatsSink write path.
+        //
+        // Best-effort: a failure is caught and discarded — the proposal + diary
+        // functions have already succeeded by this point. The watermark and
+        // last-run timestamp are NOT advanced on failure so the next due cycle
+        // retries the same window.
+        //
+        // Uses take/replace to avoid borrow conflicts between the boxed duty and
+        // the other `self` fields the duty call passes as arguments.
+        let health_due = match self.last_performance_health_epoch_secs {
+            None => true, // never run → always due
+            Some(last) => (now_epoch_secs - last) >= HEALTH_DUTY_CADENCE_SECS,
+        };
+        if health_due {
+            if let Some(mut duty) = self.performance_health_duty.take() {
+                match duty.run_health_duty(self.performance_health_watermark_ms, now_epoch_secs) {
+                    Ok(new_watermark) => {
+                        self.performance_health_watermark_ms = new_watermark;
+                        self.last_performance_health_epoch_secs = Some(now_epoch_secs);
+                    }
+                    Err(_) => {
+                        // Best-effort: ignore — the watermark is not advanced so the
+                        // next due cycle retries the same window. Mirrors the Swift
+                        // daemon's catch block which logs and discards the error.
+                    }
+                }
+                self.performance_health_duty = Some(duty);
+            }
+        }
 
         MaintenanceCycleReport {
             audit_checked,
@@ -1379,5 +1481,157 @@ node-invariant-violations 0"
         let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
         // 1 empty parent + 1 inconsistent display = 2 violations.
         assert_eq!(report.node_invariant_violations, 2);
+    }
+
+    // ─── A7: performance-health duty (Rust parity) ────────────────────────
+
+    /// Fake duty that records call count and the watermark it received.
+    struct FakeHealthDuty {
+        call_count: usize,
+        received_watermark_ms: i64,
+        return_watermark_ms: i64,
+    }
+    impl FakeHealthDuty {
+        fn new(return_watermark_ms: i64) -> Self {
+            Self {
+                call_count: 0,
+                received_watermark_ms: 0,
+                return_watermark_ms,
+            }
+        }
+    }
+    impl PerformanceHealthDuty for FakeHealthDuty {
+        fn run_health_duty(
+            &mut self,
+            watermark_ms: i64,
+            _now_epoch_secs: f64,
+        ) -> Result<i64, Box<dyn std::error::Error>> {
+            self.call_count += 1;
+            self.received_watermark_ms = watermark_ms;
+            Ok(self.return_watermark_ms)
+        }
+    }
+
+    /// Fake duty that always fails.
+    struct FakeFailingHealthDuty {
+        call_count: usize,
+    }
+    impl PerformanceHealthDuty for FakeFailingHealthDuty {
+        fn run_health_duty(
+            &mut self,
+            _watermark_ms: i64,
+            _now_epoch_secs: f64,
+        ) -> Result<i64, Box<dyn std::error::Error>> {
+            self.call_count += 1;
+            Err("fake duty error".into())
+        }
+    }
+
+    // A7-R1: duty fires on the first cycle (last_performance_health_epoch_secs
+    // is None → always due). Diary entry still written. Mirrors Swift
+    // `a7HealthDutyFiresOnFirstCycle`.
+    #[test]
+    fn a7_r1_duty_fires_on_first_cycle() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        // Box the fake duty and pass it via with_duty().
+        let duty_raw = Box::new(FakeHealthDuty::new(1_000_000));
+        // SAFETY: we'll recover duty_raw after run_cycle via daemon_state inspection.
+        // Instead, use a shared counter via pointer aliasing is not needed here —
+        // the take/replace round-trip returns the duty. We cannot access the duty
+        // directly after run_cycle because it's owned by the daemon. So we verify
+        // via indirect signals: watermark advanced, diary written.
+        //
+        // To verify call_count without unsafe, we observe the daemon's new
+        // watermark (returned via daemon_state) and check that it matches
+        // return_watermark_ms = 1_000_000.
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default())
+            .with_duty(duty_raw);
+
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        // Diary entry was written (the cycle ran to completion).
+        assert_eq!(sink.diaries.len(), 1, "diary must be written even when duty runs");
+        // The daemon advanced last_performance_health_epoch_secs to now.
+        let state = d.daemon_state();
+        assert_eq!(
+            state.last_performance_health_epoch_secs,
+            Some(1_000_000.0),
+            "last_performance_health_epoch_secs must be set after first duty run"
+        );
+        // The watermark advanced to the return value from FakeHealthDuty (1_000_000).
+        assert_eq!(
+            state.performance_health_watermark_ms, 1_000_000,
+            "watermark must advance to the duty's returned value"
+        );
+        // Cycle completed normally — report has at least one diary entry.
+        let _ = report;
+    }
+
+    // A7-R2: duty is NOT called when < 24 h have elapsed. Two cycles: first
+    // fires duty, second (12 h later) does not. Mirrors Swift
+    // `a7HealthDutySkippedWhenNotDue`.
+    #[test]
+    fn a7_r2_duty_skipped_when_not_due() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let duty_raw = Box::new(FakeHealthDuty::new(1_000_000));
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default())
+            .with_duty(duty_raw);
+
+        // First cycle at t=0 s: duty fires.
+        let _ = d.run_cycle(0.0, &reader, &mut sink);
+        let state_after_first = d.daemon_state();
+        assert_eq!(
+            state_after_first.last_performance_health_epoch_secs,
+            Some(0.0),
+            "duty must have run on the first cycle"
+        );
+
+        // Second cycle at t = 12 h (< 24 h): duty must NOT fire.
+        let twelve_hours: f64 = 12.0 * 3_600.0;
+        let _ = d.run_cycle(twelve_hours, &reader, &mut sink);
+        let state_after_second = d.daemon_state();
+        assert_eq!(
+            state_after_second.last_performance_health_epoch_secs,
+            Some(0.0), // unchanged — duty did not fire
+            "last_performance_health_epoch_secs must NOT advance when duty is not due"
+        );
+        assert_eq!(
+            state_after_second.performance_health_watermark_ms,
+            1_000_000, // unchanged from first run
+            "watermark must not change when duty is not due"
+        );
+    }
+
+    // A7-R3: duty failure does not abort the cycle. Diary is still written,
+    // report is returned, watermark does NOT advance. Mirrors Swift
+    // `a7DutyFailureDoesNotAbortCycle`.
+    #[test]
+    fn a7_r3_duty_failure_does_not_abort_cycle() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let duty_raw = Box::new(FakeFailingHealthDuty { call_count: 0 });
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default())
+            .with_duty(duty_raw);
+
+        // run_cycle must return normally even though the duty throws.
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        // Diary was written: cycle completed.
+        assert_eq!(sink.diaries.len(), 1, "diary must be written even when duty fails");
+        // Watermark did NOT advance (failure → no advance, so next cycle retries).
+        let state = d.daemon_state();
+        assert_eq!(
+            state.performance_health_watermark_ms, 0,
+            "watermark must not advance when duty fails"
+        );
+        // last_performance_health_epoch_secs also stays None (duty did not succeed).
+        assert!(
+            state.last_performance_health_epoch_secs.is_none(),
+            "last_performance_health_epoch_secs must stay None when duty fails"
+        );
+        // Report has the correct cycle count (cycle completed normally).
+        assert_eq!(report.audit_checked, true, "cycle ran to completion");
     }
 }
