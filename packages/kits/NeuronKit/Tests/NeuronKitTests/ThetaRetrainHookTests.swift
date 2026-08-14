@@ -10,6 +10,11 @@
 //   TR-4: hook failure does not abort the THETA cycle; result is still returned.
 //   TR-5: hook receives the same `now` timestamp passed to `runThetaCycle`.
 //   TR-6: two consecutive THETA cycles → hook invoked twice (once per cycle).
+//   TR-7: thetaDue returns false before the 24 h cadence elapses.
+//   TR-8: drift gate with probe below threshold — hook does NOT fire on second cycle.
+//   TR-9: drift gate with probe at threshold — hook fires on second cycle.
+//   TR-10: first-ever THETA cycle fires immediately regardless of vocab (sentinel).
+//   TR-11: after retrain, lastReindexVocab advances — sub-floor growth defers next cycle.
 //
 // Timing is deterministic: `now` is always injected. The fake hook records
 // calls without touching a live Corpus. No wall-clock reads inside cycle code.
@@ -218,4 +223,144 @@ struct ThetaRetrainHookTests {
         let due = await daemon.thetaDue(now: t1)
         #expect(!due, "thetaDue must return false within the 24 h window")
     }
+
+    // TR-8: drift gate — vocab growth below the threshold → hook does NOT fire.
+    // When a growthProbe is wired and the daemon's shared lastReindexVocab has
+    // been set (after the first THETA cycle), subsequent cycles respect the same
+    // drift threshold as the ALPHA auto-reindex check.
+    @Test("TR-8: drift gate defers retrain when vocab growth is below the threshold")
+    func tr8_driftGateDefersBelowThreshold() async throws {
+        let probe = FakeDriftProbeForTheta(vocab: 100)
+        let hook = FakeThetaRetrainHook()
+        let daemon = makeDriftGatedDaemon(probe: probe, hook: hook)
+        let t1 = Date(timeIntervalSinceReferenceDate: 8_000_000)
+
+        // Cycle 1: sentinel path (lastReindexVocab == -1) fires immediately;
+        // after success, lastReindexVocab is set to 100.
+        _ = try await daemon.runThetaCycle(now: t1)
+        let afterFirst = await hook.callCount
+        #expect(afterFirst == 1, "sentinel path must fire on the first THETA cycle")
+
+        // Grow by 20 — below threshold max(25, ceil(100 × 0.10)=10) = 25.
+        await probe.setVocab(120)
+
+        // Cycle 2: delta = 20 < trigger 25 → drift gate defers, hook not called.
+        let t2 = Date(timeIntervalSinceReferenceDate: 8_000_001)
+        _ = try await daemon.runThetaCycle(now: t2)
+        let afterSecond = await hook.callCount
+        #expect(afterSecond == 1,
+                "drift gate must suppress the retrain when growth (20) is below the threshold (25)")
+    }
+
+    // TR-9: drift gate — vocab growth at the threshold → hook fires.
+    // At exactly max(floor, ceil(fraction × baseline)) the gate must pass.
+    @Test("TR-9: drift gate fires retrain when vocab growth meets the threshold")
+    func tr9_driftGateFiresAtThreshold() async throws {
+        let probe = FakeDriftProbeForTheta(vocab: 100)
+        let hook = FakeThetaRetrainHook()
+        let daemon = makeDriftGatedDaemon(probe: probe, hook: hook)
+        let t1 = Date(timeIntervalSinceReferenceDate: 9_000_000)
+
+        // Cycle 1: sentinel fires; lastReindexVocab = 100.
+        _ = try await daemon.runThetaCycle(now: t1)
+
+        // Grow by exactly max(25, ceil(100 × 0.10)=10) = 25 terms.
+        await probe.setVocab(125)
+
+        // Cycle 2: delta = 25 == trigger → gate passes, hook fires.
+        let t2 = Date(timeIntervalSinceReferenceDate: 9_000_001)
+        _ = try await daemon.runThetaCycle(now: t2)
+        let count = await hook.callCount
+        #expect(count == 2,
+                "drift at the threshold must trigger retrain: sentinel(1) + threshold-met(1)")
+    }
+
+    // TR-10: first-ever THETA cycle fires immediately regardless of current vocab.
+    // THETA acts as a backstop for a dormant ALPHA path — the sentinel (-1)
+    // unconditionally fires so the estate is never left without an initial basis.
+    @Test("TR-10: sentinel path fires retrain on the very first THETA cycle")
+    func tr10_firstCycleFiresImmediately() async throws {
+        // Large vocab so the proportional fraction alone would require ≥100 terms
+        // of growth — but the sentinel ignores the threshold entirely.
+        let probe = FakeDriftProbeForTheta(vocab: 1_000)
+        let hook = FakeThetaRetrainHook()
+        let daemon = makeDriftGatedDaemon(probe: probe, hook: hook)
+        let t = Date(timeIntervalSinceReferenceDate: 10_000_000)
+
+        _ = try await daemon.runThetaCycle(now: t)
+
+        let count = await hook.callCount
+        #expect(count == 1,
+                "sentinel (lastReindexVocab == -1) must fire retrain on the first cycle")
+    }
+
+    // TR-11: after a THETA retrain the shared vocab baseline advances so the NEXT
+    // cycle measures drift from the post-retrain level, not from the original baseline.
+    // This confirms that advance_reindex_vocab is called correctly after success.
+    @Test("TR-11: vocab baseline advances after THETA retrain; sub-floor growth defers next cycle")
+    func tr11_baselineAdvancesAfterRetrain() async throws {
+        let probe = FakeDriftProbeForTheta(vocab: 100)
+        let hook = FakeThetaRetrainHook()
+        let daemon = makeDriftGatedDaemon(probe: probe, hook: hook)
+        let t1 = Date(timeIntervalSinceReferenceDate: 11_000_000)
+
+        // Cycle 1: sentinel fires; lastReindexVocab = 100.
+        _ = try await daemon.runThetaCycle(now: t1)
+
+        // Grow by 25 (= trigger): fires; lastReindexVocab advances to 125.
+        await probe.setVocab(125)
+        let t2 = Date(timeIntervalSinceReferenceDate: 11_000_001)
+        _ = try await daemon.runThetaCycle(now: t2)
+        #expect(await hook.callCount == 2, "growth at threshold must fire retrain")
+
+        // Now grow by only 10 from 125 (vocab = 135). If the baseline correctly
+        // advanced to 125, delta = 10 < trigger max(25, ceil(125×0.10)=13) = 25
+        // → defers. If the baseline did NOT advance (stuck at 100), delta = 35
+        // → fires incorrectly.
+        await probe.setVocab(135)
+        let t3 = Date(timeIntervalSinceReferenceDate: 11_000_002)
+        _ = try await daemon.runThetaCycle(now: t3)
+        let finalCount = await hook.callCount
+        #expect(finalCount == 2,
+                "after retrain advances baseline to 125, growth of 10 (135-125) must defer")
+    }
+}
+
+// MARK: - Drift gate helpers (TR-8 through TR-11)
+
+/// Minimal growth probe for drift-gate tests. Exposes a settable vocab count;
+/// does not implement reindex (THETA delegates retrain to the hook, not the probe).
+private actor FakeDriftProbeForTheta: CorpusGrowthProbe {
+
+    private(set) var vocab: Int
+
+    init(vocab: Int) { self.vocab = vocab }
+
+    func vocabAnchor() async throws -> Int { vocab }
+
+    /// THETA's drift gate reads vocabAnchor() only; it does not call
+    /// reindex() on the probe (the probe is the observer, the hook is
+    /// the worker). This body is a required conformance stub.
+    func reindex(now: Date) async throws {}
+
+    func setVocab(_ v: Int) { vocab = v }
+}
+
+/// Build a daemon wired with BOTH a growth probe (drift gate) and a retrain hook.
+/// Empty traces → early-return path in runThetaCycle, which still calls fireTheta.
+private func makeDriftGatedDaemon(
+    probe: any CorpusGrowthProbe,
+    hook: (any ThetaBasisRetrainHook)? = nil
+) -> DreamingDaemon {
+    let reader = HookTestReader(traces: [])
+    let sink = HookTestSink()
+    let store = InMemoryDreamingPolicyStore(.default)
+    return DreamingDaemon(
+        reader: reader,
+        sink: sink,
+        rewardSource: RecallTraceRewardSource(),
+        policyStore: store,
+        growthProbe: probe,
+        thetaRetrainHook: hook
+    )
 }
