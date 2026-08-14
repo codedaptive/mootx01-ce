@@ -266,12 +266,19 @@ public actor AutonomicGovernor {
         // auto-reindex gate each cycle (no error, no log spam). The production governor
         // always passes a live probe; tests may omit it by constructing DreamingDaemon
         // directly with growthProbe: nil.
+        //
+        // THETA-RETRAIN: wire an EstateThetaBasisRetrainHook so the embedding basis
+        // is refreshed unconditionally once per THETA cycle (daily cadence). This
+        // covers estates where content changes in kind but not in raw word count, so
+        // the vocab-growth gate never fires. The hook is optional — a nil hook
+        // disables the duty (correct for tests and LocusOnly estates).
         self.dreaming = DreamingDaemon(
             reader: EstateDreamingReader(handle: handle, kit: kit),
             sink: EstateDreamingSink(handle: handle, kit: kit),
             rewardSource: RecallTraceRewardSource(),
             policyStore: EstateManifestDreamingPolicyStore(handle: handle, kit: kit),
-            growthProbe: EstateCorpusGrowthProbe(handle: handle, kit: kit)
+            growthProbe: EstateCorpusGrowthProbe(handle: handle, kit: kit),
+            thetaRetrainHook: EstateThetaBasisRetrainHook(handle: handle, kit: kit)
         )
         self.maintenance = MaintenanceDaemon(
             reader: EstateMaintenanceReader(handle: handle, kit: kit),

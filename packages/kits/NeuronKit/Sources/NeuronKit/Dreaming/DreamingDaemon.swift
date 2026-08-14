@@ -233,6 +233,14 @@ public actor DreamingDaemon {
     /// for test environments that do not wire a live Corpus).
     private let growthProbe: (any CorpusGrowthProbe)?
 
+    /// Optional hook for the THETA-gate daily basis retrain. When non-nil,
+    /// the daemon calls `ThetaBasisRetrainHook.retrain(now:)` once per THETA
+    /// cycle — regardless of whether consolidation produced proposals — so the
+    /// embedding basis stays current with ingested content on a daily cadence.
+    /// Nil disables the duty (correct for LocusOnly estates and tests). Failures
+    /// are logged at the error level but do not abort the THETA cycle.
+    private let thetaRetrainHook: (any ThetaBasisRetrainHook)?
+
     /// Fractional vocabulary growth above which the daemon triggers a corpus
     /// basis retrain. Defaults to `autoReindexVocabGrowthFraction` (0.10). See
     /// that constant for the vocabulary-drift rationale.
@@ -335,6 +343,11 @@ public actor DreamingDaemon {
     ///   - reindexVocabGrowthFloor: absolute floor on new vocabulary terms before
     ///     a retrain, regardless of the fraction. Defaults to
     ///     `autoReindexVocabGrowthFloor` (25 terms).
+    ///   - thetaRetrainHook: optional hook for the THETA-gate daily basis retrain.
+    ///     When non-nil, the daemon calls `ThetaBasisRetrainHook.retrain(now:)` once
+    ///     per THETA cycle so the embedding basis stays current on a daily cadence.
+    ///     Defaults to nil (duty disabled). Production callers pass an
+    ///     `EstateThetaBasisRetrainHook` to activate the daily retrain lane.
     public init(
         reader: DreamingSubstrateReader,
         sink: DreamingProposalSink,
@@ -345,7 +358,8 @@ public actor DreamingDaemon {
         policy: DreamingPolicy = .default,
         growthProbe: (any CorpusGrowthProbe)? = nil,
         reindexVocabGrowthFraction: Double = autoReindexVocabGrowthFraction,
-        reindexVocabGrowthFloor: Int = autoReindexVocabGrowthFloor
+        reindexVocabGrowthFloor: Int = autoReindexVocabGrowthFloor,
+        thetaRetrainHook: (any ThetaBasisRetrainHook)? = nil
     ) {
         self.reader = reader
         self.sink = sink
@@ -357,6 +371,7 @@ public actor DreamingDaemon {
         self.growthProbe = growthProbe
         self.reindexVocabGrowthFraction = reindexVocabGrowthFraction
         self.reindexVocabGrowthFloor = reindexVocabGrowthFloor
+        self.thetaRetrainHook = thetaRetrainHook
     }
 
     // MARK: - Policy registration (§ 3.1 registration API)
@@ -958,6 +973,48 @@ public actor DreamingDaemon {
         return now.timeIntervalSince(last) >= Self.omegaCadenceSecs
     }
 
+    // MARK: - THETA-gate basis-retrain helper
+
+    /// Fire the THETA daily basis-retrain hook, catching and logging any error.
+    ///
+    /// Called at both exit paths of `runThetaCycle` (the early-return
+    /// no-data path and the main consolidation path) so the duty fires
+    /// exactly once per THETA gate invocation. Failures are non-fatal:
+    /// a stale basis degrades dense recall but does not break the daemon's
+    /// proposal and diary functions.
+    ///
+    /// Emits OSLog error and an Intellectus metric on failure so operators
+    /// can investigate. On success, emits a metric for observability.
+    ///
+    /// - Parameters:
+    ///   - retrainHook: the wired hook, or nil if duty is disabled.
+    ///   - now: deterministic timestamp forwarded to `retrain(now:)`.
+    private func fireTheta(
+        retrainHook: (any ThetaBasisRetrainHook)?,
+        now: Date
+    ) async {
+        guard let hook = retrainHook else { return }
+        do {
+            try await hook.retrain(now: now)
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.theta_retrain",
+                value: 1.0,
+                tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                ts: now.timeIntervalSince1970
+            ))
+        } catch {
+            // Log at error level so operators can investigate, but the cycle
+            // continues — a stale basis degrades recall, it does not break the
+            // daemon's proposal and diary functions.
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.theta_retrain_error",
+                value: 1.0,
+                tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                ts: now.timeIntervalSince1970
+            ))
+        }
+    }
+
     // MARK: - REM-THETA cycle
 
     /// Daily bounded consolidation sweep (NEURONKIT_SPEC § 12.6 THETA row).
@@ -1031,6 +1088,10 @@ public actor DreamingDaemon {
             // on a low-recall estate).
             lastThetaRunAt = now
             try await policyStore.saveDaemonState(currentDaemonState())
+            // Daily basis retrain fires on every THETA gate invocation, including
+            // the no-data early-return path. A stale basis degrades dense recall
+            // regardless of whether THETA had anything to consolidate today.
+            await fireTheta(retrainHook: thetaRetrainHook, now: now)
             return nil
         }
 
@@ -1128,6 +1189,11 @@ public actor DreamingDaemon {
         // Advance the THETA last-run timestamp and persist daemon state.
         lastThetaRunAt = now
         try await policyStore.saveDaemonState(currentDaemonState())
+
+        // Daily basis retrain: fire after the diary write and timestamp advance
+        // so a retrain failure cannot interfere with the consolidation result
+        // or the cycle's persistence step. Failure is logged but non-fatal.
+        await fireTheta(retrainHook: thetaRetrainHook, now: now)
 
         return DreamingCycleReport(
             tickedAt: now,
