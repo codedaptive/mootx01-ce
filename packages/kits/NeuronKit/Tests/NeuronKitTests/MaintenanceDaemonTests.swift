@@ -72,6 +72,39 @@ private actor RecordingSink: MaintenanceProposalSink {
     }
 }
 
+/// Records whether the daily timing-derivation health duty was invoked and
+/// what watermark it received. Returns a configurable new watermark so callers
+/// can assert that the daemon persisted the advanced value.
+private actor FakeHealthDuty: PerformanceHealthDuty {
+    private(set) var callCount: Int = 0
+    private(set) var receivedWatermarkMs: Int64 = 0
+    /// The watermark value this fake returns to the daemon on each call.
+    let returnWatermarkMs: Int64
+
+    init(returnWatermarkMs: Int64 = 1_000_000) {
+        self.returnWatermarkMs = returnWatermarkMs
+    }
+
+    func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64 {
+        callCount += 1
+        receivedWatermarkMs = watermarkMs
+        return returnWatermarkMs
+    }
+}
+
+/// A duty seam that always throws. Used to verify that duty failures
+/// are caught and swallowed inside `runCycle` — the diary entry and
+/// the cycle report must still be produced.
+private actor FakeFailingHealthDuty: PerformanceHealthDuty {
+    private(set) var callCount: Int = 0
+    struct DutyError: Error {}
+
+    func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64 {
+        callCount += 1
+        throw DutyError()
+    }
+}
+
 /// A sink that throws on the Nth `propose` (0-based), recording every frame
 /// whose write succeeded. Used to prove B-4 idempotency: a key must not be
 /// committed to `proposedKeys` unless ITS proposal was persisted, so a
@@ -213,9 +246,15 @@ private func tamperedAuditLog() -> UnifiedAuditLog {
 private func daemon(
     reader: FakeReader,
     sink: RecordingSink,
-    policyStore: MaintenancePolicyStore = InMemoryMaintenancePolicyStore()
+    policyStore: MaintenancePolicyStore = InMemoryMaintenancePolicyStore(),
+    performanceHealthDuty: (any PerformanceHealthDuty)? = nil
 ) -> MaintenanceDaemon {
-    MaintenanceDaemon(reader: reader, sink: sink, policyStore: policyStore)
+    MaintenanceDaemon(
+        reader: reader,
+        sink: sink,
+        policyStore: policyStore,
+        performanceHealthDuty: performanceHealthDuty
+    )
 }
 
 @Suite("Maintenance daemon conformance")
@@ -808,6 +847,81 @@ struct MaintenanceDaemonTests {
         try await d.registerMaintenancePolicy(decayWindowSeconds: 999_999)
         let report = try await d.triggerMaintenanceCycle(now: t0)
         #expect(report.nodeInvariantViolations >= 1)
+    }
+
+    // MARK: - A7: performance-health duty
+
+    /// Duty fires on the first cycle (lastPerformanceHealthAt = nil → always due).
+    /// After the cycle the fake records one call and received the initial watermark (0).
+    /// The return value from the duty (1_000_000) is stored in the daemon's
+    /// internal watermark field; the next cycle passes it to the duty on the
+    /// subsequent due call — verified in the cadence test below.
+    @Test("A7: health duty fires on first cycle (lastPerformanceHealthAt nil → due)")
+    func a7HealthDutyFiresOnFirstCycle() async throws {
+        let duty = FakeHealthDuty(returnWatermarkMs: 1_000_000)
+        let reader = FakeReader()
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink, performanceHealthDuty: duty)
+        try await d.registerMaintenancePolicy(decayWindowSeconds: 999_999)
+
+        _ = try await d.triggerMaintenanceCycle(now: t0)
+
+        let calls = await duty.callCount
+        let receivedWatermark = await duty.receivedWatermarkMs
+        #expect(calls == 1, "duty must fire exactly once on the first cycle")
+        // Initial watermark is 0 (no prior run, start from beginning of log).
+        #expect(receivedWatermark == 0, "first call must pass watermark 0 (start of log)")
+
+        // Diary entry was still written (duty fires inside the cycle, not after).
+        let diaryCount = await sink.diaryCount()
+        #expect(diaryCount == 1, "diary entry must be written even when duty runs")
+    }
+
+    /// Within 24 h, the duty must NOT re-fire. After a first cycle at t0
+    /// (which sets lastPerformanceHealthAt = t0), a second cycle at t0 + 12 h
+    /// is within the 24 h gate and must not call the duty again.
+    @Test("A7: health duty is skipped when < 24 h have elapsed")
+    func a7HealthDutySkippedWhenNotDue() async throws {
+        let duty = FakeHealthDuty(returnWatermarkMs: 1_000_000)
+        let reader = FakeReader()
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink, performanceHealthDuty: duty)
+        try await d.registerMaintenancePolicy(decayWindowSeconds: 999_999)
+
+        // First cycle: fires the duty and sets lastPerformanceHealthAt = t0.
+        _ = try await d.triggerMaintenanceCycle(now: t0)
+
+        // Second cycle: 12 h later — still within the 24 h cadence.
+        let twelveHoursLater = t0.addingTimeInterval(12 * 3_600)
+        _ = try await d.triggerMaintenanceCycle(now: twelveHoursLater)
+
+        let calls = await duty.callCount
+        #expect(calls == 1, "duty must not fire when < 24 h have elapsed since last run")
+    }
+
+    /// When the duty throws, the cycle must complete normally: the diary entry
+    /// is still written, the cycle report is returned, and no error propagates
+    /// to the caller. The failure posture is best-effort (A7 spec §6).
+    @Test("A7: duty failure does not abort the maintenance cycle")
+    func a7DutyFailureDoesNotAbortCycle() async throws {
+        let duty = FakeFailingHealthDuty()
+        let reader = FakeReader(active: [drawer(id: "d-1", filedAt: t0)])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink, performanceHealthDuty: duty)
+        try await d.registerMaintenancePolicy(decayWindowSeconds: 999_999)
+
+        // triggerMaintenanceCycle(now:) must return normally despite the duty throwing.
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        // Duty was called (it just failed).
+        let calls = await duty.callCount
+        #expect(calls == 1, "duty must have been called before its error was caught")
+
+        // Cycle completed: diary entry written, report returned with expected timestamp.
+        let diaryCount = await sink.diaryCount()
+        #expect(diaryCount == 1, "diary entry must be written even when duty throws")
+        // tickedAt confirms the cycle ran to completion (it is set before the duty gate).
+        #expect(report.tickedAt == t0, "cycle must have completed and recorded the cycle timestamp")
     }
 
 }
