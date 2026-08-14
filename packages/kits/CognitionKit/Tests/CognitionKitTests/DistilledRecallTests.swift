@@ -86,7 +86,8 @@ struct DistilledRecallTests {
             scoring: .matrixAware,
             limit: limit,
             fallback: .allowDegraded,
-            queryText: query)
+            queryText: query,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
         return result.hits.compactMap { $0.drawer?.id }
     }

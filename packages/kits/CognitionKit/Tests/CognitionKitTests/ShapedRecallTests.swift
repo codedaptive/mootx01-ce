@@ -134,7 +134,9 @@ struct ShapedRecallTests {
             let request = GLKRecallRequest(
                 frame: frame, mode: .unionBest, scoring: .matrixAware,
                 limit: 10, fallback: .allowDegraded,
-                queryText: "river mill", recallShape: nil)
+                queryText: "river mill",
+                origin: .internal,
+                recallShape: nil)
             let direct = try await kit.recall(handle, request)
 
             #expect(shaped.matches.map(\.id) == direct.hits.map(\.id),
